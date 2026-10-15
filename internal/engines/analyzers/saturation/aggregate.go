@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"sort"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -87,6 +88,9 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		observedReplicas := 0
 
 		var capacityLabel string
+		// The rows the variant's price was taken from, so the borrow reported
+		// for it is the one that price carries.
+		var pricedRows []capacity.ReplicaCapacity
 		if len(replicas) > 0 {
 			// BRIDGES count toward demand and not toward supply.
 			//
@@ -139,6 +143,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			if len(ownCapacities) > 0 {
 				perReplicaCapacity = float64(median(ownCapacities))
 				capacityLabel = k2SourceLabel(ownRows)
+				pricedRows = ownRows
 			} else {
 				// Only bridges reported. The variant's own per-replica capacity is
 				// unmeasured this cycle, and the bridge's is the closest thing to
@@ -152,6 +157,10 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 				// at all -- exactly while it is short.
 				perReplicaCapacity = bridgePerReplica
 				capacityLabel = k2SourceLabel(replicas)
+				// A bridge is priced under the variant's own learned state, so
+				// its k2 can be a sibling's borrowed one, and that is the price
+				// the variant is sized on this cycle.
+				pricedRows = replicas
 			}
 			// Prefer the live count over readyCount: it is what actually reported
 			// capacity this cycle, where readyCount is (lagging) scale-target status.
@@ -219,6 +228,20 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 
 		totalCapacity := float64(replicaCount) * perReplicaCapacity
 
+		// The replica Reason names, so the source and age published for the
+		// variant describe the figure its price carries -- unless that figure
+		// is a k2 at or above k1, which prices nothing: the KV cache does.
+		var k2Source string
+		var k2Age time.Duration
+		var hasK2Age bool
+		if row := medianK2Row(pricedRows); row != nil {
+			k2Source = row.K2Priority.String()
+			k2Age, hasK2Age = row.K2WriteAge, row.K2WriteAgeKnown
+			if k2DoesNotBind(row) {
+				k2Source, k2Age, hasK2Age = k2SourceK1Bound, 0, false
+			}
+		}
+
 		var utilization float64
 		if totalCapacity > 0 {
 			utilization = totalDemand / totalCapacity
@@ -245,6 +268,10 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			TotalDemand:                totalDemand,
 			Utilization:                utilization,
 			Reason:                     capacityLabel,
+			Borrowed:                   k2BorrowOf(namespace, pricedRows),
+			K2Source:                   k2Source,
+			K2Age:                      k2Age,
+			HasK2Age:                   hasK2Age,
 		})
 		if warmPoolReplicas > 0 {
 			logger.Info("warm-pool-bridge-supply",
@@ -314,4 +341,39 @@ func median(values []int64) int64 {
 		return (sorted[n/2-1] + sorted[n/2]) / 2
 	}
 	return sorted[n/2]
+}
+
+// ownRowsOf is a variant's own replicas, without the bridges a warm pool lent
+// it. A bridge is priced under the variant's own learned state -- its k2 and
+// ITL line -- but the throughput floor skips bridges, so a line a bridge was
+// priced from is not one the variant's fleet is held on.
+func ownRowsOf(replicas []capacity.ReplicaCapacity) []capacity.ReplicaCapacity {
+	own := make([]capacity.ReplicaCapacity, 0, len(replicas))
+	for _, rc := range replicas {
+		if !rc.FromWarmPool {
+			own = append(own, rc)
+		}
+	}
+	return own
+}
+
+// k2BorrowOf reports a variant's k2 borrow, if any of its replicas was priced
+// from one, with the donor's namespace: a k2 is borrowed only within the
+// variant's own. Replicas in different output buckets can borrow at different
+// stages of relaxation; the one held hardest -- least relaxed -- is reported,
+// since that is the replica the borrow constrains most.
+func k2BorrowOf(namespace string, rows []capacity.ReplicaCapacity) []domain.LearnedStateBorrow {
+	var out []domain.LearnedStateBorrow
+	for _, rc := range rows {
+		if rc.K2Priority != capacity.K2SrcBorrowed || rc.K2BorrowedFrom == "" {
+			continue
+		}
+		if len(out) == 0 || rc.K2BorrowRelaxed < out[0].Relaxed {
+			out = []domain.LearnedStateBorrow{{
+				Quantity: domain.BorrowedK2, Donor: rc.K2BorrowedFrom, DonorNamespace: namespace,
+				Relaxed: rc.K2BorrowRelaxed,
+			}}
+		}
+	}
+	return out
 }

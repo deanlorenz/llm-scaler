@@ -21,6 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // The saturation analyzer's learned state survives a controller restart in one
@@ -107,6 +108,7 @@ type learnedStater interface {
 	ExportLearnedState() saturation.LearnedState
 	RestoreLearnedState(saturation.LearnedState) saturation.RestoreReport
 	ForgetLearnedState()
+	TakeRestoreOutcomes() (installed, rejected int)
 }
 
 // Pinned at compile time: the assertion below fails silently at run time.
@@ -181,6 +183,7 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	logger := ctrl.LoggerFrom(ctx).WithName("learned-state")
 	cm, err := e.readLearnedState(ctx)
 	if err != nil {
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
 		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot; nothing restored, and nothing will be written until a read succeeds")
 		return
 	}
@@ -198,6 +201,7 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	}
 	var doc learnedStateDoc
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
 		logger.Error(err, "Learned state: the snapshot could not be read; nothing restored, and it will be replaced")
 		return
 	}
@@ -233,6 +237,11 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	st := &e.learnedState
+	// Every cycle, not every interval: the restores the analyzer decided this
+	// cycle are counted in this cycle's scrape.
+	if a, ok := e.saturationV2Analyzer.(learnedStater); ok {
+		e.metricsEmitter.AddLearnedStateRestores(a.TakeRestoreOutcomes())
+	}
 	if !st.restored || (!st.lastWrite.IsZero() && now.Sub(st.lastWrite) < learnedStateInterval) {
 		return
 	}
@@ -247,6 +256,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	// interval, not at the next refresh.
 	cm, err := e.readLearnedState(ctx)
 	if err != nil {
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
 		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot to update it; not written")
 		return
 	}
@@ -277,6 +287,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	budget := max(min(learnedStateMaxBytes, learnedStateMaxData-others), 0)
 	raw, dropped, err := encodeLearnedState(state, now, budget)
 	if err != nil {
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpWrite)
 		e.reportLearnedStateErr(logger, err, "Learned state: the snapshot does not fit its bound beside the other versions' documents; not written")
 		return
 	}
@@ -305,6 +316,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 			st.lastDigest = ""
 			return
 		}
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpWrite)
 		e.reportLearnedStateErr(logger, err, "Learned state: could not write the snapshot")
 		return
 	}

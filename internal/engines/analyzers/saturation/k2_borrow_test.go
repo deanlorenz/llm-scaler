@@ -74,6 +74,29 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		Expect(b.donor).To(Equal("variant-a"), "the donor is named, so the borrow can be traced")
 	})
 
+	It("reports the borrow on the variant's result, with how far it has relaxed", func() {
+		borrowedOf := func(result *domain.AnalyzerResult, variant string) []domain.LearnedStateBorrow {
+			for _, vc := range result.VariantCapacities {
+				if vc.VariantName == variant {
+					return vc.Borrowed
+				}
+			}
+			Fail("no capacity reported for " + variant)
+			return nil
+		}
+		cycle(4000, 6, 1000, 16000, 0)
+		result := cycle(1000, 0, 1000, 16000, 0)
+		Expect(borrowedOf(result, "variant-b")).To(Equal([]domain.LearnedStateBorrow{
+			{Quantity: domain.BorrowedK2, Donor: "variant-a", DonorNamespace: "test-ns", Relaxed: 0},
+		}), "a variant priced from a sibling's k2 does not say so")
+		Expect(borrowedOf(result, "variant-a")).To(BeEmpty(), "the donor reported a borrow of its own")
+
+		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		got := borrowedOf(cycle(1000, 0, 1000, 16000, 0), "variant-b")
+		Expect(got).To(HaveLen(1))
+		Expect(got[0].Relaxed).To(BeNumerically("~", 0.5, 0.01), "the relaxation was not carried to the result")
+	})
+
 	It("never raises a variant above its own figure", func() {
 		// The own figure here is DERIVED, below k1, because that is the only
 		// case the rule can be seen in: capacity is min(k1, k2), so a borrowed
@@ -277,8 +300,9 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// must not start.
 			cycle(14000, 6, 1000, 16000, 0)
 			result := cycle(1000, 0, 1000, 16000, 0)
+			borrower := states[1].VariantName
 			for _, vc := range result.VariantCapacities {
-				if vc.VariantName == "variant-b" {
+				if vc.VariantName == borrower {
 					Expect(vc.Reason).NotTo(Equal("P2-borrow"))
 				}
 			}

@@ -433,6 +433,63 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
     ]
   }
   ```
+
+### Learned state
+
+What the saturation analyzer learned, and where it came from. A variant priced
+from a figure a sibling measured, and the snapshot that carries learned state
+across a restart, are otherwise visible only in the logs.
+
+### `wva_learned_state_borrowed`
+- **Type**: Gauge
+- **Description**: 1 while a variant is priced from a figure a sibling variant learned, on a replica that reported this cycle. That is a replica of its own; or, for a `k2` borrow, a warm-pool bridge while the bridge is all that carries the variant, since the variant's capacity is then the bridge's. Absent when the variant uses only its own figures, or has no replica reporting.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant that borrows
+  - `quantity`: `k2` -- a sibling's measured k2, used only where it is lower than this variant's own capacity (`P2-borrow` in the [cycle log](cycle-log.md)); or `itl-line` -- a sibling's fitted ITL line, shared when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `donor`, `donor_namespace`: the sibling variant it was learned on. A k2 is borrowed only within the variant's own namespace. An ITL line is shared by engine configuration -- same model, accelerator, GPU count and configuration fingerprint -- so its lender can be any such variant, in this namespace or another, whatever its name
+- **Use Case**: Answers "is this variant priced from its own measurement?" A canary or a newly scaled-out variant borrows until it saturates and measures for itself; one that borrows for days never saturates, which is the case the k2 borrow's relaxation exists for:
+  ```promql
+  wva_learned_state_borrowed{quantity="k2"}
+  ```
+
+### `wva_learned_state_borrow_relaxed`
+- **Type**: Gauge
+- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, then rising linearly toward 1 over the next 6 hours. When the relaxation completes the variant is on its own figure again: the borrow ends, and this series and the `k2` series of `wva_learned_state_borrowed` disappear, so the gauge never reads 1. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`. Present only while `wva_learned_state_borrowed{quantity="k2"}` is.
+
+### `wva_learned_state_k2_source`
+- **Type**: Gauge
+- **Description**: 1 for the source of the k2 a variant is priced on, named as the [cycle log](cycle-log.md) names it: `P1-obs` (measured this cycle), `P2-hist` (the variant's own earlier measurement), `P2-borrow` (a sibling's measurement), `P3-k2` (derived from the engine flags) or `P4-k1` (no k2: the KV cache, or the stored capacity estimate for an engine that publishes no cache configuration). It reads `k1-bound` when the k2, from whichever source, is at or above k1: the KV cache prices the replica, and `analyzer-result`'s `reason` still names the k2's source. Taken from the lower-median replica by capacity, the one `reason` names; with an even replica count the price averages the central pair, and this is the lower of the two. One series per variant. Absent when no replica of the variant reported this cycle.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`, `role`, `source`.
+- **Use Case**: Answers "is this variant priced on a measurement, and whose?" `P3-k2` and `P4-k1` mean nothing has been measured for the output length being served.
+
+### `wva_learned_state_k2_age_seconds`
+- **Type**: Gauge
+- **Description**: Seconds since the k2 a variant is priced on was last measured: the variant's own window for `P1-obs` and `P2-hist`, the donor's for `P2-borrow`. It is the age of the measurement, not of its last use: a figure in use every cycle is read every cycle and still ages. Absent for `P3-k2`, `P4-k1` and `k1-bound`, where no measured k2 prices the replica. Like the other analyzer series, it is deleted on a cycle in which no replica of the model reported, and keeps its last value through a cycle whose collection or analysis failed -- so during a long collection outage it stops growing, and an alert on it does not fire; `WVAMetricsCollectionFailing` reports that outage instead.
+- **Labels**: as `wva_learned_state_k2_source`.
+- **Use Case**: A k2 is only ever measured while a replica is saturated, and a low k2 orders enough replicas that none saturates again -- so a too-low figure can price a fleet for weeks without anything correcting it. An old `P2-hist` at a large fleet is that case:
+  ```promql
+  wva_learned_state_k2_age_seconds{source="P2-hist"} > 86400
+    and on (exported_namespace, model_name, variant_name)
+  max by (exported_namespace, model_name, variant_name) (wva_analyzer_observed_replicas) > 4
+  ```
+  An old figure is not wrong by itself: a fleet sized correctly does not saturate either. The alert says where to look; a measurement is renewed only by a burst that saturates a replica.
+
+### `wva_learned_state_restores_total`
+- **Type**: Counter
+- **Description**: Variants whose learned state was restored from the snapshot after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.
+- **Labels**: `outcome`: `installed`, or `rejected` -- the variant's engine configuration differs from the one the state was learned under, or could not be read completely. Both are published at 0 from startup.
+- **Use Case**: After a restart, `rejected` well above `installed` means the snapshot was mostly not used -- a rollout during the downtime, flags the controller cannot resolve, or an upgrade that changed how configurations are identified ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
+
+### `wva_learned_state_snapshot_errors_total`
+- **Type**: Counter
+- **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.
+- **Labels**: `operation`: `read` or `write`. Both are published at 0 from startup.
+- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`):
+  ```promql
+  increase(wva_learned_state_snapshot_errors_total{operation="read"}[15m]) > 0
+  ```
+
 ### Metrics Collection Observability
 
 ### `wva_metrics_collection_duration_seconds`

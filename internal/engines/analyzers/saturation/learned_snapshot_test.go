@@ -84,10 +84,24 @@ var _ = Describe("learned state across a restart", func() {
 		second.RestoreLearnedState(saved)
 		Expect(capacityOf(second)).To(Equal(float64(12800)),
 			"a k2 measured under --max-num-seqs=256 priced an engine running 64")
+		installed, rejected := second.TakeRestoreOutcomes()
+		Expect([]int{installed, rejected}).To(Equal([]int{0, 1}), "the rejection was not counted")
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.pendingRestore).To(BeEmpty(), "checked once, and dropped")
 		Expect(second.priorK2).To(BeEmpty(), "an older document takes no prior: it cannot say the arguments differed")
+	})
+
+	It("counts each installed restore once", func() {
+		saved := carry(learn(newProcess(params(256))))
+		second := newProcess(params(256))
+		second.RestoreLearnedState(saved)
+		capacityOf(second)
+		capacityOf(second) // a second cycle installs nothing more
+		installed, rejected := second.TakeRestoreOutcomes()
+		Expect([]int{installed, rejected}).To(Equal([]int{1, 0}))
+		installed, rejected = second.TakeRestoreOutcomes()
+		Expect([]int{installed, rejected}).To(Equal([]int{0, 0}), "the counts were not reset when taken")
 	})
 
 	It("does not restore an entry past its horizon", func() {

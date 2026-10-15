@@ -150,4 +150,25 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 				"measured itself")
 	}
 	require.True(t, seen, "no record for the starved variant: the test proves nothing")
+
+	// And wva_learned_state_borrowed says the same: a line held but not used
+	// is not a borrow. The result is read through Analyze, one cycle later,
+	// on the same fixture.
+	at := base.Add(4 * 2 * time.Minute)
+	a.now = func() time.Time { return at }
+	res, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows(5410), states))
+	require.NoError(t, err)
+	var reported bool
+	for _, vc := range res.VariantCapacities {
+		if vc.VariantName != starved {
+			continue
+		}
+		reported = true
+		for _, b := range vc.Borrowed {
+			require.NotEqual(t, domain.BorrowedITLLine, b.Quantity,
+				"the variant was priced from its own measured window, yet the "+
+					"borrow gauge says it is priced from a sibling's line")
+		}
+	}
+	require.True(t, reported, "no capacity for the starved variant: the test proves nothing")
 }

@@ -388,7 +388,9 @@ from the deployment-derived capacity until the model saturates again; that is
 higher than the measured figure, so the fleet is smaller and TTFT worse for a
 while after every upgrade or leader change. `LEARNED_STATE_SNAPSHOT=true`
 carries the measured state across ([configuration](configuration.md#learned-state-across-a-restart)).
-With it on, the log says what happened (logger `learned-state`):
+With it on, `wva_learned_state_restores_total{outcome}` counts the variants
+restored and rejected, `wva_learned_state_snapshot_errors_total{operation}` the
+failed reads and writes, and the log says why (logger `learned-state`):
 
 - `Learned state: no snapshot to restore` -- the first start with the store,
   or after a flush. Expected once.

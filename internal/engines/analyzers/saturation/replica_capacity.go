@@ -99,7 +99,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// rule is spelled: the k2 write, the throughput write below, the borrow
 	// clock and the capacity-store update all read adm.
 	adm := admissionOf(rm)
-	k2, k2Priority, k2Recordable := a.computeK2(
+	k2, k2Priority, k2Recordable, k2Borrowed := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -113,6 +113,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		adm,
 		logger,
 	)
+	k2Age, k2AgeKnown := a.k2WriteAge(historyKey, k2Priority, k2Borrowed.donor)
 	// The same saturated moment that yields a k2 observation yields the
 	// replica's saturated THROUGHPUT: with the queue over the threshold the
 	// engine is completing requests as fast as it can, so its completion rate
@@ -306,6 +307,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		MemoryBoundCapacity:         k1,
 		ComputeBoundCapacity:        k2,
 		K2Priority:                  k2Priority,
+		K2BorrowedFrom:              k2Borrowed.donor,
+		K2BorrowRelaxed:             k2Borrowed.relaxed,
+		K2WriteAge:                  k2Age,
+		K2WriteAgeKnown:             k2AgeKnown,
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
@@ -434,8 +439,10 @@ const derivedBucket = "derived"
 // 3. Derived (from deployment args) → formula-based estimate
 // 4. Fallback → k1 (memory-bound only)
 // Returns the k2 the replica is priced on this cycle, the source that produced
-// it, and the k2 the chain gave -- the figure the capacity store may keep. The
-// first and last differ only for an unadmitted row (unadmittedPrice).
+// it, the k2 the chain gave -- the figure the capacity store may keep -- and
+// the sibling's k2 it borrowed when that is P2-borrow (zero otherwise). The
+// first and third differ only for an unadmitted row (unadmittedPrice), which
+// is then priced at its own reading, not from a borrow.
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
 // and variantName are for the log lines only. adm is the row's admission
 // (admissionOf): a row that is not admitted has its saturated reading logged
@@ -454,12 +461,16 @@ func (a *SaturationAnalyzer) computeK2(
 	downstreamSaturated bool,
 	adm admission,
 	logger logr.Logger,
-) (k2 int64, src capacity.K2Source, recordable int64) {
-	chain, chainSrc := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
+) (k2 int64, src capacity.K2Source, recordable int64, borrow k2Borrow) {
+	chain, chainSrc, chainBorrow := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
 		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
 		adm, logger)
-	return a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
+	k2, src, recordable = a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
+	if src == capacity.K2SrcUnadmitted {
+		return k2, src, recordable, k2Borrow{}
+	}
+	return k2, src, recordable, chainBorrow
 }
 
 // unadmittedPrice returns the k2 a row is priced on this cycle, its source,
@@ -522,7 +533,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	downstreamSaturated bool,
 	adm admission,
 	logger logr.Logger,
-) (int64, capacity.K2Source) {
+) (int64, capacity.K2Source, k2Borrow) {
 	armBorrowClock := adm.admitted()
 	// Priority 1: Observed (queue saturated)
 	//
@@ -661,7 +672,7 @@ func (a *SaturationAnalyzer) k2Chain(
 				"priority", capacity.K2SrcObserved.String(), "historyKey", historyKey,
 				"queueLength", queueLen, "queueThreshold", queueThreshold,
 				"k2Observed", k2Observed, "k2", k2Smoothed, "historyWindowLen", historyLen)
-			return k2Smoothed, capacity.K2SrcObserved
+			return k2Smoothed, capacity.K2SrcObserved, k2Borrow{}
 		}
 	}
 
@@ -713,7 +724,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"k2", int64(histAvg), "historyWindowLen", histLen,
 			"historyAgeSeconds", int64(histAge.Seconds()))
-		return int64(histAvg), capacity.K2SrcHistorical
+		return int64(histAvg), capacity.K2SrcHistorical, k2Borrow{}
 	}
 
 	// Priority 3: Derived from deployment args
@@ -766,21 +777,21 @@ func (a *SaturationAnalyzer) k2Chain(
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
 			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, armBorrowClock); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
-				return b.k2, capacity.K2SrcBorrowed
+				return b.k2, capacity.K2SrcBorrowed, b
 			}
 			logger.V(logging.DEFAULT).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
 				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
 				"engineParams", engineParams, "k2", k2Derived)
-			return k2Derived, capacity.K2SrcDerived
+			return k2Derived, capacity.K2SrcDerived, k2Borrow{}
 		}
 	}
 
 	// Priority 4: Fallback to k1
 	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, armBorrowClock); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
-		return b.k2, capacity.K2SrcBorrowed
+		return b.k2, capacity.K2SrcBorrowed, b
 	}
 	reason := "no observed/historical/derived k2; capacity is memory-bound only"
 	if isPrefill {
@@ -791,7 +802,7 @@ func (a *SaturationAnalyzer) k2Chain(
 		"priority", capacity.K2SrcFallback.String(), "historyKey", historyKey,
 		"reason", reason,
 		"k1", k1)
-	return k1, capacity.K2SrcFallback
+	return k1, capacity.K2SrcFallback, k2Borrow{}
 }
 
 // lookupCompatibleCapacity searches the capacity store for a record from
@@ -978,17 +989,42 @@ func memoryBound(totalKvCapacityTokens int64, kvCacheThreshold float64) int64 {
 // never produce a value that matches no element.
 // Returns "" when replicas is empty.
 func k2SourceLabel(replicas []capacity.ReplicaCapacity) string {
-	if len(replicas) == 0 {
+	row := medianK2Row(replicas)
+	if row == nil {
 		return ""
+	}
+	if label := row.K2Priority.String(); label != "" {
+		return label
+	}
+	return domain.ReasonError
+}
+
+// k2SourceK1Bound is the k2 source published for a variant whose k2, from
+// whichever source, is at or above k1: the KV cache prices the replica, and
+// the k2's own source and age say nothing about the price. The cycle log's
+// Reason still names the k2 source.
+const k2SourceK1Bound = "k1-bound"
+
+// k2DoesNotBind reports whether row's k2 is at or above its k1, so that k1
+// is what prices it. A P4-k1 row is its own answer: its k2 is k1 by
+// construction, and on the store fallback both are the stored estimate.
+func k2DoesNotBind(row *capacity.ReplicaCapacity) bool {
+	return row.K2Priority != capacity.K2SrcFallback &&
+		row.ComputeBoundCapacity >= row.MemoryBoundCapacity
+}
+
+// medianK2Row is the replica k2SourceLabel names: the lower median by
+// EffectiveCapacity, from a sorted copy. Nil when replicas is empty. With an
+// even count the variant's price averages the central pair, so this row is
+// the lower of the two figures it averages.
+func medianK2Row(replicas []capacity.ReplicaCapacity) *capacity.ReplicaCapacity {
+	if len(replicas) == 0 {
+		return nil
 	}
 	sorted := make([]capacity.ReplicaCapacity, len(replicas))
 	copy(sorted, replicas)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].EffectiveCapacity < sorted[j].EffectiveCapacity
 	})
-	medIdx := (len(sorted) - 1) / 2
-	if label := sorted[medIdx].K2Priority.String(); label != "" {
-		return label
-	}
-	return domain.ReasonError
+	return &sorted[(len(sorted)-1)/2]
 }

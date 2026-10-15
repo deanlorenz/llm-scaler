@@ -281,6 +281,38 @@ const (
 	// was true when written and stopped being true in the same PR.
 	WVAEngineConfig = "wva_engine_config"
 
+	// WVALearnedStateBorrowed is a gauge, 1 while a variant is priced from a
+	// figure a sibling variant learned: a k2 below its own capacity, or a
+	// shared ITL line. Labels: namespace, model_name, variant_name, quantity
+	// (k2 or itl-line), donor, donor_namespace. Absent when it borrows nothing.
+	WVALearnedStateBorrowed = "wva_learned_state_borrowed"
+	// WVALearnedStateBorrowRelaxed is a gauge of how far a variant's k2 borrow
+	// has relaxed back to its own figure: 0 at full strength, 1 fully relaxed.
+	// Labels: namespace, model_name, variant_name. Present only while
+	// wva_learned_state_borrowed{quantity="k2"} is.
+	WVALearnedStateBorrowRelaxed = "wva_learned_state_borrow_relaxed"
+	// WVALearnedStateK2Source is a gauge, 1 for the source of the k2 a
+	// variant is priced on (P1-obs, P2-hist, P2-borrow, P3-k2, P4-k1), or
+	// k1-bound when the k2 is at or above k1 and the KV cache prices it.
+	// Labels: namespace, model_name, variant_name, role, source. Absent when
+	// no replica of the variant reported this cycle.
+	WVALearnedStateK2Source = "wva_learned_state_k2_source"
+	// WVALearnedStateK2AgeSeconds is how long ago the k2 a variant is priced
+	// on was last measured -- written, not read. Same labels as
+	// WVALearnedStateK2Source; present only for P1-obs, P2-hist and
+	// P2-borrow, the sources that read a measured window. Like every
+	// analyzer series it keeps its last value through a cycle whose
+	// collection or analysis failed.
+	WVALearnedStateK2AgeSeconds = "wva_learned_state_k2_age_seconds"
+	// WVALearnedStateRestoresTotal counts variants whose learned state was
+	// restored from the snapshot (LEARNED_STATE_SNAPSHOT), by outcome:
+	// installed, or rejected because the engine configuration differed or
+	// could not be read completely.
+	WVALearnedStateRestoresTotal = "wva_learned_state_restores_total"
+	// WVALearnedStateSnapshotErrorsTotal counts failed reads and writes of
+	// the learned-state snapshot ConfigMap, by operation (read or write).
+	WVALearnedStateSnapshotErrorsTotal = "wva_learned_state_snapshot_errors_total"
+
 	// LabelFingerprint is the engine-configuration digest, and
 	// LabelFingerprintVersion the hash's own version -- published beside it
 	// because the hash's input set is a wire format, and a bump means every
@@ -913,7 +945,15 @@ const (
 	LabelPool               = "pool"
 	// LabelOutcome distinguishes a borrow that hit, one blocked by an exhausted
 	// reserve, and one that missed because the model was resident nowhere.
-	LabelOutcome            = "outcome"
+	LabelOutcome = "outcome"
+	// LabelQuantity names what a variant borrowed from a sibling (k2 or
+	// itl-line), and LabelDonor the sibling it borrowed from.
+	LabelQuantity = "quantity"
+	LabelDonor    = "donor"
+	// LabelDonorNamespace is the donor variant's namespace.
+	LabelDonorNamespace = "donor_namespace"
+	// LabelOperation names the operation a store error happened in.
+	LabelOperation          = "operation"
 	LabelErrorType          = "error_type"
 	LabelAnalyzerName       = "analyzer_name"
 	LabelLimiterEnabled     = "limiter_enabled"

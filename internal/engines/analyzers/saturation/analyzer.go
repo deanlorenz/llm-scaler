@@ -84,6 +84,10 @@ type SaturationAnalyzer struct {
 	// (installRestored, learned_snapshot.go). Swept a retention after the
 	// restore, for a variant that never comes back.
 	pendingRestore map[string]*pendingVariant
+	// restoresInstalled and restoresRejected count the variants installRestored
+	// decided since TakeRestoreOutcomes last read them, for the engine to
+	// publish (wva_learned_state_restores_total).
+	restoresInstalled, restoresRejected int
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
 	// last reading it was given, sample or not (recordSaturatedThroughput);
