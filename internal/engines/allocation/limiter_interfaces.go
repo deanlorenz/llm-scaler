@@ -83,9 +83,15 @@ type ResourceConstraints struct {
 	// that only impose cluster/per-type constraints. The optimizer caps a
 	// model's allocation at min(per-type pool, this namespace's pool).
 	NamespacePools map[string]map[string]ResourcePool
-	TotalLimit     int
-	TotalUsed      int
-	TotalAvail     int
+	// NamespaceScoped is true for a provider that caps namespaces, not the
+	// cluster: a namespace-scoped quota. Its Pools are then the sum of the
+	// caps of the namespaces it lists, not a budget over every namespace, and
+	// a namespace it excludes is bound by it not at all. It is set even when
+	// no active namespace is capped and NamespacePools is empty.
+	NamespaceScoped bool
+	TotalLimit      int
+	TotalUsed       int
+	TotalAvail      int
 	// PoolsVersion is the version of the warm-pool figure
 	// (decision.WarmPoolGPUsVersion) that the usage these constraints were
 	// computed against included. Set by the engine that built the usage views,
@@ -193,6 +199,10 @@ type NamespaceAwareInventory interface {
 	// sentinel pool with Limit < 0 (so it stays distinct from a type the
 	// namespace does not list, which the optimizer must deny). SetUsedByNamespace
 	// should be called first so the returned pools carry current usage.
+	// An inventory with no namespace dimension (a cluster-scoped quota)
+	// returns nil; a namespace-scoped one returns a non-nil map, empty when
+	// no active namespace is capped (DefaultLimiter reads the difference as
+	// ResourceConstraints.NamespaceScoped).
 	NamespaceResourcePools(activeNamespaces []string) map[string]map[string]ResourcePool
 }
 

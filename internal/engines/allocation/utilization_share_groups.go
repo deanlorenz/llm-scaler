@@ -88,9 +88,11 @@ type ShareGroup struct {
 	// Variants lists every variant of each planned role. Once the optimizer is
 	// active it owns all their targets, not only the ones a transfer touches.
 	Variants map[string][]ShareVariant
-	// PhysicalFree bounds what a fill may place this cycle: the cluster's free
-	// GPUs of the type, which a namespace quota can exceed (as in applyRescale).
-	// math.MaxInt when the cluster pool is unbounded or unknown.
+	// PhysicalFree bounds what a fill may place this cycle: the free GPUs of
+	// the type in the budget over every namespace (a cluster quota or the
+	// physical inventory), which a namespace quota can exceed (as in
+	// applyRescale). math.MaxInt when no such budget bounds the type: the sum
+	// of the namespace quotas is not one.
 	PhysicalFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
@@ -116,13 +118,26 @@ type ShareGroup struct {
 	listed int // the planned roles' GPUs by replica count, for the budget
 }
 
+// UnsharedExcludedNamespace is why a model of a namespace a namespace-scoped
+// quota excludes is planned in no group when no cluster-scoped quota bounds it:
+// such a namespace bypasses the namespace quota, so the only budget it could be
+// planned over is the other tenants' free quota, which does not count what it
+// holds.
+const UnsharedExcludedNamespace = "its namespace is excluded from the namespace quota and no cluster quota bounds it"
+
 // ShareGroupOptions controls which groups BuildShareGroups returns.
 type ShareGroupOptions struct {
-	// ClusterIsQuota reports whether the cluster-scope budget is a quota. When
-	// it is not, it is the physical inventory, and the cluster group is built
-	// only with PhysicalGroups.
+	// ClusterIsQuota reports whether a cluster-scoped quota bounds the cluster
+	// group. A namespace-scoped quota is not one: it bounds only the
+	// namespaces it caps. When ClusterIsQuota is false the cluster-scope budget
+	// is the physical inventory, and the cluster group is built only with
+	// PhysicalGroups.
 	ClusterIsQuota bool
 	PhysicalGroups bool
+	// Unshared, when set, is called for each model planned in no group
+	// because no budget bounds it, with why (UnsharedExcludedNamespace).
+	// Today's optimizer keeps such a model.
+	Unshared func(req ModelScalingRequest, why string)
 	// NamespaceEnabled reports whether a namespace-quota group takes part. Nil
 	// means every namespace does.
 	NamespaceEnabled func(namespace string) bool
@@ -160,7 +175,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	if len(constraints) == 0 {
 		return nil
 	}
-	available := mergeConstraints(constraints)
+	available, namespaceQuota := clusterBudgets(constraints)
 	availableByNS := mergeNamespaceConstraints(constraints)
 
 	type key struct{ acc, scope string }
@@ -204,8 +219,20 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				continue
 			}
 			scope = req.Namespace
-		} else if !opts.ClusterIsQuota && !opts.PhysicalGroups {
-			continue
+		} else {
+			// Every active namespace a namespace-scoped quota does not exclude
+			// is in its pools, so a namespace outside them is excluded. Only a
+			// cluster-scoped budget bounds it; without one it is not shared,
+			// whatever ClusterIsQuota and PhysicalGroups say.
+			if free, ok := available[acc]; namespaceQuota && (!ok || free > MaxShareBudgetGPUs) {
+				if opts.Unshared != nil {
+					opts.Unshared(req, UnsharedExcludedNamespace)
+				}
+				continue
+			}
+			if !opts.ClusterIsQuota && !opts.PhysicalGroups {
+				continue
+			}
 		}
 		g := group(acc, scope)
 
@@ -265,10 +292,14 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if !ok || free < 0 || free > MaxShareBudgetGPUs {
 			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
 		}
-		// The limiter's free figure is net of what WVA's variants hold by
-		// replica count, so the budget adds back that count -- not the held
-		// figure, which also counts terminating pods. Those then show up as
-		// committed and not idle, which is the point of counting them.
+		// free is net of what the group's planned roles hold by replica
+		// count: a namespace group's is its own namespace's quota, and the
+		// cluster group's a budget over every namespace (clusterBudgets) -- a
+		// cluster quota, charged what WVA's variants hold, or the physical
+		// inventory, charged every GPU on the nodes. So the budget adds back
+		// that count -- not the held figure, which also counts terminating
+		// pods. Those then show up as committed and not idle, which is the
+		// point of counting them.
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
@@ -283,6 +314,28 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		out = append(out, *g)
 	}
 	return out
+}
+
+// clusterBudgets returns, per accelerator type, the free GPUs of the providers
+// whose pools bound every namespace -- a cluster-scoped quota, or the physical
+// inventory -- and whether any provider is a namespace-scoped quota. A
+// namespace-scoped quota's pools are the sum of the caps of the namespaces it
+// lists and are net of only their holdings: a namespace it excludes holds GPUs
+// that sum never counts, so the cluster group planned over it would grow its
+// budget one for one with what that namespace holds.
+func clusterBudgets(constraints []*ResourceConstraints) (map[string]int, bool) {
+	var cluster []*ResourceConstraints
+	namespaced := false
+	for _, c := range constraints {
+		switch {
+		case c == nil:
+		case c.NamespaceScoped || len(c.NamespacePools) > 0:
+			namespaced = true
+		default:
+			cluster = append(cluster, c)
+		}
+	}
+	return mergeConstraints(cluster), namespaced
 }
 
 type shareRoleInput struct {

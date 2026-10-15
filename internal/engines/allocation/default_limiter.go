@@ -111,7 +111,11 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 	if nai, ok := l.inventory.(NamespaceAwareInventory); ok {
 		nai.SetUsedByNamespace(usageByNamespace)
 		activeNamespaces := slices.Collect(maps.Keys(usageByNamespace))
-		if nsPools := nai.NamespaceResourcePools(activeNamespaces); len(nsPools) > 0 {
+		nsPools := nai.NamespaceResourcePools(activeNamespaces)
+		// A namespace-scoped inventory answers with a map, empty when none of
+		// the active namespaces is capped; a cluster-scoped one with nil.
+		rc.NamespaceScoped = nsPools != nil
+		if len(nsPools) > 0 {
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)

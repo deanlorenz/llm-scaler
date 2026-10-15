@@ -132,7 +132,10 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 1. If `N` appears in `exclude`, the limiter **passes through** — the request is
    returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply.
+   still apply. The utilization-share optimizer does not share an excluded
+   namespace unless a `scope: cluster` quota also covers it: this quota does
+   not bound it, so there is no budget to share
+   ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace

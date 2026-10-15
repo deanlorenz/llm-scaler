@@ -262,9 +262,17 @@ reports `invalid`) and the controller logs
 
 - one group per namespace that a namespace quota (`scope: namespace`) covers, per
   accelerator type;
-- one cluster group per accelerator type for every other model, when the cluster
-  limiter is a `quota`. Under a `gpu-inventory` limiter alone there is no cluster
-  group unless you set `physicalGroups: true` (see the table).
+- one cluster group per accelerator type for every other model, when a
+  `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
+  is no cluster group unless you set `physicalGroups: true` (see the table).
+
+A namespace that a namespace quota lists in `exclude` is not shared unless a
+`scope: cluster` quota also covers it. The namespace quota does not bound it, so
+the only budget left would be the other tenants' free quota, which does not
+count what the excluded namespace holds. Its models stay on today's optimizer,
+and the controller logs them once:
+`Utilization share: not sharing models no quota bounds`. To share them, add a
+`scope: cluster` quota for their accelerator type.
 
 A model whose variants run on more than one accelerator type, or whose analyzer
 result is not live this cycle, is left to today's optimizer for that cycle.

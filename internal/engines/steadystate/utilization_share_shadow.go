@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,9 @@ type utilizationShareState struct {
 	// lastUnmatched are the disabled namespaces the last cycle found no
 	// namespace quota for, comma-joined: reported once per change.
 	lastUnmatched string
+	// lastUnshared are the models the last cycle planned in no group because
+	// no budget bounds them, comma-joined: reported once per change.
+	lastUnshared string
 	// noBoundSince is when the cycles began to see no constraints at all;
 	// zero while they see some. goneSince is when each ledger's group began
 	// to be missing from cycles that saw constraints. See shareAbsenceGrace.
@@ -186,8 +190,14 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	seen := map[string]bool{}
 
 	weightErrs := map[string]string{}
+	var unshared []string
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
-		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
+		// Only a cluster-scoped quota is a cluster budget: a namespace-scoped
+		// one bounds the namespaces it caps, and one it excludes not at all.
+		ClusterIsQuota: e.Config.HasClusterQuota(),
+		Unshared: func(req allocation.ModelScalingRequest, why string) {
+			unshared = append(unshared, utils.GetNamespacedKey(req.Namespace, req.ModelID)+": "+why)
+		},
 		PhysicalGroups:   us.PhysicalGroups,
 		ReserveGPUs:      us.ReserveGPUs,
 		PoolUnheld:       decision.DefaultWarmPoolUnheld.Latest(decision.WarmPoolUnheldMaxAge, now),
@@ -221,6 +231,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 	}
 	st.lastWeightErrs = weightErrs
+	st.reportUnshared(logger, unshared)
 	published := make([]metrics.UtilizationShareGroup, 0, len(groups))
 	for _, g := range groups {
 		// Every target gives a role at most its headroom of the spare
@@ -518,6 +529,22 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 	if joined != "" {
 		logger.Info("Utilization share: the namespaces block disables namespaces no namespace quota names; it has no effect on them",
 			"namespaces", joined)
+	}
+}
+
+// reportUnshared logs, once per change, the models planned in no group because
+// no budget bounds them -- a namespace a namespace quota excludes, with no
+// cluster quota. Today's optimizer keeps them.
+func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []string) {
+	slices.Sort(models)
+	joined := strings.Join(models, ",")
+	if joined == st.lastUnshared {
+		return
+	}
+	st.lastUnshared = joined
+	if joined != "" {
+		logger.Info("Utilization share: not sharing models no quota bounds; today's optimizer keeps them",
+			"models", models)
 	}
 }
 
