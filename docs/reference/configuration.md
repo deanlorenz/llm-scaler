@@ -592,8 +592,8 @@ plaintext.
 **Undo.** `make undeploy-wva` removes what carries the `wva.llmd.ai/scaler-tls`
 label. The admin's uninstall also removes KEDA's side, again only what carries
 the label, and prints the KEDA restart command. The installer refuses
-to overwrite a Secret, Issuer, Certificate or ClusterTriggerAuthentication
-without that label, or one it cannot read.
+to overwrite a Secret, Issuer, Certificate, ClusterTriggerAuthentication or the
+`wva-scaler-keda-auth` ConfigMap without that label, or one it cannot read.
 
 <details>
 <summary>Details: the controller flags, and setting TLS up by hand</summary>

@@ -943,9 +943,27 @@ reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA_OBJ_NS=keda-objs
 ok '[ "$RC" = 0 ] && grep -q "secret@keda-objs/$CTA" "$WORK/keda-writes" && [ "$(jq -r .data.secretNamespace "$STORE/configmap__wva-scaler-keda-auth.json")" = keda-objs ]' "moved object namespace: copy not written to keda-objs: '$(tr '\n' ' ' <"$WORK/keda-writes")'"
-# KEDA's operator no longer says where (uninstalled first, or reconfigured).
-run wva_scaler_tls_undeploy STUB_CM=absent
+# Where KEDA runs is no longer known (KEDA uninstalled first), so the marker
+# is all there is.
+run wva_scaler_tls_undeploy STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false
 ok 'grep -q "^delete secret $CTA -n keda-objs" "$WORK/kubectl.log" && [ ! -f "$STORE/secret@keda-objs__$CTA.json" ]' "undeploy left KEDA's copy in keda-objs: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
+
+echo "== undeploy trusts where KEDA reads its Secrets over a marker that names another namespace"
+# The marker is in the controller namespace, so its admin can point it at any
+# namespace that holds a Secret of that name with the label.
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+# marker_edit <program>: rewrites the marker in the store.
+marker_edit() {
+    jq "$1" "$STORE/configmap__wva-scaler-keda-auth.json" >"$WORK/m.json" && mv "$WORK/m.json" "$STORE/configmap__wva-scaler-keda-auth.json"
+}
+marker_edit '.data.secretNamespace = "victim"'
+jq '.metadata.namespace = "victim"' "$STORE/secret@keda__$CTA.json" >"$STORE/secret@victim__$CTA.json"
+run wva_scaler_tls_undeploy STUB_CM=absent
+ok '[ ! -f "$STORE/secret@keda__$CTA.json" ] && grep -q "^delete secret $CTA -n keda" "$WORK/kubectl.log"' "forged marker: our copy in keda not removed: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
+ok '[ -f "$STORE/secret@victim__$CTA.json" ] && ! grep -q "^delete secret $CTA -n victim" "$WORK/kubectl.log"' "forged marker: deleted the Secret in the namespace the marker named: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
+ok 'grep -q "says KEDA.s copy of the scaler client certificate went to victim, but KEDA reads its Secrets from keda" "$WORK/warnings"' "forged marker: the mismatch is not reported: $(cat "$WORK/warnings")"
 
 echo "== undeploy leaves a same-named ClusterTriggerAuthentication and copy it did not write"
 reset_store
@@ -998,10 +1016,6 @@ store_tls_controller() {
     else
         fail "the TLS overlay does not render: $(head -3 "$WORK/err")"
     fi
-}
-# marker_edit <jq program>: rewrites the marker in the store.
-marker_edit() {
-    jq "$1" "$STORE/configmap__wva-scaler-keda-auth.json" >"$WORK/m.json" && mv "$WORK/m.json" "$STORE/configmap__wva-scaler-keda-auth.json"
 }
 
 echo "== controller phase: KEDA trusts an old CA: warn, with the admin command and the KEDA restart"
@@ -1097,6 +1111,52 @@ reset_store
 run wva_scaler_tls_provision_openssl
 ok 'grep -q "serving certificate is valid 365 days, KEDA.s client certificate 3650 days" "$WORK/info"' "issued line: $(grep issued "$WORK/info")"
 
+
+# ---------------------------------------------------------------- the marker is the installer's
+echo "== a ConfigMap wva-scaler-keda-auth this installer did not write is refused, not overwritten"
+reset_store
+fresh_k
+jq -n '{kind: "ConfigMap", metadata: {name: "wva-scaler-keda-auth"}, data: {clusterTriggerAuthentication: "theirs"}}' >"$STORE/configmap__wva-scaler-keda-auth.json"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent
+ok '[ "$RC" = 1 ] && grep -q "ConfigMap wva-scaler-keda-auth in $NS was not created by this installer" "$WORK/refusal"' "foreign marker: exit $RC, $(cat "$WORK/refusal")"
+ok '[ ! -s "$WORK/keda-writes" ] && [ "$(jq -r .data.clusterTriggerAuthentication "$STORE/configmap__wva-scaler-keda-auth.json")" = theirs ]' "foreign marker: wrote '$(tr '\n' ' ' <"$WORK/keda-writes")' or overwrote it"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent STUB_CONFIGMAPS=FORBIDDEN
+ok '[ "$RC" = 1 ] && grep -q "Cannot read ConfigMap wva-scaler-keda-auth" "$WORK/refusal" && [ ! -s "$WORK/keda-writes" ]' "unreadable marker: exit $RC, wrote '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/refusal")"
+
+# ---------------------------------------------------------------- no key left behind by a refusal
+# provision_tmp_case <label>: an OpenShift refusal over a foreign serving Secret
+# must leave TMPDIR empty -- no CA key, and no empty directory either.
+provision_tmp_case() {
+    echo "== OpenShift refusal ($1): nothing left in TMPDIR"
+    put_foreign_secret "$SERVING"
+    rm -rf "$WORK/tmpd2"
+    mkdir -p "$WORK/tmpd2"
+    run wva_scaler_tls_provision_openssl ENVIRONMENT=openshift "export TMPDIR=$WORK/tmpd2"
+    ok '[ "$RC" = 1 ] && grep -q "service CA" "$WORK/refusal"' "$1: exit $RC, $(cat "$WORK/refusal")"
+    ok '[ -z "$(find "$WORK/tmpd2" -name ca.key)" ] && [ -z "$(ls -A "$WORK/tmpd2")" ]' "$1: left behind: $(cd "$WORK/tmpd2" && find . | tr '\n' ' ')"
+}
+reset_store
+provision_tmp_case "no CA yet"
+reset_store
+put_foreign_secret "$SERVING" '{"service.beta.openshift.io/originating-service-name":"wva-external-scaler"}'
+run wva_scaler_tls_provision_openssl ENVIRONMENT=openshift
+ok '[ "$RC" = 0 ] && [ -n "$(jq -r ".data[\"tls.key\"] // empty" "$STORE/secret__$CA.json")" ]' "setup for the CA-key case: no CA with a key was stored: $(cat "$WORK/refusal")"
+provision_tmp_case "the CA and its key exist"
+
+# ---------------------------------------------------------------- client identity limits
+echo "== WVA_SCALER_CLIENT_SAN: label and length limits"
+L63="$(printf 'a%.0s' $(seq 63))"
+L61="$(printf 'b%.0s' $(seq 61))"
+L62="$(printf 'b%.0s' $(seq 62))"
+for good in "$L63.x" "$L63.$L63.$L63.$L61"; do
+    run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent "WVA_SCALER_CLIENT_SAN=$good"
+    ok '[ "$RC" = 0 ]' "client SAN of ${#good} characters refused: $(cat "$WORK/refusal")"
+done
+for bad in 'a..b' "${L63}c.x" "$L63.$L63.$L63.$L62" 'a.-b' 'a-.b'; do
+    run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent "WVA_SCALER_CLIENT_SAN=$bad"
+    ok '[ "$RC" = 1 ] && grep -q "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name" "$WORK/refusal"' "client SAN '$bad' (${#bad} characters) accepted (exit $RC)"
+done
 
 # ---------------------------------------------------------------- where KEDA runs: Forbidden is not absent
 # probe_apisvc and probe_np print the return code of the common.sh readers:

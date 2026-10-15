@@ -78,11 +78,14 @@ wva_scaler_client_san() {
 # wva_scaler_check_client_san refuses a WVA_SCALER_CLIENT_SAN that is not one
 # lowercase DNS name. The value goes into an openssl config, a YAML manifest and
 # a controller flag; a comma, a newline or a space would add names or keys there.
+# Each label is 1 to 63 characters and starts and ends with a letter or digit,
+# and the whole name is at most 253, as RFC 1123 has it.
 wva_scaler_check_client_san() {
-    local san="${WVA_SCALER_CLIENT_SAN:-}" re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+    local san="${WVA_SCALER_CLIENT_SAN:-}" label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+    local re="^${label}(\.${label})*\$"
     [ -n "$san" ] || return 0
-    [[ "$san" =~ $re ]] && return 0
-    log_error "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name: letters, digits, dots and hyphens, starting and ending with a letter or digit (got: ${san})."
+    [ "${#san}" -le 253 ] && [[ "$san" =~ $re ]] && return 0
+    log_error "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name: labels of letters, digits and hyphens, each starting and ending with a letter or digit and at most 63 long, joined by single dots, 253 in all (got: ${san})."
 }
 
 # wva_scaler_not_found succeeds when kubectl error text $1 is the API server
@@ -302,45 +305,56 @@ wva_scaler_sha256() {
 
 # wva_scaler_check_openshift_serving makes room for the service CA to write the
 # serving Secret: absent or already the service CA's is fine, one this installer
-# wrote earlier is removed, anything else is a refusal.
+# wrote earlier is removed, anything else is a refusal. Every refusal drops the
+# temporary key directory first, in case a caller already made one.
 wva_scaler_check_openshift_serving() {
     local svc
     wva_scaler_object_state secret "$WVA_SCALER_TLS_SECRET"
     case "$WVA_OBJ_STATE" in
         absent) return 0 ;;
         unreadable)
+            wva_scaler_drop_tmp
             log_error "Cannot read Secret $WVA_SCALER_TLS_SECRET in $WVA_NS ($WVA_OBJ_ERR), so whether the service CA owns it is unknown. Grant get on secrets there, or set WVA_SCALER_TLS=false." ;;
         ours)
             kubectl delete secret "$WVA_SCALER_TLS_SECRET" -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 \
-                || log_error "Could not remove Secret $WVA_SCALER_TLS_SECRET in $WVA_NS so the service CA can issue it."
+                || { wva_scaler_drop_tmp; log_error "Could not remove Secret $WVA_SCALER_TLS_SECRET in $WVA_NS so the service CA can issue it."; }
             return 0 ;;
     esac
     svc="$(printf '%s' "$WVA_OBJ_JSON" | jq -r '.metadata.annotations["service.beta.openshift.io/originating-service-name"] // ""' 2>/dev/null)" || svc=""
     [ "$svc" = wva-external-scaler ] && return 0
+    wva_scaler_drop_tmp
     log_error "Secret $WVA_SCALER_TLS_SECRET in $WVA_NS was not issued by the OpenShift service CA for wva-external-scaler, nor by this installer; refusing to take it over. Remove or rename it, or set WVA_SCALER_TLS=false."
 }
 
 # wva_scaler_tls_provision_openssl mints or refreshes the CA and leaves with
 # openssl and sets WVA_SCALER_CLIENT_CA_HASH.
 wva_scaler_tls_provision_openssl() {
-    local d ca_new=false issued="" kept="" serving=true dns san
+    local d ca_new=false issued="" kept="" serving=true dns san ca_json client_json serving_json=""
     [ "${ENVIRONMENT:-}" = openshift ] && serving=false
-    wva_scaler_tmp_begin
-    d="$WVA_SCALER_TMPD"
 
-    # Every refusal first, so none leaves a private key behind in $d.
+    # Every refusal first, before the temporary directory exists, so none can
+    # leave a private key (or an empty directory) behind.
     wva_scaler_require_writable secret "$WVA_SCALER_CA_SECRET"
-    wva_scaler_secret_field tls.crt "$d/ca.crt"
-    wva_scaler_secret_field tls.key "$d/ca.key"
+    ca_json="$WVA_OBJ_JSON"
     wva_scaler_require_writable secret "$WVA_SCALER_CLIENT_SECRET"
-    wva_scaler_secret_field tls.crt "$d/client.old"
-    wva_scaler_secret_field ca.crt "$d/client-ca.old"
+    client_json="$WVA_OBJ_JSON"
     if [ "$serving" = true ]; then
         wva_scaler_require_writable secret "$WVA_SCALER_TLS_SECRET"
-        wva_scaler_secret_field tls.crt "$d/serving.old"
+        serving_json="$WVA_OBJ_JSON"
     else
         wva_scaler_check_openshift_serving
     fi
+
+    wva_scaler_tmp_begin
+    d="$WVA_SCALER_TMPD"
+    WVA_OBJ_JSON="$ca_json"
+    wva_scaler_secret_field tls.crt "$d/ca.crt"
+    wva_scaler_secret_field tls.key "$d/ca.key"
+    WVA_OBJ_JSON="$client_json"
+    wva_scaler_secret_field tls.crt "$d/client.old"
+    wva_scaler_secret_field ca.crt "$d/client-ca.old"
+    WVA_OBJ_JSON="$serving_json"
+    wva_scaler_secret_field tls.crt "$d/serving.old"
 
     # A provider switch: Certificates this installer created would keep
     # rewriting the Secrets below.
@@ -824,6 +838,14 @@ wva_scaler_keda_auth_apply() {
         wva_scaler_drop_tmp
         log_error "Cannot read ClusterTriggerAuthentication $name ($(printf '%s\n' "$out" | head -1)). Grant get on clustertriggerauthentications.keda.sh, or set WVA_SCALER_TLS=false."
     fi
+    # The marker: the controller phase trusts what it says, so a same-named
+    # ConfigMap someone else wrote is never taken over.
+    wva_scaler_object_state configmap "$WVA_SCALER_KEDA_MARKER"
+    case "$WVA_OBJ_STATE" in
+        absent|ours) ;;
+        unreadable) wva_scaler_drop_tmp; log_error "Cannot read ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS ($WVA_OBJ_ERR). Grant get on configmaps there, or set WVA_SCALER_TLS=false." ;;
+        *) wva_scaler_drop_tmp; log_error "ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false." ;;
+    esac
 
     jq -n --arg n "$name" --arg ns "$WVA_SCALER_KEDA_OBJ_NS" --arg l "$WVA_SCALER_TLS_LABEL" --arg src "$WVA_NS" \
         --rawfile crt "$d/tls.crt" --rawfile key "$d/tls.key" --rawfile ca "$d/ca.crt" \
@@ -1374,14 +1396,14 @@ wva_scaler_tls_undeploy() {
     # KEDA's side, and the marker that records it, are the admin's: only an
     # uninstall that may write them removes them.
     [ "${WVA_APPLY_SCOPE:-all}" != controller ] || return 0
-    local name marker_state copy_ns="" out rc=0 removed=false
+    local name marker_state copy_ns="" marker_ns="" out rc=0 removed=false
     name="$(wva_scaler_keda_auth_name)"
     # The marker records where the copy went. Read it before anything is
     # deleted, and delete it last: it is how a re-run finds the copy.
     wva_scaler_object_state configmap "$WVA_SCALER_KEDA_MARKER"
     marker_state="$WVA_OBJ_STATE"
     if [ "$marker_state" = ours ]; then
-        copy_ns="$(printf '%s' "$WVA_OBJ_JSON" | jq -r '.data.secretNamespace // ""' 2>/dev/null)" || copy_ns=""
+        marker_ns="$(printf '%s' "$WVA_OBJ_JSON" | jq -r '.data.secretNamespace // ""' 2>/dev/null)" || marker_ns=""
     fi
 
     out="$(kubectl get clustertriggerauthentications.keda.sh "$name" -o json 2>&1)" || rc=$?
@@ -1397,9 +1419,15 @@ wva_scaler_tls_undeploy() {
         log_warning "Could not read ClusterTriggerAuthentication $name ($(printf '%s\n' "$out" | head -1)); left in place."
     fi
 
+    # Where KEDA reads its Secrets, worked out from sources a tenant cannot
+    # choose, comes first. The marker lives in the controller namespace, whose
+    # admin can edit it, so it is used only when that is not known.
+    wva_scaler_keda_object_ns
+    copy_ns="$WVA_SCALER_KEDA_OBJ_NS"
     if [ -z "$copy_ns" ]; then
-        wva_scaler_keda_object_ns
-        copy_ns="$WVA_SCALER_KEDA_OBJ_NS"
+        copy_ns="$marker_ns"
+    elif [ -n "$marker_ns" ] && [ "$marker_ns" != "$copy_ns" ]; then
+        log_warning "ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS says KEDA's copy of the scaler client certificate went to $marker_ns, but KEDA reads its Secrets from $copy_ns. Only $copy_ns is cleaned up. Check $marker_ns by hand:  kubectl get secret $name -n $marker_ns --show-labels"
     fi
     if [ -n "$copy_ns" ]; then
         WVA_NS="$copy_ns" wva_scaler_object_state secret "$name"
