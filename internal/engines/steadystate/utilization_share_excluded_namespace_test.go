@@ -119,7 +119,7 @@ func TestUtilizationShareReportsAnExcludedNamespaceUnshared(t *testing.T) {
 // excludedNamespace is the namespace namespaceQuotaDoc excludes.
 const excludedNamespace = "ns-x"
 
-const unsharedMessage ="Utilization share: not sharing models no quota bounds; today's optimizer keeps them"
+const unsharedMessage = "Utilization share: not sharing models no quota bounds; today's optimizer keeps them"
 
 // Two unshared models reported in either order are the same set: one line,
 // the models sorted.
