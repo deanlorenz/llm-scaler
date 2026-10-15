@@ -109,6 +109,8 @@ expect "budget: excluded from both entries shares" "ns-y" \
 # still its own group, so nothing is shared.
 expect "budget: a cluster quota beside a namespace quota shares nothing" namespace \
     "$(printf '%s\n' "$QUOTA_POLICY" | yq '.limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]' | us_budget_scope)"
+expect "budget: the inventory alias beside namespace quotas is ignored too" namespace \
+    "$(printf '%s\n  - name: p\n    type: inventory\n' "$QUOTA_POLICY" | us_budget_scope)"
 expect "budget: the inventory alone forms no group" none "$(printf '%s\n' "$INV_POLICY" | us_budget_scope)"
 expect "budget: the inventory with physicalGroups is shared" cluster \
     "$(printf '%s\n' "$INV_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
@@ -393,6 +395,32 @@ printf '%s\n' 'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' 'team
 run activate
 vcase "activate: a ScaledObject whose address names no controller is warned about" \
     eval '[ $RC -eq 0 ] && says "team-g (10.1.2.3:9090)"'
+# A pool calling ANOTHER named controller is attributed, to that one: not
+# listed as unattributed. The IP-addressed one still is.
+fresh "$CLUSTER_POLICY"
+printf '%s\n' 'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-o wva-external-scaler.other.svc:9090 pool-o' 'team-g 10.1.2.3:9090 - llama' > "$STATE/sos"
+run activate
+vcase "activate: a pool on another named controller is not unattributed; the IP one is" \
+    eval '[ $RC -eq 0 ] && says "team-g (10.1.2.3:9090)" && ! says "team-o ("'
+# clusterNamespaces matches whole names: team-c2 listed does not admit team-c,
+# which a substring match would.
+fresh "$(printf '%s\n' "$CLUSTER_POLICY" | yq '.optimizer.utilizationShare.clusterNamespaces = ["team-a", "team-c2"]')"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c2 wva-external-scaler.team-a.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate
+vcase "activate: clusterNamespaces matches whole names (team-c2 does not admit team-c)" \
+    eval '[ $RC -eq 0 ] && says "pods in team-c2." && ! says "pods in team-c."'
+# Not allowed to ask is unknown, never yes or no.
+fresh "$CLUSTER_POLICY"
+printf '%s\n' 'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' > "$STATE/sos"
+echo denied > "$STATE/cani.team-b"
+run activate
+vcase "activate: a can-i it may not ask says it could not tell, for that namespace" \
+    eval '[ $RC -eq 0 ] && says "could not tell whether the controller may patch pods in team-b"'
 
 fresh "$TUNED_POLICY"; run activate
 vcase "activate: from shadow sets shadow false, keeps tuning" \
@@ -554,7 +582,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=90
+CASES_EXPECTED=94
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

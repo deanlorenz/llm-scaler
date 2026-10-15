@@ -70,11 +70,27 @@ def grants(path):
     return out
 
 
+# Grants the tenant Role must carry that the ClusterRole no longer does, so the
+# comparison above cannot see them go. A namespace-scoped controller has no
+# role/wva-pod-writer: without `patch` on pods here its warm pool and the
+# utilization-share optimizer cannot write a pod.
+TENANT_REQUIRED = {
+    ("", "pods"): {"patch"},
+}
+
+
 def main():
     cluster = grants(CLUSTER_ROLE)
     tenant = grants(TENANT_ROLE)
 
     problems = []
+    for key, verbs in sorted(TENANT_REQUIRED.items()):
+        missing = verbs - tenant.get(key, set())
+        if missing:
+            group, resource = key
+            problems.append("  %s%s: the tenant Role must grant %s itself (no "
+                            "role/wva-pod-writer is made for a namespace-scoped controller)"
+                            % (group + "/" if group else "", resource, ",".join(sorted(missing))))
     for key, verbs in sorted(cluster.items()):
         if key in CLUSTER_SCOPED:
             continue

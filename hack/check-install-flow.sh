@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=54
+EXPECT_CASES=58
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -492,6 +492,51 @@ ns-u 10.0.0.9:9090 - llama"
         fail "POD WRITES: wva_regrant_pod_writers must sit directly inside the all|prereqs and cluster-scope guards" "got:  $guard
 want: $want_guard"
     fi
+fi
+
+# --- WIRING -------------------------------------------------------------------
+#
+# The TLS and token helpers are tested on their own in check-install-defaults.sh;
+# these prove deploy_wva_controller and the uninstall still call them, in order.
+# Line numbers inside the function body, whitespace aside.
+body_of() { # body_of <file> <function>: the function's lines, numbered from its opening line
+    # Depth-counted: deploy_wva_controller defines functions inside itself.
+    tr -d '\r' < "$1" | awk -v f="$2() {" '
+        $0 == f {on=1}
+        on && /^[A-Za-z_][A-Za-z0-9_]*\(\) \{$/ {depth++}
+        on {print}
+        on && $0 == "}" {depth--; if (depth == 0) exit}' | sed 's/^[[:space:]]*//' | cat -n
+}
+line_of() { printf '%s\n' "$1" | awk -v p="$2" 'index($0, p) {print $1; exit}'; }
+dwc="$(body_of "$ROOT/deploy/lib/infra_wva.sh" deploy_wva_controller)"
+read_at="$(line_of "$dwc" 'wva_read_live_prometheus_tls "$WVA_NS"')"
+guard_at="$(line_of "$dwc" 'if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then')"
+refuse_at="$(line_of "$dwc" 'wva_refuse_unknown_prometheus_tls')"
+render_at="$(line_of "$dwc" 'wva_render_manager_config_patch "$tmp_overlay"')"
+apply_at="$(line_of "$dwc" 'kubectl apply -k "$tmp_overlay"')"
+write_at="$(line_of "$dwc" 'wva_write_prometheus_settings')"
+token_at="$(line_of "$dwc" 'all|prereqs) wva_delete_legacy_controller_token "$WVA_NS" ;;')"
+if [ -n "$read_at" ] && [ -n "$guard_at" ] && [ "$((guard_at + 1))" = "$read_at" ] \
+    && [ -n "$refuse_at" ] && [ -n "$render_at" ] && [ -n "$apply_at" ] \
+    && [ "$read_at" -lt "$refuse_at" ] && [ "$refuse_at" -lt "$render_at" ] && [ "$render_at" -lt "$apply_at" ]; then
+    ok "WIRING: the live TLS settings are read (not in the prereqs phase), checked and rendered before the apply"
+else
+    fail "WIRING: deploy_wva_controller must read the live TLS settings under the != prereqs guard, then refuse-if-unknown, then render, all before the apply (guard ${guard_at:-none}, read ${read_at:-none}, refuse ${refuse_at:-none}, render ${render_at:-none}, apply ${apply_at:-none})"
+fi
+if [ -n "$write_at" ] && [ -n "$apply_at" ] && [ "$write_at" -gt "$apply_at" ]; then
+    ok "WIRING: the Prometheus settings are written into the live config after the apply"
+else
+    fail "WIRING: wva_write_prometheus_settings must run after the apply (write ${write_at:-none}, apply ${apply_at:-none})"
+fi
+if [ -n "$token_at" ] && [ -n "$apply_at" ] && [ "$token_at" -gt "$apply_at" ]; then
+    ok "WIRING: the legacy controller token is deleted after the apply, in the all|prereqs phases"
+else
+    fail "WIRING: wva_delete_legacy_controller_token must sit in the all|prereqs case after the apply (token ${token_at:-none}, apply ${apply_at:-none})"
+fi
+if [ -n "$(line_of "$(body_of "$ROOT/deploy/lib/cleanup.sh" undeploy_wva_controller)" 'wva_delete_legacy_controller_token "$WVA_NS"')" ]; then
+    ok "WIRING: the uninstall deletes the legacy controller token"
+else
+    fail "WIRING: undeploy_wva_controller must call wva_delete_legacy_controller_token"
 fi
 
 if ! declare -F wva_remove_pod_writers >/dev/null; then

@@ -991,6 +991,34 @@ ${names}  target:
 EOF
 }
 
+# wva_write_prometheus_settings writes the Prometheus URL and TLS settings into
+# the live manager config, after the overlay apply, and warns about what the
+# controller will run with. Needs the WVA_LIVE_* globals that
+# wva_read_live_prometheus_tls set before the apply.
+wva_write_prometheus_settings() {
+    wva_resolve_prometheus_url
+
+    if [ -n "${PROMETHEUS_URL:-}" ]; then
+        log_info "Pointing WVA at Prometheus: $PROMETHEUS_URL"
+        patch_manager_config ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\""
+        wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
+    fi
+    local skip_verify ca_path
+    skip_verify="$(wva_prometheus_skip_verify)"
+    if [ -n "$skip_verify" ]; then
+        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${skip_verify}\""
+    fi
+    ca_path="$(wva_prometheus_ca_path)"
+    if [ -n "$ca_path" ]; then
+        WVA_CA="$ca_path" patch_manager_config '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'
+    fi
+    wva_warn_prometheus_tls_upgrade
+    # Read back what the controller will actually run with, after every patch
+    # above, rather than reasoning about which of them applied.
+    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
@@ -1425,27 +1453,7 @@ wva_reconcile_prometheus_scheme() {
     # kept as the write path: the value is already rendered into the ConfigMap the
     # apply created, and re-applying it here is what fixes an install whose
     # ConfigMap predates that rendering.
-    wva_resolve_prometheus_url
-
-    if [ -n "${PROMETHEUS_URL:-}" ]; then
-        log_info "Pointing WVA at Prometheus: $PROMETHEUS_URL"
-        patch_manager_config ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\""
-        wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
-    fi
-    local skip_verify ca_path
-    skip_verify="$(wva_prometheus_skip_verify)"
-    if [ -n "$skip_verify" ]; then
-        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${skip_verify}\""
-    fi
-    ca_path="$(wva_prometheus_ca_path)"
-    if [ -n "$ca_path" ]; then
-        WVA_CA="$ca_path" patch_manager_config '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'
-    fi
-    wva_warn_prometheus_tls_upgrade
-    # Read back what the controller will actually run with, after every patch
-    # above, rather than reasoning about which of them applied.
-    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
-        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    wva_write_prometheus_settings
 
     if [ "${ENABLE_SCALE_TO_ZERO:-false}" = "true" ]; then
         log_info "Enabling scale-to-zero in WVA ConfigMap (ENABLE_SCALE_TO_ZERO=true)..."

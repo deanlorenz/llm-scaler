@@ -53,14 +53,14 @@ for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_war
           wva_append_metrics_reader_decision render_default_scaledobject \
           wva_read_live_prometheus_tls wva_warn_prometheus_tls_upgrade \
           wva_prometheus_ca_path wva_refuse_unknown_prometheus_tls wva_rerun_cmd wva_render_manager_config_patch \
-          wva_hint_untrusted_prometheus_cert; do
+          wva_hint_untrusted_prometheus_cert wva_write_prometheus_settings; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=107
+EXPECT_CASES=115
 RAN=0
 FAILED=0
 
@@ -192,12 +192,20 @@ SHIPPED_CFG="$(tr -d '\r' < "$ROOT/config/base/manager/manager-configmap.yaml" |
 check 'tls: the shipped config verifies' 'false' \
     "$(printf '%s\n' "$SHIPPED_CFG" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY')"
 # What the installer writes over it, and that its choice is announced.
+# sentinel <cmd...> prints the command's output, `unset` when it printed
+# nothing, and ERROR<rc> when it failed: an empty expectation also passed for a
+# function that crashed.
+sentinel() {
+    local o rc=0
+    o="$("$@")" || rc=$?
+    if [ "$rc" -ne 0 ]; then printf 'ERROR%s' "$rc"; elif [ -z "$o" ]; then printf unset; else printf '%s' "$o"; fi
+}
 # skip_for <ENVIRONMENT> <URL> <explicit skip> [DEPLOY_PROMETHEUS] [PROMETHEUS_URL_EXPLICIT];
 # the installer's own stack lives in MONITORING_NAMESPACE=our-mon.
 skip_for() {
     ( ENVIRONMENT="$1" PROMETHEUS_URL="$2" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="$3" \
         DEPLOY_PROMETHEUS="${4:-true}" PROMETHEUS_URL_EXPLICIT="${5:-}" MONITORING_NAMESPACE=our-mon \
-        wva_prometheus_skip_verify )
+        sentinel wva_prometheus_skip_verify )
 }
 OWN_URL='https://kube-prometheus-stack-prometheus.our-mon.svc.cluster.local:9090'
 k8s_skip="$(skip_for kubernetes "$OWN_URL" '')"
@@ -206,21 +214,21 @@ check 'tls: the same stack, found again by a re-run, stays off' 'true' \
     "$(skip_for kubernetes 'https://prometheus-operated.our-mon.svc.cluster.local:9090' '')"
 # Was 'true' for ANY https URL: the controller then sent its token, unverified,
 # to a Prometheus nobody had vouched for.
-check 'tls: any other https Prometheus keeps verification on' '' "$(skip_for kubernetes https://prom.obs.svc:9090 '')"
-check 'tls: an external https Prometheus keeps verification on' '' "$(skip_for kubernetes https://prom.example.com:9090 '')"
-check 'tls: DEPLOY_PROMETHEUS=false keeps verification on, even in MONITORING_NAMESPACE' '' \
+check 'tls: any other https Prometheus keeps verification on' 'unset' "$(skip_for kubernetes https://prom.obs.svc:9090 '')"
+check 'tls: an external https Prometheus keeps verification on' 'unset' "$(skip_for kubernetes https://prom.example.com:9090 '')"
+check 'tls: DEPLOY_PROMETHEUS=false keeps verification on, even in MONITORING_NAMESPACE' 'unset' \
     "$(skip_for kubernetes "$OWN_URL" '' false)"
-check 'tls: OpenShift keeps the shipped verification (service CA)' '' "$(skip_for openshift https://t:9091 '')"
+check 'tls: OpenShift keeps the shipped verification (service CA)' 'unset' "$(skip_for openshift https://t:9091 '')"
 check 'tls: an explicit choice wins' 'false' "$(skip_for kubernetes "$OWN_URL" false)"
 check 'tls: an explicit true is honoured for any Prometheus' 'true' "$(skip_for kubernetes https://prom.obs.svc:9090 true)"
 # Own stack is the Service this install deploys, not "anything in
 # MONITORING_NAMESPACE": a Thanos or a second Prometheus there is somebody
 # else's, and was sent the token unverified.
-check 'tls: a Thanos in MONITORING_NAMESPACE is not the own stack: verified' '' \
+check 'tls: a Thanos in MONITORING_NAMESPACE is not the own stack: verified' 'unset' \
     "$(skip_for kubernetes 'https://thanos-querier.our-mon.svc:9091' '')"
-check 'tls: another Prometheus in MONITORING_NAMESPACE is not the own stack: verified' '' \
+check 'tls: another Prometheus in MONITORING_NAMESPACE is not the own stack: verified' 'unset' \
     "$(skip_for kubernetes 'https://team-prom.our-mon.svc.cluster.local:9090' '')"
-check 'tls: prometheus-operated named by the caller is not assumed to be ours: verified' '' \
+check 'tls: prometheus-operated named by the caller is not assumed to be ours: verified' 'unset' \
     "$(skip_for kubernetes 'https://prometheus-operated.our-mon.svc.cluster.local:9090' '' true \
         'https://prometheus-operated.our-mon.svc.cluster.local:9090')"
 check 'tls: the default Service named by the caller is still the own stack' 'true' \
@@ -240,7 +248,7 @@ skip_live() {
         ENVIRONMENT=kubernetes PROMETHEUS_URL="$4" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="${5:-}"
         DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon PROMETHEUS_CA_CERT_PATH='' WVA_NS=wns
         out="$(wva_warn_prometheus_tls_upgrade 2>&1)"
-        printf '%s|%s|%s' "$(wva_prometheus_skip_verify)" \
+        printf '%s|%s|%s' "$(sentinel wva_prometheus_skip_verify)" \
             "$(printf '%s\n' "$out" | grep -c 'stays OFF, as it was before this upgrade')" \
             "$(printf '%s\n' "$out" | grep -c 'This install points at')"
     )
@@ -252,21 +260,21 @@ check 'tls upgrade: the warning names both ways to turn it on' '2' \
          PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' PROMETHEUS_CA_CERT_PATH=''
          WVA_NS=wns ENVIRONMENT=kubernetes PROMETHEUS_URL="$EXT_URL" DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
          wva_warn_prometheus_tls_upgrade 2>&1 | grep -cE 'PROMETHEUS_CA_CERT_PATH=<file>|PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false') )"
-check 'tls upgrade: live false stays verified, quietly' '|0|0' "$(skip_live read false '' "$EXT_URL")"
+check 'tls upgrade: live false stays verified, quietly' 'unset|0|0' "$(skip_live read false '' "$EXT_URL")"
 # A CA the controller runs with means verify: there is something to verify
 # against. Was '' -- and the CA path itself was dropped by the re-render.
 check 'tls upgrade: live true with a CA path verifies against that CA, quietly' 'false|0|0' \
     "$(skip_live read true /etc/ca/ca.crt "$EXT_URL")"
-check 'tls upgrade: a new install verifies, quietly' '|0|0' "$(skip_live absent '' '' "$EXT_URL")"
+check 'tls upgrade: a new install verifies, quietly' 'unset|0|0' "$(skip_live absent '' '' "$EXT_URL")"
 check 'tls upgrade: an explicit false wins over live true, quietly' 'false|0|0' "$(skip_live read true '' "$EXT_URL" false)"
-check 'tls upgrade: plain http takes no TLS setting' '|0|0' "$(skip_live read true '' http://prom.obs.svc:9090)"
+check 'tls upgrade: plain http takes no TLS setting' 'unset|0|0' "$(skip_live read true '' http://prom.obs.svc:9090)"
 check 'tls upgrade: the stack this install deploys stays off, no upgrade warning' 'true|0|0' \
     "$(skip_live read false '' 'https://prometheus-operated.our-mon.svc.cluster.local:9090')"
 # Kept off only for the SAME Prometheus. Pointed at another one, what was true
 # of the old one says nothing: the new default, and the operator is told.
-check 'tls upgrade: live true for ANOTHER Prometheus: verified, and said so' '|0|1' \
+check 'tls upgrade: live true for ANOTHER Prometheus: verified, and said so' 'unset|0|1' \
     "$(skip_live read true '' "$EXT_URL" '' 'https://old-prom.obs.svc:9090')"
-check 'tls upgrade: live true, no live URL recorded: verified, and said so' '|0|1' \
+check 'tls upgrade: live true, no live URL recorded: verified, and said so' 'unset|0|1' \
     "$(skip_live read true '' "$EXT_URL" '' '')"
 
 # The CA path. The re-render replaces config.yaml with the shipped one, so a CA
@@ -295,9 +303,46 @@ check 'tls render: the own stack with a live CA keeps the CA and verifies' \
 check 'tls render: an explicit PROMETHEUS_CA_CERT_PATH wins over the live one' \
     '/etc/pki/prom.pem|false' "$(render_tls false /etc/ca/ca.crt "$EXT_URL" /etc/pki/prom.pem)"
 check 'tls render: no CA anywhere writes none' '|false' "$(render_tls false '' "$EXT_URL")"
-check 'tls: OpenShift never takes a CA path from the installer (its overlay sets the service CA)' '' \
+check 'tls: OpenShift never takes a CA path from the installer (its overlay sets the service CA)' 'unset' \
     "$( (ENVIRONMENT=openshift PROMETHEUS_URL=https://t:9091 PROMETHEUS_CA_CERT_PATH=/x WVA_LIVE_PROM_TLS=read WVA_LIVE_CA_PATH=/y
-         wva_prometheus_ca_path) )"
+         sentinel wva_prometheus_ca_path) )"
+# The own stack, rendered: verification off, and on for any other Prometheus.
+check 'tls render: the own stack renders skip true' '|true' "$(render_tls false '' "$OWN_URL")"
+# OpenShift takes no installer TLS choice, even with a live "true" -- for an
+# external URL or one that looks like the own stack.
+check 'tls: OpenShift with live true and an external URL writes nothing' 'unset' \
+    "$( (ENVIRONMENT=openshift PROMETHEUS_URL="$EXT_URL" WVA_LIVE_PROM_TLS=read WVA_LIVE_SKIP_VERIFY=true WVA_LIVE_CA_PATH=''
+         WVA_LIVE_PROM_URL="$EXT_URL" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+         sentinel wva_prometheus_skip_verify) )"
+check 'tls: OpenShift with live true and the own-stack URL writes nothing' 'unset' \
+    "$( (ENVIRONMENT=openshift PROMETHEUS_URL="$OWN_URL" WVA_LIVE_PROM_TLS=read WVA_LIVE_SKIP_VERIFY=true WVA_LIVE_CA_PATH=''
+         WVA_LIVE_PROM_URL="$OWN_URL" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+         sentinel wva_prometheus_skip_verify) )"
+check 'tls upgrade: the own stack with live true stays off, no upgrade warning' 'true|0|0' \
+    "$(skip_live read true '' "$OWN_URL")"
+
+# The write path after the apply: what it patches into the live config. A stub
+# kubectl answers the read-back; patch_manager_config records each expression.
+write_tls() { # write_tls <live skip> <live CA> <URL>: prints the patches, then the warnings seen
+    (
+        P="$(mktemp)"
+        patch_manager_config() { printf '%s\n' "$1" >> "$P"; }
+        kubectl() { printf '%s\n' "$SHIPPED_CFG"; }
+        WVA_NS=wns WVA_SCOPE=namespace INSTALL_PHASE_EXPLICIT='' ENVIRONMENT=kubernetes
+        WVA_LIVE_PROM_TLS=read WVA_LIVE_SKIP_VERIFY="$1" WVA_LIVE_CA_PATH="$2" WVA_LIVE_PROM_URL="$3"
+        PROMETHEUS_URL="$3" PROMETHEUS_URL_EXPLICIT="$3" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' PROMETHEUS_CA_CERT_PATH=''
+        DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+        out="$(wva_write_prometheus_settings 2>&1)"
+        grep -E 'SKIP_VERIFY|CA_CERT' "$P" | paste -sd';' -
+        printf '%s\n' "$out" | grep -c 'stays OFF, as it was before this upgrade'
+        rm -f "$P"
+    )
+}
+check 'tls write: live true, no CA, same Prometheus: patches true and says it stays off' \
+    "$(printf '%s\n%s' '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true"' 1)" "$(write_tls true '' "$EXT_URL")"
+check 'tls write: live CA: patches verify and the CA path' \
+    "$(printf '%s\n%s' '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false";.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)' 0)" \
+    "$(write_tls false /etc/ca/ca.crt "$EXT_URL")"
 
 # Unreadable is unknown, never a new install, and the install cannot choose for
 # the operator: it stops before anything is written. Was: verify, with a warning.
@@ -339,6 +384,8 @@ check 'live config: verification off is read' 'read|true|' \
 check 'live config: a CA path is read' 'read|true|/etc/ca/ca.crt' \
     "$(live_read "$(live_cm "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true" | .PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')")")"
 check 'live config: no config.yaml is unknown' 'unknown||' "$(live_read '{"data":{}}')"
+check 'live config: a config.yaml that is not YAML is unknown' 'unknown||' "$(live_read "$(live_cm 'a: [unclosed')")"
+check 'live config: an answer that is not JSON is unknown' 'unknown||' "$(live_read 'not json {')"
 INSTALLED_CFG="$(printf '%s\n' "$SHIPPED_CFG" | yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$k8s_skip\"")"
 check 'tls: the installer choice on Kubernetes is warned about' '1' "$(tls_warned "$INSTALLED_CFG")"
 check 'tls: a CA path silences it' '0' \
