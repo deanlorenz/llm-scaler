@@ -338,11 +338,9 @@ func TestPodScrapingFromController(ctx context.Context, config PodScrapingTestCo
 	}
 	g.Expect(testPod).NotTo(gom.BeNil(), "Should have at least one ready pod with IP")
 
-	controllerPods, err := config.K8sClient.CoreV1().Pods(config.controllerNS()).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=workload-variant-autoscaler",
-	})
-	if err == nil && len(controllerPods.Items) > 0 {
-		controllerPod := controllerPods.Items[0]
+	controllerPods, err := ControllerPods(ctx, config.K8sClient, config.controllerNS(), ControllerDeploymentName)
+	if err == nil && len(controllerPods) > 0 {
+		controllerPod := controllerPods[0]
 		g.Expect(testPod.Status.PodIP).NotTo(gom.BeEmpty(), "EPP pod should have IP address")
 		g.Expect(controllerPod.Status.PodIP).NotTo(gom.BeEmpty(), "Controller pod should have IP address")
 		_, _ = fmt.Fprintf(ginkgo.GinkgoWriter, "Verified: EPP pod %s has IP %s, accessible from controller pod %s\n",

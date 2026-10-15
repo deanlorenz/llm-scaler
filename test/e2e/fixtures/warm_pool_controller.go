@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // ControllerDeployment is the WVA controller, wherever the suite installed it.
@@ -73,16 +74,18 @@ func WaitForControllerReady(ctx context.Context, clientset *kubernetes.Clientset
 // Reading "the" controller Pod by label picks an arbitrary one, and during a
 // rollout that is as likely to be the outgoing process as the incoming one. Its
 // log then shows the behaviour of the configuration the test just replaced.
-func NewestControllerPod(ctx context.Context, clientset *kubernetes.Clientset, c ControllerDeployment) (*corev1.Pod, error) {
-	pods, err := clientset.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
+//
+// Only Pods of c's Deployment count (utils.ControllerPods): a relay or
+// warm-pool Pod wearing the controller's labels is not the controller, however
+// recently it started.
+func NewestControllerPod(ctx context.Context, clientset kubernetes.Interface, c ControllerDeployment) (*corev1.Pod, error) {
+	pods, err := utils.ControllerPods(ctx, clientset, c.Namespace, c.Name)
 	if err != nil {
-		return nil, fmt.Errorf("list controller pods: %w", err)
+		return nil, err
 	}
 	var newest *corev1.Pod
-	for i := range pods.Items {
-		p := &pods.Items[i]
+	for i := range pods {
+		p := &pods[i]
 		if p.Status.Phase != corev1.PodRunning || p.DeletionTimestamp != nil {
 			continue
 		}

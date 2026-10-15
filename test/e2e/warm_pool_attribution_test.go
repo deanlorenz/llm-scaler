@@ -81,8 +81,8 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 	)
 
 	controllerLog := func() string {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceRestart)
 		if err != nil {
 			return ""
 		}

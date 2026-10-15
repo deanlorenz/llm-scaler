@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // Saturation config YAML strings for multi-analyzer (V2) mode.
@@ -187,25 +188,18 @@ const externalScalerService = "wva-external-scaler"
 
 // wvaControllerPods names the controller-manager Pods that exist now.
 //
-// By owner, not by label: the e2e may install the controller in the model
-// namespace, where the warm-pool relays wear the controller's labels on
-// purpose (fixtures.ControllerDriverLabels) and would otherwise be waited on
-// as though they were a controller that never goes away.
+// By owner, not by label (utils.ControllerPods): the e2e may install the
+// controller in the model namespace, where the warm-pool relays wear the
+// controller's labels on purpose (fixtures.ControllerDriverLabels) and would
+// otherwise be waited on as though they were a controller that never goes away.
 func wvaControllerPods(ctx context.Context) ([]string, error) {
-	pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
+	pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 	if err != nil {
-		return nil, fmt.Errorf("list controller pods: %w", err)
+		return nil, err
 	}
 	var names []string
-	for i := range pods.Items {
-		for _, owner := range pods.Items[i].OwnerReferences {
-			if owner.Kind == "ReplicaSet" && strings.HasPrefix(owner.Name, "wva-controller-manager-") {
-				names = append(names, pods.Items[i].Name)
-				break
-			}
-		}
+	for i := range pods {
+		names = append(names, pods[i].Name)
 	}
 	return names, nil
 }

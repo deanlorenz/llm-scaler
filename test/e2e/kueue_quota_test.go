@@ -62,8 +62,8 @@ var _ = Describe("Quota limiter - bounded by Kueue", Label("full"), Label("kueue
 	)
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceRestart)
 		return logs, err
 	}
 

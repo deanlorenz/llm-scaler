@@ -102,8 +102,8 @@ var _ = Describe("Warm pool - a retained pool does not churn its Pod", Label("fu
 	}
 
 	poolState := func() string {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", rtSinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", rtSinceRestart)
 		if err != nil {
 			return ""
 		}

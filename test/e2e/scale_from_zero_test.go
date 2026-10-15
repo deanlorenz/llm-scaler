@@ -139,7 +139,6 @@ func expectScaleFromZeroEngineActivation(variantName string, since time.Time) {
 		}
 	}()
 
-	const controllerManagerLabel = "control-plane=controller-manager"
 	// Logged by internal/engines/scalefromzero once it publishes the activation
 	// to the decision store, which is what WVA pushes to KEDA.
 	const pattern = "Published scale-from-zero activation"
@@ -147,7 +146,7 @@ func expectScaleFromZeroEngineActivation(variantName string, since time.Time) {
 	Eventually(func(g Gomega) {
 		// Recomputed per attempt so the window always starts at `since`.
 		sinceSeconds := int64(time.Since(since).Seconds()) + 1
-		ok, logs, logErr := utils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace, controllerManagerLabel, pattern, sinceSeconds)
+		ok, logs, logErr := utils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName, pattern, sinceSeconds)
 		g.Expect(logErr).NotTo(HaveOccurred())
 		g.Expect(ok).To(BeTrue(),
 			"scale-from-zero engine never published an activation; if the target scaled up anyway, something other than the scale-from-zero path woke it")

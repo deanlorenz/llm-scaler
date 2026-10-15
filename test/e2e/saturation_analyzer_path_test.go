@@ -174,13 +174,12 @@ func saturationConfigMapNameFromDeployment(dep *appsv1.Deployment) string {
 // controller-manager logs show the model being processed on the V2 path. V2 is
 // the sole analysis path since the V1 analyzer was removed, so there is no mode
 // to select — the helper asserts the model is being processed at all.
-// It uses testutils.PodLogsLabelSelectorContain for log collection.
+// It uses testutils.ControllerLogsContain for log collection.
 func expectAnalyzerPathLog(modelID string) {
 	GinkgoHelper()
-	const controllerManagerLabel = "control-plane=controller-manager"
 	const pattern = "Processing model (V2)"
 	Eventually(func(g Gomega) {
-		ok, logs, logErr := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace, controllerManagerLabel, pattern, 120)
+		ok, logs, logErr := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace, testutils.ControllerDeploymentName, pattern, 120)
 		g.Expect(logErr).NotTo(HaveOccurred())
 		g.Expect(ok && strings.Contains(logs, modelID)).To(BeTrue())
 	}, time.Duration(cfg.EventuallyLongSec)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())

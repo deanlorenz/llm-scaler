@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 const secondaryControllerOverlayPathEnv = "WVA_E2E_SECONDARY_OVERLAY_PATH"
@@ -175,13 +176,11 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 
 			By("Waiting for secondary controller to be ready")
 			Eventually(func(g Gomega) {
-				pods, listErr := k8sClient.CoreV1().Pods(secondaryController).List(ctx, metav1.ListOptions{
-					LabelSelector: "control-plane=controller-manager",
-				})
+				pods, listErr := utils.ControllerPods(ctx, k8sClient, secondaryController, utils.ControllerDeploymentName)
 				g.Expect(listErr).NotTo(HaveOccurred())
-				g.Expect(pods.Items).NotTo(BeEmpty(), "Expected secondary controller pod")
+				g.Expect(pods).NotTo(BeEmpty(), "Expected secondary controller pod")
 				ready := 0
-				for _, pod := range pods.Items {
+				for _, pod := range pods {
 					if pod.Status.Phase != corev1.PodRunning {
 						continue
 					}

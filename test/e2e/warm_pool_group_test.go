@@ -110,8 +110,8 @@ var _ = Describe("Warm pool - a unit that spans Pods", Label("full"), Label("war
 	}
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceControllerRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceControllerRestart)
 		return logs, err
 	}
 
