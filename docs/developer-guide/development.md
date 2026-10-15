@@ -252,7 +252,8 @@ conventions that CI enforces:
 ## Release Process
 
 See [Release Process](release-process.md): the checklist, the tag and GitHub
-Release (which builds and pushes the image to GHCR), and who may release.
+Release (which tests, scans, builds, pushes and signs the image), and who may
+release.
 
 ## Useful Commands
 

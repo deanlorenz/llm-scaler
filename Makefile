@@ -605,12 +605,19 @@ INSTALL_PHASE_ARG = $(if $(filter command line environment,$(origin INSTALL_PHAS
 # which any authenticated user may read) and uses kubernetes otherwise.
 ENVIRONMENT_INSTALL = $(if $(filter command line environment,$(origin ENVIRONMENT)),$(ENVIRONMENT),)
 
+# The install targets apply the COMMITTED manifests. They used to depend on
+# `manifests kustomize`: a go install of controller-gen, a type-check of ./...,
+# and a rewrite of the tracked config/base/rbac/manager-clusterrole.yaml from
+# whatever checkout ran the install -- so an operator with kubectl, helm, yq and
+# jq passed check-prereqs and then failed on `go: command not found`, and the
+# downloaded kustomize was never used (the install runs `kubectl kustomize`).
+# Regenerating is a development step: `make manifests`.
 .PHONY: setup-prereqs
-setup-prereqs: manifests kustomize ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
+setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
-deploy-wva: manifests kustomize ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),$(ENVIRONMENT_INSTALL))
 
 .PHONY: undeploy-wva
@@ -618,11 +625,11 @@ undeploy-wva: ## Remove WVA. Pass the same ENVIRONMENT, SCOPE and namespace you 
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 .PHONY: deploy-wva-on-k8s
-deploy-wva-on-k8s: manifests kustomize ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
+deploy-wva-on-k8s: ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
 	$(call wva_phase,$(INSTALL_PHASE_ARG),kubernetes)
 
 .PHONY: deploy-wva-on-openshift
-deploy-wva-on-openshift: manifests kustomize ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),openshift)
 
 ## Removing. Pass the SAME SCOPE and namespace you installed with — an uninstall
@@ -2683,6 +2690,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/sample_replicas.sh
 	@bash -n hack/benchmark/tail_wva_logs.sh
 	@bash -n hack/benchmark/file_capture.sh
+	@bash -n hack/check-install-flow.sh
+	@bash -n hack/check-e2e-images.sh
+	@bash -n hack/check-policy-apply-docs.sh
+	@bash -n hack/check-release-latest.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2817,6 +2828,20 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# controller-only upgrade, bounds the namespace at nothing. The
 	@# preflight must refuse that phase; executed against a stub kubectl.
 	@bash hack/check-kueue-namespace-grant.sh
+	@echo "Checking the installer's decisions against a stubbed cluster..."
+	@# KEDA preflight and install order, image pinning, chart pinning, TLS
+	@# verification, uninstall grants and summaries: each parses and is wrong.
+	@bash hack/check-install-flow.sh
+	@echo "Checking every image the e2e Go code names has a registry host..."
+	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
+	@bash hack/check-e2e-images.sh
+	@echo "Checking no doc applies the sample scaling policy over an install..."
+	@# The sample has no limiters: applying it removes the GPU limit.
+	@bash hack/check-policy-apply-docs.sh
+	@echo "Checking only the highest final release tag moves latest..."
+	@# Runs the release workflow step against a scratch repository. A backport
+	@# tagged after a newer release used to move latest back to the old line.
+	@bash hack/check-release-latest.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when

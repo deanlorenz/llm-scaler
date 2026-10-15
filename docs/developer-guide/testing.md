@@ -359,6 +359,10 @@ and `kustomize-build` run; the e2e jobs are PR-only.
 
 `ci-e2e-openshift.yaml` (the GPU OpenShift run) is manual
 (`workflow_dispatch` only); its PR and `/ok-to-test` triggers are disabled.
+When they are enabled, a fork PR runs only on `/ok-to-test <sha>` or
+`/retest <sha>`, where `<sha>` is the full 40-character SHA of the head commit
+you reviewed. The run is refused if the head has moved since; review the new
+commits and approve the new SHA.
 
 Every commit also needs a DCO sign-off (`git commit -s`); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#commits).

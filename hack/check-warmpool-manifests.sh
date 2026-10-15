@@ -21,8 +21,13 @@ set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/deploy/warmpool.sh"
 FAILED=0
 
-ok()   { printf 'ok    %s\n' "$1"; }
-fail() { printf 'FAIL  %s\n' "$1"; FAILED=1; }
+# Every case reports ok or FAIL exactly once. A run that ends early, or a case
+# that silently stops running, otherwise passes having checked less than it
+# says. Change this deliberately with the cases.
+EXPECT_CASES=67
+CASES=0
+ok()   { CASES=$((CASES + 1)); printf 'ok    %s\n' "$1"; }
+fail() { CASES=$((CASES + 1)); printf 'FAIL  %s\n' "$1"; FAILED=1; }
 
 # render prints the manifests for a pool, or nothing if the script failed.
 render() {
@@ -49,7 +54,7 @@ ok "create --dry-run produces manifests"
 
 # Parseable. A rendering bug usually shows up here first, and as a YAML error
 # rather than as anything about pools.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if printf '%s\n' "$POOL" | python3 -c '
 import sys, yaml
 docs = list(yaml.safe_load_all(sys.stdin))
@@ -59,10 +64,38 @@ sys.exit(0 if all(d for d in docs) else 1)
   else
     fail "a rendered document does not parse as YAML"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 [ "$(count_kind "$POOL" Deployment)" = 1 ] \
   && ok "one Deployment" || fail "expected exactly one Deployment"
+
+# The pod-write grant. The controller's ClusterRole only READS pods, and lending
+# a pool Pod is a patch -- so the pool brings the write with it, for this
+# namespace alone, and before the ScaledObject that makes the controller look.
+# Without python3 (and PyYAML) this cannot be asserted, and that is a failure:
+# a grant check that skips itself passes on a pool that grants nothing.
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' 2>/dev/null; then
+  fail "python3 with PyYAML is required to check the pod-write grant; install it (pip install pyyaml)"
+else
+  grant="$(printf '%s\n' "$POOL" | python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+kinds = [d["kind"] for d in docs]
+role = [d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "wva-pod-writer"]
+rb = [d for d in docs if d["kind"] == "RoleBinding" and d.get("roleRef", {}).get("name") == "wva-pod-writer"]
+ok = (len(role) == 1 and role[0]["metadata"]["namespace"] == "tenant"
+      and role[0]["rules"] == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["patch"]}]
+      and len(rb) == 1 and rb[0]["metadata"]["namespace"] == "tenant"
+      and rb[0]["subjects"] == [{"kind": "ServiceAccount", "name": "wva-controller-manager", "namespace": "wva-system"}]
+      and "ScaledObject" in kinds and kinds.index("RoleBinding") < kinds.index("ScaledObject"))
+print("yes" if ok else "no")
+' 2>/dev/null)"
+  [ "$grant" = yes ] \
+    && ok "grants the controller patch on pods in the pool namespace only, before the ScaledObject" \
+    || fail "expected Role wva-pod-writer (patch pods, namespace tenant) bound to wva-system/wva-controller-manager, ahead of the ScaledObject"
+fi
 
 # THE OTHER ONE THAT SHIPPED BROKEN, and the one nothing else could see. Every
 # embedded Python program -- the preStop drain hook and both probes -- must
@@ -81,7 +114,7 @@ fi
 # assertion below still passed, and a drain that drains nothing says nothing. So
 # this compares the DELIVERED program with the manifest's, character for
 # character, which is the only comparison that could have failed.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if printf '%s\n' "$POOL" | python3 -c '
 import ast, sys, yaml
 
@@ -133,6 +166,8 @@ for where, program in sorted(got.items()):
   else
     fail "an embedded python program was corrupted in rendering, or no longer matches the manifest"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 # THE ONE THAT SHIPPED BROKEN. A pool with no ScaledObject is not a pool: it is
@@ -344,7 +379,7 @@ fi
 #
 # The SERVING rule specifically: the control rule below it names a namespace on
 # purpose, and must go on doing so.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if python3 -c '
 import sys, yaml
 
@@ -366,6 +401,8 @@ sys.exit(0)
   else
     fail "the shipped NetworkPolicy admits a namespace on the serving port; only the installer knows which one"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 # --- the e2e suite must not leave the policy behind ------------------------
@@ -522,8 +559,24 @@ case "$1 $2" in
     echo 'Error from server (NotFound): scaledobjects.keda.sh "x" not found' >&2; exit 1 ;;
   "get deployment"|"get leaderworkerset")
     echo 'Error from server (NotFound): not found' >&2; exit 1 ;;
+  # May the controller already patch pods? STUB_CANI: yes, no, or denied
+  # (this user may not impersonate it, so kubectl cannot ask).
+  "auth can-i")
+    case "${STUB_CANI:-no}" in
+      yes) echo yes; exit 0 ;;
+      no)  echo no; exit 1 ;;
+      *)   echo 'Error from server (Forbidden): users "u" is forbidden: User "u" cannot impersonate resource "serviceaccounts"' >&2; exit 1 ;;
+    esac ;;
+  "get rolebinding")
+    echo 'Error from server (NotFound): rolebindings.rbac.authorization.k8s.io "x" not found' >&2; exit 1 ;;
   "apply -f")
-    cat >> "$STUB_DIR/applied"; exit 0 ;;
+    body="$(cat)"
+    if [ -n "${STUB_ROLE_FORBIDDEN:-}" ] && printf '%s\n' "$body" | grep -q '^kind: Role$'; then
+      echo 'Error from server (Forbidden): roles.rbac.authorization.k8s.io "wva-pod-writer" is forbidden: User "u" cannot create resource "roles"' >&2
+      exit 1
+    fi
+    # One marker per apply, so a case can tell one apply from two.
+    printf '# APPLY\n%s\n' "$body" >> "$STUB_DIR/applied"; exit 0 ;;
 esac
 exit 0
 STUB
@@ -538,10 +591,60 @@ create_live() {
   env PATH="$WP_STUB:$PATH" STUB_DIR="$WP_STUB" "$@" bash "$SCRIPT" create -n tenant --name pool \
     --proxy-image example.invalid/proxy:v1 --wva-namespace wva-system \
     --models 2 --model-size 8B --accelerator NVIDIA-H100-80GB-HBM3 \
-    --runtime-class none --reserve 3 >/dev/null 2>&1
+    --runtime-class none --reserve 3 >"$WP_STUB/out" 2>&1
   echo "$?" > "$WP_STUB/rc"
   cat "$WP_STUB/applied"
 }
+
+# --- the pod-write grant, applied on its own and first ------------------------
+#
+# It used to be the first document of the pool's own apply, so a user who may
+# not create Roles got a raw Forbidden with the pool half-applied behind it.
+
+# first_apply / later_applies split what the stub recorded at its markers.
+first_apply()   { printf '%s\n' "$1" | awk '/^# APPLY$/ {n++; next} n == 1'; }
+later_applies() { printf '%s\n' "$1" | awk '/^# APPLY$/ {n++; next} n > 1'; }
+
+GRANTED="$(create_live STUB_CANI=no)"
+if [ "$(cat "$WP_STUB/rc")" = 0 ] \
+   && [ "$(count_kind "$(first_apply "$GRANTED")" Role)" = 1 ] \
+   && [ "$(count_kind "$(first_apply "$GRANTED")" ScaledObject)" = 0 ] \
+   && [ "$(count_kind "$(later_applies "$GRANTED")" ScaledObject)" = 1 ] \
+   && [ "$(count_kind "$(later_applies "$GRANTED")" Role)" = 0 ]; then
+  ok "the grant is its own apply, made before the pool's"
+else
+  fail "expected the Role in a first apply of its own, and the pool in a later one"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
+
+DENIED_GRANT="$(create_live STUB_CANI=no STUB_ROLE_FORBIDDEN=1)"
+if [ "$(cat "$WP_STUB/rc")" != 0 ] \
+   && [ "$(printf '%s\n' "$DENIED_GRANT" | grep -c '^kind:')" = 0 ] \
+   && grep -q 'Nothing was created' "$WP_STUB/out" \
+   && grep -q 'create on roles and rolebindings in tenant' "$WP_STUB/out" \
+   && grep -q 'pod_writer.sh tenant wva-system | kubectl apply -f -' "$WP_STUB/out"; then
+  ok "a refused grant stops before the pool, and says what to ask an admin for"
+else
+  fail "a refused grant must apply nothing and name what to ask an admin for (rc=$(cat "$WP_STUB/rc"))"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
+
+ALREADY="$(create_live STUB_CANI=yes)"
+if [ "$(cat "$WP_STUB/rc")" = 0 ] && [ "$(count_kind "$ALREADY" Role)" = 0 ] \
+   && [ "$(count_kind "$ALREADY" ScaledObject)" = 1 ] && grep -q 'can already patch pods' "$WP_STUB/out"; then
+  ok "no grant when the controller can already patch pods there"
+else
+  fail "a controller that can already patch pods must get no second grant"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
+
+UNASKABLE="$(create_live STUB_CANI=denied)"
+if [ "$(cat "$WP_STUB/rc")" = 0 ] && [ "$(count_kind "$(first_apply "$UNASKABLE")" Role)" = 1 ]; then
+  ok "when the check itself is not allowed, the grant is tried"
+else
+  fail "a can-i that cannot be asked must lead to trying the grant, not to skipping it"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
 
 KEPT_POOL="$(create_live STUB_SO="$LIVE_POOL_SO")"
 kept_ok=1
@@ -577,8 +680,47 @@ if [ "$(cat "$WP_STUB/rc")" != 0 ] &&[ "$(printf '%s\n' "$DENIED_POOL" | grep -c
 else
   fail "create replaced a pool ScaledObject it could not read, dropping whatever was set on it"
 fi
+
+# With neither sha256sum nor shasum the binding cannot be named. It used to
+# come out as `wva-pod-writer-`, one name for every controller, with exit 0.
+BASH_BIN="$(command -v bash)"
+NOHASH="$(env PATH=/nonexistent "$BASH_BIN" -c '. "$1"; wva_pod_writer_manifest tenant wva-system' _ \
+  "$(dirname "$SCRIPT")/lib/pod_writer.sh" 2>&1)"
+NOHASH_RC=$?
+if [ "$NOHASH_RC" -ne 0 ] && ! printf '%s\n' "$NOHASH" | grep -q 'name: wva-pod-writer-$' \
+   && printf '%s\n' "$NOHASH" | grep -q 'neither sha256sum nor shasum'; then
+  ok "no sha256sum or shasum: the grant is refused, not named wva-pod-writer-"
+else
+  fail "with no hashing tool the grant must be refused (rc=$NOHASH_RC)"
+  printf '%s\n' "$NOHASH" | sed 's/^/    /'
+fi
+
+# delete keeps the grant and prints how to remove it: THIS controller's binding
+# by its exact name, never every wva-pod-writer-* binding in the namespace, and
+# nothing GNU-only (xargs -r).
+WVA_SUFFIX="$(printf '%s' wva-system | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)"
+PATH="$WP_STUB:$PATH" STUB_DIR="$WP_STUB" bash "$SCRIPT" delete -n tenant --name pool \
+  --wva-namespace wva-system >"$WP_STUB/out" 2>&1
+if grep -q "kubectl delete rolebinding wva-pod-writer-${WVA_SUFFIX} -n tenant" "$WP_STUB/out" \
+   && ! grep -q 'xargs' "$WP_STUB/out"; then
+  ok "delete names this controller's binding exactly (wva-pod-writer-${WVA_SUFFIX}), with no xargs -r"
+else
+  fail "delete must print a removal for this controller's binding only, without xargs -r"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
+# A warning, not an info line: the grant outlives the pool.
+if grep -q 'WARNING.*Kept role/wva-pod-writer' "$WP_STUB/out"; then
+  ok "delete warns that the pod-write grant is kept"
+else
+  fail "delete must WARN that role/wva-pod-writer is kept"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
 rm -rf "$WP_STUB"
 
+if [ "$CASES" -ne "$EXPECT_CASES" ]; then
+  echo "FAIL  $CASES case(s) ran, $EXPECT_CASES expected -- the run did not finish, or a case was added without updating EXPECT_CASES"
+  FAILED=1
+fi
 if [ "$FAILED" -eq 0 ]; then
   echo "Warm pool manifest checks passed."
 else

@@ -121,14 +121,25 @@ wva_resolve_prometheus_url() {
 # The content is generated from the shipped file, never a second copy of it: yq
 # reads data["config.yaml"] and assigns into it, so comments and every other
 # setting survive, and a new key in the shipped ConfigMap needs no change here.
+#
+# Because it replaces the whole config.yaml, every key an operator set on the
+# live one is gone after the apply unless it is written here. The two TLS keys
+# are: a re-run that dropped PROMETHEUS_CA_CERT_PATH left a controller that had
+# verified against a mounted CA verifying against the public roots only, and
+# it could no longer connect. See wva_prometheus_ca_path.
 wva_render_manager_config_patch() {
     local tmp_overlay="$1" src rendered
     src="$WVA_PROJECT/config/base/manager/manager-configmap.yaml"
     [ -f "$src" ] || return 0
     [ -n "${PROMETHEUS_URL:-}" ] || return 0
 
+    local skip ca
+    skip="$(wva_prometheus_skip_verify)"
+    ca="$(wva_prometheus_ca_path)"
     rendered="$(yq '.data."config.yaml"' "$src" \
-        | yq ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\"")" || return 0
+        | WVA_URL="$PROMETHEUS_URL" yq '.PROMETHEUS_BASE_URL = strenv(WVA_URL)' \
+        | if [ -n "$skip" ]; then WVA_SKIP="$skip" yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'; else cat; fi \
+        | if [ -n "$ca" ]; then WVA_CA="$ca" yq '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'; else cat; fi)" || return 0
     [ -n "$rendered" ] || return 0
 
     {
@@ -406,29 +417,391 @@ wva_warn_floating_image() {
     log_warning "=================================================================="
 }
 
-# wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
-# Prometheus without verifying its certificate. $1 is the manager config.yaml.
+# wva_prometheus_skip_verify echoes the PROMETHEUS_TLS_INSECURE_SKIP_VERIFY value
+# this install writes into the manager config, or nothing to leave the shipped
+# one ("false", verify) in place.
 #
-# The shipped config skips verification, and on Kubernetes it has to: the
-# installer has no CA to give the controller -- the certificate of the
-# kube-prometheus-stack it deploys is self-signed and generated on the
-# workstation, and nothing mounts it into the controller. Flipping the default
-# would make every such install exit on "x509: certificate signed by unknown
-# authority". So the default stays, and an install that ends up unverified says
-# so, with the production setting. OpenShift ships verification on (service CA)
-# and never reaches the warning.
+# The shipped config verifies. The installer turns verification OFF in one case
+# only: the kube-prometheus-stack it deploys itself (DEPLOY_PROMETHEUS=true, and
+# a URL in MONITORING_NAMESPACE -- the same rule wva_prometheus_scraper_sa uses).
+# That stack's certificate is self-signed on the workstation and nothing mounts
+# it into the controller, so there is no CA to verify against;
+# wva_warn_prometheus_tls says so at the end of the install.
+#
+# Any other https:// Prometheus keeps verification on. The controller sends it
+# a bearer token, and a Prometheus nobody named is no place to send one
+# unverified. If its certificate is from a private CA, the controller cannot
+# connect until the CA is mounted, and wva_warn_prometheus_tls says how.
+#
+# One exception, for upgrades: a controller that runs unverified NOW, with no
+# CA, against the SAME Prometheus, stays unverified
+# (wva_prometheus_tls_kept_from_live). Earlier releases shipped "true" for
+# every Prometheus. Turning verification on with no CA to verify against stops
+# the new pod from connecting -- "CRITICAL: Failed to connect to Prometheus" --
+# while the install still reports success. wva_warn_prometheus_tls_upgrade says
+# it was kept, and how to turn it on. A different Prometheus is a new decision:
+# what was true of the old one says nothing about the new one.
+#
+# An EXPLICIT PROMETHEUS_CA_CERT_PATH means verify: the caller gave something to
+# verify against, so neither the own-stack rule nor the upgrade rule turns it
+# off. A CA path kept from the live config does not: the controller may have run
+# with it and verification off, and turning verification on behind the
+# operator's back is the same unannounced change as above. It keeps the live
+# value.
+#
+# An explicit PROMETHEUS_TLS_INSECURE_SKIP_VERIFY wins; OpenShift verifies
+# against the service CA; plain http:// takes no TLS settings at all.
+wva_prometheus_skip_verify() {
+    if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
+        printf '%s' "$PROMETHEUS_TLS_INSECURE_SKIP_VERIFY"
+        return 0
+    fi
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    case "${PROMETHEUS_URL:-}" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    if [ -n "${PROMETHEUS_CA_CERT_PATH:-}" ]; then
+        printf 'false'
+        return 0
+    fi
+    if [ -n "$(wva_prometheus_ca_path)" ]; then
+        if [ "${WVA_LIVE_SKIP_VERIFY:-}" = "true" ]; then printf 'true'; else printf 'false'; fi
+        return 0
+    fi
+    if wva_prometheus_is_own_stack || wva_prometheus_tls_kept_from_live; then
+        printf 'true'
+    fi
+    return 0
+}
+
+# wva_prometheus_ca_path echoes the PROMETHEUS_CA_CERT_PATH this install writes
+# into the manager config, or nothing.
+#
+# An explicit PROMETHEUS_CA_CERT_PATH wins. Otherwise the one the live config
+# holds is kept, for the SAME Prometheus: the controller runs with it, and the
+# CA volume and mount that go with it were added by the operator, which this
+# install does not touch. Dropping it left the controller verifying against the
+# public roots only, and a private-CA Prometheus then refused it. A different
+# Prometheus is a new decision -- its certificate may come from another CA --
+# so the live path is dropped there, and wva_warn_prometheus_tls_upgrade says
+# so. Not on OpenShift, whose overlay sets the service CA as Deployment env;
+# not for plain http://.
+wva_prometheus_ca_path() {
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    case "${PROMETHEUS_URL:-}" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    if [ -n "${PROMETHEUS_CA_CERT_PATH:-}" ]; then
+        printf '%s' "$PROMETHEUS_CA_CERT_PATH"
+        return 0
+    fi
+    if [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] && [ -n "${WVA_LIVE_CA_PATH:-}" ] && wva_same_prometheus_as_live; then
+        printf '%s' "$WVA_LIVE_CA_PATH"
+    fi
+    return 0
+}
+
+# wva_same_prometheus_as_live reports whether PROMETHEUS_URL is the Prometheus
+# the live config names. A trailing slash does not make a different Prometheus.
+wva_same_prometheus_as_live() {
+    [ -n "${WVA_LIVE_PROM_URL:-}" ] && [ "${WVA_LIVE_PROM_URL%/}" = "${PROMETHEUS_URL%/}" ]
+}
+
+# wva_prometheus_is_own_stack reports whether PROMETHEUS_URL is the
+# kube-prometheus-stack this install deploys: DEPLOY_PROMETHEUS=true, and the
+# URL names that stack's Service in MONITORING_NAMESPACE --
+# kube-prometheus-stack-prometheus, the default -- or, when nobody set
+# PROMETHEUS_URL, the prometheus-operated Service a re-run detects in its place.
+#
+# Not "any URL in MONITORING_NAMESPACE": a Thanos, or a second Prometheus, in
+# that namespace is somebody else's, and was being sent the controller's token
+# with verification off.
+#
+# prometheus-operated is trusted on the name alone, unlike the default: it is
+# the Service the Prometheus operator makes for ANY Prometheus CR in that
+# namespace, not only the one this install's chart creates. Not checked against
+# the Helm release because this is asked in many subshells and before the stack
+# exists (INSTALL_PHASE=all); the URL reaches here only when nobody set one and
+# the installer detected it, and MONITORING_NAMESPACE is this install's own.
+#
+# A URL holding userinfo, a query, a fragment or a backslash is never the own
+# stack. Read naively, https://kube-prometheus-stack-prometheus.<mon>.svc:443@evil.example.com/
+# names the stack before the "@" and connects to evil.example.com after it --
+# with verification off and the controller's token. The host is also read
+# after the last "@", so a URL that slips past the first rule still names the
+# host it connects to.
+wva_prometheus_is_own_stack() {
+    [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] || return 1
+    local mon="${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}" host
+    host="${PROMETHEUS_URL:-}"
+    case "$host" in
+        *@*|*\?*|*\#*|*\\*) return 1 ;;
+    esac
+    host="${host#*://}"
+    host="${host%%/*}"
+    host="${host##*@}"
+    host="${host%%:*}"
+    case "$host" in
+        "kube-prometheus-stack-prometheus.$mon.svc"|"kube-prometheus-stack-prometheus.$mon.svc.cluster.local")
+            return 0 ;;
+        "prometheus-operated.$mon.svc"|"prometheus-operated.$mon.svc.cluster.local")
+            [ -z "${PROMETHEUS_URL_EXPLICIT:-}" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# WVA_LIVE_PROM_TLS records what the manager config held BEFORE this install
+# re-rendered it. One of:
+#   ""        not read (the prereqs phase, or a caller that never asked);
+#   absent    no wva-manager-config: a new install;
+#   read      read; WVA_LIVE_SKIP_VERIFY, WVA_LIVE_CA_PATH and WVA_LIVE_PROM_URL
+#             hold its values, and WVA_LIVE_PROM_KEYS every PROMETHEUS_* key
+#             (wva_prometheus_keys) to tell afterwards whether any changed;
+#   unknown   it exists or may exist, but could not be read (WVA_LIVE_PROM_TLS_ERR).
+# Globals, set by wva_read_live_prometheus_tls in the caller's own shell.
+WVA_LIVE_PROM_TLS=""
+WVA_LIVE_SKIP_VERIFY=""
+WVA_LIVE_CA_PATH=""
+WVA_LIVE_PROM_URL=""
+WVA_LIVE_PROM_KEYS=""
+WVA_LIVE_PROM_TLS_ERR=""
+
+# wva_prometheus_keys echoes every PROMETHEUS_* key of config.yaml $1, one
+# "KEY = value" per line, sorted. Properties output prints "true" and true the
+# same way, so a quoted and an unquoted value are not a change.
+wva_prometheus_keys() {
+    printf '%s\n' "$1" | yq -o=props 'with_entries(select(.key | test("^PROMETHEUS_")))' 2>/dev/null | sort
+}
+
+# wva_read_live_prometheus_tls <namespace> reads the Prometheus TLS settings of
+# the live manager config in <namespace> into the WVA_LIVE_* globals above.
+#
+# Must run before the overlay apply: the apply replaces config.yaml with the
+# rendered one, and after it the old values are gone. A read that fails for any
+# reason other than NotFound is "unknown", never "absent" -- a Forbidden read
+# taken as a new install would turn verification on in silence.
+wva_read_live_prometheus_tls() {
+    local ns="$1" rc=0 cfg
+    WVA_LIVE_PROM_TLS="" WVA_LIVE_SKIP_VERIFY="" WVA_LIVE_CA_PATH="" WVA_LIVE_PROM_URL="" WVA_LIVE_PROM_KEYS="" WVA_LIVE_PROM_TLS_ERR=""
+    kc_capture get configmap wva-manager-config -n "$ns" -o json || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if kc_not_found "$KC_ERR"; then
+            WVA_LIVE_PROM_TLS=absent
+            return 0
+        fi
+        WVA_LIVE_PROM_TLS=unknown
+        WVA_LIVE_PROM_TLS_ERR="$(printf '%s\n' "$KC_ERR" | head -1)"
+        [ -n "$WVA_LIVE_PROM_TLS_ERR" ] || WVA_LIVE_PROM_TLS_ERR="kubectl exited $rc"
+        return 0
+    fi
+    cfg="$(printf '%s' "$KC_OUT" | jq -r '.data["config.yaml"] // ""' 2>/dev/null)" || cfg=""
+    if [ -z "$cfg" ]; then
+        WVA_LIVE_PROM_TLS=unknown
+        WVA_LIVE_PROM_TLS_ERR="wva-manager-config in $ns has no config.yaml"
+        return 0
+    fi
+    if ! WVA_LIVE_SKIP_VERIFY="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null)" \
+        || ! WVA_LIVE_CA_PATH="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null)" \
+        || ! WVA_LIVE_PROM_URL="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null)"; then
+        WVA_LIVE_PROM_TLS=unknown WVA_LIVE_SKIP_VERIFY="" WVA_LIVE_CA_PATH="" WVA_LIVE_PROM_URL=""
+        WVA_LIVE_PROM_TLS_ERR="the config.yaml of wva-manager-config in $ns does not parse as YAML"
+        return 0
+    fi
+    WVA_LIVE_PROM_KEYS="$(wva_prometheus_keys "$cfg")"
+    WVA_LIVE_PROM_TLS=read
+}
+
+# wva_prometheus_tls_kept_from_live reports whether the live controller skips
+# verification with no CA path for the Prometheus this install points at -- the
+# state an upgrade keeps rather than break.
+#
+# The no-CA term never decides today: both callers have already returned for a
+# live CA on the same Prometheus (wva_prometheus_ca_path), and a different one
+# fails the URL term. It is kept so the function means what its name says on
+# its own, for a caller that does not check the CA first.
+wva_prometheus_tls_kept_from_live() {
+    [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] \
+        && [ "${WVA_LIVE_SKIP_VERIFY:-}" = "true" ] \
+        && [ -z "${WVA_LIVE_CA_PATH:-}" ] \
+        && wva_same_prometheus_as_live
+}
+
+# wva_rerun_install_vars echoes, one per line, the VAR=value arguments a re-run
+# needs to install the SAME thing: every input that changes the install and
+# that the caller set rather than left to a default.
+#
+# Without them a printed re-run changed the install it was meant to repeat:
+# with no PROMETHEUS_URL it detected a Prometheus again, possibly another one;
+# with no DEPLOY_PROMETHEUS=false it installed kube-prometheus-stack; with no IMG
+# it deployed the default image over the one running. The image is carried
+# whenever it is not the default, however it was chosen (IMG, -i,
+# WVA_IMAGE_REPO/WVA_IMAGE_TAG).
+wva_rerun_install_vars() {
+    local img
+    [ -z "${ENVIRONMENT_EXPLICIT:-}" ] || printf 'ENVIRONMENT=%q\n' "$ENVIRONMENT_EXPLICIT"
+    if [ -n "${WVA_IMAGE_REPO:-}" ]; then
+        if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then img="$WVA_IMAGE_REPO@$WVA_IMAGE_DIGEST"; else img="$WVA_IMAGE_REPO:${WVA_IMAGE_TAG:-}"; fi
+        [ "$img" = "${WVA_DEFAULT_IMAGE_REF:-}" ] || printf 'IMG=%q\n' "$img"
+    fi
+    [ -z "${PROMETHEUS_URL_EXPLICIT:-}" ] || printf 'PROMETHEUS_URL=%q\n' "$PROMETHEUS_URL_EXPLICIT"
+    [ "${DEPLOY_PROMETHEUS:-true}" != "false" ] || printf 'DEPLOY_PROMETHEUS=false\n'
+    return 0
+}
+
+# wva_rerun_cmd echoes the make command that re-runs this install, with any
+# VAR=value arguments put in front. The variables that shaped this install
+# (wva_rerun_install_vars) come first, so pasting it repeats the install and
+# changes only what the arguments name.
+wva_rerun_cmd() {
+    local phase="" kv
+    local -a vars=()
+    while IFS= read -r kv; do
+        [ -z "$kv" ] || vars+=("$kv")
+    done <<< "$(wva_rerun_install_vars)"
+    [ "${INSTALL_PHASE_EXPLICIT:-}" != "wva" ] || phase="INSTALL_PHASE=wva"
+    wva_make_cmd deploy-wva ${vars[@]+"${vars[@]}"} ${phase:+"$phase"} "$@"
+}
+
+# wva_refuse_unknown_prometheus_tls stops the install, before anything is
+# written, when the live controller config could not be read and this install
+# would otherwise choose the TLS setting blind.
+#
+# An unreadable config is not a new install. Taken as one, the install wrote
+# "verify" for a controller that may have run unverified with no CA, and it then
+# could not connect -- the same failure wva_live_limiters refuses for the
+# limiter. The operator knows which it was; the install does not.
+#
+# Not refused when the caller decided -- an explicit skip, or an explicit CA
+# path, which means verify -- nor for the Prometheus this install deploys,
+# whose setting does not depend on the live config. main calls this before
+# any phase runs, so "Nothing was changed" is true; it resolves the URL only
+# once the cheaper answers have not settled it.
+wva_refuse_unknown_prometheus_tls() {
+    [ "${WVA_LIVE_PROM_TLS:-}" = "unknown" ] || return 0
+    [ -z "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ] || return 0
+    [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] || return 0
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    wva_resolve_prometheus_url
+    case "${PROMETHEUS_URL:-}" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    ! wva_prometheus_is_own_stack || return 0
+    log_error "Cannot read the controller config this install replaces (${WVA_LIVE_PROM_TLS_ERR:-wva-manager-config in $WVA_NS is unreadable}), so it cannot tell whether TLS verification for $PROMETHEUS_URL is on now. Nothing was changed. Re-run naming it:
+    $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false)   to verify (a public CA, or set PROMETHEUS_CA_CERT_PATH too)
+    $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true)    to connect without verifying"
+}
+
+# wva_hint_untrusted_prometheus_cert prints the two fixes when $1 -- the
+# controller's last container lines -- shows it refusing the Prometheus
+# certificate. That is the failure this install's TLS default can cause, and
+# the raw x509 line does not say what to do about it. Not on OpenShift: its
+# overlay mounts the service CA and takes no TLS settings from the installer,
+# so neither re-run would change anything there.
+wva_hint_untrusted_prometheus_cert() {
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    printf '%s\n' "$1" | grep -qE 'x509|certificate signed by unknown authority' || return 0
+    log_warning "  The controller does not trust the Prometheus certificate. Fix it one of two ways:"
+    log_warning "    1. Mount the CA into the controller, then re-run with its path (docs/reference/prometheus.md#tls-configuration):"
+    log_warning "         $(wva_rerun_cmd 'PROMETHEUS_CA_CERT_PATH=<file>')"
+    log_warning "    2. For a development cluster only, re-run without verification:"
+    log_warning "         $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true)"
+    log_warning "  The re-run restarts the controller so it reads the new setting."
+}
+
+# wva_warn_prometheus_tls_upgrade says when wva_prometheus_skip_verify kept
+# verification off from the live config, when it did not because this install
+# points at a different Prometheus, and when it dropped the live CA path for
+# the same reason.
+wva_warn_prometheus_tls_upgrade() {
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    case "${PROMETHEUS_URL:-}" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    if [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] && [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] \
+        && [ -n "${WVA_LIVE_CA_PATH:-}" ] && ! wva_same_prometheus_as_live; then
+        log_warning "=================================================================="
+        log_warning "The controller verified ${WVA_LIVE_PROM_URL:-its old Prometheus} with the CA at $WVA_LIVE_CA_PATH."
+        log_warning "  This install points at $PROMETHEUS_URL instead, so that CA path was DROPPED."
+        log_warning "  If the new Prometheus has a certificate from the same CA, re-run with it:"
+        log_warning "    $(wva_rerun_cmd "PROMETHEUS_CA_CERT_PATH=$WVA_LIVE_CA_PATH")"
+        log_warning "=================================================================="
+    fi
+    [ -z "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ] || return 0
+    [ -z "$(wva_prometheus_ca_path)" ] || return 0
+    ! wva_prometheus_is_own_stack || return 0
+    [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] || return 0
+    [ "${WVA_LIVE_SKIP_VERIFY:-}" = "true" ] || return 0
+    if wva_prometheus_tls_kept_from_live; then
+        log_warning "=================================================================="
+        log_warning "TLS verification for $PROMETHEUS_URL stays OFF, as it was before this upgrade."
+        log_warning "  New installs verify by default. This controller has no CA to verify with, so turning it"
+        log_warning "  on now would stop it connecting to Prometheus. To turn verification on, do one of these:"
+        log_warning "    1. Mount the CA into the controller and re-run with PROMETHEUS_CA_CERT_PATH=<file> (docs/reference/prometheus.md#tls-configuration)."
+        log_warning "    2. If a public CA signed its certificate, re-run with verification on:"
+        log_warning "         $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false)"
+        log_warning "=================================================================="
+        return 0
+    fi
+    log_warning "=================================================================="
+    log_warning "TLS verification was OFF for ${WVA_LIVE_PROM_URL:-the Prometheus this controller used before}."
+    log_warning "  This install points at $PROMETHEUS_URL instead, so it takes the new default and VERIFIES it."
+    log_warning "  If that Prometheus has a private CA, the controller cannot connect. To keep verification off:"
+    log_warning "    $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true)"
+    log_warning "=================================================================="
+    return 0
+}
+
+# wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
+# Prometheus without verifying its certificate, and when it will verify one
+# with no CA configured -- which fails for a private CA. $1 is the manager
+# config.yaml. OpenShift verifies against the service CA, mounted by its
+# overlay, and never reaches either warning. Sets WVA_TLS_SUMMARY to one line
+# print_summary repeats, since this warning scrolls past long before the end.
 wva_warn_prometheus_tls() {
     local cfg="$1" url skip ca
+    WVA_TLS_SUMMARY=""
     [ -n "$cfg" ] || return 0
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
     url="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null || true)"
     skip="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null || true)"
     ca="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null || true)"
     case "$url" in https://*) ;; *) return 0 ;; esac
-    [ "$skip" = "true" ] || return 0
-    [ -z "$ca" ] || return 0
+    if [ -n "$ca" ]; then
+        [ "$skip" = "true" ] || return 0
+        # A CA kept from the live config keeps the live skip value
+        # (wva_prometheus_skip_verify), so a controller can hold a CA and still
+        # not verify. Say so: the CA path reads as though it verifies.
+        WVA_TLS_SUMMARY="does NOT verify the certificate of $url, although a CA path ($ca) is set (see the TLS warning above)"
+        log_warning "WVA will NOT verify the TLS certificate of $url: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY is true, as it was before."
+        log_warning "  PROMETHEUS_CA_CERT_PATH is set ($ca) but unused while verification is off. To verify against it:"
+        log_warning "    $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false)"
+        return 0
+    fi
+    if [ "$skip" != "true" ]; then
+        WVA_TLS_SUMMARY="verifies $url against the public roots only; if it has a private CA, the controller cannot connect (see the TLS warning above)"
+        log_warning "=================================================================="
+        log_warning "WVA will VERIFY the TLS certificate of $url against the public roots only (no PROMETHEUS_CA_CERT_PATH)."
+        log_warning "  The installer turns verification off only for the Prometheus it deploys itself."
+        log_warning "  If its certificate comes from a private CA, the controller cannot connect. To check, once it has started:"
+        log_warning "    kubectl logs -n $WVA_NS deploy/wva-controller-manager | grep -m1 x509"
+        log_warning "  No output: nothing to do. Otherwise fix it one of two ways:"
+        log_warning "    1. Mount the CA into the controller, then re-run with its path (docs/reference/prometheus.md#tls-configuration):"
+        log_warning "         $(wva_rerun_cmd 'PROMETHEUS_CA_CERT_PATH=<file>')"
+        log_warning "    2. For a development cluster only, re-run without verification:"
+        log_warning "         $(wva_rerun_cmd PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true)"
+        log_warning "  A re-run that changes either setting restarts the controller, which reads them only at startup."
+        log_warning "=================================================================="
+        return 0
+    fi
+    WVA_TLS_SUMMARY="does NOT verify the certificate of $url (development only; see the TLS warning above)"
     log_warning "WVA will NOT verify the TLS certificate of $url (PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true, no PROMETHEUS_CA_CERT_PATH)."
     log_warning "  Fine for a development cluster. In production, mount the CA that signed the Prometheus certificate into the"
-    log_warning "  controller and set PROMETHEUS_CA_CERT_PATH=<file> and PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false."
+    log_warning "  controller, then re-run with its path:"
+    log_warning "    $(wva_rerun_cmd 'PROMETHEUS_CA_CERT_PATH=<file>')"
     log_warning "  See docs/reference/prometheus.md#tls-configuration."
 }
 
@@ -730,6 +1103,63 @@ ${names}  target:
 EOF
 }
 
+# wva_write_prometheus_settings writes the Prometheus URL and TLS settings into
+# the live manager config, after the overlay apply, and warns about what the
+# controller will run with. Needs the WVA_LIVE_* globals that
+# wva_read_live_prometheus_tls set before the apply.
+wva_write_prometheus_settings() {
+    wva_resolve_prometheus_url
+
+    if [ -n "${PROMETHEUS_URL:-}" ]; then
+        log_info "Pointing WVA at Prometheus: $PROMETHEUS_URL"
+        # strenv, never spliced into the program: a quote in the URL would
+        # otherwise be yq syntax.
+        WVA_URL="$PROMETHEUS_URL" patch_manager_config '.PROMETHEUS_BASE_URL = strenv(WVA_URL)'
+        wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
+    fi
+    local skip_verify ca_path
+    skip_verify="$(wva_prometheus_skip_verify)"
+    if [ -n "$skip_verify" ]; then
+        WVA_SKIP="$skip_verify" patch_manager_config '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'
+    fi
+    ca_path="$(wva_prometheus_ca_path)"
+    if [ -n "$ca_path" ]; then
+        WVA_CA="$ca_path" patch_manager_config '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'
+    fi
+    wva_warn_prometheus_tls_upgrade
+    # Read back what the controller will actually run with, after every patch
+    # above, rather than reasoning about which of them applied.
+    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+}
+
+# wva_restart_on_prometheus_change restarts the controller when a PROMETHEUS_*
+# key of the manager config ($1, as written) differs from what it held before
+# this install (WVA_LIVE_PROM_KEYS).
+#
+# The controller reads its config file once, at startup: the ConfigMap is
+# mounted through subPath, which the kubelet never refreshes. Patching it changed
+# nothing until the pod happened to restart, so a re-run that turned
+# verification off, or set a CA path, left the running controller failing
+# exactly as before while the install reported the fix. A config that could
+# not be read before ("unknown"), or cannot be read now, is restarted too: the
+# install cannot tell whether it changed. A new install ("absent") is not: its
+# pod starts on the rendered config.
+wva_restart_on_prometheus_change() {
+    local cfg="$1"
+    case "${WVA_LIVE_PROM_TLS:-}" in
+        read)
+            [ -z "$cfg" ] || [ "$(wva_prometheus_keys "$cfg")" != "$WVA_LIVE_PROM_KEYS" ] || return 0 ;;
+        unknown) ;;
+        *) return 0 ;;
+    esac
+    log_info "The Prometheus settings in wva-manager-config changed; restarting the controller, which reads them only at startup."
+    if ! kubectl rollout restart deployment/wva-controller-manager -n "$WVA_NS"; then
+        log_warning "Could not restart the controller. It keeps the old Prometheus settings until its next restart. Restart it with:"
+        log_warning "  kubectl rollout restart deployment/wva-controller-manager -n $WVA_NS"
+    fi
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
@@ -859,7 +1289,17 @@ EOF
     # And the Prometheus URL, so the Deployment this apply creates never sees the
     # shipped default. Appended after the `patches:` key exists, for the same
     # reason the pull-policy patch is.
+    #
+    # The TLS settings the controller runs with NOW are read first: the render
+    # replaces the whole config.yaml, and an upgrade must not turn verification
+    # on for a Prometheus it was connecting to unverified. See
+    # wva_read_live_prometheus_tls. main reads it before any phase runs; this
+    # read is for a caller that did not.
+    if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ] && [ -z "${WVA_LIVE_PROM_TLS:-}" ]; then
+        wva_read_live_prometheus_tls "$WVA_NS"
+    fi
     wva_resolve_prometheus_url
+    wva_refuse_unknown_prometheus_tls
     wva_render_manager_config_patch "$tmp_overlay"
 
     # Who may call the external scaler: KEDA's namespace only, unless opted out.
@@ -967,6 +1407,18 @@ EOF
         all|prereqs) wva_apply_watch_namespace_rbac "$tmp_overlay" ;;
     esac
 
+    # Before the apply that takes `patch` on pods out of the ClusterRole: an
+    # earlier install's warm pools and utilization-share marks still need it,
+    # and nothing else would grant it again (lib/pod_writer.sh). A
+    # namespace-scoped controller keeps `patch` in its own Role.
+    case "${WVA_APPLY_SCOPE:-all}" in
+        all|prereqs)
+            if [ "$(wva_install_scope)" = "cluster" ]; then
+                wva_regrant_pod_writers "$WVA_NS"
+            fi
+            ;;
+    esac
+
     # A private registry needs the pull secret on the ServiceAccount, not on the
     # Deployment: patching the SA covers the controller and anything else that
     # runs as it, and survives a re-apply of the Deployment from the overlay.
@@ -1034,6 +1486,12 @@ EOF
         *)
             log_error "WVA_APPLY_SCOPE must be all, prereqs or controller (got '${WVA_APPLY_SCOPE}')"
             ;;
+    esac
+
+    # The ServiceMonitor references wva-metrics-scraper-token now; the token the
+    # controller's own ServiceAccount used to be scraped with goes.
+    case "${WVA_APPLY_SCOPE:-all}" in
+        all|prereqs) wva_delete_legacy_controller_token "$WVA_NS" ;;
     esac
 
     # Put the operator's own entries back. A merge patch names only the keys it
@@ -1137,20 +1595,7 @@ wva_reconcile_prometheus_scheme() {
     # kept as the write path: the value is already rendered into the ConfigMap the
     # apply created, and re-applying it here is what fixes an install whose
     # ConfigMap predates that rendering.
-    wva_resolve_prometheus_url
-
-    if [ -n "${PROMETHEUS_URL:-}" ]; then
-        log_info "Pointing WVA at Prometheus: $PROMETHEUS_URL"
-        patch_manager_config ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\""
-        wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
-    fi
-    if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
-        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY}\""
-    fi
-    # Read back what the controller will actually run with, after every patch
-    # above, rather than reasoning about which of them applied.
-    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
-        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    wva_write_prometheus_settings
 
     if [ "${ENABLE_SCALE_TO_ZERO:-false}" = "true" ]; then
         log_info "Enabling scale-to-zero in WVA ConfigMap (ENABLE_SCALE_TO_ZERO=true)..."
@@ -1274,6 +1719,11 @@ wva_reconcile_prometheus_scheme() {
             log_error "WVA_LIMITER must be 'none', 'gpu-inventory' or 'quota', got '${WVA_LIMITER}'"
             ;;
     esac
+
+    # After every patch to the manager config, so the new pod reads all of them.
+    # See wva_restart_on_prometheus_change.
+    wva_restart_on_prometheus_change "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
 
     # Wait for WVA to be ready.
     #

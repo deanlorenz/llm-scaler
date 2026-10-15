@@ -470,6 +470,7 @@ kill %1
 | pod restarts (`CrashLoopBackOff`) at startup, log `Shutdown requested during startup` after Prometheus connection errors, exit code 143 (read it with `kubectl get pod <pod> -n "$NS" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'`) | the controller cannot reach Prometheus at startup and keeps retrying. Its health endpoint is not served yet, so the startup probe kills it after about 60s and the pod restarts | make Prometheus reachable: check the URL, TLS settings and network policy ([Prometheus](prometheus.md#configuration)). The restarts stop once it connects |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
+| `CrashLoopBackOff`, `x509: certificate signed by unknown authority` | verification is on by default now, and a private CA signed the Prometheus certificate | mount the CA, then re-run the install with `PROMETHEUS_CA_CERT_PATH=<file>` and every other variable you installed with. The re-run restarts the controller ([TLS configuration](prometheus.md#tls-configuration)) |
 
 ## Cluster policy is not applied (policy namespace unverified)
 

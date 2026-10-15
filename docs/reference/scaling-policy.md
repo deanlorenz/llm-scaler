@@ -952,7 +952,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 | --- | --- |
 | `scaleToZero` | repeat it, or set it on a named tier or a per-model entry (an entry whose body names the model); both are kept |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
-| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
+| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again, each with `NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>` |
 | `limiters:` | kept when `WVA_LIMITER` is not passed, hand-written entries included; `WVA_LIMITER=none` removes it |
 
 This touches only the controller's own ConfigMap. A policy published in
@@ -1893,7 +1893,7 @@ INFO No cluster policy ConfigMap in the policy namespace
 
 ### 2. Customizing Global Defaults
 
-Edit `deploy/configmap-scaling-policy.yaml`. Keeping the `analyzers:` section
+Edit the installed ConfigMap and keep its `limiters:`. Keeping the `analyzers:` section
 is recommended: it states the analyzer and its score explicitly, and it makes the
 entry V2-shaped so the scaling band is defaulted on the entry itself (see
 [Analyzer Selection](#analyzer-selection)):
@@ -1915,10 +1915,15 @@ data:
     queueLengthThreshold: 10    # capacity sizing
 ```
 
-Apply the ConfigMap:
+Edit it in place:
 ```bash
-kubectl apply -f deploy/configmap-scaling-policy.yaml
+kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
 ```
+
+**Do not `kubectl apply -f deploy/configmap-scaling-policy.yaml`.** That sample has
+no `limiters:` and names its own namespace, so applying it replaces the installed
+`default` entry and silently removes the GPU limit the installer wrote. Edit the
+installed ConfigMap instead, or re-run the install with your `WVA_LIMITER`.
 
 Changes apply at once, with no pod restart: the controller watches the
 ConfigMap, reloads its cache, and reconciles every discovered variant.
@@ -2205,9 +2210,9 @@ modify the cache.
 INFO No cluster policy ConfigMap in the policy namespace: no limiters or quotas are in force
 ```
 
-**Solution:** Deploy the ConfigMap:
+**Solution:** Re-run the install, which writes the ConfigMap with the limiter you pass:
 ```bash
-kubectl apply -f deploy/configmap-scaling-policy.yaml
+NAMESPACE=<controller-namespace> WVA_LIMITER=<none|gpu-inventory|quota> make deploy-wva
 ```
 
 ### Invalid Configuration Entry
@@ -2301,9 +2306,9 @@ WARN Failed to load initial saturation scaling config, will use defaults
 
 **Solution:** This is non-fatal. The controller continues with the analyzer's hardcoded defaults. To fix:
 
-1. Deploy the ConfigMap:
+1. Re-run the install, which writes the ConfigMap with the limiter you pass:
    ```bash
-   kubectl apply -f deploy/configmap-scaling-policy.yaml
+   NAMESPACE=<controller-namespace> WVA_LIMITER=<none|gpu-inventory|quota> make deploy-wva
    ```
 
 2. The watch mechanism will automatically reload the cache once ConfigMap is available
@@ -2351,9 +2356,9 @@ data:
     queueLengthThreshold: 15
 ```
 
-Apply the configuration:
+Merge these entries into the installed ConfigMap, keeping its `limiters:`:
 ```bash
-kubectl apply -f deploy/configmap-scaling-policy.yaml
+kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
 ```
 
 Verify deployment:

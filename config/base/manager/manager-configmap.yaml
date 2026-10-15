@@ -22,7 +22,12 @@ data:
     # namespace; override in your overlay (e.g. OpenShift -> Thanos Querier).
     PROMETHEUS_BASE_URL: "https://kube-prometheus-stack-prometheus.workload-variant-autoscaler-monitoring.svc.cluster.local:9090"
     # Whether to skip TLS certificate verification when connecting to Prometheus.
-    PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"
+    # Verified by default: the controller sends its ServiceAccount token as a
+    # bearer header, and an unverified endpoint is one anybody on the path can
+    # impersonate to collect it. Set PROMETHEUS_CA_CERT_PATH to the CA that signed
+    # the Prometheus certificate. deploy/install.sh turns this off on Kubernetes,
+    # with a warning, because it has no CA for the self-signed stack it deploys.
+    PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"
 
     # Optimization
     # Global optimization loop interval for autoscaling decisions.
