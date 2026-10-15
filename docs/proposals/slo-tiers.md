@@ -112,8 +112,8 @@ modes:
 
 The SLO's count reaches KEDA through the same optimizer output and
 external-scaler push as every other count; there is no new actuation path.
-Before the composite lands, the analyzer runs in observe mode on today's `main`
-with no engine change (built).
+Before the composite lands, the analyzer runs in observe mode with no change to
+the engine's decision path (built): its result is published and not consumed.
 
 ## What llm-d's KEDA recipes read
 
@@ -179,7 +179,7 @@ The engines' series say which variant to price, and how full it may run.
 
 ## What exists today
 
-From `main` at `cb37a21e2`, with what this branch changed:
+From `main` at `fee45eb52` (this PR's base), with what this branch changed:
 
 | | Where | What it means here |
 | --- | --- | --- |
@@ -444,8 +444,10 @@ them. vLLM only: SGLang publishes no per-stage prefill figure.
   computed-token counter is recorded a whole generation after the prefill, and
   its queue is mostly KV held by decodes.
 - **Cost.** The prefill and queue-time replica queries are fetched only in
-  namespaces where a model ran the `slo` analyzer on the previous cycle
-  (`SetSLOInputNamespaces`), so a cluster that does not use it pays nothing.
+  namespaces where a model's resolved policy lists the `slo` analyzer, marked
+  as the policy is resolved and before the model is collected
+  (`noteSLOPolicy`, `AddSLOInputNamespace`), so a cluster that does not use it
+  pays nothing and a namespace that does gets them the same cycle.
 
 **The 2b design, not built.** Recorded so 2a's data can test it.
 
@@ -527,11 +529,14 @@ says why; the request count is still published. Reasons:
   Ready and failed its probe: a flap, not a start. A LeaderWorkerSet group
   lists no Pod ages, so a group pending **continuously for 30 minutes** stops
   counting as starting (`boundPending`); an unschedulable group is judged.
-- **`unobserved`**: the analyzer did not see the model on the previous cycles.
-  The engine skipped it (for example a waking model whose Pods have no metrics
-  yet), or the controller restarted, or the model was just configured. The
-  window may hold a transient nothing here saw, so it is excluded for
-  window + grace from the first cycle seen.
+- **`unobserved`**: the analyzer did not analyze the model on the previous
+  engine cycle. The engine skipped it (for example a waking model whose Pods
+  have no metrics yet), or the controller restarted, or the model was just
+  configured. The window may hold a transient nothing here saw, so it is
+  excluded for window + grace from the first cycle analyzed. Counted in cycles
+  (the engine calls `BeginCycle` at the top of every cycle), not read from
+  timing: a slow cycle is not a skipped one, and a timing rule excluded a model
+  with a recurring slow cycle for ever.
 
 The exclusion lasts for the router window plus a **grace**: the longer of
 120 s and 1.5 × the longest mean request duration among ready replicas, **at
@@ -574,8 +579,12 @@ Alerts (built, with promtool tests):
   thresholds do not meet the SLO, not that the autoscaler failed one.
 - **`WVAModelSLOUnjudged`** (info): a target present for the whole last hour
   (`count_over_time(...[1h:1m]) >= 60`), nothing judged in it, replicas > 0,
-  for 15m. The description says how to tell constant scale-ups, too little
-  traffic, missing `include_usage` and unscraped router histograms apart.
+  for 15m, **and a cause to act on**: excluded for at least half the hour, the
+  objective's router series missing, or TPOT with no requests while TTFT has
+  them (no `include_usage`). Too little traffic -- a quiet or idle model, which
+  publishes a request count of 0 -- does not fire it.
+- Both alerts carry `component: slo`, so an observe-only finding can be routed
+  apart from pages.
 
 - **Stale series are deleted** when a model, variant or target disappears
   (built, the per-cycle `SweepSLO`).
@@ -682,7 +691,7 @@ SLO decides needs latency that rises with load (open question 2).
 (branch `bench/keda-recipe-arm`) needs the attainment scorer it lists as to-do.
 That scorer and `wva_slo_attainment_ratio` cross-check each other.
 
-- **Phase 0:** run ours with `slo` in shadow, and record the SLO's `D ÷ P`
+- **Phase 0:** run ours with `slo` in observe mode, and record the SLO's `D ÷ P`
   beside the actual count.
 - **Phase 1:** add **ours-slo**, sizer mode, mean TPOT 100 ms. Its attainment
   is judged on the router's clock, so it is not directly comparable with
@@ -730,10 +739,20 @@ That scorer and `wva_slo_attainment_ratio` cross-check each other.
      predicted-vs-observed mean TPOT error within X %; `pinned`-vs-`own`
      disagreement on the same variant below Y; and a TPOT-bound benchmark
      showing attainment ≥ target with replicas no higher than saturation-only.
-     Needs the phase-0 follow-up (the line's ITL at the current fill).
+     The error is measured **out of sample**: the prediction one cycle makes,
+     scored at the fill the fleet reaches later, bucketed by how far the fill
+     moved. A line pinned through a fixed intercept passes near the window's
+     own mean point by construction, so an in-sample error tests almost
+     nothing. Needs the phase-0 follow-up (the line's ITL, or A and B, at the
+     current fill).
    - **2b:** a minimum number of effective cycles per bin, plus a monotonicity
      or fit-residual criterion on the curve.
    - **2c:** to be set from 2b's shadow results.
+
+   **Phase 1 does not ship** while any of these holds: the out-of-sample TPOT
+   error is outside X %; in guard mode on a loose target the SLO adds replicas
+   saturation did not ask for; no TPOT-bound benchmark has been run and scored;
+   or any of "Before phase 1 prices anything" items 1-4 is open.
 2. **The simulator's load factor.** We pass none today, and whether v0.9.0 has
    one is unchecked. Without it no e2e spec can have the SLO decide.
 3. **Pinned pricing.** Whether `pinned` may price in sizer mode, decided from
@@ -778,8 +797,8 @@ the token rate is concave, so the realised fill sits below the priced one; each
 window's maximum then pulled the bound down, to a fixed point near
 `0.05·s ÷ (1 − s)`: 0.28 at `s = 0.85`. In sizer mode the SLO could never
 loosen; in guard mode a loose SLO kept adding replicas. Replaced by the
-[0.15, 0.80] clamp; a closed-loop test (phase 1, in the composite) asserts a loose SLO never raises `N`
-above saturation's in guard mode.
+[0.15, 0.80] clamp; a closed-loop test (phase 1, in the composite) asserts
+a loose SLO never raises `N` above saturation's in guard mode.
 
 **2. Holding an infeasible variant froze single-variant P/D models.** The first
 draft held an infeasible variant at its current count. That freezes a
@@ -794,8 +813,8 @@ quantiles do not add. Replaced by a mean curve and a tail ratio.
 could never be crossed at p99 (it needs a lower bound over 100 %); its dead
 band was set by a fixed `n = 200`, not by the SLO; point estimates mis-trim (at
 n = 300 a true 90.5 % reads under 90 % about 40 % of the time); bursty misses
-at a design effect of 5 raise the false trim-down rate at p90 from 2.7 % to
-17.6 % a test; and it fell 7.5× faster than it recovered. Phase 3 is therefore
+at a design effect of 5 raise the false trim-down rate per test at p90 from
+2.7 % to 17.6 %; and it fell 7.5× faster than it recovered. Phase 3 is therefore
 stated as requirements and designed later.
 
 ## Appendix: the composite rules
