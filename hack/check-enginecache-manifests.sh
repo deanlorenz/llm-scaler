@@ -181,7 +181,7 @@ SEED_MARKER=.seeded SEED_ID=shared:y MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh
 mkdir -p "$M/seed/triton/y"; echo y > "$M/seed/triton/y/f"; chmod 000 "$M/seed/triton/y"
 SEED_MARKER=.seeded SEED_ID=shared:z MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run4.out" 2>&1; chmod 755 "$M/seed/triton/y"
 if [ "$(id -u)" = 0 ]; then ok "merge: (the failed-copy case needs a non-root check runner)"; else
-grep -q "did not complete" "$M/run4.out" && [ "$(cat "$M/cache/.seeded")" = shared:y ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves the marker at the previous seed and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded")"; fi
+grep -q "did not complete" "$M/run4.out" && [ ! -e "$M/cache/.seeded" ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves no seed marker (not the previous seed's) and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded" 2>&1)"; fi
 # a seed claim whose subPath does not exist yet -- a fresh stand-up's
 # workload claim: nothing to seed, said so, and Ready; the seed is merged
 # once it appears
@@ -212,6 +212,31 @@ SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache 
     && ok "seed: a stamped seed is merged again by a node already seeded, and the marker records the stamp" || fail "stamped seed: $(cat "$F/run3.out"; cat "$F/cache/.seeded")"
 SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run4.out" 2>&1
 grep -q "seeded on" "$F/run4.out" && fail "stamped seed: merged again with no new stamp" || ok "seed: the same stamp is not merged twice"
+# a newer stamp whose merge fails, on a node that merged the stamp before: the
+# node must not stay Ready on the old marker. The rendered probe is run against
+# the node directory. A fake cp fails on one entry, so this holds under root too.
+mkdir -p "$T/failcp"
+REAL_CP="$(command -v cp)"
+cat > "$T/failcp/cp" <<EOF
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *keyFAIL*) echo "cp: fake failure on \$a" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/failcp/cp"
+probe_f="$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.containers[0].readinessProbe.exec.command[2]' "$T/render-seed.yaml" | sed "s|/engine-cache|$F/cache|g")"
+if [ -z "$probe_f" ] || ! sh -c "$probe_f"; then fail "probe: the rendered probe refuses a node that merged the current stamp: '$probe_f' marker $(cat "$F/cache/.seeded")"; else
+    echo 20261014120000 > "$F/seed/engine-cache/.published"
+    mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL"; echo x > "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL/f"
+    PATH="$T/failcp:$PATH" SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run5.out" 2>&1
+    if grep -q "did not complete" "$F/run5.out" && ! sh -c "$probe_f" && [ ! -e "$F/cache/vllm/torch_compile_cache/keyFAIL" ]; then
+        ok "seed: a newer stamp that fails to merge leaves the node not Ready, not Ready on the stamp before"
+    else
+        fail "seed: a failed merge of a newer stamp left the node Ready (marker: $(cat "$F/cache/.seeded" 2>&1)): $(cat "$F/run5.out")"
+    fi
+    SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run6.out" 2>&1
+    [ "$(cat "$F/cache/.seeded" 2>/dev/null)" = "workload-pvc:engine-cache@20261014120000" ] && sh -c "$probe_f" \
+        && ok "seed: the failed stamp is merged at the next start, and the node is Ready again" || fail "seed retry after a failed stamp: $(cat "$F/run6.out")"
+fi
 # the readiness probe accepts every marker form the preparer writes
 for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
     echo "$m" > "$T/marker"
@@ -221,7 +246,7 @@ echo "other-claim:x" > "$T/marker"
 grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" && fail "probe accepts another seed's marker" || ok "probe: accepts the seed's three marker forms, refuses another seed's"
 # publish waits on the usable nodes (status), never `rollout status`, which
 # also waits for a cordoned node's pod that never comes up
-pub_body="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+pub_body="$(sed -n '/^cmd_publish() {/,/^}/p; /^reseed_wait() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
 if [ -z "$pub_body" ]; then fail "publish: no cmd_publish found"
 elif printf '%s' "$pub_body" | grep -q 'rollout status'; then fail "publish: waits with rollout status, which counts cordoned nodes"
 elif printf '%s' "$pub_body" | grep -q 'enginecache.sh" status'; then ok "publish: waits for the usable nodes to re-seed, not for every DaemonSet pod"
@@ -257,6 +282,24 @@ stale_preparers '"$(echo "$c" | cut -d: -f2)")"
     printf '%s' "$pub_body" | grep -q 'deprecated\\.daemonset\\.template\\.generation' \
         && ok "publish: compares against the DaemonSet's template generation, which the pod label follows" \
         || fail "publish: compares against .metadata.generation, which also moves on edits outside the template"
+fi
+# a node that never merges the new stamp: the wait times out and publish fails,
+# never reporting success. status is a stand-in that exits as told.
+rw_body="$(sed -n '/^reseed_wait() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$rw_body" ]; then fail "publish: no reseed_wait, so nothing stops a success report after the re-seed wait times out"; else
+    mkdir -p "$T/rw"; printf '#!/bin/sh\nexit "$STATUS_RC"\n' > "$T/rw/enginecache.sh"
+    for c in 1:1 0:0; do
+        out="$(STATUS_RC="${c%%:*}" bash -c 'stale_preparers() { echo 0; }; sleep() { SECONDS=$((SECONDS + $1)); }; HERE="'"$T/rw"'"; NAMESPACE=ns; '"$rw_body"'
+SECONDS=0; reseed_wait 13 600; echo "rc=$?"')"
+        [ "$out" = "rc=${c#*:}" ] && ok "reseed_wait: status exiting ${c%%:*} gives $out" || fail "reseed_wait: status exiting ${c%%:*} gave '$out', want rc=${c#*:}"
+    done
+    pub_only="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+    if printf '%s\n' "$pub_only" | grep -A1 'reseed_wait "$gen"' | grep -q '|| log_error' \
+        && [ "$(printf '%s\n' "$pub_only" | grep -n 'reseed_wait "$gen"' | cut -d: -f1)" -lt "$(printf '%s\n' "$pub_only" | grep -n 'log_success' | cut -d: -f1)" ]; then
+        ok "publish: a re-seed wait that times out is an error, and success is reported only after it passes"
+    else
+        fail "publish: reports success whether or not every usable node merged the new stamp"
+    fi
 fi
 ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else

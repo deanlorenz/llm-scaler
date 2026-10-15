@@ -476,8 +476,10 @@ file by file:
 - a subPath that does not exist yet is nothing to seed, not an error.
 
 With a seed, a node is Ready only once it carries it, so `engine-cache-status`
-counts a node whose seed did not complete as not prepared. The engines never
-wait on the preparer.
+counts a node whose seed did not complete as not prepared. That holds for the
+newest seed: before the preparer merges a new one, it drops the record of the
+old one. A node whose newest merge failed is not prepared, even if an older
+merge worked. The engines never wait on the preparer.
 
 The seed is code the engines load, so trust it as the cache itself, and more:
 one write to it reaches every node at the next prepare, while a write to the
@@ -511,6 +513,11 @@ make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
 
 Run it again after adding a model or changing an engine flag: the new stamp
 makes every node merge the new keys.
+
+Publish waits up to 10 minutes for every usable node to merge the new stamp.
+If a node does not, publish fails and says so. The seed stays stamped, so run
+`make engine-cache-status` to see which node, and read that node's preparer log
+to see why.
 
 #### Check the cache without a second start
 

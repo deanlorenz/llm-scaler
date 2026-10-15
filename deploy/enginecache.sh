@@ -312,6 +312,9 @@ if [ -d /seed ] && [ ! -d "$seed_dir" ]; then
   fi
   echo "engine cache: no seed on $HOSTNAME: $SEED_ID has no $seed_dir yet; nothing to seed"
 elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
+  # Drop the old marker first. If this merge fails, the node must be not
+  # Ready -- not Ready on the stamp it merged before.
+  rm -f "/engine-cache/$SEED_MARKER" || exit 1
   complete=1; added=""
   for d in vllm flashinfer triton; do
     [ -d "$seed_dir/$d" ] || continue
@@ -337,7 +340,10 @@ seed_volume_yaml() {
     printf '        - name: seed\n          persistentVolumeClaim:\n            claimName: %s\n            readOnly: true\n' "$SEED_CLAIM"
 }
 # seed_probe prints the readiness probe's extra clause with a seed: the node
-# carries the marker of THIS seed. The probe is a single-quoted YAML scalar,
+# carries the marker of THIS seed. Any stamp matches, which is safe only
+# because the preparer drops the marker before it merges a new stamp: the
+# marker a pod finds is the stamp that pod merged, never an older one left
+# behind by a merge that failed. The probe is a single-quoted YAML scalar,
 # so the double quotes in it need no escaping.
 seed_probe() {
     [ -n "$SEED_CLAIM" ] || return 0
@@ -926,18 +932,26 @@ EOF
         || { kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null 2>&1; log_error "publish: the seed was filled but not stamped; rerun publish"; }
     kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
     kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
-    # Wait on the usable nodes, as status counts them: `rollout status` also
-    # waits for a cordoned node's pod, which never comes up. status alone
-    # passes on the preparers from before the restart (still Ready), so the
-    # wait also needs every live preparer to be of the restarted template.
-    local deadline=$((SECONDS + 600)) gen
+    local gen
     gen="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.deprecated\.daemonset\.template\.generation}')"
     sleep 5
+    reseed_wait "$gen" 600 \
+        || log_error "publish: the seed is stamped ${stamp}, but not every usable node merged it within 600 s. A node whose merge failed is not prepared: enginecache.sh status -n ${NAMESPACE} says which, and that node's preparer log says why"
+    log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every usable node merged it"
+}
+
+# reseed_wait GEN TIMEOUT_S waits for the preparers to merge a new stamp: 0
+# once every live preparer is of template GEN and status passes, 1 when
+# TIMEOUT_S passes first. It waits on the usable nodes, as status counts them:
+# `rollout status` also waits for a cordoned node's pod, which never comes up.
+# status alone passes on the preparers from before the restart (still Ready),
+# so the wait also needs every live preparer to be of the restarted template.
+reseed_wait() {
+    local gen="$1" deadline=$((SECONDS + $2))
     until [ -n "$gen" ] && [ "$(stale_preparers "$gen")" = 0 ] && bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
-        [ "$SECONDS" -lt "$deadline" ] || { log_warning "publish: not every usable node re-seeded within 600 s; enginecache.sh status says which"; break; }
+        [ "$SECONDS" -lt "$deadline" ] || return 1
         sleep 10
     done
-    log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
 }
 
 # KEY_RE matches a compile cache path in an engine's log, up to its rank
