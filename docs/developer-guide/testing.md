@@ -286,6 +286,11 @@ failed against good code.
   Bump the tag, and check the pod's age, not just its image.
 - The restart is best-effort: if the suite may not patch the Deployment, it
   warns and continues.
+- After a restart, wait before creating a ScaledObject. `restartWVAController`
+  returns only once the scaler Service routes to the new pod alone. A
+  ScaledObject created while KEDA cannot reach the scaler gets a CPU-only HPA
+  that KEDA never fixes. Specs that create one after a restart call
+  `waitForKEDAExternalMetricWired`, which recreates it once if that happened.
 
 ### E2E shared fixtures
 

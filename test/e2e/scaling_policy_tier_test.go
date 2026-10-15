@@ -174,6 +174,13 @@ var _ = Describe("Named scaling policy tier", Label("full"), Ordered, func() {
 			fixtures.WithExternalScalerTrigger(scalerAddress),
 			fixtures.WithScaledObjectScaleDownStabilizationWindow(30))).To(Succeed())
 		DeferCleanup(func() { _ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, scalerBaseName) })
+
+		// Arcs 1 and 2 assert the workload HOLDS at 1, which an HPA parked on
+		// the CPU default also does. Only arc 3 would notice, after its whole
+		// scale-up budget -- the failure seen in CI when this ScaledObject was
+		// created while KEDA's connection to a just-restarted scaler was down.
+		By("Waiting for KEDA to wire the external metric onto the HPA")
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, scalerBaseName)
 	})
 
 	AfterAll(func() {
