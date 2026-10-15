@@ -1223,8 +1223,11 @@ One thing about turning it on **can** change scaling: a tier that lists
    itself. The policy line shows `"(default entry)"` for both of the last two,
    so read `default` for a `defaultPolicy:` key. Then, each needing no
    restart:
-   - a new tier, named by each of the model's ScaledObjects (step 4);
    - the tier the model is on: add to it, and keep its own values;
+   - a new tier, named by each of the model's ScaledObjects (step 4). A tier
+     inherits from `default`, never from another tier, so on a model already
+     on a tier, a new one drops every field that tier sets: copy them all into
+     the new one, or add to the tier instead;
    - the `defaultPolicy:` tier, or `default` when there is none. This turns it
      on for every model that uses it, except a model whose tier or per-model
      override lists its own `analyzers:`, which replaces this list.
@@ -1240,7 +1243,8 @@ One thing about turning it on **can** change scaling: a tier that lists
    inherits every field it leaves unset from `default`, the band included,
    with one exception: its `analyzers:` list replaces the inherited one whole,
    and with it saturation's `score` and `parameters:`. So copy saturation's
-   entry: the tier's own where it lists one, `default`'s where it does not.
+   entry: the tier's own where it lists one, `default`'s where it does not,
+   and `score: 1` with no `parameters:` where neither lists one.
    Leave the band and the thresholds out: written here, they would stop
    following `default`. On the tier the model is already on, keep its own
    values as they are. Replace each `<...>` below; do not paste the example
@@ -1267,8 +1271,12 @@ One thing about turning it on **can** change scaling: a tier that lists
    `slo`, which shows the targets, for example
    `tpot mean<=100ms, ttft p95<=2s (observe)`, and, for a new tier,
    `scalingPolicy`, which must read `slo-watch`: `"(default entry)"` there means
-   step 4 did not take. Saturation's `parameters:`, `score` and
-   `queueLengthThreshold` are not in that line: compare those in the ConfigMap.
+   step 4 did not take. `slo=off` means the tier did not apply: the controller
+   logs `Scaling-policy entry rejected` for an entry it could not parse, and
+   `Scaling policy not found` for a tier name with no entry, and the model
+   then runs on `default`. Saturation's `parameters:` and `score`,
+   `queueLengthThreshold`, the scale-to-zero settings and the hold are not in
+   that line: compare those in the ConfigMap.
 
 **See the result**
 

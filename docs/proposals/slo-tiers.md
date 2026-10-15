@@ -167,7 +167,7 @@ The engines' series say which variant to price, and how full it may run.
 
 ## What exists today
 
-From `main` at `fee45eb52` (this PR's base), with what this branch changed:
+From `main` at `fee45eb52`, where this work started, with what this branch changed:
 
 | | Where | What it means here |
 | --- | --- | --- |
