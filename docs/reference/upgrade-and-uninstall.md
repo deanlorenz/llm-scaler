@@ -162,13 +162,54 @@ they enable. Do this, in order:
      ```
      It prints, for example, `wva-policy inventory+quota/gpu-inventory,tenant-quota true`:
      the limiter types joined by `+`, then the name of every entry
-     ([what changed in this format](#limiters)).
+     ([what changed in this format](#limiters-and-kueue-borrowing)).
 
-#### Limiters
+#### Limiters and Kueue borrowing
 
-**Before you upgrade**, list the limiter types every policy declares. A
-cluster admin runs this; a namespace owner runs the inner command for their own
-namespace:
+> **ACTION REQUIRED before upgrade.** A Kueue-backed namespace quota starts
+> counting cohort borrowing **without a config change**. Borrowing is
+> experimental but on by default. Before the upgrade:
+>
+> 1. **(cluster admin) Re-run `make setup-prereqs`** for every
+>    namespace-scoped install ([step 1 above](#upgrading-to-this-release)).
+>    It adds the cluster-wide Workload read and a Role in the Kueue namespace
+>    to read the `kueue-controller-manager` Deployment and its leader Lease.
+>    Without that Role, borrowing stops with `kueue-controller-down`; without
+>    the Workload read, with `lenders-unreadable`.
+> 2. **Check the node read** for every policy that declares `gpu-inventory`
+>    beside `quota` (below).
+> 3. **Choose, per Kueue-backed entry**:
+>    - **borrow everywhere**: nothing to do, where the conditions hold;
+>    - **pilot**: set `borrowNamespaces` on the entry to the namespaces that
+>      may borrow ([how](../guides/kueue-borrowing/#pilot-on-a-few-namespaces));
+>    - **opt out**: set `countBorrowable: false` on the entry
+>      (`WVA_QUOTA_KUEUE_BORROW=false` on the install), which keeps the
+>      Kueue cap at nominal exactly as before.
+> 4. **Give borrowing a GPU bound** where you borrow: a `gpu-inventory` entry,
+>    or a GPU `ResourceQuota` whose `hard` is **at most nominal plus
+>    `borrowingLimit`**. The installer adds neither; without one borrowing is
+>    withheld as `no-gpu-bound`.
+> 5. **After the upgrade**, check that borrowing is counted where you want it,
+>    and read the reason where it is not:
+>    ```promql
+>    wva_quota_limit_gpus{tier="borrowable"} > 0
+>    sum by (reason) (wva_quota_borrow_withheld)
+>    ```
+>    A missing permission shows as the reason of the read it blocks, never as
+>    "nothing to borrow": `lenders-unreadable` (Workloads),
+>    `not-kueue-managed` (a GPU pod's owner), `resourcequota-unreadable`,
+>    `hierarchy-unknown` (Cohorts), `kueue-controller-down` (the Role in the
+>    Kueue namespace). [What each reason means](troubleshooting.md#borrowing-is-withheld).
+>
+> Counting the capacity of lenders that do **not** reclaim
+> (`reclaimWithinCohort: Never`, or `LowerPriority` that does not outrank the
+> borrowers), and handing it back to them, is not in this release: it moves to
+> a later release, as an opt-in. Here such a lender's capacity is not counted
+> (`lender-cannot-reclaim`).
+
+**Before you upgrade**, list the limiter types every policy declares, and
+every Kueue-backed entry with its borrowing settings. A cluster admin runs
+this; a namespace owner runs the inner commands for their own namespace:
 
 ```bash
 for ns in $(kubectl get cm -A --field-selector metadata.name=wva-scaling-policy-config \
@@ -176,6 +217,10 @@ for ns in $(kubectl get cm -A --field-selector metadata.name=wva-scaling-policy-
   printf '%s: ' "$ns"
   kubectl get cm wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' \
     | yq -r '[.limiters[]?.type] | join(",")'
+  # Kueue entries: null countBorrowable means the default, true;
+  # null borrowNamespaces means every governed namespace.
+  kubectl get cm wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' \
+    | yq -o=json -I=0 '.limiters[]? | select(.kueue.enabled == true) | {"name": .name, "countBorrowable": .kueue.countBorrowable, "borrowNamespaces": .kueue.borrowNamespaces}'
 done
 ```
 
@@ -248,6 +293,32 @@ What changes without a config change:
 - **Scale-from-zero debits each wake against its fallback snapshot**, so wakes
   during a limiter outage cannot all pass on the same free GPUs. A wake with no
   check at all counts in `wva_scale_from_zero_wake_unchecked_total`.
+- **A Kueue-bounded namespace quota counts cohort borrowing**, on by default,
+  where it is safe, and only capacity Kueue would take back for its lender
+  (`lender-cannot-reclaim` otherwise). Kueue takes borrowed replicas back for
+  that lender, and the scaling manager lowers a borrowed replica that did not
+  place within `placementTimeout`. While a declared `gpu-inventory` limiter
+  is skipped (no node read, say), no new borrowing starts. See the box above
+  and [the guide](../guides/kueue-borrowing/). Borrowing state is kept in
+  `wva-controller-status`, so it survives a restart.
+
+New reads, for borrowing: `cohorts` and `workloads` (Kueue; `workloads`
+cluster-wide, watched through an informer), the `kueue-controller-manager`
+Deployment and its leader Lease in the Kueue namespace, and in the managed
+namespace `resourcequotas`, `events`, and the owners of GPU pods
+(`replicasets`, `statefulsets`, `jobs`, `leaderworkersets`). A cluster-scoped
+install gets them from the install itself. **A namespace-scoped install needs a cluster admin to re-run
+`make setup-prereqs`** (step 1 above). Until then borrowing is withheld or
+frozen, with the reasons the box lists, and the nominal cap applies.
+
+**Rolling back past this release**: first turn borrowing off
+(`countBorrowable: false`, or `WVA_QUOTA_KUEUE_BORROW=false`), and wait for
+models to drop back under nominal. Turning it off evicts nothing: a lowered
+cap only stops growth, and models move back as they scale down (lower a
+model's `maxReplicaCount` to hurry it). Then install the older release. It
+ignores the `borrowReleaseLedger` and `limiterBudgets` keys in
+`wva-controller-status`. The RBAC borrowing added stays behind; it grants
+reads only. Remove it by re-applying the older release's roles, or leave it.
 
 What you read changes:
 
@@ -265,7 +336,14 @@ What you read changes:
   entries after the first` (was `WARNING: limiters declares more than one
   physical (gpu-inventory) entry`).
 - **New metrics**: `wva_constraint_provider_skipped` and
-  `wva_scale_from_zero_wake_unchecked_total` ([Prometheus](prometheus.md)).
+  `wva_scale_from_zero_wake_unchecked_total` ([Prometheus](prometheus.md)),
+  and for Kueue: the borrowing series ([Prometheus](prometheus.md#kueue-borrowing-metrics)),
+  `wva_kueue_borrowed_gpus`, `wva_kueue_controller_version_known`,
+  `wva_kueue_borrow_cooldown_seconds` and `wva_kueue_never_read`, with the
+  alerts `WVAKueueNeverRead`, `WVAKueueVersionUnknown`, `WVAKueueBorrowDrift`
+  and the others in [Kueue borrowing alerts](troubleshooting.md#kueue-borrowing-alerts).
+- **`scaling-decision`** lines carry `borrowed`, the GPUs a model holds past
+  its guaranteed figure.
 
 **Rolling back** to an older controller reads a policy that declares both kinds
 as quota-only again: the physical limiter stops bounding, and that release only
@@ -283,6 +361,11 @@ Installer:
   target under its older name) removes the kind
   `WVA_LIMITER_TYPE` names: `gpu-inventory` (the default), `quota`, or `all`.
   Exit codes are in [Uninstall](#policy-namespace-and-limiter-leftovers-cluster-admin).
+- `WVA_QUOTA_KUEUE_BORROW=false`, beside `WVA_QUOTA_KUEUE=true`, keeps the
+  Kueue cap at nominal (`countBorrowable: false`).
+- With `WVA_QUOTA_KUEUE=true` the installer adds no `gpu-inventory` entry.
+  Name it yourself (`WVA_LIMITER=gpu-inventory,quota`) to give borrowing its
+  GPU bound.
 
 #### Other changes that need an action
 

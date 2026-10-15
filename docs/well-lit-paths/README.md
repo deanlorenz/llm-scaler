@@ -14,7 +14,7 @@ replica starts fast ([start-path checklist](../reference/workload-preparation.md
 | [Hold several large models on one set of GPUs](retained-pool/) | Models too large to start on demand share GPUs, one awake at a time | **Experimental** | [Retained pools](../guides/warm-pool/multi-pool.md#retained-pools-which-model-holds-the-gpus) |
 | [Bound a fleet by real GPUs](bound-by-gpus/) | Autoscaling never asks for more GPUs than the cluster has | Stable | [Bound every install by real GPUs](../guides/admin-gpu-bounding/) |
 | [Cap what each tenant may take](tenant-gpu-quotas/) | Each team's autoscaling stays inside its promised GPU number | Stable (control path) | [The path's steps](tenant-gpu-quotas/#start-here) |
-| [Bound tenants by the quotas Kueue already holds](kueue-bounded-quotas/) | Tenant caps read from Kueue, with no second copy | **Experimental** | [The path's steps](kueue-bounded-quotas/#start-here) |
+| [Bound tenants by the quotas Kueue already holds](kueue-bounded-quotas/) | Tenant caps read from Kueue, with no second copy, and cohort borrowing where it is safe | **Experimental** | [Borrow from a Kueue cohort](../guides/kueue-borrowing/) |
 | [Share one GPU quota between models](utilization-share/) | Models that peak at different times share one quota on purpose | **Experimental** | [Utilization share](../guides/utilization-share/) |
 | [Give classes of workloads different scaling behaviour](workload-classes/) | Interactive and batch tiers, without per-model config | Stable | [The path's steps](workload-classes/#start-here) |
 | [Serve one model on two accelerator variants](accelerator-variants/) | The cost-efficient variant grows first | Stable | [Register the workloads](../guides/install-in-namespace/README.md#4-register-the-workloads) |

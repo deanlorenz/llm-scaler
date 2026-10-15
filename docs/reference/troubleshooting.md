@@ -24,7 +24,10 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
-| a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
+| a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; `wva_constraint_provider_skipped{reason="unobserved"}`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
+| Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `reason` in `limiterBudgets`; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold (withheld), Kueue cannot be trusted right now (frozen), or there is nothing to draw (counted, but 0) | [borrowing is withheld](#borrowing-is-withheld) |
+| scaled past nominal | a model holds more GPUs than its ClusterQueue's `nominalQuota`; `used` above `guaranteed` in `limiterBudgets`; `wva_kueue_borrowed_gpus > 0` | expected: borrowing is on by default for a Kueue-backed namespace quota | [past nominal](#a-model-runs-past-its-kueue-nominal-quota) |
+| a Kueue borrowing alert fires | `WVAKueueBorrowDrift`, `WVAKueueVersionUnknown`, `WVAKueueLenderWaitingPastCooldown` | Kueue accounts differently, its version cannot be read, a lender is not getting its capacity back | [Kueue borrowing alerts](#kueue-borrowing-alerts) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
@@ -321,7 +324,7 @@ model cannot grow while others hold GPUs.
 | `wva_available_gpus` | GPUs the `gpu-inventory` limiter sees per accelerator type |
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
-| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved` (its GPU usage is not observed yet; clears after a refresh), `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
+| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet, or a Kueue-backed quota entry that leaves a type at `-1` has never read Kueue. In the second case it is reported only: the entry still bounds with its finite caps, and it clears on the first successful read. See [never read](#a-kueue-backed-quota-was-never-read). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
 | `Physical limiter: replicas are not fitted to nodes this cycle` | the physical limiter bounds scaling but no node snapshot younger than 2 minutes exists, so replicas are fitted to the pool only, as before node fit; `reason` says why. Usually the GPU usage observation is failing (the same cause skips the provider soon after). `Physical limiter: replicas are fitted to nodes again` ends it. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | `Upgrade note (transitional): this policy declares a physical GPU limiter and quotas, and both now bound scaling` | expected once after upgrading a policy that declares both kinds: the listed variants get a different target than the quota alone gave them, because the GPUs that exist now bound them too. Nothing to fix unless the physical bound is not wanted; then drop the `gpu-inventory` entry. Logged only when the set of variants changes, and removed in the next release |
@@ -414,16 +417,11 @@ What to do:
   hand meanwhile, lower the borrowing model's `maxReplicaCount` on its
   ScaledObject, or set `countBorrowable: false` on the quota entry, which caps
   every namespace at nominal.
-- **A lender waits past the cooldown** (`WVAKueueLenderWaitingPastCooldown`):
-  the scaling manager counts only what Kueue would reclaim for its lender, so
-  Kueue is expected to preempt for it. It stops new borrowing in the cohort
-  meanwhile (reason `lender-waiting` on `wva_quota_borrow_withheld`), and never
-  hands borrowed replicas back itself. A long wait usually means the lender's
-  pending Workload does not outrank the borrowers' (`LowerPriority`), or the
-  GPUs it waits for are held by a borrower this controller does not govern.
-  Check the lender's pending Workload with `kubectl describe workload`. To free
-  capacity by hand, lower the borrowing model's `maxReplicaCount`, or set
-  `countBorrowable: false` on the quota entry.
+- **The Kueue controller is down** (reason `kueue-controller-down`): see
+  [Borrowing is withheld](#borrowing-is-withheld). Borrowing freezes: nothing
+  new is borrowed, nothing is given back, and nothing borrowed is taken away.
+- **A lender waits past the cooldown**: see
+  [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown).
 - **Pods refused by a ResourceQuota**: no shipped alert covers this. No
   scaling-manager metric carries the refusal, and the shipped alerts depend on
   no kube-state-metrics series (`kube_resourcequota` would). Check by hand:
@@ -439,8 +437,14 @@ is 1.
 
 The quota entry has `kueue.enabled: true` and caps at least one accelerator
 type at `-1`, so Kueue is meant to supply that figure. No Kueue read has
-succeeded since the controller started, so nothing bounds that type: the
-static entry applies alone. Borrowing is not counted either.
+succeeded since the controller started, so the entry is skipped as an
+unobserved provider (`wva_constraint_provider_skipped{reason="unobserved"}`)
+and borrowing is not counted.
+
+This is not fail-closed, and it is not over-allocation. The other limiters
+still bound, and Kueue still gates every pod past its quota at admission, so
+replicas ordered past Kueue's quota wait as gated pods. The cost is churn:
+replicas created, held Pending at Kueue's gate, and their GPUs not delivered.
 
 ```bash
 $LOGS | grep 'external quota source unreadable and never read' | tail -3
@@ -457,8 +461,107 @@ What to do:
   the Kueue reads (see [the quota limiter](quota-limiter.md)).
 - **Meanwhile**: replace `-1` with a number in the entry to bound the type.
 
-The scaling manager does not refuse to scale while the entry is unread;
-whether it should fail closed is an open question.
+The scaling manager does not refuse to scale while the entry is unread, by
+design: see above.
+
+## Borrowing is withheld
+
+**Symptom**: a model on a Kueue quota stays at its guaranteed figure while its
+cohort has idle GPUs; `wva_quota_borrow_withheld == 1` names a reason.
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '.entries[] | select(.reason) | {namespace, accelerator, reason}'
+$LOGS | grep 'Kueue borrowing applied' | tail -1
+```
+
+Each namespace shows one reason: the first in this table that applies. Every
+reason below is published on `wva_quota_borrow_withheld`. "Re-run the admin
+phase" means a cluster admin runs `NAMESPACE=<ns> make setup-prereqs` with the
+variables the install used. `<controller SA>` is
+`system:serviceaccount:$NS:wva-controller-manager`.
+
+**Withheld**: borrowable is 0, and the namespace stays at guaranteed.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `not-selected` | the entry's `borrowNamespaces` is set and does not list this namespace | add it to `borrowNamespaces`, or remove the list to borrow everywhere ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)) |
+| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install, a Forbidden, a failed list), so it could not see a lender wait | **(cluster admin)** re-run the admin phase; `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
+| `not-kueue-managed` | a GPU pod in the namespace is not backed by a Workload with quota reserved, owned by a kind a Kueue integration manages; or the controller may not read the pod's owner | find it: `kubectl get workloads.kueue.x-k8s.io -n <ns>` against `kubectl get pods -n <ns>`. Put the workload behind a LocalQueue (`kueue.x-k8s.io/queue-name`), or move it out of the namespace. For a Forbidden owner read, re-run the admin phase |
+| `resourcequota-unreadable` | the namespace's ResourceQuotas cannot be read: Forbidden, or failing for five refresh intervals | `kubectl auth can-i list resourcequotas -n <ns> --as=<controller SA>`; re-run the admin phase |
+| `no-gpu-bound` | nothing checks that borrowed GPUs exist: no `gpu-inventory` limiter, and no GPU `ResourceQuota` at most nominal plus `borrowingLimit` | declare one ([prerequisites](../guides/kueue-borrowing/#prerequisites)) |
+| `kueue-version-unknown` | the `kueue-controller-manager` Deployment was read, but its image carries no version tag (a digest-only image, say) | check the image: `kubectl get deploy kueue-controller-manager -n kueue-system -o jsonpath='{.spec.template.spec.containers[*].image}'`. If it runs a [tested version](quota-limiter.md#supported-kueue-versions), set `kueue.assumeTestedVersion: true` on the entry |
+| `kueue-version-untested` | Kueue runs a release outside the tested range | run a [tested version](quota-limiter.md#supported-kueue-versions); the nominal cap applies meanwhile |
+| `no-cohort` | the namespace's ClusterQueue is in no cohort, so there is nothing to borrow from | set `spec.cohortName` on the ClusterQueue, if borrowing is wanted |
+| `inactive` | the ClusterQueue admits nothing: `stopPolicy` is `Hold` or `HoldAndDrain`, or it names a flavor that does not exist | `kubectl get clusterqueue <cq> -o yaml`: read its `Active` condition |
+| `malformed` | a `nominalQuota`, `borrowingLimit` or `lendingLimit` of the queue does not parse | fix the quantity on the ClusterQueue |
+| `no-status` | a queue in the cohort has no reservation status yet | wait one refresh; if it stays, check that Kueue's controller is reconciling (its log) |
+| `hierarchical-cohort` | the cohort has a parent or child Cohort | not supported: flatten the cohort, or set `countBorrowable: false` |
+| `hierarchy-unknown` | Cohort objects cannot be read, so a nested cohort cannot be ruled out | `kubectl auth can-i list cohorts.kueue.x-k8s.io --as=<controller SA>`; re-run the admin phase |
+| `effective-quotas` | a queue in the cohort uses `status.effectiveQuotas` | not supported |
+| `fair-sharing` | Kueue Fair Sharing is on | not supported |
+| `topology-aware` | a GPU flavor in the cohort has a `topologyName` (Topology-Aware Scheduling) | not supported |
+| `admission-checks` | a queue in the cohort has admission checks, MultiKueue included | not supported |
+| `borrow-within-cohort` | a queue in the cohort sets `preemption.borrowWithinCohort` other than `Never`, so a borrower could preempt another queue's work | set `borrowWithinCohort.policy: Never` (or remove it) on every queue in the cohort |
+| `flavor-unpinned` | the queue has more than one flavor for the GPU, or `flavorFungibility.whenCanBorrow` is `Borrow` or `MayStopSearch`, and a variant's pod template does not select the flavor's `nodeLabels`, so Kueue could admit it on another flavor than the one counted | add the flavor's `nodeLabels` to the variant's `nodeSelector` |
+| `co-resource-bound` | the GPU flavor's resource group also covers other resources (CPU, memory) and a variant's per-replica request for one of them cannot be read from its pod template | set requests for every covered resource on the variant's containers |
+
+**Frozen**: nothing new is borrowed, the last figures are kept, and nothing
+borrowed is taken away.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `stale` | the last Kueue read failed, or is older than twice `refreshInterval`; or one namespace's ResourceQuota read is failing | `$LOGS \| grep 'external quota source unreadable'` names the read; usually RBAC or a missing CRD. Alert `WVAKueueReaderStale` |
+| `kueue-controller-down` | Kueue's leader Lease was not renewed within twice its `leaseDuration` (with no Lease, the Deployment has no ready replica), or the controller cannot read the Deployment or the Lease at all: never found, or Forbidden for want of the Role in the Kueue namespace | `kubectl get deploy kueue-controller-manager -n kueue-system`; `kubectl auth can-i get deployments/kueue-controller-manager -n kueue-system --as=<controller SA>` (and the same for `leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io`); re-run the admin phase. Kueue elsewhere: set `kueue.controllerNamespace` |
+
+**Counted, but 0 this cycle**: borrowing is on, and there is nothing to draw.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` with Workloads that outrank no borrowing Workload | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity |
+| `lender-waiting` | a lender waits for capacity it lent. What is borrowed stays until Kueue preempts it; nothing new is borrowed in the cohort, until `borrowCooldown` after the wait ends | nothing: Kueue reclaims for the lender. If it lasts, see [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown) |
+| `cohort-pool-empty` | the cohort's free pool holds no GPUs, after what is in flight and held at Kueue's gate | nothing: the cohort is in use |
+| `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed | raise the one that binds, if borrowing is wanted |
+| `preemptions-unreadable` | Kueue's preemptions in the namespace could not be read this cycle | transient; if it repeats, check the controller's `get`/`list`/`watch` on Workloads and pods |
+
+Two more labels you may meet:
+
+- `nominal-lent-out` is not a withheld reason. It qualifies a guaranteed
+  figure below nominal: a peer holds part of the queue's nominal and need not
+  give it back. On `wva_model_scaling_blocked`, it marks a model that cannot
+  wake for that reason. To get the nominal back, set `reclaimWithinCohort:
+  Any` on the queue.
+- `borrow-namespaces-split` is a warning in the log: two Kueue entries govern
+  one cohort and only one sets `borrowNamespaces`. Nothing is withheld; set
+  the list on both entries, or on neither.
+
+## A model runs past its Kueue nominal quota
+
+**Symptom**: a model holds more GPUs than its ClusterQueue's `nominalQuota`.
+
+This is borrowing, on by default for a namespace-scope quota entry with
+`kueue.enabled`. Confirm it:
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '.entries[] | select(.namespace == "<ns>") | {accelerator, guaranteed, borrowable, used}'
+kubectl get clusterqueue <cq> -o jsonpath='{.status.flavorsReservation}'
+```
+
+`used` above `guaranteed`, and Kueue's own `borrowed` above 0, is a model on
+borrowed capacity. `wva_kueue_borrowed_gpus` shows what this controller holds
+borrowed, per cohort and flavor.
+
+What to do, if it is not wanted:
+
+- Set `countBorrowable: false` on the entry, or pilot with
+  `borrowNamespaces` ([the guide](../guides/kueue-borrowing/#cleanup)). This
+  evicts nothing: the cap only stops growth, and models move back under
+  nominal as they scale down.
+- To hand GPUs back now, lower the model's `maxReplicaCount` on its
+  ScaledObject.
+- To stop a queue borrowing for anyone, set its `borrowingLimit` to 0 in
+  Kueue.
 
 ## Kueue borrowing alerts
 
@@ -503,7 +606,7 @@ kubectl auth can-i get deployments/kueue-controller-manager -n kueue-system \
 ```
 
 - **The image has no version tag** (a digest only): if the release is a
-  tested one, set
+  [tested one](quota-limiter.md#supported-kueue-versions), set
   `kueue.assumeTestedVersion: true` on the entry.
 - **The Deployment cannot be read** (`no` above, or not found): the reason is
   then `kueue-controller-down`, and `assumeTestedVersion` does not lift it.

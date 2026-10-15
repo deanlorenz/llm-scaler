@@ -123,7 +123,7 @@ intervals.
 | [Workload classes](well-lit-paths/workload-classes/) | Stable | end-to-end suite (simulator only) |
 | [Accelerator variants](well-lit-paths/accelerator-variants/) | Stable (control path); variant choice asserted by unit specs only | a benchmark scenario and one written-up run on one GPU type; `limiter_test.go` runs two variants end to end but does not assert which grows |
 | [P/D disaggregation](well-lit-paths/pd-disaggregation/) | Experimental | benchmark run twice |
-| [Kueue quotas](well-lit-paths/kueue-bounded-quotas/) | Experimental | unit and API-server tests; no live Kueue run |
+| [Kueue quotas](well-lit-paths/kueue-bounded-quotas/) | Experimental; borrowing on by default | unit and API-server tests; the live e2e runs in CI job `e2e-tests-kueue-borrow` |
 | [Retained pool](well-lit-paths/retained-pool/) | Experimental | unit tests, a benchmark scenario, one end-to-end spec (simulator only) |
 | [Sharing a quota](well-lit-paths/utilization-share/) | Experimental | unit and end-to-end tests; single benchmark runs |
 
@@ -172,9 +172,11 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - The scaler port is plaintext by default; a NetworkPolicy is shipped and
   mutual TLS is opt-in and manual
-  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)).
-- The Kueue quota source counts nominal quota only, not capacity a queue could
-  borrow from its cohort
+  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
+  it the default).
+- The Kueue quota source counts cohort borrowing only on a flat cohort
+  without Fair Sharing or `effectiveQuotas`, and only from lenders Kueue would
+  reclaim for; elsewhere it caps at guaranteed
   ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).
