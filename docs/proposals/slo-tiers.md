@@ -447,8 +447,7 @@ A window is not judged while it may hold requests that waited out capacity no
 steady-state sizing could have had ready: a wake, a replica still starting, or
 a cycle the analyzer did not see. Stuck or unschedulable capacity is judged.
 The rules are in [scaling-policy](../reference/scaling-policy.md), under
-*`slo` (observe only)*. These sections land with PR #148. Why they are shaped
-this way:
+*`slo` (observe only)*. Why they are shaped this way:
 
 - **A grace follows the window**, because a request queued through a wake is
   recorded only when its generation ends. One scale-up leaves an objective
@@ -480,8 +479,8 @@ records.
 
 The `wva_slo_*` metrics are listed in [prometheus](../reference/prometheus.md)
 (*SLO Analyzer Metrics*), and the two alerts are explained in
-[troubleshooting](../reference/troubleshooting.md). These sections land with
-PR #148. The design choices behind them:
+[troubleshooting](../reference/troubleshooting.md). The design choices behind
+them:
 
 - **Absent, not zero.** Too few requests, or an excluded window, publishes no
   attainment; `wva_slo_window_requests` tells "too few" from "nothing".
