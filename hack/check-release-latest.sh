@@ -17,7 +17,7 @@ ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKFLOW="$ROOT/.github/workflows/ci-release.yaml"
 # One ok or FAIL per case. A run that stops early otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=25
+EXPECT_CASES=29
 PASS=0
 FAIL=0
 
@@ -247,6 +247,44 @@ if [ "$(dispatch '' feat/my-branch)" = "0|feat-my-branch" ] && [ "$(dispatch pr-
 else
     fail "branch-name and ordinary dispatch tags must still work (got $(dispatch '' feat/my-branch), $(dispatch pr-158 feat/x))"
 fi
+# A tag input is one line. Checked per line by grep, "foo", a newline,
+# "tag=latest" passed, and the second line landed in GITHUB_OUTPUT as tag=latest.
+NL_TAG="$(printf 'foo\ntag=latest')"
+nl_rc=0
+: > "$WORK/img.out"
+env INPUT_TAG="$NL_TAG" INPUT_PLATFORMS='' GITHUB_REF_NAME=feat/x GITHUB_OUTPUT="$WORK/img.out" \
+    GITHUB_REPOSITORY_OWNER=Owner GITHUB_REPOSITORY=Owner/repo bash "$WORK/img.sh" >/dev/null 2>&1 || nl_rc=$?
+nl_plat_rc=0
+env INPUT_TAG=pr-1 INPUT_PLATFORMS="$(printf 'linux/amd64\nplatforms=linux/evil')" GITHUB_REF_NAME=feat/x \
+    GITHUB_OUTPUT="$WORK/img2.out" GITHUB_REPOSITORY_OWNER=Owner GITHUB_REPOSITORY=Owner/repo \
+    bash "$WORK/img.sh" >/dev/null 2>&1 || nl_plat_rc=$?
+if [ "$nl_rc" -ne 0 ] && ! grep -q '^tag=' "$WORK/img.out" && [ "$nl_plat_rc" -ne 0 ]; then
+    ok "a dispatch tag or platform list holding a newline is refused, and writes no output"
+else
+    fail "a multi-line tag or platform input must be refused (tag rc=$nl_rc, platforms rc=$nl_plat_rc)" "$(cat "$WORK/img.out")"
+fi
+
+# The image source label names the repository that built the image: the
+# workflows pass it, and the Dockerfile reads it.
+mbuild="$(yq -r '.jobs.docker-build-and-push.steps[] | select(.name == "Build and push image") | .run' "$M")"
+if printf '%s\n' "$mbuild" | grep -qF -- '--build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}"'; then
+    ok "the main-image build passes IMAGE_SOURCE from this repository"
+else
+    fail "ci-main-image.yaml must pass --build-arg IMAGE_SOURCE=\${{ github.server_url }}/\${{ github.repository }}"
+fi
+if tr -d '\r' < "$ROOT/Dockerfile" | grep -qxF 'LABEL org.opencontainers.image.source="${IMAGE_SOURCE}"'; then
+    ok "the Dockerfile source label reads IMAGE_SOURCE"
+else
+    fail "the Dockerfile must set LABEL org.opencontainers.image.source=\"\${IMAGE_SOURCE}\""
+fi
+rbuilds="$(yq -r '[.jobs.release.steps[] | select(.uses == "docker/build-push-action*") | .with."build-args" // ""] | map(select(contains("IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}"))) | length' "$R")"
+rtotal="$(yq -r '[.jobs.release.steps[] | select(.uses == "docker/build-push-action*")] | length' "$R")"
+if [ "$rtotal" = 2 ] && [ "$rbuilds" = 2 ]; then
+    ok "both release builds (scan and push) pass IMAGE_SOURCE from this repository"
+else
+    fail "both ci-release.yaml build steps must pass IMAGE_SOURCE in build-args (builds $rtotal, with it $rbuilds)"
+fi
+
 mlogin="$(yq -r '.jobs.docker-build-and-push.steps[] | select(.name == "Log in to GitHub Container Registry") | .env.REGISTRY_TOKEN' "$M")"
 if [ "$mlogin" = '${{ secrets.GITHUB_TOKEN }}' ]; then
     ok "the main-image login uses the built-in GITHUB_TOKEN alone"

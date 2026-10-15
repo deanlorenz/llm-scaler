@@ -87,10 +87,13 @@ jobs:
             esac
           fi
           # The OCI tag grammar, and a comma-separated list of os/arch[/variant].
-          if ! printf '%s' "$TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'; then
+          # Matched with [[ =~ ]], whose ^ and $ anchor the whole value: grep
+          # tests each line, so "foo", a newline, "tag=latest" passed and wrote a
+          # second tag line into GITHUB_OUTPUT.
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
             echo "::error::not a valid image tag: $TAG"; exit 1
           fi
-          if ! printf '%s' "$PLATFORMS" | grep -qE '^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?(,[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?)*$'; then
+          if ! [[ "$PLATFORMS" =~ ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?(,[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?)*$ ]]; then
             echo "::error::not a valid platform list: $PLATFORMS"; exit 1
           fi
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
