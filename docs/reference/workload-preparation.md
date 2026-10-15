@@ -512,6 +512,146 @@ make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
 Run it again after adding a model or changing an engine flag: the new stamp
 makes every node merge the new keys.
 
+#### Check the cache without a second start
+
+You can check that every node holds the torch.compile cache without
+starting an engine there.
+
+1. Start each engine configuration once.
+2. Run `make engine-cache-publish`, so every node gets what it compiled.
+3. Ask those pods which key they compiled under, and check the keys on every node:
+
+```bash
+# the key(s) the running engine pods used: one per configuration
+make engine-cache-keys NAMESPACE=<ns> ENGINE_CACHE_PODS='<decode pod> <prefill pod>'
+# every usable node: is each key there, with every rank, and readable
+make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>...]'
+```
+
+If your engines do not run as root and any node was seeded or published to,
+add `ENGINE_CACHE_UID=$(kubectl exec -n <ns> <engine pod> -- id -u)`.
+Without it, a seeded key is judged for root and passes even when your engines
+cannot read it. The UID is also the pod's `securityContext.runAsUser` (or the
+container's), when set. `ENGINE_CACHE_UID` is one UID for every pod: if prefill
+and decode run as different users, run the check once for each.
+
+Pass the keys exactly as `engine-cache-keys` prints them, for example
+`torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
+the rank directories the engine wrote. Each one must be on the node.
+
+Multi-node engines (a LeaderWorkerSet, or data parallel across nodes) need
+one more step. Name the leader and every worker pod. Their ranks merge into
+one key, for example 16 ranks for two nodes of eight. `engine-cache-verify`
+then needs all 16 ranks on every node. Each node compiled only its own ranks,
+so this passes only after `make engine-cache-publish`. If you name only the
+leader pod, the check covers only the leader's ranks.
+
+`engine-cache-verify` prints one line per node and key:
+
+- `present`: the key is there, with every listed rank, and every file under it
+  is readable by the UID the check assumed. The line names that UID.
+- `ABSENT`: the key, or one of its ranks, is not on the node. The line names a
+  missing rank. It means: if that rank starts on this node, it recompiles
+  torch.compile. On a multi-node engine, a node often lacks ranks that never
+  run there; publish to fill them in.
+- `UNREADABLE`: a file under the key cannot be read, the engine's user could
+  not read it or a directory on the way to it (the line names that UID), or it
+  is a symbolic link.
+- `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
+  Forbidden, or timed out. This is never reported as absent.
+
+When `ENGINE_CACHE_UID` is not set, each key is judged for the user that owns
+it. That is your engines' user only if they wrote the key. A seeded or
+published key is owned by root. A key can also belong to another deployment
+sharing the cache, or to the engines' old user if the image changed it. So the
+summary always warns, says how many node/key checks it judged that way, and
+names the UIDs it assumed. The last line names them too: `VERIFIED for root`,
+`VERIFIED for uid 1000`, or `VERIFIED for uids 0, 1000`. More than one UID
+means the keys have different owners. The engines of one configuration all run
+as one UID, so at least one line was judged for the wrong user. These verdicts
+still exit zero. Re-run with `ENGINE_CACHE_UID` to check your engines' user;
+only then does the last line say plain `VERIFIED`.
+
+It exits non-zero unless every key is present on every node. It needs
+`pods/exec` in the namespace, plus the node list `engine-cache-status` needs.
+`engine-cache-keys` warns when an engine compiled outside `VLLM_CACHE_ROOT`
+(its cache root was not writable); that start did not fill the node cache.
+
+What it does not check: the FlashInfer and Triton caches (`flashinfer/` and
+`triton/` beside `vllm/`). A node can be `present` for every key and still
+build those kernels on its next start. Only a real start shows that.
+
+<details>
+<summary>Details: what a key is and how the check reads it</summary>
+
+A key is the directory between `VLLM_CACHE_ROOT` and the rank directory in
+the engine's log. vLLM writes one of two layouts:
+
+- `torch_compile_cache/<hash>/rank_<r>_<dp>/<prefix>`, logged as `Using cache
+  directory: ... for vLLM's torch.compile`.
+- `torch_compile_cache/torch_aot_compile/<hash>/rank_<r>_<dp>/model` when
+  `VLLM_USE_AOT_COMPILE` is on, logged as `Directly load AOT compilation from
+  path ...` or `saved AOT compiled function to ...`.
+
+Every rank of one configuration shares the key; each rank has its own
+`rank_<r>_<dp>` directory under it. A key without `@ranks` (or a bare hash,
+read as `torch_compile_cache/<hash>`) is present when any rank is there.
+
+The check runs in the preparer pod already on each node (`kubectl exec`, no
+GPU). That pod runs as root on Kubernetes, so it can read any file. To catch
+files the engine could not read, it also checks the permissions for the
+engine's user:
+
+- By default the engine's user is the owner of the key directory: the engine
+  that wrote the key. A file it owns needs owner read. A file owned by
+  another user needs group read if it is in the key directory's group, and
+  read for others if not. The check assumes the engine is in the key
+  directory's group. Directories need read and search the same way, both
+  under the key and on the way to it, from the volume mount (`/engine-cache`)
+  down.
+- vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
+  fine when the engine owns them, which it does when it wrote them. They are
+  `present`.
+- A seeded or published key is owned by root: the preparer copied it there as
+  root, keeping the modes. By default it is judged for root, which can read
+  it, so it is `present (... for uid 0, ...)`, the summary warns, and the
+  last line says `VERIFIED for root`.
+- Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
+  the one that owns the keys. The check then reads the permissions for
+  that UID: owner read if it owns the file, read for others if not. Its
+  groups are not known, so group permissions are not counted.
+
+```bash
+make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>' ENGINE_CACHE_UID=1001
+```
+
+vLLM writes no symbolic links. A link under the key, or a linked directory on
+the way to it, is `UNREADABLE` and is never followed.
+
+`engine-cache-keys` takes no key from a log line saying an AOT save failed
+(`unable to save AOT compiled function to ...`), or that a load failed and
+the engine compiled again. It warns instead.
+
+The read stops after 300 seconds, and after 280 inside the pod when its
+image has `timeout`. The image needs `find` (with `-user`, `-group` and
+`-perm`), `ls` and `awk` to read file modes and owners; without them every
+key is `COULD NOT CHECK`, and the line names what is missing.
+
+What the mode check cannot see:
+
+- The engine's other groups are not known. A file in one of them with read
+  for others but not for the group (mode `604`) is `present`, though the
+  engine cannot read it. Under `ENGINE_CACHE_UID` no group is known at all.
+- A setgid key directory gives its files its group. If the engine is not in
+  that group, a `640` file there is `present` and still unreadable.
+- ACLs are not read: only the mode bits are.
+- An engine running as root with `CAP_DAC_OVERRIDE` reads any file, whatever
+  the modes say.
+
+</details>
+
+#### What it costs
+
 Costs and needs are the weights section's, with two changes:
 
 - **Size:** a few gigabytes per engine config per node, not a model.

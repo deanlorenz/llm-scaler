@@ -270,11 +270,11 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			now := time.Now()
 
 			a.noteITL(key, nil, variant, now, logr.Discard())
-			Expect(a.itlWindows).To(HaveKey(key), "precondition: noteITL creates the window")
+			Expect(a.itlWindowLens()).To(HaveKey(key), "precondition: noteITL creates the window")
 
 			a.EvictStaleHistory()
 
-			Expect(a.itlWindows).To(HaveKey(key),
+			Expect(a.itlWindowLens()).To(HaveKey(key),
 				"noteITL must stamp the key it creates state under, rather than relying on "+
 					"noteReplicaStart having been called first by a third file")
 		})

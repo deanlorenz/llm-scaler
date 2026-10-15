@@ -979,6 +979,8 @@ const (
 	// is a Kubernetes API error (reason forbidden, unavailable or other), and
 	// the collector then treats every Pod as Ready and present for the cycle.
 	QueryTypePodList = "pod_list"
+	// QueryTypeRouterLatency is the router TTFT/TPOT read by the slo analyzer.
+	QueryTypeRouterLatency = "router_latency"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute

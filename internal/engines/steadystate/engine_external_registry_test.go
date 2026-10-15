@@ -2,7 +2,10 @@ package steadystate
 
 import (
 	"context"
+	"strings"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -160,6 +163,30 @@ var _ = Describe("reconcileExternalAnalyzers", func() {
 		})
 		e.reconcileExternalAnalyzers(context.Background())
 		Expect(e.externalAnalyzerNames()).NotTo(ContainElement(domain.SaturationAnalyzerName))
+	})
+
+	It("says so once, at the default level, when a built-in takes a catalog entry's name", func() {
+		// slo became a built-in: a catalog that already had an analyzer of that
+		// name stops running it, and that must be in a default log.
+		cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+			config.GlobalDefaultsKey: {AnalyzerDefinitions: config.ExternalAnalyzerCatalog{
+				domain.SaturationAnalyzerName: {Query: "q", Threshold: "0.5"},
+			}},
+		})
+		var lines []string
+		ctx := logr.NewContext(context.Background(), funcr.New(func(_, args string) {
+			lines = append(lines, args)
+		}, funcr.Options{Verbosity: 0}))
+		for range 3 {
+			e.reconcileExternalAnalyzers(ctx)
+		}
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, "the built-in runs instead") {
+				n++
+			}
+		}
+		Expect(n).To(Equal(1), "%v", lines)
 	})
 
 	It("skips a malformed definition (unparseable threshold)", func() {

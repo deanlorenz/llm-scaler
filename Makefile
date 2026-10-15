@@ -415,6 +415,10 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
+	@# The race detector on the packages whose concurrency spec only it can
+	@# check (a few seconds): without -race that spec proves no deadlock and
+	@# nothing more.
+	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -849,6 +853,25 @@ engine-cache-delete: ## Drop the engine-cache claim, volume and preparer in NAME
 engine-cache-publish: ## Fill the seed claim from every prepared node, then re-seed every node, so no node starts an engine configuration cold. Run it once each configuration has started somewhere. NAMESPACE=<ns>
 	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-publish: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/enginecache.sh publish -n "$(NAMESPACE)"
+
+## Check the cache without starting an engine a second time: start each engine
+## configuration once, print the key it compiled under with engine-cache-keys,
+## then engine-cache-verify reads that key on every usable node, through the
+## preparer pod there (kubectl exec; no GPU). It fails on a node that lacks a
+## key, a node with no Ready preparer, and a read that could not be made.
+ENGINE_CACHE_KEYS ?=
+ENGINE_CACHE_PODS ?=
+ENGINE_CACHE_UID ?=
+.PHONY: engine-cache-keys engine-cache-verify
+engine-cache-keys: ## Print the compile cache key(s) running engine pods used. NAMESPACE=<ns> ENGINE_CACHE_PODS='<pod> [<pod>...]'
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-keys: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_PODS)" || { echo "engine-cache-keys: set ENGINE_CACHE_PODS='<engine pod> [<engine pod>...]', one pod per engine configuration (prefill and decode differ)" >&2; exit 1; }
+	@bash deploy/enginecache.sh keys -n "$(NAMESPACE)" $(foreach p,$(ENGINE_CACHE_PODS),"$(p)")
+
+engine-cache-verify: ## Per usable accelerator node: is every compile cache key present and readable. NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>]' [ENGINE_CACHE_UID=<uid the engines run as>]
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-verify: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_KEYS)" || { echo "engine-cache-verify: set ENGINE_CACHE_KEYS='<key>[,<key>]' (make engine-cache-keys prints them)" >&2; exit 1; }
+	@$(if $(ENGINE_CACHE_UID),ENGINE_CACHE_UID="$(ENGINE_CACHE_UID)",) bash deploy/enginecache.sh verify -n "$(NAMESPACE)" --keys "$(ENGINE_CACHE_KEYS)" $(if $(WEIGHTS_NODE_SELECTOR),--node-selector "$(WEIGHTS_NODE_SELECTOR)",)
 
 .PHONY: workload-patch
 workload-patch: ## Write a patch for model servers that do not drain on scale-down, download weights outside every volume they mount, or compile their kernels on every start. NAMESPACE=<ns> scopes it; WVA_WORKLOAD_PATCH_APPLY=true applies the drain half live (add WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true for the weights volume, after `make model-cache`; WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true for the engine-cache volume, after `make engine-cache`).
@@ -2698,6 +2721,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rewrite another workload's trigger metadata. A policy that selects no Pod,
 	@# admits {} or drops the metrics port all apply cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-external-scaler-networkpolicy.sh
+	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
+	@# evaluates the shipped rules on synthetic series.
+	@$(MAKE) --no-print-directory promtool
+	@PROMTOOL=$(PROMTOOL) bash hack/check-alert-rules.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's
@@ -2907,6 +2934,8 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
+# The version is in the name, so raising PROMTOOL_VERSION installs it afresh.
+PROMTOOL ?= $(LOCALBIN)/promtool-$(PROMTOOL_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -2917,6 +2946,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.8.0
 HELM_VERSION ?= v3.17.1
+# PROMTOOL_VERSION is a Prometheus release; promtool comes from its tarball.
+PROMTOOL_VERSION ?= 2.54.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -2936,6 +2967,11 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 		echo "Error: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
 		exit 1; \
 	}
+
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool locally if necessary.
+$(PROMTOOL): $(LOCALBIN)
+	@bash hack/install-promtool.sh $(PROMTOOL) $(PROMTOOL_VERSION)
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.

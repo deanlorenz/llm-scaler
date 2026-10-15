@@ -38,7 +38,7 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		a.noteVariantSeen(key, now)
-		a.itlBaseline[key] = 0.012
+		a.itlTracker.SetBaseline(key, 0.012)
 		a.startSeconds[key] = 70
 		return key
 	}
@@ -59,11 +59,11 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 
 		parkFor(2*timeout, "parked")
 
-		Expect(a.itlBaseline).To(HaveKey(parked), "the parked variant woke on the default ITL baseline")
+		Expect(a.itlBaselines()).To(HaveKey(parked), "the parked variant woke on the default ITL baseline")
 		Expect(a.startSeconds).To(HaveKey(parked), "the parked variant lost its start estimate")
 		// The control in the same run: the sweep does evict, so the case
 		// above is kept by the stamp and not by a sweep that never fires.
-		Expect(a.itlBaseline).NotTo(HaveKey(deleted), "a variant no longer named must still age out")
+		Expect(a.itlBaselines()).NotTo(HaveKey(deleted), "a variant no longer named must still age out")
 		Expect(a.startSeconds).NotTo(HaveKey(deleted))
 	})
 
@@ -77,7 +77,7 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 		a.NoteVariantsPresent(ns, model, []string{"v"})
 		a.EvictStaleHistory()
 
-		Expect(a.itlBaseline).To(HaveKey(key), "the sweep took the state on the cycle the fleet woke")
+		Expect(a.itlBaselines()).To(HaveKey(key), "the sweep took the state on the cycle the fleet woke")
 	})
 
 	It("keeps every key the variant learned under, and no other variant's", func() {
@@ -89,15 +89,15 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 		otherModel := a.itlWindowKey(ns, "other-model", "v", accel, 1)
 		a.mu.Lock()
 		a.noteVariantSeen(otherModel, now)
-		a.itlBaseline[otherModel] = 0.012
+		a.itlTracker.SetBaseline(otherModel, 0.012)
 		a.mu.Unlock()
 
 		parkFor(2*timeout, "v")
 
-		Expect(a.itlBaseline).To(HaveKey(h200))
-		Expect(a.itlBaseline).To(HaveKey(h100))
-		Expect(a.itlBaseline).NotTo(HaveKey(longerName), `"v" must not keep "v2" alive`)
-		Expect(a.itlBaseline).NotTo(HaveKey(otherModel), "a variant name is scoped to its model")
+		Expect(a.itlBaselines()).To(HaveKey(h200))
+		Expect(a.itlBaselines()).To(HaveKey(h100))
+		Expect(a.itlBaselines()).NotTo(HaveKey(longerName), `"v" must not keep "v2" alive`)
+		Expect(a.itlBaselines()).NotTo(HaveKey(otherModel), "a variant name is scoped to its model")
 	})
 
 	It("keeps the variant's accelerator memo alive, so its key does not move on wake", func() {

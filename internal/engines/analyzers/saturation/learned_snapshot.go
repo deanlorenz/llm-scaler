@@ -352,7 +352,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	s := LearnedState{
 		K2:              make(map[string]capacity.RollingAverageSnapshot, len(a.computeCapacityHistory)),
 		Throughput:      make(map[string]ThroughputSnapshot, len(a.saturatedThroughput)),
-		ITLBaseline:     make(map[string]float64, len(a.itlBaseline)),
+		ITLBaseline:     a.itlTracker.Baselines(),
 		StartSeconds:    make(map[string]float64, len(a.startSeconds)),
 		VariantSeenAt:   make(map[string]time.Time, len(a.variantSeenAt)),
 		Accelerators:    make(map[string]AcceleratorSnapshot, len(a.lastAccelerator)),
@@ -371,9 +371,6 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 			SampledAt:              a.throughputSampledAt[k],
 			LastRead:               a.throughputLastRead[k],
 		}
-	}
-	for k, v := range a.itlBaseline {
-		s.ITLBaseline[k] = v
 	}
 	for k, v := range a.startSeconds {
 		s.StartSeconds[k] = v
@@ -733,9 +730,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, latency bool) int {
 		a.variantSeenAt[k] = seen
 		kept++
 		if b, ok := s.ITLBaseline[k]; ok && latency && finitePositive(b) {
-			if _, have := a.itlBaseline[k]; !have {
-				a.itlBaseline[k] = b
-			}
+			a.itlTracker.RestoreBaseline(k, b)
 		}
 		if t, ok := s.StartSeconds[k]; ok && finitePositive(t) {
 			if _, have := a.startSeconds[k]; !have {
@@ -822,7 +817,7 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	clear(a.saturatedThroughput)
 	clear(a.throughputSampledAt)
 	clear(a.throughputLastRead)
-	clear(a.itlBaseline)
+	a.itlTracker.ForgetBaselines()
 	clear(a.startSeconds)
 	clear(a.variantSeenAt)
 	clear(a.lastAccelerator)
