@@ -92,15 +92,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			rejected[key] = err
 			continue
 		}
-		// Reported only for a kept entry: a dropped one is reported as rejected,
-		// and nothing in it applies. Counted as an error as well as logged, so
-		// it is as visible as a rejected entry.
-		for _, f := range fieldsIgnored {
-			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
-				"the field is treated as unset",
-				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
-			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
-		}
 		// limiters: is a cluster-"default"-scope setting read only from the global
 		// default entry (Config.EffectiveLimiterMode). Warn if it appears elsewhere so
 		// a misplaced block is not silently ignored.
@@ -149,6 +140,25 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		count++
 	}
 	return configs, count, rejected, ignored
+}
+
+// reportIgnoredFields logs each field parseScalingPolicyConfigRejects cleared
+// and counts it under ignoredFieldErrorType, so it is as visible as a rejected
+// entry. Only kept entries have ignored fields: a dropped one is reported as
+// rejected, and nothing in it applies.
+//
+// The caller decides whether to report: the policy namespace's ConfigMap is
+// parsed with the same function, but only its limiters and optimizer are read,
+// so a field cleared there would be reported for a value nothing uses.
+func reportIgnoredFields(logger logr.Logger, ignored map[string][]config.IgnoredField) {
+	for _, key := range slices.Sorted(maps.Keys(ignored)) {
+		for _, f := range ignored[key] {
+			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
+				"the field is treated as unset",
+				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
+			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
+		}
+	}
 }
 
 // isNamespaceConfigEnabled checks if a namespace has the opt-in label for namespace-local ConfigMaps.

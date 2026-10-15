@@ -62,6 +62,13 @@ func TestParseReportsIgnoredFields(t *testing.T) {
 		t.Errorf("ignored has %d keys, want 2: %v", len(ignored), ignored)
 	}
 
+	// Parsing alone counts nothing: the policy namespace's ConfigMap is parsed
+	// the same way, and its ignored fields are not reported.
+	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 0 {
+		t.Errorf("error metric after parsing alone = %v, want 0", got)
+	}
+	reportIgnoredFields(logr.Discard(), ignored)
+
 	// One count per ignored field of a kept entry: two in default, one in
 	// batch. The rejected entry's field is not counted; that entry is counted
 	// as rejected instead.

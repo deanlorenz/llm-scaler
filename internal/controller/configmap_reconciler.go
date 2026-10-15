@@ -264,9 +264,9 @@ func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *c
 func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, cm *corev1.ConfigMap) error {
 	logger := log.FromContext(ctx)
 
-	// Fields ignored here are not reported in the status: only limiters and the
-	// optimizer are read from this ConfigMap, and no field that can be ignored
-	// is one of them.
+	// Fields ignored here are not reported at all, not in the log, the error
+	// metric or the status: only limiters and the optimizer are read from this
+	// ConfigMap, and no field that can be ignored is one of them.
 	configs, _, rejected, _ := parseScalingPolicyConfigRejects(cm.Data, logger)
 	r.reportUnknownKeys(ctx, cm)
 	policy, ok := configs[config.GlobalDefaultsKey]
@@ -440,6 +440,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 
 	// Parse scaling policy entries
 	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
+	reportIgnoredFields(logger, ignored)
 	// The surviving entries replace the live set wholesale, so a rejected
 	// key would otherwise vanish: a bad "default" took every limiter and tuned
 	// threshold with it. The entry previously in force under that key stays.
