@@ -248,19 +248,29 @@ func TestAFailedCycleAndItsRetryAreOneSLOCycle(t *testing.T) {
 // that lasted an interval or more are cycles nobody saw, so the cycle after
 // them counts as two and every model is unobserved. Counting none, a model
 // starting through a half-hour API outage was judged on recovery as one
-// pending all along.
+// pending all along. Real failures through optimize, on a short interval:
+// the run is timed from its first failure, not its last.
 func TestALongRunOfFailedCyclesIsASkippedCycle(t *testing.T) {
 	e := sloWiringEngine(t)
 	spy := &sloKeeperSpy{}
 	e.sloAnalyzer = spy
 	e.Variants.Observe("ns", "m-wva", map[string]string{registry.ModelIDKey: "m"})
 	e.Variants.SetTarget("ns", "m-wva", registry.Target{APIVersion: "apps/v1", Kind: "Deployment", Name: "m"})
-	e.sloFailedSince = time.Now().Add(-30 * time.Minute)
+	config.SetOptimizationIntervalForTest(e.Config, 50*time.Millisecond)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := e.optimize(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first failure: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if err := e.optimize(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second failure: %v", err)
+	}
 	if err := e.optimize(context.Background()); err != nil {
-		t.Fatalf("optimize: %v", err)
+		t.Fatalf("recovery: %v", err)
 	}
 	if spy.cycles != 2 {
-		t.Fatalf("the cycle after 30 minutes of failures counted %d slo cycles, want 2", spy.cycles)
+		t.Fatalf("the cycle after more than an interval of failures counted %d slo cycles, want 2", spy.cycles)
 	}
 	if !e.sloFailedSince.IsZero() {
 		t.Fatal("a successful cycle must end the run of failures")

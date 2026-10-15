@@ -1228,6 +1228,11 @@ built-in defaults for every field it leaves unset, and those override
    - the `defaultPolicy:` tier, or `default` when there is none, which turns it
      on for every model that uses it.
 
+   If an entry in the map names this model in its body (a per-model override),
+   it is applied after the tier and wins over it, `analyzers:` and `slo`
+   included. Put the `slo` block and the `analyzers:` list there instead, or
+   take them out of it.
+
 3. **Write the tier with every field it relies on.** Read the ConfigMap first:
    `kubectl get configmap wva-scaling-policy-config -n <controller-ns> -o yaml`
    (or the namespace-local map, if the model's namespace has one). A tier's
@@ -1236,10 +1241,14 @@ built-in defaults for every field it leaves unset, and those override
    with an `analyzers:` list takes the built-in band too -- 0.85 and 0.70 for
    `scaleUpThreshold` and `scaleDownBoundary`
    ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)). The
-   list also replaces saturation's inherited `parameters:` and `score`. So copy
-   every one of those the tier does not already set from the tier the model is
-   on now (step 2), and keep the tier's own values where it does. Replace each
-   `<...>` below; do not paste the example values:
+   list also replaces saturation's inherited `parameters:` and `score`. So
+   write every one of them out, keeping the tier's own values where it sets
+   them. Take `scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold` and
+   `priority` from the line saved in step 1: those are the values the model
+   runs at now, wherever they came from. Take `queueLengthThreshold`, and
+   saturation's `score` and `parameters:`, from the ConfigMap: the tier's entry
+   where it sets them, `default` where it does not. Replace each `<...>` below;
+   do not paste the example values:
 
    ```yaml
    slo-watch: |
@@ -1445,8 +1454,11 @@ not readings of the fleet:
   rows considered, and the readings the window kept and held) and the fill
   before the clamp; and why a window is excluded, since when, and for how long.
   The controller runs at `--v=2` by default, so none of these is logged until
-  you set `--v=3` in the controller Deployment's args. Set it before you need
-  the answer: `wva_slo_excluded` alone says the reason, not since when.
+  you add `- --v=3` under the container's `args:`
+  (`kubectl edit deploy <controller> -n <controller-ns>`). The edit restarts
+  the controller: its lines are learned again and the first windows read
+  `unobserved`. So set it ahead of time, not during an incident:
+  `wva_slo_excluded` alone says the reason, not since when.
 
 ### Default Configuration
 

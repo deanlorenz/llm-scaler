@@ -550,7 +550,8 @@ help: loosen the target, or move the model to faster hardware.
 ```promql
 # tpot: 1 for "infeasible" -- even an almost empty replica is over the target
 wva_slo_source{model_name="<model>", source="infeasible"} == 1
-# ttft: a prefill as slow as the target, per pod (vLLM), queue left out
+# ttft: prefill time per pod (vLLM), queue left out; at or above the TTFT
+# target, no replica count meets it
 rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
 ```
 
@@ -593,7 +594,7 @@ tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 
-A target set for the whole last hour, and no window judged in it. The alert
+A target set for 55 of the last 60 minutes, and no window judged in the hour. The alert
 needs `wva_slo_target_seconds`, which exists only when the policy is right, so
 **for the alert, skip to the router side below**. For an empty dashboard row
 with no alert, start with the policy side -- the model's last

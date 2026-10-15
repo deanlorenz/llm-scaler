@@ -1034,7 +1034,7 @@ The `wva_slo_source` values:
   line was last forgotten (unseen for `LEARNED_STATE_VARIANT_TIMEOUT`, 24 hours
   by default), including after every controller restart. Not a measurement: on a large accelerator the real
   intercept is several times 6 ms, so the fitted slope is too steep. Then
-  `wva_slo_fill` reads low for a target above the fleet's current latency and
+  `wva_slo_fill` reads low for a target above the window's mean latency and
   high for one below it, and a target below the real floor can read feasible
   when no fill meets it. A whole-node
   replica rarely spans enough fill for a full fit, so it can stay here.
@@ -1064,7 +1064,8 @@ comments say why each is there:
 - `max_over_time(wva_model_replicas[5m])`, so a model parked for 5 minutes
   does not fire and a restart's gap does not resolve a firing alert;
 - for "set for the hour", `count_over_time(...[1h:1m]) >= 55`, not 60:
-  Prometheus 3 ranges are left-open, so 60 fails on one missed scrape;
+  Prometheus 3 ranges are left-open, so 60 fails on any gap in the series,
+  such as a restart's;
 - for "unjudged", a cause to act on, so a quiet model does not fire.
 
 ### Utilization-Share Optimizer Metrics

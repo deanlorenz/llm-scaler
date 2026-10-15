@@ -370,7 +370,9 @@ type presenceNoter interface {
 // later are one cycle. But failures that went on for an optimization interval
 // or more are cycles nobody saw: they count as one skipped cycle, so a model
 // is not judged on recovery as if it had been watched throughout. A slow cycle
-// that succeeds is not a failure and counts once, however long it took.
+// that succeeds is not a failure and counts once, however long it took; one
+// slow failure lasting an interval does count as a skipped cycle, which costs a
+// window and its grace unjudged and is the safe direction.
 func (e *Engine) beginSLOCycle() {
 	failedSince := e.sloFailedSince
 	e.sloFailedSince = time.Time{}
@@ -384,14 +386,15 @@ func (e *Engine) beginSLOCycle() {
 }
 
 // sloMissedAfter is how long a run of failed cycles lasts before it counts as
-// a skipped cycle: one optimization interval, or 30s when none is configured.
+// a skipped cycle: one optimization interval, or the loader's default when none
+// is configured (only a hand-built test Engine has none).
 func (e *Engine) sloMissedAfter() time.Duration {
 	if e.Config != nil {
 		if d := e.Config.OptimizationInterval(); d > 0 {
 			return d
 		}
 	}
-	return 30 * time.Second
+	return config.DefaultOptimizationInterval
 }
 
 // sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
