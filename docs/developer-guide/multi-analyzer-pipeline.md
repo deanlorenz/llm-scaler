@@ -356,19 +356,31 @@ it, and the holds. Every PRC stays saturation's:
   demand, aggregated); the role's variants share it in saturation's
   proportions (evenly when saturation attributed none), and their utilization
   is recomputed from it. `HeldRoleDemand` is raised to the other analyzers'
-  demand where it is larger, and dropped for a role saturation did not size.
+  demand where it is larger, and dropped where the hold did not set the
+  demand: a role saturation did not size, or one where the others ask for at
+  least the held figure (kept, the share optimizer would give nothing from
+  the role).
   PRC is never rewritten, so variants on different accelerators keep their
   relative worth in the cost-aware optimizer.
 - **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
   saturation unlisted, a role none of whose variants has a need is held both
-  ways. A listed analyzer other than saturation that is live but not eligible
+  ways, and on P/D every other role is held against growth too, as the share
+  optimizer already froze such a model whole. A listed analyzer other than saturation that is live but not eligible
   -- inside its staleness grace with no reading, or returned nothing this
   cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
   of the roles it reports variants for, or of every role when it reports
   none. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
-  raising the role's floor to what it has on `NoScaleDown`.
+  raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale
+  pass (`rescaleModelDecisions`) also reads them: a role held both ways keeps
+  its GPUs and the other roles split the rest of the model's target, and no
+  role is reclaimed or filled in a direction it is held against.
+- **Warm-pool pressure** (`publishVariantPressure`) is published from the
+  composite, after it is built, with saturation's scale-up threshold; a role
+  held against growth never reports `NeedsScaleUp`. Warm-pool supply is still
+  published from saturation's entry: the composite keeps saturation's PRC, so
+  the two are the same.
 
 The composite is judged against saturation's thresholds
 (`AnalyzerThresholds(saturation)`), and recorded in the same

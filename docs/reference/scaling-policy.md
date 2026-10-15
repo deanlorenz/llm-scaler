@@ -1589,14 +1589,15 @@ registration order and invokes its `Analyze` method.
 > observes.
 >
 > - **Nothing listed can size a role.** With saturation unlisted, the role
->   holds where it is: no scale-up, no scale-down. When that is every
->   variant, the model reports `no-composite-signal`
->   ([Prometheus](prometheus.md#wva_model_scaling_blocked)).
-> - **A listed analyzer misses a cycle.** While it is inside its staleness
->   grace, the roles it covers do not scale down, so one missed scrape from
->   the analyzer asking for most replicas does not shrink the fleet.
->   Scale-up still follows the others. Saturation's own grace works as it
->   always has.
+>   holds where it is: no scale-up, no scale-down. On a P/D model the other
+>   role does not grow either. When that is every variant, the model reports
+>   `no-composite-signal` ([Prometheus](prometheus.md#wva_model_scaling_blocked));
+>   when it is one role, only the log says so (`composite holds a role`).
+> - **A listed analyzer misses a cycle.** For up to three cycles after its
+>   last good reading (90s at the default 30s interval), the roles it covers
+>   do not scale down, so one missed scrape from the analyzer asking for
+>   most replicas does not shrink the fleet. Scale-up still follows the
+>   others. Saturation's own grace works as it always has.
 >
 > The decision is the `CompositeSignal` analyzer in `wva_analyzer_*` and in
 > the cycle log, and each held role logs `composite holds a role`.
@@ -1650,14 +1651,26 @@ post-merge. Either way saturation alone sizes the model.
 > listed analyzer now sizes the model, where before only saturation did and the
 > others were published and ignored. Check these policies before you upgrade:
 >
+> - **Any `analyzers:` list without `saturation`**, including a per-model or
+>   tier override that replaces the list. Saturation no longer sizes the
+>   model. If nothing else in the list can size it, which is the case for a
+>   list of `slo` alone, the model holds where it is. Add `saturation` to
+>   every such list before you upgrade, unless you mean the others to size
+>   the model alone.
 > - **Saturation and another analyzer listed.** The model is sized to the
 >   larger need, so the fleet grows when the other analyzer asks for more
 >   than saturation, and shrinks only when both agree.
 > - **Only the other analyzer listed.** It sizes the model alone. A role it
 >   cannot size (for example prefill, when it reports decode only) holds
->   where it is: no scale-up, no scale-down. Add `saturation` to the list to
->   keep saturation sizing the model.
-> - **`slo` listed.** No change: it only observes.
+>   where it is: no scale-up, no scale-down. On a P/D model the other role
+>   then does not grow either, since decode grown against a frozen prefill
+>   is capacity prefill cannot feed. Add `saturation` to the list to keep
+>   saturation sizing the model.
+> - **`slo` listed beside `saturation`.** No change: `slo` only observes.
+> - **Dashboards and alerts on `wva_analyzer_*`.** These series gain
+>   `analyzer_name="CompositeSignal"`. A panel or alert that sums across
+>   `analyzer_name` now counts demand at least twice; filter it on
+>   `analyzer_name`.
 >
 > To keep the old behaviour, list `saturation`, and remove the other entries
 > or set `enabled: false` on them.

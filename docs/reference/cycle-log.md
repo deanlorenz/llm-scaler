@@ -43,7 +43,7 @@ capacity the optimizer branches on.
 | `modelID` | the scaling manager model ID (unique within a namespace) |
 | `namespace` | Kubernetes namespace |
 | `analyzer` | Analyzer name, e.g. `"saturation"`, `"throughput"` |
-| `live` | Whether this analyzer currently contributes to the composite aggregation and the scale-down veto. `false` does not mean the other fields on this line are missing or stale-looking — they are this analyzer's real numbers; `live` alone says whether they currently count |
+| `live` | Whether the analyzer produced a good reading within its staleness window. It counts toward the composite only when the policy lists it, and `slo` never counts. `false` does not mean the other fields on this line are missing or stale-looking — they are this analyzer's real numbers |
 | `supply` | Total token supply across ready replicas (readyCount × perReplicaCapacity) |
 | `demand` | Total token demand. For saturation V2 it is the sum of three terms: resident KV tokens; a role-aware projection of requests waiting in each replica's engine queue; and a model-level, prefix-cache-discounted projection of requests still queued in llm-d flow control (`SchedulerQueue`, not attributed to any variant). See [scaling-policy-config.md](scaling-policy.md) |
 | `util` | `demand / supply`; > 1.0 means the model is over capacity |
@@ -227,8 +227,10 @@ INFO  composite holds a role  {"modelID": "my-model", "namespace": "default", "r
 ```
 
 `noScaleUp` and `noScaleDown` both true: no listed analyzer can size the role.
-`noScaleDown` alone: a listed analyzer is inside its staleness grace with no
-reading, and the role waits for it before shrinking.
+`noScaleUp` alone, on a P/D model: the other role is held, so this one does not
+grow either. `noScaleDown` alone: a listed analyzer is inside its staleness
+grace (up to three cycles) with no reading, and the role waits for it before
+shrinking.
 
 ---
 

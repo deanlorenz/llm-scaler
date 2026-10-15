@@ -17,7 +17,8 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
-| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back; `wva_model_scaling_blocked{reason="no-composite-signal"}` | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics, no listed analyzer able to size it | [will not scale up](#a-model-will-not-scale-up) |
+| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back; `wva_model_scaling_blocked{reason="no-composite-signal"}` (it blocks scaling only when `saturation` is not listed) | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics, no listed analyzer able to size it | [will not scale up](#a-model-will-not-scale-up) |
+| one role (often prefill) never moves | `composite holds a role` in the controller log; no blocked reason is set | a policy without `saturation` whose analyzers do not size that role, or a listed analyzer inside its staleness grace | [will not scale up](#a-model-will-not-scale-up), step 3 under `no-composite-signal` |
 | will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
@@ -87,7 +88,19 @@ dashboard's *Models blocked from scaling* panel counts it.
    variant, which analyzers sized it (`contributors`) and the replicas they
    needed (`totalReplicas`).
 3. Look for `composite holds a role` in the log: a role no listed analyzer can
-   size, or one waiting out a listed analyzer's missed reading.
+   size, or one waiting out a listed analyzer's missed reading (up to three
+   cycles). It is logged for a single held role too, which sets no blocked
+   reason.
+4. Look for the line that names the cause:
+   - `listed analyzer reports no per-role demand, so it cannot size this P/D
+     model`: the analyzer reports model-level demand only, so on P/D it sizes
+     neither role.
+   - `no listed analyzer can size this model this cycle, so it holds where it
+     is`: the policy leaves `saturation` out and lists nothing else that
+     sizes, for example `slo` alone.
+   - `a listed analyzer's need is dropped: saturation has no per-replica
+     capacity for the variant`: saturation has no capacity estimate for the
+     variant yet, so another analyzer's need cannot be expressed for it.
 
 ## A model will not wake from zero
 

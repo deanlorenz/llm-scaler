@@ -269,9 +269,9 @@ saturation's, not shared. `O` scales both `D` and `P`, so it largely cancels in
 2. **Saturation disabled only by an explicit `enabled: false`** (above).
 3. **`shadow: true`** (above), also left out of `maxScore`, or a shadowed
    `score` still moves cross-model priority.
-4. **Warm-pool pressure from the composite**, not from saturation's result.
-   The composite keeps saturation's PRC, so supply is the same in both; only
-   demand differs.
+4. **Warm-pool pressure from the composite** (built, #167), not from
+   saturation's result. The composite keeps saturation's PRC, so supply is the
+   same in both; only demand differs.
 5. **Size a role saturation sees as idle** (built, #167). The composite
    expresses a need as demand at saturation's PRC, `N_com × P_sat`, which is
    defined when `D_sat[role] = 0`.
