@@ -43,6 +43,8 @@ func TestCollectReplicaMetrics_PrefillAndQueueTime(t *testing.T) {
 				return results, nil
 			},
 		}, fake.NewClientBuilder().WithScheme(scheme).Build(), nil, nil, scalerLocator(map[string]string{"pod-abc": "va-1"}))
+		// A namespace where the slo analyzer runs: elsewhere these are not fetched.
+		c.SetSLOInputNamespaces(map[string]bool{"test-ns": true})
 		got, err := c.CollectReplicaMetrics(context.Background(), "test-model", "test-ns",
 			map[string]scaletarget.ScaleTargetAccessor{}, map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{}, nil)
 		if err != nil || len(got) != 1 {

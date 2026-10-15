@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -216,6 +217,61 @@ var _ = Describe("Analyzer state and inputs", func() {
 		vc := byName["agg"]
 		Expect(vc.PerReplicaCapacity).To(BeNumerically(">", 0))
 		Expect(vc.Utilization).To(BeNumerically("~", vc.TotalDemand/(2*vc.PerReplicaCapacity), 1e-12))
+	})
+
+	It("reports utilization over the Ready replicas, not those still starting", func() {
+		a := newAt(nil)
+		starting := agg
+		starting.CurrentReplicas, starting.PendingReplicas = 3, 1 // two Ready rows, one Pod starting
+		var res *domain.AnalyzerResult
+		for i := range 5 {
+			var err error
+			res, err = a.Analyze(ctx, domain.AnalyzerInput{
+				ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 0), ArrivalRate: 2,
+				VariantStates: []domain.VariantReplicaState{starting}, ReplicaMetrics: cycleRows("agg", i),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(15 * time.Second)
+		}
+		vc := res.VariantCapacities[0]
+		Expect(vc.ObservedReplicas).To(Equal(2))
+		Expect(vc.PerReplicaCapacity).To(BeNumerically(">", 0))
+		Expect(vc.Utilization).To(BeNumerically("~", vc.TotalDemand/(2*vc.PerReplicaCapacity), 1e-12))
+	})
+
+	It("prices the realised fill at the slo entry's own threshold when it sets one", func() {
+		predicted := func(cfg *config.ScalingPolicy) float64 {
+			registry := prometheus.NewRegistry()
+			Expect(metrics.InitMetrics(registry)).To(Succeed())
+			a := newAt(nil)
+			for i := range 5 {
+				_, err := a.Analyze(ctx, domain.AnalyzerInput{
+					ModelID: "m", Namespace: "ns", Config: cfg, ArrivalRate: 2,
+					VariantStates: []domain.VariantReplicaState{agg}, ReplicaMetrics: cycleRows("agg", i),
+				})
+				Expect(err).NotTo(HaveOccurred())
+				clock = clock.Add(15 * time.Second)
+			}
+			v, ok := gaugeIn(registry, constants.WVASLOPredictedITLSeconds, map[string]string{constants.LabelVariantName: "agg"})
+			Expect(ok).To(BeTrue())
+			return v
+		}
+		tier := predicted(policy(44*time.Millisecond, 0))
+		own := policy(44*time.Millisecond, 0)
+		half := 0.5
+		own.Analyzers[1].ScaleUpThreshold = &half
+		Expect(predicted(own)).To(BeNumerically("<", tier),
+			"a lower threshold runs the fleet emptier, so its predicted ITL is lower")
+	})
+
+	It("reads the shape from the rows whose figures are all finite", func() {
+		good := row("agg", "agg-a", 0.5)
+		bad := row("agg", "agg-b", 0.5)
+		bad.AvgInputTokens = math.NaN()
+		f := readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
+			ReplicaMetrics: []domain.ReplicaMetrics{good, bad}})
+		Expect(finite(f.shape.AvgInputTokens)).To(BeTrue(), "one NaN row must not make the fleet's shape NaN")
+		Expect(f.shape.AvgOutputTokens).To(Equal(good.AvgOutputTokens))
 	})
 })
 

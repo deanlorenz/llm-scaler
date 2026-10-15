@@ -137,9 +137,12 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	if cfg.SLO != nil && cfg.SLO.TPOT != nil {
 		tpotTarget = cfg.SLO.TPOT.Target.Seconds()
 	}
+	// The threshold the engine publishes this analyzer's target with: the slo
+	// entry's own when it sets one, the tier's otherwise.
+	scaleUp, _ := cfg.AnalyzerThresholds(domain.SLOAnalyzerName)
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
-		vc, reading := a.priceVariant(input, vs, key, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
+		vc, reading := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
 		// Only a reading priceVariant made was priced for TPOT; one made below
 		// carries TTFT inputs alone and has no output length to lack.
 		pricedForTPOT := reading != nil
@@ -161,8 +164,10 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		if shapeKnown && fleet.generatingReplicas > 0 && isGenerating(vs.Role) {
 			vc.TotalDemand = demand * float64(fleet.ready[vs.VariantName]) / float64(fleet.generatingReplicas)
 		}
-		if vc.PerReplicaCapacity > 0 && vc.ReplicaCount > 0 {
-			vc.Utilization = vc.TotalDemand / (float64(vc.ReplicaCount) * vc.PerReplicaCapacity)
+		// Over the Ready replicas the demand was split across, not
+		// CurrentReplicas: a replica still starting serves none of it.
+		if vc.PerReplicaCapacity > 0 && vc.ObservedReplicas > 0 {
+			vc.Utilization = vc.TotalDemand / (float64(vc.ObservedReplicas) * vc.PerReplicaCapacity)
 		}
 		result.VariantCapacities = append(result.VariantCapacities, vc)
 		if reading != nil {
@@ -539,7 +544,10 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		if f.requestRate > 0 {
 			w = rm.RequestRate
 		}
-		if !(w > 0) || !finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) {
+		// A row with any non-finite shape figure is no reading of the shape: one
+		// NaN summed in would turn the whole fleet's shape into NaN.
+		if !(w > 0) || !finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
+			!finite(rm.AvgInputTokens) || !finite(rm.PrefixCacheHitRate) {
 			continue
 		}
 		in += w * rm.AvgInputTokens

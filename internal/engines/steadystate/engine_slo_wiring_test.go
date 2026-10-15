@@ -195,6 +195,53 @@ func TestNotePresentVariantsStampsTheSLOAnalyzer(t *testing.T) {
 	}
 }
 
+// TestSLONamespacesReachTheCollectorEachCycle pins the gate on the replica
+// queries only the slo analyzer reads: the namespaces it ran in this cycle are
+// the ones collected with them next cycle, and a namespace it stopped running
+// in loses them.
+func TestSLONamespacesReachTheCollectorEachCycle(t *testing.T) {
+	e := sloWiringEngine(t)
+	e.noteSLONamespace("chat")
+	e.handOverSLONamespaces()
+	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") || e.ReplicaMetricsCollector.CollectsSLOInputs("batch") {
+		t.Fatal("the collector must fetch the slo inputs in chat, where the analyzer ran, and only there")
+	}
+	e.handOverSLONamespaces()
+	if e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
+		t.Fatal("a cycle with no slo model must stop the inputs it no longer reads")
+	}
+
+	// And a cycle hands its set over on the way out.
+	e.noteSLONamespace("chat")
+	e.optimizeV2(context.Background(), nil, nil)
+	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
+		t.Fatal("optimizeV2 did not hand this cycle's slo namespaces to the collector")
+	}
+}
+
+// TestRunningTheSLOAnalyzerNotesItsNamespace pins the producer side of that
+// gate: a model whose policy lists slo marks its namespace, and one whose
+// policy does not marks nothing.
+func TestRunningTheSLOAnalyzerNotesItsNamespace(t *testing.T) {
+	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
+	sloSpy := &fakeAnalyzerWithResult{analyzerName: domain.SLOAnalyzerName, result: &domain.AnalyzerResult{}}
+	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
+		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: sloSpy}}}
+	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	withSLO := plain
+	withSLO.Analyzers = []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}
+
+	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "batch", nil, plain, nil, nil, nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "chat", nil, withSLO, nil, nil, nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !e.sloNamespaces["chat"] || e.sloNamespaces["batch"] {
+		t.Fatalf("slo namespaces this cycle are %v, want only chat", e.sloNamespaces)
+	}
+}
+
 // TestPruneAnalyzerSeriesDeletesADepartedModelsSLOSeries pins that a model
 // whose VariantAutoscalings are gone loses its SLO series with its other
 // analyzer series, not ten minutes later.

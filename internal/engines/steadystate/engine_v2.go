@@ -192,6 +192,9 @@ func (e *Engine) runAnalyzersAndScore(
 		if !config.AnalyzerEnabled(entry.name) {
 			continue
 		}
+		if entry.name == domain.SLOAnalyzerName {
+			e.noteSLONamespace(namespace)
+		}
 		result := runRegisteredAnalyzer(ctx, logger, entry, modelID, input)
 		if result == nil {
 			continue
@@ -359,6 +362,24 @@ type staleHistoryEvictor interface {
 // staleHistoryEvictor.
 type presenceNoter interface {
 	NoteVariantsPresent(namespace, modelID string, variantNames []string)
+}
+
+// noteSLONamespace records that a model in namespace ran the slo analyzer this
+// cycle, so the next cycle's collection there fetches the inputs only it reads.
+func (e *Engine) noteSLONamespace(namespace string) {
+	if e.sloNamespaces == nil {
+		e.sloNamespaces = map[string]bool{}
+	}
+	e.sloNamespaces[namespace] = true
+}
+
+// handOverSLONamespaces gives the collector this cycle's slo namespaces and
+// starts the next cycle's set empty.
+func (e *Engine) handOverSLONamespaces() {
+	if e.ReplicaMetricsCollector != nil {
+		e.ReplicaMetricsCollector.SetSLOInputNamespaces(e.sloNamespaces)
+	}
+	e.sloNamespaces = nil
 }
 
 // sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:

@@ -141,6 +141,12 @@ type Engine struct {
 	// learned state whether or not any model runs it. Nil in tests that build
 	// an Engine by hand.
 	sloAnalyzer sloStateKeeper
+	// sloNamespaces is this cycle's namespaces in which a model ran the slo
+	// analyzer; handed to the collector when the cycle ends.
+	sloNamespaces map[string]bool
+	// reportedCollisions is the external analyzer labels already logged as
+	// taken by a built-in, so each is logged once.
+	reportedCollisions map[string]bool
 
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *capacity.Store
@@ -348,7 +354,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		analyzers: []analyzerEntry{
 			{name: domain.SaturationAnalyzerName, analyzer: satV2},
 			// Built in and always registered: it runs only for a model whose
-			// policy lists it under analyzers:, so registering it costs nothing
+			// policy lists it under analyzers:, and its router queries and the
+			// replica queries only it reads run only in a namespace where it
+			// ran (handOverSLONamespaces), so registering it costs nothing
 			// elsewhere, and enabling it needs no restart. Its result is
 			// published and, like every non-saturation result, not yet consumed
 			// (docs/proposals/slo-tiers.md, phase 0).
@@ -502,7 +510,17 @@ func (e *Engine) reconcileExternalAnalyzers(ctx context.Context) {
 	desired := make(map[string]struct{}, len(catalog))
 	for label, def := range catalog {
 		if _, isBuiltin := builtin[label]; isBuiltin {
-			logger.V(logging.DEBUG).Info("Skipping external analyzer: name collides with a built-in", "label", label)
+			// Once per name at the default level, not every cycle at DEBUG:
+			// a catalog entry that stopped running because a built-in took
+			// its name (slo did) must be visible in a default log.
+			if !e.reportedCollisions[label] {
+				logger.Info("Skipping external analyzer: its name is a built-in analyzer's, and the built-in runs instead",
+					"label", label)
+				if e.reportedCollisions == nil {
+					e.reportedCollisions = map[string]bool{}
+				}
+				e.reportedCollisions[label] = true
+			}
 			continue
 		}
 		d, err := toExternalDefinition(label, def)
@@ -1302,6 +1320,7 @@ func (e *Engine) optimizeV2(
 	// swept, and written after the cycle has learned what it will.
 	e.restoreLearnedState(ctx, time.Now())
 	defer func() { e.writeLearnedState(ctx, time.Now()) }()
+	defer e.handOverSLONamespaces()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.

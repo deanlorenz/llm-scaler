@@ -107,6 +107,29 @@ type ReplicaMetricsCollector struct {
 	// namespace per cycle. Nil outside a cycle, like cycleResults.
 	cyclePods map[string]namespacePods
 	cycleMu   sync.Mutex
+
+	// sloInputNamespaces are the namespaces whose replica collection also
+	// fetches sloInputQueries. Guarded by mu.
+	sloInputNamespaces map[string]bool
+}
+
+// SetSLOInputNamespaces names the namespaces in which a model ran the slo
+// analyzer this cycle, so the next cycle's replica collection fetches the
+// TTFT curve's inputs there and nowhere else. The engine calls it once per
+// cycle; a namespace that starts using the analyzer gets them a cycle late,
+// which costs one cycle of an observed-only input.
+func (c *ReplicaMetricsCollector) SetSLOInputNamespaces(namespaces map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sloInputNamespaces = namespaces
+}
+
+// CollectsSLOInputs reports whether replica collection in namespace fetches
+// the slo analyzer's inputs this cycle.
+func (c *ReplicaMetricsCollector) CollectsSLOInputs(namespace string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sloInputNamespaces[namespace]
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.

@@ -88,7 +88,6 @@ func (a *Analyzer) observeTTFTInputs(key, variant, role string, rows []domain.Re
 		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
 			continue
 		}
-		replicas++
 		w := 1.0
 		if finite(rm.RequestRate) && rm.RequestRate > 0 {
 			w = rm.RequestRate
@@ -101,8 +100,12 @@ func (a *Analyzer) observeTTFTInputs(key, variant, role string, rows []domain.Re
 			queue += w * rm.AvgQueueTime
 			wQueue += w
 		}
+		// Utilization is over the replicas that report a rate: one whose
+		// series is missing, or a fresh one with no rate yet, is not a
+		// replica computing nothing, and counting it would read low.
 		if finite(rm.PrefillComputedTokenRate) && rm.PrefillComputedTokenRate > 0 {
 			tokenRate += rm.PrefillComputedTokenRate
+			replicas++
 		}
 		if saturatedForCeiling(rm) {
 			saturated = append(saturated, rm.PrefillComputedTokenRate)
