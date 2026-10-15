@@ -179,11 +179,6 @@ func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error
 	}
 }
 
-// registerMetricsSource adds src to reg under name.
-//
-// Returned, not os.Exit: this runs inside a manager runnable, and exiting there
-// skipped graceful shutdown and the lease release, so the successor waited out
-// the full LeaseDuration.
 // kueueWorkloadCache runs the cluster-wide Kueue Workload cache of a
 // namespace-scoped install on every replica, not only the leader: a cache
 // added to the manager would otherwise start only once leadership is won.
@@ -192,6 +187,11 @@ type kueueWorkloadCache struct{ cache.Cache }
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 func (kueueWorkloadCache) NeedLeaderElection() bool { return false }
 
+// registerMetricsSource adds src to reg under name.
+//
+// Returned, not os.Exit: this runs inside a manager runnable, and exiting there
+// skipped graceful shutdown and the lease release, so the successor waited out
+// the full LeaseDuration.
 func registerMetricsSource(reg *source.SourceRegistry, name string, src source.MetricsSource) error {
 	if err := reg.Register(name, src); err != nil {
 		return fmt.Errorf("registering the %s metrics source: %w", name, err)
