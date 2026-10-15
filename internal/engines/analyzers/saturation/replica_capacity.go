@@ -790,7 +790,13 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			// variant's answer -- the shared ITL line, and
 			// lookupCompatibleCapacity, where the record IS the estimate -- and
 			// leaves every clamp alone.
-			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
+			//
+			// For the same reason the clamp is found under the looser equality
+			// (FindClampBound): the borrow's equality compares the parallel
+			// layout, speculative decoding, the KV connector, offloading, prefix
+			// caching and the checkpoint, and refusing a sibling on those removed
+			// the ceiling rather than tightening it.
+			if compatible := a.capacityStore.FindClampBound(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
 					boundedBy = "compatible-variant-live"

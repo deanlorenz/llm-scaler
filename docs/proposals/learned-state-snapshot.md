@@ -98,8 +98,9 @@ stored, so a restart does not restart a borrow at full strength.
    survives a routine image bump; changed arguments restore only the old k2,
    as a lower-only prior that expires like a borrowed k2 (#132), and nothing
    else. A document with no `args` keeps the whole-configuration rule. The
-   prior is not itself written back, so a second restart inside its 6.5 hours
-   loses it. An entry
+   prior is written back with its borrow clock, so a second restart inside its
+   life resumes it; its life runs on that clock from a bucket's first use, and
+   a prior no bucket uses goes after the bucket retention. An entry
    whose variant cannot be named -- a key from before per-variant keys (#132)
    -- cannot be checked, and is not restored. Nor is one whose configuration
    was not read **completely**, on either side: a flag the controller could

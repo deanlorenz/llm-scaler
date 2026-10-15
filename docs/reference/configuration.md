@@ -553,7 +553,15 @@ What is restored, and what is not:
   prior**: it is used where it is below what the variant would otherwise be
   priced at, for 30 minutes at full strength, then relaxes to the variant's
   own figure over 6 hours -- the same rule as a capacity borrowed from a
-  sibling. Nothing else is restored for it;
+  sibling. The 30 minutes start when an output-length bucket first uses it,
+  not at the restart; a prior no bucket uses goes after the bucket retention.
+  The prior is written back with its clock, so another restart inside those
+  hours resumes it. Nothing else is restored for it;
+- a parallel size computed when the pod starts -- llm-d's wide-EP
+  LeaderWorkerSet passes `--data-parallel-size $((LWS_GROUP_SIZE *
+  DP_SIZE_LOCAL))` -- does not stop a variant restoring its own state: the
+  expression is compared as written. It only keeps the variant from sharing a
+  latency line with another (`wva_engine_config`'s `sharing_unresolved`);
 - the first restart after an upgrade that changes how the configuration is
   identified (the `fingerprint_version` label of `wva_engine_config`) starts
   every variant cold once;

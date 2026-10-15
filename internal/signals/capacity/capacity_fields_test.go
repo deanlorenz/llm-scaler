@@ -44,6 +44,7 @@ var (
 		"PrefixCachingDisabled",
 		"ModelPath",
 		"ModelRevision",
+		"SharingUnresolved",
 	}
 	// Each of these needs its reason, because "ignored" is the dangerous half
 	// of the list and an unexplained entry here is how a field gets dropped.
@@ -72,8 +73,9 @@ var (
 		// fingerprint hashes it instead.
 		"Image": "a tag changes every rebuild; refusing records removes a max clamp",
 		// Provenance, as Unresolved: two variants whose checkpoint could not
-		// be read compare by the ModelPath both hold, and comparing the bit
-		// too would make the equality non-reflexive in the same way.
+		// be read compare by the ModelPath both hold, as every checkpoint did
+		// before the checkpoint was compared. Refusing them would withhold a
+		// lower-only borrow, which raises capacity; see the field.
 		"ModelUnresolved": "provenance; withholds sharing in engineFingerprint instead",
 	}
 )
@@ -154,6 +156,9 @@ func TestEveryComparedFieldChangesTheAnswer(t *testing.T) {
 		"PrefixCachingDisabled":     func(p *EngineParams) { p.PrefixCachingDisabled = true },
 		"ModelPath":                 func(p *EngineParams) { p.ModelPath = testModelPath },
 		"ModelRevision":             func(p *EngineParams) { p.ModelRevision = testModelRevision },
+		"SharingUnresolved": func(p *EngineParams) {
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
+		},
 	}
 
 	for _, name := range capacityCompared {

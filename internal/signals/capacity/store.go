@@ -3,6 +3,7 @@ package capacity
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -321,6 +322,19 @@ func (s *Store) EvictStale(timeout time.Duration) int {
 // ones), or nil if no compatible record exists. As with Get, the record is
 // the store's own.
 func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
+	return s.findCompatible(modelID, accelerator, gpuCount, params, (*EngineParams).IsCapacityCompatible)
+}
+
+// FindClampBound is FindCompatible under the looser equality a max clamp
+// takes (EngineParams.IsCapacityClampCompatible), for a ceiling on a
+// zero-replica estimate: a sibling that differs in the layout or feature
+// flags the borrow's equality compares is still a ceiling.
+func (s *Store) FindClampBound(modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
+	return s.findCompatible(modelID, accelerator, gpuCount, params, (*EngineParams).IsCapacityClampCompatible)
+}
+
+func (s *Store) findCompatible(modelID, accelerator string, gpuCount int, params *EngineParams,
+	compatible func(*EngineParams, *EngineParams) bool) *Record {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -383,7 +397,7 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 		// LearnedFrom, which made the one place the uncertainty is acted on
 		// the one place it was invisible -- so the mitigation this paragraph
 		// offers for not gating on completeness was not actually there.
-		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
+		if rec.EngineParams == nil || !compatible(rec.EngineParams, params) {
 			continue
 		}
 
@@ -450,5 +464,6 @@ func kvTotalCarries(prev, cur EngineParams) bool {
 		parallelSize(prev.PipelineParallelSize) == parallelSize(cur.PipelineParallelSize) &&
 		prev.ExpertParallel == cur.ExpertParallel && prev.SpeculativeConfig == cur.SpeculativeConfig &&
 		prev.ModelPath == cur.ModelPath && prev.ModelRevision == cur.ModelRevision &&
+		slices.Equal(prev.SharingUnresolved, cur.SharingUnresolved) &&
 		cur.EffectiveMaxBatchedTokens <= prev.EffectiveMaxBatchedTokens && cur.MaxNumSeqs <= prev.MaxNumSeqs
 }

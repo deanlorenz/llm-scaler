@@ -52,6 +52,8 @@ var fingerprintHashed = []string{
 	"ModelPath",
 	"ModelRevision",
 	"ModelUnresolved",
+	// What was read for identity and not interpreted, as written.
+	"SharingUnresolved",
 }
 
 // All three are excluded on one rule: they exist only to resolve
@@ -155,6 +157,9 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"ModelPath":             func(p *EngineParams) { p.ModelPath = testModelPath },
 		"ModelRevision":         func(p *EngineParams) { p.ModelRevision = testModelRevision },
 		"ModelUnresolved":       func(p *EngineParams) { p.ModelUnresolved = true },
+		"SharingUnresolved": func(p *EngineParams) {
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
+		},
 	}
 
 	if len(mutations) != len(fingerprintHashed) {
@@ -371,6 +376,9 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"model":                   func(p *EngineParams) { p.ModelPath = testModelPath },
 		"model_revision":          func(p *EngineParams) { p.ModelRevision = testModelRevision },
 		"model_unresolved":        func(p *EngineParams) { p.ModelUnresolved = true },
+		"sharing_unresolved": func(p *EngineParams) {
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
+		},
 	}
 
 	names := FingerprintFields()

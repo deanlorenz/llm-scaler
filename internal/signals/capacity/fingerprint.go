@@ -42,7 +42,9 @@ import (
 // same version adds the parallel layout (data and pipeline parallel sizes,
 // expert parallelism), speculative decoding, the KV connector, KV offloading,
 // prefix caching and the checkpoint served -- one bump for both, so the one
-// cold start after the upgrade is paid once.
+// cold start after the upgrade is paid once -- and the flags read for identity
+// but not interpreted (SharingUnresolved), within the same version since no
+// release carried version 3 without them.
 const FingerprintVersion = 3
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
@@ -137,6 +139,9 @@ func (p *EngineParams) Fingerprint() string {
 		// Hashed for the reason Unresolved is: an unread checkpoint must not
 		// collide with a read one.
 		"model_unresolved=" + strconv.FormatBool(p.ModelUnresolved),
+		// The text of what was read but not interpreted, so a changed
+		// expression is a changed configuration.
+		"sharing_unresolved=" + joinQuoted(p.SharingUnresolved),
 	}
 
 	h := sha256.New()
@@ -239,7 +244,19 @@ func (p *EngineParams) FingerprintValues() []string {
 		p.ModelPath,
 		p.ModelRevision,
 		strconv.FormatBool(p.ModelUnresolved),
+		joinQuoted(p.SharingUnresolved),
 	}
+}
+
+// joinQuoted joins quoted entries with commas: an entry is a flag's value as
+// written and may hold a comma itself, which a plain join would let two lists
+// share.
+func joinQuoted(entries []string) string {
+	q := make([]string, len(entries))
+	for i, e := range entries {
+		q[i] = strconv.Quote(e)
+	}
+	return strings.Join(q, ",")
 }
 
 // LearnedStateKey composes the key that learned per-configuration state is

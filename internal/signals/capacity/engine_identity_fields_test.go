@@ -83,12 +83,137 @@ func TestKVTransferConfigThatIsNotJSONIsKeptWhole(t *testing.T) {
 
 // A new flag whose value cannot be read is a gap like any other: recorded,
 // so the configuration is not used as an equality.
-func TestAnUnreadableParallelSizeMakesTheReadIncomplete(t *testing.T) {
+// A parallel size computed at start-up -- llm-d's wide-EP LeaderWorkerSet
+// passes `--data-parallel-size $((LWS_GROUP_SIZE * DP_SIZE_LOCAL))` -- is
+// recorded as written and withholds only sharing. In Unresolved it made every
+// such variant's read incomplete, so its own learned state was neither
+// exported nor restored after a restart.
+func TestAnUnreadableParallelSizeWithholdsOnlySharing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		container corev1.Container
+		want      string
+	}{
+		"shell arithmetic, split by the shell splitter": {
+			container: vllmContainer([]string{"/bin/sh", "-c",
+				"vllm serve org/m --data-parallel-size $((LWS_GROUP_SIZE * DP_SIZE_LOCAL)) --enable-expert-parallel"}),
+			want: "data_parallel_size=$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))",
+		},
+		"kubelet reference to a pod-only variable": {
+			container: vllmContainer([]string{"vllm", "serve", "org/m", "--data-parallel-size", "$(LWS_GROUP_SIZE)"}),
+			want:      "data_parallel_size=$(LWS_GROUP_SIZE)",
+		},
+		"a variable nothing in the template sets": {
+			container: vllmContainer([]string{"vllm", "serve", "org/m", "--pipeline-parallel-size=$PP"}),
+			want:      "pipeline_parallel_size=$PP",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(tc.container))
+			assert.True(t, p.Complete(), "unresolved: %v", p.Unresolved)
+			assert.Equal(t, []string{tc.want}, p.SharingUnresolved)
+			assert.Equal(t, 1, p.DataParallelSize, "the default stands in")
+			assert.Equal(t, "org/m", p.ModelPath)
+		})
+	}
+
+	// The text is the identity: a changed expression is a changed
+	// configuration, for the variant's own restore and for the KV carry.
+	a := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"/bin/sh", "-c", "vllm serve org/m --data-parallel-size $((LWS_GROUP_SIZE * 8))"})))
+	b := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"/bin/sh", "-c", "vllm serve org/m --data-parallel-size $((LWS_GROUP_SIZE * 4))"})))
+	assert.NotEqual(t, a.ArgsFingerprint(), b.ArgsFingerprint())
+	assert.False(t, a.IsCapacityCompatible(&b))
+	assert.True(t, a.IsCapacityCompatible(&a))
+
+	// The KV total measured under one expression is not carried to another.
+	assert.True(t, kvTotalCarries(a, a))
+	assert.False(t, kvTotalCarries(a, b))
+
+	// A later occurrence that reads takes over, as the engine takes the last.
+	c := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "org/m", "--data-parallel-size", "$(LWS_GROUP_SIZE)", "--data-parallel-size", "4"})))
+	assert.Empty(t, c.SharingUnresolved)
+	assert.Equal(t, 4, c.DataParallelSize)
+}
+
+// vLLM's single-dash aliases and SGLang's --ep, which read as absent with the
+// configuration complete.
+func TestShortAndAliasParallelFlagsAreRead(t *testing.T) {
 	p := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
-		[]string{"vllm", "serve", "m", "--data-parallel-size", "$DP_SIZE"})))
-	assert.False(t, p.Complete())
-	assert.Contains(t, p.Unresolved, "data_parallel_size")
-	assert.Equal(t, 1, p.DataParallelSize, "the default stands in")
+		[]string{"vllm", "serve", "org/m", "-tp", "2", "-dp=4", "-pp", "2", "--enforce-eager", "-tp", "8"})))
+	assert.True(t, p.Complete(), "unresolved: %v", p.Unresolved)
+	assert.Equal(t, 8, p.TensorParallelSize, "the last occurrence wins")
+	assert.Equal(t, 4, p.DataParallelSize)
+	assert.Equal(t, 2, p.PipelineParallelSize)
+	assert.True(t, p.EnforceEager, "a boolean before a short flag does not take it as its value")
+
+	neg := ParseEngineArgs(inferenceengine.EngineSGLang, deploymentWithContainers(corev1.Container{
+		Name: "sglang", Image: "lmsysorg/sglang:v0.5", Command: []string{
+			"python", "-m", "sglang.launch_server", "--model-path", "org/m", "--chunked-prefill-size", "-1", "--ep", "8",
+		}}))
+	assert.True(t, neg.Complete(), "unresolved: %v", neg.Unresolved)
+	assert.False(t, neg.ChunkedPrefillEnabled, "a negative number is a value, not a flag")
+	assert.True(t, neg.ExpertParallel)
+}
+
+// A model after the flags, where a boolean before it takes it as its value,
+// is an unread checkpoint, not an absent one that compares equal to every
+// other absent one.
+func TestAModelAfterTheFlagsIsMarkedUnread(t *testing.T) {
+	p := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "--enable-expert-parallel", "org/m"})))
+	assert.True(t, p.ModelUnresolved)
+	assert.True(t, p.Complete(), "unresolved: %v", p.Unresolved)
+
+	named := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "--enable-expert-parallel", "--model", "org/m"})))
+	assert.False(t, named.ModelUnresolved)
+	assert.Equal(t, "org/m", named.ModelPath)
+}
+
+// vLLM's dotted spelling of its JSON flags, one key per flag.
+func TestDottedJSONFlagsAreRead(t *testing.T) {
+	p := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "org/m",
+			"--speculative-config.num_speculative_tokens", "3", "--speculative-config.method", "mtp",
+			"--kv-transfer-config.kv_connector", "NixlConnector", "--kv-transfer-config.kv_role", "kv_both"})))
+	assert.True(t, p.Complete(), "unresolved: %v", p.Unresolved)
+	assert.Equal(t, "config.method=mtp;config.num_speculative_tokens=3", p.SpeculativeConfig)
+	assert.Equal(t, "NixlConnector", p.KVConnector)
+
+	none := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "org/m"})))
+	assert.NotEqual(t, none.Fingerprint(), p.Fingerprint())
+
+	unread := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer(
+		[]string{"vllm", "serve", "org/m", "--speculative-config.method", "$METHOD"})))
+	assert.True(t, unread.Complete(), "unresolved: %v", unread.Unresolved)
+	assert.Equal(t, []string{"speculative_config.method=$METHOD"}, unread.SharingUnresolved)
+}
+
+// The zero-replica estimate's ceiling is found under the looser equality: a
+// sibling differing only in a field the borrow's equality added is still a
+// ceiling.
+func TestTheClampEqualityIgnoresTheAddedIdentityFields(t *testing.T) {
+	base := defaultEngineParams()
+	resolveEffectiveMaxBatchedTokens(&base)
+	for name, mutate := range map[string]func(*EngineParams){
+		"checkpoint spelling": func(p *EngineParams) { p.ModelPath = "/models/org-m" },
+		"prefix caching":      func(p *EngineParams) { p.PrefixCachingDisabled = true },
+		"KV connector":        func(p *EngineParams) { p.KVConnector = testKVConnector },
+		"data parallel size":  func(p *EngineParams) { p.DataParallelSize = 8 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			other := base
+			mutate(&other)
+			assert.False(t, base.IsCapacityCompatible(&other), "the borrow's equality refuses it")
+			assert.True(t, base.IsCapacityClampCompatible(&other), "the clamp's does not")
+		})
+	}
+	other := base
+	other.MaxNumSeqs = 64
+	assert.False(t, base.IsCapacityClampCompatible(&other), "a field the clamp always compared still refuses")
 }
 
 // An unread checkpoint is NOT an incomplete read: that would withhold the

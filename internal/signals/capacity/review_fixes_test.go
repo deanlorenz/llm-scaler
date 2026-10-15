@@ -308,7 +308,7 @@ func TestTheValueKeySetMatchesBothApplyFunctions(t *testing.T) {
 		"mem_fraction_static", "page_size", "tp_size", "tp",
 		"max_running_requests", "max_total_tokens", "context_length",
 		"max_prefill_tokens", "chunked_prefill_size",
-		"dp_size", "pp_size", "ep_size", "expert_parallel_size", "hicache_size",
+		"dp_size", "pp_size", "ep_size", "ep", "expert_parallel_size", "hicache_size",
 		"speculative_algorithm", "speculative_num_steps", "speculative_num_draft_tokens",
 		"speculative_eagle_topk", "speculative_draft_model_path",
 		"disaggregation_transfer_backend",

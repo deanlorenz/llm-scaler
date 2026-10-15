@@ -399,16 +399,27 @@ With it on, the log says what happened (logger `learned-state`):
     changed, the arguments did not` -- a new release rolled out while the
     controller was down. Capacity, throughput and start time are kept;
   - `learned state not restored: the variant's engine arguments changed; its
-    k2 is kept as a lower-only prior` -- its flags changed while the
-    controller was down. The old capacity is used only where it is lower, and
-    expires (30 minutes, then a 6-hour relaxation);
+    k2 is kept as a lower-only prior for the buckets it was measured in` --
+    its flags changed while the controller was down. The old capacity is used
+    only where it is lower, and expires (30 minutes from a bucket's first use,
+    then a 6-hour relaxation);
+  - `learned state not restored: the variant's engine arguments changed, and
+    no k2 window was recent enough, on the hardware it runs now, to keep as a
+    prior` -- the same, with nothing to keep: the windows were old, or were
+    measured on another accelerator or GPU count;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, so it could not be checked` -- a flag such as
+    `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an `envFrom`.
+    Nothing is restored for that variant, by design. `wva_engine_config`'s
+    `unresolved` label names the flag;
   - `learned state not restored: the variant's engine configuration differs
-    from the one it was learned under, or could not be read completely` -- a
-    flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
-    `envFrom`, or a snapshot written by an older release. Nothing is restored
-    for that variant, by design. Expect it for every variant after an upgrade
-    of the scaling manager that changes the `fingerprint_version` label of
+    from the one it was learned under` -- a snapshot written by an older
+    release. Expect it for every variant after an upgrade of the scaling
+    manager that changes the `fingerprint_version` label of
     `wva_engine_config` -- this release moves it from 2 to 3, once.
+
+  Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
+  `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run

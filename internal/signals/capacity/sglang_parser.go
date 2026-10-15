@@ -145,7 +145,7 @@ func applySGLangParam(key, value string, params *EngineParams) applyResult {
 		return applyParallelSize(value, &params.DataParallelSize)
 	case "pp_size", "pipeline_parallel_size":
 		return applyParallelSize(value, &params.PipelineParallelSize)
-	case "ep_size", "expert_parallel_size":
+	case "ep_size", "expert_parallel_size", "ep":
 		v, err := strconv.Atoi(value)
 		if err != nil || v < 1 {
 			return applyUnusable

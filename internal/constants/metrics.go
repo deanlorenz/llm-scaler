@@ -967,4 +967,8 @@ var EngineConfigFlagLabels = []string{
 	"model",
 	"model_revision",
 	"model_unresolved",
+	// Flags read for identity whose value could not be interpreted, as
+	// written: a parallel size computed at start-up. A variant with anything
+	// here is not used as a key for sharing a latency line.
+	"sharing_unresolved",
 }

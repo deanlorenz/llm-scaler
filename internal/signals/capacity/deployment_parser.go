@@ -201,13 +201,42 @@ type EngineParams struct {
 	ModelPath     string
 	ModelRevision string
 	// ModelUnresolved is true when the checkpoint could not be read -- a
-	// `$MODEL` nothing resolved. It is NOT in Unresolved, and on purpose:
-	// Unresolved withholds a variant's own restore after a restart, and a
-	// model given as a variable is common enough that withholding on it would
-	// start such fleets cold on every restart, the TTFT direction. It
-	// withholds only cross-variant sharing (engineFingerprint), where two
-	// unread checkpoints comparing equal is the false equality that matters.
+	// `$MODEL` nothing resolved, or a model that is not the token right after
+	// `serve` and was not given as --model. It is NOT in Unresolved, and on
+	// purpose: Unresolved withholds a variant's own restore after a restart,
+	// and a model given as a variable is common enough that withholding on it
+	// would start such fleets cold on every restart, the TTFT direction.
+	//
+	// It withholds the shared latency line (engineFingerprint) and nothing
+	// else. IsCapacityCompatible compares the ModelPath both sides hold, so
+	// two unread checkpoints compare EQUAL there, as every checkpoint did
+	// before the checkpoint was compared at all. That is deliberate, because
+	// of what the predicate's callers do with a refusal: borrowedK2 would
+	// lose a lower-only borrow and the zero-replica estimate a max clamp, and
+	// both raise capacity. The one caller where a sibling's record becomes
+	// the estimate, lookupCompatibleCapacity, is behind
+	// enableLearnedStateReuse, off by default.
 	ModelUnresolved bool
+
+	// SharingUnresolved lists the flags read for identity whose value could
+	// not be interpreted, as key=value with the value as written: a parallel
+	// size given as an expression nothing here evaluates. llm-d's wide-EP
+	// LeaderWorkerSet passes `--data-parallel-size
+	// $((LWS_GROUP_SIZE * DP_SIZE_LOCAL))`, and LWS_GROUP_SIZE is set on the
+	// pod, not in its template. A vLLM `--speculative-config.<key>` value
+	// that does not resolve lands here too.
+	//
+	// Like ModelUnresolved it is NOT in Unresolved: putting it there made
+	// every such wide-EP variant's read incomplete, so its own learned state
+	// was neither exported nor restored -- cold on every restart. It
+	// withholds only the shared latency line (engineFingerprint). It is
+	// hashed and compared with the text as written, so an expression that
+	// changes is a configuration that changes. What it cannot see is an env
+	// value the expression reads changing under the same text; a reshape
+	// that changes the GPUs per replica changes the learned-state key anyway.
+	//
+	// Sorted, one entry per key, so it is stable enough to hash.
+	SharingUnresolved []string
 }
 
 // parallelSize is a parallel size as the engine runs it: unset is 1, its
@@ -452,6 +481,7 @@ var mappedValueKeys = map[string]struct{}{
 	"dp_size":              {},
 	"pp_size":              {},
 	"ep_size":              {},
+	"ep":                   {},
 	"expert_parallel_size": {},
 	"hicache_size":         {},
 
@@ -470,6 +500,113 @@ var modelKeys = map[string]struct{}{
 	"model":      {},
 	"model_path": {},
 	"revision":   {},
+}
+
+// sharingOnlyKeys are the parallel sizes: one that cannot be read lands in
+// SharingUnresolved, withholding sharing, rather than in Unresolved,
+// withholding the variant's own restore. A parallel size is the value a
+// multi-node group most often computes at start-up (see the field).
+var sharingOnlyKeys = map[string]struct{}{
+	"data_parallel_size":     {},
+	"pipeline_parallel_size": {},
+	"dp_size":                {},
+	"pp_size":                {},
+	"ep_size":                {},
+	"ep":                     {},
+	"expert_parallel_size":   {},
+}
+
+// The dotted spelling of vLLM's JSON flags, `--speculative-config.method
+// eagle`: one key of the JSON per flag.
+const (
+	speculativeDotted = "speculative_config."
+	kvConnectorDotted = "kv_transfer_config.kv_connector"
+)
+
+// isSharingOnlyKey reports whether an unreadable value for key withholds only
+// sharing: see sharingOnlyKeys and SharingUnresolved.
+func isSharingOnlyKey(key string) bool {
+	if _, ok := sharingOnlyKeys[key]; ok {
+		return true
+	}
+	return strings.HasPrefix(key, speculativeDotted) || key == kvConnectorDotted
+}
+
+// noteSharingUnresolved records key's value as written, replacing an earlier
+// entry for the key: the last occurrence of a flag is the one the engine
+// takes.
+func noteSharingUnresolved(params *EngineParams, key, value string) {
+	clearSharingUnresolved(params, key)
+	params.SharingUnresolved = append(params.SharingUnresolved, key+"="+value)
+	slices.Sort(params.SharingUnresolved)
+}
+
+// clearSharingUnresolved drops key's entry, for a later occurrence of the flag
+// that did read.
+func clearSharingUnresolved(params *EngineParams, key string) {
+	params.SharingUnresolved = slices.DeleteFunc(params.SharingUnresolved, func(e string) bool {
+		return strings.HasPrefix(e, key+"=")
+	})
+	if len(params.SharingUnresolved) == 0 {
+		params.SharingUnresolved = nil
+	}
+}
+
+// shortFlags are vLLM's single-dash aliases for flags this parser maps. No
+// other single-dash token is read as a flag.
+var shortFlags = map[string]string{
+	"-tp": "--tensor-parallel-size",
+	"-pp": "--pipeline-parallel-size",
+	"-dp": "--data-parallel-size",
+}
+
+// longFlag returns tok as a long flag, a short alias spelled out; ok is false
+// for a token that is not a flag this parser reads.
+func longFlag(tok string) (string, bool) {
+	if strings.HasPrefix(tok, "--") {
+		return tok, true
+	}
+	name, rest, hasEq := strings.Cut(tok, "=")
+	long, ok := shortFlags[name]
+	switch {
+	case !ok:
+		return "", false
+	case hasEq:
+		return long + "=" + rest, true
+	}
+	return long, true
+}
+
+// isFlagToken reports whether tok is a flag rather than the value of the one
+// before it. A negative number (`--chunked-prefill-size -1`) is a value.
+func isFlagToken(tok string) bool {
+	_, ok := longFlag(tok)
+	return ok
+}
+
+// maxArithmeticTokens bounds how far joinArithmetic looks for the end of an
+// expansion.
+const maxArithmeticTokens = 16
+
+// joinArithmetic rejoins a `$(( ... ))` expansion that the shell splitter cut
+// at its spaces, so the value is the expression as written; i is the index of
+// the last token read and is returned moved past what was consumed. An
+// expansion with no closing `))` nearby is left as it was.
+func joinArithmetic(value string, args []string, i int) (string, int) {
+	if !strings.Contains(value, "$((") || strings.Contains(value, "))") {
+		return value, i
+	}
+	parts := []string{value}
+	for j := i + 1; j < len(args) && j <= i+maxArithmeticTokens; j++ {
+		if isFlagToken(args[j]) {
+			break
+		}
+		parts = append(parts, args[j])
+		if strings.Contains(args[j], "))") {
+			return strings.Join(parts, " "), j
+		}
+	}
+	return value, i
 }
 
 // normalizeKey replaces hyphens with underscores and strips the leading
@@ -511,8 +648,8 @@ func parseArgs(args []string, params *EngineParams, env map[string]string) {
 func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 	apply paramApplier) {
 	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "--") {
+		arg, isFlag := longFlag(args[i])
+		if !isFlag {
 			continue
 		}
 
@@ -526,7 +663,7 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 		} else {
 			key = normalizeKey(arg)
 			// Check if next token is the value (not another flag)
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+			if i+1 < len(args) && !isFlagToken(args[i+1]) {
 				value = args[i+1]
 				hasValue = true
 				i++ // consume the value
@@ -535,6 +672,7 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 		}
 
 		if hasValue {
+			value, i = joinArithmetic(value, args, i)
 			resolved, ok := resolveRefs(value, env)
 			if !ok {
 				// The reference named something the container does not
@@ -547,6 +685,10 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 				// resolving a configMapKeyRef would mean giving it one. That
 				// is a deliberate choice and a reviewable change, not a
 				// permission to grant.
+				if isSharingOnlyKey(key) {
+					noteSharingUnresolved(params, key, value)
+					continue
+				}
 				if _, ok := modelKeys[key]; ok {
 					params.ModelUnresolved = true
 				}
@@ -559,7 +701,11 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 		switch apply(key, value, params) {
 		case applyUnusable:
 			// Recognised the flag and could not use the value.
-			noteUnresolved(params, key)
+			if isSharingOnlyKey(key) {
+				noteSharingUnresolved(params, key, value)
+			} else {
+				noteUnresolved(params, key)
+			}
 		case applyUnknown:
 			// NOT a flag this parser maps -- and that is the wrong-parser
 			// signal, when the OTHER engine's parser maps it.
@@ -587,7 +733,9 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 			// the same condition written twice.
 			noteUnresolved(params, key)
 		case applyOK:
-			// Recognised and used.
+			// Recognised and used -- over an earlier occurrence that did not
+			// read, for a key that records one.
+			clearSharingUnresolved(params, key)
 		}
 	}
 }
@@ -728,7 +876,23 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 		applyModel(value, &params.ModelPath, params)
 	case "revision":
 		applyModel(value, &params.ModelRevision, params)
+	case kvConnectorDotted:
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.KVConnector = value
 	default:
+		// `--speculative-config.<key> <value>`, one JSON key per flag: kept
+		// as sorted key=value pairs, as SGLang's --speculative-* flags are.
+		// The same configuration written as one JSON object hashes
+		// differently, the safe direction.
+		if sub, ok := strings.CutPrefix(key, speculativeDotted); ok && sub != "" {
+			if !usableWord(value) {
+				return applyUnusable
+			}
+			addSpeculativePart(params, key, value)
+			return applyOK
+		}
 		// Not a flag this parser maps. parseArgsWith decides whether
 		// that is harmless or the wrong-parser signal.
 		return applyUnknown
@@ -817,10 +981,21 @@ func applyModel(value string, field *string, params *EngineParams) {
 // applyPositionalModel reads vLLM's positional model, `vllm serve <model>`,
 // which wins over --model as it does in vLLM. A reference nothing resolves
 // marks the checkpoint unread.
+//
+// So does a flag right after `serve` with no --model: the model is then a
+// positional after the flags, where a boolean flag before it may have taken
+// it as its value (`serve --enable-expert-parallel org/m`). Read as absent it
+// would compare equal to every other checkpoint read as absent.
 func applyPositionalModel(args []string, params *EngineParams, env map[string]string) {
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] != "serve" || strings.HasPrefix(args[i+1], "-") {
+		if args[i] != "serve" {
 			continue
+		}
+		if strings.HasPrefix(args[i+1], "-") {
+			if params.ModelPath == "" {
+				params.ModelUnresolved = true
+			}
+			return
 		}
 		v, ok := resolveRefs(args[i+1], env)
 		if !ok {
@@ -894,7 +1069,14 @@ func addSpeculativePart(params *EngineParams, key, value string) {
 // The parallel layout, expert parallelism, speculative decoding, the KV
 // connector, KV offloading, prefix caching and the checkpoint are compared:
 // each changes what one replica holds or how fast it drains, so a figure
-// measured with one is not a bound for the other.
+// measured with one is not taken as the other's. SharingUnresolved is
+// compared as text: two layouts written as the same expression compare
+// equal, as they would have before the layout was compared at all.
+//
+// That makes this the equality for taking a sibling's figure AS this
+// variant's -- a borrow, or a record that becomes the estimate. It is not the
+// one for a CEILING: see IsCapacityClampCompatible, which estimateStoredCapacity
+// uses so that comparing these fields did not remove a max clamp.
 //
 // EnforceEager is deliberately NOT compared: no CUDA graphs changes the
 // inter-token latency, and so the ITL line, but it does not change how much
@@ -941,7 +1123,37 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.KVOffloadingBackend == other.KVOffloadingBackend &&
 		p.PrefixCachingDisabled == other.PrefixCachingDisabled &&
 		p.ModelPath == other.ModelPath &&
-		p.ModelRevision == other.ModelRevision
+		p.ModelRevision == other.ModelRevision &&
+		slices.Equal(p.SharingUnresolved, other.SharingUnresolved)
+}
+
+// IsCapacityClampCompatible is the looser equality the zero-replica estimate
+// takes a sibling's live capacity under as a MAX clamp: the twelve fields
+// IsCapacityCompatible compared before the layout, speculative decoding, the
+// KV connector, offloading, prefix caching and the checkpoint were added to it.
+//
+// A clamp only lowers an estimate, so refusing one raises capacity and orders
+// fewer replicas. Tightening the clamp's equality with the borrow's took the
+// ceiling away from a parked variant whose live sibling differs only in, say,
+// how its checkpoint path is spelled, or prefix caching -- and left it on the
+// raw derived figure. A sibling that differs in those fields is a looser
+// ceiling than an identical one, never a missing one.
+func (p *EngineParams) IsCapacityClampCompatible(other *EngineParams) bool {
+	if p == nil || other == nil {
+		return false
+	}
+	return p.Engine == other.Engine &&
+		p.GpuMemoryUtilization == other.GpuMemoryUtilization &&
+		p.BlockSize == other.BlockSize &&
+		p.KvCacheDtype == other.KvCacheDtype &&
+		p.TensorParallelSize == other.TensorParallelSize &&
+		p.NumGpuBlocksOverride == other.NumGpuBlocksOverride &&
+		p.TotalKvTokensOverride == other.TotalKvTokensOverride &&
+		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
+		p.MaxNumSeqs == other.MaxNumSeqs &&
+		p.MaxModelLen == other.MaxModelLen &&
+		p.WeightDtype == other.WeightDtype &&
+		p.Quantization == other.Quantization
 }
 
 // resolveEffectiveMaxBatchedTokens computes the per-step token budget

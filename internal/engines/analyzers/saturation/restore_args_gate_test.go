@@ -91,6 +91,7 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		r, done := second.installRestored("test-ns", "test-model", "variant-a")
 		Expect(done).To(BeTrue())
 		Expect(r.Installed).To(BeFalse())
+		Expect(r.Outcome).To(Equal(RestoredPrior))
 		Expect(r.Priors).To(Equal(1))
 
 		second.mu.Lock()
@@ -106,10 +107,129 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		Expect(capacityOf(second)).To(Equal(float64(12800)), "the prior outlived its relaxation")
 
 		clock = clock.Add(time.Minute)
-		second.EvictStaleHistory()
+		evicted := second.EvictStaleHistory()
+		Expect(evicted.K2Priors).To(Equal(1))
+		Expect(evicted.K2Borrows).To(BeZero(), "a prior is not a borrow clock")
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.priorK2).To(BeEmpty(), "the sweep kept a prior past its life")
+	})
+
+	// The prior's hold and relaxation run on the borrow clock, which starts
+	// when the bucket is first priced. Swept on when it was installed, a
+	// bucket first priced five hours after the restart lost its prior an hour
+	// and a half into the relaxation, and capacity jumped to own at once.
+	It("keeps a prior first used hours after the restart until its own relaxation ends", func() {
+		saved := learn(params(256, "vllm:v1"))
+		second := newProcess(params(64, "vllm:v1"))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+		_, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+
+		clock = clock.Add(5 * time.Hour)
+		Expect(second.EvictStaleHistory().K2Priors).To(BeZero(), "an unused prior went before the bucket retention")
+		Expect(capacityOf(second)).To(Equal(float64(4000)), "first use, five hours in: the hold starts now")
+
+		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		Expect(second.EvictStaleHistory().K2Priors).To(BeZero(), "the prior went part way through its relaxation")
+		Expect(capacityOf(second)).To(Equal(float64(8400)), "relaxing half way to own")
+
+		clock = clock.Add(BorrowedK2Relax/2 + time.Minute)
+		Expect(second.EvictStaleHistory().K2Priors).To(Equal(1), "the prior outlived its own relaxation")
+	})
+
+	It("lets a prior never used go a bucket retention after it was installed", func() {
+		saved := learn(params(256, "vllm:v1"))
+		second := newProcess(params(64, "vllm:v1"))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+		_, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+
+		clock = clock.Add(second.horizons.BucketRetention - time.Minute)
+		Expect(second.EvictStaleHistory().K2Priors).To(BeZero())
+		clock = clock.Add(2 * time.Minute)
+		Expect(second.EvictStaleHistory().K2Priors).To(Equal(1))
+	})
+
+	// A second restart inside the prior's life: the prior and its clock are
+	// exported, so the relaxation resumes where it was instead of the variant
+	// dropping to its own figure at once.
+	It("keeps a prior and its clock across a second restart", func() {
+		saved := learn(params(256, "vllm:v1"))
+		second := newProcess(params(64, "vllm:v1"))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+		_, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(capacityOf(second)).To(Equal(float64(4000)), "precondition: the prior in use")
+
+		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		Expect(capacityOf(second)).To(Equal(float64(8400)), "precondition: half way")
+		raw, err := json.Marshal(second.ExportLearnedState())
+		Expect(err).NotTo(HaveOccurred())
+		var again LearnedState
+		Expect(json.Unmarshal(raw, &again)).To(Succeed())
+		Expect(again.PriorK2).To(HaveLen(1), "the prior was not exported")
+
+		third := newProcess(params(64, "vllm:v1"))
+		third.now = func() time.Time { return clock }
+		third.RestoreLearnedState(again)
+		r, done := third.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(r.Outcome).To(Equal(RestoredWhole))
+		Expect(capacityOf(third)).To(Equal(float64(8400)), "the relaxation did not resume where it was")
+	})
+
+	It("says when the arguments changed and no prior could be kept", func() {
+		saved := learn(params(256, "vllm:v1"))
+		// The variant now runs on two GPUs per replica: its k2 keys were
+		// filed under one, and are never looked up again.
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
+			AcceleratorName: "H100", GpuCount: 2, EngineParams: params(64, "vllm:v1"),
+		})
+		second := NewSaturationAnalyzer(store)
+		second.RestoreLearnedState(saved)
+		r, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(r.Outcome).To(Equal(RestoredPrior))
+		Expect(r.Priors).To(BeZero(), "a prior was kept under a key the variant can no longer read")
+	})
+
+	It("names an incomplete read as the reason nothing was restored", func() {
+		saved := learn(params(256, "vllm:v1"))
+		unread := params(256, "vllm:v1")
+		unread.Unresolved = []string{"max_num_seqs"}
+		second := newProcess(unread)
+		second.RestoreLearnedState(saved)
+		r, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(r.Outcome).To(Equal(RestoredIncomplete))
+	})
+
+	// llm-d's wide-EP LeaderWorkerSet computes its data-parallel size at
+	// start-up. Read as an incomplete configuration, such a variant's own
+	// learned state was neither exported nor restored.
+	It("restores a variant whose parallel size is computed at start-up", func() {
+		wideEP := func() *capacity.EngineParams {
+			p := params(256, "vllm:v1")
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))"}
+			return p
+		}
+		saved := learn(wideEP())
+		second := newProcess(wideEP())
+		second.RestoreLearnedState(saved)
+		r, done := second.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(r.Outcome).To(Equal(RestoredWhole))
+		Expect(capacityOf(second)).To(Equal(float64(4000)))
+		Expect(second.engineFingerprint("test-ns", "test-model", "variant-a")).To(BeEmpty(),
+			"a layout read as text is not a key for sharing a latency line")
 	})
 
 	It("never takes a prior above what the variant would get without it", func() {

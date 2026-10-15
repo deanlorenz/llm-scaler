@@ -207,6 +207,9 @@ type Evicted struct {
 	MuWindows int
 	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
 	K2Borrows int
+	// K2Priors is a variant's own k2 from before its arguments changed, kept
+	// as a prior after a restart (priorK2).
+	K2Priors int
 	// PendingRestores is restored learned state whose variant never came back.
 	PendingRestores int
 	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
@@ -238,7 +241,7 @@ type Evicted struct {
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
-	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
+	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
@@ -591,10 +594,15 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.K2Borrows++
 		}
 	}
+	// A prior goes on its borrow clock once used, not on when it was
+	// installed: a bucket first priced hours after a restart would otherwise
+	// lose its prior part way through the relaxation, and capacity would jump
+	// to the variant's own figure in one cycle.
 	for key, p := range a.priorK2 {
-		if a.now().Sub(p.installedAt) > PriorK2Life {
+		since, used := a.k2BorrowedSince[key]
+		if priorExpired(p, since, used, a.now(), bucketRetention) {
 			delete(a.priorK2, key)
-			evicted.K2Borrows++
+			evicted.K2Priors++
 		}
 	}
 	// Restored entries for a variant that has not been analysed since the
@@ -808,9 +816,11 @@ func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName s
 	//
 	// An unread checkpoint withholds the key too, on the same reasoning: two
 	// variants serving `$MODEL` agree on an empty model whichever checkpoints
-	// they load. It withholds only sharing; the variant's own restore is
-	// gated on Complete() alone (see EngineParams.ModelUnresolved).
-	if !rec.EngineParams.Complete() || rec.EngineParams.ModelUnresolved {
+	// they load. So does a parallel size computed at start-up
+	// (SharingUnresolved): two groups written as the same expression agree on
+	// its text whatever it evaluates to. Both withhold only sharing; the
+	// variant's own restore is gated on Complete() alone.
+	if !rec.EngineParams.Complete() || rec.EngineParams.ModelUnresolved || len(rec.EngineParams.SharingUnresolved) > 0 {
 		return ""
 	}
 	return rec.EngineParams.Fingerprint()
