@@ -374,24 +374,23 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	curByRole := make(map[string]int, len(roles))
 	demByRole := make(map[string]int, len(roles))
 	floorByRole := make(map[string]int, len(roles))
-	// A role the composite holds both ways keeps what it has, and the others
-	// share what is left: its demand is a figure the policy does not size on.
-	budget := targetGPUs
-	var split, pinned []string
+	// A role the composite holds both ways freezes the model here, as the
+	// share optimizer freezes it: its demand is a figure the policy does not
+	// size on, and shrinking or growing the other roles around it strands one
+	// role's output. Taking its GPUs out of the budget instead put the whole
+	// cut of a contended model on decode.
+	pinned := false
 	for _, role := range roles {
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
 		if h := satNamed.Holds[role]; h.NoScaleUp && h.NoScaleDown {
-			budget -= curByRole[role]
-			pinned = append(pinned, role)
-		} else {
-			split = append(split, role)
+			pinned = true
 		}
 	}
-	tgtByRole := distributeGPUsByWeight(max(budget, 0), split, demByRole, curByRole, floorByRole)
-	for _, role := range pinned {
-		tgtByRole[role] = curByRole[role]
+	tgtByRole := curByRole
+	if !pinned {
+		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
 	}
 
 	limited := make(gpuLimitTracker)

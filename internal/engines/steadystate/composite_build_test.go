@@ -119,7 +119,9 @@ func TestBuildCompositeKeepsSaturationPRCExactly(t *testing.T) {
 		}
 		sat := liveEntry(domain.SaturationAnalyzerName, d, p)
 		named := []allocation.NamedAnalyzerResult{sat}
-		for _, eligible := range [][]allocation.NamedAnalyzerResult{named, nil} {
+		// An analyzer needing the same is a tie, priced in saturation's frame.
+		tie := []allocation.NamedAnalyzerResult{sat, liveEntry("throughput", d, p)}
+		for _, eligible := range [][]allocation.NamedAnalyzerResult{named, nil, tie} {
 			composite := buildComposite(context.Background(), named, eligible, 0.85, 0.7)
 			require.Equal(t, p, composite.Result.VariantCapacities[0].PerReplicaCapacity,
 				"demand %v, prc %v, path %s", d, p, composite.Result.VariantCapacities[0].Reason)

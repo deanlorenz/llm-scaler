@@ -70,15 +70,17 @@ func TestRescaleKeepsAHeldRole(t *testing.T) {
 	assert.Equal(t, 4, rescaleTargets(pdRescaleRequest(down), 8, 0)["p"])
 }
 
-// TestRescaleSplitsWhatAHeldRoleLeaves: a role held both ways keeps its GPUs
-// and the others share the rest of the model's target. Split as if it would
-// shrink to its demand, decode was filled toward 7 of a target of 8 while
-// prefill kept its 4.
-func TestRescaleSplitsWhatAHeldRoleLeaves(t *testing.T) {
+// TestRescaleFreezesAModelWithAPinnedRole: a role held both ways freezes the
+// model's rescale, as the share optimizer freezes it. Split around it, decode
+// was filled toward 7 of a target of 8 while prefill kept its 4, and a target
+// below prefill's 4 cut decode to its floor.
+func TestRescaleFreezesAModelWithAPinnedRole(t *testing.T) {
 	both := map[string]RoleHold{domain.RolePrefill: {NoScaleUp: true, NoScaleDown: true}}
-	got := rescaleTargets(pdRescaleRequest(both), 8, 8)
-	assert.Equal(t, 4, got["p"])
-	assert.Equal(t, 4, got["d"], "8 - 4 held")
+	for _, tc := range []struct{ target, free int }{{8, 8}, {3, 0}, {16, 8}} {
+		got := rescaleTargets(pdRescaleRequest(both), tc.target, tc.free)
+		assert.Equal(t, 4, got["p"], "target %d", tc.target)
+		assert.Equal(t, 4, got["d"], "target %d", tc.target)
+	}
 }
 
 // TestRescaleDoesNotFillAHeldRole: a role held against growth is not filled,
