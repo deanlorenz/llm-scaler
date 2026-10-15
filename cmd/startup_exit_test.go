@@ -3,33 +3,83 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 )
 
+const testStep = "CRITICAL: Failed to connect to Prometheus"
+
 // A SIGTERM during a startup step cancels the step. That must exit 0 with an
-// info line, not report the step as failed and exit 1.
-func TestStartupExitCodeOnShutdown(t *testing.T) {
-	var lines []string
-	log := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
-	stepErr := errors.New("context canceled")
-
-	ctx, cancel := context.WithCancel(context.Background())
+// info line, not report the step as failed and exit 1. Anything else -- a real
+// failure, with or without a shutdown under way -- exits 1 with the step's
+// error.
+func TestStartupExitCode(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if code := startupExitCode(ctx, log, stepErr, "CRITICAL: Failed to connect to Prometheus"); code != 0 {
-		t.Errorf("exit code after shutdown = %d, want 0", code)
-	}
-	if len(lines) != 1 || !strings.Contains(lines[0], "Shutdown requested during startup") {
-		t.Errorf("log after shutdown = %q, want one shutdown info line", lines)
-	}
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancelExpired()
 
-	lines = nil
-	if code := startupExitCode(context.Background(), log, errors.New("connection refused"), "CRITICAL: Failed to connect to Prometheus"); code != 1 {
-		t.Errorf("exit code on a real failure = %d, want 1", code)
+	cases := []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		wantCode int
+	}{
+		{
+			name:     "shutdown cancels the step",
+			ctx:      cancelled,
+			err:      fmt.Errorf("listing namespaces: %w", context.Canceled),
+			wantCode: 0,
+		},
+		{
+			name:     "the context's deadline ends the step",
+			ctx:      expired,
+			err:      fmt.Errorf("query: %w", context.DeadlineExceeded),
+			wantCode: 0,
+		},
+		{
+			name:     "real failure, no shutdown",
+			ctx:      context.Background(),
+			err:      errors.New("connection refused"),
+			wantCode: 1,
+		},
+		{
+			// The step failed for its own reason; that the signal arrived at
+			// the same moment does not make it a clean shutdown.
+			name:     "real failure while shutting down",
+			ctx:      cancelled,
+			err:      errors.New("namespaces is forbidden"),
+			wantCode: 1,
+		},
+		{
+			// A cancellation that is not this context's: some inner context
+			// was cancelled while the signal context is still live.
+			name:     "inner cancellation, no shutdown",
+			ctx:      context.Background(),
+			err:      fmt.Errorf("query: %w", context.Canceled),
+			wantCode: 1,
+		},
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], "CRITICAL: Failed to connect to Prometheus") {
-		t.Errorf("log on a real failure = %q, want the step's error", lines)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lines []string
+			log := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
+			if code := startupExitCode(tc.ctx, log, tc.err, testStep); code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if len(lines) != 1 {
+				t.Fatalf("log = %q, want one line", lines)
+			}
+			if shutdown := strings.Contains(lines[0], "Shutdown requested during startup"); shutdown != (tc.wantCode == 0) {
+				t.Errorf("log = %q: shutdown line = %v, want %v", lines[0], shutdown, tc.wantCode == 0)
+			}
+			if !strings.Contains(lines[0], testStep) {
+				t.Errorf("log = %q, want the step named", lines[0])
+			}
+		})
 	}
 }
