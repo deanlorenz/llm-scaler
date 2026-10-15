@@ -3815,7 +3815,10 @@ render_default_scaledobject() {
     local auth_block="" auth
     auth="$(so_trigger_auth "$scaler_addr")"
     if [ -n "$auth" ]; then
-        auth_block=$'\n      authenticationRef:\n        name: '"$(printf '%s' "$auth" | jq -r .name)"$'\n        kind: ClusterTriggerAuthentication'
+        auth_block="
+      authenticationRef:
+        name: $(printf '%s' "$auth" | jq -r .name)
+        kind: ClusterTriggerAuthentication"
     fi
 
     # The fallback block, or nothing: WVA_SO_FALLBACK=false, a floor of 0, or a
