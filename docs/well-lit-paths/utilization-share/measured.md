@@ -19,8 +19,8 @@ The tables below are that report's, unedited, except where a row says it came
 from the controller log. Five later runs, on a scenario with different burst
 shapes, follow in
 [their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
-they found failures the first scenario could not show. A run with both models
-[P/D-disaggregated](#pd-two-disaggregated-models-under-one-quota) closes the
+they found failures the first scenario could not show. Three runs with both models
+[P/D-disaggregated](#pd-two-disaggregated-models-under-one-quota) close the
 page. Every run used 1 GPU per replica.
 
 ## The setup
@@ -62,6 +62,12 @@ the donor's scale-down window. Llama started growing about **5.5 minutes later**
 than under `today`.
 
 ## Time to first token
+
+**How it is measured.** Every time to first token on this page is measured at
+the client: by the load generator, on streamed responses, sent through the
+gateway. So it includes router queueing, the KV transfer on P/D, and the
+engine. The load generator runs in the cluster, so it does not include the
+network between a user and the cluster.
 
 ![p95 (bar) and p50 (tick) TTFT per rise window, per arm](figures/ttft-rises.svg)
 
@@ -473,10 +479,18 @@ whether the cluster scenario's second burst recovers.
 ## P/D: two disaggregated models under one quota
 
 The same three arms ran on two P/D-disaggregated models, each with its own
-prefill and decode Deployment, so **four roles** competed for one quota. There
-was one run of each arm on H200 nodes, from 2026-10-13 to 2026-10-14. The
-controller was deployed by digest (`sha256:13c196c6…`). The scenario is
-`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`.
+prefill and decode Deployment, so **four roles** competed for one quota. It
+ran three times. The second run (2026-10-14 to 2026-10-15) and the third
+(2026-10-15) used the same settings, and they are the result below, side by
+side. Both sent Llama 15 000-token prompts and let the router queue a request
+for 60 s. The [first run](#the-first-pd-run-20-000-token-prompts-30-s-router-ttl)
+sent 20 000-token prompts and dropped requests after 30 s; it is kept below.
+All three runs used the same controller, deployed by digest
+(`sha256:13c196c6…`), and the same scenario file,
+`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`, with the
+differences above. One more attempt, between the second and third runs, was
+thrown away: in its `today` arm, other workloads on the cluster preempted 8 of
+the engine Pods, so its numbers measured the cluster, not the scaling manager.
 
 | | |
 | --- | --- |
@@ -484,11 +498,105 @@ controller was deployed by digest (`sha256:13c196c6…`). The scenario is
 | engine | vLLM v0.31.0 (see below for why not v0.26.0) |
 | quota | `NVIDIA-H200: 10`, one namespace quota for all four roles |
 | bounds | each role 1–4 replicas, so the four roles together could want 16 |
-| load | inference-perf, Poisson open-loop, synthetic prompts. A: 20 000 in / 250 out (prompt-heavy). B: 1000 in / 6000 out (output-heavy) |
+| load | inference-perf, Poisson open-loop, synthetic prompts. A: 15 000 in / 250 out (prompt-heavy; set with `INPUT_TOKENS=15000`, the runbook uses 20 000). B: 1000 in / 6000 out (output-heavy) |
 | schedule | 0.25 rps each at rest. B bursts at 1 rps from 120 s to 1320 s; A bursts at 4 rps from 1620 s to 2820 s. 6810 requests per arm |
-| router | EPP v0.11.0, flow control on, `defaultRequestTTL: 30s` (see the caveat below) |
+| router | EPP v0.11.0, flow control on, `defaultRequestTTL: 60s` |
+| engine CPU | 4 CPU requested per Pod, no CPU limit |
+| time to first token | measured at the client: the load generator, on streamed responses, through the gateway |
+| guards | each arm was checked for outside disruption: no engine preempted, nothing outside the benchmark scaled a role down, and no role at 0 ready Pods for over 120 s. All three arms of both runs passed |
 
 ### Time to first token, per rise (ms)
+
+Each rise is the first 240 s of a burst: 960 Llama requests, 240 Qwen
+requests. Each cell is second run / third run.
+
+| model | arm | failed | p50 | p95 | max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Llama (A) | today | 116 / 123 | 55 427 / 53 060 | 95 551 / 99 850 | 106 427 / 109 246 |
+| Llama (A) | shadow | 29 / 9 | 46 073 / 47 333 | 71 966 / 68 241 | 79 013 / 75 327 |
+| Llama (A) | share | 0 / 0 | 1 257 / 1 043 | **6 013 / 3 530** | 8 346 / 6 415 |
+| Qwen (B) | today | 0 / 0 | 13 786 / 34 592 | 51 164 / 73 252 | 60 330 / 90 299 |
+| Qwen (B) | shadow | 0 / 0 | 132 / 6 293 | 46 893 / 50 950 | 61 474 / 56 544 |
+| Qwen (B) | share | 0 / 0 | 79 / 80 | **90 / 93** | 131 / 3 816 |
+
+Whole run, p95 (today / shadow / share): Llama 62 508 / 54 456 / 2 441 ms in
+the second run and 62 779 / 55 118 / 2 079 ms in the third; Qwen 21 716 /
+14 041 / 87 ms and 47 724 / 20 622 / 88 ms.
+
+### When each model started growing
+
+From the fleet sampler (one sample about every 5 s), in seconds after the load
+generator started the burst. Each cell is second run / third run.
+
+| model | arm | at the burst (prefill + decode) | asked for more | first new replica ready | most replicas ready |
+| --- | --- | --- | ---: | ---: | --- |
+| Llama (A) | today | 1 + 1 | +31 / +48 | +118 / +106 | 6 at +357 / 6 at +324 |
+| Llama (A) | shadow | 1 + 1 | +37 / +28 | +93 / +86 | 6 at +126 / 7 at +334 |
+| Llama (A) | share | **2 + 2** | +57 / +44 | +109 / +97 | 7 at +271 / 7 at +247 |
+| Qwen (B) | today | 1 + 1 | +50 / +62 | +101 / +113 | 5 at +161 / 5 at +173 |
+| Qwen (B) | shadow | 1 + 1 | +59 / +50 | +107 / +109 | 5 at +176 / 5 at +164 |
+| Qwen (B) | share | **1 + 2** | +42 / +58 | +97 / +109 | 6 at +952 / 6 at +1027 |
+
+### Accelerators
+
+| arm | GPU-seconds | peak GPUs |
+| --- | ---: | ---: |
+| today | 18 961 / 18 336 | 10 / 8 |
+| shadow | 18 879 / 19 541 | 10 / 9 |
+| share | 26 332 (+38.9%) / 26 242 (+43.1%) | 10 / 10 |
+
+### What the optimizer did
+
+In the share arm of each run, sharing finished 10 moves, cancelled one and
+aborted none. In both runs a model was kept from growing for 2880
+model-seconds, nearly all because its floor was pinned (`floor-pinned`: 2730 s
+and 2775 s); the rest waited while a GPU was being released
+(`awaiting-release`: 150 s and 105 s). The shadow arm planned moves for 2790 s
+in each run and made none.
+
+### What this says, and how far it goes
+
+- **Sharing served both bursts, in both runs.** Qwen's output-heavy burst:
+  p95 90 ms and 93 ms, against 51 s and 73 s today. Llama's prompt-heavy
+  burst: p95 6.0 s and 3.5 s, against 96 s and 100 s today, with no failed
+  requests against 116 and 123.
+- **Where it loses is GPUs.** Sharing cost 39% more GPU-seconds in the second
+  run and 43% in the third. It made bursts faster and cost GPUs; it did not
+  save any.
+- **Llama was not held back at the swap.** In both runs it began its burst on
+  2 prefill and 2 decode replicas instead of 1 and 1, and asked for more
+  within a minute, as under today's optimizer. Its first new replica was ready
+  about as soon as today's (97–109 s against 106–118 s). The swap delay seen
+  in the first scenario on this page did not appear here.
+- **The failures are requests the router dropped.** Every failed request was a
+  429 (the report files it as "Rate Limit"); the load generator's per-request
+  records give the router's reason, `request evicted from queue: request TTL
+  expired`, after 60 s in its queue. A dropped request is missing from the
+  percentiles, so today's and shadow's Llama p95 are lower bounds.
+- **The two runs agree on the direction and on the cost.** Share was far
+  ahead on both rises in both runs, served every request, and cost 39–43%
+  more GPU-seconds.
+- **They disagree on the arms that should match.** Shadow moves nothing, so it
+  should match today. Its Llama p95 was 24 s lower in the second run and 32 s
+  lower in the third. On Qwen's rise, today's median went from 14 s to 35 s
+  between runs, and shadow's from 0.13 s to 6.3 s. Share's own gap from today
+  is far larger than this spread, but two runs are two samples, not a
+  distribution.
+- **The quota did not bind every arm in the third run.** In the second run
+  every arm peaked at 10 of 10 GPUs. In the third, today peaked at 8 and
+  shadow at 9, so the quota was not what slowed their bursts there.
+- **Share's Qwen tail had one outlier in the third run**: a maximum of 3.8 s
+  against 131 ms, while its p95 stayed at 93 ms.
+- **Prompt length and router TTL both changed from the first run.** With
+  20 000-token prompts, Llama's burst was overloaded in every arm, share
+  included (p95 59 s). So the first run cannot be compared with the other two
+  on prompt length alone (and its CPU setting is not recorded).
+
+### The first P/D run (20 000-token prompts, 30 s router TTL)
+
+Run on 2026-10-13 to 2026-10-14, with the setup above except:
+Llama's prompts were 20 000 tokens, and the router dropped a request after
+30 s (`defaultRequestTTL: 30s`). Its engine CPU setting was not recorded.
 
 | model | arm | served | failed | p50 | p95 | max |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -501,41 +609,22 @@ controller was deployed by digest (`sha256:13c196c6…`). The scenario is
 
 Whole run, Qwen's p95 was 10 986 / 15 451 / 86 ms (today / shadow / share).
 
-### Accelerators
-
 | arm | GPU-seconds | peak GPUs |
 | --- | ---: | ---: |
 | today | 18 913 | 9 |
 | shadow | 19 676 | 10 |
 | share | 25 791 (+36.4%) | 10 |
 
-### What the optimizer did
-
 In the share arm, 8 transfers completed and none aborted. Qwen's decode lent
-GPUs to both of Llama's roles, prefill and decode. The share arm held models back for 3045 model-seconds, almost
-all of it `floor-pinned` (2850 s), plus 180 s `awaiting-release` and 15 s
-`fast-swing-capped`. The shadow arm planned moves for 2790 s and made none.
+GPUs to both of Llama's roles, prefill and decode. Models were held back for
+3045 model-seconds, almost all `floor-pinned` (2850 s), plus 180 s
+`awaiting-release` and 15 s `fast-swing-capped`.
 
-### What this says, and how far it goes
-
-- **Qwen's output-heavy burst was served at once with sharing:** p95 95 ms
-  against 42 s today, with no failures.
-- **Llama's prompt-heavy burst was overloaded in every arm.** Sharing lowered
-  its p95 by 19% (72.8 s to 59.2 s), but 20 000-token prompts at 4 rps are more
-  than the quota can prefill.
-- **Sharing cost 36% more GPU-seconds.** The quota was binding (peak 10 of 10),
-  and the extra GPU-seconds are GPUs the quota allowed and today's
-  optimizer did not use.
-- **The failures are censored latency, not errors.** Every failed request was
-  a 429 `request evicted from queue: request TTL expired`: the router shed
-  anything queued past 30 s. A shed request is missing from the percentiles, so
-  Llama's p95 is a floor in every arm, and an arm that sheds more reads faster.
-  The aggregated runs above used an EPP that never expires a queued request, so
-  they had no such failures. The scenario now sets `defaultRequestTTL: 60s`;
-  this run predates that change.
-- This is one run of each arm, with one rise per model, and no repetition. A
-  difference the size of the shadow arm's spread from today (9 s on Qwen) is
-  not a result.
+- Qwen's burst was served at once with sharing: p95 95 ms against 42 s.
+- Llama's burst was overloaded in every arm. Sharing lowered its p95 by 19%
+  (72.8 s to 59.2 s).
+- The router dropped every request queued past 30 s, so Llama lost 177 to 257
+  requests per arm, and an arm that dropped more read faster.
 
 ### Why vLLM v0.31.0
 
@@ -547,8 +636,8 @@ optimizer. The upstream reports match
 ([vllm-project/vllm#59870](https://github.com/vllm-project/vllm/issues/59870),
 [#59971](https://github.com/vllm-project/vllm/issues/59971)). On v0.31.0 a
 single-pair test ran clean, including 20 000-token prompts while the
-autoscaler took Llama to 4 prefill and 2 decode replicas, and the run above
-logged no NIXL error on any engine. The scenario pins `v0.31.0`.
+autoscaler took Llama to 4 prefill and 2 decode replicas, and the first run
+above logged no NIXL error on any engine. The scenario pins `v0.31.0`.
 
 The benchmark's model probe could not see that failure. It sent a one-word
 prompt, which fills no KV block, so prefill handed decode nothing and decode
