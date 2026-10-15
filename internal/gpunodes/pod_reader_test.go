@@ -169,6 +169,47 @@ func TestForbiddenPodListIsReported(t *testing.T) {
 	}
 }
 
+// TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure: only a physical
+// limiter reads the usage walk. On a tenant install bounded by a quota the
+// undercount a Forbidden list causes bounds nothing, and reporting it as a
+// failure (gauge 1, error log) sends the operator to fix something that does
+// not matter.
+func TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	if err := metrics.InitMetrics(registry); err != nil {
+		t.Fatal(err)
+	}
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	node := gpuNode("gpu-1")
+	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
+	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node, gpuPod("mine-0", "mine", 2)).Build()
+	reader := fake.NewClientBuilder().WithScheme(s).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", nil)
+		}}).Build()
+
+	physical := false
+	d := NewK8sWithGpuOperator(cached).WithPodReader(reader).
+		WithPhysicalLimiterCheck(func() bool { return physical })
+	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 0 {
+		t.Errorf("%s = %v with no physical limiter in force, want 0", constants.WVAPodAccessDenied, got)
+	}
+
+	physical = true
+	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 1 {
+		t.Errorf("%s = %v once a physical limiter is in force, want 1", constants.WVAPodAccessDenied, got)
+	}
+}
+
 // TestPodListIsServedFromTheWatchCache: the uncached list runs every refresh
 // and lists every Pod in the cluster. It must ask for resourceVersion "0", so
 // the API server answers from its watch cache instead of etcd, and it must not

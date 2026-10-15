@@ -317,7 +317,8 @@ const (
 	WVANodeAccessDenied = "wva_node_access_denied"
 
 	// WVAPodAccessDenied is 1 while the GPU usage walk of a namespace-scoped
-	// controller may not list Pods cluster-wide, and 0 when it can. Absent on a
+	// controller may not list Pods cluster-wide and a physical limiter reads
+	// that walk, and 0 otherwise. Absent on a
 	// cluster-scoped controller, whose cache already holds every Pod. While it is
 	// 1 the usage walk counts only the controller's own namespace, so GPUs other
 	// namespaces hold on shared nodes read as free.

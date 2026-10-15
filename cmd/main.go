@@ -595,12 +595,22 @@ func main() {
 		// The cache holds this namespace's Pods only, and a usage walk through it
 		// counts other tenants' GPUs on the same nodes as free. Read Pods uncached;
 		// when that is Forbidden the walk falls back to the cache and says so
-		// (wva_pod_access_denied).
-		usageDiscovery = usageDiscovery.WithPodReader(mgr.GetAPIReader())
+		// (wva_pod_access_denied) while a physical limiter reads the result. The
+		// limiter list is live, so that is asked per list, not decided here.
+		usageDiscovery = usageDiscovery.WithPodReader(mgr.GetAPIReader()).
+			WithPhysicalLimiterCheck(func() bool { return allocation.PhysicalUsageConfigured(cfg) })
 	}
 	usageRefresher := &gpuusage.Refresher{
 		Discovery: usageDiscovery,
-		Periodic:  func() bool { return allocation.NodeUsageWanted(cfg, watchNS != "") },
+		Periodic: func() bool {
+			if watchNS != "" && !allocation.PhysicalUsageConfigured(cfg) {
+				// The walk stops when the physical limiter goes, and nothing
+				// else would clear a denial it reported: without the limiter
+				// the undercount bounds nothing.
+				metrics.SetPodAccessDenied(false)
+			}
+			return allocation.NodeUsageWanted(cfg, watchNS != "")
+		},
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
 		setupLog.Error(err, "unable to add the GPU usage refresher to the manager")

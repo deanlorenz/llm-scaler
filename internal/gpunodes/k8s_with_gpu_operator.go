@@ -28,10 +28,21 @@ type K8sWithGpuOperator struct {
 	// podReader lists the Pods the usage walk counts; nil reads through Client.
 	// See WithPodReader.
 	podReader client.Reader
-	// podsDenied remembers whether the last pod list was Forbidden, so the
-	// error is logged when it starts rather than on every refresh.
-	podsDenied atomic.Bool
+	// physicalLimiterInForce reports whether a physical GPU limiter reads the
+	// usage walk right now; nil means always. See WithPhysicalLimiterCheck.
+	physicalLimiterInForce func() bool
+	// podsDenied remembers how the last Forbidden pod list was reported
+	// (podsDeniedNone, podsDeniedInfo or podsDeniedError), so it is logged when
+	// it starts or changes rather than on every refresh.
+	podsDenied atomic.Int32
 }
+
+// How a Forbidden cluster-wide pod list was last reported.
+const (
+	podsDeniedNone int32 = iota
+	podsDeniedInfo
+	podsDeniedError
+)
 
 // NewK8sWithGpuOperator creates a new K8sWithGpuOperator instance.
 func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
@@ -50,10 +61,23 @@ func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
 // scale-up is admitted onto a full node. Reading uncached, the walk sees every
 // Pod on the GPU nodes when RBAC lets it list Pods cluster-wide. The list is
 // served from the API server's watch cache, not etcd; see listAllPods. When it does
-// not, the walk falls back to the cache and reports the undercount
-// (wva_pod_access_denied and an error log); see listPods.
+// not, the walk falls back to the cache and, while a physical limiter reads it,
+// reports the undercount (wva_pod_access_denied and an error log); see listPods.
 func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator {
 	d.podReader = r
+	return d
+}
+
+// WithPhysicalLimiterCheck sets how listPods learns whether a physical GPU
+// limiter is in force, and returns d. The limiter list is live, so inForce is
+// asked on every Forbidden list.
+//
+// Only a physical limiter reads the per-node usage the walk produces. With a
+// quota limiter, or none, the undercount a Forbidden list causes bounds
+// nothing, so it is not reported as a failure: no error log, and
+// wva_pod_access_denied stays 0.
+func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
+	d.physicalLimiterInForce = inForce
 	return d
 }
 
@@ -332,9 +356,10 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 // when a pod reader is set, through it (listAllPods).
 //
 // A Forbidden list through the pod reader falls back to Client, which counts
-// the Pods this controller's cache holds and no others, and says so: the
-// wva_pod_access_denied gauge reads 1 and an error is logged when the denial
-// starts. The fallback is a deliberate choice over publishing nothing. An
+// the Pods this controller's cache holds and no others, and says so. While a
+// physical limiter is in force, the wva_pod_access_denied gauge reads 1 and an
+// error is logged when the denial starts. Otherwise the undercount bounds
+// nothing: the gauge reads 0 and the denial is logged once at info. The fallback is a deliberate choice over publishing nothing. An
 // absent usage view sends the optimizer to its unlimited posture
 // (GPUUsageViews.MissingBasis), which bounds less than a known-low count does;
 // a reported undercount keeps the cap at the nodes' capacity and is visible.
@@ -343,26 +368,45 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 		pods, err := listAllPods(ctx, d.podReader)
 		if err == nil {
 			metrics.SetPodAccessDenied(false)
-			d.podsDenied.Store(false)
+			d.podsDenied.Store(podsDeniedNone)
 			return pods, nil
 		}
 		if !apierrors.IsForbidden(err) {
 			return nil, fmt.Errorf("failed to list pods cluster-wide: %w", err)
 		}
-		metrics.SetPodAccessDenied(true)
-		if !d.podsDenied.Swap(true) {
-			log.FromContext(ctx).Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
-				"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
-				"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
-				"or bound with a quota limiter instead.",
-				"metric", constants.WVAPodAccessDenied)
-		}
+		d.reportPodsDenied(ctx, err)
 	}
 	var list corev1.PodList
 	if err := d.Client.List(ctx, &list); err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
 	return list.Items, nil
+}
+
+// reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
+// while a physical limiter is in force, and as information otherwise.
+func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
+	physical := d.physicalLimiterInForce == nil || d.physicalLimiterInForce()
+	metrics.SetPodAccessDenied(physical)
+	level := podsDeniedInfo
+	if physical {
+		level = podsDeniedError
+	}
+	if d.podsDenied.Swap(level) == level {
+		return
+	}
+	logger := log.FromContext(ctx)
+	if physical {
+		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
+			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
+			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
+			"or bound with a quota limiter instead.",
+			"metric", constants.WVAPodAccessDenied)
+		return
+	}
+	logger.Info("Cannot list Pods cluster-wide, so GPU usage counts only this controller's own namespace. "+
+		"No physical GPU limiter is in force, so this bounds nothing. A physical limiter would need list "+
+		"on pods cluster-wide.", "error", err.Error())
 }
 
 // listAllPods lists every Pod through r in one request, with resourceVersion

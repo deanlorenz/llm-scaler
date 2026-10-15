@@ -790,7 +790,7 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 
 ### `wva_pod_access_denied`
 - **Type**: Gauge
-- **Description**: `1` while a namespace-scoped controller may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` when it can. Absent on a cluster-scoped controller.
+- **Description**: `1` while a namespace-scoped controller with a `gpu-inventory` limiter in force may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` otherwise. Under a quota limiter, or none, nothing reads that count, so it stays `0`. Absent on a cluster-scoped controller.
 - **Labels**: optional `controller_instance`
 - **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
 
