@@ -475,7 +475,12 @@ case "\$1 \$2" in
   "get nodes")   if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
                  [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
                  if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
-  "get pods")    want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
+  "get pods")    want -n check-ns; want -l "$LBL"
+                 [ -z "\${STUB_PODS_ERROR:-}" ] || { echo "\$STUB_PODS_ERROR" >&2; exit 1; }
+                 cat "\${STUB_PODS_FILE:-$T/pods.json}" ;;
+  "get pod")     want -n check-ns
+                 case "\$ARGV" in *"VLLM_CACHE_ROOT"*) cat "$T/engine-root/\$5" 2>/dev/null; exit 0 ;; *) echo "stub kubectl: unexpected pod read:\$ARGV" >&2; exit 2 ;; esac ;;
+  "exec -n")     want -n check-ns; exec bash "$T/exec-stub.sh" "\$@" ;;
   "get daemonset")
       want -n check-ns
       case "\$ARGV" in *" engine-cache "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
@@ -505,7 +510,11 @@ case "\$1 \$2" in
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
   "get events")  want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
-  "logs -n")     want -n check-ns; printf '%s\n' "\${STUB_LOG:-}" ;;
+  "logs -n")     want -n check-ns
+                 case "\$ARGV" in
+                   *" -c vllm "*) [ -z "\${STUB_ENGINE_LOG_ERROR:-}" ] || { echo "\$STUB_ENGINE_LOG_ERROR" >&2; exit 1; }; cat "$T/engine-logs/\$4" ;;
+                   *) printf '%s\n' "\${STUB_LOG:-}" ;;
+                 esac ;;
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
   "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
@@ -637,6 +646,502 @@ PATH="$STUB_PATH" bash deploy/enginecache.sh delete -n check-ns --dry-run > "$T/
 grep -q '^delete ' "$T/calls" && fail "delete --dry-run deleted something" || ok "delete --dry-run: prints what would go, deletes nothing ($(grep -c 'would run' "$T/dry.out") lines)"
 
 # ---------------------------------------------------------------------------
+# 3c. verify and keys: the GPU-free cache check, against the same stub. The
+# exec into a preparer runs the real verify script locally, on a fake node
+# directory per pod ($T/ecv/<pod>/vllm), so what is asserted is what runs.
+# ---------------------------------------------------------------------------
+cat > "$T/exec-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+# kubectl exec -n NS POD -c prepare -- /bin/sh -c WRAP sh SCRIPT ROOT KEY...
+pod="$4"
+case " ${STUB_EXEC_FORBIDDEN:-} " in *" $pod "*)
+    echo "Error from server (Forbidden): pods \"$pod\" is forbidden: User \"tenant\" cannot create resource \"pods/exec\" in API group \"\" in the namespace \"check-ns\"" >&2; exit 1 ;; esac
+case " ${STUB_EXEC_FAIL:-} " in *" $pod "*)
+    echo "error: unable to upgrade connection: container not found (\"prepare\")" >&2; exit 1 ;; esac
+# STUB_EXEC_EXIT="POD:CODE ...": the command in POD ended with CODE, as a
+# timeout in the preparer ends it (kubectl exec passes the code through)
+for x in ${STUB_EXEC_EXIT:-}; do case "$x" in "$pod:"*)
+    echo "command terminated with exit code ${x#*:}" >&2; exit "${x#*:}" ;; esac; done
+[ "$5 $6 $7 $8 $9" = "-c prepare -- /bin/sh -c" ] || { echo "stub kubectl: exec is not sh -c in the prepare container: $*" >&2; exit 2; }
+[ "${11}" = sh ] && [ "${13}" = /engine-cache/vllm ] || { echo "stub kubectl: exec root is not /engine-cache/vllm: ${13}" >&2; exit 2; }
+wrap="${10}"; script="${12}"
+shift 13
+# STUB_EXEC_PATH: the PATH inside the preparer (an image without find)
+sh_bin="$(command -v "$STUB_SH")"
+PATH="${STUB_EXEC_PATH:-$PATH}" exec "$sh_bin" -c "$wrap" sh "$script" "$STUB_EC_ROOT/$pod/vllm" "$@"
+EOF
+ECV_SH=sh; command -v dash >/dev/null 2>&1 && ECV_SH=dash
+mkdir -p "$T/engine-logs" "$T/engine-root"
+K1=torch_compile_cache/3f2a9c1d0e
+K2=torch_compile_cache/77b0e1aa42
+ecv_reset() {  # every node holds both keys, two ranks each
+    rm -rf "$T/ecv"
+    local p k r
+    for p in ec-a ec-b ec-c ec-d; do for k in "$K1" "$K2"; do for r in rank_0_0 rank_1_0; do
+        mkdir -p "$T/ecv/$p/vllm/$k/$r/backbone"; echo artefact > "$T/ecv/$p/vllm/$k/$r/backbone/model.py"
+    done; done; done
+    chmod -R u=rwX,go=rX "$T/ecv"  # the modes a preparer leaves, whatever the umask here
+}
+ecv_pod() {  # ecv_pod NAME NODE READY
+    printf '{"metadata":{"name":"%s","labels":{"wva.llmd.ai/engine-cache":"engine-cache"}},"spec":{"nodeName":"%s"},"status":{"phase":"Running","containerStatuses":[{"ready":%s,"state":{"running":{}}}]}}' "$1" "$2" "$3"
+}
+ecv_node() { printf '{"metadata":{"name":"%s","labels":{"nvidia.com/gpu.product":"H200"}}}' "$1"; }
+printf '{"items":[%s,%s,%s]}' "$(ecv_node n-a)" "$(ecv_node n-b)" "$(ecv_node n-c)" > "$T/ecv-nodes.json"
+printf '{"items":[%s,%s,%s,%s]}' "$(ecv_pod ec-a n-a true)" "$(ecv_pod ec-b n-b true)" "$(ecv_pod ec-c n-c true)" \
+    "$(ecv_pod other-ds n-a true | sed 's/"engine-cache":"engine-cache"/"engine-cache":"other"/')" > "$T/ecv-pods.json"
+ecv() {  # ecv OUTFILE ARGS... -- verify against the fixture; prints the exit code
+    local out="$1"; shift
+    STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_NODES_FILE="${ECV_NODES:-$T/ecv-nodes.json}" STUB_PODS_FILE="${ECV_PODS:-$T/ecv-pods.json}" \
+        PATH="${ECV_PATH:-$STUB_PATH}" bash deploy/enginecache.sh verify -n check-ns "$@" > "$out" 2>&1
+    echo $?
+}
+ecv_row() { grep -qE "^  $2 +$3 +${4//+/\\+}( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY (a + in KEY is literal)
+# The fixture's keys are owned by the runner, and without ENGINE_CACHE_UID
+# they are judged for that owner, which the verdict names (VERIFIED for
+# root, VERIFIED for uid 1000)
+ME="$(id -u)"; OTHER=$((ME + 4242))
+if [ "$ME" = 0 ]; then VOK='VERIFIED for root: every key is on every usable node'; else VOK="VERIFIED for uid ${ME}: every key is on every usable node"; fi
+HINT='run again with ENGINE_CACHE_UID=$(kubectl exec -n check-ns <engine pod> -- id -u)'
+# every node has every key: a pass, a bare hash taken as torch_compile_cache/<hash>
+ecv_reset
+rc="$(ecv "$T/ecv-all.out" --keys "3f2a9c1d0e,$K2")"
+if [ "$rc" = 0 ] && grep -q '3 usable node(s) x 2 key(s): 6 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-all.out" \
+    && grep -q "$VOK" "$T/ecv-all.out" && ecv_row "$T/ecv-all.out" n-b present "$K1"; then
+    ok "verify: every key on every node passes (6 of 6 present; a bare hash is torch_compile_cache/<hash>)"
+else fail "verify all present: rc=$rc $(tail -3 "$T/ecv-all.out" | tr '\n' ';')"; fi
+grep -q "^exec -n check-ns ec-a -c prepare -- /bin/sh -c " "$T/calls" && ! grep -q '^exec -n check-ns other-ds' "$T/calls" \
+    && ok "verify: reads through our preparer pods only, in the prepare container" || fail "verify exec calls: $(grep '^exec' "$T/calls" | cut -c1-60 | tr '\n' ';')"
+# one node lacks a key: a fail, naming the node and the key
+ecv_reset; rm -rf "$T/ecv/ec-b/vllm/$K2"
+rc="$(ecv "$T/ecv-miss.out" --keys "$K1,$K2")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-miss.out" n-b ABSENT "$K2" && ecv_row "$T/ecv-miss.out" n-b present "$K1" && ecv_row "$T/ecv-miss.out" n-a present "$K2" \
+    && grep -q '5 present, 1 absent, 0 unreadable, 0 could not check' "$T/ecv-miss.out" && grep -q 'NOT VERIFIED' "$T/ecv-miss.out"; then
+    ok "verify: a node missing a key fails, and names the node and the key (n-b $K2)"
+else fail "verify one missing: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-miss.out" | tr '\n' ';')"; fi
+# one rank directory missing: the key with its ranks is absent, naming the
+# rank; the plain key (any rank) still passes
+ecv_reset; rm -rf "$T/ecv/ec-a/vllm/$K1/rank_1_0"
+rc="$(ecv "$T/ecv-rank.out" --keys "$K1@rank_0_0+rank_1_0")"
+if [ "$rc" != 0 ] && grep -qE "^  n-a +ABSENT +$K1@rank_0_0\+rank_1_0  \(rank directory missing or empty: rank_1_0\)" "$T/ecv-rank.out" \
+    && ecv_row "$T/ecv-rank.out" n-b present "$K1@rank_0_0+rank_1_0" && grep -q '2 present, 1 absent, 0 unreadable, 0 could not check' "$T/ecv-rank.out"; then
+    ok "verify: a key whose rank directory is missing on a node is absent there, naming the rank (n-a rank_1_0)"
+else fail "verify missing rank: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-rank.out" | tr '\n' ';')"; fi
+rc="$(ecv "$T/ecv-anyrank.out" --keys "$K1")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-anyrank.out" n-a present "$K1" && ok "verify: a plain key (no ranks) is present with any rank directory" || fail "verify plain key, one rank: rc=$rc $(grep n-a "$T/ecv-anyrank.out")"
+# a rank directory that holds no file is not that rank
+ecv_reset; rm -rf "$T/ecv/ec-c/vllm/$K2/rank_1_0"; mkdir -p "$T/ecv/ec-c/vllm/$K2/rank_1_0/backbone"
+rc="$(ecv "$T/ecv-rankempty.out" --keys "$K2@rank_0_0+rank_1_0")"
+[ "$rc" != 0 ] && grep -qE "^  n-c +ABSENT +$K2@rank_0_0\+rank_1_0  \(rank directory missing or empty: rank_1_0\(empty\)\)" "$T/ecv-rankempty.out" \
+    && ok "verify: a rank directory with no file in it is absent, naming the rank" || fail "verify empty rank: rc=$rc $(grep n-c "$T/ecv-rankempty.out")"
+# an empty key directory is not a cache
+ecv_reset; rm -rf "$T/ecv/ec-c/vllm/$K1"; mkdir -p "$T/ecv/ec-c/vllm/$K1/rank_0_0"
+rc="$(ecv "$T/ecv-empty.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-c +ABSENT +$K1  \(an empty directory\)" "$T/ecv-empty.out" && ok "verify: a key directory with no file in it is absent" || fail "verify empty dir: rc=$rc $(grep n-c "$T/ecv-empty.out")"
+# Forbidden exec: could not check, never absent
+ecv_reset
+rc="$(STUB_EXEC_FORBIDDEN=ec-c ecv "$T/ecv-forb.out" --keys "$K1,$K2")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-forb.out" n-c "COULD NOT CHECK" "$K1" && ecv_row "$T/ecv-forb.out" n-c "COULD NOT CHECK" "$K2" \
+    && ! grep -qE '^  n-c +ABSENT' "$T/ecv-forb.out" && grep -q 'exec Forbidden: reading the cache needs pods/exec' "$T/ecv-forb.out" \
+    && grep -q '4 present, 0 absent, 0 unreadable, 2 could not check' "$T/ecv-forb.out"; then
+    ok "verify: a Forbidden exec is could-not-check on that node, never absent, and names the permission"
+else fail "verify Forbidden: rc=$rc $(grep -E 'n-c|Forbidden|present,' "$T/ecv-forb.out" | tr '\n' ';')"; fi
+# an exec that fails for another reason: could not check, with the reason
+ecv_reset
+rc="$(STUB_EXEC_FAIL=ec-a ecv "$T/ecv-xfail.out" --keys "$K1")"
+[ "$rc" != 0 ] && ecv_row "$T/ecv-xfail.out" n-a "COULD NOT CHECK" "$K1" && grep -q 'exec into ec-a failed (exit 1): error: unable to upgrade connection' "$T/ecv-xfail.out" \
+    && ok "verify: a failed exec is could-not-check, with the error" || fail "verify exec failure: rc=$rc $(grep -E 'n-a|exec' "$T/ecv-xfail.out" | tr '\n' ';')"
+# a node whose preparer is not Ready, and one with no preparer at all: could not check
+ecv_reset
+printf '{"items":[%s,%s,%s]}' "$(ecv_node n-a)" "$(ecv_node n-d)" "$(ecv_node n-e)" > "$T/ecv-nodes2.json"
+printf '{"items":[%s,%s]}' "$(ecv_pod ec-a n-a true)" "$(ecv_pod ec-d n-d false)" > "$T/ecv-pods2.json"
+: > "$T/calls"
+rc="$(ECV_NODES="$T/ecv-nodes2.json" ECV_PODS="$T/ecv-pods2.json" ecv "$T/ecv-nopod.out" --keys "$K1")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-nopod.out" n-d "COULD NOT CHECK" "$K1" && ecv_row "$T/ecv-nopod.out" n-e "COULD NOT CHECK" "$K1" \
+    && grep -q 'no Ready preparer on n-d (Running (not ready))' "$T/ecv-nopod.out" && grep -q 'no Ready preparer on n-e (no pod)' "$T/ecv-nopod.out" \
+    && ecv_row "$T/ecv-nopod.out" n-a present "$K1" && ! grep -q '^exec -n check-ns ec-d' "$T/calls"; then
+    ok "verify: a node with no Ready preparer (not ready, or no pod) fails as could-not-check, and is not exec-ed into"
+else fail "verify no Ready preparer: rc=$rc $(grep -E 'n-d|n-e' "$T/ecv-nopod.out" | tr '\n' ';')"; fi
+# The modes are read for the engine's UID: the owner of the key directory
+# (the engine that wrote it), or ENGINE_CACHE_UID. vLLM v0.31.0 writes its
+# AOT files 600 under 755 key directories, all owned by the engine (measured
+# on a cluster, as root): readable by that engine, so present -- this was
+# UNREADABLE on every node when only the bits for other users were read.
+AOTK=torch_compile_cache/torch_aot_compile/5d1e0c9b8a
+ecv_aot() {  # every node holds AOTK, as vLLM writes it
+    local p
+    for p in ec-a ec-b ec-c; do
+        mkdir -p "$T/ecv/$p/vllm/$AOTK/rank_0_0" "$T/ecv/$p/vllm/$AOTK/modelinfos"
+        echo aot > "$T/ecv/$p/vllm/$AOTK/rank_0_0/model"; echo meta > "$T/ecv/$p/vllm/$AOTK/modelinfos/m.json"
+        chmod 755 "$T/ecv/$p/vllm/$AOTK" "$T/ecv/$p/vllm/$AOTK/rank_0_0" "$T/ecv/$p/vllm/$AOTK/modelinfos"
+        chmod 600 "$T/ecv/$p/vllm/$AOTK/rank_0_0/model" "$T/ecv/$p/vllm/$AOTK/modelinfos/m.json"
+    done
+}
+ecv_reset; ecv_aot
+rc="$(ecv "$T/ecv-aot600.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-aot600.out" n-a present "$AOTK@rank_0_0" && grep -q '3 usable node(s) x 1 key(s): 3 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-aot600.out" \
+    && grep -q "$VOK" "$T/ecv-aot600.out" && grep -q 'modes read for the owner of each key directory' "$T/ecv-aot600.out" \
+    && grep -qE "^  n-a +present +$AOTK@rank_0_0  \(2 files; for uid ${ME}, the key directory's owner\)" "$T/ecv-aot600.out" \
+    && ok "verify: vLLM's 600 AOT files under a 755 key directory, owned by the key's owner (uid ${ME}), are present, for that uid" || fail "verify AOT 600: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-aot600.out" | tr '\n' ';')"
+# Without ENGINE_CACHE_UID each key is judged for its owner, which is the
+# engines' UID only when they wrote it: a key owned by root (a seeded or
+# published copy: the preparer copies as root, modes kept), or by another
+# deployment's UID, passes for that owner. So the summary always warns, names
+# the UIDs it assumed, and the verdict names them; a plain VERIFIED needs
+# ENGINE_CACHE_UID.
+grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uid ${ME}), taken as the engines' UID." "$T/ecv-aot600.out" \
+    && grep -qF "$HINT" "$T/ecv-aot600.out" && ! grep -q 'different owners' "$T/ecv-aot600.out" \
+    && ok "verify: keys owned by uid ${ME}, no ENGINE_CACHE_UID: a warning naming uid ${ME} (3 of 3 node/key checks), the id -u hint, and ${VOK%%:*}" \
+    || fail "verify owner warning: $(grep -E 'WARNING|run again|VERIFIED' "$T/ecv-aot600.out" | tr '\n' ';')"
+if [ "$ME" = 0 ]; then
+    grep -q "A key owned by root (uid 0) is a seeded or published copy, or a root engine's" "$T/ecv-aot600.out" \
+        && ok "verify: root-owned keys (seeded, 755 key, 600 files), no ENGINE_CACHE_UID: the warning says what a root key is" \
+        || fail "verify root-owned warning: $(grep -E 'WARNING|root|VERIFIED' "$T/ecv-aot600.out" | tr '\n' ';')"
+    rc="$(ENGINE_CACHE_UID=1000 ecv "$T/ecv-aotseed.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$AOTK@rank_0_0  \($AOTK/(rank_0_0/model|modelinfos/m\.json): not readable by uid 1000 \(ENGINE_CACHE_UID\)\)" "$T/ecv-aotseed.out" \
+        && ! grep -q 'WARNING:' "$T/ecv-aotseed.out" \
+        && ok "verify: the same root-owned keys with ENGINE_CACHE_UID=1000 are unreadable, naming uid 1000" || fail "verify seeded, uid 1000: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-aotseed.out" | tr '\n' ';')"
+    rc="$(ENGINE_CACHE_UID=0 ecv "$T/ecv-aotroot.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED: every key is on every usable node' "$T/ecv-aotroot.out" && ! grep -q 'WARNING:' "$T/ecv-aotroot.out" \
+        && grep -qE "^  n-a +present +$AOTK@rank_0_0  \(2 files; for uid 0, ENGINE_CACHE_UID\)" "$T/ecv-aotroot.out" \
+        && ok "verify: ENGINE_CACHE_UID=0 names root: VERIFIED, no warning" || fail "verify ENGINE_CACHE_UID=0: rc=$rc $(grep -E 'n-a|WARNING|VERIFIED' "$T/ecv-aotroot.out" | tr '\n' ';')"
+    # a key owned by a non-root UID that may not be the engines' (another
+    # deployment, or a changed image user): VERIFIED for that uid, warned
+    ecv_reset; ecv_aot; for p in ec-a ec-b ec-c; do chown -R 1000:1000 "$T/ecv/$p/vllm/$AOTK"; done
+    rc="$(ecv "$T/ecv-own1000.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED for uid 1000: every key is on every usable node, readable by uid 1000' "$T/ecv-own1000.out" \
+        && grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uid 1000)" "$T/ecv-own1000.out" \
+        && grep -qF "$HINT" "$T/ecv-own1000.out" && ! grep -q 'A key owned by root' "$T/ecv-own1000.out" && ! grep -q 'different owners' "$T/ecv-own1000.out" \
+        && ok "verify: keys owned by uid 1000, no ENGINE_CACHE_UID: VERIFIED for uid 1000, a warning and the id -u hint" \
+        || fail "verify owner 1000: rc=$rc $(grep -E 'WARNING|run again|VERIFIED' "$T/ecv-own1000.out" | tr '\n' ';')"
+    rc="$(ENGINE_CACHE_UID=1000 ecv "$T/ecv-own1000u.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-own1000u.out" && ! grep -q 'WARNING:' "$T/ecv-own1000u.out" \
+        && ok "verify: the same keys with ENGINE_CACHE_UID=1000: a plain VERIFIED, no warning" \
+        || fail "verify owner 1000, ENGINE_CACHE_UID=1000: rc=$rc $(grep -E 'WARNING|VERIFIED' "$T/ecv-own1000u.out" | tr '\n' ';')"
+    # the same key owned by 1000 on one node and 2000 on the others: both
+    # named, and said plainly that one of them is the wrong user
+    chown -R 2000:2000 "$T/ecv/ec-b/vllm/$AOTK" "$T/ecv/ec-c/vllm/$AOTK"
+    rc="$(ecv "$T/ecv-ownmix.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED for uids 1000, 2000: every key is on every usable node, each readable by the owner of its key directory' "$T/ecv-ownmix.out" \
+        && grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uids 1000, 2000)" "$T/ecv-ownmix.out" \
+        && grep -qF "The keys have 2 different owners. The engines of one configuration all run as one UID, so at least one line was judged for the wrong user" "$T/ecv-ownmix.out" \
+        && grep -qF "$HINT" "$T/ecv-ownmix.out" \
+        && ok "verify: one key owned by 1000 on one node and 2000 on two: VERIFIED for uids 1000, 2000, and at least one line judged for the wrong user" \
+        || fail "verify mixed owners across nodes: rc=$rc $(grep -E 'WARNING|owners|VERIFIED' "$T/ecv-ownmix.out" | tr '\n' ';')"
+    ecv_reset; ecv_aot  # back to keys the runner owns
+fi
+rc="$(ENGINE_CACHE_UID="$ME" ecv "$T/ecv-aotme.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && grep -q '3 present, 0 absent, 0 unreadable' "$T/ecv-aotme.out" && grep -q "modes read for uid ${ME} (ENGINE_CACHE_UID)" "$T/ecv-aotme.out" \
+    && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-aotme.out" && ! grep -q 'WARNING:' "$T/ecv-aotme.out" \
+    && ok "verify: ENGINE_CACHE_UID equal to the owner of the 600 files (${ME}) is present: a plain VERIFIED, no warning" || fail "verify ENGINE_CACHE_UID=owner: rc=$rc $(grep -E 'n-a|present,|modes|VERIFIED|WARNING' "$T/ecv-aotme.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-aotother.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$AOTK@rank_0_0  \($AOTK/(rank_0_0/model|modelinfos/m\.json): not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-aotother.out" \
+    && grep -q '0 present, 0 absent, 3 unreadable, 0 could not check' "$T/ecv-aotother.out" && grep -q 'NOT VERIFIED' "$T/ecv-aotother.out" \
+    && ok "verify: ENGINE_CACHE_UID=${OTHER}, not the owner of the 600 files, is unreadable on every node, naming the uid" || fail "verify ENGINE_CACHE_UID=other: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-aotother.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="00${ME}" ecv "$T/ecv-aotzeros.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && grep -q "modes read for uid ${ME} (ENGINE_CACHE_UID)" "$T/ecv-aotzeros.out" \
+    && ok "verify: ENGINE_CACHE_UID with leading zeros is that uid, not octal" || fail "verify ENGINE_CACHE_UID=00${ME}: rc=$rc $(grep -E 'modes|present,' "$T/ecv-aotzeros.out" | tr '\n' ';')"
+for bad in abc 12a -1 1.5 99999999999 4294967295; do
+    : > "$T/calls"
+    rc="$(ENGINE_CACHE_UID="$bad" ecv "$T/ecv-baduid.out" --keys "$K1")"
+    [ "$rc" != 0 ] && grep -q "ENGINE_CACHE_UID must be a" "$T/ecv-baduid.out" && ! grep -q '^exec' "$T/calls" \
+        && ok "verify: ENGINE_CACHE_UID='${bad}' is refused before any exec" || fail "verify ENGINE_CACHE_UID='${bad}': rc=$rc $(tail -1 "$T/ecv-baduid.out")"
+done
+# the default UID is the key directory's owner: a 600 file the runner owns
+# is present; under ENGINE_CACHE_UID=another, unreadable
+ecv_reset; chmod 600 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+rc="$(ecv "$T/ecv-mode.out" --keys "$K1")"
+[ "$rc" = 0 ] && grep -q '3 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-mode.out" \
+    && ok "verify: a 600 file owned by the key directory's owner is present" || fail "verify mode 600, owner: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-mode2.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-mode2.out" \
+    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-mode2.out" \
+    && ok "verify: a 600 file another UID (ENGINE_CACHE_UID) would run as is unreadable, naming the file and the uid" || fail "verify mode 600, other uid: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode2.out" | tr '\n' ';')"
+ecv_reset; chmod 700 "$T/ecv/ec-b/vllm/$K2/rank_0_0"
+rc="$(ecv "$T/ecv-dmode.out" --keys "$K2")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-dmode.out" n-b present "$K2" \
+    && ok "verify: a 700 directory owned by the key directory's owner is present" || fail "verify dir mode 700, owner: rc=$rc $(grep n-b "$T/ecv-dmode.out")"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-dmode2.out" --keys "$K2")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K2  \($K2/rank_0_0: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-dmode2.out" \
+    && ok "verify: a 700 directory another UID cannot search is unreadable, naming it and the uid" || fail "verify dir mode 700, other uid: rc=$rc $(grep n-b "$T/ecv-dmode2.out")"
+# mixed owners under one key, with the default UID: needs files owned by
+# other UIDs, so a root runner. The key directory is uid/gid 4243; a file
+# owned by 4242 is readable through the group when it is in group 4243 and
+# g+r, through other when it is not -- and never through the bit of the
+# class it is not in.
+if [ "$ME" != 0 ]; then ok "verify: (the mixed-owner cases need a root check runner)"; else
+    mixed() {  # mixed OWNER:GROUP MODE WANT -- the file under ec-a K1, the rest 4243:4243
+        ecv_reset; chown -R 4243:4243 "$T/ecv/ec-a/vllm/$K1"
+        local f="$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+        chown "$1" "$f"; chmod "$2" "$f"
+        rc="$(ecv "$T/ecv-mixed.out" --keys "$K1")"
+        if [ "$3" = present ]; then
+            [ "$rc" = 0 ] && ecv_row "$T/ecv-mixed.out" n-a present "$K1" && ok "verify: a $2 file owned by $1 under a 4243:4243 key is present" || fail "verify mixed $1 $2: rc=$rc $(grep n-a "$T/ecv-mixed.out")"
+        else
+            [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by uid 4243, the owner of the key directory" "$T/ecv-mixed.out" \
+                && ok "verify: a $2 file owned by $1 under a 4243:4243 key is unreadable for uid 4243" || fail "verify mixed $1 $2: rc=$rc $(grep n-a "$T/ecv-mixed.out")"
+        fi
+    }
+    mixed 4242:4243 640 present
+    mixed 4242:4243 604 unreadable
+    mixed 4242:4244 640 unreadable
+    mixed 4242:4244 604 present
+    mixed 4242:4244 600 unreadable
+    mixed 4243:4244 600 present
+    mixed 4243:4244 044 unreadable
+    ecv_reset; chown -R 4243:4243 "$T/ecv/ec-a/vllm/$K1"; chown 4242:4244 "$T/ecv/ec-a/vllm/$K1/rank_1_0"; chmod 750 "$T/ecv/ec-a/vllm/$K1/rank_1_0"
+    rc="$(ecv "$T/ecv-mixeddir.out" --keys "$K1")"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0: not readable by uid 4243" "$T/ecv-mixeddir.out" \
+        && ok "verify: a 750 directory owned by another uid and group under the key is unreadable for the key's owner" || fail "verify mixed dir: rc=$rc $(grep n-a "$T/ecv-mixeddir.out")"
+fi
+# a preparer whose find takes no -user cannot read the owners: could not check
+mkdir -p "$T/nofinduser"
+printf '#!/bin/sh\ncase " $* " in *" -user "*) echo "find: unrecognized: -user" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$(command -v find)" > "$T/nofinduser/find"; chmod +x "$T/nofinduser/find"
+ecv_reset
+rc="$(STUB_EXEC_PATH="$T/nofinduser:$PATH" ecv "$T/ecv-nofinduser.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image's find cannot run the mode check \(it takes no -user\)\)" "$T/ecv-nofinduser.out" && grep -q '0 present, 0 absent, 0 unreadable, 3 could not check' "$T/ecv-nofinduser.out" \
+    && ok "verify: a find without -user is could-not-check, never present" || fail "verify find without -user: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-nofinduser.out" | tr '\n' ';')"
+# a find that takes -user but rejects -group or -perm: the whole expression
+# is probed first, so this is could-not-check too -- an expression find
+# refuses prints nothing, which read as every file readable (present)
+for prim in group perm; do
+    mkdir -p "$T/nofind$prim"
+    printf '#!/bin/sh\ncase " $* " in *" -%s "*) echo "find: unrecognized: -%s" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$prim" "$prim" "$(command -v find)" > "$T/nofind$prim/find"; chmod +x "$T/nofind$prim/find"
+    ecv_reset
+    rc="$(STUB_EXEC_PATH="$T/nofind$prim:$PATH" ecv "$T/ecv-nofind$prim.out" --keys "$K1")"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image's find cannot run the mode check \(it takes no -$prim\)\)" "$T/ecv-nofind$prim.out" \
+        && grep -q '0 present, 0 absent, 0 unreadable, 3 could not check' "$T/ecv-nofind$prim.out" \
+        && ok "verify: a find without -$prim is could-not-check, never present" || fail "verify find without -$prim: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-nofind$prim.out" | tr '\n' ';')"
+done
+rc="$(ENGINE_CACHE_UID="$OTHER" STUB_EXEC_PATH="$T/nofindperm:$PATH" ecv "$T/ecv-nofindperm2.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image's find cannot run the mode check \(it takes no -perm\)\)" "$T/ecv-nofindperm2.out" \
+    && ok "verify: a find without -perm is could-not-check under ENGINE_CACHE_UID too" || fail "verify find without -perm, ENGINE_CACHE_UID: rc=$rc $(grep n-a "$T/ecv-nofindperm2.out")"
+# the directories on the way to the key are read too: one the engine's UID
+# cannot search hides every file under it
+ecv_reset; ecv_aot; chmod 700 "$T/ecv/ec-b/vllm/torch_compile_cache/torch_aot_compile"
+rc="$(ecv "$T/ecv-anc.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-anc.out" n-b present "$AOTK@rank_0_0" \
+    && ok "verify: a 700 parent directory owned by the key's owner is present" || fail "verify parent 700, owner: rc=$rc $(grep n-b "$T/ecv-anc.out")"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc2.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$AOTK@rank_0_0  \(torch_compile_cache/torch_aot_compile: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc2.out" \
+    && ok "verify: a 700 parent directory another UID cannot search is unreadable, naming the directory" || fail "verify parent 700, other uid: rc=$rc $(grep n-b "$T/ecv-anc2.out")"
+ecv_reset; ecv_aot; chmod 700 "$T/ecv/ec-c/vllm"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc3.out" --keys "$AOTK@rank_0_0")"
+chmod 755 "$T/ecv/ec-c/vllm"
+[ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c/vllm: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc3.out" \
+    && ok "verify: a cache root another UID cannot search is unreadable, naming it" || fail "verify cache root 700: rc=$rc $(grep n-c "$T/ecv-anc3.out")"
+# the volume mount above the cache root (/engine-cache; here the pod
+# directory) is on the way too
+ecv_reset; ecv_aot; chmod 700 "$T/ecv/ec-c"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc5.out" --keys "$AOTK@rank_0_0")"
+chmod 755 "$T/ecv/ec-c"
+[ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc5.out" \
+    && ecv_row "$T/ecv-anc5.out" n-c UNREADABLE "$AOTK@rank_0_0" \
+    && ok "verify: a 700 volume mount above the cache root another UID cannot search is unreadable, naming it" || fail "verify mount root 700: rc=$rc $(grep n-c "$T/ecv-anc5.out")"
+if [ "$ME" = 0 ]; then
+    # a root 700 mount root above keys owned by 1000, judged for their owner
+    ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a"
+    rc="$(ecv "$T/ecv-anc6.out" --keys "$AOTK@rank_0_0")"
+    chmod 755 "$T/ecv/ec-a"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-a: not readable by uid 1000, the owner of the key directory" "$T/ecv-anc6.out" \
+        && ok "verify: a root 700 volume mount above a 1000:1000 key is unreadable for uid 1000, naming the mount" \
+        || fail "verify root 700 mount root, owner 1000: rc=$rc $(grep n-a "$T/ecv-anc6.out")"
+fi
+if [ "$ME" = 0 ]; then
+    # the reviewer's case: torch_aot_compile root 700, the key 1000:1000
+    ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a/vllm/torch_compile_cache/torch_aot_compile"
+    for uidset in "" 1000; do
+        rc="$(ENGINE_CACHE_UID="$uidset" ecv "$T/ecv-anc4.out" --keys "$AOTK@rank_0_0")"
+        [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$AOTK@rank_0_0  \(torch_compile_cache/torch_aot_compile: not readable by uid 1000" "$T/ecv-anc4.out" \
+            && ok "verify: a root 700 torch_aot_compile above a 1000:1000 key is unreadable for uid 1000 (ENGINE_CACHE_UID='${uidset}')" \
+            || fail "verify root 700 parent, ENGINE_CACHE_UID='${uidset}': rc=$rc $(grep n-a "$T/ecv-anc4.out")"
+    done
+fi
+# the make target passes ENGINE_CACHE_UID through only when it is set
+if env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k ENGINE_CACHE_UID=1001 2>/dev/null | grep -q 'ENGINE_CACHE_UID="1001" bash deploy/enginecache.sh verify' \
+    && ! env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k 2>/dev/null | grep -q 'ENGINE_CACHE_UID='; then
+    ok "engine-cache-verify: ENGINE_CACHE_UID reaches the script when set, and only then"
+else fail "engine-cache-verify: ENGINE_CACHE_UID pass-through: $(env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k ENGINE_CACHE_UID=1001 2>&1 | tail -1)"; fi
+# a file no one but root can read: as root the read passes and the mode
+# check names it (owner read is missing); as any other runner the read
+# itself fails -- unreadable either way, never present
+ecv_reset; chmod 000 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+rc="$(ecv "$T/ecv-unread.out" --keys "$K1")"
+chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+if [ "$ME" = 0 ]; then why000='not readable by uid 0, the owner of the key directory \(taken as the engine.s UID; ENGINE_CACHE_UID names another\)'; else why000='cannot be read'; fi
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: $why000\)" "$T/ecv-unread.out" \
+    && ok "verify: a file with mode 000 is unreadable, naming the file (runner uid $(id -u): ${why000//\\/})" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
+# vLLM writes no symbolic link: one under the key is unreadable, never
+# followed or skipped -- a link to a file, a dangling link, and a directory
+# on the way to the key
+ecv_reset
+f="$T/ecv/ec-b/vllm/$K1/rank_1_0/backbone/model.py"; mv "$f" "$T/elsewhere.py"; ln -s "$T/elsewhere.py" "$f"
+rc="$(ecv "$T/ecv-links.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: a symlink under the cache; vLLM writes none\)" "$T/ecv-links.out" \
+    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-links.out" \
+    && ok "verify: a symbolic link to a file under the key is unreadable, naming it" || fail "verify symlink: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-links.out" | tr '\n' ';')"
+ecv_reset; ln -s "$T/no-such-file" "$T/ecv/ec-a/vllm/$K2/rank_0_0/backbone/extra.py"
+rc="$(ecv "$T/ecv-dangling.out" --keys "$K2")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K2  \($K2/rank_0_0/backbone/extra.py: a symlink under the cache" "$T/ecv-dangling.out" \
+    && ok "verify: a dangling symbolic link under the key is unreadable, not skipped" || fail "verify dangling symlink: rc=$rc $(grep n-a "$T/ecv-dangling.out")"
+ecv_reset; mv "$T/ecv/ec-c/vllm/torch_compile_cache" "$T/elsewhere-tcc"; ln -s "$T/elsewhere-tcc" "$T/ecv/ec-c/vllm/torch_compile_cache"
+rc="$(ecv "$T/ecv-dirlink.out" --keys "$K1@rank_0_0+rank_1_0")"
+rm -rf "$T/elsewhere-tcc"
+[ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$K1@rank_0_0\+rank_1_0  \(torch_compile_cache: a symlink under the cache; vLLM writes none\)" "$T/ecv-dirlink.out" \
+    && ok "verify: a symlinked directory on the way to the key is unreadable, not followed" || fail "verify symlinked component: rc=$rc $(grep n-c "$T/ecv-dirlink.out")"
+# the read runs under a time limit on both sides of the exec: timeout 300
+# here, and the preparer's own timeout around the script inside the pod
+ecv_reset; mkdir -p "$T/tbin"
+printf '#!/bin/sh\necho "$*" | cut -c1-24 >> "%s"\nshift\nexec "$@"\n' "$T/timeout.calls" > "$T/tbin/timeout"; chmod +x "$T/tbin/timeout"
+: > "$T/timeout.calls"
+rc="$(ECV_PATH="$T/tbin:$STUB_PATH" ecv "$T/ecv-timeout.out" --keys "$K1")"
+[ "$rc" = 0 ] && grep -q '^300 kubectl exec' "$T/timeout.calls" && grep -q '^280 /bin/sh -c' "$T/timeout.calls" \
+    && ok "verify: timeout 300 around the exec here, timeout 280 around the script in the preparer" || fail "verify time limits: rc=$rc calls=$(tr '\n' ';' < "$T/timeout.calls")"
+# no timeout here (stock macOS): a warning, and the check still runs
+mkdir -p "$T/notimeout"
+IFS=: read -r -a pdirs <<< "$STUB_PATH"
+for d in "${pdirs[@]}"; do for f in "$d"/*; do
+    # an empty PATH directory leaves "$d/*" unexpanded: no command, skip it
+    # (linked, it was a dangling "*" that every later empty directory tried
+    # to link again: "ln: ... File exists")
+    [ -e "$f" ] || continue
+    b="${f##*/}"; [ "$b" = timeout ] || [ -e "$T/notimeout/$b" ] || ln -s "$f" "$T/notimeout/$b"
+done; done
+[ ! -e "$T/notimeout/timeout" ] || fail "verify no timeout: the stripped PATH still has timeout"
+rc="$(ECV_PATH="$T/notimeout" ecv "$T/ecv-notimeout.out" --keys "$K1")"
+[ "$rc" = 0 ] && grep -q 'no timeout command here (stock macOS has none' "$T/ecv-notimeout.out" \
+    && ok "verify: without a timeout command it warns there is no limit on this side, and still checks" || fail "verify no timeout: rc=$rc $(grep -iE 'timeout|VERIFIED' "$T/ecv-notimeout.out" | tr '\n' ';')"
+# the preparer's timeout ends the read: 124 from GNU timeout is timed out;
+# 143 or 137 (the TERM or KILL status of the script) is busybox timeout OR a
+# killed or rolled preparer, so it says both -- each is could not check, never absent
+for code in 124 143 137; do
+    rc="$(STUB_EXEC_EXIT="ec-b:$code" ecv "$T/ecv-rto-$code.out" --keys "$K1")"
+    if [ "$code" = 124 ]; then want='the read on ec-b timed out (280 s in the preparer, 300 s here)'
+    else want="the read on ec-b timed out or was killed (exit ${code})"; fi
+    if [ "$rc" != 0 ] && ecv_row "$T/ecv-rto-$code.out" n-b "COULD NOT CHECK" "$K1" && grep -qF "$want" "$T/ecv-rto-$code.out" \
+        && ! grep -q ABSENT "$T/ecv-rto-$code.out" && grep -q '2 present, 0 absent, 0 unreadable, 1 could not check' "$T/ecv-rto-$code.out"; then
+        ok "verify: a read the preparer ends with exit ${code} is timed out, could not check"
+    else fail "verify remote exit ${code}: rc=$rc $(grep -E 'n-b|ec-b|present,' "$T/ecv-rto-$code.out" | tr '\n' ';')"; fi
+done
+# a preparer image with no find cannot read the modes: could not check, never present
+mkdir -p "$T/nofind"
+for f in "$T/notimeout"/*; do b="${f##*/}"; [ "$b" = find ] || [ -e "$T/nofind/$b" ] || ln -s "$(readlink "$f")" "$T/nofind/$b"; done
+[ ! -e "$T/nofind/find" ] || fail "verify no find: the stripped PATH still has find"
+rc="$(STUB_EXEC_PATH="$T/nofind" ecv "$T/ecv-nofind.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image has no find to read file modes with\)" "$T/ecv-nofind.out" \
+    && grep -q '0 present, 0 absent, 0 unreadable, 3 could not check' "$T/ecv-nofind.out" && grep -q 'NOT VERIFIED' "$T/ecv-nofind.out" \
+    && ok "verify: a preparer image with no find is could-not-check on every node, never present" || fail "verify no find: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-nofind.out" | tr '\n' ';')"
+# the preparer pods cannot be listed: an error, nothing called absent
+rc="$(STUB_PODS_ERROR='Error from server (Forbidden): pods is forbidden: stub' ecv "$T/ecv-podsforb.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -q 'cannot list the engine-cache preparer pods in check-ns: Error from server (Forbidden)' "$T/ecv-podsforb.out" && grep -q 'nothing was checked' "$T/ecv-podsforb.out" && ! grep -q ABSENT "$T/ecv-podsforb.out" \
+    && ok "verify: preparer pods that cannot be listed are an error, nothing called absent" || fail "verify pods Forbidden: rc=$rc $(tail -1 "$T/ecv-podsforb.out")"
+# the multi-pair selector reaches the node listing, as for status
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_PODS_FILE="$T/ecv-pods.json" PATH="$STUB_PATH" \
+    bash deploy/enginecache.sh verify -n check-ns --keys "$K1" > "$T/ecv-sel2.out" 2>&1
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "verify: the live two-pair nodeSelector picks the nodes" || fail "verify selector: $(grep 'get nodes' "$T/calls")"
+refuse "verify without --keys" verify -n check-ns
+refuse "a key with '..'" verify -n check-ns --keys "torch_compile_cache/../x"
+refuse "an absolute key" verify -n check-ns --keys /engine-cache/vllm/x
+refuse "a key with a space" verify -n check-ns --keys "a b"
+refuse "an empty key in the list" verify -n check-ns --keys "a,,b"
+refuse_key() {  # refuse_key "<why>" KEY -- refused as a key, before any cluster read
+    if PATH="$STUB_PATH" STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_NODES_FILE="$T/ecv-nodes.json" STUB_PODS_FILE="$T/ecv-pods.json" \
+        bash deploy/enginecache.sh verify -n check-ns --keys "$2" > "$T/refkey.out" 2>&1; then fail "accepted: $1"
+    elif grep -q 'not a compile cache key' "$T/refkey.out"; then ok "refused as a key: $1"
+    else fail "refused, but not as a key: $1: $(tail -1 "$T/refkey.out")"; fi
+}
+refuse_key "a key whose last component is ." "torch_compile_cache/."
+refuse_key "a key with a . component" "torch_compile_cache/./${K1#*/}"
+refuse_key "a key that is ." "."
+refuse "a rank that is not rank_<r>_<dp>" verify -n check-ns --keys "$K1@rank_x"
+refuse "an empty rank list" verify -n check-ns --keys "$K1@"
+refuse "an empty rank in the list" verify -n check-ns --keys "$K1@rank_0_0++rank_1_0"
+refuse "a rank that climbs out" verify -n check-ns --keys "$K1@../rank_0_0"
+refuse "--keys on status" status -n check-ns --keys a
+refuse "keys without a pod" keys -n check-ns
+refuse "a pod name that is not one" keys -n check-ns 'Pod;x'
+# keys: read off the engine log, one per configuration, every rank folded
+cat > "$T/engine-logs/pd-decode-0" <<'EOF'
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_0_0/backbone for vLLM's torch.compile
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_1_0/backbone for vLLM's torch.compile
+INFO 10-14 [monitor.py:34] torch.compile takes 0.31 s in total
+EOF
+cat > "$T/engine-logs/pd-prefill-0" <<'EOF'
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/77b0e1aa42/rank_0_0/backbone for vLLM's torch.compile
+EOF
+# the guard the scenarios put before the engine prints this when the cache
+# root is not writable, then unsets VLLM_CACHE_ROOT (pd-disaggregation.yaml)
+cat > "$T/engine-logs/fell-back" <<'EOF'
+engine cache VLLM_CACHE_ROOT=/engine-cache/vllm is not writable; using the engine default instead
+INFO 10-14 [backends.py:550] Using cache directory: /root/.cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_0_0/backbone for vLLM's torch.compile
+EOF
+# VLLM_USE_AOT_COMPILE (vLLM v0.31.0 decorators.py): the artefact sits at
+# VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/<sha256>/rank_<r>_<dp>/model
+AOT=torch_compile_cache/torch_aot_compile/9c4e1f0a7b3d2c5e8f6a1b4d7c0e3f2a5b8d1c4e7f0a3b6d9c2e5f8a1b4d7c0e
+cat > "$T/engine-logs/aot" <<EOF
+INFO 10-14 [decorators.py:313] Directly load AOT compilation from path /engine-cache/vllm/$AOT/rank_0_0/model
+INFO 10-14 [decorators.py:313] Directly load AOT compilation from path /engine-cache/vllm/$AOT/rank_1_0/model
+EOF
+printf 'INFO 10-14 Starting vLLM API server\n' > "$T/engine-logs/no-compile"
+for p in pd-decode-0 pd-prefill-0 fell-back no-compile aot; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys1.out" 2> "$T/keys1.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys1.out")" = "$K1@rank_0_0+rank_1_0" ] && grep -q "make engine-cache-verify NAMESPACE=check-ns ENGINE_CACHE_KEYS=$K1@rank_0_0+rank_1_0\$" "$T/keys1.err" && ! grep -q WARNING "$T/keys1.err" \
+    && ok "keys: one key per configuration, naming every rank directory its log shows, and the verify line to run" || fail "keys one pod: rc=$rc out=$(tr '\n' ' ' < "$T/keys1.out") err=$(tr '\n' ' ' < "$T/keys1.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 pd-prefill-0 > "$T/keys2.out" 2> "$T/keys2.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(tr '\n' ' ' < "$T/keys2.out")" = "$K1@rank_0_0+rank_1_0 $K2@rank_0_0 " ] && grep -q "ENGINE_CACHE_KEYS=$K1@rank_0_0+rank_1_0,$K2@rank_0_0\$" "$T/keys2.err" \
+    && ok "keys: prefill and decode give two keys, joined for verify" || fail "keys two pods: rc=$rc out=$(tr '\n' ' ' < "$T/keys2.out") err=$(tail -1 "$T/keys2.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/keys3.out" 2> "$T/keys3.err"; rc=$?
+[ "$(cat "$T/keys3.out")" = "$K1@rank_0_0" ] && grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/engine-cache/vllm' "$T/keys3.err" \
+    && ok "keys: an engine that fell back off the cache root still names its key, and says the start did not fill the node cache" || fail "keys fell back: out=$(cat "$T/keys3.out") err=$(tr '\n' ' ' < "$T/keys3.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot > "$T/keys-aot.out" 2> "$T/keys-aot.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aot.out")" = "$AOT@rank_0_0+rank_1_0" ] && ! grep -q WARNING "$T/keys-aot.err" \
+    && ok "keys: an AOT compile names its key under the cache root (torch_compile_cache/torch_aot_compile/<hash>), with its ranks" || fail "keys AOT: rc=$rc out=$(cat "$T/keys-aot.out") err=$(tr '\n' ' ' < "$T/keys-aot.err")"
+printf /engine-cache/vllm/ > "$T/engine-root/pd-prefill-0"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-prefill-0 > "$T/keys-slash.out" 2> "$T/keys-slash.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-slash.out")" = "$K2@rank_0_0" ] && ! grep -q WARNING "$T/keys-slash.err" \
+    && ok "keys: a VLLM_CACHE_ROOT with a trailing / is the same root, not a fall-back" || fail "keys trailing slash: rc=$rc err=$(tr '\n' ' ' < "$T/keys-slash.err")"
+printf /engine-cache/vllm > "$T/engine-root/pd-prefill-0"
+# the AOT save line names the key; a failed save, or a failed load that
+# compiled again, does not (vLLM v0.31.0 decorators.py)
+AOT2=torch_compile_cache/torch_aot_compile/0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e
+printf 'INFO 10-14 [decorators.py:330] saved AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model\n' "$AOT" > "$T/engine-logs/aot-saved"
+{ printf 'WARNING 10-14 [decorators.py:335] unable to save AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model: OSError\n' "$AOT2"
+  printf "INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1"; } > "$T/engine-logs/aot-unsaved"
+{ printf 'WARNING 10-14 [decorators.py:320] Compiling model again due to a load failure from /engine-cache/vllm/%s/rank_0_0/model, reason: EOFError\n' "$AOT"
+  printf 'INFO 10-14 [decorators.py:330] saved AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model\n' "$AOT"; } > "$T/engine-logs/aot-reload"
+for p in aot-saved aot-unsaved aot-reload; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-saved > "$T/keys-aots.out" 2> "$T/keys-aots.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aots.out")" = "$AOT@rank_0_0" ] && ! grep -q WARNING "$T/keys-aots.err" \
+    && ok "keys: an AOT save line (saved AOT compiled function to ...) names its key" || fail "keys AOT saved: rc=$rc out=$(cat "$T/keys-aots.out") err=$(tr '\n' ' ' < "$T/keys-aots.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-unsaved > "$T/keys-aotu.out" 2> "$T/keys-aotu.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aotu.out")" = "$K1@rank_0_0" ] && grep -q "aot-unsaved: the engine could not save its AOT compile to /engine-cache/vllm/$AOT2/rank_0_0; that line gives no key" "$T/keys-aotu.err" \
+    && ok "keys: a failed AOT save gives no key, and says the save failed" || fail "keys AOT unsaved: rc=$rc out=$(tr '\n' ' ' < "$T/keys-aotu.out") err=$(tr '\n' ' ' < "$T/keys-aotu.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-reload > "$T/keys-aotr.out" 2> "$T/keys-aotr.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aotr.out")" = "$AOT@rank_0_0" ] && grep -q "aot-reload: the AOT compile at /engine-cache/vllm/$AOT/rank_0_0 failed to load and was compiled again; that line gives no key" "$T/keys-aotr.err" \
+    && ok "keys: a failed AOT load warns; the save that follows still names the key" || fail "keys AOT reload: rc=$rc out=$(tr '\n' ' ' < "$T/keys-aotr.out") err=$(tr '\n' ' ' < "$T/keys-aotr.err")"
+# VLLM_CACHE_ROOT=/ is the root /, not unset
+printf "INFO 10-14 [backends.py:550] Using cache directory: /%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1" > "$T/engine-logs/root-slash"
+printf / > "$T/engine-root/root-slash"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns root-slash > "$T/keys-rs.out" 2> "$T/keys-rs.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-rs.out")" = "$K1@rank_0_0" ] && ! grep -q WARNING "$T/keys-rs.err" \
+    && ok "keys: VLLM_CACHE_ROOT=/ is the root /, and its key is found" || fail "keys root /: rc=$rc out=$(cat "$T/keys-rs.out") err=$(tr '\n' ' ' < "$T/keys-rs.err")"
+printf / > "$T/engine-root/fell-back"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/keys-rsf.out" 2> "$T/keys-rsf.err"
+grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/ ' "$T/keys-rsf.err" && ! grep -q 'sets no VLLM_CACHE_ROOT' "$T/keys-rsf.err" \
+    && ok "keys: an engine that fell back off VLLM_CACHE_ROOT=/ is told apart from one with no VLLM_CACHE_ROOT" || fail "keys root / fell back: err=$(tr '\n' ' ' < "$T/keys-rsf.err")"
+printf /engine-cache/vllm > "$T/engine-root/fell-back"
+# a relative VLLM_CACHE_ROOT: the key is found, and the warning says the root is relative, not that it fell back
+printf "INFO 10-14 [backends.py:550] Using cache directory: cache/%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1" > "$T/engine-logs/rel-root"
+printf cache > "$T/engine-root/rel-root"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns rel-root > "$T/keys-rel.out" 2> "$T/keys-rel.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-rel.out")" = "$K1@rank_0_0" ] && grep -q 'VLLM_CACHE_ROOT=cache is a relative path' "$T/keys-rel.err" && ! grep -q 'fell back' "$T/keys-rel.err" \
+    && ok "keys: a relative VLLM_CACHE_ROOT finds the key and says the root is relative, not that it fell back" || fail "keys relative root: rc=$rc out=$(cat "$T/keys-rel.out") err=$(tr '\n' ' ' < "$T/keys-rel.err")"
+if PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns no-compile > "$T/keys4.out" 2>&1; then fail "keys must fail on a log with no cache directory"; else
+    grep -q 'no compile cache directory in its log' "$T/keys4.out" && ok "keys: a log with no cache directory is a failure, not an empty answer" || fail "keys no line: $(tail -1 "$T/keys4.out")"; fi
+if STUB_ENGINE_LOG_ERROR='Error from server (Forbidden): pods "pd-decode-0" is forbidden: cannot get resource "pods/log"' PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys5.out" 2>&1; then fail "keys must fail when the log cannot be read"; else
+    grep -q 'cannot read the log of pd-decode-0 (container vllm): Error from server (Forbidden)' "$T/keys5.out" && ok "keys: a log that cannot be read (Forbidden) is a failure that says so" || fail "keys log Forbidden: $(tail -1 "$T/keys5.out")"; fi
+
+# ---------------------------------------------------------------------------
 # 4. The Makefile: the targets' argv and the standup's step.
 # ---------------------------------------------------------------------------
 line="$(make -n engine-cache ENGINE_CACHE_PATH=/mnt/local/w ENGINE_CACHE_IMAGE=i:1 ENGINE_CACHE_CAPACITY=50Gi NAMESPACE=ns PREPULL_TOLERATIONS=t1 2>/dev/null | tr -d '\\\n' | grep -o 'bash deploy/enginecache.sh apply.*' || true)"
@@ -656,6 +1161,11 @@ line="$(make -n engine-cache-status NAMESPACE=ns WEIGHTS_NODE_SELECTOR=k=v 2>/de
 case "$line" in *'-n "ns"'*'--node-selector "k=v"'*) ok "make engine-cache-status: namespace and selector reach the script" ;; *) fail "make engine-cache-status argv: $line" ;; esac
 line="$(make -n engine-cache-delete NAMESPACE=ns 2>/dev/null | grep -o 'bash deploy/enginecache.sh delete.*' || true)"
 case "$line" in *'-n "ns"'*) ok "make engine-cache-delete: the namespace reaches the script" ;; *) fail "make engine-cache-delete argv: $line" ;; esac
+line="$(make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=torch_compile_cache/a,b WEIGHTS_NODE_SELECTOR=k=v,k2=v2 2>/dev/null | grep -o 'bash deploy/enginecache.sh verify.*' || true)"
+case "$line" in *'-n "ns" --keys "torch_compile_cache/a,b" --node-selector "k=v,k2=v2"'*) ok "make engine-cache-verify: namespace, keys and selector reach the script" ;; *) fail "make engine-cache-verify argv: $line" ;; esac
+if make -n engine-cache-verify NAMESPACE=ns 2>/dev/null | grep -q 'test -n ""'; then ok "make engine-cache-verify: without ENGINE_CACHE_KEYS the guard is empty and fails at run time"; else fail "make engine-cache-verify: no guard on ENGINE_CACHE_KEYS"; fi
+line="$(make -n engine-cache-keys NAMESPACE=ns ENGINE_CACHE_PODS='p-decode-1 p-prefill-2' 2>/dev/null | grep -o 'bash deploy/enginecache.sh keys.*' || true)"
+case "$line" in *'keys -n "ns" "p-decode-1" "p-prefill-2"'*) ok "make engine-cache-keys: each pod reaches the script as its own argument" ;; *) fail "make engine-cache-keys argv: $line" ;; esac
 n="$(make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_MODEL_HOSTPATH=/mnt/local/w BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null | grep -n 'model_hostpath.sh\|enginecache.sh apply\|engine_cache_claim.sh\|standup \\$' | cut -d: -f1 | tr '\n' ' ')"
 set -- $n
 if [ $# -ge 4 ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ] && [ "$3" -lt "$4" ]; then ok "benchmark-standup: BENCHMARK_MODEL_HOSTPATH alone turns the cache on too, after the weights edit and before the harness standup (apply, then the scenario edit)"; else fail "benchmark-standup ordering: $n"; fi

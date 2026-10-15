@@ -850,6 +850,25 @@ engine-cache-publish: ## Fill the seed claim from every prepared node, then re-s
 	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-publish: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/enginecache.sh publish -n "$(NAMESPACE)"
 
+## Check the cache without starting an engine a second time: start each engine
+## configuration once, print the key it compiled under with engine-cache-keys,
+## then engine-cache-verify reads that key on every usable node, through the
+## preparer pod there (kubectl exec; no GPU). It fails on a node that lacks a
+## key, a node with no Ready preparer, and a read that could not be made.
+ENGINE_CACHE_KEYS ?=
+ENGINE_CACHE_PODS ?=
+ENGINE_CACHE_UID ?=
+.PHONY: engine-cache-keys engine-cache-verify
+engine-cache-keys: ## Print the compile cache key(s) running engine pods used. NAMESPACE=<ns> ENGINE_CACHE_PODS='<pod> [<pod>...]'
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-keys: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_PODS)" || { echo "engine-cache-keys: set ENGINE_CACHE_PODS='<engine pod> [<engine pod>...]', one pod per engine configuration (prefill and decode differ)" >&2; exit 1; }
+	@bash deploy/enginecache.sh keys -n "$(NAMESPACE)" $(foreach p,$(ENGINE_CACHE_PODS),"$(p)")
+
+engine-cache-verify: ## Per usable accelerator node: is every compile cache key present and readable. NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>]' [ENGINE_CACHE_UID=<uid the engines run as>]
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-verify: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_KEYS)" || { echo "engine-cache-verify: set ENGINE_CACHE_KEYS='<key>[,<key>]' (make engine-cache-keys prints them)" >&2; exit 1; }
+	@$(if $(ENGINE_CACHE_UID),ENGINE_CACHE_UID="$(ENGINE_CACHE_UID)",) bash deploy/enginecache.sh verify -n "$(NAMESPACE)" --keys "$(ENGINE_CACHE_KEYS)" $(if $(WEIGHTS_NODE_SELECTOR),--node-selector "$(WEIGHTS_NODE_SELECTOR)",)
+
 .PHONY: workload-patch
 workload-patch: ## Write a patch for model servers that do not drain on scale-down, download weights outside every volume they mount, or compile their kernels on every start. NAMESPACE=<ns> scopes it; WVA_WORKLOAD_PATCH_APPLY=true applies the drain half live (add WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true for the weights volume, after `make model-cache`; WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true for the engine-cache volume, after `make engine-cache`).
 	@# NAMESPACE pins the SCAN, not just the connection. Without the
