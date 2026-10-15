@@ -30,7 +30,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 
-LABEL org.opencontainers.image.source="https://github.com/llm-d/llm-d-workload-variant-autoscaler"
+# The repository this image is built from. The workflows pass their own
+# (github.server_url/github.repository), so a fork's image names the fork.
+ARG IMAGE_SOURCE=https://github.com/ev-shindin/llm-scaling-manager
+LABEL org.opencontainers.image.source="${IMAGE_SOURCE}"
 LABEL org.opencontainers.image.description="Workload Variant Autoscaler (WVA) - GPU-aware autoscaler for LLM inference workloads"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

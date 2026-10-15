@@ -1,17 +1,18 @@
 # Release Process
 
-This guide describes how to cut a release of the llm-scaling-manager: what to
-prepare in this repository, how to tag, and what the release workflow does with
-the tag.
+How to cut a release of the llm-scaling-manager: what to merge to `main`, how
+to tag it, and what to do when the release workflow fails.
 
 ## Quick reference
 
+Every release, `-rc` ones included, takes **two PRs to `main`** and one tag:
+
 | Step | Where | What |
 |------|--------|------|
-| 1. Pre-release | This repo | Changelog, the kustomize image pin, dependency pins (see below) |
-| 2. Tag & release | GitHub | Push tag `vX.Y.Z` (or create it from **Releases**); publish the GitHub Release |
-| 3. Automation | GitHub Actions | Lint + unit tests, scan, multi-arch build + push, SBOM, provenance, signature |
-| 4. Post-release | This repo | Verify the signature; set `newTag` back to `main` on `main` |
+| 1. Release PR | PR to `main` | Changelog and `newTag: vX.Y.Z`; merge it |
+| 2. Tag | Your clone | Tag `origin/main`, check it is on `main`, push the tag |
+| 3. Reset PR | PR to `main` | `newTag: main` again, right away |
+| 4. Publish | GitHub | Publish the GitHub Release; verify the signature |
 
 ---
 
@@ -20,51 +21,37 @@ the tag.
 1. **A version tag** in this repository, `vMAJOR.MINOR.PATCH` or
    `vMAJOR.MINOR.PATCH-PRERELEASE` (e.g. `v0.6.0`, `v0.6.0-rc1`).
 2. **A container image** at `ghcr.io/<repository owner>/llm-scaling-manager:<tag>`,
-   i.e. `ghcr.io/ev-shindin/llm-scaling-manager:<tag>` for this repository. The
-   name is derived from the repository, exactly as
-   [`ci-main-image.yaml`](../../.github/workflows/ci-main-image.yaml) derives the
-   floating `:main` image, and matches `IMAGE_TAG_BASE` in the
-   [Makefile](../../Makefile) and `config/base/manager/kustomization.yaml`.
+   i.e. `ghcr.io/ev-shindin/llm-scaling-manager:<tag>` for this repository.
 3. **Release notes and documentation** in this repository.
+
+Only `main`'s current line can be released. The workflow refuses a tag that is
+not on `main`, and needs `newTag` on the tagged commit to equal the tag. There
+is no release branch, so a patch for an older line (a `v0.5.3` after `v0.6.0`)
+cannot be released.
 
 ---
 
 ## Prerequisites
 
-- **Permissions:** ability to push tags and to create/publish GitHub Releases.
-- **Registry credentials:** none to configure. The workflow pushes with the
-  built-in `GITHUB_TOKEN` (`packages: write`) only; a `GHCR_TOKEN` secret is not
-  used. If the package was first pushed by a personal token and the push is
-  refused, give this repository write access in the package's settings
-  (**Manage Actions access**).
-- **State of the tagged commit:** it must be on `main`; a tag anywhere else is
-  refused. The workflow runs the PR checks again on it (below), so a commit that
-  does not pass them cannot be released. It does not run the kind e2e suites;
-  tag a commit whose PR e2e runs were green.
+- [ ] You may push tags to this repository and publish GitHub Releases.
+- [ ] The GHCR package `llm-scaling-manager` gives this repository **Write**
+  access ([first release](#the-first-release-to-a-new-package)).
+- [ ] The commit you will tag passed its PR checks, including the e2e runs. The
+  release reruns the PR checks, not the e2e suites.
 
 ---
 
 ## Pre-release checklist
 
-Do these on the branch you intend to tag (normally `main`).
-
-1. **Changelog.** Add `docs/CHANGELOG-vX.Y.Z.md` summarising user-facing and
-   notable changes, and paste it into the GitHub Release notes.
-2. **Pin the default install to the release (required).** On the commit you tag,
-   set `newTag` in `config/base/manager/kustomization.yaml` to the release tag
-   (e.g. `v0.6.0`). The workflow fails before it builds anything if `newTag` does
-   not equal the tag: otherwise the release's own manifests deploy the floating
-   `:main`, not the image being released. After the tag is pushed, set `newTag`
-   back to `main` on `main`; the pinned value lives on in the tag.
-
-   Installing a release then needs no `IMG`: `git checkout vX.Y.Z && make deploy-wva`
-   deploys `:vX.Y.Z`, pulled `IfNotPresent` because a release tag does not move.
-   Pin any other build with `IMG=<repo>@sha256:<digest>`; the installer warns
-   whenever it deploys a floating tag (`main`, `latest`, `dev`, `nightly`).
-3. **Dependency pins.** If the release moves an upstream dependency (for example
-   [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)), update
-   its pin in the [Makefile](../../Makefile) and the files that reference it
-   (`test/e2e/fixtures/model_service_builder.go`, `test/utils/resources/llmdsim.go`).
+1. **Open the release PR to `main`.** It holds two changes:
+   - `docs/CHANGELOG-vX.Y.Z.md`, summarising user-facing and notable changes.
+   - `newTag: vX.Y.Z` in `config/base/manager/kustomization.yaml`. The release
+     fails before it builds anything if `newTag` is not the tag.
+2. **Bump dependency pins**, if the release moves one (for example
+   [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)): the
+   [Makefile](../../Makefile), `test/e2e/fixtures/model_service_builder.go` and
+   `test/utils/resources/llmdsim.go`. Same PR.
+3. **Merge it.**
 
 ---
 
@@ -72,54 +59,73 @@ Do these on the branch you intend to tag (normally `main`).
 
 ### 1. Push the tag
 
+Tag the merged commit on `origin/main`, not your local branch:
+
 ```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
+git fetch origin
+git tag vX.Y.Z origin/main
+git merge-base --is-ancestor vX.Y.Z origin/main && git push origin vX.Y.Z
 ```
 
-Alternatively create the tag from **Releases → Draft a new release** by typing a
-new tag name; publishing creates the tag, which starts the same workflow.
+The push starts [`ci-release.yaml`](../../.github/workflows/ci-release.yaml).
+Watch it in the **Actions** tab.
 
-### 2. What the workflow does
+### 2. Set `newTag` back to `main`
 
-[`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml) runs
-once per tag push (it no longer also runs on `release: published`, which built and
-pushed every release twice). Releases run one at a time, so an older tag cannot
-finish last and move `latest` back. GitHub keeps one run waiting: if you push a
-third tag while one runs and one waits, the waiting run is cancelled. Re-run it
-from the Actions tab.
-
-1. **Gate.** Calls [`ci-pr-checks.yaml`](../../.github/workflows/ci-pr-checks.yaml)
-   on the tagged commit: `golangci-lint`, `make build`, `make test`,
-   `make lint-deploy-scripts`, the docs checks and the kustomize builds. Nothing
-   is built for release unless they pass.
-2. **Validate the tag and the pin.** A tag whose commit is not on `main` is
-   refused. So is anything other than `vMAJOR.MINOR.PATCH[-PRERELEASE]`, and a
-   tagged commit whose kustomization `newTag` is not the tag.
-3. **Scan before push.** Builds the `linux/amd64` image into the runner's Docker
-   daemon only and scans it with Trivy. A **fixable CRITICAL** vulnerability fails
-   the release (`ignore-unfixed: true`: a CRITICAL with no upstream fix cannot be
-   cured by rebuilding, so it is reported but does not block). A second,
-   non-blocking scan prints every HIGH and CRITICAL finding.
-4. **Build and push once.** One `linux/amd64,linux/arm64` buildx build, pushed with
-   an SBOM (`sbom: true`) and a max-mode SLSA provenance attestation
-   (`provenance: mode=max`).
-5. **Tags.** Always `:<version>`. `:latest` moves only for the highest final
-   release in the repository. A tag with a prerelease suffix (`v0.6.0-rc1`)
-   never touches `latest`, and neither does a backport (`v0.5.3` tagged after
-   `v0.6.0`, on an older commit of `main`; there is no release-branch flow). `hack/check-release-latest.sh` tests this.
-6. **Sign.** Keyless `cosign sign` of the pushed digest, with the workflow's OIDC
-   identity as the signer. The run summary prints the digest and the verify
-   command.
+Right away, open a second PR to `main` that sets `newTag: main` again. Until it
+merges, an install from `main` deploys the release image instead of `:main`.
 
 ### 3. Publish the GitHub Release
 
 In **Releases**, choose the tag, paste the changelog, mark it as a pre-release if
 the tag has a prerelease suffix, and publish.
 
+### If the release fails
+
+Find the failed step in the run.
+
+- **It failed before "Build and push the multi-arch image".** Nothing was
+  published. Delete the tag, fix the problem on `main` with a PR, and tag again:
+  ```bash
+  git push origin --delete vX.Y.Z && git tag -d vX.Y.Z
+  ```
+- **It failed at or after "Build and push the multi-arch image".** An image
+  may be public under that tag. Do not move or delete the tag. Fix the cause
+  (for example, the package access below), then open the run and use
+  **Re-run failed jobs**.
+
+---
+
+## The first release to a new package
+
+The release pushes with the built-in `GITHUB_TOKEN`. No `GHCR_TOKEN` secret is
+used. If the repository has no Write access to the package, the run fails at
+**Build and push the multi-arch image** with:
+
+```
+denied: permission_denied: write_package
+```
+
+To fix it:
+
+1. Open the package page: **Packages** on the repository owner's profile, then
+   `llm-scaling-manager`.
+2. **Package settings** → **Manage Actions access** → **Add repository**.
+   Pick this repository and give it **Write**.
+3. In the failed run, choose **Re-run failed jobs**. No new tag is needed.
+
+A package GitHub creates on the first push is **private**. Users then get
+`401 Unauthorized` when they pull. In **Package settings**, set its visibility
+to **Public**.
+
+Make the first release after this workflow lands an `-rc1` tag. It tests the
+package access and visibility without moving `latest`.
+
 ---
 
 ## Verifying a release
+
+Replace the owner `ev-shindin` with yours if you release from a fork.
 
 ```bash
 IMAGE=ghcr.io/ev-shindin/llm-scaling-manager
@@ -135,10 +141,41 @@ docker buildx imagetools inspect "$IMAGE:vX.Y.Z" --format '{{ json .Provenance }
 Deploy by digest (`IMG=$IMAGE@sha256:...`) when you need the exact bytes that
 were verified; a tag can be moved after the fact, a digest cannot.
 
+Installing a release needs no `IMG`: `git checkout vX.Y.Z && make deploy-wva`
+deploys `:vX.Y.Z`, pulled `IfNotPresent` because a release tag does not move.
+
 ---
 
 ## Enabling others to cut releases
 
 Grant them permission to push tags and to publish Releases. No registry secret
-needs sharing: the workflow uses the built-in token. Point them at this page and
-at [`ci-release.yaml`](../../.github/workflows/ci-release.yaml).
+needs sharing. Point them at this page.
+
+---
+
+## Details
+
+### What the workflow does
+
+[`ci-release.yaml`](../../.github/workflows/ci-release.yaml) runs once per tag
+push. Releases run one at a time. GitHub keeps one run waiting: a third tag
+pushed while one runs and one waits cancels the waiting run, which you then
+re-run from the **Actions** tab.
+
+1. **Gate.** Calls [`ci-pr-checks.yaml`](../../.github/workflows/ci-pr-checks.yaml)
+   on the tagged commit: `golangci-lint`, `make build`, `make test`,
+   `make lint-deploy-scripts`, the docs checks and the kustomize builds.
+2. **Validate.** Refuses a tag whose commit is not on `main`, a tag that is not
+   `vMAJOR.MINOR.PATCH[-PRERELEASE]`, and a commit whose `newTag` is not the tag.
+3. **Scan before push.** Builds the `linux/amd64` image locally and scans it
+   with Trivy. A **fixable CRITICAL** vulnerability fails the release. A CRITICAL
+   with no upstream fix is reported but does not block. A second, non-blocking
+   scan prints every HIGH and CRITICAL finding.
+4. **Build and push once.** One `linux/amd64,linux/arm64` build, pushed with an
+   SBOM and a max-mode SLSA provenance attestation.
+5. **Tags.** Always `:<version>`. `:latest` moves only for the highest final
+   release; a prerelease (`-rc1`) never moves it. `hack/check-release-latest.sh`
+   tests this.
+6. **Sign.** Keyless `cosign sign` of the pushed digest, with the workflow's
+   OIDC identity as the signer. The run summary prints the digest and the
+   verify command.

@@ -131,7 +131,7 @@ jobs:
           set -euo pipefail
           have="$(awk '$1 == "newTag:" {print $2}' config/base/manager/kustomization.yaml | tr -d '"')"
           if [ "$have" != "$VERSION" ]; then
-            echo "::error file=config/base/manager/kustomization.yaml::newTag is '${have}', expected '${VERSION}'. Pin the release tag on the tagged commit (release-process.md, pre-release step 2)."
+            echo "::error file=config/base/manager/kustomization.yaml::newTag is '${have}', expected '${VERSION}'. Pin the release tag on the tagged commit (release-process.md, pre-release checklist step 1)."
             exit 1
           fi
           echo "kustomization newTag: ${have}"
@@ -156,6 +156,8 @@ jobs:
           provenance: false
           sbom: false
           tags: release-scan:${{ steps.meta.outputs.version }}
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -198,6 +200,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
           sbom: true
           provenance: mode=max
           cache-from: type=gha

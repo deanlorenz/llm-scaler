@@ -48,13 +48,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # GHCR_TOKEN where it is configured (upstream), otherwise the built-in
-      # token, which `permissions: packages: write` above already scopes to this
-      # repository's own packages. A fork has no GHCR_TOKEN, and failing to log
-      # in is not a useful thing for it to do.
+      # The built-in token only, as in ci-release.yaml. `permissions: packages:
+      # write` above scopes it to this repository's own packages, for this run.
+      # The package must grant this repository Write access (Package settings ->
+      # Manage Actions access); see docs/developer-guide/release-process.md.
       - name: Log in to GitHub Container Registry
         env:
-          REGISTRY_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Resolve image and tag
@@ -66,8 +66,9 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PLATFORMS: ${{ inputs.platforms }}
         run: |
-          # Owner-derived, so this is unchanged upstream (owner IS llm-d) and a
-          # fork pushes to its own namespace instead of being denied by it.
+          # Owner-derived: the image goes to the namespace of whoever owns this
+          # repository (ghcr.io/ev-shindin/llm-scaling-manager here), the only
+          # one its token may write to.
           IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${GITHUB_REPOSITORY##*/}
           if [ "${{ github.event_name }}" = "push" ]; then
             TAG=main
@@ -77,6 +78,13 @@ jobs:
             # A branch name is not a legal tag: refs/heads/feat/x has slashes.
             [ -n "$TAG" ] || TAG=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr -cd '[:alnum:]._-' | cut -c1-100)
             PLATFORMS="${INPUT_PLATFORMS:-linux/amd64}"
+            # An on-demand build must not overwrite what users install: latest
+            # and release tags come from ci-release.yaml, main from a push to main.
+            case "$TAG" in
+              latest|main|v[0-9]*)
+                echo "::error::tag $TAG is reserved (latest, main and v<digit>... are published by the push and release workflows); pass another tag"
+                exit 1 ;;
+            esac
           fi
           # The OCI tag grammar, and a comma-separated list of os/arch[/variant].
           if ! printf '%s' "$TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'; then
@@ -99,6 +107,7 @@ jobs:
             --annotation "index:org.opencontainers.image.description=Workload Variant Autoscaler (WVA) - GPU-aware autoscaler for LLM inference workloads" \
             --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
             --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             -t ${{ steps.img.outputs.image }}:${{ steps.img.outputs.tag }} .
 
       - name: Summarise
