@@ -99,10 +99,14 @@ type SelectionInput struct {
 	// Constraints are the GPU/quota constraints to place within. Empty means
 	// unknown, which FitsGPUBudget treats as permissive.
 	Constraints []*allocation.ResourceConstraints
-	// Nodes is the per-node picture of free GPUs when the physical limiter
-	// bounds the wake; nil fits by pools alone. A set fits only if each
-	// member's replica lands on a node: free GPUs as 4+4+8 hold one 8-GPU
-	// replica, not a P/D pair.
+	// Admitted is what earlier wakes already took against Constraints, by
+	// accelerator name, when Constraints are a remembered snapshot rather than
+	// this tick's: every fit check adds it to the set's own demand.
+	Admitted map[string]int
+	// Nodes is the per-node picture of free GPUs, with what earlier wakes in
+	// this tick took debited, when the physical limiter bounds the wake; nil
+	// fits by pools alone. A set fits only if each member's replica lands on a
+	// node: free GPUs as 4+4+8 hold one 8-GPU replica, not a P/D pair.
 	Nodes *allocation.NodeView
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
@@ -240,7 +244,11 @@ func cheapestFeasiblePair(in SelectionInput, decodes, prefills []Candidate) ([]C
 // fits reports whether the set can be placed within the GPU budget, testing the
 // combined demand rather than each member alone.
 func fits(in SelectionInput, set []Candidate) bool {
-	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demandOf(set)) {
+	demand := demandOf(set)
+	for accelerator, gpus := range in.Admitted {
+		demand[accelerator] += gpus
+	}
+	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demand) {
 		return false
 	}
 	return in.Nodes.PlaceReplicas(replicaShapes(in.Namespace, set), false)
