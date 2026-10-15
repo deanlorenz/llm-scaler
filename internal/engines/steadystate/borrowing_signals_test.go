@@ -148,7 +148,7 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 		reqs := model(time.Time{})
 		var cs []*allocation.ResourceConstraints
 		var ds []domain.VariantDecision
-		now := t0
+		var now time.Time
 		// Review T4: every cycle, not only after the debounce. The cohort is
 		// closed from the first sighting; the wait is published once it is
 		// debounced (60s), with its age.

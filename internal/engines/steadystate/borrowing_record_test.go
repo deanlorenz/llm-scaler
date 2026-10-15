@@ -92,7 +92,7 @@ func TestABorrowedTargetDoesNotAlternate(t *testing.T) {
 	e := &Engine{Config: config.NewTestConfig()}
 	e.borrowing.inFlight = allocation.NewBorrowInFlight()
 	t0 := time.Unix(30_000, 0)
-	var got []int
+	got := make([]int, 0, 3)
 	desired := 2
 	for i := range 3 {
 		target, _ := recordCycle(e, 8, 2, desired, t0.Add(time.Duration(i)*30*time.Second), nil)

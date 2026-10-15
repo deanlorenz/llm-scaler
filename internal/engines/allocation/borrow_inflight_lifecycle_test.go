@@ -7,9 +7,10 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
-// freeAt is the cohort chunk's free GPUs after u, the chunk read at readAt.
-func freeAt(readAt time.Time, free int, u Unreserved) int {
-	q := borrowQuota(free, nsBorrow{ns: "a", cap: config.QuotaUnlimited})
+// freeAt is the free GPUs after u of a cohort chunk Kueue reads as 16 free,
+// read at readAt.
+func freeAt(readAt time.Time, u Unreserved) int {
+	q := borrowQuota(16, nsBorrow{ns: "a", cap: config.QuotaUnlimited})
 	q.SharedPools[0].ReadAt = readAt
 	return DeductUnreservedAt([]*ResourceConstraints{q}, u)[0].SharedPools[0].Free
 }
@@ -28,21 +29,21 @@ func TestAResolvedDrawLagsUntilARead(t *testing.T) {
 		t.Fatalf("the draw is still in flight once its pods exist: %+v", got)
 	}
 	u := b.Unreserved(t0.Add(30 * time.Second))
-	if got := freeAt(t0, 16, u); got != 8 {
+	if got := freeAt(t0, u); got != 8 {
 		t.Fatalf("a read from before the pods existed shows %d free, want 8: the admitted replica is not free", got)
 	}
-	if got := freeAt(t0.Add(time.Minute), 16, u); got != 16 {
+	if got := freeAt(t0.Add(time.Minute), u); got != 16 {
 		t.Fatalf("a read after the pods existed shows %d free, want 16: it counts the replica already", got)
 	}
-	if got := freeAt(t0, 16, Unreserved{InFlight: u.InFlight, Gated: map[string]map[string]int{"a": {"": 8}}}); got != 8 {
+	if got := freeAt(t0, Unreserved{InFlight: u.InFlight, Gated: map[string]map[string]int{"a": {"": 8}}}); got != 8 {
 		t.Fatalf("a lagging draw whose pod is at the gate reads %d free, want 8: counted once", got)
 	}
 	// Gated, then admitted: the same, from when the admission was seen.
 	admitted := Unreserved{Admitted: []AdmittedGPUs{{Namespace: "a", GPUs: 8, At: t0.Add(30 * time.Second)}}}
-	if got := freeAt(t0, 16, admitted); got != 8 {
+	if got := freeAt(t0, admitted); got != 8 {
 		t.Fatalf("an admitted pod reads %d free in an older read, want 8", got)
 	}
-	if got := freeAt(t0.Add(time.Minute), 16, admitted); got != 16 {
+	if got := freeAt(t0.Add(time.Minute), admitted); got != 16 {
 		t.Fatalf("an admitted pod reads %d free in a newer read, want 16", got)
 	}
 	b.ObserveAt(map[string]VariantObservation{"a/v": {Current: 3, Desired: 3}}, t0.Add(30*time.Second+InFlightTTL+time.Second))
@@ -111,7 +112,7 @@ func TestAVariantRePlacesItsOwnDrawInFlight(t *testing.T) {
 		b.RecordAt(o.BorrowDraws(), now)
 		return target
 	}
-	var got []int
+	got := make([]int, 0, 3)
 	for i := range 3 {
 		got = append(got, pass(t0.Add(time.Duration(i)*30*time.Second), 2))
 	}
