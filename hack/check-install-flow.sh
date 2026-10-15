@@ -579,7 +579,7 @@ fi
 # The controller reads its config once, at startup: a changed Prometheus
 # setting needs a restart, after every patch to that config.
 restart_at="$(line_of "$dwc" 'wva_restart_on_prometheus_change "$(kubectl get configmap wva-manager-config')"
-limiter_at="$(line_of "$dwc" 'case "${WVA_LIMITER:-}" in')"
+limiter_at="$(line_of "$dwc" 'case "$limiter_set" in')"
 wait_at="$(line_of "$dwc" '# Wait for WVA to be ready.')"
 if [ -n "$restart_at" ] && [ -n "$write_at" ] && [ -n "$limiter_at" ] && [ -n "$wait_at" ] \
     && [ "$restart_at" -gt "$write_at" ] && [ "$restart_at" -gt "$limiter_at" ] && [ "$restart_at" -lt "$wait_at" ]; then
