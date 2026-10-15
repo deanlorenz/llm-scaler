@@ -140,10 +140,10 @@ func restartWVAController(ctx context.Context) error {
 	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"` + restartedAtAnnotation + `":"` +
 		stamp + `"}}}}}`)
 	if _, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Patch(
-		ctx, "wva-controller-manager",
+		ctx, utils.ControllerDeploymentName,
 		types.StrategicMergePatchType, patch, metav1.PatchOptions{},
 	); err != nil {
-		return fmt.Errorf("patch wva-controller-manager: %w", err)
+		return fmt.Errorf("patch %s: %w", utils.ControllerDeploymentName, err)
 	}
 	// One budget for the rollout and the lease wait together. The lease wait
 	// alone has been measured at 64 s (an old pod that died without releasing,
@@ -153,9 +153,9 @@ func restartWVAController(ctx context.Context) error {
 	poll := time.Duration(cfg.PollIntervalSec) * time.Second
 	rolledOut := false
 	for time.Now().Before(deadline) {
-		dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+		dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, utils.ControllerDeploymentName, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("get wva-controller-manager: %w", err)
+			return fmt.Errorf("get %s: %w", utils.ControllerDeploymentName, err)
 		}
 		// Status lags the patch: until the controller has observed the new
 		// generation, the counts describe the previous rollout and read as
@@ -174,7 +174,7 @@ func restartWVAController(ctx context.Context) error {
 		time.Sleep(poll)
 	}
 	if !rolledOut {
-		return fmt.Errorf("wva-controller-manager rollout did not complete within %ds", cfg.PodReadyTimeout)
+		return fmt.Errorf("%s rollout did not complete within %ds", utils.ControllerDeploymentName, cfg.PodReadyTimeout)
 	}
 	if err := waitForWVALeadership(ctx, stamp, deadline, poll); err != nil {
 		return err
@@ -371,8 +371,8 @@ func waitForWVALeadership(ctx context.Context, stamp string, deadline time.Time,
 		}
 		time.Sleep(poll)
 	}
-	return fmt.Errorf("no live wva-controller-manager pod acquired the leader lease within %ds (last holder %q)",
-		cfg.PodReadyTimeout, lastHolder)
+	return fmt.Errorf("no live %s pod acquired the leader lease within %ds (last holder %q)",
+		utils.ControllerDeploymentName, cfg.PodReadyTimeout, lastHolder)
 }
 
 // buildThroughputSustainedLoadJob returns a Job spec that sends continuous completions

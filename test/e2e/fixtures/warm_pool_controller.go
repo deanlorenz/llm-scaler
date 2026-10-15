@@ -19,6 +19,13 @@ type ControllerDeployment struct {
 	Name      string
 }
 
+// WVAController is the controller Deployment the e2e install creates, in
+// namespace. Its name is utils.ControllerDeploymentName, so the specs and the
+// log helpers in test/utils name the same Deployment.
+func WVAController(namespace string) ControllerDeployment {
+	return ControllerDeployment{Namespace: namespace, Name: utils.ControllerDeploymentName}
+}
+
 // EnableWarmPool used to restart the controller with --warm-pool-namespace, and
 // no longer does anything. It is kept so the specs read the same and so this
 // explanation has somewhere to live.
@@ -75,9 +82,8 @@ func WaitForControllerReady(ctx context.Context, clientset *kubernetes.Clientset
 // rollout that is as likely to be the outgoing process as the incoming one. Its
 // log then shows the behaviour of the configuration the test just replaced.
 //
-// Only Pods of c's Deployment count (utils.ControllerPods): a relay or
-// warm-pool Pod wearing the controller's labels is not the controller, however
-// recently it started.
+// Only Pods of c's Deployment count (utils.ControllerPods): a relay wearing
+// the controller's labels is not the controller, however recently it started.
 func NewestControllerPod(ctx context.Context, clientset kubernetes.Interface, c ControllerDeployment) (*corev1.Pod, error) {
 	pods, err := utils.ControllerPods(ctx, clientset, c.Namespace, c.Name)
 	if err != nil {

@@ -144,15 +144,13 @@ func buildSaturationConfigYAMLWithModel(
 
 // scalingPolicyConfigMapName resolves the active saturation ConfigMap name from controller runtime env.
 func scalingPolicyConfigMapName() string {
-	// Match the controller's runtime config map name; discover by label first
-	// since the deployment name can vary across overlays.
-	deps, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
-	if err != nil || len(deps.Items) == 0 {
+	// Match the controller's runtime config map name. The Deployment's name is
+	// the same in every overlay (namePrefix wva-, no suffix), so read it by name.
+	dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, testutils.ControllerDeploymentName, metav1.GetOptions{})
+	if err != nil {
 		return config.ScalingPolicyConfigMapName()
 	}
-	return saturationConfigMapNameFromDeployment(&deps.Items[0])
+	return saturationConfigMapNameFromDeployment(dep)
 }
 
 // saturationConfigMapNameFromDeployment extracts SATURATION_CONFIG_MAP_NAME from manager container env.

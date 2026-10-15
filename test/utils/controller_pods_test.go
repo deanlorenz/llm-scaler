@@ -57,7 +57,9 @@ func labelTwins() []runtime.Object {
 			"wva-controller-manager-7d9f", 10*time.Minute),
 		// A relay (fixtures.CreateHTTPDriver): a bare Pod with the controller's labels.
 		testPod(testControllerNS, "e2e-control-driver", controllerLabels(nil), "", time.Minute),
-		// A warm-pool Pod: owned by its own Deployment's ReplicaSet.
+		// A warm-pool Pod: owned by its own Deployment's ReplicaSet. Real ones
+		// carry only app.kubernetes.io/name; this one wears control-plane too, so
+		// the label selector cannot be what keeps it out.
 		testPod(testControllerNS, "e2e-pool-5c6b-qwert",
 			controllerLabels(map[string]string{"pod-template-hash": "5c6b", "app.kubernetes.io/component": "warm-pool"}),
 			"e2e-pool-5c6b", 2*time.Minute),

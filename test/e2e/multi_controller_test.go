@@ -71,7 +71,7 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 			}
 
 			By("Installing secondary namespace-scoped controller via Kustomize")
-			primaryController, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+			primaryController, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, utils.ControllerDeploymentName, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred(), "Failed to read primary controller deployment image")
 			Expect(primaryController.Spec.Template.Spec.Containers).NotTo(BeEmpty(), "Primary controller deployment should contain containers")
 			imageRepo, imageTag := splitImage(primaryController.Spec.Template.Spec.Containers[0].Image)
@@ -116,7 +116,7 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 				"patches:",
 				"- target:",
 				"    kind: Deployment",
-				"    name: wva-controller-manager",
+				"    name: " + utils.ControllerDeploymentName,
 				"  patch: |",
 				`    - op: add`,
 				`      path: /spec/template/spec/containers/0/env/-`,

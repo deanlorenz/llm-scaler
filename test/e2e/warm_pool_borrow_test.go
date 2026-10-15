@@ -101,10 +101,7 @@ var _ = Describe("Warm pool - a borrow WVA decides on its own", Label("full"), L
 			Skip("--fake-metrics is simulator-only, and this spec needs demand that does not depend on timing")
 		}
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 		servingSet = fixtures.ServingPoolNameForEPP(cfg.EPPServiceName)
 
 		nodes, err := fixtures.SchedulableNodes(ctx, k8sClient)

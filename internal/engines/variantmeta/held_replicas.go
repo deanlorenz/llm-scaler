@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -113,7 +112,7 @@ func ListVariantPods(ctx context.Context, c client.Client, namespace string,
 		return nil, err
 	}
 	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
-		return !ownedByDeployment(&p, acc.GetName())
+		return !scaletarget.OwnedByDeployment(&p, acc.GetName())
 	}), nil
 }
 
@@ -133,21 +132,6 @@ func ListDeploymentPods(ctx context.Context, c client.Client, namespace, name st
 		return nil, err
 	}
 	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
-		return !ownedByDeployment(&p, name)
+		return !scaletarget.OwnedByDeployment(&p, name)
 	}), nil
-}
-
-// ownedByDeployment reports whether a pod is controlled by a ReplicaSet of the
-// named Deployment.
-func ownedByDeployment(p *corev1.Pod, deployment string) bool {
-	hash := p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]
-	if hash == "" {
-		return false
-	}
-	for _, o := range p.OwnerReferences {
-		if o.Controller != nil && *o.Controller && o.Kind == "ReplicaSet" && o.Name == deployment+"-"+hash {
-			return true
-		}
-	}
-	return false
 }

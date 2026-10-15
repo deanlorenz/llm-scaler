@@ -126,10 +126,7 @@ var _ = Describe("Warm pool - a unit that spans Pods", Label("full"), Label("war
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		// A cluster without the CRD cannot build the object under test, and a
 		// spec that quietly passed there would be reporting on nothing.

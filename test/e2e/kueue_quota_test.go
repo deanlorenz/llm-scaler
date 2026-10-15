@@ -76,10 +76,7 @@ var _ = Describe("Quota limiter - bounded by Kueue", Label("full"), Label("kueue
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		if !fixtures.KueueInstalled(crClient) {
 			if cfg.Environment == envKindEmulator {

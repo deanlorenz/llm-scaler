@@ -59,7 +59,7 @@ var _ = Describe("Warm pool - the controller drains when it returns a Pod", Labe
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller := fixtures.ControllerDeployment{Namespace: cfg.WVANamespace, Name: "wva-controller-manager"}
+		controller := fixtures.WVAController(cfg.WVANamespace)
 
 		By("Applying the NetworkPolicy, so the driver is the admitted path")
 		policyName, err := fixtures.ApplyWarmPoolNetworkPolicy(ctx, k8sClient, cfg.LLMDNamespace)

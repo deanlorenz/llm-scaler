@@ -40,8 +40,7 @@ func TestNewestControllerPodSkipsLabelTwins(t *testing.T) {
 		pod("e2e-control-driver", "", "", time.Minute),
 		pod("e2e-pool-5c6b-qwert", "5c6b", "e2e-pool-5c6b", 2*time.Minute),
 	)
-	got, err := NewestControllerPod(context.Background(), c,
-		ControllerDeployment{Namespace: ns, Name: "wva-controller-manager"})
+	got, err := NewestControllerPod(context.Background(), c, WVAController(ns))
 	if err != nil {
 		t.Fatal(err)
 	}
