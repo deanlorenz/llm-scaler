@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -714,16 +716,53 @@ func (c *ScalingPolicy) Validate() error {
 		return err
 	}
 
-	// Checked here, once per ConfigMap change, so a typo fails the entry where
-	// the operator looks. Left to ResolveScaleToZeroRetention it passed load and
-	// was then reported on every cycle for every model resolving to it.
+	return nil
+}
+
+// IgnoredField is one setting ResetUnusableFields cleared.
+type IgnoredField struct {
+	// Field is the YAML path of the setting, e.g. "scaleToZero.retentionPeriod".
+	Field string
+	// Value is the value as the operator wrote it.
+	Value string
+	// Reason says why the value cannot be used.
+	Reason error
+}
+
+// ResetUnusableFields clears each setting whose value cannot be used, so the
+// entry behaves as if that one field were unset, and returns what it cleared.
+// The caller warns once per ConfigMap load with the result.
+//
+// These are reset instead of failing Validate because a failing entry is
+// dropped whole. For the "default" entry that drops its limiters too, so a typo
+// in a retention period would quietly switch off GPU quota enforcement.
+//
+// Cleared:
+//   - scaleToZero.retentionPeriod that does not parse or is not positive. Left
+//     in place it passed load and was reported on every cycle for every model
+//     resolving to it, then fell back to the default anyway.
+//   - shapeChangeHoldSeconds below zero. Merge copies any non-zero value, so a
+//     negative one replaced the default entry's hold, and the getters then
+//     honour only positive values: the operator's hold was silently lost.
+func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
+	var ignored []IgnoredField
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
-			return fmt.Errorf("scaleToZero.retentionPeriod %q: %w", c.ScaleToZero.RetentionPeriod, err)
+			ignored = append(ignored, IgnoredField{
+				Field: "scaleToZero.retentionPeriod", Value: c.ScaleToZero.RetentionPeriod, Reason: err,
+			})
+			c.ScaleToZero.RetentionPeriod = ""
 		}
 	}
-
-	return nil
+	if c.ShapeChangeHoldSeconds < 0 {
+		ignored = append(ignored, IgnoredField{
+			Field:  "shapeChangeHoldSeconds",
+			Value:  strconv.Itoa(c.ShapeChangeHoldSeconds),
+			Reason: errors.New("must be >= 0"),
+		})
+		c.ShapeChangeHoldSeconds = 0
+	}
+	return ignored
 }
 
 // validateLimiters checks the inline Limiters list. gpu-inventory/inventory

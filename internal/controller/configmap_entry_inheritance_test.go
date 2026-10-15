@@ -59,3 +59,31 @@ func TestParsedEntriesInheritCapacityThresholdsAndPriority(t *testing.T) {
 			got.KvCacheThreshold, got.QueueLengthThreshold, got.Priority)
 	}
 }
+
+// A bad scaleToZero.retentionPeriod in the default entry must not drop the
+// entry. Dropping it drops its limiters, which turns off GPU quota enforcement
+// over a typo in an unrelated field.
+func TestDefaultEntryWithBadRetentionKeepsLimiters(t *testing.T) {
+	data := map[string]string{
+		"default": "scaleToZero:\n  retentionPeriod: 5 minutes\n" +
+			"shapeChangeHoldSeconds: -10\n" +
+			"limiters:\n  - type: quota\n    name: team-quota\n    scope: cluster\n    quotas: { H100: 8 }\n",
+	}
+	configs, count, rejected := parseScalingPolicyConfigRejects(data, logr.Discard())
+	if count != 1 || len(rejected) != 0 {
+		t.Fatalf("parsed %d entries, rejected %v; want the default entry kept", count, rejected)
+	}
+	def := configs[config.GlobalDefaultsKey]
+	if len(def.Limiters) != 1 || def.Limiters[0].Name != "team-quota" {
+		t.Errorf("default entry limiters = %+v, want the team-quota limiter", def.Limiters)
+	}
+	if def.ScaleToZero == nil || def.ScaleToZero.RetentionPeriod != "" {
+		t.Errorf("bad retentionPeriod was kept: %+v", def.ScaleToZero)
+	}
+	if def.ShapeChangeHoldSeconds != 0 {
+		t.Errorf("negative shapeChangeHoldSeconds was kept: %d", def.ShapeChangeHoldSeconds)
+	}
+	if got := config.ResolveScaleToZeroRetention(&def); got != config.DefaultScaleToZeroRetentionPeriod {
+		t.Errorf("retention = %v, want the built-in default %v", got, config.DefaultScaleToZeroRetentionPeriod)
+	}
+}

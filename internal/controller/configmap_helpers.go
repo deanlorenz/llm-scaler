@@ -67,6 +67,14 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		// thresholds stay zero ("unset") so tiers and overrides inherit them in
 		// the merge; the resolved policy is fully defaulted after it.
 		satConfig.ApplyEntryDefaults()
+		// An unusable value in one of these fields is ignored, not fatal:
+		// rejecting the entry would drop everything else in it, and for the
+		// default entry that includes its limiters.
+		for _, f := range satConfig.ResetUnusableFields() {
+			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
+				"the field is treated as unset",
+				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
+		}
 		if err := satConfig.Validate(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
