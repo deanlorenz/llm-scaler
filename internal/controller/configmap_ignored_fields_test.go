@@ -62,9 +62,10 @@ func TestParseReportsIgnoredFields(t *testing.T) {
 		t.Errorf("ignored has %d keys, want 2: %v", len(ignored), ignored)
 	}
 
-	// One count per ignored field, the rejected entry's included: it was read
-	// and cleared before Validate dropped the entry.
-	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 4 {
-		t.Errorf("error metric for ignored fields = %v, want 4", got)
+	// One count per ignored field of a kept entry: two in default, one in
+	// batch. The rejected entry's field is not counted; that entry is counted
+	// as rejected instead.
+	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 3 {
+		t.Errorf("error metric for ignored fields = %v, want 3", got)
 	}
 }

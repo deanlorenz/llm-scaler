@@ -81,21 +81,24 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		satConfig.ApplyEntryDefaults()
 		// An unusable value in one of these fields is ignored, not fatal:
 		// rejecting the entry would drop everything else in it, and for the
-		// default entry that includes its limiters. Counted as an error as well
-		// as logged, so it is as visible as a rejected entry.
+		// default entry that includes its limiters. Cleared before Validate, so
+		// it cannot fail the entry.
 		fieldsIgnored := satConfig.ResetUnusableFields()
-		for _, f := range fieldsIgnored {
-			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
-				"the field is treated as unset",
-				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
-			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
-		}
 		if err := satConfig.Validate(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)
 			rejected[key] = err
 			continue
+		}
+		// Reported only for a kept entry: a dropped one is reported as rejected,
+		// and nothing in it applies. Counted as an error as well as logged, so
+		// it is as visible as a rejected entry.
+		for _, f := range fieldsIgnored {
+			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
+				"the field is treated as unset",
+				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
+			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
 		}
 		// limiters: is a cluster-"default"-scope setting read only from the global
 		// default entry (Config.EffectiveLimiterMode). Warn if it appears elsewhere so
