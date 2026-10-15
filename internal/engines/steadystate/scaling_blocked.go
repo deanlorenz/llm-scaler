@@ -62,6 +62,19 @@ func (e *Engine) recordForbiddenBy(namespace, modelID string, tiers []string) (c
 	return changed
 }
 
+// forgetForbiddenBy clears the tiers recorded as disabling scale-to-zero for
+// every model not in evaluated. A cycle that skips a model does not resolve its
+// policy, so the record no longer reflects the last evaluation; kept, it would
+// keep an unchanged line quiet after the gap.
+func (e *Engine) forgetForbiddenBy(evaluated map[string]bool) {
+	for key, ref := range e.lastBlockedModels {
+		if !evaluated[key] && ref.forbiddenBy != "" {
+			ref.forbiddenBy = ""
+			e.lastBlockedModels[key] = ref
+		}
+	}
+}
+
 // pruneBlockedModels drops every reason series for a model that is no longer
 // active, and forgets its bookkeeping.
 //

@@ -1083,6 +1083,34 @@ func scaleToZeroPolicy(
 	return out, disabledBy
 }
 
+// scaleToZeroForbiddenMessage is the log line that names the tiers disabling a
+// model's scale-to-zero. The alert WVAModelScalingBlocked quotes its start.
+const scaleToZeroForbiddenMessage = "Scale-to-zero is disabled by the scaling policy of a tier this model's variants name " +
+	"(its per-model entry, if any, included)"
+
+// scaleToZeroForbiddenFix says where to enable scale-to-zero for a model whose
+// resolved policy disables it, and whether the model's per-model entry is what
+// disables it.
+//
+// Each tier is resolved with the model's per-model entry merged in, so a
+// per-model enabled: false disables every tier at once; naming the tiers then
+// sends the operator to the wrong place. disabledBy is spelled by tierNames.
+func scaleToZeroForbiddenFix(
+	configMap map[string]config.ScalingPolicy,
+	modelID, namespace string,
+	disabledBy []string,
+) (fix string, perModel bool) {
+	if override, ok := config.FindModelOverride(configMap, modelID, namespace); ok &&
+		override.ScaleToZero != nil && override.ScaleToZero.Enabled != nil && !*override.ScaleToZero.Enabled {
+		return "enable scaleToZero on the model's per-model entry", true
+	}
+	if slices.Equal(disabledBy, []string{config.GlobalDefaultsKey}) {
+		return "no variant names a tier: enable scaleToZero on the default entry (or the tier its defaultPolicy names), " +
+			"or on the model's per-model entry", false
+	}
+	return "enable scaleToZero on each tier in disabledBy, or on the model's per-model entry", false
+}
+
 // tierNames spells policy tiers for a log line: "" is the default entry.
 func tierNames(tiers []string) []string {
 	out := make([]string, 0, len(tiers))
@@ -1276,6 +1304,12 @@ func (e *Engine) optimizeV2(
 	e.pruneLastGoodAnalysis(activeKeys)
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
+	// evaluated are the models whose scale-to-zero stage 3 resolves this cycle.
+	// A model skipped by a cycle -- config not loaded, collection failed, or
+	// every model failed and the cycle returned early -- has its "disabled by
+	// tier" record forgotten, so the line is said again when it comes back.
+	evaluated := make(map[string]bool, len(modelGroups))
+	defer func() { e.forgetForbiddenBy(evaluated) }()
 	e.pruneLastDecided(e.stickyAge(), time.Now())
 	// The learned-state snapshot, restored once before anything is learned or
 	// swept, and written after the cycle has learned what it will.
@@ -1435,6 +1469,7 @@ func (e *Engine) optimizeV2(
 
 	// Stage 3: Apply enforcer per-model (directly on decisions)
 	for _, req := range requests {
+		evaluated[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = true
 		e.applyScaleToZeroEnforcement(
 			ctx, req.ModelID, req.Namespace, optimizer.Name(),
 			modelTiers[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
@@ -1646,10 +1681,12 @@ func (e *Engine) applyScaleToZeroEnforcement(
 		forbiddenBy = tierNames(disabledBy)
 	}
 	if e.recordForbiddenBy(namespace, modelID, forbiddenBy) && len(forbiddenBy) > 0 {
-		logger.Info("Scale-to-zero is disabled by the scaling policy of a tier this model's variants name; "+
-			"enable scaleToZero on every such tier",
+		fix, perModel := scaleToZeroForbiddenFix(e.Config.ScalingPolicyConfigForNamespace(namespace),
+			modelID, namespace, forbiddenBy)
+		logger.Info(scaleToZeroForbiddenMessage,
 			"modelID", modelID, "namespace", namespace,
-			"tiers", tierNames(tiers), "disabledBy", forbiddenBy)
+			"tiers", tierNames(tiers), "disabledBy", forbiddenBy,
+			"disabledByPerModelEntry", perModel, "fix", fix)
 	}
 
 	if len(decisions) == 0 {
