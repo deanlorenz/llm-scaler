@@ -121,6 +121,9 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 			Expect(got.NamespaceBorrow).To(BeNil())
 			Expect(got.BorrowWithheld).To(HaveKeyWithValue("team-a", Not(BeEmpty())), "the reason is reported")
 			got.BorrowWithheld = nil // reported only, never decided on
+			// The queue's own nominal figures, not borrowing: what it lent out
+			// and can reclaim, what it reaches within nominal (W1, W7).
+			got.NamespaceNominal = nil
 			Expect(got).To(Equal(headOf(entry(nil), snap)))
 			Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 8}))
 		},

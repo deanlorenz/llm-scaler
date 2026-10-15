@@ -11,9 +11,12 @@ package steadystate
 // in-flight ledger see them (allocation.DefaultInFlight).
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,17 +26,29 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // borrowingState is the steady-state engine's cohort-borrowing state.
 type borrowingState struct {
-	// inFlight is borrowed growth ordered and not yet visible as pods. The
+	// inFlight is borrowed growth ordered and not yet visible as pods, and
+	// what a Kueue read may not show yet: the process-wide record
+	// (allocation.DefaultBorrowInFlight), which the wake reads too. The
 	// release steps of the proposal extend it.
 	inFlight *allocation.BorrowInFlight
+	// credit is this cycle's draws in flight on open cohorts, each its
+	// variant's to re-place (GreedyByScoreOptimizer.BorrowCredit).
+	credit []allocation.BorrowDraw
+	// gatedSeen is the managed pods seen at Kueue's admission gate, kept
+	// past the gate until a read shows them (gatedGPUs); gatedErrLogged the
+	// namespaces whose pod list failed and was logged, until one succeeds.
+	gatedSeen      map[types.UID]gatedPod
+	gatedErrLogged map[string]bool
 	// physicalSkipped is set while a declared physical limiter is missing from
 	// the cycle's constraints (notePhysicalSkipped): no new borrowing starts.
 	physicalSkipped bool
@@ -106,12 +121,13 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
-	st.cycle, st.gated, st.cohortsByNS = allocation.BorrowCycle{}, nil, nil
+	st.cycle, st.gated, st.cohortsByNS, st.credit = allocation.BorrowCycle{}, nil, nil, nil
 	if st.inFlight == nil {
-		st.inFlight = allocation.NewBorrowInFlight()
+		st.inFlight = allocation.DefaultBorrowInFlight
 	}
-	st.inFlight.Observe(observeVariants(requests))
+	st.inFlight.ObserveAt(observeVariants(requests), now)
 	if !allocation.HasBorrowing(constraints) {
+		st.inFlight.SetCycle(nil, nil, nil, now)
 		e.idlePreemptions(ctx, requests, scaleTargets, now)
 		return constraints
 	}
@@ -119,13 +135,53 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	e.notePhysicalSkipped(ctx, physical && !slices.ContainsFunc(constraints, func(c *allocation.ResourceConstraints) bool {
 		return c != nil && c.ProviderName == allocation.PhysicalLimiterName
 	}))
-	st.gated = e.gatedGPUs(ctx, constraints)
-	constraints = allocation.DeductUnreserved(constraints, st.inFlight.Entries(), st.gated)
+	gated, admitted, unreadable := e.gatedGPUs(ctx, constraints, now)
+	st.gated = gated
+	u := st.inFlight.Unreserved(now)
+	u.Gated, u.Admitted = gated, admitted
+	constraints = allocation.DeductUnreservedAt(constraints, u)
+	// A namespace whose gated pods could not be listed may hold any number of
+	// them: its cohorts borrow nothing new this cycle (G3).
+	unreadableCohorts := cohortsOf(constraints, unreadable)
+	constraints = allocation.BlockCohorts(constraints, unreadableCohorts)
 	// What only the variants' pod templates show: a flavor not pinned where
 	// Kueue could pick another, a co-resource request not stated (B1).
 	constraints = allocation.WithholdByVariants(constraints, requests)
 	e.warnBorrowNamespacesSplit(ctx, constraints)
-	return e.governBorrowing(ctx, constraints, requests, scaleTargets, now)
+	constraints = e.governBorrowing(ctx, constraints, requests, scaleTargets, now)
+	blocked := st.governor.BlockedCohorts(now)
+	for c := range unreadableCohorts {
+		blocked[c] = true
+	}
+	// The wake deducts what this cycle deducted, and closes what it closed.
+	st.inFlight.SetCycle(gated, admitted, blocked, now)
+	// A variant's own draw in flight is its to re-place (A4), on a cohort
+	// still open to borrowing.
+	for _, d := range st.inFlight.Entries() {
+		if !blocked[d.Cohort] {
+			st.credit = append(st.credit, d)
+		}
+	}
+	return constraints
+}
+
+// cohortsOf is the cohorts constraints map the namespaces to.
+func cohortsOf(constraints []*allocation.ResourceConstraints, namespaces []string) map[string]bool {
+	if len(namespaces) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for _, ns := range namespaces {
+			for _, co := range c.NamespaceCohorts[ns] {
+				out[co] = true
+			}
+		}
+	}
+	return out
 }
 
 // notePhysicalSkipped records whether this cycle's declared physical limiter
@@ -167,13 +223,50 @@ func (e *Engine) warnBorrowNamespacesSplit(ctx context.Context, constraints []*a
 	}
 }
 
-// recordBorrowDraws keeps what the optimizer borrowed this cycle as in flight.
-func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer) {
+// recordBorrowDraws keeps what the optimizer borrowed this cycle as in flight,
+// and returns it: the pass's draws less those of the models the utilization
+// share planned -- it overrides their targets, so what the pass ordered for
+// them is not spent (W9) -- each cut to its variant's decided target. The
+// draws already in flight are cut to the decided targets too (Trim): a
+// target of 0 the engine decided is known, unlike a desired count read back
+// as 0 (W6).
+func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisions []domain.VariantDecision, now time.Time) []allocation.BorrowDraw {
 	g, ok := optimizer.(*allocation.GreedyByScoreOptimizer)
 	if !ok || e.borrowing.inFlight == nil {
-		return
+		return nil
 	}
-	e.borrowing.inFlight.Record(g.BorrowDraws())
+	targets := decidedTargets(decisions)
+	var draws []allocation.BorrowDraw
+	for _, d := range g.BorrowDraws() {
+		if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] {
+			continue
+		}
+		if t, ok := targets[d.Namespace+"/"+d.Variant]; ok && t < d.Target {
+			cut := d.Target - t
+			if cut >= d.Replicas {
+				continue
+			}
+			per := (d.GPUs + d.Replicas - 1) / d.Replicas
+			d.Replicas -= cut
+			d.GPUs = min(d.GPUs, d.Replicas*per)
+			d.CreditReplicas = min(d.CreditReplicas, d.Replicas)
+			d.CreditGPUs = min(d.CreditGPUs, d.GPUs)
+			d.Target = t
+		}
+		draws = append(draws, d)
+	}
+	e.borrowing.inFlight.Trim(targets)
+	e.borrowing.inFlight.RecordAt(draws, now)
+	return draws
+}
+
+// decidedTargets is each decision's target, keyed "namespace/variant".
+func decidedTargets(decisions []domain.VariantDecision) map[string]int {
+	out := make(map[string]int, len(decisions))
+	for _, d := range decisions {
+		out[d.Namespace+"/"+d.VariantName] = d.TargetReplicas
+	}
+	return out
 }
 
 // borrowedFlavors is, per "namespace/variant", the flavor placement of the
@@ -211,14 +304,39 @@ func observeVariants(requests []allocation.ModelScalingRequest) map[string]alloc
 	return out
 }
 
+// gatedPod is a managed pod seen at Kueue's admission gate.
+type gatedPod struct {
+	namespace, accelerator string
+	gpus                   int
+	// admittedAt is when the pod was first seen past the gate; zero while
+	// gated.
+	admittedAt time.Time
+}
+
 // gatedGPUs is, per namespace some borrowing constraint maps to a cohort, the
 // GPUs of pods held at Kueue's admission gate, per the accelerator their node
 // selector names ("" when none). They hold no reservation yet, so the cohort's
 // free pool still counts what Kueue is about to admit them onto. Read from the
 // manager's cached pod informer: one list per such namespace, no API call.
-func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.ResourceConstraints) map[string]map[string]int {
+//
+// admitted is the pods seen gated and past the gate since: Kueue reserved them,
+// but a read taken before then does not show it, so they stay deducted from a
+// chunk read before their admission was seen (W3), for at most InFlightTTL.
+//
+// unreadable is the namespaces whose pods could not be listed. Logged once
+// per namespace until a list succeeds; the caller closes their cohorts to new
+// borrowing this cycle (G3), since any number of gated pods may hide there.
+func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.ResourceConstraints,
+	now time.Time) (gated map[string]map[string]int, admitted []allocation.AdmittedGPUs, unreadable []string) {
 	if e.client == nil {
-		return nil
+		return nil, nil, nil
+	}
+	st := &e.borrowing
+	if st.gatedSeen == nil {
+		st.gatedSeen = map[types.UID]gatedPod{}
+	}
+	if st.gatedErrLogged == nil {
+		st.gatedErrLogged = map[string]bool{}
 	}
 	namespaces := map[string]bool{}
 	for _, c := range constraints {
@@ -229,26 +347,61 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			namespaces[ns] = true
 		}
 	}
-	out := map[string]map[string]int{}
-	for ns := range namespaces {
+	gated = map[string]map[string]int{}
+	listed := map[string]bool{}
+	present := map[types.UID]bool{}
+	for _, ns := range slices.Sorted(maps.Keys(namespaces)) {
 		var pods corev1.PodList
 		if err := e.client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
+			unreadable = append(unreadable, ns)
+			if !st.gatedErrLogged[ns] {
+				st.gatedErrLogged[ns] = true
+				ctrl.LoggerFrom(ctx).Error(err, "Cannot list the pods at Kueue's admission gate; nothing new is borrowed in the namespace's cohorts until a list succeeds",
+					"namespace", ns)
+			}
 			continue
 		}
+		delete(st.gatedErrLogged, ns)
+		listed[ns] = true
 		for i := range pods.Items {
 			p := &pods.Items[i]
-			if p.DeletionTimestamp != nil || !kueue.PodGated(p) {
+			if p.DeletionTimestamp != nil {
 				continue
 			}
 			g := resources.PodGPURequests(p)
 			if g <= 0 {
 				continue
 			}
-			if out[ns] == nil {
-				out[ns] = map[string]int{}
+			present[p.UID] = true
+			acc := accelerator.ProductFromNodeSelector(p.Spec.NodeSelector)
+			if kueue.PodGated(p) {
+				if gated[ns] == nil {
+					gated[ns] = map[string]int{}
+				}
+				gated[ns][acc] += g
+				st.gatedSeen[p.UID] = gatedPod{namespace: ns, accelerator: acc, gpus: g}
+				continue
 			}
-			out[ns][accelerator.ProductFromNodeSelector(p.Spec.NodeSelector)] += g
+			if s, seen := st.gatedSeen[p.UID]; seen && s.admittedAt.IsZero() {
+				s.admittedAt = now
+				st.gatedSeen[p.UID] = s
+			}
 		}
 	}
-	return out
+	for uid, s := range st.gatedSeen {
+		switch {
+		case !namespaces[s.namespace], listed[s.namespace] && !present[uid]:
+			delete(st.gatedSeen, uid) // gone, or no longer read
+		case !s.admittedAt.IsZero() && now.Sub(s.admittedAt) > allocation.InFlightTTL:
+			delete(st.gatedSeen, uid)
+		case !s.admittedAt.IsZero():
+			admitted = append(admitted, allocation.AdmittedGPUs{Namespace: s.namespace, Accelerator: s.accelerator,
+				GPUs: s.gpus, At: s.admittedAt})
+		}
+	}
+	slices.SortFunc(admitted, func(a, b allocation.AdmittedGPUs) int {
+		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.Accelerator, b.Accelerator),
+			a.At.Compare(b.At), cmp.Compare(a.GPUs, b.GPUs))
+	})
+	return gated, admitted, unreadable
 }

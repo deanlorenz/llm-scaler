@@ -27,6 +27,10 @@ type NominalFigures struct {
 	LentOut int
 	// WithinNominal is what it can reach without borrowing (B7).
 	WithinNominal int
+	// Guaranteed is what it reaches whatever the cohort's free pool holds:
+	// nominal for a reclaiming queue, what it kept or uses for one that
+	// cannot reclaim.
+	Guaranteed int
 	// NominalLentOut is the nominal it cannot reach: lent by a queue that cannot
 	// reclaim (B10).
 	NominalLentOut int
@@ -56,13 +60,14 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 			for _, r := range rowsOfType(rows, accType) {
 				nominal += r.Nominal
 				f.WithinNominal += r.WithinNominal
+				f.Guaranteed += r.Guaranteed
 				if r.Counted() {
 					f.LentOut += r.LentOut
 				}
 			}
 			f.NominalLentOut = max(0, nominal-f.WithinNominal)
-			if f.LentOut == 0 && f.NominalLentOut == 0 {
-				continue
+			if f.LentOut == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
+				continue // nominal, whatever the pool holds: nothing to carry
 			}
 			if out[ns] == nil {
 				out[ns] = map[string]NominalFigures{}
@@ -205,6 +210,119 @@ func CreditReclaimable(constraints []*ResourceConstraints, reclaimable map[strin
 		out = append(out, &cc)
 	}
 	return out
+}
+
+// NominalLentOutAny reports whether some queue of ns, counted or not, lent
+// nominal it cannot reclaim (NamespaceBorrow and NamespaceNominal's
+// NominalLentOut): a wake refused within nominal then says why (B10).
+func NominalLentOutAny(constraints []*ResourceConstraints, ns string) bool {
+	if NominalLentOut(constraints, ns) > 0 {
+		return true
+	}
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for _, f := range c.NamespaceNominal[ns] {
+			if f.NominalLentOut > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// WithinNominalNow is WithinNominal for a wake (A1, W7): the figures as of
+// what the scaling manager asked for that the Kueue read does not show yet
+// (u: borrowed draws in flight and lagging, gated and admitted pods) and the
+// cohorts closed to new borrowing (blocked). A queue that cannot reclaim
+// reaches past what it kept only through the cohort's free pool, so its
+// within-nominal figure loses what of the pool those take: the steady-state
+// engine's last free 8 GPUs, drawn for a decode a moment ago, are not there
+// for a cold wake too. A namespace read and not counted is held at its
+// queues' within-nominal figure (NamespaceNominal), its nominal otherwise,
+// the same way. A reclaiming queue reaches its whole nominal whatever the
+// pool holds, and is unchanged.
+func WithinNominalNow(constraints []*ResourceConstraints, u Unreserved, blocked map[string]bool) []*ResourceConstraints {
+	after := BlockCohorts(DeductUnreservedAt(constraints, u), blocked)
+	adjusted := make([]*ResourceConstraints, 0, len(after))
+	for i, c := range after {
+		before := constraints[i]
+		if c == nil || (c.NamespaceBorrow == nil && len(c.NamespaceNominal) == 0) {
+			adjusted = append(adjusted, c)
+			continue
+		}
+		cc := *c
+		taken := func(ns, acc string) int {
+			return max(0, chunkFreeFor(before, ns, acc)-chunkFreeFor(c, ns, acc))
+		}
+		if c.NamespaceBorrow != nil {
+			cc.NamespaceBorrow = make(map[string]map[string]NamespaceBorrow, len(c.NamespaceBorrow))
+			for ns, perType := range c.NamespaceBorrow {
+				out := maps.Clone(perType)
+				for t, b := range out {
+					g := poolLimit(c, ns, t)
+					if g < 0 || b.WithinNominal <= g {
+						continue
+					}
+					b.WithinNominal = max(g, b.WithinNominal-taken(ns, t))
+					out[t] = b
+				}
+				cc.NamespaceBorrow[ns] = out
+			}
+		}
+		if len(c.NamespaceNominal) > 0 {
+			cc.NamespacePools = maps.Clone(c.NamespacePools)
+			for ns, perType := range c.NamespaceNominal {
+				pools, ok := cc.NamespacePools[ns]
+				if !ok {
+					continue
+				}
+				pools = maps.Clone(pools)
+				for t, f := range perType {
+					k, found := accelerator.FindKey(pools, t)
+					if !found {
+						continue
+					}
+					p := pools[k]
+					within := f.WithinNominal
+					if within > f.Guaranteed {
+						within = max(f.Guaranteed, within-taken(ns, t))
+					}
+					if p.Limit < 0 || within < p.Limit {
+						p.Limit = within
+					}
+					pools[k] = p
+				}
+				cc.NamespacePools[ns] = pools
+			}
+		}
+		adjusted = append(adjusted, &cc)
+	}
+	return WithinNominal(adjusted)
+}
+
+// chunkFreeFor is the free GPUs of ns's cohorts' chunks in c serving acc.
+func chunkFreeFor(c *ResourceConstraints, ns, acc string) int {
+	if c == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range c.SharedPools {
+		if slices.Contains(c.NamespaceCohorts[ns], p.Cohort) && p.serves(acc) {
+			n += p.Free
+		}
+	}
+	return n
+}
+
+// poolLimit is ns's pool Limit of type t in c (its guaranteed figure where
+// borrowing is counted); config.QuotaUnlimited when it has none.
+func poolLimit(c *ResourceConstraints, ns, t string) int {
+	if k, ok := accelerator.FindKey(c.NamespacePools[ns], t); ok {
+		return c.NamespacePools[ns][k].Limit
+	}
+	return config.QuotaUnlimited
 }
 
 // ReclaimableNominal is, per accelerator type, the nominal of ns's reclaiming

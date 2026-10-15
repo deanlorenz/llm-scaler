@@ -100,17 +100,17 @@ func (e *Engine) borrowBlockedIn() func(namespace, modelID, cohort string) bool 
 	}
 }
 
-// borrowedByModel is, per "namespace/model", the GPUs the last pass drew from
-// the cohorts' shared pools; nil when the cycle counts no borrowing.
-func (e *Engine) borrowedByModel(optimizer allocation.ScalingOptimizer, constraints []*allocation.ResourceConstraints) map[string]int {
+// borrowedByModel is, per "namespace/model", the GPUs the cycle's decisions
+// draw from the cohorts' shared pools (recordBorrowDraws: the pass's draws
+// less those a utilization-share override replaced, W9); nil when the cycle
+// counts no borrowing.
+func borrowedByModel(draws []allocation.BorrowDraw, constraints []*allocation.ResourceConstraints) map[string]int {
 	if !allocation.HasBorrowing(constraints) {
 		return nil
 	}
 	out := map[string]int{}
-	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
-		for _, d := range g.BorrowDraws() {
-			out[d.Namespace+"/"+d.ModelID] += d.GPUs
-		}
+	for _, d := range draws {
+		out[d.Namespace+"/"+d.ModelID] += d.GPUs
 	}
 	return out
 }

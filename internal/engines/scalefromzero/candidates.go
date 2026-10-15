@@ -299,13 +299,22 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// queue that cannot reclaim the nominal it lent does not count it, so the
 	// wake does not create a pod Kueue would hold at its gate. A refusal then
 	// says why (OutcomeNominalLentOut).
-	p.nominalLentOut = allocation.NominalLentOut(constraints, namespace) > 0
+	//
+	// The pool a queue that cannot reclaim reaches through is the one the
+	// steady-state engine borrows from: what it drew and Kueue has not
+	// reserved yet, the pods at Kueue's gate and those it admitted since the
+	// read, and the cohorts closed to new borrowing (a lender waits) come
+	// off it first, from the process-wide record (A1, W7). A namespace read
+	// and not counted is held to its queues' within-nominal figure too.
+	p.nominalLentOut = allocation.NominalLentOutAny(constraints, namespace)
 	// Nominal a reclaiming queue of the namespace lent out is its to take
 	// back: Kueue preempts the borrowers whose pods fill those GPUs and nodes
 	// to admit the wake, so neither the cluster bounds nor the node view
 	// refuse it for their being in use (W1).
 	p.reclaimable = allocation.ReclaimableNominal(constraints, namespace)
-	constraints = allocation.CreditReclaimable(allocation.WithinNominal(constraints), p.reclaimable)
+	record := allocation.DefaultBorrowInFlight
+	constraints = allocation.CreditReclaimable(
+		allocation.WithinNominalNow(constraints, record.Unreserved(now), record.Blocked(now)), p.reclaimable)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints
 	return p

@@ -3,6 +3,7 @@ package allocation
 import (
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -31,6 +32,13 @@ type BorrowDraw struct {
 	// the in-flight ledger holds their holes on those nodes until the pods
 	// hold them (ShapeOfDraws).
 	Placement *kueue.FlavorPlacement
+	// OrderedAt is when the record first took it (BorrowInFlight.RecordAt);
+	// ResolvedAt when its pods were seen to exist, zero while in flight.
+	OrderedAt, ResolvedAt time.Time
+	// CreditGPUs and CreditReplicas are the part of a pass's draw re-placed
+	// on the variant's own draw still in flight (GreedyByScoreOptimizer.
+	// BorrowCredit): borrowed this pass, already in the record.
+	CreditGPUs, CreditReplicas int
 }
 
 // nsBorrowLeft is what one namespace may still borrow of one accelerator type
@@ -67,6 +75,12 @@ type borrowState struct {
 	cohorts map[string][]string
 	nodes   *NodeView
 	draws   []BorrowDraw
+	// credit is, per "namespace/variant" and chunk key, the GPUs of the
+	// variant's own draws still in flight (BorrowCredit): the pools were
+	// debited them before the pass, and the targets restart from the current
+	// replicas, so the pass re-places those very replicas. They are the
+	// variant's to re-place, not another draw on the pool (A4).
+	credit map[string]map[string]int
 	// blocked reports a variant that may not borrow this pass; nil blocks none.
 	blocked func(namespace, modelID, variant string) bool
 	// blockedIn reports a model that may not draw on one cohort's pools this
@@ -214,10 +228,38 @@ type borrowSave struct {
 	nodes      viewDebits
 	draws      int
 	guaranteed map[string]int
+	credit     map[string]map[string]int
+}
+
+// setCredit takes the variants' own draws in flight as credit (A4).
+func (bs *borrowState) setCredit(draws []BorrowDraw) {
+	if bs == nil || len(draws) == 0 {
+		return
+	}
+	bs.credit = map[string]map[string]int{}
+	for _, d := range draws {
+		k := d.Namespace + "/" + d.Variant
+		if bs.credit[k] == nil {
+			bs.credit[k] = map[string]int{}
+		}
+		bs.credit[k][d.Cohort+"/"+d.Flavor+"/"+d.Resource] += d.GPUs
+	}
+}
+
+// cloneCredit copies a credit map.
+func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(m))
+	for k, v := range m {
+		out[k] = maps.Clone(v)
+	}
+	return out
 }
 
 func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
-	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed)}
+	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
 		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
@@ -236,6 +278,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	}
 	bs.nodes.restoreDebits(s.nodes)
 	bs.draws = bs.draws[:s.draws]
+	bs.credit = s.credit
 	clear(guaranteed)
 	maps.Copy(guaranteed, s.guaranteed)
 }
@@ -456,8 +499,10 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			continue // backed off in this cohort (B12)
 		}
 		open = true
+		// The variant's own draw in flight on this chunk is its to re-place.
+		own := bs.credit[p.namespace+"/"+variant][c.key()]
 		// K1: a LowerPriority lender's GPUs only for a model it outranks.
-		if c.drawable(p.class, borrow.priority) < need || !coFitsKept(c.CoFree, borrow.coKept, requests) ||
+		if c.drawable(p.class, borrow.priority)+own < need || !coFitsKept(c.CoFree, borrow.coKept, requests) ||
 			!coWithin(borrow.coHeadroom, requests) { // K2b
 			continue // the GPUs, or a co-resource of the flavor's group (B1), would hold it back
 		}
@@ -469,17 +514,25 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			byNodes = true // the pools held it; no node of the flavor did
 			continue
 		}
-		c.Free -= need
+		fromOwn := min(own, need)
+		if fromOwn > 0 {
+			bs.credit[p.namespace+"/"+variant][c.key()] -= fromOwn
+		}
+		c.Free -= need - fromOwn
 		spendCo(borrow, c, requests)
 		if borrow.cap >= 0 {
 			borrow.cap -= need
 		}
 		p.guaranteed[key] = 0
-		bs.draws = append(bs.draws, BorrowDraw{
+		d := BorrowDraw{
 			Namespace: p.namespace, ModelID: p.modelID, Variant: variant,
 			Cohort: c.Cohort, Flavor: c.Flavor, Resource: c.Resource,
 			GPUs: need, Replicas: 1, Target: target, Placement: &c.FlavorPlacement,
-		})
+		}
+		if fromOwn > 0 {
+			d.CreditGPUs, d.CreditReplicas = fromOwn, 1
+		}
+		bs.draws = append(bs.draws, d)
 		return true, true
 	}
 	if len(chunks) > 0 && !open {
@@ -508,6 +561,8 @@ func (bs *borrowState) drawsByVariant() []BorrowDraw {
 		}
 		out[i].GPUs += d.GPUs
 		out[i].Replicas += d.Replicas
+		out[i].CreditGPUs += d.CreditGPUs
+		out[i].CreditReplicas += d.CreditReplicas
 		out[i].Target = max(out[i].Target, d.Target)
 	}
 	return out

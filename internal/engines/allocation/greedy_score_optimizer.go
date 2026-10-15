@@ -72,6 +72,15 @@ type GreedyByScoreOptimizer struct {
 	// repeated preemptions or placement timeouts (BorrowGovernor.BorrowBlockedIn).
 	BorrowBlockedIn func(namespace, modelID, cohort string) bool
 
+	// BorrowCredit, when set, is the borrowed draws still in flight
+	// (BorrowInFlight.Entries) on cohorts open this cycle: the pools were
+	// debited them, and a variant's targets restart from its current
+	// replicas, so its own draw is re-placed on its own GPUs rather than
+	// counted against it (A4). Without it the target of a variant whose pods
+	// are not created yet alternated, 3/2/3, one cycle on the pool, the next
+	// refused by its own draw.
+	BorrowCredit []BorrowDraw
+
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
 }
@@ -208,6 +217,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	if bs != nil {
 		bs.blocked = o.BorrowBlocked
 		bs.blockedIn = o.BorrowBlockedIn
+		bs.setCredit(o.BorrowCredit)
 	}
 	if !o.quiet {
 		o.draws = nil

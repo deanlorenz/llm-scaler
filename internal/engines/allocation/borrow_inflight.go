@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 )
 
 // BorrowInFlight is borrowed growth the greedy optimizer ordered that Kueue
@@ -14,18 +15,59 @@ import (
 // free pool still counts those GPUs, and a second cycle -- or another
 // namespace -- would borrow them again.
 //
-// An entry stays until the variant's pods exist (its replica count reaches the
-// target it was ordered at; from then on a pod still behind Kueue's admission
-// gate is charged by the gated-pod deduction, and an admitted one by Kueue's
-// reservation) or its desired count goes back below that target. The release
-// steps of the proposal (B5, B6) extend this record; it is keyed by namespace,
-// variant and chunk so a release can find what a variant borrowed and where.
+// An entry is in flight until the variant's pods exist (its replica count
+// reaches the target it was ordered at), its target goes back below that
+// target -- the engine's own decision (Trim), or a desired count read back
+// (Observe) -- or InFlightTTL passes since it was ordered. Pods that exist are
+// still not in a Kueue read taken before they did: a resolved draw lags, held
+// against its chunk until the chunk's snapshot was read after it resolved
+// (W3), and so is a pod seen at Kueue's admission gate and admitted since
+// (SetCycle's admitted). The release steps of the proposal (B5, B6) extend
+// this record; it is keyed by namespace, variant and chunk so a release can
+// find what a variant borrowed and where.
+//
+// One record serves both engines (DefaultBorrowInFlight): the steady-state
+// engine records its draws and, each cycle, the gated and admitted pods and
+// the cohorts closed to new borrowing; a wake deducts them all (A1).
 //
 // It is safe for concurrent use. Every method accepts a nil receiver, which
 // records nothing and holds nothing.
 type BorrowInFlight struct {
 	mu      sync.Mutex
 	entries map[inFlightKey]BorrowDraw
+	// lagging is resolved draws, held until a read after they resolved.
+	lagging []BorrowDraw
+	// The last borrowing cycle's figures (SetCycle), as of cycleAt.
+	gated    map[string]map[string]int
+	admitted []AdmittedGPUs
+	blocked  map[string]bool
+	cycleAt  time.Time
+}
+
+// DefaultBorrowInFlight is the process-wide record both engines share.
+var DefaultBorrowInFlight = NewBorrowInFlight()
+
+// AdmittedGPUs is GPUs of pods seen at Kueue's admission gate and admitted
+// since: Kueue reserves them, but a snapshot read before At does not show it.
+type AdmittedGPUs struct {
+	Namespace string
+	// Accelerator is the type the pods' node selector names, "" when none.
+	Accelerator string
+	GPUs        int
+	// At is when the admission was first seen.
+	At time.Time
+}
+
+// Unreserved is what the scaling manager asked for and a Kueue read may not
+// show yet (DeductUnreservedAt).
+type Unreserved struct {
+	// InFlight is the draws in flight and the lagging ones (ResolvedAt set).
+	InFlight []BorrowDraw
+	// Gated is GPUs of managed pods at Kueue's admission gate, per namespace
+	// and accelerator ("" when the pod names none).
+	Gated map[string]map[string]int
+	// Admitted is gated pods since admitted.
+	Admitted []AdmittedGPUs
 }
 
 type inFlightKey struct {
@@ -40,7 +82,9 @@ func keyOfDraw(d BorrowDraw) inFlightKey {
 type VariantObservation struct {
 	// Current is the replicas that exist (pods created, gated ones included).
 	Current int
-	// Desired is the target the variant is held at now; 0 when unknown.
+	// Desired is the target the variant is held at now, as read back; 0 when
+	// unknown -- a desired count of 0 the engine decided reaches the record
+	// through Trim instead.
 	Desired int
 }
 
@@ -49,9 +93,25 @@ func NewBorrowInFlight() *BorrowInFlight {
 	return &BorrowInFlight{entries: map[inFlightKey]BorrowDraw{}}
 }
 
-// Record adds a pass's draws. A variant that borrows again from the same chunk
-// before its earlier draw resolved holds both, at the newer target.
-func (b *BorrowInFlight) Record(draws []BorrowDraw) {
+// Reset empties the record. For tests.
+func (b *BorrowInFlight) Reset() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.entries)
+	b.lagging, b.gated, b.admitted, b.blocked, b.cycleAt = nil, nil, nil, nil, time.Time{}
+}
+
+// Record adds a pass's draws, ordered now. A variant that borrows again from
+// the same chunk before its earlier draw resolved holds both, at the newer
+// target, from the earlier order: the borrowing placer re-places a draw still
+// in flight on its own GPUs (BorrowCredit) and records only what is new.
+func (b *BorrowInFlight) Record(draws []BorrowDraw) { b.RecordAt(draws, time.Now()) }
+
+// RecordAt is Record at a given time.
+func (b *BorrowInFlight) RecordAt(draws []BorrowDraw, now time.Time) {
 	if b == nil {
 		return
 	}
@@ -59,54 +119,176 @@ func (b *BorrowInFlight) Record(draws []BorrowDraw) {
 	defer b.mu.Unlock()
 	for _, d := range draws {
 		k := keyOfDraw(d)
-		if prev, ok := b.entries[k]; ok {
+		d.OrderedAt, d.ResolvedAt = now, time.Time{}
+		// What was re-placed on the variant's own draw is already here.
+		d.GPUs, d.Replicas = d.GPUs-d.CreditGPUs, d.Replicas-d.CreditReplicas
+		d.CreditGPUs, d.CreditReplicas = 0, 0
+		prev, ok := b.entries[k]
+		if ok {
 			d.GPUs += prev.GPUs
 			d.Replicas += prev.Replicas
 			d.Target = max(d.Target, prev.Target)
+			d.OrderedAt = prev.OrderedAt
+		}
+		if d.GPUs <= 0 || d.Replicas <= 0 {
+			continue
 		}
 		b.entries[k] = d
 	}
 }
 
-// Observe drops the entries that resolved: the variant's pods exist up to the
-// target the draw was ordered at, its desired count went back below that
-// target, or it is no longer observed at all. observed is keyed by
-// "namespace/variant".
+// Observe settles the record against a cycle's replica counts, now.
 func (b *BorrowInFlight) Observe(observed map[string]VariantObservation) {
+	b.ObserveAt(observed, time.Now())
+}
+
+// ObserveAt settles the record against a cycle's replica counts, observed
+// keyed by "namespace/variant". A draw whose variant is no longer observed,
+// whose desired count went back below its target, or that was ordered
+// InFlightTTL ago is dropped (its pods were never created, or the target
+// that ordered them is gone). The replicas whose pods now exist resolve: they
+// leave the draw and lag (W3), until a read after now shows them, or
+// InFlightTTL passes.
+func (b *BorrowInFlight) ObserveAt(observed map[string]VariantObservation, now time.Time) {
 	if b == nil {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.lagging = slices.DeleteFunc(b.lagging, func(d BorrowDraw) bool {
+		_, ok := observed[d.Namespace+"/"+d.Variant]
+		return !ok || now.Sub(d.ResolvedAt) > InFlightTTL
+	})
 	for k, d := range b.entries {
 		o, ok := observed[k.namespace+"/"+k.variant]
-		if !ok || o.Current >= d.Target || (o.Desired > 0 && o.Desired < d.Target) {
+		if !ok || (o.Desired > 0 && o.Desired < d.Target) || now.Sub(d.OrderedAt) > InFlightTTL {
 			delete(b.entries, k)
 			continue
 		}
-		// Replicas that now exist are no longer in flight here.
-		if missing := d.Target - o.Current; missing < d.Replicas {
-			per := ceilDiv(d.GPUs, d.Replicas)
-			d.GPUs = min(d.GPUs, missing*per)
-			d.Replicas = missing
+		missing := max(0, d.Target-o.Current)
+		if missing >= d.Replicas {
+			continue
+		}
+		// Replicas that now exist are no longer in flight; they lag.
+		per := ceilDiv(d.GPUs, d.Replicas)
+		resolved := d
+		resolved.Replicas = d.Replicas - missing
+		resolved.GPUs = d.GPUs - min(d.GPUs, missing*per)
+		resolved.ResolvedAt = now
+		if resolved.GPUs > 0 {
+			b.lagging = append(b.lagging, resolved)
+		}
+		if missing == 0 {
+			delete(b.entries, k)
+			continue
+		}
+		d.GPUs = min(d.GPUs, missing*per)
+		d.Replicas = missing
+		b.entries[k] = d
+	}
+}
+
+// Trim lowers the draws to the targets the engine decided this cycle, keyed
+// "namespace/variant": a draw ordered past a variant's target is cut by the
+// replicas above it, and dropped when none is left. A decided target is known
+// even at 0, unlike a desired count read back (W6). A variant without a
+// target here is left as it is.
+func (b *BorrowInFlight) Trim(targets map[string]int) {
+	if b == nil || len(targets) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, d := range b.entries {
+		t, ok := targets[k.namespace+"/"+k.variant]
+		if !ok {
+			continue
+		}
+		if d, keep := trimDraw(d, t); keep {
 			b.entries[k] = d
+		} else {
+			delete(b.entries, k)
 		}
 	}
 }
 
-// Entries returns the draws still in flight, in a stable order.
+// trimDraw cuts d to target: the replicas it ordered above target are not in
+// flight. Reports false when nothing is left.
+func trimDraw(d BorrowDraw, target int) (BorrowDraw, bool) {
+	cut := d.Target - target
+	if cut <= 0 {
+		return d, true
+	}
+	if cut >= d.Replicas {
+		return d, false
+	}
+	per := ceilDiv(d.GPUs, d.Replicas)
+	d.Replicas -= cut
+	d.GPUs = min(d.GPUs, d.Replicas*per)
+	d.Target = target
+	return d, true
+}
+
+// Entries returns the draws still in flight -- ordered, their pods not
+// created -- in a stable order. The lagging ones are not among them.
 func (b *BorrowInFlight) Entries() []BorrowDraw {
 	if b == nil {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.entriesLocked()
+}
+
+func (b *BorrowInFlight) entriesLocked() []BorrowDraw {
 	keys := slices.SortedFunc(maps.Keys(b.entries), compareInFlightKeys)
 	out := make([]BorrowDraw, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, b.entries[k])
 	}
 	return out
+}
+
+// SetCycle records a borrowing cycle's gated and admitted pods and the
+// cohorts closed to new borrowing, for the wake (Unreserved, Blocked). A
+// cycle that counts no borrowing records nothing.
+func (b *BorrowInFlight) SetCycle(gated map[string]map[string]int, admitted []AdmittedGPUs, blocked map[string]bool, now time.Time) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gated, b.admitted, b.blocked, b.cycleAt = gated, slices.Clone(admitted), maps.Clone(blocked), now
+}
+
+// Unreserved is everything the record holds that a Kueue read may not show
+// yet: the draws in flight and lagging, and, when the last borrowing cycle is
+// younger than InFlightTTL, its gated and admitted pods.
+func (b *BorrowInFlight) Unreserved(now time.Time) Unreserved {
+	if b == nil {
+		return Unreserved{}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	u := Unreserved{InFlight: append(b.entriesLocked(), b.lagging...)}
+	if now.Sub(b.cycleAt) <= InFlightTTL {
+		u.Gated, u.Admitted = b.gated, slices.Clone(b.admitted)
+	}
+	return u
+}
+
+// Blocked is the cohorts the last borrowing cycle closed to new borrowing,
+// when it is younger than InFlightTTL; nil otherwise.
+func (b *BorrowInFlight) Blocked(now time.Time) map[string]bool {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Sub(b.cycleAt) > InFlightTTL {
+		return nil
+	}
+	return maps.Clone(b.blocked)
 }
 
 // compareInFlightKeys orders keys by namespace, variant, cohort, flavor and
@@ -136,9 +318,21 @@ func compareInFlightKeys(a, b inFlightKey) int {
 // pod is not counted twice, and a peer's ask -- another controller's, or a
 // batch job's -- is not borrowed from under it.
 func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw, gated map[string]map[string]int) []*ResourceConstraints {
-	if !HasBorrowing(constraints) || (len(inFlight) == 0 && len(gated) == 0 && !anyPending(constraints)) {
+	return DeductUnreservedAt(constraints, Unreserved{InFlight: inFlight, Gated: gated})
+}
+
+// DeductUnreservedAt is DeductUnreserved over everything u holds. A lagging
+// draw (ResolvedAt set) and an admitted pod come off a chunk only while the
+// chunk's snapshot was read no later than they resolved -- or its read time
+// is unknown -- since a later read already counts them as reserved (W3). The
+// admitted pods are charged beside the gated ones, before the larger of those
+// and the pending demand is taken: a pod admitted after the read may still be
+// among its pending Workloads, the cautious side.
+func DeductUnreservedAt(constraints []*ResourceConstraints, u Unreserved) []*ResourceConstraints {
+	if !HasBorrowing(constraints) || (len(u.InFlight) == 0 && len(u.Gated) == 0 && len(u.Admitted) == 0 && !anyPending(constraints)) {
 		return constraints
 	}
+	inFlight := lagCoveredByGated(u.InFlight, u.Gated, u.Admitted)
 	out := make([]*ResourceConstraints, 0, len(constraints))
 	for _, c := range constraints {
 		if c == nil || c.NamespaceBorrow == nil || len(c.SharedPools) == 0 {
@@ -150,35 +344,41 @@ func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw,
 		for _, d := range inFlight {
 			for i := range cc.SharedPools {
 				p := &cc.SharedPools[i]
-				if p.Cohort == d.Cohort && p.Flavor == d.Flavor && p.Resource == d.Resource {
+				if p.Cohort == d.Cohort && p.Flavor == d.Flavor && p.Resource == d.Resource && !readAfter(p, d.ResolvedAt) {
 					p.Free = max(0, p.Free-d.GPUs)
 				}
 			}
 		}
-		// What the governed gated pods take of each chunk, first chunk first.
+		// What the governed gated pods take of each chunk, first chunk first;
+		// then what the admitted ones take of a chunk read before them.
 		fromPods := make([]int, len(cc.SharedPools))
 		left := make([]int, len(cc.SharedPools))
 		for i := range cc.SharedPools {
 			left[i] = cc.SharedPools[i].Free
 		}
-		for _, ns := range slices.Sorted(maps.Keys(gated)) {
-			byAcc := gated[ns]
-			for _, acc := range slices.Sorted(maps.Keys(byAcc)) {
-				n := byAcc[acc]
-				for i := range cc.SharedPools {
-					p := &cc.SharedPools[i]
-					if n <= 0 {
-						break
-					}
-					if !slices.Contains(c.NamespaceCohorts[ns], p.Cohort) || (acc != "" && !p.serves(acc)) {
-						continue
-					}
-					take := min(left[i], n)
-					left[i] -= take
-					fromPods[i] += take
-					n -= take
+		charge := func(ns, acc string, n int, at time.Time) {
+			for i := range cc.SharedPools {
+				p := &cc.SharedPools[i]
+				if n <= 0 {
+					return
 				}
+				if !slices.Contains(c.NamespaceCohorts[ns], p.Cohort) || (acc != "" && !p.serves(acc)) || readAfter(p, at) {
+					continue
+				}
+				take := min(left[i], n)
+				left[i] -= take
+				fromPods[i] += take
+				n -= take
 			}
+		}
+		for _, ns := range slices.Sorted(maps.Keys(u.Gated)) {
+			byAcc := u.Gated[ns]
+			for _, acc := range slices.Sorted(maps.Keys(byAcc)) {
+				charge(ns, acc, byAcc[acc], time.Time{})
+			}
+		}
+		for _, a := range u.Admitted {
+			charge(a.Namespace, a.Accelerator, a.GPUs, a.At)
 		}
 		for i := range cc.SharedPools {
 			p := &cc.SharedPools[i]
@@ -187,6 +387,45 @@ func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw,
 		out = append(out, &cc)
 	}
 	return out
+}
+
+// lagCoveredByGated is draws with each lagging one's GPUs less what its
+// namespace's gated and admitted pods already charge: a draw resolves into
+// pods at Kueue's gate, or admitted past it, which those deductions count,
+// and must not be counted twice. Only what is left -- pods never seen at the
+// gate, admitted before a read shows them -- lags. In flight draws are as
+// they are.
+func lagCoveredByGated(draws []BorrowDraw, gated map[string]map[string]int, admitted []AdmittedGPUs) []BorrowDraw {
+	if (len(gated) == 0 && len(admitted) == 0) || !slices.ContainsFunc(draws, func(d BorrowDraw) bool { return !d.ResolvedAt.IsZero() }) {
+		return draws
+	}
+	cover := map[string]int{}
+	for ns, byAcc := range gated {
+		for _, n := range byAcc {
+			cover[ns] += n
+		}
+	}
+	for _, a := range admitted {
+		cover[a.Namespace] += a.GPUs
+	}
+	out := slices.Clone(draws)
+	for i := range out {
+		d := &out[i]
+		if d.ResolvedAt.IsZero() {
+			continue
+		}
+		c := min(cover[d.Namespace], d.GPUs)
+		d.GPUs -= c
+		cover[d.Namespace] -= c
+	}
+	return out
+}
+
+// readAfter reports whether chunk p's snapshot was read after at: it then
+// counts what resolved at at. A zero at (still in flight, still gated) or an
+// unknown read time is never read after.
+func readAfter(p *SharedPoolChunk, at time.Time) bool {
+	return !at.IsZero() && !p.ReadAt.IsZero() && p.ReadAt.After(at)
 }
 
 // anyPending reports whether some borrowing constraint's chunk carries pending

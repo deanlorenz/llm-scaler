@@ -1583,10 +1583,11 @@ func (e *Engine) optimizeV2(
 		g.Rescale = e.resolveRescaleFlags(requests)
 		g.BorrowBlocked = e.borrowBlocked()
 		g.BorrowBlockedIn = e.borrowBlockedIn()
+		g.BorrowCredit = e.borrowing.credit
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
-	e.recordBorrowDraws(optimizer)
-	logScalingDecisions(ctx, requests, allDecisions, e.borrowedByModel(optimizer, constraints))
+	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)
+	logScalingDecisions(ctx, requests, allDecisions, borrowedByModel(draws, constraints))
 
 	logger.Info("V2 optimizer produced decisions",
 		"optimizer", optimizer.Name(),
@@ -1609,6 +1610,8 @@ func (e *Engine) optimizeV2(
 	// replica asks back, last, so nothing above raises it again
 	// (borrowing_release.go). A no-op without borrowing.
 	e.releaseBorrowed(ctx, requests, allDecisions, variantScaleTargets, borrowNow)
+	// A release lowers a target; what was in flight above it is not.
+	e.borrowing.inFlight.Trim(decidedTargets(allDecisions))
 	// What on-call sees: the budgets the cycle used, the borrowing reasons,
 	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
 	// so a cleared condition clears its series.
