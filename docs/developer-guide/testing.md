@@ -301,6 +301,18 @@ go doc ./test/e2e/fixtures
 go test ./test/e2e/... -run TestDoesNotExist
 ```
 
+**Helpers that reuse the controller's labels need their own NetworkPolicy
+allow.** The e2e installs the controller in the model namespace, and the
+shipped `wva-external-scaler` NetworkPolicy selects every Pod there that
+carries the controller's labels. It admits only `:8443`, `:8081` and `:9090`.
+A test Pod that borrows those labels (the warm-pool relays made with
+`fixtures.ControllerDriverLabels`) is cut off on any other port. On kind it
+only shows on a worker node, because traffic from the control-plane node
+itself is not filtered, so the failure is intermittent: `dial tcp ...: i/o
+timeout`. `fixtures.CreateHTTPDriver` adds a policy that admits the relay port
+on that one Pod. Do the same for any new helper; do not widen the shipped
+policy.
+
 ### Configuration
 
 The main variables (full list in the [E2E README](../../test/e2e/)):
