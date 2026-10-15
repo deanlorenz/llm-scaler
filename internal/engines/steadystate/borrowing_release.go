@@ -216,7 +216,9 @@ func (e *Engine) loadBorrowLedger(ctx context.Context) {
 		ctrl.LoggerFrom(ctx).Info("Warning: dropped borrowing release ledger items out of bounds; this controller did not write them",
 			"dropped", dropped)
 	}
-	st.lastLedger = raw
+	// lastLedger stays unset: the next persist hands the loaded ledger to the
+	// status publisher, so it is in the desired status whether or not the
+	// publisher's own carry-over read it (review R10).
 }
 
 // persistBorrowLedger hands the ledger to the status publisher when changed.

@@ -120,10 +120,11 @@ const (
 	KeyLeader                = "leader"
 	KeyControllerInstance    = "controllerInstance"
 	// KeyBorrowReleaseLedger is the Kueue borrowing release ledger, JSON
-	// (allocation.BorrowLedger): which releases of borrowed capacity to
-	// waiting lenders are still in flight, so a restart does not release a
-	// second unit for a lender the first has not reached yet. The steady-state
-	// engine writes it and reads it back on start.
+	// (allocation.BorrowLedger): the placement-timeout holds still in force
+	// and the borrowing cooldowns with their backoff, so a restart neither
+	// lets a released replica grow back before its pods are gone nor forgets
+	// a model's cooldown. The steady-state engine writes it and reads it back
+	// on start.
 	KeyBorrowReleaseLedger = "borrowReleaseLedger"
 )
 
@@ -319,11 +320,16 @@ func ReadKey(ctx context.Context, reader client.Reader, namespace, key string) (
 
 // carryOver copies the persisted keys from the ConfigMap into the desired
 // status where this process has not set them yet, so the first write of a
-// term does not erase state another term persisted.
-func (p *Publisher) carryOver(ctx context.Context) {
+// term does not erase state another term persisted. A read that fails is
+// returned: Start writes nothing until one succeeds (review R10), since a
+// write without the persisted keys would erase them.
+func (p *Publisher) carryOver(ctx context.Context) error {
 	for _, key := range persistedKeys {
 		v, found, err := ReadKey(ctx, p.reader, p.namespace, key)
-		if err != nil || !found {
+		if err != nil {
+			return fmt.Errorf("reading the persisted %s key before the first write: %w", key, err)
+		}
+		if !found {
 			continue
 		}
 		p.mu.Lock()
@@ -332,6 +338,7 @@ func (p *Publisher) carryOver(ctx context.Context) {
 		}
 		p.mu.Unlock()
 	}
+	return nil
 }
 
 // Data returns a copy of the status as it will be written.
@@ -362,7 +369,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	// reads the instance from the environment.
 	p.desired[KeyControllerInstance] = metrics.GetControllerInstance()
 	p.mu.Unlock()
-	p.carryOver(ctx)
+	carried := false
 	p.signal() // the first write after election, whatever is pending
 	backoff := p.retryMin
 	// One timer for the whole term, armed only while a write is failing. retry
@@ -383,7 +390,17 @@ func (p *Publisher) Start(ctx context.Context) error {
 		if !sleep(ctx, p.debounce) {
 			return nil
 		}
-		if err := p.flush(ctx); err != nil {
+		err := error(nil)
+		if !carried {
+			// The persisted keys first, retried with the write's backoff.
+			if err = p.carryOver(ctx); err == nil {
+				carried = true
+			}
+		}
+		if err == nil {
+			err = p.flush(ctx)
+		}
+		if err != nil {
 			p.reportErr(logger, err)
 			timer.Reset(backoff)
 			retry = timer.C
