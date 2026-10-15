@@ -477,7 +477,13 @@ file by file:
 - a symbolic link is skipped, and the log names it: vLLM writes none, and a
   link is not the cache;
 - a file only its owner can read is copied readable by every user, and the
-  log counts it: the engine may run as another user.
+  log counts it: the engine may run as another user;
+- every directory it creates is readable and searchable by every user.
+
+The copies are made as root. Kept at their source modes, vLLM's `600` AOT files
+would be unreadable to an engine that does not run as root, on every seeded
+node. The cache directory is already world-writable and shared by every engine
+on the node, so world-readable copies expose nothing more.
 
 Each copy belongs to the user the preparer runs as (root on Kubernetes), not to
 the user that compiled it. An engine under another user can read what was
@@ -546,10 +552,12 @@ make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>...]'
 
 If your engines do not run as root and any node was seeded or published to,
 add `ENGINE_CACHE_UID=$(kubectl exec -n <ns> <engine pod> -- id -u)`.
-Without it, a seeded key is judged for root and passes even when your engines
-cannot read it. The UID is also the pod's `securityContext.runAsUser` (or the
-container's), when set. `ENGINE_CACHE_UID` is one UID for every pod: if prefill
-and decode run as different users, run the check once for each.
+Without it, a key owned by root is judged for root and passes even when your
+engines cannot read it: seeded and published copies are readable by every
+user, but a key written by a root engine may not be. The UID is also the
+pod's `securityContext.runAsUser` (or the container's), when set.
+`ENGINE_CACHE_UID` is one UID for every pod: if prefill and decode run as
+different users, run the check once for each.
 
 Pass the keys exactly as `engine-cache-keys` prints them, for example
 `torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
@@ -629,9 +637,10 @@ engine's user:
   fine when the engine owns them, which it does when it wrote them. They are
   `present`.
 - A seeded or published key is owned by root: the preparer copied it there as
-  root, keeping the modes. By default it is judged for root, which can read
-  it, so it is `present (... for uid 0, ...)`, the summary warns, and the
-  last line says `VERIFIED for root`.
+  root, and made every file readable and every directory readable and
+  searchable by every user, so an engine that is not root can read it. By
+  default it is judged for root, so it is `present (... for uid 0, ...)`,
+  the summary warns, and the last line says `VERIFIED for root`.
 - Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
   the one that owns the keys. The check then reads the permissions for
   that UID: owner read if it owns the file, read for others if not. Its

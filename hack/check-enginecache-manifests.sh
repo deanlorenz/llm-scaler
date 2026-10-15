@@ -293,6 +293,34 @@ SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$LP/pub.sh" > "$LP/pub.out" 2>&1; 
 LS="$LP/seed/engine-cache/vllm/torch_compile_cache/keyM"
 [ "$rc" = 0 ] && [ "$(cat "$LS/f" 2>/dev/null)" = m ] && [ ! -L "$LS/link" ] && [ ! -e "$LS/link" ] && ls -ld "$LS/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 symlink(s) skipped' "$LP/pub.out" \
     && ok "publish: a node's symlink never reaches the seed, and a private file reaches it readable" || fail "publish with a symlink and a private file: rc=$rc $(ls -l "$LS" 2>&1); $(cat "$LP/pub.out")"
+# a key only its owner can read -- 700 directories and a 600 file, as vLLM
+# writes its AOT files -- is copied readable and searchable by every user, by
+# both merges and with either cp: the copier is root and a non-root engine
+# must read the copy. Run under umask 077, so a mode the copy merely inherits
+# from mkdir or cp is private and only the merge's own chmod makes it public.
+modes_case() { # $1: merge or publish; $2: gnu or busybox
+    local W="$T/modes-$1-$2" k="vllm/torch_compile_cache/torch_aot_compile/keyR" src dst pth="$PATH" rc d bad=""
+    if [ "$1" = merge ]; then src="$W/seed"; dst="$W/cache"; else src="$W/node"; dst="$W/seed/engine-cache"; fi
+    [ "$2" = gnu ] || pth="$T/bbcp:$PATH"
+    mkdir -p "$src/$k/rank_0_0" "$W/cache" "$W/seed"
+    echo m > "$src/$k/rank_0_0/model"; chmod 600 "$src/$k/rank_0_0/model"
+    chmod 700 "$src/vllm/torch_compile_cache" "$src/vllm/torch_compile_cache/torch_aot_compile" "$src/$k" "$src/$k/rank_0_0"
+    if [ "$1" = merge ]; then
+        sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$W/seed|g; s|/engine-cache|$W/cache|g; s|^trap .*||" > "$W/run.sh"
+        (umask 077; PATH="$pth" SEED_MARKER=.seeded SEED_ID=shared:m MARKER=.prepared NODE_NAME=n1 "$SH" "$W/run.sh") > "$W/run.out" 2>&1; rc=$?
+    else
+        sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$W/seed|g; s|/engine-cache|$W/node|g" > "$W/run.sh"
+        (umask 077; PATH="$pth" SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$W/run.sh") > "$W/run.out" 2>&1; rc=$?
+    fi
+    [ "$(cat "$dst/$k/rank_0_0/model" 2>/dev/null)" = m ] || bad="$bad no copy;"
+    ls -ld "$dst/$k/rank_0_0/model" 2>/dev/null | grep -q '^-......r' || bad="$bad model not o+r;"
+    for d in vllm/torch_compile_cache vllm/torch_compile_cache/torch_aot_compile "$k" "$k/rank_0_0"; do
+        ls -ld "$dst/$d" 2>/dev/null | grep -q '^d......r.x' || bad="$bad $d not o+rx;"
+    done
+    [ "$rc" = 0 ] && [ -z "$bad" ] && ok "$1 ($2 cp): a 600 file under 700 directories is copied o+r, its directories o+rx" \
+        || fail "$1 ($2 cp) modes: rc=$rc$bad $(ls -lR "$dst/vllm" 2>&1 | head -12 | tr '\n' ';') $(cat "$W/run.out")"
+}
+modes_case merge gnu; modes_case merge busybox; modes_case publish gnu; modes_case publish busybox
 # the readiness probe accepts every marker form the preparer writes
 for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
     echo "$m" > "$T/marker"
