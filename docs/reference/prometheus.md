@@ -184,6 +184,10 @@ until you do one of these:
 - re-run the install with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true`, on a
   development cluster only.
 
+An upgrade of a controller that already skips verification, with no CA set,
+keeps skipping it and says so
+([upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
+
 The installer warns about both cases at the end of the install: an HTTPS
 connection it does not verify, and one it verifies with no CA set. The OpenShift
 overlays verify against the service CA.

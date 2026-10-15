@@ -25,6 +25,10 @@ command -v yq >/dev/null 2>&1 || {
     printf 'FATAL: yq is required to run these checks.\n' >&2
     exit 1
 }
+command -v jq >/dev/null 2>&1 || {
+    printf 'FATAL: jq is required to run these checks.\n' >&2
+    exit 1
+}
 
 # Sourced through CR-stripped copies: a Windows checkout with core.autocrlf
 # makes bash stop at the first function definition, which looks exactly like
@@ -46,14 +50,15 @@ source "$WORK/scaledobject.sh"
 
 for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_warn_floating_image \
           wva_warn_prometheus_tls wva_prometheus_skip_verify wva_prometheus_scraper_sa wva_prometheus_url_namespace \
-          wva_append_metrics_reader_decision render_default_scaledobject; do
+          wva_append_metrics_reader_decision render_default_scaledobject \
+          wva_read_live_prometheus_tls wva_warn_prometheus_tls_upgrade; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=71
+EXPECT_CASES=85
 RAN=0
 FAILED=0
 
@@ -205,6 +210,65 @@ check 'tls: DEPLOY_PROMETHEUS=false keeps verification on, even in MONITORING_NA
 check 'tls: OpenShift keeps the shipped verification (service CA)' '' "$(skip_for openshift https://t:9091 '')"
 check 'tls: an explicit choice wins' 'false' "$(skip_for kubernetes "$OWN_URL" false)"
 check 'tls: an explicit true is honoured for any Prometheus' 'true' "$(skip_for kubernetes https://prom.obs.svc:9090 true)"
+
+# An UPGRADE. Earlier releases shipped verification off for every Prometheus,
+# and the installer re-renders the whole config.yaml, so a controller that
+# connected unverified, with no CA, had verification turned on by the upgrade
+# and could no longer connect. The install still ended "complete".
+# skip_live <live state> <live skip> <live CA> <URL> [explicit] prints
+# <value>|<kept warnings>|<unreadable warnings>.
+skip_live() {
+    (
+        WVA_LIVE_PROM_TLS="$1" WVA_LIVE_SKIP_VERIFY="$2" WVA_LIVE_CA_PATH="$3"
+        WVA_LIVE_PROM_TLS_ERR='Error from server (Forbidden)'
+        ENVIRONMENT=kubernetes PROMETHEUS_URL="$4" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="${5:-}"
+        DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+        out="$(wva_warn_prometheus_tls_upgrade 2>&1)"
+        printf '%s|%s|%s' "$(wva_prometheus_skip_verify)" \
+            "$(printf '%s\n' "$out" | grep -c 'stays OFF, as it was before this upgrade')" \
+            "$(printf '%s\n' "$out" | grep -c 'Could not read the controller config')"
+    )
+}
+EXT_URL='https://prom.obs.svc:9090'
+check 'tls upgrade: live true, no CA: kept off, and said so' 'true|1|0' "$(skip_live read true '' "$EXT_URL")"
+check 'tls upgrade: the warning names both ways to turn it on' '2' \
+    "$( (WVA_LIVE_PROM_TLS=read WVA_LIVE_SKIP_VERIFY=true WVA_LIVE_CA_PATH='' PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=''
+         ENVIRONMENT=kubernetes PROMETHEUS_URL="$EXT_URL" DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+         wva_warn_prometheus_tls_upgrade 2>&1 | grep -cE 'PROMETHEUS_CA_CERT_PATH=<file>|PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false') )"
+check 'tls upgrade: live false stays verified, quietly' '|0|0' "$(skip_live read false '' "$EXT_URL")"
+check 'tls upgrade: live true with a CA path is not kept' '|0|0' "$(skip_live read true /etc/ca/ca.crt "$EXT_URL")"
+check 'tls upgrade: a new install verifies, quietly' '|0|0' "$(skip_live absent '' '' "$EXT_URL")"
+check 'tls upgrade: an explicit false wins over live true, quietly' 'false|0|0' "$(skip_live read true '' "$EXT_URL" false)"
+# Unreadable is unknown, never a new install: the new default, warned loudly.
+check 'tls upgrade: live config unreadable: verifies, warned loudly' '|0|1' "$(skip_live unknown '' '' "$EXT_URL")"
+check 'tls upgrade: plain http takes no TLS setting' '|0|0' "$(skip_live read true '' http://prom.obs.svc:9090)"
+check 'tls upgrade: the stack this install deploys stays off, no upgrade warning' 'true|0|0' \
+    "$(skip_live read false '' 'https://prometheus-operated.our-mon.svc.cluster.local:9090')"
+
+# What wva_read_live_prometheus_tls makes of the API answer. A stub kubectl
+# prints $LIVE_CM, or a NotFound/Forbidden error on stderr like the API server.
+live_read() {
+    (
+        LIVE_CM="$1"
+        kubectl() {
+            case "$LIVE_CM" in
+                NOTFOUND) echo 'Error from server (NotFound): configmaps "wva-manager-config" not found' >&2; return 1 ;;
+                FORBIDDEN) echo 'Error from server (Forbidden): configmaps "wva-manager-config" is forbidden' >&2; return 1 ;;
+                *) printf '%s' "$LIVE_CM" ;;
+            esac
+        }
+        wva_read_live_prometheus_tls wns
+        printf '%s|%s|%s' "$WVA_LIVE_PROM_TLS" "$WVA_LIVE_SKIP_VERIFY" "$WVA_LIVE_CA_PATH"
+    )
+}
+live_cm() { jq -cn --arg c "$1" '{data:{"config.yaml":$c}}'; }
+check 'live config: NotFound is a new install' 'absent||' "$(live_read NOTFOUND)"
+check 'live config: Forbidden is unknown, never absent' 'unknown||' "$(live_read FORBIDDEN)"
+check 'live config: verification off is read' 'read|true|' \
+    "$(live_read "$(live_cm "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true"')")")"
+check 'live config: a CA path is read' 'read|true|/etc/ca/ca.crt' \
+    "$(live_read "$(live_cm "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true" | .PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')")")"
+check 'live config: no config.yaml is unknown' 'unknown||' "$(live_read '{"data":{}}')"
 INSTALLED_CFG="$(printf '%s\n' "$SHIPPED_CFG" | yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$k8s_skip\"")"
 check 'tls: the installer choice on Kubernetes is warned about' '1' "$(tls_warned "$INSTALLED_CFG")"
 check 'tls: a CA path silences it' '0' \
