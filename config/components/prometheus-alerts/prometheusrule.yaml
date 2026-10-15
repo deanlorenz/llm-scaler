@@ -16,6 +16,7 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/monitoring.md#the-logs"
         summary: "llm-scaling-manager error rate elevated in {{ $labels.component }}"
         description: "Controller component '{{ $labels.component }}' error_type '{{ $labels.error_type }}' rate is {{ $value | printf \"%.2f\" }}/sec (>6/min threshold) sustained for 5+ minutes. Check controller logs for error patterns."
 
@@ -25,6 +26,7 @@ spec:
       labels:
         severity: info
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-controller-is-not-ready-or-crash-looping"
         summary: "llm-scaling-manager has processed zero models for 15+ minutes"
         description: "wva_models_processed has been 0 (or absent) over a 10-minute window, sustained for 15+ minutes. This is EXPECTED when no variants are being managed (an idle controller). If you do have managed workloads, it can indicate the optimization loop is stalled/crashed or metric collection is failing — check controller pod status and logs, and Prometheus connectivity."
 
@@ -34,6 +36,7 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#metrics-stale-or-missing"
         summary: "llm-scaling-manager metrics collection failing for {{ $labels.query_type }}"
         description: "Metrics collection query_type '{{ $labels.query_type }}' failing with reason '{{ $labels.reason }}' at {{ $value | printf \"%.2f\" }}/sec (>5/min threshold) sustained for 5+ minutes. Scaling decisions may be based on stale data. Verify Prometheus/metrics endpoint connectivity."
 
@@ -43,6 +46,7 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified"
         summary: "llm-scaling-manager in {{ $labels.namespace }} cannot see the cluster policy namespace"
         description: "The controller in {{ $labels.namespace }} was denied get on the Namespaces that decide where its limiters and quotas come from (the wva-policy namespace, or a wva.llmd.ai/policy-namespace label), so it runs on its own ConfigMap. A cluster policy an admin published is NOT applied to it, and it may be scaling under a weaker bound than the admin believes is in force. Grouped by namespace, not exported_namespace: this is a controller-level gauge with no model namespace, so the scrape's namespace label is the controller's own. Fix: have a cluster admin re-run 'NAMESPACE=<ns> make setup-prereqs', which grants the Namespace get (components/policy-namespace-reader). The value is set once at startup, so restart the controller after the grant."
 
@@ -52,6 +56,7 @@ spec:
       labels:
         severity: critical
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-controller-is-not-ready-or-crash-looping"
         summary: "llm-scaling-manager has a GPU limiter configured but cannot read nodes"
         description: "A gpu-inventory limiter is declared in the scaling-policy ConfigMap, and this controller's ServiceAccount is denied list on nodes. Every variant is therefore charged to no accelerator pool, receives no GPU budget, and HAS STOPPED SCALING UP — with no other error, because an unresolved accelerator is a normal state when no limiter is configured. This usually follows an admin adding a limiters: entry to a controller that was installed without node permission. Either grant the node read to the controller's ServiceAccount, or remove the limiters: entry."
 
@@ -61,8 +66,9 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#gpus-held-or-quota-spent"
         summary: "GPU-labeled {{ $labels.accelerator_type }} nodes report zero allocatable accelerators"
-        description: "The controller sees zero allocatable {{ $labels.accelerator_vendor }} {{ $labels.accelerator_model }} ({{ $labels.accelerator_type }}) GPUs for 5+ minutes. Note: this reflects node *allocatable* capacity (not free/schedulable GPUs), and wva_available_gpus is only emitted when a gpu-inventory limiter is declared in the saturation config's limiters list. A GPU-labeled node advertising zero allocatable accelerators usually means it is NotReady or its device plugin/driver is not installed — check GPU node status and device-plugin pods."
+        description: "The controller sees zero allocatable {{ $labels.accelerator_vendor }} {{ $labels.accelerator_model }} ({{ $labels.accelerator_type }}) GPUs for 5+ minutes. Note: this reflects node *allocatable* capacity (not free/schedulable GPUs), and wva_available_gpus is only emitted when a gpu-inventory limiter is declared in the scaling-policy ConfigMap's limiters: list. A GPU-labeled node advertising zero allocatable accelerators usually means it is NotReady or its device plugin/driver is not installed — check GPU node status and device-plugin pods."
 
     - alert: WVAReplicaScalingThrashing
       expr: sum by (exported_namespace, variant_name) (rate(wva_replica_scaling_total[10m])) > 0.033
@@ -70,6 +76,7 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-is-flapping"
         summary: "llm-scaling-manager scaling thrashing detected for {{ $labels.exported_namespace }}/{{ $labels.variant_name }}"
         description: "Variant {{ $labels.exported_namespace }}/{{ $labels.variant_name }} scaling at {{ $value | printf \"%.3f\" }}/sec (>2/min threshold) sustained for 10+ minutes, indicating possible thrashing. Review scaling thresholds and consider adjusting stabilization window or thresholds."
 
@@ -79,6 +86,7 @@ spec:
       labels:
         severity: info
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/guides/scale-to-zero/README.md#when-a-model-will-not-park"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} cannot reach zero ({{ $labels.reason }})"
         description: "Half of this model's configuration asks it to park and the other half forbids it, so it never will. reason 'variant-floor': scale-to-zero is enabled, but a variant declares minReplicas > 0 — a model is at zero only when nothing serves it, so that one floor keeps the whole model up and the accelerators are billed indefinitely. reason 'policy-forbids-zero': every variant permits zero, but the model's resolved scaling policy disables scale-to-zero, so the bounds are inert; most misleading with a single variant, where minReplicas: 0 reads exactly like a deliberate request to park. Neither is an error and neither breaks serving — which is why nothing else reports them: the model is up and healthy, exactly as every other metric says it should be. Either set every variant's minReplicas to 0, or disable scale-to-zero for the model, so the configuration says what it does."
 
@@ -88,15 +96,18 @@ spec:
       labels:
         severity: warning
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-will-not-wake-from-zero"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} has no wake signal"
         description: "EPP is exporting no flow-control queue metric at all for this model, so a request arriving while it is parked has nothing that can wake it. This is the ABSENCE of the metric family, not a queue reading zero — an idle queue reports 0 and is healthy. The usual cause is an EPP pod older than the ConfigMap that enabled the flowControl feature gate: EPP reads --config-file once at startup, so enabling the gate does not reach a process already running, and every artifact (image digest, ConfigMap, feature gate, auth) still matches. Check the EPP pod's own startup log for the config it parsed rather than comparing it to the ConfigMap, then restart the EPP deployment. Until this clears, a model that scales to zero will stay there."
 
-# There is deliberately NO alert on reason="engine-unsupported". It is a standing
-# property of running a non-vLLM engine, not an event: it would fire on the day
-# the model is deployed and never clear, and an alert that is always firing is one
-# operators learn to route to /dev/null — taking the two alerts above with it. The
-# reason is still on the metric and on the operational dashboard, which is where a
-# permanent condition belongs.
+# There is deliberately NO alert on reason="engine-unsupported". It means one
+# model is served by BOTH vLLM and SGLang, so no single request counter measures
+# its idleness and it is never parked (vLLM alone and SGLang alone are each
+# supported). That is a standing property of how the model is deployed, not an
+# event: it would fire on the day the model is deployed and never clear, and an
+# alert that is always firing is one operators learn to route to /dev/null --
+# taking the two alerts above with it. The reason is still on the metric and on
+# the operational dashboard, which is where a permanent condition belongs.
 
     - alert: WVAModelParkedWhileRequestsRefused
       expr: (sum by (exported_namespace, model_name) (wva_model_replicas) == 0) and on (model_name) (sum by (model_name) (rate(llm_d_epp_request_error_total{error_code="ServiceUnavailable"}[5m])) > 0)
@@ -104,5 +115,16 @@ spec:
       labels:
         severity: critical
       annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-will-not-wake-from-zero"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} is at zero replicas while requests are being refused"
         description: "Grouped by exported_namespace, not namespace: Prometheus renames a scraped `namespace` label to `exported_namespace` because the scrape job already carries one, so plain `namespace` here is the CONTROLLER's namespace and would name the wrong place. Nothing is serving this model and EPP is returning ServiceUnavailable for it, so traffic is being dropped and the autoscaler has not brought it back. This alerts on the SYMPTOM, so it fires whatever the cause: no wake signal (see WVAModelHasNoWakeSignal, which names that specific cause), an EPP that cannot be scraped, KEDA not delivering the activation, an admission or quota refusal on the scale-up, or a bug. Start with wva_model_scaling_blocked for this model — if a reason is present it is the likely cause. Note the join is on model_name alone because EPP's metrics carry no namespace, so two namespaces serving the same modelID cannot be told apart here; the namespace shown comes from the controller's side."
+
+    - alert: WVAScalerTargetsUndecided
+      expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#scaledobject-ready-false-or-targets-unknown"
+        summary: "{{ $value }} ScaledObject(s) in {{ $labels.exported_namespace }} have had no usable scaling decision for 10 minutes"
+        description: "Grouped by exported_namespace, not namespace: the gauge carries the ScaledObject's namespace, which Prometheus renames to exported_namespace because the scrape job already has a namespace label (the controller's). The KEDA external scaler is answering these ScaledObjects with the target's current replica count because no engine has a usable decision for them, so their replica counts are frozen: they neither scale up under load nor down when idle. For a cycle or two after a controller restart or leader change this is expected; ten minutes is not. wva_scaler_undecided_answers_total says why: reason not-managed, or no-decision that never stops, means the model is never planned, usually a trigger metadata value that does not parse; stale means its decision stopped being republished, so read that model's scaling-decision lines. The controller log line 'external scaler has no decision for this target' names each ScaledObject."

@@ -164,6 +164,31 @@ esac
 bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --memory 48Gi --dry-run > "$T/render-mem.yaml"
 [ "$(mem_limit "$T/render-mem.yaml")" = 48Gi ] && ok "--memory sets the downloader's memory limit" || fail "--memory 48Gi rendered a limit of '$(mem_limit "$T/render-mem.yaml")'"
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --memory 'lots' --dry-run >/dev/null 2>&1; then fail "apply must refuse --memory that is not a quantity"; else ok "apply: --memory that is not a quantity is refused"; fi
+# Several KEY=VALUE pairs, comma separated: a node must carry every one. Where
+# no single label picks out the usable GPU nodes, the product label AND a
+# second one does. Every pair is a nodeSelector entry, in the order given, and
+# the annotation reads back as the flag was given.
+SEL2=example.com/accelerator=h200,example.com/state=production
+if bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
+    [ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && ok "two pairs: the nodeSelector carries both keys" || fail "two pairs rendered: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")"
+    [ "$(yq -r 'select(.kind == "DaemonSet") | .metadata.annotations["wva.llmd.ai/weights-node-selector"]' "$T/render-sel2.yaml")" = "$SEL2" ] \
+        && [ "$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec | has("affinity")' "$T/render-sel2.yaml")" = false ] \
+        && ok "two pairs: the annotation records the selector as given, and no affinity is added" || fail "two pairs: annotation or affinity wrong"
+else
+    fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
+fi
+# one pair renders the block it always did -- the quoted key, the quoted value,
+# nothing more (the key is quoted since a key such as on is a YAML 1.1 boolean)
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
+selbad=0
+for badsel in 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b' 'a in (b)' $'a=b\nc=d' $'a=b\n'; do
+    if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector of '$badsel' must be refused"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a selector with an empty pair, a trailing or leading comma, a key twice, a space, a pair with no =, or a set-based term is refused"
 
 # ---------------------------------------------------------------------------
 # 2. status and delete, offline.
@@ -210,7 +235,7 @@ refuse() { case "\$ARGV" in *" \$1 "*) echo "stub kubectl: unexpected \$1 in:\$A
 case "\$1 \$2" in
   "get nodes")   if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
                  [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
-                 cat "$T/nodes.json" ;;
+                 if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
   "get pods")    want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
   "get daemonset")
       want -n check-ns
@@ -220,7 +245,7 @@ case "\$1 \$2" in
            cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
-           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
+           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then printf '%s' "\$STUB_DS_SELECTOR" | jq -Rc 'split(",") | map(index("=") as \$i | {key: .[:\$i], value: .[\$i+1:]}) | from_entries'; else printf '{}'; fi ;;
       esac ;;
   "get pvc")
       want -n check-ns
@@ -233,6 +258,19 @@ case "\$1 \$2" in
         *"jsonpath={.spec.volumeName}"*)
             case "\$ARGV" in *" -l "*) echo "stub kubectl: a single-object jsonpath on a list get:\$ARGV" >&2; exit 2 ;; esac
             case "\$ARGV" in *" ${NAME} "*) printf '%s\n' "\${STUB_PVC_VOLUMES-${PVNAME}}" ;; *) : ;; esac ;;
+        *"jsonpath={.spec.resources.requests.storage}"*)
+            # the size a re-apply keeps: absent is --ignore-not-found's empty
+            # answer, never a failure; a failure is an error the stub names
+            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: the size read names no claim:\$ARGV" >&2; exit 2 ;; esac
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the size read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_SIZE-1Ti}" ;;
+        *"jsonpath={.metadata.name}/{.spec.storageClassName}"*)
+            # whose claim it is: ours is on node-local-weights
+            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: the class read names no claim:\$ARGV" >&2; exit 2 ;; esac
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the class read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s/%s' "${NAME}" "\${STUB_PVC_CLASS-node-local-weights}" ;;
         *"model-pvc"*) printf '%s' "\${STUB_MODEL_PVC_CLASS:-}" ;;
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
@@ -241,7 +279,7 @@ case "\$1 \$2" in
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
   "delete serviceaccount") want -n check-ns; echo deleted ;;
-  "apply -f")    cat >/dev/null; echo applied ;;
+  "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
   "delete daemonset"|"delete pvc") want -n check-ns; echo deleted ;;
   "get pv")      want -l "$LBL"; want -o json; refuse -n; cat "$T/pvs.json" ;;
   "delete pv")   refuse -n; echo deleted ;;
@@ -328,12 +366,95 @@ if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/weights.sh status -n che
 : > "$T/calls"
 if STUB_NO_PV=1 PATH="$STUB_PATH" bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" > "$T/nopv.out" 2>&1; then fail "apply must refuse without leave to create PersistentVolumes"; else
     grep -q 'leave to create PersistentVolumes' "$T/nopv.out" && ! grep -q '^apply -f' "$T/calls" && ok "apply: without leave to create PersistentVolumes nothing is applied, and the reason names the cluster admin" || fail "apply without PV rights: $(tail -1 "$T/nopv.out"); calls: $(grep '^apply' "$T/calls")"; fi
+# A re-apply keeps an existing claim's size. The claim is bound to a static
+# volume and only a dynamically provisioned claim can be resized, so a
+# re-apply rendering the default failed mid-apply on every re-run once the
+# default changed. --capacity equal to the claim is fine (in any spelling of
+# the size); a different one is refused before anything lands; a claim that
+# cannot be read is an error, not an absent claim.
+claim_size() { yq -r 'select(.kind == "PersistentVolumeClaim") | .spec.resources.requests.storage' "$1" 2>/dev/null; }
+pv_size() { yq -r 'select(.kind == "PersistentVolume") | .spec.capacity.storage' "$1" 2>/dev/null; }
+WAPPLY=(apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG")
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/keep.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && [ "$(pv_size "$T/applied.yaml")" = 200Gi ] && grep -q 'exists at 200Gi; keeping that size' "$T/keep.out" \
+    && ok "re-apply: an existing 200Gi claim and no --capacity renders 200Gi on the claim and the volume, and says so" || fail "re-apply keep: claim '$(claim_size "$T/applied.yaml")' volume '$(pv_size "$T/applied.yaml")'; $(head -2 "$T/keep.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 200Gi > "$T/equal.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ! grep -q 'cannot be resized' "$T/equal.out" && ok "re-apply: --capacity equal to the existing claim applies" || fail "re-apply equal: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 204800Mi > "$T/equal2.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ok "re-apply: --capacity of the same size written otherwise (204800Mi for 200Gi) applies, as the claim has it" || fail "re-apply same size: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal2.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_SIZE=200Gi PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 1Ti > "$T/resize.out" 2>&1; then fail "re-apply must refuse a --capacity that differs from the existing claim"; else
+    grep -q -- '--capacity 1Ti differs from the existing claim .* which is 200Gi: a claim bound to a static (node-local) volume cannot be resized' "$T/resize.out" && grep -q 'weights.sh delete -n check-ns --model Qwen/Qwen3-32B' "$T/resize.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "re-apply: a different --capacity is refused before anything lands, saying why and what frees the claim" || fail "re-apply resize: $(tail -1 "$T/resize.out"); calls: $(grep '^apply' "$T/calls")"; fi
+# the delete it names frees nothing while a pod mounts the claim: the
+# refusal says to scale the engines down first
+grep -q 'scale the model servers (engines) using .* to 0 first, or pvc-protection leaves it Terminating' "$T/resize.out" \
+    && ok "re-apply resize: the refusal says no pod may mount the claim (scale the engines to 0) or it stays Terminating" || fail "re-apply resize: no word on pods mounting the claim: $(tail -1 "$T/resize.out")"
+# A decimal size or an exponent is the same size as its integer spelling:
+# 1.5Ti against a claim stored as 1536Gi was compared as text and refused.
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=1536Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 1.5Ti > "$T/equal3.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 1536Gi ] && ok "re-apply: --capacity 1.5Ti against a 1536Gi claim applies, as the claim has it" || fail "re-apply 1.5Ti vs 1536Gi: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal3.out" | tr '\n' ';')"
+qbad=0
+for pair in '1.5Ti 1536Gi' '0.5Gi 512Mi' '.5Ki 512' '1e3 1k' '1E3 1k' '1.0Ti 1Ti' '2.5k 2500' '1e0 1' '1000e-3 1'; do
+    # shellcheck disable=SC2086
+    bash -c 'source deploy/lib/nodedir.sh; nodedir_same_quantity "$1" "$2"' _ $pair || { fail "nodedir_same_quantity: '${pair% *}' and '${pair#* }' are the same size"; qbad=1; }
+done
+for pair in '1.5Ti 1Ti' '1e3 1Ki' '0.5Gi 500Mi' '1.5Ti 1537Gi'; do
+    # shellcheck disable=SC2086
+    if bash -c 'source deploy/lib/nodedir.sh; nodedir_same_quantity "$1" "$2"' _ $pair; then fail "nodedir_same_quantity: '${pair% *}' and '${pair#* }' differ"; qbad=1; fi
+done
+# a fraction of a byte, or past 2^63, is no claim size: not parsed
+for q in 0.1 1.5 1e-1 16Ei 9999999999999999999 1e19 . ''; do
+    if bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes "$1" >/dev/null' _ "$q"; then fail "nodedir_quantity_bytes: '$q' must not parse to whole bytes"; qbad=1; fi
+done
+[ "$(bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes 1.5Ti')" = 1649267441664 ] || { fail "nodedir_quantity_bytes 1.5Ti: '$(bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes 1.5Ti')'"; qbad=1; }
+[ "$qbad" -eq 0 ] && ok "sizes compare in bytes across decimals and exponents (1.5Ti = 1536Gi, 0.5Gi = 512Mi, 1e3 = 1k); a fraction of a byte or an overflow does not parse"
+# A claim of the model's name on another storage class is not this
+# script's: refused before anything lands, and not offered for deletion.
+for extra in "" "--capacity 1Ti"; do
+    : > "$T/calls"
+    # shellcheck disable=SC2086
+    if STUB_PVC_CLASS=standard PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" $extra > "$T/foreign.out" 2>&1; then fail "apply must refuse a claim of the model's name on another storage class (${extra:-no --capacity})"; else
+        grep -q "already has a claim named ${NAME} on storage class 'standard', which weights.sh did not make" "$T/foreign.out" && ! grep -qi 'delete' "$T/foreign.out" && ! grep -q '^apply -f' "$T/calls" \
+            && ok "apply: a claim of the model's name on another class is refused, named, not offered for deletion, nothing applied (${extra:-no --capacity})" || fail "apply on a foreign claim (${extra:-no --capacity}): $(tail -1 "$T/foreign.out"); calls: $(grep '^apply' "$T/calls")"; fi
+done
+: > "$T/applied.yaml"
+STUB_PVC_PHASE="" STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/fresh.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 1Ti ] && ! grep -q 'keeping that size' "$T/fresh.out" && ok "apply: no claim yet renders the default 1Ti" || fail "apply fresh: '$(claim_size "$T/applied.yaml")'"
+: > "$T/calls"
+if STUB_PVC_READ_ERROR='Error from server (Forbidden): persistentvolumeclaims is forbidden: stub' PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/pvcforb.out" 2>&1; then fail "apply must fail when the claim cannot be read"; else
+    grep -q 'cannot read the claim .*(kubectl: Error from server (Forbidden): persistentvolumeclaims is forbidden: stub)' "$T/pvcforb.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "apply: a claim that cannot be read (Forbidden) is an error with kubectl's reason, not an absent claim; nothing applied" || fail "apply pvc Forbidden: $(tail -1 "$T/pvcforb.out"); calls: $(grep '^apply' "$T/calls")"; fi
+if STUB_PVC_READ_ERROR='stub: must not be read' PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --dry-run > "$T/dry.out" 2>&1 && [ "$(claim_size "$T/dry.out")" = 1Ti ]; then ok "apply --dry-run reads no claim and renders the default"; else fail "apply --dry-run: $(tail -1 "$T/dry.out")"; fi
 if STUB_DAEMONSETS="" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/none.out" 2>&1; then fail "status with nothing to check must fail"; else grep -q 'no weights DaemonSets' "$T/none.out" && ok "status: no DaemonSets and no --model is refused with a reason" || fail "status: $(tail -1 "$T/none.out")"; fi
 : > "$T/calls"
 STUB_DS_SELECTOR=example.com/accelerator=h200 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns >/dev/null 2>&1 || true
 grep -q 'get nodes -l example.com/accelerator=h200' "$T/calls" && ok "status: lists the nodes the DaemonSet was applied for (its live nodeSelector)" || fail "status: live selector not used: $(grep 'get nodes' "$T/calls")"
 if STUB_DS_SELECTOR='a=b"c' PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/edited.out" 2>&1; then fail "status must refuse a DaemonSet nodeSelector that is not label characters"; else
     grep -q 'this script did not write' "$T/edited.out" && ok "status: a DaemonSet nodeSelector this script did not write is refused before kubectl" || fail "status on an edited DaemonSet: $(tail -1 "$T/edited.out")"; fi
+# a live nodeSelector of two keys reads back as both: listing the nodes on
+# the first alone would count nodes the DaemonSet is never scheduled to
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/sel2-live.out" 2>&1 || true
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "status: every pair of the live nodeSelector reaches the node listing" || fail "status: two-key live selector read back as: $(grep 'get nodes' "$T/calls"); $(tail -1 "$T/sel2-live.out")"
+# a node matches only when it carries every pair
+cat > "$T/nodes-sel2.json" <<'EOF'
+{"items":[
+ {"metadata":{"name":"node-both",        "labels":{"example.com/accelerator":"h200","example.com/state":"production"}}},
+ {"metadata":{"name":"node-accel-only",  "labels":{"example.com/accelerator":"h200"}}},
+ {"metadata":{"name":"node-state-only",  "labels":{"example.com/state":"production"}}},
+ {"metadata":{"name":"node-other-state", "labels":{"example.com/accelerator":"h200","example.com/state":"broken"}}},
+ {"metadata":{"name":"node-both-cordoned","labels":{"example.com/accelerator":"h200","example.com/state":"production"}},"spec":{"unschedulable":true}},
+ {"metadata":{"name":"node-accel-cordoned","labels":{"example.com/accelerator":"h200"}},"spec":{"unschedulable":true}}
+]}
+EOF
+STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns --node-selector "$SEL2" > "$T/sel2-status.out" 2>&1 || true
+grep -q '^  node-both ' "$T/sel2-status.out" && ! grep -Eq 'node-(accel-only|state-only|other-state|accel-cordoned)' "$T/sel2-status.out" \
+    && ok "status: a node carrying only one of the pairs is not counted" || fail "status two-pair node rows: $(grep -o 'node-[a-z-]*' "$T/sel2-status.out" | sort -u | tr '\n' ' ')"
 if STUB_NODES_ERROR='error: unable to parse requirement' PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/nf.out" 2>&1; then fail "status must fail when nodes cannot be listed"; else
     grep -q 'unable to parse requirement' "$T/nf.out" && ! grep -q cluster-reader "$T/nf.out" && ok "status: a node-list failure that is not a Forbidden reports kubectl's reason" || fail "status non-Forbidden: $(tail -1 "$T/nf.out")"; fi
 
@@ -432,6 +553,34 @@ PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n8.yaml" /mnt/local/
 cp "$T/nested.yaml" "$T/n9.yaml"
 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n9.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 > "$T/hp9.out" 2>&1 || fail "model_hostpath with a selector failed: $(cat "$T/hp9.out")"
 [ "$(yq -r '.scenario[0].common.storage.hostPath | .nodeSelector["example.com/accelerator"] + " " + (.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values | join(","))' "$T/n9.yaml")" = "h200 node-cordoned,node-foreign" ] && ok "model_hostpath: with a selector, the excluded nodes are an affinity beside the nodeSelector" || fail "model_hostpath selector exclusion: $(yq -o json -I0 '.scenario[0].common.storage.hostPath' "$T/n9.yaml")"
+# two pairs: both are nodeSelector entries, and the nodes kept off are only
+# those carrying both (a cordoned node with one of the labels is not a node
+# the downloader would go to, so it is not named)
+cp "$T/nested.yaml" "$T/n10.yaml"
+if STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n10.yaml" /mnt/local/wva check-ns "$SEL2" > "$T/hp10.out" 2>&1; then
+    [ "$(yq -o json -I0 '.scenario[0].common.storage.hostPath.nodeSelector' "$T/n10.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && ok "model_hostpath: two pairs become a nodeSelector with both keys" || fail "model_hostpath two pairs: $(yq -o json -I0 '.scenario[0].common.storage.hostPath' "$T/n10.yaml")"
+    [ "$(yq -r '.scenario[0].common.storage.hostPath.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values | join(",")' "$T/n10.yaml")" = node-both-cordoned ] \
+        && ok "model_hostpath: with two pairs only a node carrying both is a candidate to keep off" || fail "model_hostpath two-pair exclusion: $(yq -o json -I0 '.scenario[0].common.storage.hostPath.affinity' "$T/n10.yaml")"
+    grep -q 'on nodes with example.com/accelerator=h200 and example.com/state=production;' "$T/hp10.out" && ok "model_hostpath: the message says both pairs must match" || fail "model_hostpath two-pair message: $(tail -1 "$T/hp10.out")"
+else
+    fail "model_hostpath refused a two-pair selector: $(cat "$T/hp10.out")"
+fi
+selbad=0
+for badsel in 'a=b,' 'a=b,,c=d' 'a=b,a=c' 'a=b c' $'a=b\nc=d' 'a/b/c=d' 'a=-b'; do
+    cp "$T/nested.yaml" "$T/n11.yaml"
+    if PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n11.yaml" /mnt/local/wva check-ns "$badsel" >/dev/null 2>&1; then fail "model_hostpath accepted the selector '$badsel'"; selbad=1; fi
+done
+[ "$selbad" -eq 0 ] && ok "model_hostpath: a trailing comma, an empty pair, a key twice, a space, a newline or a key or value outside label syntax is refused"
+# A node listing that fails says why: kubectl's own error is in the message
+# (a selector the API server refuses reads as that, not as a bare "cannot
+# list"), and it is never taken for the node list.
+cp "$T/nested.yaml" "$T/n12.yaml"
+STUB_NODES_ERROR='error: unable to parse requirement: stub refusal' STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" \
+    bash hack/benchmark/model_hostpath.sh "$T/n12.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 > "$T/hp12.out" 2>&1 || fail "model_hostpath with a failed node listing failed: $(cat "$T/hp12.out")"
+grep -qF 'cannot list nodes with selector example.com/accelerator=h200 (kubectl: error: unable to parse requirement: stub refusal)' "$T/hp12.out" \
+    && [ "$(yq -r '.scenario[0].common.storage.hostPath.nodeSelector["example.com/accelerator"]' "$T/n12.yaml")" = h200 ] \
+    && ok "model_hostpath: a failed node listing reports kubectl's error and the selector, and the edit still lands" || fail "model_hostpath node-listing error: $(cat "$T/hp12.out")"
 grep -q '^#' "$T/n1.yaml" && ok "model_hostpath: the scenario keeps its comments (yq, not a dump)" || fail "model_hostpath: comments lost"
 # The rule itself, on the cases the fixtures above do not reach: a toleration
 # with no key tolerates every taint, and PreferNoSchedule never excludes.
@@ -496,6 +645,8 @@ line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPAC
 case "$line" in *'--node-selector "k=v"'*) ok "make weights: PREPULL_NODE_SELECTOR is inherited" ;; *) fail "make weights inheritance: $line" ;; esac
 line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPACE=ns PREPULL_NODE_SELECTOR=k=v WEIGHTS_NODE_SELECTOR=w=x 2>/dev/null | tr -d '\\\n' || true)"
 case "$line" in *'--node-selector "w=x"'*) ok "make weights: WEIGHTS_NODE_SELECTOR overrides PREPULL_NODE_SELECTOR" ;; *) fail "make weights override: $line" ;; esac
+line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPACE=ns WEIGHTS_NODE_SELECTOR=k=v,w=x 2>/dev/null | tr -d '\\\n' || true)"
+case "$line" in *'--node-selector "k=v,w=x"'*) ok "make weights: a two-pair WEIGHTS_NODE_SELECTOR reaches the script whole" ;; *) fail "make weights two pairs: $line" ;; esac
 line="$(make -n weights-delete NAMESPACE=ns 2>/dev/null | grep 'weights.sh delete' || true)"
 case "$line" in *"--all"*) ok "make weights-delete with no WEIGHTS_MODEL deletes every model's holder" ;; *) fail "weights-delete: $line" ;; esac
 : > "$T/calls"

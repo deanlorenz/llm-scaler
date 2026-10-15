@@ -52,10 +52,16 @@ spec:
   # arrives over the push stream.
   minReplicaCount: 0
   maxReplicaCount: 10
-  fallback:
-    failureThreshold: 3
-    replicas: 2
-    behavior: "currentReplicasIfHigher"
+  # No fallback, because the floor is 0. KEDA treats a trigger error as
+  # "inactive": with no fallback that only marks the trigger as failing, but
+  # with fallback.replicas 0 it parks the workload once cooldownPeriod passes.
+  # A non-zero replicas avoids that but raises a running fleet to at least that
+  # many for as long as the scaler fails, which a floor of 0 did not ask for.
+  # Before WVA's first decision after a restart the scaler answers the current
+  # replica count, so a restart needs no fallback either way. With a floor of
+  # 1 or more, add one -- it covers a controller that is down:
+  #   fallback: {failureThreshold: 3, replicas: <the floor>, behavior: currentReplicasIfHigher}
+  # (behavior needs KEDA 2.17 or later.)
   advanced:
     restoreToOriginalReplicaCount: false
     horizontalPodAutoscalerConfig:
@@ -65,11 +71,12 @@ spec:
       # with its defaults); hack/check-install-defaults.sh keeps the two equal.
       #
       # Scale-down waits for 300s of sustained low demand. With a 0s window, as
-      # this sample used to have, one low reading removed replicas at once --
-      # and the scaler answers 0 until WVA has made its first decision for a
-      # variant, so a fresh ScaledObject could drop a serving workload to its
-      # floor before WVA had looked at it. Scale-up acts on the current
-      # recommendation: the wait is already paid in cold start.
+      # this sample used to have, one low reading removed replicas at once.
+      # Before WVA's first decision for a variant the scaler answers the
+      # target's current replica count, so that window is not what holds a
+      # fresh ScaledObject; it guards the first decisions a new leader makes.
+      # Scale-up acts on the current recommendation: the wait is already paid
+      # in cold start.
       behavior:
         scaleUp:
           stabilizationWindowSeconds: 0
@@ -86,6 +93,10 @@ spec:
   triggers:
   - type: external-push
     name: wva-external-scaler
+    # The scaler answers a replica count, which only AverageValue (KEDA's
+    # default) keeps a count; under Value the HPA multiplies it by the
+    # current replicas.
+    metricType: AverageValue
     metadata:
       # The WVA controller's external-scaler gRPC service (host:port).
       scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc.cluster.local:9090

@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=29
+EXPECT_CASES=116
 RAN=0
 FAILED=0
 
@@ -242,6 +242,493 @@ check 'pause GPUs: no request reads as one GPU, as the controller defaults' '1' 
 unset -f kubectl
 
 # ----------------------------------------------------------------------------
+# The KEDA fallback on generated and adopted ScaledObjects
+# ----------------------------------------------------------------------------
+# Read back through yq, not grepped: the block is spliced into a heredoc, and
+# the failure that matters is one that still prints the words but at the wrong
+# indent -- a fallback under advanced, or an advanced block that lost its key.
+command -v yq >/dev/null 2>&1 || {
+    printf 'FATAL: yq is required for the fallback group.\n' >&2
+    exit 1
+}
+for fn in render_default_scaledobject render_scaledobject so_adopt_patch so_adopt_needs_fallback \
+          so_fallback_check so_fallback_failures so_keda_fallback_probe so_fallback_note so_show_plan \
+          so_adopt_fallback_note so_value_trigger_warning; do
+    declare -F "$fn" >/dev/null || {
+        printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
+        exit 1
+    }
+done
+# Every case below runs against a KEDA that has fallback.behavior unless it says
+# otherwise. Set, not probed: the probe would call the real kubectl.
+SO_KEDA_FALLBACK_BEHAVIOR=yes
+render_with() {   # render_with <min> -- with whatever WVA_SO_FALLBACK* is set
+    render_default_scaledobject ns Deployment decode Qwen/Qwen3-0.6B addr:9090 "$1" 8 '' ''
+}
+fb_of() { yq -o=json '.spec.fallback' | jq -r 'if . == null then "none" else [.failureThreshold, .replicas, .behavior] | map(tostring) | join(",") end'; }
+
+check 'fallback: a generated object gets one, replicas at its minReplicaCount' \
+    '3,2,currentReplicasIfHigher' "$(render_with 2 | fb_of)"
+check 'fallback: the rest of the spec survives the splice' \
+    '2,8,true,300' \
+    "$(render_with 2 | yq -o=json '.spec' | jq -r '[.minReplicaCount, .maxReplicaCount, .advanced.restoreToOriginalReplicaCount, .advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds] | map(tostring) | join(",")')"
+# A floor of 0 gets NO fallback. KEDA sends a trigger error on an object with
+# fallback.replicas 0 and minReplicaCount 0 to scaleToZeroOrIdle, so a zero
+# fallback parks a serving model on any error window.
+check 'fallback: a floor of zero gets none' \
+    'none' "$(render_with 0 | fb_of)"
+check 'fallback: a floor written 00 is still zero' \
+    'none' "$(render_with 00 | fb_of)"
+check 'fallback: a floor of zero still renders a valid object' \
+    '0,8,true' \
+    "$(render_with 0 | yq -o=json '.spec' | jq -r '[.minReplicaCount, .maxReplicaCount, .advanced.restoreToOriginalReplicaCount] | map(tostring) | join(",")')"
+check 'fallback: WVA_SO_FALLBACK_FAILURES sets failureThreshold' \
+    '5,1,currentReplicasIfHigher' "$(WVA_SO_FALLBACK_FAILURES=5 render_with 1 | fb_of)"
+check 'fallback: WVA_SO_FALLBACK=false leaves it out' \
+    'none' "$(WVA_SO_FALLBACK=false render_with 1 | fb_of)"
+check 'fallback: WVA_SO_FALLBACK=false still renders the advanced block' \
+    'true' "$(WVA_SO_FALLBACK=false render_with 1 | yq -r '.spec.advanced.restoreToOriginalReplicaCount')"
+check 'fallback: WVA_SO_FALLBACK must be true or false' \
+    'refused' "$( (WVA_SO_FALLBACK=yes so_fallback_check) 2>/dev/null && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of 0 is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=0 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold with a leading zero is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=010 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of int32 max is accepted' \
+    '2147483647' "$(WVA_SO_FALLBACK_FAILURES=2147483647 so_fallback_failures 2>/dev/null)"
+check 'fallback: a failureThreshold above int32 is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=2147483648 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of eleven digits is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=99999999999 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+
+# KEDA before 2.17 has no fallback.behavior: its CRD prunes the field and the
+# fallback that is left is static at minReplicaCount. None at all instead.
+check 'fallback: KEDA < 2.17 gets none' \
+    'none' "$(SO_KEDA_FALLBACK_BEHAVIOR=no render_with 2 | fb_of)"
+check 'fallback: an unreadable KEDA CRD gets none' \
+    'none' "$(SO_KEDA_FALLBACK_BEHAVIOR=unknown render_with 2 | fb_of)"
+
+# The probe, against a stub kubectl. Each in a subshell with the cache cleared,
+# so the answer is the probe and not the value set above. The stub answers
+# `kubectl explain` from EXPLAIN_* and everything else (the CRD read) from
+# CRD_*. The explain texts are what kubectl 1.31 printed against an envtest API
+# server serving the KEDA 2.18 CRD, with and without fallback.behavior.
+EXPLAIN_OUT='error: unable to reach the server'
+EXPLAIN_RC=1
+CRD_FIXTURE=''
+CRD_FIXTURE_RC=0
+CRD_ERR=''
+kubectl() {
+    if [ "$1" = explain ]; then
+        printf '%s\n' "$EXPLAIN_OUT"
+        return "$EXPLAIN_RC"
+    fi
+    [ -z "$CRD_ERR" ] || printf '%s\n' "$CRD_ERR" >&2
+    printf '%s' "$CRD_FIXTURE"
+    return "$CRD_FIXTURE_RC"
+}
+probe() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>/dev/null; printf '%s' "$SO_KEDA_FALLBACK_BEHAVIOR" ); }
+probe_warning() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>&1 >/dev/null ); }
+FORBIDDEN='Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io "scaledobjects.keda.sh" is forbidden: User "tenant" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope'
+
+# OpenAPI first: any authenticated user may read it, where a tenant usually
+# may not get the CRD -- so these answer with the CRD read Forbidden.
+CRD_FIXTURE_RC=1
+CRD_ERR="$FORBIDDEN"
+EXPLAIN_OUT=$'GROUP:      keda.sh\nKIND:       ScaledObject\nVERSION:    v1alpha1\n\nFIELD: behavior <string>'
+EXPLAIN_RC=0
+check 'probe: the OpenAPI answers for a tenant that may not read the CRD' 'yes' "$(probe)"
+EXPLAIN_OUT=$'GROUP:      keda.sh\nKIND:       ScaledObject\nVERSION:    v1alpha1\n\nerror: field "behavior" does not exist'
+EXPLAIN_RC=1
+check 'probe: an OpenAPI without fallback.behavior is older' 'no' "$(probe)"
+EXPLAIN_OUT=$'error: field "fallback" does not exist'
+check 'probe: an OpenAPI without fallback at all is older' 'no' "$(probe)"
+EXPLAIN_OUT='error: unable to reach the server'
+check 'probe: neither source readable is unknown' 'unknown' "$(probe)"
+check 'probe: and the warning names Forbidden' \
+    'named' "$(probe_warning | grep -q 'Forbidden to this identity' && echo named || echo unnamed)"
+CRD_ERR=''
+
+# The CRD read, when the OpenAPI could not answer.
+CRD_FIXTURE_RC=0
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{},"behavior":{"enum":["static","currentReplicas"]}}}}}}}}}]}}'
+check 'probe: a CRD with fallback.behavior is KEDA 2.17 or later' 'yes' "$(probe)"
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{}}}}}}}}}]}}'
+check 'probe: a CRD without it is older' 'no' "$(probe)"
+check 'probe: an older CRD says so in a warning' \
+    'warned' "$(probe_warning | grep -q 'KEDA 2.17' && echo warned || echo silent)"
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"replicas":{}}}}}}}}},{"name":"v1alpha2","served":false,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"behavior":{}}}}}}}}}]}}'
+check 'probe: the field on an unserved version only does not count' 'no' "$(probe)"
+CRD_FIXTURE=''
+CRD_FIXTURE_RC=1
+check 'probe: a CRD that cannot be read is unknown, not new' 'unknown' "$(probe)"
+CRD_FIXTURE_RC=0
+CRD_FIXTURE='not json'
+check 'probe: a CRD that does not parse is unknown' 'unknown' "$(probe)"
+
+# A plan whose every entry renders from a template writes no fallback, so it
+# does not probe, and does not warn about one.
+rows_of() { local a; for a in "$@"; do printf '%s\037ns\037Deployment\037d\037m\0372\0374\037\037\n' "$a"; done; }
+probed() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_fallback_check "$1" 2>/dev/null; printf '%s' "${SO_KEDA_FALLBACK_BEHAVIOR:-unprobed}" ); }
+check 'probe: a template-only plan is not probed' \
+    'unprobed' "$(WVA_DEFAULT_SO_TEMPLATE=/x probed "$(rows_of yes no yes)")"
+check 'probe: an adopt entry in a template plan is' \
+    'unknown' "$(WVA_DEFAULT_SO_TEMPLATE=/x probed "$(rows_of yes adopt)")"
+check 'probe: a generated entry is' \
+    'unknown' "$(probed "$(rows_of yes)")"
+unset -f kubectl
+
+# What the plan table and the apply lines say about each entry.
+check 'note: a generated entry with a floor gets one' '(+fallback)' "$(so_fallback_note yes 2)"
+check 'note: a floor of zero says why it gets none' '(no fallback: floor 0)' "$(so_fallback_note yes 0)"
+check 'note: an old KEDA says why it gets none' '(no fallback: KEDA < 2.17)' "$(SO_KEDA_FALLBACK_BEHAVIOR=no so_fallback_note yes 2)"
+check 'note: an adopted entry keeps a fallback it has' '(+fallback unless it has one)' "$(so_fallback_note adopt 2)"
+check 'note: an entry not applied says nothing' '-' "$(so_fallback_note no 2)"
+check 'note: a template decides its own' '(fallback: as the template says)' "$(WVA_DEFAULT_SO_TEMPLATE=/x so_fallback_note yes 2)"
+PLAN_FIXTURE="$WORK/plan.yaml"
+printf '%s\n' 'plan:' \
+    '  - {apply: yes, namespace: ns, kind: Deployment, name: up, modelID: m, minReplicas: 2, maxReplicas: 4}' \
+    '  - {apply: yes, namespace: ns, kind: Deployment, name: parked, modelID: m, minReplicas: 0, maxReplicas: 4}' \
+    > "$PLAN_FIXTURE"
+check 'plan table: a FALLBACK column per entry' \
+    'up:(+fallback)|parked:(no fallback: floor 0)' \
+    "$(so_show_plan "$PLAN_FIXTURE" 2>/dev/null | awk '$4 == "up" || $4 == "parked" { print $4 ":" substr($0, index($0, "(")) }' | sed 's/ *$//' | paste -sd'|' -)"
+
+# Adoption: added only to an object with none, never merged into one it has.
+check 'adopt: add_fallback=yes adds the default block' \
+    '3,2,currentReplicasIfHigher' \
+    "$(so_adopt_patch m addr 2 8 10.0 '' yes | jq -r '.spec.fallback | [.failureThreshold, .replicas, .behavior] | map(tostring) | join(",")')"
+check 'adopt: without add_fallback the patch has no fallback key' \
+    'false' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec | has("fallback")')"
+SO_FIXTURE=''
+SO_FIXTURE_RC=0
+kubectl() { printf '%s' "$SO_FIXTURE"; return "$SO_FIXTURE_RC"; }
+check 'adopt: an object with no fallback gets one' \
+    'yes' "$(so_adopt_needs_fallback ns so 2)"
+check 'adopt: an object with a floor of zero gets none' \
+    '' "$(so_adopt_needs_fallback ns so 0)"
+check 'adopt: an old KEDA adds none' \
+    '' "$(SO_KEDA_FALLBACK_BEHAVIOR=no so_adopt_needs_fallback ns so 2)"
+SO_FIXTURE='{"failureThreshold":9,"replicas":4}'
+check 'adopt: an object with a fallback keeps it' \
+    '' "$(so_adopt_needs_fallback ns so 2)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":0}'
+check 'adopt: a kept zero fallback on a floor of zero is warned about' \
+    'warned' "$(so_adopt_needs_fallback ns so 0 2>&1 >/dev/null | grep -q 'replicas is 0 with minReplicaCount 0' && echo warned || echo silent)"
+check 'adopt: a kept zero fallback above a floor is not' \
+    'silent' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'replicas is 0' && echo warned || echo silent)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":4}'
+check 'adopt: a kept fallback above the new floor is warned about' \
+    'warned' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'replicas (4) is above the minReplicaCount this plan sets (2)' && echo warned || echo silent)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":2}'
+check 'adopt: a kept fallback at the new floor is not' \
+    'silent' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'is above the minReplicaCount' && echo warned || echo silent)"
+SO_FIXTURE=''
+SO_FIXTURE_RC=1
+check 'adopt: an object that cannot be read is not one without a fallback' \
+    'unreadable' "$(so_adopt_needs_fallback ns so 2 2>/dev/null)"
+check 'adopt: and the apply line says it was left as it was' \
+    '(fallback unchanged: could not read it)' "$(so_adopt_fallback_note "$(so_adopt_needs_fallback ns so 2 2>/dev/null)" 2)"
+check 'adopt: on a floor of zero too' \
+    '(fallback unchanged: could not read it)' "$(so_adopt_fallback_note "$(so_adopt_needs_fallback ns so 0 2>/dev/null)" 0)"
+SO_FIXTURE_RC=0
+check 'adopt: a kept fallback says so' \
+    '(kept its own fallback)' "$(so_adopt_fallback_note '' 2)"
+check 'adopt: an added fallback says so' \
+    '(+fallback)' "$(so_adopt_fallback_note yes 2)"
+check 'adopt: WVA_SO_FALLBACK=false adds none' \
+    '' "$(WVA_SO_FALLBACK=false so_adopt_needs_fallback ns so 2)"
+unset -f kubectl
+
+# A template owns its fallback, except the one shape KEDA scales to zero on.
+TMPL_FIXTURE="$WORK/zero-fallback-template.yaml"
+printf '%s\n' 'apiVersion: keda.sh/v1alpha1' 'kind: ScaledObject' 'metadata:' '  name: {{NAME}}-wva' \
+    'spec:' '  minReplicaCount: {{MIN}}' '  fallback:' '    failureThreshold: 3' '    replicas: {{MIN}}' > "$TMPL_FIXTURE"
+check 'template: fallback.replicas 0 on a floor of 0 is refused' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'template: and prints no manifest for kubectl to apply' \
+    '' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 0 4) 2>/dev/null)"
+check 'template: the same template above a floor renders' \
+    '2' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.spec.fallback.replicas')"
+check 'template: the shipped template renders a floor of 0 with no fallback' \
+    'none,0' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 0 4 2>/dev/null | yq -o=json '.spec' | jq -r '[(.fallback // "none"), .minReplicaCount] | map(tostring) | join(",")')"
+
+# The same zero fallback behind another document: yq answers once per
+# document, and the guard used to compare that whole multi-line answer with
+# "true".
+TMPL_MULTI="$WORK/multi-doc-template.yaml"
+{ printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: {{NAME}}-notes' 'data:' '  a: b' '---'
+  cat "$TMPL_FIXTURE"; } > "$TMPL_MULTI"
+check 'template: a zero fallback in a multi-document template is refused' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_MULTI" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'template: the multi-document template above a floor renders both' \
+    'ConfigMap,ScaledObject' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_MULTI" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.kind' | grep -v '^---$' | paste -sd, -)"
+TMPL_BROKEN="$WORK/broken-template.yaml"
+printf '%s\n' 'kind: ScaledObject' 'spec:' '  minReplicaCount: {{MIN}}' '  fallback: [unclosed' > "$TMPL_BROKEN"
+check 'template: a template yq cannot read is refused, not passed' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_BROKEN" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+
+# metricType. The scaler answers a replica count, which only AverageValue keeps
+# a count, so the generator and the adopt patch say so explicitly and a
+# template that asks for Value is warned about.
+check 'metricType: the generator writes AverageValue on its trigger' \
+    'external-push:AverageValue' "$(render_with 2 | yq -r '.spec.triggers[0] | .type + ":" + .metricType')"
+check 'metricType: the adopt patch writes AverageValue on its trigger' \
+    'AverageValue' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec.triggers[0].metricType')"
+TMPL_VALUE="$WORK/value-template.yaml"
+printf '%s\n' 'apiVersion: keda.sh/v1alpha1' 'kind: ScaledObject' 'metadata:' '  name: {{NAME}}-wva' \
+    'spec:' '  minReplicaCount: {{MIN}}' '  triggers:' '    - type: external-push' '      name: wva-external-scaler' \
+    '      metricType: Value' '      metadata:' '        scalerAddress: {{SCALER_ADDRESS}}' > "$TMPL_VALUE"
+check 'metricType: a template trigger with Value is warned about' \
+    'warned' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_VALUE" render_scaledobject ns Deployment d m addr 2 4 2>&1 >/dev/null | grep -q 'has metricType: Value' && echo warned || echo silent)"
+check 'metricType: and still renders' \
+    'Value' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_VALUE" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.spec.triggers[0].metricType')"
+check 'metricType: the shipped template is not warned about' \
+    'silent' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 2 4 2>&1 >/dev/null | grep -q 'metricType' && echo warned || echo silent)"
+
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# so_apply_plan / so_repoint_stale: which scaler an address names, and what an
+# adopt keeps
+# ----------------------------------------------------------------------------
+# Executed against a stubbed kubectl that records every patch and apply. Two
+# failures this covers, both found by review and neither visible to `bash -n`:
+#
+#   - In the out-of-reach shape (controller in its own namespace, managing a
+#     tenant one) WVA_NS is the TENANT namespace when NAMESPACE is set, and every
+#     trigger was written as wva-external-scaler.<tenant>, where nothing runs.
+#     KEDA falls back to CPU and the install looks healthy.
+#   - `apply: adopt` merge-patches the triggers LIST, which replaces it, so every
+#     re-run stripped the keys set by hand on the trigger (defaultOutputTokens,
+#     warmPool, ...), and repointed objects already working against a live WVA.
+#
+# Cases are asserted on what reached the API server -- the recorded patch and
+# apply -- never on the library source.
+command -v yq >/dev/null 2>&1 || {
+    printf 'FATAL: yq is required to run the plan checks (so_plan_rows reads the plan with it).\n' >&2
+    exit 1
+}
+
+SOW="$WORK/so"
+mkdir -p "$SOW"
+
+# STUB_SVC          "ns=present ns2=forbidden" -- any other namespace is NotFound
+# STUB_RB           the RoleBinding list served for every namespace
+# STUB_SOS          the ScaledObject list served for every namespace and -A
+# STUB_SO_FORBIDDEN 1: a GET of one named ScaledObject is Forbidden
+so_stub() {
+    printf '%s\n' "$*" >> "$SOW/kubectl.log"
+    local a ns="" prev=""
+    local empty='{"items":[]}'
+    for a in "$@"; do
+        [ "$prev" = "-n" ] && ns="$a"
+        prev="$a"
+    done
+    case "$1 $2" in
+        "get svc")
+            case " ${STUB_SVC:-} " in
+                *" $ns=present "*) echo "service/wva-external-scaler"; return 0 ;;
+                *" $ns=forbidden "*)
+                    echo "Error from server (Forbidden): services \"wva-external-scaler\" is forbidden: User \"tenant\" cannot get resource \"services\" in API group \"\" in the namespace \"$ns\"" >&2
+                    return 1 ;;
+            esac
+            echo 'Error from server (NotFound): services "wva-external-scaler" not found' >&2
+            return 1 ;;
+        "get rolebinding")
+            printf '%s\n' "${STUB_RB:-$empty}" ;;
+        "get scaledobject")
+            case "$3" in
+                -A|-n) printf '%s\n' "${STUB_SOS:-$empty}" ;;
+                *)
+                    if [ -n "${STUB_SO_FORBIDDEN:-}" ]; then
+                        echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden' >&2
+                        return 1
+                    fi
+                    local one
+                    one=$(printf '%s' "${STUB_SOS:-$empty}" \
+                        | jq -ce --arg n "$3" '.items[] | select(.metadata.name == $n)') || {
+                        echo "Error from server (NotFound): scaledobjects.keda.sh \"$3\" not found" >&2
+                        return 1
+                    }
+                    # The one jsonpath the library asks of a named object:
+                    # its spec.fallback, empty when it has none.
+                    case " $* " in
+                        *" jsonpath={.spec.fallback} "*)
+                            printf '%s' "$one" | jq -c '.spec.fallback // empty' ;;
+                        *) printf '%s\n' "$one" ;;
+                    esac ;;
+            esac ;;
+        "patch scaledobject")
+            local p="" next=0
+            for a in "$@"; do
+                [ "$next" = 1 ] && { p="$a"; next=0; }
+                [ "$a" = "-p" ] && next=1
+            done
+            printf '%s\n' "$p" >> "$SOW/patched" ;;
+        "apply -f")
+            cat >> "$SOW/applied" ;;
+        *) return 0 ;;
+    esac
+}
+
+# run_so <function> [VAR=value...] runs it in a subshell against the stub and
+# echoes its verdict: REFUSED when it refused, else OK. WARN is appended when it
+# warned. What it wrote is left in $SOW/patched and $SOW/applied.
+run_so() {
+    local fn="$1"
+    shift
+    : > "$SOW/kubectl.log"; : > "$SOW/patched"; : > "$SOW/applied"; : > "$SOW/out"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { printf '%s\n' "$1" >> "$SOW/warned"; }
+        log_error() { printf 'REFUSED\n' >> "$SOW/out"; printf '%s\n' "$1" > "$SOW/refusal"; exit 1; }
+        kubectl() { so_stub "$@"; }
+        : > "$SOW/warned"
+        WVA_NS=tenant WVA_NS_EXPLICIT='' WVA_DEFAULT_SO_PLAN='' WVA_DEFAULT_SO_NS=''
+        STUB_SVC='' STUB_RB='' STUB_SOS='' STUB_SO_FORBIDDEN=''
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        "$fn" "$SOW/plan.yaml" >/dev/null 2>&1
+    )
+    local v
+    v="$(head -1 "$SOW/out")"
+    [ -n "$v" ] || v=OK
+    [ -s "$SOW/warned" ] && v="$v WARN"
+    printf '%s' "$v"
+}
+
+# The address a run wrote: from the created object, else the patch.
+written_addr() {
+    { grep -h 'scalerAddress:' "$SOW/applied" 2>/dev/null | sed -E 's/.*scalerAddress:[[:space:]]*"?([^"]*)"?.*/\1/'
+      jq -r '.spec.triggers[0].metadata.scalerAddress // empty' "$SOW/patched" 2>/dev/null
+    } | head -1
+}
+
+plan_entry() {   # plan_entry <apply>
+    cat > "$SOW/plan.yaml" <<YAML
+plan:
+  - apply: "$1"
+    namespace: tenant
+    kind: Deployment
+    name: decode
+    modelID: "Qwen/Qwen3-0.6B"
+    minReplicas: 1
+    maxReplicas: 4
+    variantCost: "10.0"
+YAML
+}
+
+RB_CTL='{"items":[{"metadata":{"name":"wva-manager-wva-ctl"},"subjects":[{"kind":"ServiceAccount","name":"wva-controller-manager","namespace":"wva-ctl"}]}]}'
+# so_adopted <scaler namespace> -- an adopted object carrying two hand-set keys.
+so_adopted() {
+    printf '{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"scaleTargetRef":{"name":"decode"},"minReplicaCount":1,"maxReplicaCount":4,"triggers":[{"type":"external-push","name":"wva-external-scaler","metadata":{"scalerAddress":"wva-external-scaler.%s.svc.cluster.local:9090","modelID":"Qwen/Qwen3-0.6B","variantCost":"10.0","defaultOutputTokens":"512","warmPool":"pool-a"}}]}}]}' "$1"
+}
+
+# --- which scaler a created object names
+plan_entry yes
+check 'apply: out of reach, the scaler comes from the RoleBinding the installer wrote' \
+    'OK|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_RB='$RB_CTL'")|$(written_addr)"
+
+check 'apply: no scaler in WVA_NS and nothing names one -- refused, nothing written' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan)|$(written_addr)"
+
+check 'apply: the refusal names the command that fixes it' \
+    'yes' \
+    "$(grep -q 'NAMESPACE=tenant make scaledobjects-apply WVA_NS=<controller-namespace> WVA_WATCH_NS=tenant' "$SOW/refusal" && echo yes || echo no)"
+
+# Following that command must scan the TENANT namespace. With WVA_NS given and
+# no WVA_WATCH_NS, so_target_namespaces scanned the controller's own, empty one.
+tns() { ( unset WVA_WATCH_NS WVA_DEFAULT_SO_NS; for kv in "$@"; do eval "$kv"; done; so_target_namespaces 2>/dev/null ); }
+check 'plan: NAMESPACE differing from an explicit WVA_NS is the namespace scanned'     'tenant' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=tenant)"
+check 'plan: an explicit WVA_WATCH_NS still wins'     'other' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=tenant WVA_WATCH_NS=other)"
+check 'plan: no NAMESPACE scans WVA_NS, as before'     'wva-ctl' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=)"
+
+check 'apply: an explicit WVA_NS the tenant may not read is used, with a warning' \
+    'OK WARN|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden')|$(written_addr)"
+
+check 'apply: an explicit WVA_NS with no scaler Service is refused' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl)|$(written_addr)"
+
+check 'apply: two live installs named in the namespace -- refused, not guessed' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan "STUB_SVC='wva-ctl=present other=present'" "STUB_RB='$RB_CTL'" "STUB_SOS='$(so_adopted other | sed 's/decode/elsewhere/g')'")|$(written_addr)"
+
+# --- what an adopt keeps
+plan_entry adopt
+check 'adopt: keeps the hand-set trigger keys (defaultOutputTokens, warmPool)' \
+    'OK|512|pool-a|Qwen/Qwen3-0.6B' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'")|$(jq -r '.spec.triggers[0].metadata | [.defaultOutputTokens, .warmPool, .modelID] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+# Keeping trigger keys and the fallback rules are separate: the keys are trigger
+# metadata, the fallback is spec, metricType is the trigger's own and always
+# AverageValue. One patch has to carry all three.
+check 'adopt: keeps hand-set keys AND adds a fallback AND writes AverageValue' \
+    'OK|512|pool-a|AverageValue|3,1,currentReplicasIfHigher' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'")|$(jq -r '[.spec.triggers[0].metadata.defaultOutputTokens, .spec.triggers[0].metadata.warmPool, .spec.triggers[0].metricType, (.spec.fallback | [.failureThreshold, .replicas, .behavior] | map(tostring) | join(","))] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+check 'adopt: an object with its own fallback keeps it, and its hand-set keys' \
+    'OK|512|false' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl | jq -c '.items[0].spec.fallback = {failureThreshold: 5, replicas: 1}')'")|$(jq -r '[.spec.triggers[0].metadata.defaultOutputTokens, (.spec | has("fallback") | tostring)] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+check 'adopt: out of reach, re-applying keeps the address the object already works on' \
+    'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'" >/dev/null; written_addr)"
+
+check 'adopt: an object on another LIVE install is not moved without WVA_NS' \
+    'wva-external-scaler.other.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl "STUB_SVC='wva-ctl=present other=present'" "STUB_SOS='$(so_adopted other)'" >/dev/null; written_addr)"
+
+check 'adopt: an explicit WVA_NS does move it' \
+    'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl "STUB_SVC='wva-ctl=present other=present'" "STUB_SOS='$(so_adopted other)'" >/dev/null; written_addr)"
+
+check 'adopt: an object that cannot be read is not patched over' \
+    '0' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'" STUB_SO_FORBIDDEN=1 >/dev/null; grep -c . "$SOW/patched")"
+
+# --- what the plan says about an adopted object
+STUB_SOS="$(so_adopted wva-ctl)"
+kubectl() { so_stub "$@"; }
+IFS=$'\037' read -r _n _min _max _cost _pol _wva e_model e_kept e_addr <<< "$(so_existing_info tenant decode)"
+check 'plan: so_existing_info reads the modelID, kept keys and address back' \
+    'Qwen/Qwen3-0.6B|defaultOutputTokens,warmPool|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "${e_model:-}|${e_kept:-}|${e_addr:-}"
+unset -f kubectl
+STUB_SOS=''
+
+kept_note() {
+    local note='' existing_kept="$1" existing_name=decode-so
+    so_kept_keys_note 2>/dev/null
+    printf '%s' "$note"
+}
+check 'plan: the note names the keys an adopt keeps' \
+    'yes' \
+    "$(case "$(kept_note 'defaultOutputTokens,warmPool')" in *'defaultOutputTokens, warmPool'*) echo yes ;; *) echo no ;; esac)"
+
+prefer() {   # prefer <discovered> <existing> [SO_PREFER_EXISTING_MODEL]
+    local model="$1" existing_model="$2" existing_name=decode-so note=''
+    SO_PREFER_EXISTING_MODEL="${3:-true}" so_prefer_existing_model tenant decode 2>/dev/null
+    printf '%s' "$model"
+}
+check 'plan: a re-discovered modelID does not replace the one the object carries' \
+    'Qwen/Qwen3-0.6B' "$(prefer /models/qwen Qwen/Qwen3-0.6B)"
+check 'plan: verify-scaledobjects still sees what the container serves' \
+    '/models/qwen' "$(prefer /models/qwen Qwen/Qwen3-0.6B false)"
+
+# --- repoint: Forbidden is not dead
+REPOINT_SOS='{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.gone.svc.cluster.local:9090","modelID":"m"}}]}}]}'
+check 'repoint: an address in a namespace that cannot be read is left alone' \
+    '0' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl "STUB_SVC='wva-ctl=present gone=forbidden'" "STUB_SOS='$REPOINT_SOS'" >/dev/null; grep -c . "$SOW/patched")"
+check 'repoint: an explicit WVA_NS the tenant may not read is accepted, and a dead address repointed' \
+    'OK WARN|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden' "STUB_SOS='$REPOINT_SOS'")|$(written_addr)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d model-identification assertion(s) failed.\n' "$FAILED" >&2

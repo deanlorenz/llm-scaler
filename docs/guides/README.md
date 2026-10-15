@@ -1,10 +1,10 @@
 # Guides
 
-Each guide takes one reader from nothing to a working install. Follow one; they
-do not need to be combined.
+Each guide takes you from nothing to a working install. Follow one; you do not
+need to combine them.
 
-For the decision above the steps — what a scenario buys, what it costs, and the
-evidence that it works — see **[the well-lit paths](../well-lit-paths/)**.
+Deciding which scenario to run (what it buys, what it costs, the evidence it
+works)? See **[the well-lit paths](../well-lit-paths/)**.
 
 ```bash
 source docs/guides/env.sh
@@ -52,11 +52,11 @@ source docs/guides/env.sh
 make benchmark-smoke NAMESPACE=<namespace>
 ```
 
-Symmetric 1024-in/1024-out load at 15 req/s for five minutes against what you
-already installed, then a dashboard snapshot over that window. It stands nothing up and
-needs no benchmark CLI; it checks the whole chain first — KEDA, a scaling-manager
-controller managing *this* namespace, model servers, an EPP, a ScaledObject —
-and names every gap at once. Runs on plain Kubernetes and OpenShift.
+Five minutes of 1024-in/1024-out load at 15 req/s against what you already
+installed, then a dashboard snapshot of that window. It stands nothing up and
+needs no benchmark CLI. It first checks KEDA, a controller managing *this*
+namespace, model servers, an EPP and a ScaledObject, and names every gap at
+once. Runs on plain Kubernetes and OpenShift.
 
 ## Editing a guide
 

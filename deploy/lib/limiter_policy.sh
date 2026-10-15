@@ -399,3 +399,70 @@ policy_declared_limiters() {
         log_error "the merged policy came out empty; refusing to write it"
     fi
 }
+
+# --- A re-install that does not name a limiter keeps the one in force.
+#
+# The overlay apply re-applies wva-scaling-policy-config from the shipped
+# manifest, which resets data.default -- `limiters:` and all. So `make
+# deploy-wva` re-run without WVA_LIMITER (an upgrade, a re-install to change an
+# image) silently removed a limiter somebody declared, and a controller an admin
+# had bounded with `make enable-physical-limiter` or WVA_LIMITER=quota ran
+# UNBOUNDED from then on. The install said nothing about it.
+#
+# Now WVA_LIMITER has three meanings:
+#   unset          keep the limiters: block the live default entry declares
+#                  (its quota and Kueue settings travel inside it), and say so;
+#   none           remove it -- the reset does that -- and say so when one was there;
+#   gpu-inventory, replace it with that one (policy_declared_limiters).
+#   quota
+
+# WVA_LIVE_LIMITERS is the live default entry's limiters: list, as compact JSON,
+# or empty when there is none. A global, set by wva_live_limiters in the
+# caller's own shell.
+WVA_LIVE_LIMITERS=""
+
+# wva_live_limiters <namespace> reads the limiters: list declared by the default
+# entry of the scaling-policy ConfigMap in <namespace> into WVA_LIVE_LIMITERS.
+# Returns 0 having looked -- an absent ConfigMap or entry is simply none -- and 2
+# when it could not look. 2 is never "none": a Forbidden read folded into "no
+# limiter" is how an upgrade would remove one in silence.
+wva_live_limiters() {
+    local ns="$1" rc=0 def lim
+    WVA_LIVE_LIMITERS=""
+    kc_capture get configmap wva-scaling-policy-config -n "$ns" -o json || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        kc_not_found "$KC_ERR" && return 0
+        WVA_LIVE_LIMITERS_ERR="$(printf '%s\n' "$KC_ERR" | head -1)"
+        return 2
+    fi
+    def="$(printf '%s' "$KC_OUT" | jq -r '.data.default // ""' 2>/dev/null)" || return 2
+    [ -n "$def" ] || return 0
+    lim="$(printf '%s\n' "$def" | yq -o=json -I=0 '.limiters // []' 2>/dev/null)" || {
+        WVA_LIVE_LIMITERS_ERR="its default entry does not parse as YAML"
+        return 2
+    }
+    case "$lim" in
+        ''|'[]'|null) return 0 ;;
+    esac
+    WVA_LIVE_LIMITERS="$lim"
+}
+
+# wva_keep_live_limiters <namespace> <limiters json> writes the given limiters:
+# list back into the default entry of the scaling-policy ConfigMap in
+# <namespace>, replacing whatever the apply left there. Refuses -- exits --
+# rather than leaving the controller unbounded without a word.
+wva_keep_live_limiters() {
+    local ns="$1" limiters="$2" current updated
+    current="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || current=""
+    if [ -z "$current" ]; then
+        log_error "could not read the default entry of wva-scaling-policy-config in $ns after the apply, so the limiter it declared before cannot be put back. It is NOT in force now. Re-run with WVA_LIMITER=<type> to declare one."
+    fi
+    updated="$(policy_with_limiters "$current" "$limiters")" || exit 1
+    if ! kubectl patch configmap wva-scaling-policy-config -n "$ns" --type=merge \
+            -p "$(jq -n --arg d "$updated" '{data:{"default":$d}}')" >/dev/null; then
+        log_error "could not write the kept limiter back into wva-scaling-policy-config in $ns. It is NOT in force now. Re-run with WVA_LIMITER=<type> to declare one."
+    fi
+    log_warning "WVA_LIMITER was not given, so the limiter this controller already had was KEPT (in ${ns}/wva-scaling-policy-config):"
+    printf '%s\n' "$limiters" | yq -P '.' 2>/dev/null | sed 's/^/    /' >&2 || true
+    log_warning "  Pass WVA_LIMITER=gpu-inventory|quota to replace it, or WVA_LIMITER=none to remove it."
+}

@@ -1,11 +1,14 @@
 # Preparing a workload to be scaled
 
-Three things decide whether a scale-up actually helps: whether a new replica can
-get to Ready quickly -- its weights, and everything else on the way -- whether
-an old one can leave without dropping requests, and whether the Deployment says
-enough about itself for the scaling manager to act on. None of them are
-scaling-manager settings -- they are properties of the model server. `make workload-patch` writes the first two;
-the rest of the start path is a checklist, below.
+Three things decide whether a scale-up helps:
+
+- a new replica gets to Ready quickly (its weights, and the rest of the start);
+- an old replica leaves without dropping requests;
+- the Deployment says enough about itself for the scaling manager to act on.
+
+None are scaling-manager settings; they are properties of the model server.
+`make workload-patch` writes the first two. The rest of the start path is a
+checklist, below.
 
 > Part of the [deployment guide](../../deploy/). For what to watch once it is
 > running, see [Watching what the scaling manager decides](monitoring.md).
@@ -33,65 +36,59 @@ Deployment has `.spec.template`.
 
 ## Weights and the model cache
 
-A replica that has to fetch its weights before it can serve turns every scale-up
-into a download. It is slow, it can be rate-limited, and it makes scaling depend
-on Hugging Face being reachable from a cluster that may deliberately not have
-egress.
+A replica that must fetch its weights first turns every scale-up into a
+download. That is slow, can be rate-limited, and needs Hugging Face reachable
+from a cluster that may have no egress on purpose.
 
-llm-d already solves this: the modelservice chart defaults to `uriProtocol: pvc`
-and mounts a shared cache at `/model-cache`, so the weights are fetched once and
-every later pod reads them locally. On a stock llm-d install there is nothing to
-turn on.
+llm-d already solves this. The modelservice chart defaults to
+`uriProtocol: pvc` and mounts a shared cache at `/model-cache`, so the weights
+are fetched once and later pods read them locally. On a stock llm-d install
+there is nothing to turn on.
 
-To check, ask `make workload-patch` rather than looking for a volume. Listing the
-PVCs on the pod is the obvious test and it is the wrong one: a claim mounted at
-one path while the engine downloads to another passes it, and re-downloads on
-every scale-up anyway. What matters is where the weights *land*.
+To check, run `make workload-patch`; do not just list the pod's PVCs. A claim
+mounted at one path while the engine downloads to another passes that test and
+still re-downloads on every scale-up. What matters is where the weights *land*:
+`HF_HOME` (or `--download-dir`) under a mounted path. A cache with nothing
+pointed at it looks solved and is not.
 
-`make scaledobjects-plan` reports a workload whose engine downloads outside any
-volume it has mounted, because registering a ScaledObject is the point at which
-new replicas start appearing without anyone asking. The test is where the weights
-*land* — `HF_HOME` (or `--download-dir`) under a mounted path — not whether a
-volume exists somewhere in the pod: a cache mounted with nothing pointed at it is
-the case that looks solved and is not.
+`make scaledobjects-plan` also flags a workload whose engine downloads outside
+every volume it mounts, because registering a ScaledObject is when new replicas
+start appearing.
 
 ### What it does not buy
 
 **It does not make scale-up fast.** An 8B model still spends tens of seconds
-getting weights it already has locally into GPU memory, and a 70B model minutes.
-That is the same order as a cold start.
+moving weights it already has locally into GPU memory, and a 70B model minutes:
+the same order as a cold start.
 
-The reason is not the disk. Measured here with direct I/O, the shared RWX PVC
-reads at ~1.8 GB/s and local NVMe at ~5.2 GB/s — fast enough that an 8B model's
-weights are a few seconds of pure I/O. What costs is the *load*: parsing
-safetensors, sharding, and copying to the device runs at roughly 2 GB/s even
-with the file already in page cache.
+The disk is not the reason. Measured with direct I/O, the shared RWX PVC reads
+at ~1.8 GB/s and local NVMe at ~5.2 GB/s, so an 8B model is a few seconds of
+I/O. The cost is the *load*: parsing safetensors, sharding and copying to the
+device runs at about 2 GB/s even from page cache.
 
 So the cache removes the *download*, not the *load*, and faster storage does not
-remove the load either. Anything aimed at it is a different mechanism — keeping
-a process warm, or snapshotting a loaded engine.
+remove the load either. That takes a different mechanism: keeping a process
+warm, or snapshotting a loaded engine.
 
-The first of those ships here as the **warm pool**: Pods that hold an engine
-already loaded on a GPU, which a scaling model borrows instead of paying the
-load for. Whether a pool is worth it, and how many models one Pod can hold, are
-cluster questions rather than defaults — see the [warm pool
-guide](../guides/warm-pool/), and run `deploy/warmpool.sh plan -n <ns>`
-to see which of a namespace's models could share one.
+The first ships here as the **warm pool**: Pods holding an engine already loaded
+on a GPU, which a scaling model borrows instead of paying the load. Whether a
+pool pays, and how many models one Pod holds, depend on the cluster; see the
+[warm pool guide](../guides/warm-pool/), and run
+`deploy/warmpool.sh plan -n <ns>` to see which models could share one.
 
-(An earlier revision of this section gave ~430 MB/s as the PVC's bandwidth. That
-was an end-to-end weight-load rate, not storage throughput; the conclusion above
-is unchanged, but the reason it gave was wrong.)
+(An earlier revision gave ~430 MB/s as the PVC's bandwidth. That was an
+end-to-end weight-load rate, not storage throughput; the conclusion stands, the
+stated reason was wrong.)
 
 ## The rest of the start path
 
-Why start time is an autoscaling concern and not only an operations one: the
-running replicas serve alone until the new one is Ready, the queue they build
-in that time is charged to the fleet as demand, and the ramp is sized by it. A
-replica that takes twice as long to start does not cost one more replica; it
-costs however many the doubled queue implies, and they arrive after the queue
-is gone. So before tuning the scaler, take the seconds out of the start. These
-are properties of the pod template -- a Deployment's or a LeaderWorkerSet's --
-and hold with or without a benchmark harness in front of the workload:
+Start time is an autoscaling concern, not only an operations one. Until a new
+replica is Ready the running ones serve alone; the queue they build meanwhile is
+charged as demand, and the ramp is sized by it. A replica that starts twice as
+slowly costs not one more replica but as many as the doubled queue implies, and
+they arrive after the queue is gone. So take the seconds out of the start before
+tuning the scaler. These are pod-template properties (Deployment or
+LeaderWorkerSet), with or without a benchmark harness:
 
 | on the way to Ready | what to check |
 |---|---|
@@ -101,9 +98,9 @@ and hold with or without a benchmark harness in front of the workload:
 | **The image is already on the node.** | An engine image is 10-20 GB; a node that has to pull it adds a minute or more before the container even starts, and the kubelet evicts unused images under disk pressure, so "it was pulled once" does not stay true. `make prepull IMAGES=<image> NAMESPACE=<ns>` holds the image open on every accelerator node (one DaemonSet per image, the image itself asleep, no accelerator requested), and `make prepull-status` says per node whether the kubelet has it -- see [Holding the image on the nodes](#holding-the-image-on-the-nodes). With the image held, a pinned tag should pull `IfNotPresent`: `Always` contacts the registry at every start for a digest that cannot have changed. |
 | **The weights** | are the [section above](#weights-and-the-model-cache) -- the download; for a large model, also [Weights on the node's disk](#weights-on-the-nodes-disk) -- the read. |
 
-What is left after those is the cold process itself -- imports, the API
-server, the KV-transfer connector, the profile run -- and the weight load on a
-large model. Below that floor the only lever is not starting cold: the
+What remains is the cold process itself (imports, the API server, the
+KV-transfer connector, the profile run) and, on a large model, the weight load.
+Below that floor the only lever is not starting cold: the
 [warm pool](../guides/warm-pool/), or a minimum replica count of two.
 
 ### Holding the image on the nodes
@@ -115,47 +112,74 @@ make prepull-status NAMESPACE=<ns>          # per accelerator node: present / ab
 make prepull-delete NAMESPACE=<ns>          # stop holding every image (or IMAGES=<image> for one)
 ```
 
-By default the holder lands on every node carrying any known GPU product
-label -- GPU Feature Discovery's, CoreWeave's, GKE's, EKS's, Karpenter's,
-the AMD operator's; the list in `deploy/lib/accelerator_nodes.sh`, the same
-one the controller resolves nodes through. What places the model servers
-is their accelerator *resource* request, not a label, so on a cluster of
-one vendor these are the same nodes; on a cluster mixing vendors the
-default also holds a CUDA image on AMD, Intel or Gaudi nodes, where the
-engine can never run -- `prepull-status` names those nodes and warns, and
-there `PREPULL_NODE_SELECTOR=<key=value>` is required, not optional: set it
+**Which nodes.** By default, every node with a known GPU product label (GPU
+Feature Discovery's, CoreWeave's, GKE's, EKS's, Karpenter's, the AMD
+operator's). The list is in `deploy/lib/accelerator_nodes.sh`, the same one the
+controller resolves nodes through. Model servers are placed by their
+accelerator *resource* request, not a label, so on a one-vendor cluster these
+are the same nodes. On a mixed-vendor cluster the default also holds a CUDA
+image on AMD, Intel or Gaudi nodes where it can never run; `prepull-status`
+names those nodes and warns. There `PREPULL_NODE_SELECTOR` is required: set it
 to what the model servers select on.
-`PREPULL_TOLERATIONS=<key>[,<key>]` adds taints beyond `nvidia.com/gpu`,
-which is always tolerated: a holder `Pending` on every node with no reason
-is a taint it does not tolerate. `prepull-status` lists the nodes each
-DaemonSet was applied for (the selector is recorded on it), so it needs no
-selector of its own. It, `weights-status` and `engine-cache-status` count
-only the nodes a model server can use: a cordoned node, or one with a
-`NoSchedule` or `NoExecute` taint the DaemonSet does not tolerate, is listed
-as `excluded` with the reason and not counted, and the command exits 0 when
-every usable node is ready. The holder runs the image itself, asleep, with a
-memory limit and no accelerator: a container that exited would not protect
-its image from the kubelet's garbage collection, a running one does. The
-image has to carry `/bin/sh` for that; one that does not is still pulled
-(the kubelet fetched it to create the container) and `status` says so --
-`pulled`, not `present` -- but nothing holds it. Several images are a
-comma-separated list. Nothing in the scaling manager depends on the holder; it
-is a start-time measure, and `prepull-status` is how you know it worked --
-the node's own image list is compared against the reference, so an image
-named differently from what the pods pull shows as absent on every node.
-A node whose holder reads `Failed Evicted` is under `DiskPressure`: the
-kubelet is evicting pods and garbage-collecting images there, a replica
-scheduled to it would pull from scratch, and nothing in the namespace can
-fix that -- it is the node's disk. (Seen on the first run of this on a
-17-node cluster: 16 held the image within two minutes, one was that node.)
+
+**The selector.** One or more `key=value` pairs, comma-separated with no spaces.
+A node must carry **every** pair: each pair becomes an equality term of the
+holder's `nodeSelector` (no set-based terms, no `!=`, each key once). An
+explicit selector **replaces** the default rather than adding to it, so include
+the product label among the pairs to stay on GPU nodes. Keys and values follow
+Kubernetes label syntax (a key is an optional DNS-subdomain prefix and `/`, then
+a name of at most 63 characters; a value is at most 63; both start and end with
+a letter or digit). An empty value selects the nodes whose label is empty, not
+every node with the key: `gpu.nvidia.com/model=` is CoreWeave's CPU nodes.
+
+Two pairs are for a cluster where no single label picks the right nodes. Say one
+GPU node is broken, and the only label that sets the healthy ones apart is also
+on the CPU-only nodes. The product label alone takes in the broken node, the
+other label alone takes in the CPU nodes, and both together take neither:
+
+```bash
+make prepull NAMESPACE=<ns> IMAGES=<image> \
+  PREPULL_NODE_SELECTOR=nvidia.com/gpu.product=NVIDIA-H200,example.com/node-state=production
+kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H200,example.com/node-state=production   # the nodes it lands on
+```
+
+`WEIGHTS_NODE_SELECTOR`, `--node-selector` on `deploy/prepull.sh`,
+`deploy/weights.sh` and `deploy/enginecache.sh`, and the benchmark's node-local
+weights take the same form. The model servers must select the same nodes.
+
+**Taints.** `PREPULL_TOLERATIONS=<key>[,<key>]` adds taints beyond
+`nvidia.com/gpu`, which is always tolerated. A holder `Pending` on every node
+with no reason is a taint it does not tolerate.
+
+**Status.** `prepull-status` lists the nodes each DaemonSet was applied for
+(the selector is recorded on it), so it needs no selector of its own. It,
+`weights-status` and `engine-cache-status` count only nodes a model server can
+use: a cordoned node, or one with a `NoSchedule` or `NoExecute` taint the
+DaemonSet does not tolerate, is listed as `excluded` with the reason and not
+counted. The command exits 0 when every usable node is ready. It compares the
+node's own image list with the reference, so an image named differently from
+what the pods pull shows as absent everywhere.
+
+**How it holds.** The holder runs the image itself, asleep, with a memory limit
+and no accelerator: a running container protects its image from the kubelet's
+garbage collection, an exited one does not. The image must carry `/bin/sh`. One
+without it is still pulled (the kubelet fetched it to create the container) and
+`status` says `pulled`, not `present`, but nothing holds it. Several images are
+a comma-separated list. Nothing in the scaling manager depends on the holder; it
+is a start-time measure.
+
+A holder reading `Failed Evicted` means the node is under `DiskPressure`: the
+kubelet is evicting pods and garbage-collecting images, a replica there would
+pull from scratch, and nothing in the namespace can fix it. (On the first run on
+a 17-node cluster, 16 held the image within two minutes; one was that node.)
 
 Three things to know before relying on it:
 
 - `prepull-status` (and the report `prepull` prints after applying) lists
-  nodes, which is cluster-scoped. A namespace tenant has no `list nodes`
-  by default -- the controller's own read of nodes is granted by the
-  cluster-admin setup, not to the person running `make`. Without it the
-  DaemonSets still apply; the status is what fails, with a Forbidden.
+  nodes, which is cluster-scoped. A namespace tenant has no `list nodes` by
+  default; the cluster-admin setup grants it to the controller, not to whoever
+  runs `make`. Without it the DaemonSets still apply and only the status fails,
+  with a Forbidden.
 - The holder runs the engine image as that image runs -- as root on
   Kubernetes, since engine images are built that way and `runAsNonRoot`
   would fail the container; as a UID from the project's range on
@@ -175,26 +199,23 @@ Three things to know before relying on it:
   holder appears on any node, `prepull-status` prints the DaemonSet's
   latest `FailedCreate` event, which is where a pod-security, quota, SCC
   or LimitRange rejection is reported.
-- Held with `IfNotPresent` under a *tag*, a node keeps whatever that tag
-  pointed at when it pulled; with `Always` the registry's current digest
-  would win at every start. For a pinned release tag that is the point.
-  If the tag can move under you and that matters, name the image by
-  digest (`repo@sha256:...`) -- the holder, `status` and the model
-  server's pod spec all take one.
+- With `IfNotPresent` and a *tag*, a node keeps whatever the tag pointed at
+  when it pulled; with `Always` the registry's current digest wins at every
+  start. For a pinned release tag that is the point. If the tag can move and
+  that matters, use a digest (`repo@sha256:...`); the holder, `status` and the
+  model server's pod spec all accept one.
 
 
 ### Weights on the node's disk
 
-The shared cache above is where the weights are; it is not where they are
-read fastest. Every replica reads the whole model through the network
-filesystem behind the claim, and replicas starting together -- which is
-what a scale-up is -- share that pipe. For a small model on a fast shared
-class that is seconds and not worth a second copy. For a large one it is
-the start path: on one cluster, two nodes reading one 700 GB model from
-the shared volume took 1403 s against ~104 s from the node's own NVMe --
-past the engine's 600 s startup timeout, so the replica never came up at
-all. The load term the previous section describes stays either way; this
-removes the read term when it is the one that dominates.
+The shared cache holds the weights, but it is not the fastest place to read
+them. Every replica reads the whole model over the network filesystem, and
+replicas starting together (a scale-up) share that pipe. For a small model on a
+fast class that is seconds and not worth a second copy. For a large one it is
+the start path: on one cluster, two nodes reading a 700 GB model from the shared
+volume took 1403 s against ~104 s from local NVMe, past the engine's 600 s
+startup timeout, so the replica never came up. The load term stays either way;
+this removes the read term when it dominates.
 
 ```bash
 # the engine image is any image carrying huggingface_hub; the claim is printed
@@ -202,58 +223,76 @@ make weights WEIGHTS_MODEL=Qwen/Qwen3-32B WEIGHTS_PATH=/mnt/local/models \
      WEIGHTS_IMAGE=docker.io/vllm/vllm-openai:v0.26.0 NAMESPACE=<ns>
 # on RHCOS (OpenShift) the directory is under /var, one per project: WEIGHTS_PATH=/var/mnt/weights/<ns>
 make weights-status NAMESPACE=<ns>          # per accelerator node: present / downloading, and why not
-make weights-delete NAMESPACE=<ns>          # drop the claim, volume and downloader; the files stay
+make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>  # drop that model's claim, volume and downloader; the files stay
+                                            # (without WEIGHTS_MODEL: every model's in the namespace)
 ```
 
-One static `hostPath` PersistentVolume, one claim bound to it (and to no
-other: the volume carries a `claimRef`), and one DaemonSet that downloads
-the model onto every accelerator node -- the same placement as the image
-holder, `WEIGHTS_NODE_SELECTOR` / `WEIGHTS_TOLERATIONS` defaulting to the
-`PREPULL_*` values -- and then reports Ready, so `weights-status` and the
-DaemonSet's own `numberReady` both mean "the download finished on this
-node". The model lands under `<dir>/models/<id>`, the layout the benchmark
-harness uses, and a model server mounts it as `pvc://<claim>/models/<id>`,
-the way it mounts any claim: each node then reads its own copy, and nothing
-in the pod spec says hostPath. A gated model takes
-`WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`. `WEIGHTS_MEMORY` sets the
-downloader's memory limit (`16Gi` unless set; `--memory` on
-`deploy/weights.sh`). The request stays 256 MiB, so a node reserves
-nothing for it. At the earlier 2 GiB the download of an 8B model's
-safetensors was OOMKilled on every node and never finished. Deleting keeps the files; the
-next apply finds the marker and downloads nothing.
+What it creates:
+
+- one static `hostPath` PersistentVolume, and one claim bound to it and to no
+  other (the volume carries a `claimRef`);
+- one DaemonSet that downloads the model onto every accelerator node, then
+  reports Ready. `weights-status` and the DaemonSet's `numberReady` both mean
+  "the download finished on this node". Placement is the image holder's:
+  `WEIGHTS_NODE_SELECTOR` / `WEIGHTS_TOLERATIONS` default to the `PREPULL_*`
+  values.
+
+The model lands under `<dir>/models/<id>` (the benchmark harness's layout). A
+model server mounts it as `pvc://<claim>/models/<id>`, like any claim; each node
+reads its own copy, and nothing in the pod spec says hostPath.
+
+- A gated model takes `WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`.
+- `WEIGHTS_MEMORY` sets the downloader's memory limit (`16Gi` unless set;
+  `--memory` on `deploy/weights.sh`). The request stays 256 MiB, so a node
+  reserves nothing. At the earlier 2 GiB limit an 8B model's download was
+  OOMKilled on every node.
+- Deleting keeps the files; the next apply finds the marker and downloads
+  nothing.
 
 What it costs, and what it needs:
 
-- Disk: the model's size on every accelerator node, and the download from
-  Hugging Face once per node -- a 60 GB model on 16 nodes is a terabyte of
-  egress, once. The directory is the cluster's, and it is cluster-shared,
-  root-writable state that outlives every object here: every namespace
-  pointed at the same directory shares the files and trusts the marker
-  (the first to write wins, and the others download nothing), and nothing
-  charges what is written there to a quota -- a fill from one namespace is
-  `DiskPressure` for every pod on the node. One directory per trust domain
+- Disk: the model's size on every accelerator node, and one Hugging Face
+  download per node (a 60 GB model on 16 nodes is a terabyte of egress, once).
+  The directory is cluster-shared, root-writable state that outlives every
+  object here. Every namespace pointed at it shares the files and trusts the
+  marker (the first writer wins; the others download nothing), and nothing
+  charges it to a quota, so a fill from one namespace is `DiskPressure` for
+  every pod on the node. Use one directory per trust domain
   (`/mnt/local/weights/<namespace>`), on a disk that is not the node's own
-  (`/mnt/local/...` on CoreWeave), never a network mount, and never a
-  system path: the script refuses `/etc`, `/var/lib`, `/var/spool`,
+  (`/mnt/local/...` on CoreWeave), never a network mount, and never a system
+  path. The script refuses `/etc`, `/var/lib`, `/var/spool`,
   `/tmp`, `/home`, `/opt/bin` and their kind (and where RHCOS keeps them:
   `/var/home`, `/var/roothome`, `/var/usrlocal`, `/sysroot`, `/ostree`),
   `/var/mnt` and `/var/srv` themselves, a top-level directory on its own,
   and `..`.
-- Leave to create PersistentVolumes, which are cluster-scoped; a namespace
-  tenant does not have it (on OpenShift the `storage-admin` role carries
-  it). Ask the cluster admin to run `make weights` or to create the
-  volume. The claim's `WEIGHTS_CAPACITY` (1Ti unless set) is a request a
-  `requests.storage` quota charges -- a project with a storage quota
-  refuses the claim; set the capacity near the model's size there. And a
-  cluster that reaches Hugging Face through a proxy does not inject its
-  proxy into arbitrary pods: the downloader would need `HTTPS_PROXY`.
+- Rights to create PersistentVolumes, which are cluster-scoped. A namespace
+  tenant lacks them (on OpenShift the `storage-admin` role has them); ask the
+  cluster admin to run `make weights` or create the volume.
+- The claim's `WEIGHTS_CAPACITY` (1Ti unless set) is charged by a
+  `requests.storage` quota, so a project with a storage quota refuses the
+  claim; set the capacity near the model's size there.
+- The claim cannot be resized: it is bound to a static volume, and Kubernetes
+  resizes only dynamically provisioned claims. A re-run keeps an existing
+  claim's size when `WEIGHTS_CAPACITY` is unset, and refuses a different
+  `WEIGHTS_CAPACITY` before applying anything. To change the size, scale the
+  model servers that mount the claim to 0 (a mounted claim stays
+  `Terminating`), run `make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>`
+  (the files on the nodes stay; without `WEIGHTS_MODEL` it deletes every
+  model's claim in the namespace), and apply again. `--dry-run` reads nothing
+  from the cluster, so it shows the set or default size, not the kept one. The
+  same holds for `ENGINE_CACHE_CAPACITY` and the `engine-cache` claim, freed
+  with `make engine-cache-delete NAMESPACE=<ns>` (one claim per namespace).
+- A claim of the model's name on another storage class is not the script's:
+  apply refuses it and leaves it alone.
+- Behind a proxy to Hugging Face, the downloader needs `HTTPS_PROXY`: the
+  cluster does not inject its proxy into arbitrary pods.
 - Pod Security `baseline` admits the downloader (it mounts the claim, not a
   hostPath); `restricted` does not. On Kubernetes it runs as root, which
-  is what writing the root-owned directory the kubelet creates takes. It
-  runs as its own ServiceAccount, `weights-downloader`, so a grant for it
-  does not land on the namespace's `default` ServiceAccount -- but any pod
-  in the namespace may name that ServiceAccount, so an SCC bound to it is
-  root for everyone with `pods/create` there, not a private grant.
+  writing the kubelet-created root-owned directory needs. It runs as its own
+  ServiceAccount, `weights-downloader`, so a grant for it does not land on the
+  namespace's `default`. But any pod in the namespace may name that
+  ServiceAccount, so an SCC bound to it is root for everyone with `pods/create`
+  there.
 
 **On OpenShift** -- by analysis; not yet run there, and `make weights`
 says so when the cluster has SecurityContextConstraints:
@@ -304,10 +343,10 @@ says so when the cluster has SecurityContextConstraints:
   it as `excluded` and leaves it out of the count, since no engine can start
   there either. Nothing in the namespace fixes that node.
 
-On node-local NVMe the engine's default loader (memory-mapped safetensors)
-is the right one; `--safetensors-load-strategy prefetch` exists for network
-filesystems and buys nothing here. Loaders that read with direct I/O and
-many threads exist and are a further step, unmeasured here.
+On node-local NVMe use the engine's default loader (memory-mapped
+safetensors); `--safetensors-load-strategy prefetch` is for network filesystems
+and buys nothing here. Direct-I/O, many-thread loaders are a further step, not
+measured here.
 
 The benchmark standup has the same measure under
 `BENCHMARK_MODEL_HOSTPATH=<dir>`; what the harness does with it is in
@@ -315,18 +354,16 @@ The benchmark standup has the same measure under
 
 ### Engine caches on the node's disk
 
-The caches in the table above -- torch.compile, FlashInfer autotune, Triton
-JIT -- are worth keeping only if the next replica finds them, and on a
-shared RWX claim that holds until the claim does not. Measured on one
-cluster: nine starts of one decode pod spec, three per node on three nodes,
-were repeatable within 2.5 s on a node and split by node into 51-56 s and
-75-81 s. The 25 s was the cache. On the slow nodes the CSI driver had
-published the shared claim read-only (`ro` in `/proc/mounts`; `touch` fails
-with "Read-only file system"), the guard in the engine's command fell back
-to the engine default under `/tmp`, and every start on those nodes compiled
-from nothing: 14.4 s of torch.compile against 2.9 s from the cache, and
-8 s more in the API server before the engine came up. Which node a
-replica landed on decided its start time, and nothing in the pod said so.
+The caches in the table above (torch.compile, FlashInfer autotune, Triton JIT)
+pay only if the next replica finds them, and a shared RWX claim can fail that.
+Measured on one cluster: nine starts of one decode pod spec, three per node on
+three nodes, were repeatable within 2.5 s per node but split by node into
+51-56 s and 75-81 s. The 25 s was the cache. On the slow nodes the CSI driver had
+published the claim read-only (`ro` in `/proc/mounts`; `touch` fails with
+"Read-only file system"), the guard in the engine's command fell back to `/tmp`,
+and every start compiled from nothing: 14.4 s of torch.compile against 2.9 s
+cached, plus 8 s more in the API server. The node decided the start time, and
+nothing in the pod said so.
 
 ```bash
 # any image with /bin/sh; the engine image is the natural choice. Same directory as the weights.
@@ -337,13 +374,13 @@ make engine-cache-status NAMESPACE=<ns>     # per accelerator node: prepared / n
 make engine-cache-delete NAMESPACE=<ns>     # drop the claim, volume and preparer; the caches stay
 ```
 
-**What the node directory must be.** `ENGINE_CACHE_PATH` is one path that
-has to hold on every node the preparer selects -- by default every node
-carrying a known GPU product label, or `WEIGHTS_NODE_SELECTOR=<key=value>`
-narrows it to the nodes your model servers select on (the model servers
-must then select the same ones: a replica on a node the preparer did not
-reach finds no cache there, and with the guard from the start-path table
-costs a compile rather than the replica). The directory must be:
+**What the node directory must be.** `ENGINE_CACHE_PATH` is one path that must
+work on every node the preparer selects: by default every node with a known GPU
+product label, or, replacing that default, the nodes
+`WEIGHTS_NODE_SELECTOR=<key=value>[,<key=value>]` names (every pair must
+match). The model servers must select the same nodes; a replica on a node the
+preparer missed finds no cache and, with the guard, costs a compile rather than
+the replica. The directory must be:
 
 - **absolute, at least two components, no `..`**, no trailing slash
   (`/mnt/local/weights/<ns>`; the whole of a top-level directory is refused);
@@ -366,41 +403,40 @@ costs a compile rather than the replica). The directory must be:
   before `make engine-cache` (`chgrp 0`, `chmod 2775`,
   `chcon -t container_file_t`, below).
 
-And the one thing that is not about the directory: leave to create
-PersistentVolumes, which are cluster-scoped and which a namespace tenant
-does not have (`storage-admin` on OpenShift) -- ask the cluster admin to run
-`make engine-cache`, or to create the volume.
+You also need rights to create PersistentVolumes, which are cluster-scoped and
+which a namespace tenant lacks (`storage-admin` on OpenShift). Ask the cluster
+admin to run `make engine-cache`, or to create the volume.
 
 **Without a node directory.** The caches only need a read-write path that
-outlives the pod, and a shared `ReadWriteMany` claim the namespace already
-has is one: `make workload-patch` with
-`WVA_ENGINE_CACHE_CLAIM=<claim>[:<subPath>]` writes the same three
-variables and mount against that claim instead (the benchmark harness ran
-this way, on its workload claim under `engine-cache/`, before the node-local
-cache existed). The first start anywhere then compiles once and every later
-replica finds it, on any node -- at the cost this section opened with: a
-CSI driver can publish the claim read-only on a node, and every start there
-compiles. So that layout needs the guard from the start-path table in the
-engine's command, without exception; the emitted patch carries it as a
-comment, because the command belongs to the chart. And it widens who is
-trusted: what is on that claim is code every engine loads, so whoever can
-write it -- for a benchmark's workload claim, the load generator and the
-results pods too, not only the engines -- runs code in every engine, on
-every node at once, where a write to a node directory reaches that node.
-Trust the claim as you would the engine image. A node selector does not
-remove the need for a directory -- it only decides which nodes get one --
-and a `local`/`local-path` StorageClass does not either: such a claim binds
-to one node, and a per-node cache shared by every pod on that node is what
-the static hostPath volume is.
+outlives the pod; a shared `ReadWriteMany` claim the namespace already has
+works. `make workload-patch` with `WVA_ENGINE_CACHE_CLAIM=<claim>[:<subPath>]`
+writes the same three variables and mount against that claim. (The benchmark
+harness ran this way, on its workload claim under `engine-cache/`, before the
+node-local cache existed.) The first start anywhere compiles once, and later
+replicas on any node find it. The costs:
 
-One static `hostPath` PersistentVolume at `<dir>/engine-cache`, one claim
-named `engine-cache` bound to it (and to no other: the volume carries a
-`claimRef`), and one DaemonSet that creates the three cache directories on
-every accelerator node -- world-writable and sticky, so any UID the engines
-run as can write and none removes another's files -- writes a marker, and
-stays Ready, so `engine-cache-status` and the DaemonSet's `numberReady`
-both mean "prepared, and writable by this UID". A model server mounts the
-claim read-write and points the three variables under it:
+- A CSI driver can publish the claim read-only on a node, and every start there
+  compiles. So the engine's command needs the guard from the start-path table,
+  always. The emitted patch carries it as a comment, because the command
+  belongs to the chart.
+- It widens who is trusted. The claim holds code every engine loads, so whoever
+  can write it (for a benchmark's workload claim, also the load generator and
+  results pods) runs code in every engine on every node at once; a write to a
+  node directory reaches only that node. Trust the claim like the engine image.
+
+A node selector does not remove the need for a directory; it only picks which
+nodes get one. Nor does a `local`/`local-path` StorageClass: such a claim binds
+to one node, and a per-node cache shared by every pod on the node is exactly the
+static hostPath volume.
+
+What it creates: one static `hostPath` PersistentVolume at
+`<dir>/engine-cache`; one claim named `engine-cache` bound to it and to no other
+(the volume carries a `claimRef`); and one DaemonSet that creates the three
+cache directories on every accelerator node, writes a marker and stays Ready.
+The directories are world-writable and sticky: any engine UID can write, and none
+removes another's files. `engine-cache-status` and the DaemonSet's `numberReady`
+both mean "prepared, and writable by this UID". A model server mounts the claim
+read-write and points the three variables under it:
 
 ```yaml
 volumes:
@@ -418,42 +454,40 @@ containers:
       - {name: TRITON_CACHE_DIR,         value: /engine-cache/triton}
 ```
 
-A hostPath is a bind mount with no storage driver in its path, so no
-driver publishes it read-only (the filesystem under it can still go
-read-only -- an NVMe error, an admin's remount -- which is what the
-preparer's readiness and the guard are for), and each node's cache is warm
-from the second start on that node -- the first start on a node compiles once (measured: 76 s and
-81 s on two nodes whose cache was empty, then 55 s and 55 s; 50 s on a
-third whose cache a previous pod had already filled), as on the shared
-claim the first start anywhere did. That is the node-local cache's own
-edge: the scheduler spreads replicas across the accelerator nodes, so
-until every node has started an engine once, a scale-up can land on a
-cold one (measured on a benchmark pass: the second replica on a node no
-engine had used since the switch, Ready 96 s after it was wanted). So
-**seed it**: `ENGINE_CACHE_SEED_CLAIM=<claim>[:<subPath>]` names a claim
-in the namespace -- the shared RWX claim the caches lived on before is
-the natural one -- and the preparer mounts it read-only and merges its
-caches into each node's as it prepares it, file by file: an entry the
-node already has is kept, one it lacks is copied (a second engine config's
-key lands beside the node's own), a failed copy is removed and retried at
-the pod's next start, and a marker records which seed the node has, so a
-changed seed is merged in too (a subPath that does not exist yet is
-nothing to seed, not an error). With a
-seed, a node is Ready only once it carries it, so `engine-cache-status`
-counts a node whose seed did not complete as not prepared; the engines do
-not wait on the preparer either way. What is
-copied is code the engines load, so the seed claim must be trusted as the
-cache itself is, and more: one write to it reaches every node at the next
-prepare, where a write to the cache reaches the one node the writer's pod
-landed on. The caches are keyed by a hash of the engine config, not the
-node, so one claim per namespace serves every model and flag set in it and
-a changed engine misses rather than hits stale; a seeded node starts warm
-on its first engine. That a node loads what another compiled is what this
-cluster shows -- one accelerator model, one driver, one engine build on
-every node; a fleet with mixed drivers or engine versions has not been
-tried. Keep the guard from the table: a node the
-preparer has not reached (`engine-cache-status` lists it, with the seed)
-costs a compile, not the replica.
+A hostPath is a bind mount with no storage driver in its path, so no driver
+publishes it read-only. (The filesystem under it can still go read-only, from an
+NVMe error or an admin's remount; the preparer's readiness and the guard cover
+that.) Each node's cache is warm from the second start on that node. The first
+start on a node compiles once (measured: 76 s and 81 s on two nodes with an
+empty cache, then 55 s and 55 s; 50 s on a third a previous pod had filled).
+
+That is the node-local cache's weak spot: the scheduler spreads replicas across
+nodes, so until every node has started an engine once, a scale-up can land on a
+cold one (measured: a second replica on an unused node was Ready 96 s after it
+was wanted). So **seed it**. `ENGINE_CACHE_SEED_CLAIM=<claim>[:<subPath>]` names
+a claim in the namespace, naturally the shared RWX claim the caches lived on
+before. The preparer mounts it read-only and merges it into each node's cache,
+file by file:
+
+- an entry the node already has is kept; one it lacks is copied (a second engine
+  config's key lands beside the node's own);
+- a failed copy is removed and retried at the pod's next start;
+- a marker records which seed the node has, so a changed seed is merged too;
+- a subPath that does not exist yet is nothing to seed, not an error.
+
+With a seed, a node is Ready only once it carries it, so `engine-cache-status`
+counts a node whose seed did not complete as not prepared. The engines never
+wait on the preparer.
+
+The seed is code the engines load, so trust it as the cache itself, and more:
+one write to it reaches every node at the next prepare, while a write to the
+cache reaches only the writer's node. The caches are keyed by a hash of the
+engine config, not the node, so one claim per namespace serves every model and
+flag set, and a changed engine misses rather than hits stale. A seeded node
+starts warm on its first engine. Loading what another node compiled was shown on
+one accelerator model, driver and engine build; mixed drivers or engine versions
+are untried. Keep the guard: a node the preparer has not reached
+(`engine-cache-status` lists it, with the seed) costs a compile, not the replica.
 
 ```bash
 # the caches this namespace already has on its shared claim, onto every node
@@ -461,13 +495,12 @@ make engine-cache ENGINE_CACHE_PATH=/mnt/local/weights/<ns> ENGINE_CACHE_IMAGE=<
      ENGINE_CACHE_SEED_CLAIM=<shared claim>[:<subPath>] NAMESPACE=<ns>
 ```
 
-**A seed starts empty** in a fresh namespace, and the preparer only copies
-the seed *to* the nodes. Each engine configuration -- every model, and
-prefill and decode of a P/D model, which compile under different keys --
-then compiles once on every node it lands on. Measured on two P/D 8B models:
-a second replica that landed on a node its role had not run on compiled for
-12-17 s, against 2-3 s on a node it had. Fill the seed *from* the nodes once
-every configuration has started somewhere:
+**A seed starts empty** in a fresh namespace, and the preparer only copies it
+*to* the nodes. Each engine configuration (every model, and prefill and decode of
+a P/D model, which compile under different keys) then compiles once per node.
+Measured on two P/D 8B models: 12-17 s on a node the role had not run on,
+against 2-3 s on one it had. Once every configuration has started somewhere,
+fill the seed *from* the nodes:
 
 ```bash
 # every prepared node merges its caches into the seed (what the seed has is
@@ -479,48 +512,43 @@ make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
 Run it again after adding a model or changing an engine flag: the new stamp
 makes every node merge the new keys.
 
-What it costs, and what it needs, is the weights section's list with two
-things changed. The size: a few gigabytes per engine config per node rather
-than a model. And what the directory holds: **code**. The caches are
-torch.compile artefacts, FlashInfer and Triton kernels that every engine
-on the node loads and runs, and the three directories are world-writable
-(1777: any UID the engines run as can write; sticky, so one UID's files are
-not another's to remove). Whoever can write the directory runs code in
-every engine on that node. On Kubernetes that is anyone with `pods/create`
-in a namespace that can mount the claim -- no more than `pods/create`
-already grants, since such a pod runs as root and could overwrite the
-weights too; in a namespace that separates its workloads by UID (Pod
-Security `restricted`, a `runAsUser` per Deployment) it is more, and the
-1770 variant below is for that -- and across namespaces it is everyone
-pointed at the same directory. So the weights section's rules hold harder here: one directory
-per trust domain, on a disk that is not the node's own, never a system
-path (the script refuses the same paths); and wipe `<dir>/engine-cache` on
-the nodes when a namespace or a directory changes hands -- `delete` keeps
-the caches, and a new tenant of the same namespace name and directory
-would load the old one's. 1777 is a trade-off, taken so the engines need no
-`fsGroup`; a namespace that runs its engines under one UID and wants the
-separation can `chown` the three directories to it and `chmod 1770` them
-on each node. The rest is the same: leave to create PersistentVolumes (the
-claim's `ENGINE_CACHE_CAPACITY`, 200Gi unless set, is what a storage quota
-charges); Pod Security `baseline` (the preparer mounts the claim, not a
-hostPath). On OpenShift -- by analysis, not yet run there --
-`restricted-v2` runs the preparer and the engines as the project's range
-UID, and the kubelet does not relabel a hostPath: prepare
-`<dir>/engine-cache` on each node as the weights section says (`chgrp 0`,
-`chmod 2775`, `chcon -t container_file_t`, or a `context=` mount). The
-preparer then creates the three directories inside it as that UID, owns
-them, and its `chmod 1777` takes; the files carry the project's SELinux
-level, so another project's pods cannot read them unless the disk is
-mounted with `context=`, in which case the directory split is the only
-separation.
+Costs and needs are the weights section's, with two changes:
+
+- **Size:** a few gigabytes per engine config per node, not a model.
+- **Contents: code.** torch.compile artefacts and FlashInfer and Triton kernels
+  that every engine on the node loads and runs. The three directories are 1777
+  (any engine UID can write; sticky, so no UID removes another's files).
+  Whoever can write the directory runs code in every engine on that node. On
+  Kubernetes that is anyone with `pods/create` in a namespace that can mount the
+  claim: no more than `pods/create` already grants, since such a pod runs as
+  root and could overwrite the weights too. In a namespace that separates
+  workloads by UID (Pod Security `restricted`, a `runAsUser` per Deployment) it
+  is more; the 1770 variant below is for that. Across namespaces it is everyone
+  pointed at the same directory.
+
+So the weights rules hold harder here: one directory per trust domain, on a disk
+that is not the node's own, never a system path (the script refuses the same
+paths). Wipe `<dir>/engine-cache` on the nodes when a namespace or directory
+changes hands: `delete` keeps the caches, and a new tenant with the same
+namespace name and directory would load the old one's. 1777 is a trade-off so
+the engines need no `fsGroup`. A namespace that runs its engines as one UID can
+`chown` the three directories to it and `chmod 1770` them on each node.
+
+The rest is the same: rights to create PersistentVolumes (the claim's
+`ENGINE_CACHE_CAPACITY`, 200Gi unless set, is what a storage quota charges), and
+Pod Security `baseline` (the preparer mounts the claim, not a hostPath). On
+OpenShift (by analysis, not yet run there) `restricted-v2` runs the preparer and
+engines as the project's range UID, and the kubelet does not relabel a hostPath.
+Prepare `<dir>/engine-cache` on each node as the weights section says
+(`chgrp 0`, `chmod 2775`, `chcon -t container_file_t`, or a `context=` mount).
+The preparer then creates the three directories as that UID, owns them, and its
+`chmod 1777` takes. The files carry the project's SELinux level, so other
+projects' pods cannot read them, unless the disk is mounted with `context=`; then
+the directory split is the only separation.
 
 The benchmark standup has the same measure under
-`BENCHMARK_ENGINE_CACHE_HOSTPATH=<dir>`, which defaults to
-`BENCHMARK_MODEL_HOSTPATH`; what the harness does with it is in
-[Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
-
-The benchmark harness this repository uses puts its own steps on the engine's
-start path; what they are and how the benchmark scenarios handle them is in
+`BENCHMARK_ENGINE_CACHE_HOSTPATH=<dir>` (default `BENCHMARK_MODEL_HOSTPATH`).
+That, and the harness's own steps on the engine's start path, are in
 [Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 
 ## The engine's memory budget (`gpuMemoryUtilization`)
@@ -537,27 +565,25 @@ torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 594.00 MiB.
 GPU 0 has 79.18 GiB of which 500.69 MiB is free.
 ```
 
-`make benchmark-standup` sets `GPU_MEM_UTIL` to **0.90** for every model. It is
-deliberately *not* lowered for small models: per-replica capacity IS the KV
-cache size, so shrinking KV to make a small model scale sooner does the
-autoscaler's job in the wrong layer, and throws away GPU you paid for to buy an
-effect `kvCacheThreshold` gives you for free. Size the card for serving; tune
-when a replica counts as full in the [scaling policy](scaling-policy.md).
+`make benchmark-standup` sets `GPU_MEM_UTIL` to **0.90** for every model, and
+deliberately does *not* lower it for small models. Per-replica capacity IS the
+KV cache size, so shrinking KV to make a small model scale sooner does the
+autoscaler's job in the wrong layer, and wastes GPU to get what
+`kvCacheThreshold` gives for free. Size the card for serving; set when a replica
+counts as full in the [scaling policy](scaling-policy.md).
 
-Expect the consequence on a small model. At 0.90 a 0.6B model gets **651,328
-tokens** of KV cache, and one replica absorbs an enormous amount of traffic
-without ever looking full. Measured: 121 concurrent requests, KV utilisation
-peaking at **10.5%**, and the scaling manager holding at one replica --
-correctly, because by the signal it sizes on nothing was saturated. To make a
-small model scale on a small load, lower `kvCacheThreshold`; do not shrink the
-cache.
+Expect this on a small model. At 0.90 a 0.6B model gets **651,328 tokens** of KV
+cache, and one replica takes a lot of traffic without looking full. Measured: 121
+concurrent requests, KV utilisation peaking at **10.5%**, and the scaling manager
+correctly holding one replica, since nothing was saturated. To make a small model
+scale on a small load, lower `kvCacheThreshold`; do not shrink the cache.
 
 **Why it looks intermittent.** 0.95 works on an empty GPU, so the failure comes
-and goes. The memory that is already gone belongs to pods the *scheduler cannot
-see*: FMA launcher pods request **zero** GPUs while holding the engine, so
-Kubernetes places a model onto a card it believes is empty, and vLLM then
-measures 77.3 of 79.18 GiB free and budgets as though it had all of it. Any
-co-tenant that holds memory without requesting a GPU does the same.
+and goes. The missing memory belongs to pods the *scheduler cannot see*: FMA
+launcher pods request **zero** GPUs while holding the engine. Kubernetes places a
+model on a card it thinks is empty, and vLLM measures 77.3 of 79.18 GiB free and
+budgets as if it had all of it. Any co-tenant holding memory without requesting a
+GPU does the same.
 
 Override it on the standup when you need to:
 
@@ -567,21 +593,19 @@ make benchmark-standup BENCHMARK_NAMESPACE=<namespace> MODEL_ID=<model> GPU_MEM_
 
 ## Draining before scale-down
 
-A replica removed while it is streaming takes its open responses with it. The
-client sees a truncated body — `ClientPayloadError` from aiohttp, an incomplete
-stream elsewhere — and the request is lost after it was already paid for in GPU
-time.
+A replica removed while streaming takes its open responses with it. The client
+gets a truncated body (`ClientPayloadError` from aiohttp, an incomplete stream
+elsewhere), and the request is lost after its GPU time was spent.
 
-This is not something the scaling manager can fix from its side. It decides the count; the pod
-spec decides what happens to a pod that is going away, and on llm-d that spec
-belongs to the modelservice chart (`managed-by: Helm`, release `<model>-ms`).
-Anything the installer wrote there would be reverted by the next `helm upgrade`.
+The scaling manager cannot fix this. It decides the count; the pod spec decides
+what happens to a departing pod, and on llm-d that spec belongs to the
+modelservice chart (`managed-by: Helm`, release `<model>-ms`). Anything the
+installer wrote there would be reverted by the next `helm upgrade`.
 
-It is worth knowing how much this costs before you turn autoscaling on. Each
-scale-down produces a burst of client-side stream failures: they begin when the
-replica goes and stop about a generation later, once the responses it was
-writing have all been cut. Long generations make it worse, because the window in
-which a pod is mid-response is then most of its life.
+Know the cost before turning autoscaling on. Each scale-down causes a burst of
+client-side stream failures, from when the replica goes until about a generation
+later. Long generations make it worse: a pod is then mid-response for most of
+its life.
 
 Two fields on the **model server's** pod template fix it:
 
@@ -602,21 +626,19 @@ spec:
               command: ["/bin/sh", "-c", "sleep 30"]
 ```
 
-`sleep` is the crude version and it is usually enough, though not for the reason
-it looks like. Endpoint removal is **not** instantaneous from the pod's point of
-view: the pod is marked Terminating at once, but the withdrawal propagates
-asynchronously to every kube-proxy and to the EPP, which keep routing to it in
-the meantime. The window therefore covers two things — arrivals still being sent
-here, and the generations already running — which is why the emitted patch uses a
-longer sleep (45s) than the 30s in the example above. An engine that exposes a
-drain endpoint should be asked to drain instead.
+`sleep` is crude but usually enough, though not for the obvious reason.
+Endpoint removal is **not** instant: the pod is marked Terminating at once, but
+the withdrawal reaches every kube-proxy and the EPP asynchronously, and they keep
+routing to it meanwhile. So the window covers new arrivals still being sent here
+as well as generations already running. That is why the emitted patch sleeps 45s,
+not the 30s above. If the engine has a drain endpoint, call that instead.
 
-Set `terminationGracePeriodSeconds` above the preStop duration plus the time the
-longest generation needs — the grace period is the total budget, and the kubelet
-sends SIGKILL when it expires regardless of what the hook is doing.
+Set `terminationGracePeriodSeconds` above the preStop duration plus the longest
+generation. The grace period is the total budget; the kubelet sends SIGKILL when
+it expires, whatever the hook is doing.
 
-`make scaledobjects-plan` reports this per workload, because registering a
-ScaledObject is the moment scale-down becomes possible:
+`make scaledobjects-plan` reports a missing hook per workload, because
+registering a ScaledObject is when scale-down becomes possible:
 
 ```
 note: Scale-down will cut in-flight requests: vllm declares no preStop hook,
@@ -625,12 +647,11 @@ note: Scale-down will cut in-flight requests: vllm declares no preStop hook,
 
 ### In llm-d modelservice values
 
-The same two fields, written where the chart will keep them — once per role.
-**UNVERIFIED:** the chart is not vendored in this repository, so the key paths
-below (a `containers` list per role passed through to the pod, and a per-role
-`terminationGracePeriodSeconds`) have not been checked against the chart's
-templates. Render with `helm template` and confirm both fields reach the
-Deployment before relying on them.
+The same two fields, where the chart keeps them, once per role.
+**UNVERIFIED:** the chart is not vendored here, so these key paths (a per-role
+`containers` list passed through to the pod, and a per-role
+`terminationGracePeriodSeconds`) are not checked against its templates. Render
+with `helm template` and confirm both fields reach the Deployment first.
 
 ```yaml
 prefill:
@@ -664,15 +685,14 @@ helm pull <repo>/<chart> --version <version> --untar -d /tmp/ms
 grep -rn "terminationGracePeriodSeconds\|lifecycle\|preStop" /tmp/ms/*/templates/
 ```
 
-The `.Values.…` expression each match reads **is** the values path. You are
-looking for two things, per role (`prefill`, `decode`): the expression that
-fills `spec.template.spec.terminationGracePeriodSeconds`, and how the
-`vllm` container's `lifecycle` is filled — either a values key that is
-rendered into it, or a role-level `containers` list that is passed through
-whole. If neither is templated, the chart cannot set the field and the patch
-has to go on the rendered Deployment instead (and is reverted by the next
-`helm upgrade`). Then confirm on the rendered output, and once more on the
-live object after the upgrade:
+The `.Values.…` expression each match reads **is** the values path. Per role
+(`prefill`, `decode`) find two things: what fills
+`spec.template.spec.terminationGracePeriodSeconds`, and how the `vllm`
+container's `lifecycle` is filled (a values key rendered into it, or a role-level
+`containers` list passed through whole). If neither is templated, the chart
+cannot set the field; patch the rendered Deployment instead (reverted by the
+next `helm upgrade`). Confirm on the rendered output, then on the live object
+after the upgrade:
 
 ```bash
 helm template <model>-ms <repo>/<chart> --version <version> -f values.yaml \
@@ -680,20 +700,19 @@ helm template <model>-ms <repo>/<chart> --version <version> -f values.yaml \
 kubectl get deploy -n <ns> -o custom-columns=NAME:.metadata.name,GRACE:.spec.template.spec.terminationGracePeriodSeconds
 ```
 
-A null grace period or preStop in either output means the key path is wrong
-for your chart version. `make scaledobjects-plan` is the last check: the
-`Scale-down will cut in-flight requests` note disappears for a workload once
-its engine container has a preStop hook. It does not look at the grace period
-(`so_drain_note` in `deploy/lib/scaledobject.sh`), so confirm that one with
-the `kubectl` line above.
+A null grace period or preStop in either output means the key path is wrong for
+your chart version. Last check: `make scaledobjects-plan` drops the
+`Scale-down will cut in-flight requests` note once the engine container has a
+preStop hook. It ignores the grace period (`so_drain_note` in
+`deploy/lib/scaledobject.sh`), so check that with the `kubectl` line above.
 
 ### On a LeaderWorkerSet
 
-`make workload-patch` skips LeaderWorkerSets and says so: the pod templates
-live under `spec.leaderWorkerTemplate`, the API server refuses a strategic merge
-on a custom resource, and the **worker** template has to drain too — killing a
-worker aborts the leader's in-flight generations whatever hook the leader has.
-Do it by hand, in the manifest or chart that owns the LWS:
+`make workload-patch` skips LeaderWorkerSets and says so. The pod templates are
+under `spec.leaderWorkerTemplate`, the API server refuses a strategic merge on a
+custom resource, and the **worker** template must drain too: killing a worker
+aborts the leader's in-flight generations whatever hook the leader has. Do it by
+hand, in the manifest or chart that owns the LWS:
 
 ```yaml
 spec:
@@ -727,12 +746,11 @@ by the next `helm upgrade` if a chart owns the object.
 
 ## Writing the patch: `make workload-patch`
 
-The sections above describe the same shape of problem — a pod spec that is
-fine while the replica count is fixed and costly once something starts changing
-it — and `make workload-patch` writes the fix for three of them: the drain hook,
-the weights volume, and the engine-cache volume (vLLM's `VLLM_CACHE_ROOT` and
-its two siblings on no volume that outlives the pod, so every start compiles
-from nothing):
+The sections above share one shape: a pod spec that is fine at a fixed replica
+count and costly once the count changes. `make workload-patch` writes the fix
+for three of them: the drain hook, the weights volume, and the engine-cache
+volume (for vLLM's `VLLM_CACHE_ROOT` and its two siblings, when they sit on no
+volume that outlives the pod and every start compiles from nothing):
 
 ```bash
 make workload-patch                       # everything in scope
@@ -771,43 +789,39 @@ make workload-patch NAMESPACE=my-models \
 ```
 
 Step 4 patches the live objects, which **replaces their pods**. The durable
-alternative is to copy the emitted file's contents into your modelservice values
-and let the chart roll them out — the next `helm upgrade` reverts anything
-applied directly. Either way steps 2 and 3 are the same: the claims are yours,
-not the chart's. And one thing the patch cannot carry either way: the guard
-that makes an unwritable cache path cost a compile rather than the replica
-lives in the container command, which belongs to the chart. The emitted file
-has it as a comment next to the engine-cache half; put it in the command.
+way is to copy the emitted file into your modelservice values and let the chart
+roll it out; the next `helm upgrade` reverts anything applied directly. Steps 2
+and 3 are the same either way: the claims are yours, not the chart's. The patch
+cannot carry the guard (an unwritable cache path costs a compile, not the
+replica): it lives in the container command, which belongs to the chart. The
+emitted file has it as a comment beside the engine-cache half; put it in the
+command.
 
-`make model-cache` is safe to re-run. If the claim already exists it reports what
-it is and changes nothing, so "did I already create this?" is a question you can
-answer by typing the command again.
+`make model-cache` is safe to re-run: an existing claim is reported and left
+alone.
 
 **A storage half is refused, with the reason, when it would break something:**
 a volume of that name already exists on the workload (a strategic merge cannot
-replace one, so the API server rejects the whole object — including the drain
-hook), something is already mounted at that path, or the claim does not exist
-(every pod the rollout creates would stay `Pending`). In each case the drain half
-is still applied, the other storage half is judged on its own, and what was
-refused stays in the emitted file.
+replace it, so the API server rejects the whole object, drain hook included);
+something is already mounted at that path; or the claim does not exist (every
+new pod would stay `Pending`). The drain half is still applied, the other
+storage half is judged on its own, and the refused half stays in the file.
 
-It writes `wva-workload-patch.yaml`: one document per model server that needs
-something, naming the engine container, with a comment saying which of the three
-problems that workload has. A document that needs two storage halves carries one
-`env`, one `volumeMounts` and one `volumes` list for both.
+The output is `wva-workload-patch.yaml`: one document per model server that
+needs something, naming the engine container, with a comment saying which of the
+three problems it has. A document with two storage halves carries one `env`, one
+`volumeMounts` and one `volumes` list for both.
 
-**It writes a file rather than applying it, and that is deliberate.** The pod
-spec belongs to the model server's chart. A server-side apply is not merely
-impolite here, it is refused — `conflict with helm ...
-.spec.template.spec.terminationGracePeriodSeconds` — and a patch that does land
-is reverted by the next `helm upgrade`, silently. Put the contents into your
-modelservice values, where they will survive.
+**It writes a file rather than applying it, on purpose.** The pod spec belongs
+to the model server's chart. A server-side apply is refused
+(`conflict with helm ... .spec.template.spec.terminationGracePeriodSeconds`),
+and a patch that does land is silently reverted by the next `helm upgrade`. Put
+the contents in your modelservice values, where they survive.
 
-**A missing cache is not a hard failure, and it is reported loudly anyway.**
-Nothing here blocks on it: a model server with no persistent weights autoscales
-correctly, it is just expensive to scale. But the cost only appears at the moment
-a replica is added, and it looks exactly like the autoscaler being slow, so it is
-named per workload on the console rather than left in the file:
+**A missing cache is not a hard failure, but it is reported loudly.** A model
+server with no persistent weights autoscales correctly; it is just expensive to
+scale. The cost shows only when a replica is added, and looks like the
+autoscaler being slow, so it is named per workload on the console:
 
 ```text
 [WARNING]   ns/qwen-decode RE-DOWNLOADS ITS WEIGHTS on every scale-up: vllm
@@ -815,51 +829,45 @@ named per workload on the console rather than left in the file:
 [WARNING] 1 of 1 model server(s) will RE-DOWNLOAD their weights every time a replica is added.
 ```
 
-On a cluster with no egress it is not a cost but a failure, and the first time
-anyone sees it is the first scale-up.
+On a cluster with no egress it is a failure, not a cost, first seen at the
+first scale-up.
 
 The engine cache is reported the same way, per workload (`COMPILES FROM
 NOTHING on every start`) and in the summary (`N model server(s) COMPILE FROM
-NOTHING every time a replica is added`), because it has the same property: it
-costs nothing while the replica count holds and tens of seconds at every
-scale-up (measured, 14 s of `torch.compile` against 3 s from a warm cache, and
-8 s more before the API server answered). The emitted document names the claim
-it mounts (`engine-cache`, or `WVA_ENGINE_CACHE_CLAIM`), says whether it exists,
-and where it does not, what `make engine-cache` needs of a node directory and
+NOTHING every time a replica is added`). It also costs nothing at a fixed count
+and tens of seconds per scale-up (measured: 14 s of `torch.compile` against 3 s
+warm, and 8 s more before the API server answered). The emitted document names
+the claim it mounts (`engine-cache`, or `WVA_ENGINE_CACHE_CLAIM`), says whether
+it exists, and if not, what `make engine-cache` needs of a node directory and
 how to do without one. Only vLLM has the variable; for another engine the
 detector has no opinion, which is not a clean bill.
 
-`WVA_WORKLOAD_PATCH_APPLY=true` additionally applies the **drain half** to the
-live objects, for a cluster where that is the trade you want. Two things it says
-at the time, and both are worth reading before you type it:
+`WVA_WORKLOAD_PATCH_APPLY=true` also applies the **drain half** to the live
+objects. Read what it prints first:
 
-- **It replaces pods.** A patch is a new pod template, so every model server it
-  touches rolls. It rolls *before* the hook exists, so requests in flight during
-  that first rollout are still cut — the fix costs one truncation to install.
+- **It replaces pods.** A new pod template rolls every model server it touches,
+  *before* the hook exists, so the first rollout still cuts in-flight requests.
   With the default strategy at `replicas: 1` the new pod must schedule before the
-  old one goes, so on a cluster with no spare GPU the rollout stalls with the old
-  pod still serving.
-- **Each storage half has its own opt-in**, `WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true`
-  for the weights volume and `WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true` for
-  the engine-cache volume, because mounting storage is a bigger change than
-  adding a hook: it can be refused by the API server outright, and it changes
-  where an engine reads its weights from, or writes code it will load. With the
-  opt-in a half is applied only where it cannot break the workload — no volume
-  of that name, nothing already mounted at that path, and the claim exists, is
-  `Bound` and is `ReadWriteMany` (a `ReadWriteOnce` claim binds to one node,
-  and the second replica could not schedule). Any of those refuses it, says
-  which, and still applies the rest. The engine-cache half has one more: when
-  the claim is the one `make engine-cache` makes, every accelerator node its
-  preparer selects must be prepared (`make engine-cache-status` names the
-  others), because it is applied **without the guard** (the command belongs
-  to the chart), and says so: until the guard is in the chart, a node where
-  the cache path is not writable loses the replica rather than a compile.
+  old one goes, so with no spare GPU the rollout stalls with the old pod serving.
+- **Each storage half has its own opt-in**: `WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true`
+  for the weights volume, `WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true` for the
+  engine cache. Mounting storage is a bigger change than a hook: the API server
+  can refuse it outright, and it changes where an engine reads weights or writes
+  code it will load. With the opt-in a half is applied only where it cannot
+  break the workload: no volume of that name, nothing mounted at that path, and
+  the claim exists, is `Bound` and is `ReadWriteMany` (a `ReadWriteOnce` claim
+  binds to one node, so a second replica could not schedule). Otherwise it
+  refuses that half, says why, and applies the rest. The engine-cache half has
+  one more check: with the claim `make engine-cache` makes, every accelerator
+  node its preparer selects must be prepared (`make engine-cache-status` names
+  the others). It is applied **without the guard** (the command belongs to the
+  chart), and says so: until the guard is in the chart, a node with an
+  unwritable cache path loses the replica, not a compile.
 
-  The first check is the one that matters: `volumes` merges with `retainKeys`,
-  and only `kubectl apply` generates that directive, so
-  `kubectl patch --type=strategic` merges *into* a volume of the same name and
-  the API server rejects the whole object — `may not specify more than 1 volume
-  type` — taking the drain hook down with it.
+  The volume-name check matters most. `volumes` merges with `retainKeys`, which
+  only `kubectl apply` generates, so `kubectl patch --type=strategic` merges
+  *into* a same-named volume and the API server rejects the whole object
+  (`may not specify more than 1 volume type`), drain hook included.
 
 | variable | default | what it sets |
 | --- | --- | --- |
@@ -880,63 +888,59 @@ opt-in nothing applies a volume.
 
 What it will and will not do:
 
-- **It reuses a claim you already have, where there is an unambiguous one.**
-  A namespace whose cache is called `llm-d-model-cache` should not be told to
-  use `model-pvc`, because the obvious response is to provision a second
-  terabyte for weights that are already on the cluster. Only a **Bound**
-  `ReadWriteMany` claim qualifies (`ReadOnlyMany` would mount read-only under
-  a path the engine downloads into); with several candidates it
-  takes the one whose name says what it holds, and with two equally plausible
-  ones it names none and falls back to the default rather than guessing at
-  someone else's data.
-- **`workload-patch` does not create the PersistentVolumeClaims** — `make
+- **It reuses a claim you already have, when one is unambiguous.** A namespace
+  whose cache is `llm-d-model-cache` should not be told to use `model-pvc`, or
+  someone provisions a second terabyte for weights already on the cluster. Only
+  a **Bound** `ReadWriteMany` claim qualifies (`ReadOnlyMany` would mount
+  read-only where the engine downloads). With several candidates it takes the
+  one whose name says what it holds; with two equally plausible ones it names
+  none and falls back to the default.
+- **`workload-patch` does not create the PersistentVolumeClaims.** `make
   model-cache` makes the weights one and `make engine-cache` the engine-cache
-  one, as separate, deliberate steps. For the weights claim two fields decide
-  whether the cache helps or breaks scale-up, and neither is guessed:
+  one, as separate steps. For the weights claim two fields decide whether the
+  cache helps or breaks scale-up, and neither is guessed:
 
   - **`accessModes` must be `ReadWriteMany`.** Many replicas reading one copy is
-    the entire point. A cluster's *default* StorageClass is often RWO block
-    storage, and a ReadWriteOnce claim binds to one node — the second replica
-    then cannot schedule at all. An auto-created claim on the wrong class turns a
-    slow scale-up into a failed one, which is worse than no cache.
-  - **`storage` is a function of how many models share it and how large they
-    are.** At roughly two bytes per parameter, a 0.6B model is ~1.2 GiB and a 70B
-    is ~140 GB; size the claim for every model that will share it, plus room.
+    the point. A cluster's *default* StorageClass is often RWO block storage,
+    and a ReadWriteOnce claim binds to one node, so the second replica cannot
+    schedule. A claim on the wrong class turns a slow scale-up into a failed
+    one, which is worse than no cache.
+  - **`storage` depends on how many models share it and their size.** At about
+    two bytes per parameter, a 0.6B model is ~1.2 GiB and a 70B ~140 GB; size
+    for every model that will share it, plus room.
 
   ```bash
   make model-cache NAMESPACE=<ns>     # lists classes this cluster serves RWX from
   make model-cache NAMESPACE=<ns> WVA_MODEL_PVC_SIZE=<size> WVA_MODEL_PVC_CLASS=<class>
   ```
 
-  Run bare, it answers "which class do I use?" from evidence — the classes this
-  cluster already has Bound RWX claims on — rather than from a table of
-  provisioner names that would go stale. It is safe to re-run: an existing claim
-  is reported, not touched. A `WaitForFirstConsumer` class stays `Pending` until a
-  pod mounts it, which is correct and is reported as such rather than waited on.
+  Run bare, it lists the classes this cluster already has Bound RWX claims on,
+  rather than a table of provisioner names that would go stale. It is safe to
+  re-run: an existing claim is reported, not touched. A `WaitForFirstConsumer`
+  class stays `Pending` until a pod mounts it; that is correct, and reported
+  rather than waited on.
 
-  It is not part of the install, and the claim is not deleted by `undeploy-wva`:
-  a claim holds data, so an uninstall that removed it would either destroy
-  someone's weights or silently leave a terabyte behind. Deciding that is the
-  operator's, which is why it is a separate command. The emitted patch file also
-  carries the claim as a commented manifest, for anyone who would rather apply
+  It is not part of the install, and `undeploy-wva` does not delete the claim:
+  it holds data, and removing it would destroy someone's weights or silently
+  leave a terabyte behind. That is the operator's call. The emitted patch also
+  carries the claim as a commented manifest, for anyone who prefers to apply
   their own.
-- **It skips LeaderWorkerSets, loudly.** Draining a multi-node group means the
-  worker template too — killing a worker aborts the leader's in-flight
-  generations whatever hook the leader carries — and the API server will not
-  accept a strategic merge for a custom resource. Emitting a confident, wrong
-  document is worse than emitting nothing.
-- **It never reports a workload it could not read as healthy.** A listing or a
-  `get` that fails is said out loud and makes the run exit non-zero, and so does
-  a missing `jq` (or `yq`, which is needed only when applying). "Nothing to patch" is a claim about pods, and it is not
-  made about pods nobody could read.
+- **It skips LeaderWorkerSets, loudly.** A multi-node group must drain the
+  worker template too (killing a worker aborts the leader's in-flight
+  generations), and the API server refuses a strategic merge on a custom
+  resource. A confident, wrong document is worse than none.
+- **It never reports a workload it could not read as healthy.** A failed listing
+  or `get` is reported and makes the run exit non-zero, as does a missing `jq`
+  (or `yq`, needed only when applying). "Nothing to patch" is never said about
+  pods nobody could read.
 
 The emitted file opens with a header saying most of this, because it otherwise
-looks exactly like something to `kubectl apply -f` — which is the one thing not
-to do with it. The header also carries a marker line, and only a file carrying
-that marker is ever deleted once the workloads stop needing a patch: a file you
-wrote yourself at your own `WVA_WORKLOAD_PATCH_FILE` path is left alone.
+looks like something to `kubectl apply -f`, the one thing not to do with it.
+The header carries a marker line, and only a file with that marker is deleted
+once the workloads stop needing a patch; a file you wrote at your own
+`WVA_WORKLOAD_PATCH_FILE` path is left alone.
 
 `make benchmark-standup` and `make benchmark-add-variant` run this with
 `APPLY=true`, pinned to the benchmark namespace, and wait for the rollout: those
-model servers are ours, and a run whose scale-downs truncate requests is
-measuring the harness rather than the autoscaler.
+model servers are ours, and a run whose scale-downs truncate requests measures
+the harness, not the autoscaler.

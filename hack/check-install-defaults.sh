@@ -53,7 +53,7 @@ for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_war
     }
 done
 
-EXPECT_CASES=49
+EXPECT_CASES=59
 RAN=0
 FAILED=0
 
@@ -280,11 +280,86 @@ check 'scraper: the resolved URL, not the shipped default, finds the stack this 
 unset -f kubectl
 
 # ----------------------------------------------------------------------------
+# A re-run that names no Prometheus KEEPS the metrics-reader binding
+# ----------------------------------------------------------------------------
+# "No trusted source answers" is what every upgrade sees whose caller did not
+# repeat PROMETHEUS_SA, and the install DELETED the binding then: Prometheus
+# stopped scraping the controller, with no error. wva_metrics_reader_binding is
+# run against a stub that answers the binding read from $MR_CRB (a subject,
+# NOTFOUND or FORBIDDEN, on stderr like the API server); every call is logged.
+mr_run() {
+    : > "$WORK/mr.calls"
+    : > "$WORK/mr.out"
+    (
+        MR_CRB=NOTFOUND
+        PROMETHEUS_URL='https://prom.example.com:9090' PROMETHEUS_URL_EXPLICIT=''
+        WVA_PROMETHEUS_URL_RESOLVED='' PROMETHEUS_SA='' DEPLOY_PROMETHEUS=false
+        WVA_NS=wns WVA_WATCH_NS='' WVA_SCOPE=namespace WVA_APPLY_SCOPE=all
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_detect_prometheus_url() { :; }
+        log_info() { echo "INFO $1" >> "$WORK/mr.out"; }
+        log_warning() { echo "WARN $1" >> "$WORK/mr.out"; }
+        kubectl() {
+            echo "$*" >> "$WORK/mr.calls"
+            case "$*" in
+                "get clusterrolebinding "*)
+                    case "$MR_CRB" in
+                        NOTFOUND) echo 'Error from server (NotFound): clusterrolebindings.rbac.authorization.k8s.io not found' >&2; return 1 ;;
+                        FORBIDDEN) echo 'Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io is forbidden' >&2; return 1 ;;
+                        *) printf '%s ' "$MR_CRB" ;;
+                    esac ;;
+                *) return 0 ;;
+            esac
+        }
+        k="$WORK/mr.kust"
+        printf 'patches:\n' > "$k"
+        wva_metrics_reader_binding "$k" "$WVA_NS"
+    )
+}
+mr_name="wva-metrics-reader-rolebinding-$(wva_ns_suffix wns)"
+if declare -F wva_metrics_reader_binding >/dev/null; then
+    mr_run MR_CRB=obs/old-prom
+    check 'metrics-reader re-run, no source, binding present: nothing deleted' '0' \
+        "$(grep -c '^delete ' "$WORK/mr.calls")"
+    check 'metrics-reader re-run, no source, binding present: warned it was KEPT, by name' '1' \
+        "$(grep -c "^WARN Kept ClusterRoleBinding $mr_name as it is (grants the controller's /metrics to: obs/old-prom)" "$WORK/mr.out")"
+    check 'metrics-reader re-run, no source: the warning says how to repoint and how to remove' '2' \
+        "$(grep -c 'PROMETHEUS_SA=<namespace>/<serviceaccount> NAMESPACE=wns make setup-prereqs$\|kubectl delete clusterrolebinding '"$mr_name"'$' "$WORK/mr.out")"
+    mr_run MR_CRB=NOTFOUND
+    check 'metrics-reader, no source, no binding: says none is granted, deletes nothing' '1 0' \
+        "$(grep -c '^WARN No Prometheus is granted' "$WORK/mr.out") $(grep -c '^delete ' "$WORK/mr.calls")"
+    mr_run MR_CRB=FORBIDDEN
+    check 'metrics-reader, binding unreadable: unknown, left as is, nothing deleted' '1 0 0' \
+        "$(grep -c 'is unknown; this install leaves it as it is' "$WORK/mr.out") $(grep -c '^WARN No Prometheus is granted' "$WORK/mr.out") $(grep -c '^delete ' "$WORK/mr.calls")"
+    mr_run MR_CRB=obs/old-prom WVA_APPLY_SCOPE=controller
+    check 'metrics-reader, controller-only phase: no read, no message, no patch' '0 0 1' \
+        "$(grep -c . "$WORK/mr.calls") $(grep -c . "$WORK/mr.out") $(grep -c . "$WORK/mr.kust")"
+    mr_run PROMETHEUS_SA=obs/prom-sa
+    check 'metrics-reader, PROMETHEUS_SA: the binding is pointed at it' '1 1' \
+        "$(grep -c '^INFO Controller /metrics readable by ServiceAccount prom-sa in obs' "$WORK/mr.out") $(grep -c 'name: prom-sa' "$WORK/mr.kust")"
+    # The remedy repeats the install's shape: the out-of-reach controller in
+    # wva-<ns> manages <ns>, and NAMESPACE=wva-<ns> would set up a different one.
+    mr_run MR_CRB=obs/old-prom WVA_NS=wva-tenant WVA_WATCH_NS=tenant
+    check 'metrics-reader remedy, out-of-reach shape: NAMESPACE is the managed one' '1 0' \
+        "$(grep -c 'PROMETHEUS_SA=<namespace>/<serviceaccount> NAMESPACE=tenant make setup-prereqs WVA_NS=wva-tenant WVA_WATCH_NS=tenant$' "$WORK/mr.out") $(grep -c 'NAMESPACE=wva-tenant' "$WORK/mr.out")"
+    mr_run MR_CRB=obs/old-prom WVA_SCOPE=cluster
+    check 'metrics-reader remedy, cluster scope: SCOPE=cluster, no NAMESPACE' '1 0' \
+        "$(grep -c 'PROMETHEUS_SA=<namespace>/<serviceaccount> make setup-prereqs SCOPE=cluster WVA_NS=wns$' "$WORK/mr.out") $(grep -c 'NAMESPACE=wns' "$WORK/mr.out")"
+else
+    check 'metrics-reader re-run: wva_metrics_reader_binding is defined' 'defined' 'missing'
+fi
+# And no other path in the installer deletes it.
+check 'metrics-reader: the installer never deletes the binding' '0' \
+    "$(tr -d '\r' < "$ROOT/deploy/lib/infra_wva.sh" | grep -v '^[[:space:]]*#' | grep -c 'delete clusterrolebinding .*wva-metrics-reader')"
+
+# ----------------------------------------------------------------------------
 # The shipped sample ScaledObject scales like the ones the installer writes
 # ----------------------------------------------------------------------------
 # The sample is what people copy. It had a 0s scale-down window at 100%/30s,
-# while the scaler answers 0 until WVA's first decision -- so a copied sample
-# could drop a serving workload to its floor before WVA had looked at it.
+# so a copied sample shed replicas on a single low reading. (Before WVA's first
+# decision the scaler now answers the current replica count, so it no longer
+# answers 0 there either.)
 gen_behavior="$(
     unset WVA_SO_SCALE_UP_STABILIZATION WVA_SO_SCALE_UP_PERIOD \
           WVA_SO_SCALE_DOWN_STABILIZATION WVA_SO_SCALE_DOWN_PERIOD

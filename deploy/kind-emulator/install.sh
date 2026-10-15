@@ -42,7 +42,6 @@ WARMPOOL_PROXY_IMAGE=${WARMPOOL_PROXY_IMAGE:-"ghcr.io/ev-shindin/warmpool-proxy:
 
 # WVA Configuration
 WVA_RECONCILE_INTERVAL=${WVA_RECONCILE_INTERVAL:-"60s"} # WVA controller reconcile interval - tests set 30s interval
-SKIP_TLS_VERIFY=true  # Skip TLS verification in emulated environments
 WVA_LOG_LEVEL="debug" # WVA log level set to debug for emulated environments
 # Prometheus Configuration
 PROMETHEUS_SVC_NAME="kube-prometheus-stack-prometheus"

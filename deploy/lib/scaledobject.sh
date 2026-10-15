@@ -38,7 +38,7 @@
 #   cluster-scoped, its own namespace when namespace-scoped.
 #
 
-readonly SO_PLAN_HEADER=$'APPLY\tNAMESPACE\tKIND\tNAME\tMODELID\tMIN\tMAX\tCOST\tPOLICY'
+readonly SO_PLAN_HEADER=$'APPLY\tNAMESPACE\tKIND\tNAME\tMODELID\tMIN\tMAX\tCOST\tPOLICY\tFALLBACK'
 
 # The variantCost an entry gets when nothing else decides one. It is WVA's own
 # default for a trigger that omits the field, so writing it into every entry
@@ -1999,7 +1999,7 @@ ENGINENAMED
 #   one write to it reaches every node).
 #
 #   <node dir> is one path that must hold on every accelerator node
-#   (WEIGHTS_NODE_SELECTOR=<key=value> narrows which nodes; the model servers
+#   (WEIGHTS_NODE_SELECTOR=<key=value>[,<key=value>] narrows which nodes; the model servers
 #   must select the same ones). The caches land under <node dir>/engine-cache,
 #   and the directory must be:
 #     - absolute, at least two components (/mnt/local/weights/${ns}), no '..',
@@ -2082,7 +2082,19 @@ so_target_namespaces() {
         # admin-owned controller — the whole point of which is to sit outside the
         # namespace it manages — planned against its own empty namespace and
         # reported that there was nothing to autoscale.
-        wva) echo "${WVA_WATCH_NS:-$WVA_NS}"; return ;;
+        #
+        # With WVA_NS given and no WVA_WATCH_NS, a NAMESPACE that differs from it
+        # is the managed one: `NAMESPACE=<ns> make scaledobjects-plan WVA_NS=<ctl>`
+        # is the out-of-reach shape spelled the obvious way, and it scanned the
+        # controller's own empty namespace.
+        wva) if [ -n "${WVA_WATCH_NS:-}" ]; then
+                 echo "$WVA_WATCH_NS"
+             elif [ -n "${NAMESPACE_EXPLICIT:-}" ] && [ "$(wva_install_scope)" = namespace ]; then
+                 echo "$NAMESPACE_EXPLICIT"
+             else
+                 echo "$WVA_NS"
+             fi
+             return ;;
         all) : ;;
         *)   echo "$scope"; return ;;
     esac
@@ -2174,9 +2186,201 @@ so_existing_info() {
                    | .metadata.scalingPolicy // empty ] | first // ""),
                 (([ .spec.triggers[]?.metadata.scalerAddress // ""
                     | select(startswith("wva-external-scaler.")) ] | length > 0)
-                 | tostring) ]
+                 | tostring),
+                # The WVA trigger itself, for what adoption must not reset: the
+                # modelID it already carries, every key the plan does not write
+                # (comma-joined, sorted), and the address it already names.
+                (([ .spec.triggers[]? | .metadata // {}
+                    | select((.scalerAddress // "") | startswith("wva-external-scaler.")) ]
+                  | first // {}) as $w
+                 | ($w.modelID // ""),
+                   ($w | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy)
+                       | keys | join(",")),
+                   ($w.scalerAddress // "")) ]
+            | map(tostring | gsub("[\u001e\u001f\n]"; " "))
             | join("")' 2>/dev/null \
         | head -1
+}
+
+# so_kept_trigger_keys echoes, as a JSON object, the metadata of the WVA trigger on
+# ScaledObject $2 in $1 minus the keys an adopt writes (scalerAddress, modelID,
+# variantCost, scalingPolicy). That is what an adopt carries over: hand-set keys
+# such as defaultOutputTokens or warmPool, which the plan never names and a merge
+# patch -- which REPLACES the triggers list -- would otherwise drop.
+#
+# Only a trigger already naming a wva-external-scaler contributes. A prometheus or
+# cpu trigger is what adoption exists to displace, and its serverAddress or query
+# carried onto the WVA trigger would be nonsense.
+#
+# `{}` for an object with no WVA trigger. Non-zero when the object cannot be read:
+# "nothing to keep" and "could not look" must not be the same answer, because the
+# second one, patched over, is exactly the loss this exists to prevent.
+so_kept_trigger_keys() {
+    local ns="$1" so="$2" json
+    json=$(kubectl get scaledobject "$so" -n "$ns" -o json 2>/dev/null) || return 1
+    [ -n "$json" ] || return 1
+    printf '%s' "$json" | jq -ce '
+        [ .spec.triggers[]? | .metadata // {}
+          | select((.scalerAddress // "") | startswith("wva-external-scaler.")) ]
+        | first // {}
+        | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy)' 2>/dev/null
+}
+
+# so_address_ns echoes the namespace a scalerAddress names:
+# wva-external-scaler.<namespace>.svc...:port, or the short form
+# wva-external-scaler.<namespace>:port. The port is cut first, so the short form
+# does not leave it stuck to the namespace.
+so_address_ns() {
+    printf '%s' "$1" | cut -d: -f1 | cut -d. -f2
+}
+
+# so_prefer_existing_model keeps the modelID an adopted ScaledObject already
+# carries, for the plan entry so_discover is writing. It reads and sets the
+# caller's locals: model, note, existing_model, existing_name.
+#
+# Re-discovery is a guess about what the container serves -- --served-model-name,
+# else --model, else a positional -- and the object's modelID is what somebody
+# registered, possibly by hand because the guess was wrong. A plan re-run
+# unedited replaced the second with the first, so `apply: adopt` "refreshing in
+# place" could re-register a working workload under a model no metric reports.
+# The existing value wins, and a mismatch is said out loud with the edit that
+# follows the container instead.
+#
+# SO_PREFER_EXISTING_MODEL=false turns it off. so_verify_scaledobjects does,
+# because its plan is a measurement of what the containers serve: preferring the
+# object's own modelID there would make every drift compare equal to itself.
+so_prefer_existing_model() {
+    local ns="$1" name="$2" rs=$'\036'
+    [ "${SO_PREFER_EXISTING_MODEL:-true}" = "true" ] || return 0
+    [ -n "${existing_model:-}" ] || return 0
+    [ "$existing_model" != "$model" ] || return 0
+    if [ -z "$model" ]; then
+        note="${note:+$note$rs}modelID is the one ScaledObject $existing_name already carries; discovery could not read one from the container."
+    else
+        log_warning "  $ns/$name: ScaledObject $existing_name carries modelID '$existing_model', but the container reads as serving '$model'. The plan keeps '$existing_model'; set modelID: \"$model\" in it to follow the container."
+        note="${note:+$note$rs}modelID kept as the one ScaledObject $existing_name already carries. Discovery reads \"$model\" from the container: if that is what it serves now, set modelID: \"$model\" here, or WVA matches no metric for it (make verify-scaledobjects reports DRIFT)."
+    fi
+    model="$existing_model"
+}
+
+# so_kept_keys_note says, in the entry so_discover is writing, which trigger keys
+# an adopt carries over untouched. Reads the caller's existing_kept and
+# existing_name, appends to its note.
+so_kept_keys_note() {
+    local rs=$'\036'
+    [ -n "${existing_kept:-}" ] || return 0
+    note="${note:+$note$rs}apply: adopt keeps these trigger keys of ScaledObject $existing_name as they are: ${existing_kept//,/, }. It rewrites only scalerAddress, modelID, variantCost and scalingPolicy."
+}
+
+# so_scaler_evidence echoes, one per line, the namespaces that the objects in
+# namespace $1 say the controller managing it runs in:
+#
+#   - the RoleBinding the installer writes into a managed namespace for a
+#     controller installed elsewhere (labelled managed-by llm-scaling-manager,
+#     subject ServiceAccount wva-controller-manager in the controller's
+#     namespace) -- written by whoever installed that controller, so it is the
+#     out-of-reach shape's own record of where its controller lives;
+#   - the address every WVA ScaledObject there already names.
+#
+# Evidence, not a verdict: the caller checks each for a live Service. A read that
+# fails contributes nothing, and the caller's refusal says how to name it instead.
+so_scaler_evidence() {
+    local ns="$1"
+    kubectl get rolebinding -n "$ns" -l app.kubernetes.io/managed-by=llm-scaling-manager -o json 2>/dev/null \
+        | jq -r '.items[]? | .subjects[]?
+            | select(.kind == "ServiceAccount" and .name == "wva-controller-manager")
+            | .namespace // empty' 2>/dev/null || true
+    kubectl get scaledobject -n "$ns" -o json 2>/dev/null \
+        | jq -r '.items[]? | .spec.triggers[]? | .metadata.scalerAddress // ""
+            | select(startswith("wva-external-scaler."))' 2>/dev/null \
+        | while IFS= read -r a; do so_address_ns "$a"; echo; done || true
+}
+
+# so_resolve_scaler_ns sets SO_SCALER_NS: the namespace of the WVA install whose
+# scaler every trigger this run writes will name. $@ are the namespaces the run
+# writes ScaledObjects (or pools) into. Call it directly, never inside $( ): it
+# refuses through log_error, and an exit in a subshell is no refusal.
+#
+# WVA_NS used to be written into every address unexamined, and WVA_NS is the
+# MANAGED namespace whenever NAMESPACE is set and the scope is namespace -- which
+# is right for a controller installed beside its workloads and wrong for one
+# installed out of reach in another namespace. A tenant running the plan/apply
+# targets there got wva-external-scaler.<their namespace>, where nothing runs:
+# KEDA cannot fetch a metric spec and the HPA falls back to CPU, on an install
+# that otherwise looks healthy. Re-running `apply: adopt` did the same to objects
+# that had been working.
+#
+# In order:
+#   1. WVA_NS given explicitly: used. A Service the API server says is absent is
+#      refused; one it will not show us (Forbidden) is used with a warning -- a
+#      tenant may not be allowed to read the controller's namespace at all.
+#   2. A wva-external-scaler Service in WVA_NS: used.
+#   3. Otherwise the namespaces' own record (so_scaler_evidence), keeping only
+#      those that are not provably dead. Exactly one is used; several, or none,
+#      is refused with the command that names it.
+#
+# Never a dead address: an address nothing answers is the failure being fixed.
+SO_SCALER_NS=""
+so_resolve_scaler_ns() {
+    local rc=0 ns c own_state own_err cands="" live="" unverified="" picked n
+    SO_SCALER_NS=""
+    if [ -n "${WVA_NS_EXPLICIT:-}" ]; then
+        wva_scaler_svc_state "$WVA_NS_EXPLICIT" || rc=$?
+        case "$rc" in
+            0) SO_SCALER_NS="$WVA_NS_EXPLICIT"; return 0 ;;
+            1) log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so every trigger written would name a scaler nothing answers and KEDA would fall back to CPU. Pass the namespace the WVA controller runs in." ;;
+            *) log_warning "Cannot verify (Forbidden or unreadable) that WVA_NS=$WVA_NS_EXPLICIT runs a wva-external-scaler Service: ${WVA_SCALER_SVC_ERR:-no detail}"
+               log_warning "  Using it as given. If it is wrong, KEDA reports the trigger failing and the HPA falls back to CPU."
+               SO_SCALER_NS="$WVA_NS_EXPLICIT"; return 0 ;;
+        esac
+    fi
+
+    wva_scaler_svc_state "$WVA_NS" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        SO_SCALER_NS="$WVA_NS"
+        return 0
+    fi
+    own_state="$rc" own_err="${WVA_SCALER_SVC_ERR:-}"
+
+    for ns in "$@"; do
+        [ -n "$ns" ] || continue
+        cands="$cands
+$(so_scaler_evidence "$ns")"
+    done
+    cands=$(printf '%s\n' "$cands" | grep -v '^[[:space:]]*$' | sort -u || true)
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        rc=0
+        wva_scaler_svc_state "$c" || rc=$?
+        case "$rc" in
+            0) live="$live $c" ;;
+            1) : ;;
+            *) unverified="$unverified $c" ;;
+        esac
+    done <<< "$cands"
+    picked="$(printf '%s\n' $live $unverified | grep -v '^$' | sort -u || true)"
+    n=$(printf '%s' "$picked" | grep -c . || true)
+
+    local first_ns="${1:-<namespace>}" cmd
+    cmd="NAMESPACE=$first_ns make scaledobjects-apply WVA_NS=<controller-namespace> WVA_WATCH_NS=$first_ns${WVA_DEFAULT_SO_PLAN:+ WVA_DEFAULT_SO_PLAN=$WVA_DEFAULT_SO_PLAN}"
+    if [ "$n" -eq 1 ]; then
+        SO_SCALER_NS="$picked"
+        case " $live " in
+            *" $picked "*) log_info "Scaler: wva-external-scaler.$picked -- the controller $(printf '%s' "$*" | tr ' ' ',') already names (no scaler Service in $WVA_NS)." ;;
+            *) log_warning "Scaler: wva-external-scaler.$picked, the controller $(printf '%s' "$*" | tr ' ' ',') already names. Cannot verify (Forbidden) that it is running; to say so explicitly: NAMESPACE=$1 make scaledobjects-apply WVA_NS=$picked WVA_WATCH_NS=$1" ;;
+        esac
+        return 0
+    fi
+    if [ "$n" -gt 1 ]; then
+        log_error "The objects in $(printf '%s' "$*" | tr ' ' ',') name several WVA installs ($(printf '%s' "$picked" | tr '\n' ' ')). Which one these workloads belong to is your decision; name it:
+    $cmd"
+    fi
+    if [ "$own_state" -eq 1 ]; then
+        log_error "There is no wva-external-scaler Service in $WVA_NS, and nothing in $(printf '%s' "$*" | tr ' ' ',') names the controller that manages it. Writing that address would point KEDA at nothing. Name the namespace the WVA controller runs in:
+    $cmd"
+    fi
+    log_error "Cannot verify (Forbidden or unreadable) a wva-external-scaler Service in $WVA_NS: ${own_err:-no detail}. Nothing in $(printf '%s' "$*" | tr ' ' ',') names the controller either. Name the namespace the WVA controller runs in:
+    $cmd"
 }
 
 # so_existing_name echoes just the name, for callers that only ask whether one is
@@ -2192,7 +2396,7 @@ so_existing_name() {
 # deliberate act rather than an undiscoverable one.
 so_discover() {
     local ns name args envs labels objlabels model model_ref pool kind apply note drain weights caches
-    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva
+    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept
     local min max cost policy
     so_plan_preamble
     echo "plan:"
@@ -2284,10 +2488,12 @@ so_discover() {
                     # Its own bounds are carried into the entry either way, so
                     # adopting or re-applying unedited changes only who decides
                     # the count, never the count itself.
-                    IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva <<< "$existing"
+                    IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept _ <<< "$existing"
                     min="$existing_min"; max="$existing_max"; cost="$existing_cost"
                     policy="$existing_policy"
                     if [ "$existing_is_wva" = "true" ]; then
+                        so_prefer_existing_model "$ns" "$name"
+                        so_kept_keys_note
                         # Already assigned to WVA -- nothing to protect by
                         # defaulting to no here. Re-applying just refreshes the
                         # object in place (this is exactly the modelID-drift
@@ -2458,7 +2664,7 @@ so_warmpool_block() {
 # which is the failure this whole function exists to remove.
 so_discover_fma_requesters() {
     local ns="$1" name model_label model apply note pool
-    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva
+    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept
     local min max cost policy sibling scrapers launchers
 
     while IFS='|' read -r name model_label; do
@@ -2531,10 +2737,12 @@ so_discover_fma_requesters() {
 
         existing=$(so_existing_info "$ns" "$name")
         if [ -n "$existing" ]; then
-            IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva <<< "$existing"
+            IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept _ <<< "$existing"
             min="$existing_min"; max="$existing_max"; cost="$existing_cost"
             policy="$existing_policy"
             if [ "$existing_is_wva" = "true" ]; then
+                so_prefer_existing_model "$ns" "$name"
+                so_kept_keys_note
                 apply=adopt
                 note="${note:+$note}Already targets WVA (ScaledObject $existing_name, min $existing_min, max $existing_max) — apply: adopt refreshes it in place. Set apply: no to leave it untouched."
             else
@@ -2568,13 +2776,24 @@ so_discover_fma_requesters() {
 # workload with no readable model would print with every later column shifted one
 # place left, and the table would say its min was its model.
 so_show_plan() {
-    local file="$1" rows count
+    local file="$1" rows count row apply min noted=""
     # `|| exit 1`, not `|| true`: so_plan_rows dies on a plan it cannot read, and
     # that death happens inside this command substitution's subshell. Without this
     # the caller would print an empty table and carry on to apply nothing, having
     # already shown the user the reason and then contradicted it.
     rows=$(so_plan_rows "$file") || exit 1
     count=$(printf '%s' "$rows" | grep -c . || true)
+    # The FALLBACK column says what applying each entry does to its fallback.
+    # Checked and probed here, in this shell, so the KEDA probe runs and warns
+    # once rather than once per row -- and not at all for a plan whose every
+    # entry renders from a template.
+    so_fallback_check "$rows"
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        IFS=$'\037' read -r apply _ _ _ _ min _ <<< "$row"
+        noted+="$row"$'\037'"$(so_fallback_note "$apply" "$min")"$'\n'
+    done <<< "$rows"
+    rows="${noted%$'\n'}"
     echo ""
     echo "  Discovered llm-d model servers ($count):"
     echo ""
@@ -2594,7 +2813,7 @@ so_show_plan() {
 # so_apply_plan acts on every entry: creating for yes, repointing for adopt.
 so_apply_plan() {
     local file="$1" scaler_addr="wva-external-scaler.${WVA_NS}.svc.cluster.local:9090"
-    local apply ns kind name model min max cost policy existing rows
+    local apply ns kind name model min max cost policy existing rows add_fallback fb_note
     local created=0 adopted=0 skipped=0 unresolved=0
 
     # Read the whole plan before touching anything, and stop if it could not be
@@ -2602,6 +2821,10 @@ so_apply_plan() {
     # this subshell — without `|| exit 1` the loop saw no rows, applied nothing,
     # and reported a clean "0 created" for a file whose error it had just printed.
     rows=$(so_plan_rows "$file") || exit 1
+
+    # Here, not in the render: log_error must stop this shell, before anything
+    # is applied, rather than one side of a pipeline per entry.
+    so_fallback_check "$rows"
 
     # An empty plan applies nothing, and says so in those words. It reaches here
     # whenever the namespace has no model servers yet, which is not an error and
@@ -2611,6 +2834,18 @@ so_apply_plan() {
         return 0
     fi
 
+    # Where the scaler is, settled once and before anything is written -- and only
+    # when an entry will write an address. See so_resolve_scaler_ns: WVA_NS alone
+    # names the managed namespace in the out-of-reach shape, where no scaler runs.
+    local write_nss
+    write_nss=$(printf '%s\n' "$rows" | awk -F'\037' '$1 == "yes" || $1 == "adopt" {print $2}' | sort -u | tr '\n' ' ')
+    if [ -n "${write_nss// /}" ]; then
+        # shellcheck disable=SC2086
+        so_resolve_scaler_ns $write_nss
+        scaler_addr="wva-external-scaler.${SO_SCALER_NS}.svc.cluster.local:9090"
+    fi
+
+    local kept kept_keys entry_addr old_addr old_ns old_state
     while IFS=$'\037' read -r apply ns kind name model min max cost policy; do
         [ -n "$name" ] || continue
         case "$apply" in
@@ -2657,13 +2892,51 @@ so_apply_plan() {
 
         if [ "$apply" = "adopt" ]; then
             # Triggers and bounds, and nothing else: the rest of that object —
-            # polling interval, fallback, stabilization, whoever's labels — stays
+            # polling interval, any fallback, stabilization, whoever's labels — stays
             # as its author left it. The bounds are included because the plan
             # showed them, carried over from this very object, so applying them
-            # unedited is a no-op and editing them is how you change them.
+            # unedited is a no-op and editing them is how you change them. The
+            # one addition is a fallback for an object that has none at all.
+            #
+            # Every OTHER metadata key on its WVA trigger is carried over: the patch
+            # replaces the triggers list wholesale, so defaultOutputTokens,
+            # warmPool and the rest of what somebody set by hand were stripped by
+            # every re-run. Unreadable is not "nothing to keep" -- patching then
+            # would be that loss -- so it skips the entry instead.
+            if ! kept=$(so_kept_trigger_keys "$ns" "$existing") || [ -z "$kept" ]; then
+                log_warning "  $ns/$name: could not read ScaledObject $existing, so its trigger keys cannot be kept — NOT patching it. Check you can get scaledobjects in $ns and re-run."
+                skipped=$((skipped + 1)); continue
+            fi
+            kept_keys=$(printf '%s' "$kept" | jq -r 'keys | join(", ")' 2>/dev/null || true)
+
+            # An object already pointing at a WVA that answers stays on it unless
+            # WVA_NS was given: re-running a plan is not a decision to move a
+            # working workload to another install. Only a provably dead address
+            # is rewritten.
+            entry_addr="$scaler_addr"
+            old_addr=$(kubectl get scaledobject "$existing" -n "$ns" -o json 2>/dev/null \
+                | jq -r '[.spec.triggers[]?.metadata.scalerAddress // "" | select(startswith("wva-external-scaler."))] | first // ""' 2>/dev/null || true)
+            if [ -n "$old_addr" ] && [ -z "${WVA_NS_EXPLICIT:-}" ]; then
+                old_ns=$(so_address_ns "$old_addr")
+                if [ -n "$old_ns" ] && [ "$old_ns" != "$SO_SCALER_NS" ]; then
+                    old_state=0
+                    wva_scaler_svc_state "$old_ns" || old_state=$?
+                    if [ "$old_state" -ne 1 ]; then
+                        entry_addr="$old_addr"
+                        log_info "  $ns/$name: keeps its scaler $old_addr$([ "$old_state" -eq 0 ] || printf ' (cannot verify, Forbidden)'). To move it: NAMESPACE=$ns make scaledobjects-apply WVA_NS=$SO_SCALER_NS WVA_WATCH_NS=$ns"
+                    fi
+                fi
+            fi
+
+            # The fallback is not a trigger key, so keeping keys does not keep
+            # or drop it: a spec.fallback the object has stays (a merge patch
+            # leaves keys it does not name), and one it lacks is added.
+            add_fallback="$(so_adopt_needs_fallback "$ns" "$existing" "$min")"
+            fb_note="$(so_adopt_fallback_note "$add_fallback" "$min")" || exit 1
+
             if kubectl patch scaledobject "$existing" -n "$ns" --type=merge \
-                -p "$(so_adopt_patch "$model" "$scaler_addr" "$min" "$max" "$cost" "$policy")" > /dev/null; then
-                log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max)"
+                -p "$(so_adopt_patch "$model" "$entry_addr" "$min" "$max" "$cost" "$policy" "$add_fallback" "$kept")" > /dev/null; then
+                log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max${kept_keys:+; kept: $kept_keys}) $fb_note"
                 adopted=$((adopted + 1))
             else
                 log_warning "  $ns/$name: failed to update ScaledObject $existing"
@@ -2673,7 +2946,7 @@ so_apply_plan() {
 
         if render_scaledobject "$ns" "$kind" "$name" "$model" "$scaler_addr" \
             "$min" "$max" "$cost" "$policy" | kubectl apply -f - > /dev/null; then
-            log_success "  $ns/$name ($kind) -> ScaledObject ${name}-wva (modelID: $model, $min-$max)"
+            log_success "  $ns/$name ($kind) -> ScaledObject ${name}-wva (modelID: $model, $min-$max) $(so_fallback_note yes "$min")"
             created=$((created + 1))
         else
             log_warning "  $ns/$name: failed to create its ScaledObject"
@@ -2738,6 +3011,16 @@ so_apply_warmpools() {
         log_warning "  holding accelerators while reporting itself empty. Set WVA_NS and re-apply."
         return 0
     fi
+    # And the CONTROLLER's namespace, not WVA_NS as given: in the out-of-reach
+    # shape WVA_NS is the managed namespace, and a policy admitting it denies
+    # the controller every read. Already settled when the plan wrote a
+    # ScaledObject; settled here when it only asked for pools.
+    if [ -z "${SO_SCALER_NS:-}" ]; then
+        local pool_nss
+        pool_nss=$(printf '%s\n' "$rows" | awk -F'\037' '{print $1}' | sort -u | tr '\n' ' ')
+        # shellcheck disable=SC2086
+        so_resolve_scaler_ns $pool_nss
+    fi
 
     # Optional now. warmpool.sh defaults to the proxy image config/warmpool pins,
     # which is published, so an install that builds nothing still gets a working
@@ -2775,7 +3058,7 @@ so_apply_warmpools() {
                 -n "$wp_ns" --name "$wp_name" --gpus "$wp_gpus" \
                 --accelerator "$wp_acc" --models "$wp_models" --model-size "$wp_size" \
                 --replicas "$wp_replicas" --max "$wp_max" --reserve "$wp_reserve" \
-                ${image:+--proxy-image "$image"} --wva-namespace "$WVA_NS" \
+                ${image:+--proxy-image "$image"} --wva-namespace "$SO_SCALER_NS" \
                 --monitoring-namespace "${MONITORING_NAMESPACE:-}" \
                 --runtime-class "${WARMPOOL_RUNTIME_CLASS:-nvidia-legacy}"; then
             made=$((made + 1))
@@ -2855,23 +3138,118 @@ install_default_scaledobjects() {
 
 # so_adopt_patch prints the merge patch that repoints an existing ScaledObject at
 # WVA: its triggers, and the bounds and cost the plan carried. Everything else on that
-# object — polling interval, cooldown, fallback, advanced behavior, its labels —
+# object — polling interval, cooldown, any fallback, advanced behavior, its labels —
 # stays as whoever tuned it left it.
 #
 # `triggers` is a list, so a merge patch REPLACES it wholesale, which is what is
 # wanted. An object scaled by a prometheus or cpu trigger must stop being scaled by
 # it, or two scalers feed one HPA and the larger answer silently wins.
+#
+# The one exception is the fallback. add_fallback=yes ($7) adds the default block
+# (see so_fallback_block); the caller passes it only after reading the object
+# and finding no spec.fallback, because a merge patch would otherwise merge into
+# a fallback somebody chose and overwrite its fields.
+#
+# $8 is the JSON object of trigger metadata keys to keep (so_kept_trigger_keys):
+# every key of the existing WVA trigger's metadata the plan does not write. They
+# go in first, so a key the plan does write always wins. What the patch owns is
+# scalerAddress, modelID, variantCost, scalingPolicy, the trigger's type, name
+# and metricType (always AverageValue: the scaler answers a replica count, and
+# under Value the HPA multiplies it), and the bounds.
 so_adopt_patch() {
     local model="$1" scaler_addr="$2" min="$3" max="$4" cost="$5" policy="${6:-}"
+    local add_fallback="${7:-}" kept="${8:-}" failures=0
+    [ -n "$kept" ] || kept='{}'
+    if [ "$add_fallback" = "yes" ]; then
+        failures="$(so_fallback_failures)" || exit 1
+    fi
     # scalingPolicy is added only when the entry names one: an empty value would
     # be a metadata key whose value says "the default", which is what its absence
     # already says, and it would survive in the object long after anybody knew why.
     jq -nc --arg m "$model" --arg a "$scaler_addr" --arg c "$cost" --arg p "$policy" \
-        --argjson min "$min" --argjson max "$max" \
-        '{spec:{minReplicaCount:$min, maxReplicaCount:$max,
-          triggers:[{type:"external-push",name:"wva-external-scaler",
-          metadata:({scalerAddress:$a, modelID:$m, variantCost:$c}
-                    + (if $p == "" then {} else {scalingPolicy:$p} end))}]}}'
+        --argjson min "$min" --argjson max "$max" --argjson kept "$kept" \
+        --arg fb "$add_fallback" --argjson n "$failures" \
+        '{spec:({minReplicaCount:$min, maxReplicaCount:$max,
+          triggers:[{type:"external-push",name:"wva-external-scaler",metricType:"AverageValue",
+          metadata:(($kept | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy))
+                    + {scalerAddress:$a, modelID:$m, variantCost:$c}
+                    + (if $p == "" then {} else {scalingPolicy:$p} end))}]}
+          + (if $fb == "yes"
+             then {fallback:{failureThreshold:$n, replicas:$min,
+                             behavior:"currentReplicasIfHigher"}}
+             else {} end))}'
+}
+
+# so_adopt_needs_fallback prints yes when an adopted object should get the
+# default fallback: one is allowed for its floor (so_fallback_skip_reason) and
+# the object has none. It prints unreadable, with a warning, when the object
+# cannot be read -- an unreadable object is not one without a fallback, and
+# guessing would overwrite whatever it has -- and nothing otherwise.
+#
+# A fallback the object already has is kept. It is still read when no default
+# would be added, because two shapes of it change what adoption does, and the
+# operator has to hear about both before the object is pointed at WVA:
+#   - replicas 0 on a floor of 0, which KEDA scales to zero on a trigger error;
+#   - replicas above the floor the plan now sets, which KEDA holds the target at
+#     (at least) during a scaler outage, whatever the new floor says.
+so_adopt_needs_fallback() {
+    local ns="$1" name="$2" min="${3:-1}" fb skip kept
+    skip="$(so_fallback_skip_reason "$min")" || exit 1
+    if ! fb="$(kubectl get scaledobject "$name" -n "$ns" -o jsonpath='{.spec.fallback}' 2>/dev/null)"; then
+        log_warning "  $ns/$name: could not read ScaledObject $name to check its fallback -- leaving that field alone."
+        printf 'unreadable'
+        return 0
+    fi
+    if [ -n "$fb" ]; then
+        kept="$(printf '%s' "$fb" | jq -r '.replicas // 0' 2>/dev/null)"
+        case "$min" in
+            ''|*[!0-9]*) : ;;
+            *) if [ "$((10#$min))" -eq 0 ] && [ "$kept" = "0" ]; then
+                   log_warning "  $ns/$name: ScaledObject $name keeps its own fallback, whose replicas is 0 with minReplicaCount 0 -- KEDA scales that object to zero on any trigger error once cooldownPeriod passes. Remove its spec.fallback, or give it replicas of at least 1."
+               fi
+               case "$kept" in
+                   ''|*[!0-9]*) : ;;
+                   *) if [ "$((10#$kept))" -gt "$((10#$min))" ]; then
+                          log_warning "  $ns/$name: ScaledObject $name keeps its own fallback, whose replicas ($kept) is above the minReplicaCount this plan sets ($((10#$min))) -- while the scaler is unreachable KEDA holds it at $kept or more. Lower its spec.fallback.replicas to match, or remove it to get the default."
+                      fi ;;
+               esac ;;
+        esac
+        return 0
+    fi
+    [ -n "$skip" ] || printf 'yes'
+}
+
+# so_adopt_fallback_note prints what adoption did to one object's fallback,
+# from so_adopt_needs_fallback's answer: an object that could not be read was
+# left as it is, whatever its floor; otherwise the skip reason, the added
+# default, or the object's own fallback kept.
+so_adopt_fallback_note() {
+    local needs="$1" min="$2" reason
+    if [ "$needs" = "unreadable" ]; then
+        printf '(fallback unchanged: could not read it)'
+        return 0
+    fi
+    reason="$(so_fallback_skip_reason "$min")" || exit 1
+    if [ -n "$reason" ]; then
+        printf '(no fallback: %s)' "$reason"
+    elif [ "$needs" = "yes" ]; then
+        printf '(+fallback)'
+    else
+        printf '(kept its own fallback)'
+    fi
+}
+
+# so_value_trigger_warning warns, for one ScaledObject manifest or object
+# read on stdin as YAML or JSON, about an external or external-push trigger
+# whose metricType is Value. The scaler answers a replica count: under the
+# default AverageValue the HPA computes ceil(count / 1), the count; under Value
+# it computes ceil(current replicas * count), a multiple of what was decided.
+# <what> names the object in the warning. No apostrophes in this program.
+so_value_trigger_warning() {
+    local what="$1" hits
+    hits="$(yq -r 'select(.kind == "ScaledObject" or .spec.triggers != null) | .spec.triggers[]? | select((.type == "external" or .type == "external-push") and .metricType == "Value") | .name // .type' 2>/dev/null)" || return 0
+    [ -n "$hits" ] || return 0
+    log_warning "  $what: trigger $(printf '%s' "$hits" | paste -sd, -) has metricType: Value. The scaler answers a replica count, which only the default AverageValue keeps a count: under Value the HPA multiplies it by the current replicas. Remove metricType or set it to AverageValue."
 }
 
 # so_repoint_stale repoints ScaledObjects that ask for WVA by name but name a WVA
@@ -2924,11 +3302,23 @@ so_repoint_stale() {
         # `wva-external-scaler.<ns>:9090` is legal and leaves the port stuck to the
         # namespace, which would make a live install look dead and get its
         # workload taken away.
-        named_ns=$(printf '%s' "$addr" | cut -d: -f1 | cut -d. -f2)
-        if [ -n "$named_ns" ] && kubectl get svc wva-external-scaler -n "$named_ns" > /dev/null 2>&1; then
-            log_info "  $ns/$name: points at a WVA that is running in $named_ns — leaving it alone. Repointing it here would take it off that install."
-            left=$((left + 1))
-            continue
+        named_ns=$(so_address_ns "$addr")
+        if [ -n "$named_ns" ]; then
+            # Three answers, not two. Forbidden is not absent: a namespace we may
+            # not read is one we cannot call dead, and taking a workload off a
+            # live install on that guess is the hijack (2) above exists to stop.
+            local svc_state=0
+            wva_scaler_svc_state "$named_ns" || svc_state=$?
+            if [ "$svc_state" -eq 0 ]; then
+                log_info "  $ns/$name: points at a WVA that is running in $named_ns — leaving it alone. Repointing it here would take it off that install."
+                left=$((left + 1))
+                continue
+            fi
+            if [ "$svc_state" -ne 1 ]; then
+                log_warning "  $ns/$name: points at $named_ns, and whether a scaler runs there cannot be verified (Forbidden or unreadable: ${WVA_SCALER_SVC_ERR:-no detail}) — leaving it alone. If it is dead, adopt it explicitly: NAMESPACE=$ns make scaledobjects-plan WVA_NS=$dest WVA_WATCH_NS=$ns, then scaledobjects-apply with the same variables and WVA_DEFAULT_SO_PLAN=<file>."
+                left=$((left + 1))
+                continue
+            fi
         fi
 
         triggers=$(kubectl get scaledobject "$name" -n "$ns" -o json 2>/dev/null \
@@ -2966,10 +3356,16 @@ so_repoint_stale() {
 so_repoint_destination() {
     local found n
     if [ -n "${WVA_NS_EXPLICIT:-}" ]; then
-        if ! kubectl get svc wva-external-scaler -n "$WVA_NS_EXPLICIT" > /dev/null 2>&1; then
-            log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so nothing would answer at that address. Install WVA there, or drop WVA_NS and let this find the install."
-            return 1
-        fi
+        local rc=0
+        wva_scaler_svc_state "$WVA_NS_EXPLICIT" || rc=$?
+        case "$rc" in
+            0) : ;;
+            1) log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so nothing would answer at that address. Install WVA there, or drop WVA_NS and let this find the install."
+               return 1 ;;
+            *) # A tenant may not read the controller's namespace at all. Named
+               # explicitly, it is taken as given rather than refused as absent.
+               log_warning "Cannot verify (Forbidden or unreadable) that WVA_NS=$WVA_NS_EXPLICIT runs a wva-external-scaler Service: ${WVA_SCALER_SVC_ERR:-no detail}. Repointing at it as given." ;;
+        esac
         echo "$WVA_NS_EXPLICIT"
         return 0
     fi
@@ -3053,6 +3449,215 @@ so_repoint_candidates() {
         | jq -r --arg self "$self" "$filter" 2>/dev/null || true
 }
 
+# --- KEDA fallback ---------------------------------------------------------------
+#
+# A generated ScaledObject with a floor of at least 1 carries a KEDA fallback,
+# and an adopted one that has none gets the same. A floor of 0 gets none.
+#
+# What the fallback is for: a controller that is down or unreachable. Before
+# its first decision after a restart or a lease hand-off the scaler answers the
+# target's CURRENT replica count, so the HPA holds without any error, and the
+# fallback does not come into it. It is for the outage the scaler cannot
+# answer at all: every failed HPA read of the metric (about one per 15 s) is
+# counted, and once more than failureThreshold have failed in a row KEDA stops
+# passing the error on and feeds the HPA a metric worth fallback.replicas
+# (pkg/fallback/fallback.go, NumberOfFailures > FailureThreshold).
+# currentReplicasIfHigher makes that the CURRENT count whenever the current
+# count is higher, so the held count is a reading the HPA records, the
+# scale-down window still covers the moment of recovery, and the ScaledObject
+# says Fallback in its status instead of only failing. replicas is the
+# object's own minReplicaCount: the floor the operator already chose, never a
+# number the installer made up.
+#
+# Why a floor of 0 gets none: KEDA's scale loop treats a trigger error as
+# "inactive", and with fallback.replicas 0 its RequestScale switch
+# (pkg/scaling/executor/scale_scaledobjects.go) falls through to
+# scaleToZeroOrIdle -- a serving model is parked once cooldownPeriod has
+# passed, with no failureThreshold in the way. With no fallback block the same
+# error only sets Ready=False/TriggerError and scales nothing. Any fallback
+# whose replicas is 0 is that hazard, and a floor of 0 is the only floor that
+# renders one.
+#
+# Why KEDA < 2.17 gets none: fallback.behavior arrived in 2.17. An older CRD
+# prunes the unknown field, leaving a `static` fallback that forces the floor
+# whatever the fleet is running. So the ScaledObject schema is probed once per
+# plan or apply (so_keda_fallback_probe: its OpenAPI, which any user may read,
+# then the CRD) and the block is left out, with a warning, when the schema has
+# no behavior field or cannot be read. A plan with nothing whose fallback the
+# installer writes -- every entry rendered from WVA_DEFAULT_SO_TEMPLATE -- is
+# not probed at all.
+#
+#   WVA_SO_FALLBACK=false          no fallback block at all
+#   WVA_SO_FALLBACK_FAILURES=<n>   failureThreshold, default 3, 1..2147483647
+#
+# An adopted object that already has a fallback keeps it, whatever it says --
+# with a warning when it is the zero-replica hazard above.
+
+# so_fallback_enabled succeeds when generated objects get a fallback.
+so_fallback_enabled() {
+    case "${WVA_SO_FALLBACK:-true}" in
+        true)  return 0 ;;
+        false) return 1 ;;
+        *)     log_error "WVA_SO_FALLBACK must be true or false (got '${WVA_SO_FALLBACK}')" ;;
+    esac
+}
+
+# so_fallback_failures prints failureThreshold. Zero is refused: KEDA accepts
+# it, and it means the first failed read already replaces the scaler. So is a
+# leading zero -- `010` is not a JSON number, so the adopt patch could not
+# carry it, and a YAML 1.1 reader takes it for octal 8 -- and anything above
+# int32, the field's type, which the API server would reject per object.
+so_fallback_failures() {
+    local n="${WVA_SO_FALLBACK_FAILURES:-3}"
+    case "$n" in
+        ''|*[!0-9]*|0*) log_error "WVA_SO_FALLBACK_FAILURES must be a whole number from 1 to 2147483647 with no leading zero (got '$n')" ;;
+    esac
+    if [ "${#n}" -gt 10 ] || [ "$n" -gt 2147483647 ]; then
+        log_error "WVA_SO_FALLBACK_FAILURES must be a whole number from 1 to 2147483647 with no leading zero (got '$n')"
+    fi
+    printf '%s' "$n"
+}
+
+# so_keda_fallback_probe records in SO_KEDA_FALLBACK_BEHAVIOR whether the
+# cluster's ScaledObject API has fallback.behavior (KEDA 2.17 and later): yes,
+# no, or unknown when neither source below can say. It runs once per shell --
+# call it in the calling shell (so_fallback_check does), not inside a $(...),
+# or every entry probes and warns again.
+#
+# Asked of the published OpenAPI first, through `kubectl explain`, because any
+# authenticated user may read it (system:discovery); a tenant installing into
+# its own namespace usually may NOT get CustomResourceDefinitions, and reading
+# the CRD first gave every tenant install no fallback, with a warning that did
+# not say why. Measured against an envtest API server with kubectl 1.31: the
+# field present exits 0 and prints `FIELD: behavior`; absent exits 1 with
+# `error: field "behavior" does not exist`, for an admin and for a user with no
+# RBAC alike. Anything else -- no keda.sh API, an unreachable server -- falls
+# back to the CRD read.
+so_keda_fallback_probe() {
+    [ -z "${SO_KEDA_FALLBACK_BEHAVIOR:-}" ] || return 0
+    local out crd err errf rc
+    if out="$(kubectl explain scaledobjects.spec.fallback.behavior --api-version=keda.sh/v1alpha1 2>&1)" \
+        && printf '%s\n' "$out" | grep -Eq '^FIELD:[[:space:]]+behavior'; then
+        SO_KEDA_FALLBACK_BEHAVIOR=yes
+        return 0
+    fi
+    if printf '%s\n' "$out" | grep -Eq 'field "(behavior|fallback)" does not exist'; then
+        SO_KEDA_FALLBACK_BEHAVIOR=no
+        log_warning "This cluster's KEDA has no fallback.behavior (it arrived in KEDA 2.17) -- ScaledObjects get NO fallback. An older KEDA would prune the field and apply a static fallback that forces minReplicaCount. Upgrade KEDA to 2.17 or later to get one."
+        return 0
+    fi
+    # stderr kept apart: a kubectl warning on a successful read must not end up
+    # in the JSON, and on a failed one it is what says Forbidden.
+    errf="$(mktemp)"
+    crd="$(kubectl get crd scaledobjects.keda.sh -o json 2>"$errf")"
+    rc=$?
+    err="$(cat "$errf" 2>/dev/null)"
+    rm -f "$errf"
+    if [ "$rc" -ne 0 ] || [ -z "$crd" ]; then
+        SO_KEDA_FALLBACK_BEHAVIOR=unknown
+        case "$err" in
+            *Forbidden*|*forbidden*)
+                log_warning "Could not check this cluster's KEDA for fallback.behavior (KEDA 2.17 or later): kubectl explain could not answer, and reading the ScaledObject CRD is Forbidden to this identity -- ScaledObjects get NO fallback. Run the plan as an identity that may read the OpenAPI or get customresourcedefinitions, or add a fallback through WVA_DEFAULT_SO_TEMPLATE." ;;
+            *)
+                log_warning "Could not read the ScaledObject CRD (scaledobjects.keda.sh) or its OpenAPI to check for fallback.behavior, which needs KEDA 2.17 or later -- ScaledObjects get NO fallback. Without behavior an older KEDA would apply a static fallback that forces minReplicaCount." ;;
+        esac
+        return 0
+    fi
+    # Only a served version counts: KEDA reads and writes through one, and an
+    # unserved version that has the field says nothing about it. No apostrophes
+    # in this program.
+    case "$(printf '%s' "$crd" | jq -r '[.spec.versions[]? | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.fallback.properties.behavior // empty] | length > 0' 2>/dev/null)" in
+        true)
+            SO_KEDA_FALLBACK_BEHAVIOR=yes ;;
+        false)
+            SO_KEDA_FALLBACK_BEHAVIOR=no
+            log_warning "This cluster's KEDA has no fallback.behavior (it arrived in KEDA 2.17) -- ScaledObjects get NO fallback. An older KEDA would prune the field and apply a static fallback that forces minReplicaCount. Upgrade KEDA to 2.17 or later to get one." ;;
+        *)
+            SO_KEDA_FALLBACK_BEHAVIOR=unknown
+            log_warning "Could not parse the ScaledObject CRD to check for fallback.behavior (KEDA 2.17 or later) -- ScaledObjects get NO fallback." ;;
+    esac
+}
+
+# so_fallback_check validates both knobs and probes KEDA once, in the calling
+# shell, where log_error stops the run. Inside a render the same error would
+# exit only the left side of `render | kubectl apply` and surface as a failed
+# apply.
+#
+# rows, when given, are the plan's rows (so_plan_rows): the probe runs only
+# when one of them is an adopt, or a yes rendered by the installer rather than
+# by WVA_DEFAULT_SO_TEMPLATE -- the only entries whose fallback it writes. A
+# template-only plan would otherwise warn about a fallback nothing writes.
+so_fallback_check() {
+    local rows="${1-}" apply
+    so_fallback_enabled || return 0
+    so_fallback_failures > /dev/null
+    if [ "$#" -gt 0 ]; then
+        local needed=no
+        while IFS=$'\037' read -r apply _; do
+            case "$apply" in
+                adopt) needed=yes ;;
+                yes) [ -n "${WVA_DEFAULT_SO_TEMPLATE:-}" ] || needed=yes ;;
+            esac
+        done <<< "$rows"
+        [ "$needed" = yes ] || return 0
+    fi
+    so_keda_fallback_probe
+}
+
+# so_fallback_skip_reason prints why an object with this floor gets no
+# fallback, or nothing when it gets one: WVA_SO_FALLBACK=false, floor 0,
+# KEDA < 2.17, or KEDA version unknown.
+so_fallback_skip_reason() {
+    local min="$1"
+    so_fallback_enabled || { printf 'WVA_SO_FALLBACK=false'; return 0; }
+    case "$min" in
+        ''|*[!0-9]*) : ;;
+        *) [ "$((10#$min))" -ne 0 ] || { printf 'floor 0'; return 0; } ;;
+    esac
+    so_keda_fallback_probe
+    case "$SO_KEDA_FALLBACK_BEHAVIOR" in
+        yes) : ;;
+        no)  printf 'KEDA < 2.17' ;;
+        *)   printf 'KEDA version unknown' ;;
+    esac
+}
+
+# so_fallback_note prints what happens to the fallback of one plan entry, for
+# the plan table and the apply lines: (+fallback), (no fallback: <reason>), or
+# for an adopted object the conditional form, since it keeps a fallback it
+# already has. "-" for an entry that is not applied.
+so_fallback_note() {
+    local apply="$1" min="$2" reason
+    case "$apply" in
+        yes|adopt) : ;;
+        *) printf -- '-'; return 0 ;;
+    esac
+    if [ "$apply" = "yes" ] && [ -n "${WVA_DEFAULT_SO_TEMPLATE:-}" ]; then
+        printf '(fallback: as the template says)'
+        return 0
+    fi
+    reason="$(so_fallback_skip_reason "$min")" || exit 1
+    if [ -n "$reason" ]; then
+        printf '(no fallback: %s)' "$reason"
+    elif [ "$apply" = "adopt" ]; then
+        printf '(+fallback unless it has one)'
+    else
+        printf '(+fallback)'
+    fi
+}
+
+# so_fallback_block prints the spec.fallback block at two-space indent.
+so_fallback_block() {
+    local min="$1" n
+    n="$(so_fallback_failures)" || exit 1
+    cat <<EOF
+  fallback:
+    failureThreshold: ${n}
+    replicas: ${min}
+    behavior: currentReplicasIfHigher
+EOF
+}
+
 # render_scaledobject prints one ScaledObject: the shipped shape, or yours.
 #
 # WVA_DEFAULT_SO_TEMPLATE=<file> substitutes your own template instead, so a fleet
@@ -3083,7 +3688,8 @@ render_scaledobject() {
         if [ ! -f "$tmpl" ]; then
             log_error "WVA_DEFAULT_SO_TEMPLATE=$tmpl does not exist"
         fi
-        sed -e "s|{{NAMESPACE}}|${ns}|g" \
+        local out
+        out="$(sed -e "s|{{NAMESPACE}}|${ns}|g" \
             -e "s|{{NAME}}|${target}|g" \
             -e "s|{{KIND}}|${kind}|g" \
             -e "s|{{APIVERSION}}|${api}|g" \
@@ -3093,7 +3699,27 @@ render_scaledobject() {
             -e "s|{{MAX}}|${max}|g" \
             -e "s|{{VARIANT_COST}}|${cost:-$SO_DEFAULT_VARIANT_COST}|g" \
             -e "s|{{SCALING_POLICY}}|${policy}|g" \
-            "$tmpl"
+            "$tmpl")" || exit 1
+        # The template owns its fallback, all but one shape of it: a floor of 0
+        # with fallback.replicas 0 -- `replicas: {{MIN}}` on a scale-to-zero
+        # entry -- is the shape KEDA scales to zero on any trigger error (see
+        # "KEDA fallback" above). Refused for that entry rather than applied;
+        # nothing is printed, so the apply of this one entry fails and says so.
+        #
+        # Judged on the ScaledObject document alone, so a template that also
+        # carries a ConfigMap or a TriggerAuthentication is still checked: over
+        # several documents yq answers once per document, and a multi-line
+        # answer never equalled "true". A template yq cannot read is refused
+        # rather than passed: an unread fallback is not a safe one.
+        local zero_fallback
+        if ! zero_fallback="$(printf '%s\n' "$out" | yq -r 'select(.kind == "ScaledObject") | (.spec.fallback != null) and ((.spec.minReplicaCount // 0) == 0) and ((.spec.fallback.replicas // 0) == 0)' 2>&1)"; then
+            log_error "WVA_DEFAULT_SO_TEMPLATE did not render YAML that yq can read for $ns/$target, so its fallback cannot be checked: $zero_fallback"
+        fi
+        if printf '%s\n' "$zero_fallback" | grep -qx 'true'; then
+            log_error "WVA_DEFAULT_SO_TEMPLATE renders fallback.replicas 0 with minReplicaCount 0 for $ns/$target. KEDA scales that object to zero on any trigger error once cooldownPeriod passes. Give the template's fallback a fixed replicas of at least 1, or leave the fallback out."
+        fi
+        printf '%s\n' "$out" | so_value_trigger_warning "$ns/$target (WVA_DEFAULT_SO_TEMPLATE)"
+        printf '%s\n' "$out"
         return
     fi
     render_default_scaledobject "$ns" "$kind" "$target" "$model" "$scaler_addr" "$min" "$max" "$cost" "$policy"
@@ -3119,6 +3745,14 @@ render_default_scaledobject() {
     local policy_line=""
     [ -z "$policy" ] || policy_line=$'\n        scalingPolicy: "'"$policy"'"'
 
+    # The fallback block, or nothing: WVA_SO_FALLBACK=false, a floor of 0, or a
+    # KEDA without fallback.behavior. See "KEDA fallback" above for why.
+    local fallback_block="" skip
+    skip="$(so_fallback_skip_reason "$min")" || exit 1
+    if [ -z "$skip" ]; then
+        fallback_block="$(so_fallback_block "$min")"$'\n'
+    fi
+
     cat <<EOF
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -3139,7 +3773,7 @@ spec:
   cooldownPeriod: 30
   minReplicaCount: ${min}
   maxReplicaCount: ${max}
-  advanced:
+${fallback_block}  advanced:
     restoreToOriginalReplicaCount: true
     # Scaling behaviour, stated rather than inherited.
     #
@@ -3179,6 +3813,10 @@ spec:
   triggers:
     - type: external-push
       name: wva-external-scaler
+      # A replica count, which only AverageValue (KEDA's default, written out
+      # so nothing downstream changes it) keeps a count: under Value the HPA
+      # multiplies it by the current replicas.
+      metricType: AverageValue
       metadata:
         scalerAddress: ${scaler_addr}
         modelID: "${model}"
@@ -3573,7 +4211,7 @@ so_verify_scaledobjects() {
     # Silenced on both streams: log_info/log_success write to stderr, and this
     # call's own "plan written, edit it" messaging is about a temp file this
     # function deletes before returning -- irrelevant to what verify reports.
-    WVA_DEFAULT_SO=plan WVA_DEFAULT_SO_PLAN="$plan_file" install_default_scaledobjects >/dev/null 2>&1
+    SO_PREFER_EXISTING_MODEL=false WVA_DEFAULT_SO=plan WVA_DEFAULT_SO_PLAN="$plan_file" install_default_scaledobjects >/dev/null 2>&1
 
     echo
     echo "=== modelID drift check ==="

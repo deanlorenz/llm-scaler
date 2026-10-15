@@ -169,22 +169,3 @@ func TestFreshActivationWakesZeroParkedTarget(t *testing.T) {
 		t.Fatal("a fresh activation must wake a zero-parked target")
 	}
 }
-
-// TestGetMetricsIgnoresFreshness keeps the change scoped to the 0<->1 gate.
-// GetMetrics drives HPA's scaling at >=1 replicas; expiring values there would
-// make a running target's metric collapse to 0 between publishes.
-func TestGetMetricsIgnoresFreshness(t *testing.T) {
-	now := time.Now()
-	store := decision.NewStore()
-	h := freshnessHandler(t, store, 3, &now)
-	store.Set(freshnessNS, freshnessTarget, 4)
-
-	now = now.Add(activationTTL + time.Minute)
-	resp, err := h.GetMetrics(context.Background(), &pb.GetMetricsRequest{ScaledObjectRef: freshnessRef()})
-	if err != nil {
-		t.Fatalf("GetMetrics: %v", err)
-	}
-	if got := resp.MetricValues[0].MetricValue; got != 4 {
-		t.Fatalf("GetMetrics = %d, want 4 (freshness must not apply here)", got)
-	}
-}
