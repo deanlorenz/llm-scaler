@@ -71,6 +71,10 @@ type k2Borrow struct {
 	donorK2 int64         // what the donor measured
 	relaxed float64       // 0 at full strength, 1 when fully relaxed to own
 	age     time.Duration // how long this variant has been borrowing
+	// prior is true when the figure is the variant's own, measured under the
+	// engine arguments it ran before a restart found them changed
+	// (installPriorsLocked); donor is then the variant itself.
+	prior bool
 }
 
 // splitVariantKey splits a historyKey into its namespace, variant and the rest
@@ -131,6 +135,13 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 			candidates = append(candidates, candidate{variant: v, k2: k2})
 		}
 	}
+	// The variant's own figure from before its arguments changed. It needs
+	// no compatibility check -- that the arguments differ is the point -- and
+	// takes the same two rules as a sibling's: lower only, and it expires.
+	var prior int64
+	if p, ok := a.priorK2[ownKey]; ok && p.k2 > 0 && p.k2 < own {
+		prior = p.k2
+	}
 	a.mu.Unlock()
 
 	// The store has its own lock; checked outside a.mu.
@@ -143,6 +154,10 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		if c.k2 > best.k2 || (c.k2 == best.k2 && c.variant < best.variant) {
 			best = c
 		}
+	}
+	fromPrior := false
+	if prior > best.k2 {
+		best, fromPrior = candidate{variant: variant, k2: prior}, true
 	}
 	if best.k2 == 0 {
 		return k2Borrow{}, false
@@ -174,6 +189,7 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		donorK2: best.k2,
 		relaxed: f,
 		age:     age,
+		prior:   fromPrior,
 	}, true
 }
 
@@ -185,7 +201,7 @@ func logBorrowedK2(logger logr.Logger, b k2Borrow, modelID, namespace, variantNa
 	logger.V(logging.DEFAULT).Info("k2-decision",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcBorrowed.String(), "historyKey", historyKey,
-		"donor", b.donor, "donorK2", b.donorK2,
+		"donor", b.donor, "donorK2", b.donorK2, "priorConfiguration", b.prior,
 		"ownCapacity", own, "ownPriority", ownSource.String(),
 		"relaxed", b.relaxed, "borrowAgeSeconds", int64(b.age.Seconds()),
 		"k2", b.k2)

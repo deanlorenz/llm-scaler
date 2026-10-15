@@ -259,13 +259,32 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// A not-Ready Pod files its cache, which is the variant's own engine's
 	// -- so the gate here is adm.bridge, not adm.admitted() -- but at the
 	// capacity the chain gave, never at a reading it may not record.
+	//
+	// During a rollout the record already carries the NEW arguments
+	// (LoadFromScaleTarget runs first in the cycle) while old pods still
+	// report, so a figure measured on an old pod is filed under the new
+	// arguments and fingerprint. The new pods' readings replace it as they
+	// are priced; only a variant parked before any new pod reported keeps it.
+	//
+	// Filed under the STABLE accelerator, as the k2 and throughput keys are
+	// and as every reader of the store looks it up: the raw reading flips to
+	// unresolved with pod placement on a fleet spread over two products, and
+	// a record filed under whichever value the last cycle saw was missed by
+	// the next lookup that saw the other.
+	//
+	// The cost, the same compromise the k2 keys make: on a variant whose pods
+	// sit on two products, the record holds whichever replica was priced last
+	// under the product last RESOLVED, so a compatible sibling parked on one
+	// product can be bounded or estimated from the other's capacity. It needs
+	// a mixed fleet and a compatible parked sibling on the same model; filed
+	// under the raw reading instead, the record matched no sibling at all.
 	if !adm.bridge {
 		var existingParams *capacity.EngineParams
 		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
 			existingParams = existing.EngineParams
 		}
 		a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
-			AcceleratorName:       accelerator,
+			AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
 			GpuCount:              gpuCount,
 			NumGpuBlocks:          rm.NumGpuBlocks,
 			BlockSize:             rm.BlockSize,
@@ -805,7 +824,10 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 // it tries to compute a better estimate using the k2 derivation formula with
 // model-level workload averages, bounded by:
 //  1. A compatible variant's live EffectiveCapacity (already min(k1,k2))
-//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override)
+//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override,
+//     or the measured total carried across a flag change)
+//  3. Own PriorLiveCapacity: what the variant was last measured at before a
+//     rollout changed its arguments (boundedBy=prior-live)
 //
 // Falls back to stored EffectiveCapacity (EffectiveMaxBatchedTokens) when no
 // workload data is available.
@@ -854,6 +876,15 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				}
 			}
 
+			// Bound by what this variant was last measured at, under
+			// arguments a rollout has since replaced: a ceiling only, so a
+			// parked variant whose cache changed shape is never priced above
+			// its last measurement, and never held below a smaller derivation.
+			if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < bounded {
+				bounded = rec.PriorLiveCapacity
+				boundedBy = "prior-live"
+			}
+
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
 			//
 			// The reuse switch DELIBERATELY DOES NOT REACH HERE, and a
@@ -872,7 +903,13 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			// variant's answer -- the shared ITL line, and
 			// lookupCompatibleCapacity, where the record IS the estimate -- and
 			// leaves every clamp alone.
-			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
+			//
+			// For the same reason the clamp is found under the looser equality
+			// (FindClampBound): the borrow's equality compares the parallel
+			// layout, speculative decoding, the KV connector, offloading, prefix
+			// caching and the checkpoint, and refusing a sibling on those removed
+			// the ceiling rather than tightening it.
+			if compatible := a.capacityStore.FindClampBound(namespace, modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
 					boundedBy = "compatible-variant-live"
@@ -888,13 +925,18 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		}
 	}
 
-	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from LoadFromDeployment)
+	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from
+	// LoadFromDeployment), under the same prior-live ceiling.
+	fallback := rec.EffectiveCapacity
+	if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < fallback {
+		fallback = rec.PriorLiveCapacity
+	}
 	logger.Info("zero-replica-capacity-estimate",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"source", "deployment-stored-fallback",
 		"reason", "no workload averages or derivation available; using raw stored EffectiveMaxBatchedTokens",
-		"perReplicaCapacity", rec.EffectiveCapacity)
-	return float64(rec.EffectiveCapacity)
+		"perReplicaCapacity", fallback)
+	return float64(fallback)
 }
 
 // estimateCapacityFromParams computes a capacity estimate using the k2 derivation

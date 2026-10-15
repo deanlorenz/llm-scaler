@@ -344,6 +344,27 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
   }
   ```
 
+### `wva_engine_config`
+- **Type**: Gauge
+- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant
+  - `accelerator`, `gpus`: the hardware its learned state is filed under. On a fleet whose pods sit on two GPU products this is the last product that resolved, not this cycle's reading, so it can differ from what discovery reports for the same variant
+  - `fingerprint`: a 16-hex-digit digest of the labels below. Two variants of one model on the same `accelerator` and `gpus` with the same `fingerprint` run the same engine configuration as far as the scaling manager can tell, and may share a learned latency line when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `fingerprint_version`: the digest's format. A new version changes every fingerprint at once, so learned state keyed on the old ones starts cold after an upgrade
+  - `engine`, `weight_dtype`, `quantization`, `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`, `tensor_parallel_size`, `num_gpu_blocks_override`, `total_kv_tokens_override`, `effective_max_batched_tokens`, `max_num_seqs`, `max_model_len`, `enforce_eager`: the flags that are hashed, after defaults
+  - `unresolved`: the flags the scaling manager could not read, for example a value given as an unexpanded `$VARIABLE`. Those flags carry their defaults in the labels above. **Empty is the good case.** A variant with anything here is not used as a key for sharing a latency line
+  - `image`: the engine container's image. Two variants with identical flags on different engine releases get different fingerprints
+  - `data_parallel_size`, `pipeline_parallel_size`, `expert_parallel`, `speculative_config`, `kv_connector`, `kv_offloading_size`, `kv_offloading_backend`, `prefix_caching_disabled`: the layout and features of a wide-EP or P/D engine, also hashed. `speculative_config` is vLLM's `--speculative-config` re-encoded with sorted keys, or SGLang's `--speculative-*` flags as `key=value` pairs; `kv_connector` is the `kv_connector` of `--kv-transfer-config`, or SGLang's `--disaggregation-transfer-backend`
+  - `model`, `model_revision`: the checkpoint served (vLLM's positional model or `--model`, SGLang's `--model-path`, and `--revision`). `model_unresolved` is `true` when it was given as a variable the scaling manager could not resolve, or after the flags where a flag may have taken it as its value; such a variant is not used as a key for sharing a latency line, and does not take another variant's measured capacity (two unread checkpoints may be an FP8 and a BF16 build of one model), though its own learned state is still restored after a restart
+  - `sharing_unresolved`: flags read for identity whose value could not be interpreted, each as `flag="value as written"` -- typically a parallel size computed when the pod starts, such as `data_parallel_size="$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))"`. As with `model_unresolved`, such a variant does not share a latency line or take another variant's measured capacity -- the same text can be a 2x8 group in one LeaderWorkerSet and a 4x8 group in another -- and its own learned state is still restored after a restart. vLLM's `-tp`, `-dp` and `-pp` and its `--speculative-config.<key>` spelling are read
+  - `memory_layout`: flags that size or reshape what one replica holds and that no other label names, as sorted `key=value` pairs: vLLM's `--kv-cache-memory-bytes`, `--enable-eplb`, `--num-redundant-experts`, `--eplb-config` (re-encoded with sorted keys) and `--all2all-backend`, the `VLLM_ALL2ALL_BACKEND` env var (`env.VLLM_ALL2ALL_BACKEND`), and SGLang's `--enable-dp-attention` and `--moe-a2a-backend`. Empty is the common case. A value that cannot be read, including the env var set by `valueFrom`, goes to `sharing_unresolved` instead; one set by `envFrom` is not seen
+  - Only the leader pod's flags are read; the workers of a LeaderWorkerSet group are taken to run the same ones
+- **Use Case**: Answers "why did these two variants share (or not share) what they learned?" and "did the scaling manager read this engine's configuration correctly?". Compare `fingerprint` across variants of a model, and alert on a non-empty `unresolved`:
+  ```promql
+  wva_engine_config{unresolved!=""}
+  ```
+
 ### `wva_config_optimization_interval_seconds`
 - **Type**: Gauge
 - **Description**: Optimization interval in seconds

@@ -48,10 +48,22 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 			continue
 		}
 		msg := "learned state restored"
-		if !r.Installed {
-			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under, or could not be read completely"
+		switch r.Outcome {
+		case RestoredWhole:
+		case RestoredArgs:
+			msg = "learned state restored without the ITL baseline: the engine image changed, the arguments did not"
+		case RestoredPrior:
+			msg = "learned state not restored: the variant's engine arguments changed; its k2 is kept as a lower-only prior for the buckets it was measured in"
+			if r.Priors == 0 {
+				msg = "learned state not restored: the variant's engine arguments changed, and no k2 window was recent enough, on the hardware it runs now, to keep as a prior"
+			}
+		case RestoredIncomplete:
+			msg = "learned state not restored: the variant's engine configuration could not be read completely, so it could not be checked"
+		case RestoredDiffers:
+			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under"
 		}
-		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "entries", r.Entries)
+		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "outcome", r.Outcome,
+			"entries", r.Entries, "priors", r.Priors)
 	}
 
 	c := a.newCycle(ctx, input, satConfig)

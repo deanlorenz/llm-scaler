@@ -976,4 +976,29 @@ var EngineConfigFlagLabels = []string{
 	// invisible: a block_size of 16 reads identically whether the engine
 	// runs 16 or the flag was "$VLLM_BLOCK_SIZE" and nothing resolved it.
 	"unresolved",
+	// The engine container's image: the engine's code, which no flag
+	// describes. One value per configuration, so no cardinality beyond the
+	// configurations themselves.
+	"image",
+	"data_parallel_size",
+	"pipeline_parallel_size",
+	"expert_parallel",
+	"speculative_config",
+	"kv_connector",
+	"kv_offloading_size",
+	"kv_offloading_backend",
+	"prefix_caching_disabled",
+	// The checkpoint served, and whether it could be read: a model given as
+	// an unresolved variable is not used as a key for sharing.
+	"model",
+	"model_revision",
+	"model_unresolved",
+	// Flags read for identity whose value could not be interpreted, as
+	// written: a parallel size computed at start-up. A variant with anything
+	// here is not used as a key for sharing a latency line.
+	"sharing_unresolved",
+	// Flags that size or reshape what one replica holds and that no label
+	// above names (--kv-cache-memory-bytes, redundant experts, the expert
+	// all-to-all backend, SGLang's DP attention), as sorted key=value pairs.
+	"memory_layout",
 }
