@@ -89,18 +89,18 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	logger := ctrl.LoggerFrom(ctx).WithName(o.Name())
 	available := mergeConstraints(constraints)
 	availableByNS := mergeNamespaceConstraints(constraints)
-	open := excludedNamespaceBudgets(constraints, requests, availableByNS)
+	uncapped := newUncappedBudget(constraints)
 
 	// Rescale pre-pass: for enabled, contended (type, budget-scope) groups, compute
 	// priority-weighted targets and produce reclaim/fill decisions, consuming free
-	// GPUs from `available`/`availableByNS`/`open` so the additive path below sees
-	// the reduced budget. Models it handles are excluded from the additive path.
-	// When rescale is off or no group is contended, `handled` is empty and
+	// GPUs from `available`/`availableByNS`/`uncapped` so the additive path below
+	// sees the reduced budget. Models it handles are excluded from the additive
+	// path. When rescale is off or no group is contended, `handled` is empty and
 	// behaviour is unchanged.
 	var rescaleDecisions []domain.VariantDecision
 	var handled map[string]bool
 	if o.Rescale.any() {
-		rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS, open)
+		rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS, uncapped)
 	}
 
 	var scaleUpWork []*modelWork
@@ -128,7 +128,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		}
 	}
 
-	o.fairShareScaleUp(ctx, scaleUpWork, available, availableByNS, open)
+	o.fairShareScaleUp(ctx, scaleUpWork, available, availableByNS, uncapped)
 
 	allDecisions := make([]domain.VariantDecision, 0, len(scaleUpWork))
 
@@ -192,7 +192,7 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 	work []*modelWork,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
-	open map[string]int,
+	uncapped *uncappedBudget,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -202,11 +202,14 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 			break
 		}
 
-		// A namespace a namespace quota excludes draws on open, not on
-		// available: either one with GPUs left keeps the loop going.
-		if budgetTotal(available) == 0 && budgetTotal(open) == 0 {
-			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
-			break
+		// With nothing left in available, every model stops here, as it always
+		// has — except an uncapped namespace's, which does not spend available
+		// (see uncappedBudget). Those go on until their own budget runs out.
+		if budgetTotal(available) == 0 {
+			if active = uncappedOnly(active, uncapped); len(active) == 0 {
+				logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
+				break
+			}
 		}
 
 		mean := computeMean(active)
@@ -223,7 +226,7 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 			allocationMean = mean - (w.remaining / float64(len(active)))
 		}
 
-		allocated := o.allocateForModel(ctx, w, allocationMean, available, availableByNS, open)
+		allocated := o.allocateForModel(ctx, w, allocationMean, available, availableByNS, uncapped)
 
 		if !allocated {
 			w.remaining = -1
@@ -249,7 +252,7 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	mean float64,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
-	open map[string]int,
+	uncapped *uncappedBudget,
 ) bool {
 	target := w.remaining - mean
 	if target <= 0 {
@@ -274,27 +277,27 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	// allocateForModelPaired only understands a flat per-type budget, so we pass
 	// the effective copy and reconcile consumption back to both budgets
 	// afterwards. A non-nil nsBudget means a closed namespace-quota allowlist
-	// (see effectiveAvailable); nil means the namespace is open (cluster-scope
-	// quota or an excluded namespace).
+	// (see effectiveAvailable); nil means no namespace quota caps it.
 	//
 	// nsBudget is a reference into the cycle-wide availableByNS map, shared by
 	// every model in this namespace; the reconcile below decrements it in place,
 	// so later same-namespace models correctly see the reduced remaining budget.
 	//
-	// open is non-nil only beside a namespace-scoped quota (see
-	// excludedNamespaceBudgets). An open namespace then draws on open alone, and
-	// a capped one is also bounded by it, so both kinds spend a cluster quota
-	// together.
+	// An uncapped namespace (see uncappedBudget) spends the uncapped budget
+	// alone. Every other namespace is also clamped by it, so both kinds share a
+	// cluster quota.
 	nsBudget := availableByNS[w.req.Namespace]
+	isUncapped := uncapped.covers(w.req.Namespace)
 	var effAvail map[string]int
-	if nsBudget == nil && open != nil {
-		effAvail = maps.Clone(open)
+	if isUncapped {
+		effAvail = make(map[string]int, len(w.records))
+		for _, r := range w.records {
+			effAvail[r.AcceleratorName] = uncapped.free(r.AcceleratorName)
+		}
 	} else {
 		effAvail = effectiveAvailable(available, nsBudget)
 		for accType, eff := range effAvail {
-			if o, ok := open[accType]; ok && o < eff {
-				effAvail[accType] = o
-			}
+			effAvail[accType] = uncapped.clamp(accType, eff)
 		}
 	}
 	beforeEff := maps.Clone(effAvail)
@@ -309,29 +312,26 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	// budget and, where this namespace caps the type, to the namespace budget.
 	// Only decrement the cluster budget for types it actually constrains (a type
 	// present in `available`); a type bounded solely by the namespace must not
-	// drive the cluster budget negative and pollute the loop's budgetTotal stop check.
+	// drive the cluster budget negative and pollute the loop's stop check.
 	for accType, before := range beforeEff {
 		consumed := before - effAvail[accType]
 		if consumed <= 0 {
 			continue
 		}
+		uncapped.spend(accType, consumed)
+		if isUncapped {
+			// available holds the namespace quota's free GPUs too, which an
+			// uncapped namespace does not spend.
+			continue
+		}
 		// Decrement only a FINITE cluster budget. An unbounded (math.MaxInt)
 		// budget marks an unlimited-quota type and must stay exactly math.MaxInt:
 		// depleting it to MaxInt-consumed would (a) be meaningless (you cannot
-		// draw down infinity) and (b) defeat the fairShareScaleUp stop-check,
-		// whose `== math.MaxInt` guard would then miss it and let the budgetTotal
+		// draw down infinity) and (b) defeat the fairShareScaleUp stop check:
+		// budgetTotal's `== math.MaxInt` guard would then miss it and let the
 		// sum overflow with two or more unlimited types.
-		//
-		// Beside a namespace-scoped quota, available holds that quota's free
-		// GPUs, which an excluded namespace does not spend; open holds the
-		// budgets over every namespace, which everyone spends.
-		if nsBudget != nil || open == nil {
-			if cur, clusterCapped := available[accType]; clusterCapped && cur != math.MaxInt {
-				available[accType] -= consumed
-			}
-		}
-		if cur, ok := open[accType]; ok && cur != math.MaxInt {
-			open[accType] -= consumed
+		if cur, clusterCapped := available[accType]; clusterCapped && cur != math.MaxInt {
+			available[accType] -= consumed
 		}
 		if nsBudget != nil {
 			// Decrement only finite namespace caps; the unlimited sentinel
@@ -360,9 +360,9 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 // quota. A budget value < 0 in nsBudget is the "unlimited" sentinel for that
 // (namespace, type); all other values are finite GPU counts.
 //
-// nsBudget == nil → the namespace is OPEN (a cluster-scope quota, or an
-// excluded namespace): the model is bound only by the cluster budget, so the
-// result is a copy of `available`.
+// nsBudget == nil → the namespace is OPEN (no namespace quota caps it; an
+// uncapped namespace does not come here, see uncappedBudget): the model is
+// bound only by the cluster budget, so the result is a copy of `available`.
 //
 // nsBudget != nil → the namespace is a CLOSED allowlist (namespace-scope
 // quota): the model may use ONLY the accelerator types the namespace lists,
@@ -395,37 +395,22 @@ func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 	return eff
 }
 
-// excludedNamespaceBudgets returns the per-type budget that the namespaces no
-// namespace-scoped quota caps -- the ones it excludes -- share this cycle, or
-// nil when no provider is namespace-scoped: then every namespace draws on the
-// merged budget, as before. The budget comes from the providers that bound
-// every namespace (openBudgets). When there is none, nothing bounds those
-// namespaces, and every accelerator type their models run on is unbounded
-// (math.MaxInt). Only their types: a capped namespace's type stays out, so the
-// fair-share loop's stop check still sees what bounds the capped ones.
-func excludedNamespaceBudgets(constraints []*ResourceConstraints, requests []ModelScalingRequest,
-	availableByNS map[string]map[string]int) map[string]int {
-	if _, namespaced := clusterProviders(constraints); !namespaced {
-		return nil
-	}
-	if open, bounded := openBudgets(constraints); bounded {
-		return open
-	}
-	open := map[string]int{}
-	for _, req := range requests {
-		if _, capped := availableByNS[req.Namespace]; capped {
-			continue
-		}
-		for _, r := range recordsForRequest(req) {
-			open[r.AcceleratorName] = math.MaxInt
+// uncappedOnly returns the models of active that are in an uncapped
+// namespace.
+func uncappedOnly(active []*modelWork, uncapped *uncappedBudget) []*modelWork {
+	var left []*modelWork
+	for _, w := range active {
+		if uncapped.covers(w.req.Namespace) {
+			left = append(left, w)
 		}
 	}
-	return open
+	return left
 }
 
 // budgetTotal sums a per-type budget, saturating at math.MaxInt: an unbounded
-// type marks an unlimited quota. The sum serves only as the fair-share loop's
-// "== 0" stop check.
+// type marks an unlimited quota, and without the guard two of them would
+// overflow the sum. The sum serves only as the fair-share loop's "== 0" stop
+// check.
 func budgetTotal(budget map[string]int) int {
 	total := 0
 	for _, v := range budget {

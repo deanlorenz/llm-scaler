@@ -10,7 +10,9 @@ import "maps"
 //
 // A promise in a namespace group is charged to that namespace's pool and to
 // the cluster pool of its accelerator, since the receiver's pods will hold
-// both. A cluster-group promise is charged to the cluster pool only. Pools
+// both. A cluster-group promise is charged to the cluster pool only, and not
+// to a namespace quota's: the cluster group's namespaces are the ones no
+// namespace quota caps, so they do not spend its tenants' quota. Pools
 // with no finite limit are left alone. The inputs are not modified: the
 // optimizer itself already counts promised GPUs as its receivers' and must
 // read the constraints unchanged.
@@ -48,6 +50,8 @@ func WithholdPromised(constraints []*ResourceConstraints, promised map[string]ma
 					if pools, ok := cc.NamespacePools[scope]; ok {
 						charge(pools, acc, g)
 					}
+				} else if c.capsNamespaces() {
+					continue
 				}
 				if p, ok := cc.Pools[acc]; ok && p.Limit >= 0 {
 					withheld += g

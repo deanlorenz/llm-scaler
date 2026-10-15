@@ -200,13 +200,13 @@ func apportionLeftover(out map[string]int, remainder map[string]float64, leftove
 // applyRescale runs the priority-weighted rescale pass for enabled, contended
 // (accelerator type, budget scope) groups. It returns the decisions it produced and
 // the set of model IDs it handled (which the caller excludes from the additive path).
-// Fills consume free GPUs from `available` / `availableByNS` / `open` in place; reclaims
-// do not free budget this cycle (usage is CurrentReplicas-based), so fills never
-// over-subscribe.
+// Fills consume free GPUs from `available` / `availableByNS` / `uncapped` in place;
+// reclaims do not free budget this cycle (usage is CurrentReplicas-based), so fills
+// never over-subscribe.
 //
-// open, when non-nil, is the budget of the namespaces a namespace-scoped quota excludes
-// (see excludedNamespaceBudgets): the cluster-scope groups are planned over it instead
-// of `available`, and every fill draws it down.
+// The models of uncapped namespaces (see uncappedBudget) form their own groups,
+// planned over the uncapped budget instead of `available`. Every fill, in any group,
+// draws the uncapped budget down, since every namespace spends a cluster quota.
 //
 // P/D models are handled: a model's GPU target is split across its roles by role
 // demand, and reclaim/fill run per role. Multi-accelerator models (variants spanning
@@ -217,15 +217,16 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	constraints []*ResourceConstraints,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
-	open map[string]int,
+	uncapped *uncappedBudget,
 ) ([]domain.VariantDecision, map[string]bool) {
 	logger := ctrl.LoggerFrom(ctx).WithName("rescale")
 	handled := make(map[string]bool)
 	var decisions []domain.VariantDecision
 
 	type groupKey struct {
-		accType string
-		scope   string // namespace for namespace-scoped groups, "" for cluster
+		accType  string
+		scope    string // namespace for namespace-scoped groups, "" for cluster
+		uncapped bool   // a cluster group of uncapped namespaces
 	}
 	groups := make(map[groupKey][]ModelScalingRequest)
 	for _, req := range requests {
@@ -246,7 +247,7 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		if nsScoped {
 			scope = req.Namespace
 		}
-		k := groupKey{accType, scope}
+		k := groupKey{accType, scope, uncapped.covers(req.Namespace)}
 		groups[k] = append(groups[k], req)
 	}
 
@@ -255,7 +256,8 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	// the result — a stable order keeps a cycle reproducible for identical input.
 	keys := slices.Collect(maps.Keys(groups))
 	slices.SortFunc(keys, func(a, b groupKey) int {
-		return cmp.Or(cmp.Compare(a.accType, b.accType), cmp.Compare(a.scope, b.scope))
+		return cmp.Or(cmp.Compare(a.accType, b.accType), cmp.Compare(a.scope, b.scope),
+			compareBool(a.uncapped, b.uncapped))
 	})
 
 	for _, k := range keys {
@@ -264,8 +266,8 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		switch {
 		case k.scope != "":
 			free = availableByNS[k.scope][k.accType]
-		case open != nil:
-			free = open[k.accType]
+		case k.uncapped:
+			free = uncapped.free(k.accType)
 		}
 		// Skip unlimited/unknown budgets — there is nothing to redistribute.
 		if free < 0 || free == math.MaxInt {
@@ -310,9 +312,9 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 			if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
 				fillable = min(fillable, cur)
 			}
-			if cur, ok := open[k.accType]; ok && cur != math.MaxInt {
-				fillable = min(fillable, cur)
-			}
+		}
+		if !k.uncapped {
+			fillable = uncapped.clamp(k.accType, fillable)
 		}
 
 		freeThisCycle := fillable
@@ -323,7 +325,11 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		}
 
 		if consumed := fillable - freeThisCycle; consumed > 0 {
+			uncapped.spend(k.accType, consumed)
 			switch {
+			case k.uncapped:
+				// An uncapped namespace spends only the uncapped budget, not
+				// the namespace quota's free GPUs that available holds.
 			case k.scope != "":
 				if availableByNS[k.scope] != nil {
 					availableByNS[k.scope][k.accType] -= consumed
@@ -334,13 +340,6 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 				if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
 					available[k.accType] -= consumed
 				}
-				if cur, ok := open[k.accType]; ok && cur != math.MaxInt {
-					open[k.accType] -= consumed
-				}
-			case open != nil:
-				// An excluded namespace spends the budget over every
-				// namespace, not the namespace quota's.
-				open[k.accType] -= consumed
 			default:
 				available[k.accType] -= consumed
 			}
@@ -348,6 +347,18 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	}
 
 	return decisions, handled
+}
+
+// compareBool orders false before true.
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	default:
+		return 1
+	}
 }
 
 // rescaleModelDecisions drives one model to targetGPUs on accType: reclaim (shed

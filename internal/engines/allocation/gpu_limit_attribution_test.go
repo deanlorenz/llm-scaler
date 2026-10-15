@@ -45,8 +45,9 @@ var _ = Describe("bindingProvider", func() {
 	// it excludes is not bound by them (#169), so they are never credited.
 	It("credits only a provider over every namespace for a namespace a namespace quota excludes", func() {
 		namespaceQuota := &ResourceConstraints{ProviderName: "namespace-quota",
-			Pools:          map[string]ResourcePool{"A100": {Limit: 8, Used: 3}},
-			NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 1}}},
+			Pools:              map[string]ResourcePool{"A100": {Limit: 8, Used: 3}},
+			NamespacePools:     map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 1}}},
+			ExcludedNamespaces: map[string]bool{"team-z": true},
 		}
 		Expect(bindingProvider([]*ResourceConstraints{namespaceQuota}, "team-z", "A100")).To(BeEmpty(),
 			"team-z is excluded and no other provider bounds it")
@@ -55,6 +56,40 @@ var _ = Describe("bindingProvider", func() {
 			Pools: map[string]ResourcePool{"A100": {Limit: 64, Used: 3}}}
 		Expect(bindingProvider([]*ResourceConstraints{namespaceQuota, clusterQuota}, "team-z", "A100")).To(Equal("cluster-quota"),
 			"the cluster quota bounds team-z, though the namespace quota's pool is tighter")
+
+		unlimited := &ResourceConstraints{ProviderName: "cluster-quota",
+			Pools: map[string]ResourcePool{"A100": {Limit: -1}}}
+		Expect(bindingProvider([]*ResourceConstraints{namespaceQuota, unlimited}, "team-z", "A100")).To(BeEmpty(),
+			"an unlimited cluster quota bounds nothing")
+	})
+
+	It("falls back to a provider's cluster pool for a namespace it neither caps nor excludes", func() {
+		constraints := []*ResourceConstraints{
+			{ProviderName: "namespace-quota",
+				Pools:          map[string]ResourcePool{"A100": {Limit: 8, Used: 3}},
+				NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 1}}},
+			},
+		}
+		Expect(bindingProvider(constraints, "team-z", "A100")).To(Equal("namespace-quota"),
+			"team-z is not excluded, so it is not uncapped: the aggregate still bounds it")
+	})
+
+	// Quota A excludes ns-x; quota B caps it. ns-x is capped, so it is planned
+	// as before #169, bound by A's pools too. Out of scope for #169: the
+	// attribution must name what bound it, not skip A.
+	It("credits the tighter quota for a namespace one quota excludes and another caps", func() {
+		a := &ResourceConstraints{ProviderName: "A", NamespaceScoped: true,
+			Pools:              map[string]ResourcePool{"A100": {Limit: 14, Used: 12}},
+			NamespacePools:     map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 6}}},
+			ExcludedNamespaces: map[string]bool{"ns-x": true},
+		}
+		b := &ResourceConstraints{ProviderName: "B", NamespaceScoped: true,
+			Pools:              map[string]ResourcePool{"A100": {Limit: 8}},
+			NamespacePools:     map[string]map[string]ResourcePool{"ns-x": {"A100": {Limit: 8}}},
+			ExcludedNamespaces: map[string]bool{"team-a": true},
+		}
+		Expect(bindingProvider([]*ResourceConstraints{a, b}, "ns-x", "A100")).To(Equal("A"),
+			"A's pool has 2 free, B's cap 8")
 	})
 
 	It("skips unlimited sentinels and returns empty when nothing finitely bounds the type", func() {

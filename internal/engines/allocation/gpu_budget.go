@@ -1,6 +1,9 @@
 package allocation
 
 import (
+	"maps"
+	"math"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
@@ -22,14 +25,14 @@ import (
 //     allowlist: an accelerator type it does not list is denied outright, and a
 //     listed type is capped at the tighter of its cluster and namespace budgets
 //     (see mergeNamespaceConstraints).
-//   - Any other namespace is judged only by the providers that bound every
-//     namespace (see openBudgets). A namespace quota's pools are the other
-//     tenants' free quota, and a namespace it excludes is not bound by them.
-//     With a namespace quota and no such provider, nothing bounds it, so it
-//     fits.
-//   - An accelerator type no provider knows about is denied, matching the
-//     optimizer's treatment of absent constraints as zero capacity rather than
-//     unlimited.
+//   - An uncapped namespace — one a namespace quota excludes and no namespace
+//     quota caps — is judged only by the providers that bound every namespace
+//     (see uncappedBudget). A namespace quota's pools are the other tenants'
+//     free quota, and they do not bound it. A type none of those providers
+//     lists is unbounded for it, so it fits.
+//   - For any other namespace, an accelerator type no provider knows about is
+//     denied, matching the optimizer's treatment of absent constraints as zero
+//     capacity rather than unlimited.
 //
 // No constraints at all means "unknown", which returns true. That mirrors the
 // engine's own fallback when no provider can supply constraints: proceed rather
@@ -43,12 +46,9 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 
 	perType := mergeConstraints(constraints)
 	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
-	if !nsScoped {
-		open, bounded := openBudgets(constraints)
-		if !bounded {
-			return true
-		}
-		perType = open
+	uncapped := newUncappedBudget(constraints).covers(namespace)
+	if uncapped {
+		perType = uncappedReport(constraints)
 	}
 
 	for rawType, need := range demand {
@@ -66,7 +66,7 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 				}
 				continue
 			}
-			if !anyPoolFits(perType, need) {
+			if !anyPoolFits(perType, need) && !(uncapped && len(perType) == 0) {
 				return false
 			}
 			continue
@@ -93,6 +93,9 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 		} else {
 			accType, known := resolveAcceleratorKey(perType, rawType)
 			if !known {
+				if uncapped {
+					continue // no provider bounds this type for it
+				}
 				return false
 			}
 			budget = perType[accType]
@@ -115,8 +118,10 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 // is judged against, and whether that namespace is a closed allowlist (in which
 // case a type absent from the map is denied outright rather than unconstrained).
 // A negative budget is the unlimited sentinel. Nil constraints yield nil, which
-// is "unknown" — the permissive case. A namespace that nothing bounds (see
-// openBudgets) gets every type the providers name as unlimited.
+// is "unknown" — the permissive case. For an uncapped namespace (see
+// uncappedBudget) it reports the budgets of the providers that bound every
+// namespace, and every other type a provider names as unlimited; a type no
+// provider names is unbounded for it too.
 //
 // It exists so the budgets can be REPORTED with the same resolution FitsGPUBudget
 // applies. Nothing else exposes what the check actually compared against: the
@@ -129,31 +134,14 @@ func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[strin
 		return nil, false
 	}
 
-	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
-	if !nsScoped {
-		open, bounded := openBudgets(constraints)
-		if bounded {
-			return open, false
-		}
-		// Nothing bounds this namespace: every type the providers name is
-		// reported unlimited, so the line does not read as "nothing free".
-		unbounded := map[string]int{}
-		for _, c := range constraints {
-			if c == nil {
-				continue
-			}
-			for accType := range c.Pools {
-				unbounded[accType] = -1
-			}
-			for _, perType := range c.NamespacePools {
-				for accType := range perType {
-					unbounded[accType] = -1
-				}
-			}
-		}
-		return unbounded, false
+	if newUncappedBudget(constraints).covers(namespace) {
+		return uncappedReport(constraints), false
 	}
 	perType := mergeConstraints(constraints)
+	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
+	if !nsScoped {
+		return perType, false
+	}
 
 	// Mirrors the namespace branch of FitsGPUBudget: the allowlist decides what the
 	// namespace may use, still bounded by the cluster pool where one is known.
@@ -167,17 +155,21 @@ func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[strin
 	return budgets, true
 }
 
-// clusterProviders returns the providers whose pools bound every namespace --
-// a cluster-scoped quota, or the physical inventory -- and whether any
-// provider is a namespace-scoped quota. A provider that carries NamespacePools
-// is namespace-scoped whether or not it says so.
-func clusterProviders(constraints []*ResourceConstraints) ([]*ResourceConstraints, bool) {
-	var cluster []*ResourceConstraints
-	namespaced := false
+// capsNamespaces reports whether c is a namespace-scoped provider: its pools
+// are per-namespace caps, not a budget over every namespace. A provider that
+// carries NamespacePools is namespace-scoped whether or not it says so.
+func (c *ResourceConstraints) capsNamespaces() bool {
+	return c.NamespaceScoped || len(c.NamespacePools) > 0
+}
+
+// clusterProviders returns the providers whose pools bound every namespace —
+// a cluster-scoped quota, or the physical inventory — and whether any
+// provider is a namespace-scoped quota.
+func clusterProviders(constraints []*ResourceConstraints) (cluster []*ResourceConstraints, namespaced bool) {
 	for _, c := range constraints {
 		switch {
 		case c == nil:
-		case c.NamespaceScoped || len(c.NamespacePools) > 0:
+		case c.capsNamespaces():
 			namespaced = true
 		default:
 			cluster = append(cluster, c)
@@ -186,20 +178,109 @@ func clusterProviders(constraints []*ResourceConstraints) ([]*ResourceConstraint
 	return cluster, namespaced
 }
 
-// openBudgets returns the per-type budget of a namespace that no
-// namespace-scoped quota caps: the merged budget of the providers that bound
-// every namespace. A namespace-scoped quota does not count. Its pools are the
-// sum of the free quota of the namespaces it caps, and a namespace it excludes
-// is not bound by them. bounded is false when a namespace-scoped quota exists
-// and no provider bounds every namespace: then nothing bounds such a
-// namespace, for any accelerator type. Without a namespace-scoped quota the
-// budget is mergeConstraints of every provider, as before.
-func openBudgets(constraints []*ResourceConstraints) (budgets map[string]int, bounded bool) {
-	cluster, namespaced := clusterProviders(constraints)
-	if namespaced && len(cluster) == 0 {
-		return nil, false
+// uncappedBudget is the budget of the uncapped namespaces: the ones a
+// namespace quota lists in `exclude` and no namespace quota caps. A namespace
+// quota's pools are the sum of its tenants' free quota, so they do not bound
+// an uncapped namespace; only the providers over every namespace (a cluster
+// quota) do. A type none of those providers lists is unbounded for it.
+//
+// Capped namespaces spend this budget too, beside their own, so the two kinds
+// share a cluster quota. A nil *uncappedBudget means no namespace is uncapped
+// this cycle, and every namespace is planned exactly as without it.
+type uncappedBudget struct {
+	namespaces map[string]bool
+	// budgets is the free GPUs per type of the providers over every
+	// namespace. A type absent is unbounded; math.MaxInt is unlimited.
+	budgets map[string]int
+}
+
+// newUncappedBudget returns the uncapped namespaces of constraints and their
+// budget, or nil when there are none. A namespace one namespace quota
+// excludes and another caps is capped: the cap binds it.
+func newUncappedBudget(constraints []*ResourceConstraints) *uncappedBudget {
+	capped := mergeNamespaceConstraints(constraints)
+	var namespaces map[string]bool
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for ns := range c.ExcludedNamespaces {
+			if _, ok := capped[ns]; ok {
+				continue
+			}
+			if namespaces == nil {
+				namespaces = map[string]bool{}
+			}
+			namespaces[ns] = true
+		}
 	}
-	return mergeConstraints(cluster), true
+	if namespaces == nil {
+		return nil
+	}
+	cluster, _ := clusterProviders(constraints)
+	return &uncappedBudget{namespaces: namespaces, budgets: mergeConstraints(cluster)}
+}
+
+// covers reports whether namespace is uncapped.
+func (u *uncappedBudget) covers(namespace string) bool {
+	return u != nil && u.namespaces[namespace]
+}
+
+// free returns the GPUs of accType left for an uncapped namespace:
+// math.MaxInt when nothing bounds the type.
+func (u *uncappedBudget) free(accType string) int {
+	if b, ok := u.budgets[accType]; ok {
+		return b
+	}
+	return math.MaxInt
+}
+
+// clamp bounds n by the GPUs of accType left in the budget. A capped
+// namespace spends the budget too, so its own budget is clamped by it.
+func (u *uncappedBudget) clamp(accType string, n int) int {
+	if u == nil {
+		return n
+	}
+	return min(n, u.free(accType))
+}
+
+// spend takes n GPUs of accType from the budget. An unbounded or unlimited
+// type has nothing to draw down.
+func (u *uncappedBudget) spend(accType string, n int) {
+	if u == nil {
+		return
+	}
+	if b, ok := u.budgets[accType]; ok && b != math.MaxInt {
+		u.budgets[accType] = b - n
+	}
+}
+
+// uncappedReport returns the per-type budget an uncapped namespace is judged
+// against: the merged budget of the providers over every namespace, and the
+// unlimited sentinel (-1) for every other type a provider names.
+func uncappedReport(constraints []*ResourceConstraints) map[string]int {
+	out := map[string]int{}
+	for _, c := range constraints {
+		if c != nil {
+			addTypes(out, c)
+		}
+	}
+	cluster, _ := clusterProviders(constraints)
+	maps.Copy(out, mergeConstraints(cluster))
+	return out
+}
+
+// addTypes records every accelerator type c names, in its pools or in any
+// namespace's, as unlimited in out.
+func addTypes(out map[string]int, c *ResourceConstraints) {
+	for accType := range c.Pools {
+		out[accType] = -1
+	}
+	for _, perType := range c.NamespacePools {
+		for accType := range perType {
+			out[accType] = -1
+		}
+	}
 }
 
 // resolveAcceleratorKey maps an accelerator name as a WORKLOAD declares it onto
