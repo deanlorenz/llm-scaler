@@ -362,24 +362,11 @@ type presenceNoter interface {
 }
 
 // beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
-// which a model it did not analyze on the cycle before is unobserved, and the
-// collector's set of namespaces fetching the inputs only it reads. Called once
-// at the top of every cycle, before any early return.
+// which a model it did not analyze on the cycle before is unobserved. Called
+// once per cycle, before any early return.
 func (e *Engine) beginSLOCycle() {
 	if e.sloAnalyzer != nil {
 		e.sloAnalyzer.BeginCycle()
-	}
-	if e.ReplicaMetricsCollector != nil {
-		e.ReplicaMetricsCollector.ResetSLOInputNamespaces()
-	}
-}
-
-// noteSLOPolicy marks a model's namespace for the slo analyzer's inputs when
-// its resolved policy lists the analyzer, before the model is collected, so
-// they arrive the same cycle.
-func (e *Engine) noteSLOPolicy(namespace string, policy config.ScalingPolicy) {
-	if e.ReplicaMetricsCollector != nil && policy.AnalyzerEnabled(domain.SLOAnalyzerName) {
-		e.ReplicaMetricsCollector.AddSLOInputNamespace(namespace)
 	}
 }
 
@@ -531,7 +518,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	if e.sloAnalyzer != nil {
 		if ev := e.sloAnalyzer.EvictStale(time.Now()); ev.Any() {
 			logger.Info("evicted stale slo analyzer state",
-				"lines", ev.Lines, "baselines", ev.Baselines, "ceilings", ev.Ceilings,
+				"lines", ev.Lines, "baselines", ev.Baselines,
 				"transients", ev.Transients, "accelerators", ev.Accelerators)
 		}
 	}

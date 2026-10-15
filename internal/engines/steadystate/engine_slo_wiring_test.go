@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -199,66 +198,6 @@ func TestNotePresentVariantsStampsTheSLOAnalyzer(t *testing.T) {
 	}
 }
 
-// TestSLOPolicyMarksItsNamespaceTheSameCycle pins the gate on the replica
-// queries only the slo analyzer reads: a model whose resolved policy lists it
-// marks its namespace before it is collected, so the inputs arrive that cycle
-// (a mark made after analysis reached the collector a cycle late, which lost
-// them on the cycle after every skip); each cycle starts with none.
-func TestSLOPolicyMarksItsNamespaceTheSameCycle(t *testing.T) {
-	e := sloWiringEngine(t)
-	withSLO := config.ScalingPolicy{Analyzers: []config.AnalyzerScoreConfig{
-		{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}}
-	e.noteSLOPolicy("chat", withSLO)
-	e.noteSLOPolicy("batch", config.ScalingPolicy{})
-	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") || e.ReplicaMetricsCollector.CollectsSLOInputs("batch") {
-		t.Fatal("the collector must fetch the slo inputs in chat, whose policy lists the analyzer, and only there")
-	}
-	e.beginSLOCycle()
-	if e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
-		t.Fatal("a new cycle must start with no namespace marked")
-	}
-}
-
-// emptySource is a metrics source that knows its queries and returns no
-// series, so a cycle can run without a Prometheus.
-type emptySource struct{ queries *source.QueryList }
-
-func (s *emptySource) QueryList() *source.QueryList { return s.queries }
-
-func (s *emptySource) Refresh(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
-	return map[string]*source.MetricResult{}, nil
-}
-
-func (s *emptySource) Get(string, map[string]string) *source.CachedValue { return nil }
-
-// TestOptimizeMarksANamespaceFromItsResolvedPolicy pins the call site: the
-// cycle's own loop marks a model's namespace from the policy it resolves,
-// before the model is collected -- here even though its data cannot be
-// prepared (it has no scale target), which is when the mark must already
-// stand.
-func TestOptimizeMarksANamespaceFromItsResolvedPolicy(t *testing.T) {
-	c := fake.NewClientBuilder().Build()
-	sources := source.NewSourceRegistry()
-	if err := sources.Register("prometheus", &emptySource{queries: source.NewQueryList()}); err != nil {
-		t.Fatal(err)
-	}
-	e := NewEngine(c, c, c.Scheme(), nil, sources, config.NewTestConfig(), allocation.NewNoOpLimiter("test"))
-	e.Variants = registry.New(0)
-	e.Config.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
-		config.GlobalDefaultsKey: {ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, Analyzers: []config.AnalyzerScoreConfig{
-			{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}},
-	})
-	e.optimizeV2(context.Background(), map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
-		"chat/m": {{
-			ObjectMeta: metav1.ObjectMeta{Name: "chat-a", Namespace: "chat"},
-			Spec:       llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{ModelID: "m"},
-		}},
-	}, nil)
-	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
-		t.Fatal("a model whose policy lists slo did not mark its namespace in the cycle's loop")
-	}
-}
-
 // TestEveryCycleBeginsAnSLOCycle pins that the cycle count the unobserved
 // exclusion reads advances on every cycle, one with no model to analyze
 // included: counting only cycles that analyze something would hide the cycles
@@ -288,10 +227,8 @@ func (r *countingRouter) CollectRouterLatency(context.Context, string, string) *
 
 // TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt pins the zero-impact
 // promise at the engine, with the real analyzer: a model whose policy does not
-// list slo makes no router query, publishes no wva_slo_* series and marks no
-// namespace for the inputs only the analyzer reads; a model that lists it
-// does all three. (The collector half -- no prefill or queue-time query in an
-// unmarked namespace -- is pinned in the collector package.)
+// list slo makes no router query and publishes no wva_slo_* series; a model
+// that lists it does both.
 func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 	reg := promclient.NewRegistry()
 	if err := metrics.InitMetrics(reg); err != nil {
@@ -313,17 +250,13 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 	router := &countingRouter{}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
 	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}},
-		ReplicaMetricsCollector: collector.NewReplicaMetricsCollector(nil, nil, nil, nil, nil)}
-	// As the engine runs a model: resolve (which marks the namespace), then analyze.
+		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
 	run := func(namespace string, policy config.ScalingPolicy, states []domain.VariantReplicaState) {
 		t.Helper()
-		e.noteSLOPolicy(namespace, policy)
 		if _, err := e.runAnalyzersAndScore(context.Background(), "m", namespace, nil, policy, states, nil, nil, nil, nil, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	marked := e.ReplicaMetricsCollector.CollectsSLOInputs
 	targets := &config.SLOPolicy{TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 3 * time.Second}}}
 	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, SLO: targets}
 	withSLO := plain
@@ -333,14 +266,12 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 	// Targets set, analyzer not listed: the half-configured case, which must
 	// still cost nothing.
 	run("batch", plain, states)
-	if router.calls != 0 || sloSeries() != 0 || marked("batch") {
-		t.Fatalf("unlisted: %d router queries, %d slo series, inputs marked %v; want none",
-			router.calls, sloSeries(), marked("batch"))
+	if router.calls != 0 || sloSeries() != 0 {
+		t.Fatalf("unlisted: %d router queries, %d slo series; want none", router.calls, sloSeries())
 	}
 	run("chat", withSLO, states)
-	if router.calls != 1 || sloSeries() == 0 || !marked("chat") || marked("batch") {
-		t.Fatalf("listed: %d router queries, %d slo series, chat marked %v; want 1, some, true",
-			router.calls, sloSeries(), marked("chat"))
+	if router.calls != 1 || sloSeries() == 0 {
+		t.Fatalf("listed: %d router queries, %d slo series; want 1, some", router.calls, sloSeries())
 	}
 }
 

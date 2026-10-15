@@ -50,18 +50,7 @@ var agnosticReplicaQueries = []string{
 	// Putting it in EngineSpecificQueries instead would assert a variant that
 	// does not exist, and the parity test says so.
 	registration.QueryPrefillComputedTokenRate,
-	// Prefill time and engine queue time: vLLM-only for the same reason.
-	// Read by the slo analyzer alone, so collected only where it runs
-	// (sloInputQueries).
-	registration.QueryAvgPrefillTime,
-	registration.QueryAvgQueueTime,
 }
-
-// sloInputQueries are the replica queries only the slo analyzer reads: the
-// TTFT curve's prefill and engine-queue time. They are fetched only in a
-// namespace where a model's policy lists the analyzer this cycle, so a fleet
-// that does not use it pays nothing for them (AddSLOInputNamespace).
-var sloInputQueries = []string{registration.QueryAvgPrefillTime, registration.QueryAvgQueueTime}
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series
 // cannot be partitioned by model_name, because they do not carry that label.

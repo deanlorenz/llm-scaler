@@ -65,7 +65,7 @@ type Analyzer struct {
 	// was not analyzed on the one before.
 	cycle uint64
 	// seen is when each variant key was last analyzed or reported present:
-	// its line and its prefill ceiling are evicted on it (EvictStale).
+	// its line is evicted on it (EvictStale).
 	seen map[string]time.Time
 	// accelerators is the last resolved accelerator per namespace/variant,
 	// so a cycle on which the pods disagree about it keys the line where it
@@ -74,9 +74,6 @@ type Analyzer struct {
 	// transients is each model's recent fleet history, keyed namespace/model,
 	// for the transient exclusion (transient.go).
 	transients map[string]*transientMemo
-	// ceilings is each prefill-role variant's saturated prefill token rates
-	// and last ceiling, keyed like the lines (ttft.go).
-	ceilings map[string]*ceilingState
 }
 
 type acceleratorMemo struct {
@@ -96,7 +93,6 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		seen:         make(map[string]time.Time),
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
-		ceilings:     make(map[string]*ceilingState),
 	}
 }
 
@@ -147,20 +143,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
 		vc, reading := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
-		// Only a reading priceVariant made was priced for TPOT; one made below
-		// carries TTFT inputs alone and has no output length to lack.
-		pricedForTPOT := reading != nil
-		// The TTFT curve's inputs, for every variant that prefills: observed
-		// and published, nothing priced from them yet (ttft.go).
-		if cfg.SLO != nil && cfg.SLO.TTFT != nil && vs.Role != domain.RoleDecode {
-			in := a.observeTTFTInputs(key, vs.VariantName, vs.Role, input.ReplicaMetrics, now)
-			if reading == nil {
-				reading = newVariantReading(vs.VariantName, "")
-			}
-			reading.PrefillSeconds, reading.EngineQueueSeconds = in.prefillSeconds, in.queueSeconds
-			reading.PrefillUtilization, reading.PrefillCeiling = in.utilization, in.ceiling
-		}
-		if !shapeKnown && pricedForTPOT {
+		if !shapeKnown && reading != nil {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
 			reading.Fill, reading.PredictedITL = math.NaN(), math.NaN()
@@ -180,9 +163,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"variant", vs.VariantName, "role", vs.Role, "source", reading.Source,
 				"fill", reading.Fill, "predictedITL", reading.PredictedITL,
-				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason,
-				"prefillSeconds", reading.PrefillSeconds, "engineQueueSeconds", reading.EngineQueueSeconds,
-				"prefillUtilization", reading.PrefillUtilization, "prefillCeiling", reading.PrefillCeiling)
+				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason)
 		}
 	}
 
@@ -279,15 +260,11 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 
 // newVariantReading is a variant's reading with every figure unknown: NaN,
 // which PublishSLO does not publish. The one place readings are made, because a
-// field left at Go's zero value is published as a real 0 -- a decode variant
-// read as having an instant prefill and a learned ceiling of zero.
+// field left at Go's zero value is published as a real 0: a fill of zero, or a
+// predicted ITL of zero, which reads as a met target.
 func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 	nan := math.NaN()
-	return &metrics.SLOVariantReading{
-		Variant: variant, Source: source,
-		Fill: nan, PredictedITL: nan,
-		PrefillSeconds: nan, EngineQueueSeconds: nan, PrefillUtilization: nan, PrefillCeiling: nan,
-	}
+	return &metrics.SLOVariantReading{Variant: variant, Source: source, Fill: nan, PredictedITL: nan}
 }
 
 // fitLine fits one variant's ITL(k) = A*k + B with the shared itl.Tracker --
@@ -409,12 +386,6 @@ func (a *Analyzer) EvictStale(now time.Time) Evicted {
 	}
 	var ev Evicted
 	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
-	for key := range a.ceilings {
-		if stale(key) {
-			delete(a.ceilings, key)
-			ev.Ceilings++
-		}
-	}
 	for key := range a.seen {
 		if stale(key) {
 			delete(a.seen, key)
@@ -437,12 +408,12 @@ func (a *Analyzer) EvictStale(now time.Time) Evicted {
 
 // Evicted counts what one EvictStale forgot, per map.
 type Evicted struct {
-	Lines, Baselines, Ceilings, Transients, Accelerators int
+	Lines, Baselines, Transients, Accelerators int
 }
 
 // Any reports whether anything was evicted.
 func (e Evicted) Any() bool {
-	return e.Lines+e.Baselines+e.Ceilings+e.Transients+e.Accelerators > 0
+	return e.Lines+e.Baselines+e.Transients+e.Accelerators > 0
 }
 
 // BeginCycle marks the start of an engine cycle. The engine calls it once per

@@ -19,11 +19,6 @@ var (
 	sloSource       *prometheus.GaugeVec
 	sloRequests     *prometheus.GaugeVec
 	sloExcluded     *prometheus.GaugeVec
-
-	sloPrefillSeconds     *prometheus.GaugeVec
-	sloEngineQueueSeconds *prometheus.GaugeVec
-	sloPrefillUtilization *prometheus.GaugeVec
-	sloPrefillCeiling     *prometheus.GaugeVec
 )
 
 // registerSLOMetrics creates and registers the SLO analyzer's gauges. Called
@@ -76,26 +71,8 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 		"SLO analyzer: per objective, 1 for the reason its router window is not judged this cycle (a wake "+
 			"from zero, a replica starting), 0 for the others; all 0 while it is judged.",
 		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelObjective, constants.LabelReason))
-	variantLabels := withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName)
-	sloPrefillSeconds = gauge(constants.WVASLOPrefillSeconds,
-		"SLO analyzer: the variant's mean prefill time, first scheduled to first token (a preemption's "+
-			"re-wait and chunked prefill's turns included), weighted by request rate over its ready replicas. "+
-			"Observed, not priced.",
-		variantLabels)
-	sloEngineQueueSeconds = gauge(constants.WVASLOEngineQueueSeconds,
-		"SLO analyzer: the variant's mean engine scheduler-queue wait, the other half of the engine's TTFT.",
-		variantLabels)
-	sloPrefillUtilization = gauge(constants.WVASLOPrefillUtilization,
-		"SLO analyzer: a prefill variant's prefill token rate per ready replica over its learned prefill ceiling.",
-		variantLabels)
-	sloPrefillCeiling = gauge(constants.WVASLOPrefillCeiling,
-		"SLO analyzer: a prefill variant's learned prefill ceiling in tokens per second: the 90th percentile, "+
-			"over the last hour, of per-cycle medians of the rate on replicas queued with KV below 0.80; the "+
-			"last ceiling is kept once the hour runs dry.",
-		variantLabels)
 	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL,
-		sloSource, sloRequests, sloExcluded,
-		sloPrefillSeconds, sloEngineQueueSeconds, sloPrefillUtilization, sloPrefillCeiling} {
+		sloSource, sloRequests, sloExcluded} {
 		if err := registry.Register(g); err != nil {
 			return err
 		}
@@ -123,20 +100,14 @@ type SLOObjectiveReading struct {
 	Excluded string
 }
 
-// SLOVariantReading is one variant of one model, as PublishSLO takes it. A NaN
-// field is not published, and an empty Source publishes no source series: a
-// prefill variant observed for TTFT is not priced for TPOT at all.
+// SLOVariantReading is one generating variant of one model, as PublishSLO
+// takes it. A NaN field is not published, and an empty Source publishes no
+// source series.
 type SLOVariantReading struct {
 	Variant      string
 	Source       string
 	Fill         float64
 	PredictedITL float64
-
-	// The TTFT curve's inputs, published for a variant that prefills.
-	PrefillSeconds     float64
-	EngineQueueSeconds float64
-	PrefillUtilization float64
-	PrefillCeiling     float64
 }
 
 // SLOModelSnapshot is everything the SLO analyzer publishes for one model in
@@ -217,11 +188,6 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		set(sloFill, labels(constants.LabelVariantName, v.Variant,
 			constants.LabelObjective, constants.SLOObjectiveTPOT), v.Fill)
 		set(sloPredictedITL, labels(constants.LabelVariantName, v.Variant), v.PredictedITL)
-		vl := labels(constants.LabelVariantName, v.Variant)
-		set(sloPrefillSeconds, vl, v.PrefillSeconds)
-		set(sloEngineQueueSeconds, vl, v.EngineQueueSeconds)
-		set(sloPrefillUtilization, vl, v.PrefillUtilization)
-		set(sloPrefillCeiling, vl, v.PrefillCeiling)
 		if v.Source == "" {
 			continue
 		}

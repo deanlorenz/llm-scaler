@@ -58,29 +58,3 @@ func TestSLORouterQueries(t *testing.T) {
 		t.Errorf("window %q / %v disagree", SLORouterWindow, SLORouterWindowSeconds)
 	}
 }
-
-// TestPrefillAndQueueTimeQueries pins the two halves of the engine's TTFT the
-// slo analyzer publishes: a sum or count swapped, or the wrong histogram, reads
-// as a plausible latency.
-func TestPrefillAndQueueTimeQueries(t *testing.T) {
-	reg := source.NewSourceRegistry()
-	if err := reg.Register("prometheus", source.NewNoOpSource()); err != nil {
-		t.Fatal(err)
-	}
-	RegisterQueueingModelQueries(reg)
-	ql := reg.Get("prometheus").QueryList()
-	for name, metric := range map[string]string{
-		QueryAvgPrefillTime: "vllm:request_prefill_time_seconds",
-		QueryAvgQueueTime:   "vllm:request_queue_time_seconds",
-	} {
-		q, err := ql.Build(name, map[string]string{source.ParamNamespace: "ns"})
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		q = strings.Join(strings.Fields(q), " ")
-		want := "max by (model_name, instance, pod) (rate(" + metric + `_sum{namespace="ns"}[1m]) / rate(` + metric + `_count{namespace="ns"}[1m]))`
-		if q != want {
-			t.Errorf("%s:\n got %s\nwant %s", name, q, want)
-		}
-	}
-}

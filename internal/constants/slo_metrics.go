@@ -46,18 +46,6 @@ const (
 	// Labels: namespace, model_name, objective, reason.
 	WVASLOExcluded = "wva_slo_excluded"
 
-	// WVASLOPrefillSeconds, WVASLOEngineQueueSeconds, WVASLOPrefillUtilization
-	// and WVASLOPrefillCeiling are the TTFT curve's inputs for a variant that
-	// prefills: its mean prefill time (first scheduled to first token), its mean
-	// engine queue wait, its prefill token rate per replica over its learned
-	// ceiling, and the ceiling itself in tokens per second. Observed and not
-	// priced: the curve is priced only once these show it can be learned.
-	// Labels: namespace, model_name, variant_name.
-	WVASLOPrefillSeconds     = "wva_slo_prefill_seconds"
-	WVASLOEngineQueueSeconds = "wva_slo_engine_queue_seconds"
-	WVASLOPrefillUtilization = "wva_slo_prefill_utilization"
-	WVASLOPrefillCeiling     = "wva_slo_prefill_ceiling_tokens_per_second"
-
 	// LabelObjective names an SLO objective: "ttft" or "tpot".
 	LabelObjective = "objective"
 	// LabelStatistic names the statistic an objective is judged on: "mean", or

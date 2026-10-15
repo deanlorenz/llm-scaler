@@ -2868,7 +2868,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet)"
             },
             "overrides": []
           },
@@ -2906,7 +2906,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet)"
             },
             "overrides": []
           },
@@ -2940,7 +2940,7 @@
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)",
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet)",
               "mappings": [
                 {
                   "type": "value",
@@ -3004,91 +3004,6 @@
           }
         },
         {
-          "id": 83,
-          "title": "Prefill time and engine queue time, per prefilling variant",
-          "type": "timeseries",
-          "description": "The two halves of the engine's TTFT for a variant that prefills, under a TTFT target: prefill (first scheduled to first token; a preemption's re-wait and chunked prefill's turns are inside it) and the scheduler-queue wait before it. Observed, not priced.",
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 148
-          },
-          "targets": [
-            {
-              "expr": "wva_slo_prefill_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} prefill",
-              "refId": "A",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource_uid}"
-              }
-            },
-            {
-              "expr": "wva_slo_engine_queue_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} queue",
-              "refId": "B",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource_uid}"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "s",
-              "custom": {
-                "drawStyle": "line",
-                "fillOpacity": 8
-              },
-              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
-            },
-            "overrides": []
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource_uid}"
-          }
-        },
-        {
-          "id": 84,
-          "title": "Prefill utilization against the learned ceiling",
-          "type": "timeseries",
-          "description": "Prefill-role variants only: prefill tokens computed per ready replica over the variant's learned ceiling, the p90 over the last hour of per-cycle medians of the rate on replicas queued with KV below 0.80. It is throughput served, so under overload it reads about 1 whatever the queue does. Absent until a ceiling is known.",
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 156
-          },
-          "targets": [
-            {
-              "expr": "wva_slo_prefill_utilization{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
-              "refId": "A",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource_uid}"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "custom": {
-                "drawStyle": "line",
-                "fillOpacity": 8
-              },
-              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
-            },
-            "overrides": []
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource_uid}"
-          }
-        },
-        {
           "id": 85,
           "title": "Why a window was not judged",
           "type": "state-timeline",
@@ -3097,7 +3012,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 156
+            "y": 148
           },
           "targets": [
             {

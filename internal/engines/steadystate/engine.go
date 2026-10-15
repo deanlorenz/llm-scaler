@@ -351,10 +351,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		analyzers: []analyzerEntry{
 			{name: domain.SaturationAnalyzerName, analyzer: satV2},
 			// Built in and always registered: it runs only for a model whose
-			// policy lists it under analyzers:, and its router queries and the
-			// replica queries only it reads run only in a namespace where a
-			// policy lists it (noteSLOPolicy), so registering it costs nothing
-			// elsewhere, and enabling it needs no restart. Its result is
+			// policy lists it under analyzers:, and its router queries run only
+			// for such a model, so registering it costs nothing elsewhere, and
+			// enabling it needs no restart. Its result is
 			// published and, like every non-saturation result, not yet consumed
 			// (docs/proposals/slo-tiers.md, phase 0).
 			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
@@ -1361,7 +1360,6 @@ func (e *Engine) optimizeV2(
 		}
 
 		scalingPolicyConfig := e.resolveModelPolicy(ctx, saturationConfigMap, modelID, namespace, modelVAs)
-		e.noteSLOPolicy(namespace, scalingPolicyConfig)
 		data, err := e.prepareModelData(ctx, modelID, modelVAs, e.client)
 		if err != nil {
 			msg := "Model data preparation failed"

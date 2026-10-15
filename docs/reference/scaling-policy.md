@@ -1345,14 +1345,10 @@ not readings of the fleet:
   behind one API server -- the normal wide-EP decode layout. The
   [proposal](../proposals/slo-tiers.md#before-phase-1-prices-anything) lists
   what is fixed before any of it sizes a fleet.
-- **Prefill is not priced.** On a P/D model only decode variants get a figure.
-  Under a TTFT target every variant that prefills publishes the inputs TTFT will
-  be priced from: `wva_slo_prefill_seconds`, `wva_slo_engine_queue_seconds`, and,
-  for a prefill role, `wva_slo_prefill_utilization` against a learned ceiling.
-  On an aggregated variant the engine records prefill and queue time when a
-  request finishes, so those two trail by a whole generation. Pods lent by a
-  warm pool (bridges) are left out, so a variant served only by bridges reads
-  `no-line` or `no-output-length`.
+- **Prefill is not priced.** On a P/D model only decode variants get a figure,
+  and TTFT is judged but not priced. Pods lent by a warm pool (bridges) are left
+  out, so a variant served only by bridges reads `no-line` or
+  `no-output-length`.
 - Each cycle logs `slo-model` and `slo-variant` lines at verbosity 3.
 
 ### Default Configuration

@@ -309,7 +309,6 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	// applies to it as well. A first-token latency longer than the pod has
 	// existed is the same impossibility as a service time longer than it.
 	avgTTFT := data.avgTTFT
-	avgPrefillTime, avgQueueTime := data.avgPrefillTime, data.avgQueueTime
 	if !ready {
 		// At DEFAULT, not DEBUG. The incident this guards against was
 		// visible only as a moved demand floor; now that both layers
@@ -329,7 +328,6 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		avgITL = 0
 		avgServiceTime = 0
 		avgTTFT = 0
-		avgPrefillTime, avgQueueTime = 0, 0
 	}
 	// Second guard, independent of readiness: no request can have taken
 	// longer than the Pod reporting it has been running.
@@ -392,18 +390,6 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 			avgTTFT = 0
 		}
 	}
-	// The same bound on the two halves of TTFT.
-	if avgPrefillTime > 0 || avgQueueTime > 0 {
-		if uptime, known := c.podUptime(ctx, namespace, podName, collectedAt); known &&
-			uptime >= minUptimeForServiceTimeBound {
-			if avgPrefillTime > uptime.Seconds() {
-				avgPrefillTime = 0
-			}
-			if avgQueueTime > uptime.Seconds() {
-				avgQueueTime = 0
-			}
-		}
-	}
 	metric := domain.ReplicaMetrics{
 		PodName:                  podName,
 		ModelID:                  modelID,
@@ -425,8 +411,6 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		PrefixCacheHitRate:       data.prefixCacheHitRate,
 		AvgITL:                   avgITL,
 		AvgTTFT:                  avgTTFT,
-		AvgPrefillTime:           avgPrefillTime,
-		AvgQueueTime:             avgQueueTime,
 		PrefillComputedTokenRate: data.prefillComputedTokenRate,
 		AvgServiceTime:           avgServiceTime,
 		GenerationTokenRate:      data.generationTokenRate,

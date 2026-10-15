@@ -561,9 +561,9 @@ wva_slo_target_seconds{model_name="<model>", objective="tpot"}
 # (kvCacheThreshold x scaleUpThreshold, 0.68 by default), the tier runs decode
 # fuller than the target allows
 wva_slo_fill{model_name="<model>"}
-# ttft: queue against prefill time, per variant that prefills
-wva_slo_engine_queue_seconds{model_name="<model>"}
-wva_slo_prefill_seconds{model_name="<model>"}
+# ttft: the engine's queue wait against its prefill time, per pod (vLLM)
+rate(vllm:request_queue_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_queue_time_seconds_count{namespace="<ns>"}[5m])
+rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
 ```
 
 A queue that grows while prefill time stays flat is a capacity miss; a prefill

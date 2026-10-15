@@ -22,8 +22,7 @@ var _ = Describe("PublishSLO values", func() {
 			{Objective: constants.SLOObjectiveTTFT, Statistic: "p90", TargetSeconds: 3, Observed: 1.2,
 				Attainment: 0.96, Requests: 300, WindowSeconds: 300, Excluded: constants.SLOExcludedStarting},
 		},
-		Variants: []SLOVariantReading{{Variant: "v", Source: constants.SLOSourceOwn, Fill: 0.6, PredictedITL: 0.041,
-			PrefillSeconds: 0.5, EngineQueueSeconds: 0.25, PrefillUtilization: 0.7, PrefillCeiling: 9000}},
+		Variants: []SLOVariantReading{{Variant: "v", Source: constants.SLOSourceOwn, Fill: 0.6, PredictedITL: 0.041}},
 	}
 	gather := func(registry *prometheus.Registry, name string) []*dto.Metric {
 		mfs, err := registry.Gather()
@@ -58,10 +57,6 @@ var _ = Describe("PublishSLO values", func() {
 		Expect(only(registry, constants.WVASLOAttainmentRatio).GetGauge().GetValue()).To(Equal(0.96))
 		Expect(only(registry, constants.WVASLOWindowRequests).GetGauge().GetValue()).To(Equal(300.0))
 		Expect(only(registry, constants.WVASLOPredictedITLSeconds).GetGauge().GetValue()).To(Equal(0.041))
-		Expect(only(registry, constants.WVASLOPrefillSeconds).GetGauge().GetValue()).To(Equal(0.5))
-		Expect(only(registry, constants.WVASLOEngineQueueSeconds).GetGauge().GetValue()).To(Equal(0.25))
-		Expect(only(registry, constants.WVASLOPrefillUtilization).GetGauge().GetValue()).To(Equal(0.7))
-		Expect(only(registry, constants.WVASLOPrefillCeiling).GetGauge().GetValue()).To(Equal(9000.0))
 		fill := only(registry, constants.WVASLOFill)
 		Expect(fill.GetGauge().GetValue()).To(Equal(0.6))
 		Expect(labelOf(fill, constants.LabelObjective)).To(Equal(constants.SLOObjectiveTPOT))
@@ -109,9 +104,7 @@ var _ = Describe("PublishSLO values", func() {
 		PublishSLO(snap, t0)
 		for _, name := range []string{constants.WVASLOTargetSeconds, constants.WVASLOObservedSeconds,
 			constants.WVASLOAttainmentRatio, constants.WVASLOWindowRequests, constants.WVASLOFill,
-			constants.WVASLOPredictedITLSeconds, constants.WVASLOSource, constants.WVASLOExcluded,
-			constants.WVASLOPrefillSeconds, constants.WVASLOEngineQueueSeconds, constants.WVASLOPrefillUtilization,
-			constants.WVASLOPrefillCeiling} {
+			constants.WVASLOPredictedITLSeconds, constants.WVASLOSource, constants.WVASLOExcluded} {
 			ms := gather(registry, name)
 			Expect(ms).NotTo(BeEmpty(), name)
 			for _, m := range ms {

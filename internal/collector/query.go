@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -141,11 +140,7 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// - Shared: avg input tokens, avg output tokens
 	// - Per-request timings: avg ITL, avg service time
 	// - Throughput analyzer: generation token rate, instantaneous KV usage (k*), request rate
-	agnostic := agnosticReplicaQueries
-	if !c.CollectsSLOInputs(namespace) {
-		agnostic = slices.DeleteFunc(slices.Clone(agnostic), func(q string) bool { return slices.Contains(sloInputQueries, q) })
-	}
-	queries := buildEngineQueryList(engines, engineSpecificReplicaQueries, agnostic)
+	queries := buildEngineQueryList(engines, engineSpecificReplicaQueries, agnosticReplicaQueries)
 
 	// Execute the query with timing. refreshShared skips whatever another model
 	// in this namespace already fetched this cycle, so the timing observed here
