@@ -1262,11 +1262,11 @@ per pod.
   - `namespace`: the model's namespace (scraped as `exported_namespace`)
   - `model_name`: model ID
   - `variant_name`: variant name
-- **Use Case**: Watch the contention term a derived service rate rests on. A slope that jumps is a line refitted on different load.
+- **Use Case**: Watch the contention term a derived service rate rests on. The series does not say whose line it is: a slope that jumps can be the variant's own line refitted on different load, or the variant switching between its own line and a borrowed one. `wva_service_rate_per_replica{source="borrowed-line"}` tells the two apart while the borrowed line is the one in use.
 
 ### `wva_itl_line_intercept`
 - **Type**: Gauge
-- **Description**: Intercept B of the same line, in seconds: the inter-token latency at an empty cache, the hardware floor. Absent while the variant has no line.
+- **Description**: Intercept B of the same line, in seconds: the inter-token latency the line predicts at an empty cache. It is not always a fitted hardware floor: when the readings span too little of k for a free fit, the intercept is pinned to a learned or default value and only the slope is fitted, and a free fit on noisy readings can put it below zero. Absent while the variant has no line.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Compare a variant's floor across accelerators; an intercept far from the card's usual figure is a fit on too narrow a range of k.
 
