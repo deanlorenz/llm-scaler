@@ -13,12 +13,12 @@
   reclaim for is a later, opt-in PR-C ([Appendix](#appendix-pr-c)).
 - **Opt-out:** `countBorrowable: false` on the quota entry gives exactly
   today's Kueue cap. Part A still applies.
-- **Status:** proposed, revision 8.
+- **Status:** proposed, revision 9.
 
 Borrowing is experimental but on by default. Where a condition does not hold,
-borrowing is either **withheld** (borrowable 0, the namespace stays at its
-guaranteed figure) or **frozen** (nothing new is borrowed and the last figures
-are kept). Either way the reason is published on `wva_quota_borrow_withheld`.
+borrowing is either **withheld** (borrowable 0, capped at nominal as with
+`countBorrowable: false`) or **frozen** (nothing new is borrowed and the last
+figures are kept). Either way the reason is published on `wva_quota_borrow_withheld`.
 
 This also covers the in-repo part of upstream
 [llm-d WVA #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003)
@@ -70,12 +70,13 @@ This also covers the in-repo part of upstream
 6. **Borrowing needs a GPU bound you declare**: a `gpu-inventory` entry, or a
    GPU `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit`.
    The installer does not add one. Without it the reason is `no-gpu-bound`.
-7. **New read-only RBAC**: `cohorts`, `workloads` (cluster-wide, by informer),
-   `resourcequotas` in managed namespaces, `events`, `batch` Jobs, and a Role in
-   the Kueue namespace to `get` the `kueue-controller-manager` Deployment and
-   its leader Lease. A namespace-scoped install needs an admin to re-run
-   `make setup-prereqs`. **Without the new Role, borrowing freezes**
-   (`kueue-controller-down`).
+7. **New read-only RBAC**: `cohorts`, `workloads` and `localqueues`
+   (cluster-wide, by informer), `resourcequotas` in managed namespaces,
+   `events`, `batch` Jobs, and a Role in the Kueue namespace to `get` the
+   `kueue-controller-manager` Deployment and its leader Lease. A
+   namespace-scoped install needs an admin to re-run `make setup-prereqs`,
+   which grants the cluster-wide read; without it, `lenders-unreadable`.
+   **Without the new Role, borrowing freezes** (`kueue-controller-down`).
 8. **`WVA_LIMITER` accepts a list**, and
    `make disable-limiter WVA_LIMITER_TYPE=gpu-inventory|quota|all` removes one
    kind or all.
@@ -176,7 +177,7 @@ limiters:
 Each namespace shows one reason. When several apply, the first in table order
 wins: withheld, then frozen, then counted but 0.
 
-**Withheld**: borrowable is 0 and the namespace stays at guaranteed.
+**Withheld**: borrowable is 0 and the namespace is capped at its nominal.
 
 | Borrowing needs | Reason when it fails |
 |---|---|
@@ -197,9 +198,8 @@ wins: withheld, then frozen, then counted but 0.
 | No GPU flavor has a `topologyName` | `topology-aware` |
 | No queue has admission checks (including MultiKueue) | `admission-checks` |
 | No queue sets `preemption.borrowWithinCohort` other than `Never` | `borrow-within-cohort` |
-| With more than one flavor for the GPU, every variant pins the flavor's `nodeLabels` | `flavor-unpinned` |
-| With `flavorFungibility.whenCanBorrow` `Borrow` or `MayStopSearch`, every variant pins the flavor's `nodeLabels` | `flavor-unpinned` |
-| Every covered resource's request (CPU, memory, ...) is known from the pod template | `co-resource-bound` |
+| With more than one flavor offering the GPU, every variant pins the flavor's `nodeLabels` | `flavor-unpinned` |
+| Every requested resource (CPU, memory, ...) is known from the pod template, and each resource group covering one has a single flavor | `co-resource-bound` |
 
 **Frozen**: nothing new is borrowed, and the last figures are kept (0 when
 there are none yet). A freeze never shrinks a running model.
@@ -213,7 +213,7 @@ there are none yet). A freeze never shrinks a running model.
 
 | Reason | Meaning |
 |---|---|
-| `lender-cannot-reclaim` | the only unused capacity belongs to lenders Kueue would not reclaim for (B3) |
+| `lender-cannot-reclaim` | the only unused capacity belongs to lenders Kueue would not reclaim for (B3); the namespace stays at guaranteed |
 | `lender-waiting` | a lender waits for capacity it lent; no new borrowing in the cohort (B6) |
 | `cohort-pool-empty` | the free pool holds no GPUs, after what is in flight and gated |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the ResourceQuota stops the namespace at guaranteed |
@@ -224,13 +224,16 @@ there are none yet). A freeze never shrinks a running model.
   queue name or gate is not proof. An unmanaged GPU pod makes the cohort look
   idle while it is not.
 - **Forbidden is never absent.** A missing permission shows as the reason of
-  the read it blocks: Workloads not readable cluster-wide (a tenant install) as
-  `lenders-unreadable`, an owner kind as `not-kueue-managed`, the Deployment or
-  Lease (never found or Forbidden) as `kueue-controller-down`. So a missing
-  Role means `kueue-controller-down`.
+  the read it blocks: Workloads or LocalQueues not readable cluster-wide (a
+  namespace-scoped install without the admin's grant) as `lenders-unreadable`,
+  an owner kind as `not-kueue-managed`, the Deployment or Lease (never found
+  or Forbidden) as `kueue-controller-down`. So a missing Role means
+  `kueue-controller-down`.
 - **`assumeTestedVersion: true`** applies only to a version that cannot be
   read, and does not lift `kueue-controller-down`. The tested versions are the
-  ones the `e2e-tests-kueue-borrow` CI job runs.
+  ones the `e2e-tests-kueue-borrow` CI job runs; a pre-release is untested.
+- **A stale Lease** much older than the Deployment's last rollout (leader
+  election turned off) falls back to the Deployment's ready replicas.
 - **A failed Kueue read.** A Kueue-backed quota entry with a last good read
   freezes at that read (`stale`). An entry never read is skipped as an
   unobserved provider (A4), with `wva_kueue_never_read`; PR-B updates #164's
@@ -246,12 +249,12 @@ All read-only; a cohort name with no Cohort object is a flat cohort.
 | ClusterQueue `borrowingLimit`, `lendingLimit`, `resourceGroups[].coveredResources` | B3 formula, co-resources |
 | ClusterQueue `status.flavorsReservation[].resources[].total`, `.borrowed` | reserved GPUs (Kueue charges at reservation); drift gauge |
 | ClusterQueue `spec.preemption.reclaimWithinCohort`, `.borrowWithinCohort` | which lenders count; `borrow-within-cohort` |
-| ClusterQueue `spec.flavorFungibility.whenCanBorrow`, flavors per resource | `flavor-unpinned` |
+| ClusterQueue flavors offering each resource (not `whenCanBorrow`: Kueue v0.20 defaults it to `MayStopSearch` everywhere) | `flavor-unpinned` |
 | ClusterQueue `spec.admissionChecks`, `status.fairSharing`, `status.effectiveQuotas` | withheld reasons |
 | ResourceFlavor `nodeLabels`, `tolerations`, `topologyName` | node fit per flavor, pinning, `topology-aware` |
-| Workloads, cluster-wide (informer) | managed check, priority, lender requests per flavor, gated demand, preemption |
+| Workloads and LocalQueues, cluster-wide (informer); Finished Workloads ignored | managed check, priority, lender requests per flavor, gated demand, preemption |
 | Namespace `ResourceQuota` `hard`, `used` | GPU bound and ceiling; with several, the tightest |
-| Deployment `kueue-controller-manager` image; its leader Lease | version; liveness |
+| Deployment `kueue-controller-manager` image, ready replicas, last rollout; its leader Lease | version; liveness |
 
 ### B3. How much a queue can reach
 
@@ -271,18 +274,24 @@ cohortFree = max(0, Σ_{m reclaims} L_m − Σ_m max(0, U_m − G_m))
 reach_Q    = min(N_Q + B_Q, max(U_Q, G_Q) + cohortFree)
 ```
 
-- **Only lenders Kueue would reclaim for count.** `Any` reclaims.
-  `LowerPriority` reclaims when the lender's Workloads outrank at least one
-  Workload of the borrowing namespaces (their own priority, not their
-  ClusterQueue's highest). `Never` does not: serving never finishes like a
-  batch job, so that lender would wait indefinitely.
+- **Only lenders Kueue would reclaim for count.** `Any` reclaims. `Never`
+  does not: serving never finishes like a batch job, so that lender would wait
+  indefinitely. `LowerPriority` reclaims for a model only when the lender,
+  judged by its lowest-priority unfinished GPU Workload, strictly outranks the
+  model's own class priority; a template with no class takes its namespace's
+  highest. So such a lender's capacity is offered per model, not per
+  namespace.
 - **Guaranteed.** A queue that can reclaim keeps `N_Q`; its growth up to `N_Q`
-  still debits cohortFree. A queue that cannot has `min(N_Q, max(U_Q, G_Q))`,
-  qualified as `nominal-lent-out` (not a withheld reason). Guaranteed is per
-  ClusterQueue: namespaces sharing a queue share it.
-- **Co-resources.** Every resource the GPU flavor's resource group covers is
-  computed the same way. The reach in replicas is the minimum over them of
-  free capacity divided by the variant's per-replica request.
+  still debits cohortFree. Its growth into nominal it lent out needs no node
+  hole, counted or not, in steady state and on wake: the borrowers hold those
+  GPUs, and the new pod is what makes Kueue preempt them. A queue that cannot
+  reclaim has `min(N_Q, max(U_Q, G_Q))`, qualified as `nominal-lent-out` (not
+  a withheld reason). Guaranteed is per ClusterQueue: namespaces sharing a
+  queue share it.
+- **Co-resources.** Every resource group covering a requested resource is
+  computed the same way, capped at nominal plus `borrowingLimit`. The reach in
+  replicas is the minimum over them of free capacity divided by the variant's
+  per-replica request; guaranteed replicas are checked too.
 - The static entry and the namespace ResourceQuota cap the reach further.
 
 ### B4. Where borrowed capacity is spent
@@ -293,14 +302,19 @@ reach_Q    = min(N_Q + B_Q, max(U_Q, G_Q) + cohortFree)
   fit the closed cluster bounds and a node (A5).
 - **A P/D pair borrows only whole**, both roles borrowed. A reclaimed decode
   would leave a guaranteed prefill serving nothing. Kueue admits each role on
-  its own; the placement timeout releases a half left alone.
+  its own; the placement timeout releases a half left alone. An odd
+  guaranteed remainder is filled by one role alone, and the next pair borrows
+  whole. A refusal that remains is `pd-pair-borrows-whole`, not scarcity.
 - **Scale-from-zero, the warm pool and rescale use within nominal**, never
   borrowed: a model woken onto borrowed GPUs can be preempted before it
   serves. Not guaranteed alone either: under Kueue's default `Never`, an idle
   queue's guaranteed is 0. A wake blocked because nominal is lent to a peer
   that need not give it back reports `nominal-lent-out` instead of waking into
   a gated pod. A model whose within-nominal capacity is used cannot wake, even
-  with idle lenders.
+  with idle lenders. This holds for namespaces read but not counted too. The
+  wake deducts borrowing in flight, gated GPUs, GPUs admitted but not yet
+  seen by a read, and cohorts closed to new borrowing; one borrow record
+  serves both engines.
 - **The utilization-share optimizer** keeps borrowed GPUs a group holds, as no
   debt, and starts no new borrowing.
 - **Several controllers in one cohort.** Gated demand is counted from every
@@ -334,7 +348,8 @@ allowed flavors are unknown it counts on all of them.
 - **Backoff.** After a preemption or a placement-timeout release, the model
   borrows nothing new in that cohort for `borrowCooldown` (default 10
   minutes). A repeat doubles it, up to 4 times (cap 40 minutes); one clean
-  cooldown resets it.
+  cooldown resets it. A placement-timeout release during a preemption's
+  cooldown is the same event.
 - **Serving under preemption** has prerequisites; they are in the
   [Kueue path](../well-lit-paths/kueue-bounded-quotas/).
 
@@ -355,13 +370,15 @@ guaranteed, or demand fell. Read these first:
 | Alert | Fires when |
 |---|---|
 | `WVAConstraintProviderSkipped` | a declared limiter is skipped |
-| `WVAKueueReaderStale` | the Kueue reader is stale for 5 minutes |
+| `WVAKueueReaderStale` | a namespace's borrowing is `stale` for 5 minutes, per namespace |
+| `WVAKueueControllerDown` | borrowing is frozen as `kueue-controller-down` for 5 minutes (warning) |
 | `WVAKueueNeverRead` | a Kueue entry with a static `-1` has never read Kueue, for 10 minutes |
-| `WVAKueueVersionUnknown` | `wva_kueue_controller_version_known` is 0 |
+| `WVAKueueVersionUnknown` | `wva_kueue_controller_version_known` (version read, or `assumeTestedVersion`; published only while some entry counts borrowing) is 0 |
+| `WVAKueueVersionUntested` | borrowing is withheld as `kueue-version-untested` for 30 minutes (info) |
 | `WVAKueueBorrowDrift` | computed borrowed differs from Kueue's for 15 minutes (warning) |
 | `WVAKueueLenderWaitingPastCooldown` | a lender waits past `wva_kueue_borrow_cooldown_seconds` while this controller borrows |
 | `WVAKueuePodsUnplaced` | managed pods unplaced past the placement timeout |
-| `WVAKueueBorrowThrashing` | more than 3 releases plus preemptions per model per hour |
+| `WVAKueueBorrowThrashing` | more than 3.5 loss events (releases plus preemptions; a pair or group is one) per model per hour; series start at 0 |
 
 **Never-read is not fail-closed.** The other limiters still bound, and Kueue
 still gates pods past its quota, so the cost is churn of gated pods, not GPUs
