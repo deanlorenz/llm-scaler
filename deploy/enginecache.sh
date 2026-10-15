@@ -146,8 +146,11 @@
 # ENGINE_CACHE_UID=<uid> in the environment when the engines run as another
 # UID than the one that owns the key (a seeded node: the preparer copied it
 # as root). A file that UID cannot read (or a directory it cannot read and
-# search) is reported unreadable, naming the UID. vLLM's AOT files are 600,
-# which is fine for the engine that owns them. It checks the
+# search, under the key or on the way to it) is reported unreadable, naming
+# the UID. vLLM's AOT files are 600, which is fine for the engine that owns
+# them. A seeded or published key is owned by root, so without
+# ENGINE_CACHE_UID it is judged for root: every line names the UID it was
+# judged for, and the summary warns and says "VERIFIED for root". It checks the
 # torch.compile cache only: the flashinfer/ and triton/ directories beside
 # vllm/ are not read.
 #
@@ -1043,15 +1046,17 @@ cmd_keys() {
 # verify_script runs inside a preparer pod (kubectl exec, no GPU) as
 # `sh -c SCRIPT sh ROOT SPEC...`, each SPEC a KEY[@RANK[+RANK...]]: per
 # spec, one line "ecv <result> <spec> [detail]" -- present (with the file
-# count), absent (with the rank directories missing, when ranks were named),
-# empty, unreadable ("read PATH" for a file the read failed on, "mode UID
-# PATH" for one the engine's UID could not read, "link PATH" for a symbolic
-# link), or unchecked (no find, no find -user, or no owner to read the modes
-# with). Every file is read in full, so a directory listed but unreadable is
-# not called present. The read runs as the preparer's user, root on
-# Kubernetes, which reads any file; so the modes are read too, for the
-# engine's UID: ENGINE_CACHE_UID when set (the script's first line, euid=),
-# else the owner of the key directory -- the engine that wrote the key. vLLM
+# count and the UID the modes were read for), absent (with the rank
+# directories missing, when ranks were named), empty, unreadable ("read
+# PATH" for a file the read failed on, "mode UID PATH" for one the engine's
+# UID could not read, the key's parent directories included, "link PATH" for
+# a symbolic link), or unchecked (no find, a find that rejects the mode
+# check, or no owner to read the modes with). Every file is read in full,
+# so a directory listed but unreadable is not called present. The read runs
+# as the preparer's user, root on Kubernetes, which reads any file; so the
+# modes are read too, for the engine's UID: ENGINE_CACHE_UID when set (the
+# script's first line, euid=), else the owner of the key directory -- the
+# engine that wrote the key, or root for a seeded or published copy. vLLM
 # writes its AOT files 600 (measured, v0.31.0): readable by the engine that
 # owns them, and by no other UID. vLLM writes no symbolic link, so one anywhere under the
 # key, or as a directory on the way to it, is unreadable and never followed:
@@ -1085,29 +1090,51 @@ linked() {
     if [ -L "$p" ]; then echo "$p"; return; fi
   done
 }
-# private prints "UID PATH" for the first file under the key directory $1
-# that UID cannot read, or directory it cannot read and search -- UID being
-# $euid when set, else the owner of $1, the engine that wrote the key. A
-# file owned by UID needs u+r; one in the key directory's group, g+r; any
-# other, o+r (directories: r and x likewise). With $euid the UID's groups
-# are not known, so only u and o count. "? WHY" when the modes or the owner
-# cannot be read.
+# private ROOT KEY prints "ok UID" when UID can read every file under the
+# key directory ROOT/KEY and read and search every directory from ROOT down
+# to it and under it, else "no UID PATH" for the first one it cannot -- UID
+# being $euid when set, else the owner of the key directory, the engine
+# that wrote the key (root, for a seeded or published copy). A path owned by
+# UID needs u+r; one in the key directory's group, g+r (the engine is taken
+# to be in that group); any other, o+r (directories: r and x likewise). With
+# $euid the UID's groups are not known, so only u and o count. "? WHY" when
+# the modes or the owner cannot be read -- including a find that rejects any
+# part of the expression, probed whole before it is trusted: an expression
+# find refuses prints nothing, which would read as "every file readable".
 private() {
-  local o u g f
+  local root="$1" d="$1/$2" rest="$2" a c o u g f miss
   command -v find > /dev/null 2>&1 || { echo "? no-find"; return; }
-  o="$(ls -nd "$1" 2> /dev/null | awk '{ print $3, $4 }')"
+  o="$(ls -nd "$d" 2> /dev/null | awk '{ print $3, $4 }')"
   if [ -n "$euid" ]; then u="$euid"; g=""; else u="${o%% *}"; g="${o#* }"; fi
   case "$u" in ""|*[!0-9]*) echo "? no-owner"; return ;; esac
   case "$g" in *[!0-9]*) echo "? no-owner"; return ;; esac
-  find "$1" -prune -user "$u" > /dev/null 2>&1 || { echo "? no-find-user"; return; }
   if [ -n "$g" ]; then
-    f="$(find "$1" \( -type f \( \( -user "$u" ! -perm -400 \) -o \( ! -user "$u" -group "$g" ! -perm -040 \) -o \( ! -user "$u" ! -group "$g" ! -perm -004 \) \) \) \
-      -o \( -type d \( \( -user "$u" ! -perm -500 \) -o \( ! -user "$u" -group "$g" ! -perm -050 \) -o \( ! -user "$u" ! -group "$g" ! -perm -005 \) \) \) 2> /dev/null | head -n 1)"
+    set -- \( -type f \( \( -user "$u" ! -perm -400 \) -o \( ! -user "$u" -group "$g" ! -perm -040 \) -o \( ! -user "$u" ! -group "$g" ! -perm -004 \) \) \) \
+      -o \( -type d \( \( -user "$u" ! -perm -500 \) -o \( ! -user "$u" -group "$g" ! -perm -050 \) -o \( ! -user "$u" ! -group "$g" ! -perm -005 \) \) \)
   else
-    f="$(find "$1" \( -type f \( \( -user "$u" ! -perm -400 \) -o \( ! -user "$u" ! -perm -004 \) \) \) \
-      -o \( -type d \( \( -user "$u" ! -perm -500 \) -o \( ! -user "$u" ! -perm -005 \) \) \) 2> /dev/null | head -n 1)"
+    set -- \( -type f \( \( -user "$u" ! -perm -400 \) -o \( ! -user "$u" ! -perm -004 \) \) \) \
+      -o \( -type d \( \( -user "$u" ! -perm -500 \) -o \( ! -user "$u" ! -perm -005 \) \) \)
   fi
-  [ -z "$f" ] || echo "$u $f"
+  if ! find "$d" -prune \( "$@" \) > /dev/null 2>&1; then
+    miss=""
+    find "$d" -prune -user "$u" > /dev/null 2>&1 || miss="$miss -user"
+    [ -z "$g" ] || find "$d" -prune -group "$g" > /dev/null 2>&1 || miss="$miss -group"
+    find "$d" -prune -perm -400 > /dev/null 2>&1 || miss="$miss -perm"
+    echo "? no-find-modes$miss"; return
+  fi
+  # the directories on the way: the cache root, then each component of KEY
+  a="$root"
+  while :; do
+    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    [ -z "$f" ] || { echo "no $u $f"; return; }
+    [ -n "$rest" ] || break
+    c="${rest%%/*}"
+    if [ "$c" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    a="$a/$c"
+    [ -n "$rest" ] || break
+  done
+  f="$(find "$d" \( "$@" \) 2> /dev/null | head -n 1)"
+  if [ -n "$f" ]; then echo "no $u $f"; else echo "ok $u"; fi
 }
 hasfile() {
   local e
@@ -1138,11 +1165,12 @@ for s in "$@"; do
   elif [ -n "$missing" ]; then echo "ecv absent $s $missing"
   elif [ -z "$files" ]; then echo "ecv empty $s"
   else
-    p="$(private "$d")"
+    p="$(private "$root" "$k")"
     case "$p" in
       "? "*) echo "ecv unchecked $s ${p#"? "}" ;;
-      "") echo "ecv present $s ${#files}" ;;
-      *) pu="${p%% *}"; pf="${p#* }"; echo "ecv unreadable $s mode $pu ${pf#"$root"/}" ;;
+      "ok "*) echo "ecv present $s ${#files} ${p#ok }" ;;
+      "no "*) p="${p#no }"; pu="${p%% *}"; pf="${p#* }"; echo "ecv unreadable $s mode $pu ${pf#"$root"/}" ;;
+      *) echo "ecv unchecked $s no-answer" ;;
     esac
   fi
 done
@@ -1203,8 +1231,8 @@ cmd_verify() {
     fi
     printf '  %-28s %-20s %s\n' NODE RESULT KEY
     accelerator_print_excluded "$EC_EXCLUDED"
-    local present=0 absent=0 unreadable=0 unchecked=0 nodes=0
-    local node pod ready phase out xrc why line result detail
+    local present=0 absent=0 unreadable=0 unchecked=0 nodes=0 rootkeys=0
+    local node pod ready phase out xrc why line result detail vuid
     while IFS=$'\x1f' read -r node pod ready phase; do
         nodes=$((nodes + 1))
         if [ "$ready" != yes ]; then
@@ -1234,7 +1262,13 @@ cmd_verify() {
             result="${line%% *}"; detail=""
             case "$line" in *" "*) detail="${line#* }" ;; esac
             case "$result" in
-                present) printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail} files)"; present=$((present + 1)) ;;
+                present)
+                    # detail: FILES UID -- the UID the modes were read for
+                    vuid="${detail#* }"; detail="${detail%% *}"
+                    if [ -n "$ENGINE_UID" ]; then detail="${detail} files; for uid ${vuid}, ENGINE_CACHE_UID"
+                    else detail="${detail} files; for uid ${vuid}, the key directory's owner"
+                        [ "$vuid" != 0 ] || rootkeys=$((rootkeys + 1)); fi
+                    printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail})"; present=$((present + 1)) ;;
                 absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k${detail:+  (rank directory missing or empty: ${detail})}"; absent=$((absent + 1)) ;;
                 empty) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k  (an empty directory)"; absent=$((absent + 1)) ;;
                 unreadable)
@@ -1242,16 +1276,19 @@ cmd_verify() {
                         "read "*) detail="${detail#read }: cannot be read" ;;
                         "mode "*) detail="${detail#mode }"
                             if [ -n "$ENGINE_UID" ]; then detail="${detail#* }: not readable by uid ${detail%% *} (ENGINE_CACHE_UID)"
-                            else detail="${detail#* }: not readable by uid ${detail%% *}, the owner of the key directory (taken as the engine's UID; ENGINE_CACHE_UID names another)"; fi ;;
+                            else [ "${detail%% *}" != 0 ] || rootkeys=$((rootkeys + 1))
+                                detail="${detail#* }: not readable by uid ${detail%% *}, the owner of the key directory (taken as the engine's UID; ENGINE_CACHE_UID names another)"; fi ;;
                         "link "*) detail="${detail#link }: a symlink under the cache; vLLM writes none" ;;
                         not-a-directory) detail="not a directory" ;;
                     esac
                     printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
                 unchecked)
                     case "$detail" in
-                        no-find-user) detail="the preparer image's find takes no -user to read file owners with" ;;
-                        no-owner) detail="the owner of the key directory could not be read (ls -n)" ;;
-                        *) detail="the preparer image has no find to read file modes with" ;;
+                        no-find-modes*) detail="${detail#no-find-modes}"
+                            detail="the preparer image's find cannot run the mode check${detail:+ (it takes no${detail})}" ;;
+                        no-owner) detail="the owner of the key directory could not be read (the preparer image needs ls -n and awk)" ;;
+                        no-find) detail="the preparer image has no find to read file modes with" ;;
+                        *) detail="no mode check answer from the preparer" ;;
                     esac
                     printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k  (${detail})"; unchecked=$((unchecked + 1)) ;;
                 *) printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k"; unchecked=$((unchecked + 1))
@@ -1273,11 +1310,22 @@ cmd_verify() {
     rm -f "$pods_file" "$err_file"
     local total=$((nodes * ${#keys[@]}))
     echo "  ${nodes} usable node(s) x ${#keys[@]} key(s): ${present} present, ${absent} absent, ${unreadable} unreadable, ${unchecked} could not check"
+    # A key owned by root was copied there by the preparer (a seed merge or a
+    # publish) or written by a root engine; read for its owner, it passes
+    # whatever user the engines really run as. Say so.
+    if [ "$rootkeys" -gt 0 ]; then
+        echo "  WARNING: ${rootkeys} key(s) checked are owned by root (a seeded or published copy, or a root engine), so the check assumed the engines run as root."
+        echo "  If your engines run as another user, run again with ENGINE_CACHE_UID=\$(kubectl exec -n ${NAMESPACE} <engine pod> -- id -u)"
+    fi
     if [ "$present" -ne "$total" ] || [ "$total" -eq 0 ]; then
         echo "  NOT VERIFIED: a start on a node above that lacks a key compiles, or a node could not be checked"
         return 1
     fi
-    echo "  VERIFIED: every key is on every usable node"
+    if [ "$rootkeys" -gt 0 ]; then
+        echo "  VERIFIED for root: every key is on every usable node, readable by root -- not checked for any other user (see the warning above)"
+    else
+        echo "  VERIFIED: every key is on every usable node"
+    fi
 }
 
 CMD="${1:-}"

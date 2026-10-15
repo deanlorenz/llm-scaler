@@ -528,6 +528,13 @@ make engine-cache-keys NAMESPACE=<ns> ENGINE_CACHE_PODS='<decode pod> <prefill p
 make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>...]'
 ```
 
+If your engines do not run as root and any node was seeded or published to,
+add `ENGINE_CACHE_UID=$(kubectl exec -n <ns> <engine pod> -- id -u)`.
+Without it, a seeded key is judged for root and passes even when your engines
+cannot read it. The UID is also the pod's `securityContext.runAsUser` (or the
+container's), when set. `ENGINE_CACHE_UID` is one UID for every pod: if prefill
+and decode run as different users, run the check once for each.
+
 Pass the keys exactly as `engine-cache-keys` prints them, for example
 `torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
 the rank directories the engine wrote. Each one must be on the node.
@@ -542,15 +549,21 @@ leader pod, the check covers only the leader's ranks.
 `engine-cache-verify` prints one line per node and key:
 
 - `present`: the key is there, with every listed rank, and every file under it
-  can be read.
+  is readable by the UID the check assumed. The line names that UID.
 - `ABSENT`: the key, or one of its ranks, is not on the node. The line names a
   missing rank. It means: if that rank starts on this node, it recompiles
   torch.compile. On a multi-node engine, a node often lacks ranks that never
   run there; publish to fill them in.
 - `UNREADABLE`: a file under the key cannot be read, the engine's user could
-  not read it (the line names that UID), or it is a symbolic link.
+  not read it or a directory on the way to it (the line names that UID), or it
+  is a symbolic link.
 - `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
   Forbidden, or timed out. This is never reported as absent.
+
+When `ENGINE_CACHE_UID` is not set and a key is owned by root (a seeded or
+published copy, or a root engine), the summary warns and the last line says
+`VERIFIED for root`. That still exits zero: re-run with `ENGINE_CACHE_UID` to
+check your engines' user.
 
 It exits non-zero unless every key is present on every node. It needs
 `pods/exec` in the namespace, plus the node list `engine-cache-status` needs.
@@ -585,13 +598,17 @@ engine's user:
 - By default the engine's user is the owner of the key directory: the engine
   that wrote the key. A file it owns needs owner read. A file owned by
   another user needs group read if it is in the key directory's group, and
-  read for others if not. Directories need read and search the same way.
+  read for others if not. The check assumes the engine is in the key
+  directory's group. Directories need read and search the same way, both
+  under the key and on the way to it, from the cache root down.
 - vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
   fine when the engine owns them, which it does when it wrote them. They are
   `present`.
+- A seeded or published key is owned by root: the preparer copied it there as
+  root, keeping the modes. By default it is judged for root, which can read
+  it, so it is `present (... for uid 0, ...)` and the summary warns.
 - Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
-  the one that owns the keys. A seeded node is the usual case: the preparer
-  copied the keys there as root. The check then reads the permissions for
+  the one that owns the keys. The check then reads the permissions for
   that UID: owner read if it owns the file, read for others if not. Its
   groups are not known, so group permissions are not counted.
 
@@ -607,8 +624,20 @@ the way to it, is `UNREADABLE` and is never followed.
 the engine compiled again. It warns instead.
 
 The read stops after 300 seconds, and after 280 inside the pod when its
-image has `timeout`. The image needs `find` (with `-user`) and `ls` to read
-file modes and owners; without them every key is `COULD NOT CHECK`.
+image has `timeout`. The image needs `find` (with `-user`, `-group` and
+`-perm`), `ls` and `awk` to read file modes and owners; without them every
+key is `COULD NOT CHECK`, and the line names what is missing.
+
+What the mode check cannot see:
+
+- The engine's other groups are not known. A file in one of them with read
+  for others but not for the group (mode `604`) is `present`, though the
+  engine cannot read it. Under `ENGINE_CACHE_UID` no group is known at all.
+- A setgid key directory gives its files its group. If the engine is not in
+  that group, a `640` file there is `present` and still unreadable.
+- ACLs are not read: only the mode bits are.
+- An engine running as root with `CAP_DAC_OVERRIDE` reads any file, whatever
+  the modes say.
 
 </details>
 
