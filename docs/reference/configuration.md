@@ -545,35 +545,92 @@ What is restored, and what is not:
 
 - a variant's measured capacity, saturated throughput and replica start
   estimate are restored **if it runs the same engine arguments** as when they
-  were learned, read completely: a deployment whose flags come from a
-  variable the controller cannot resolve restores nothing, because a changed
-  value would look identical. A new engine image with the same arguments
+  were learned. A deployment whose flags come from a variable the controller
+  cannot resolve gets back only its measured capacity and saturated
+  throughput (see below): a changed value would look identical, so its start
+  estimate and ITL baseline are not restored. A new engine image with the same arguments
   keeps them; only the ITL baseline, a latency figure, needs the same image
   too;
 - a variant whose arguments changed while the controller was down restores
   only its old measured capacity, and only as a **lower-only, expiring
-  prior**: it is used where it is below what the variant would otherwise be
-  priced at, for 30 minutes at full strength, then relaxes to the variant's
-  own figure over 6 hours -- the same rule as a capacity borrowed from a
-  sibling. The 30 minutes start when an output-length bucket first uses it,
-  not at the restart; a prior no bucket uses goes after the bucket retention.
-  The prior is written back with its clock, so another restart inside those
-  hours resumes it. Nothing else is restored for it;
+  figure** (`P2-prior` in the [cycle log](cycle-log.md)): it is used where it
+  is below what the variant would otherwise be priced at, for 30 minutes of
+  serving at full strength, then relaxes to the variant's own figure over 6
+  hours of serving -- the same rule as a capacity borrowed from a sibling.
+  The 30 minutes start when an output-length bucket first uses it, not at the
+  restart; one no bucket uses goes after the bucket retention. It is written
+  back with its clock, so another restart inside those hours resumes it.
+  Nothing else is restored for it, except a saturated throughput measured
+  under the arguments it runs now. The same happens without a restart: a
+  rollout that changes the arguments while the controller runs turns the old
+  capacity into the same lower-only figure, and the old saturated throughput
+  is no longer read. A change of arguments restarts the 30 minutes. The
+  figure is the one measured last, under the arguments just left, and a
+  later change replaces it; it goes a bucket retention after it was last used;
+- a **rollback** to engine arguments a variant ran before gets back the
+  capacity and saturated throughput it measured under them, as its own, for
+  as long as they would have been retained (the bucket retention), across a
+  restart too. While any rollout is in progress -- an image-only one too --
+  nothing new is measured (`P1-obs-rollout` in the cycle log): a reading may
+  come from an old pod. The fleet is priced from what the variant already
+  holds, so a rollout that lowers capacity is priced on the figure from
+  before it until the new pods saturate after it ends. A replica that is
+  saturated below that figure is priced at its reading for that cycle only
+  (`P1-obs-unadmitted`), and nothing is kept of it -- so a bucket with no
+  figure at all is not priced at k1 while it shows full. A lower-only figure
+  from a change of arguments waits for the rollout, and its 30 minutes start
+  when the rollout ends, however long it stalled. A LeaderWorkerSet held
+  part way by a partition learns nothing until it is let through. An undo or a restart in mid-rollout is a rollout
+  like any other. A LeaderWorkerSet scale-up is not a rollout; a template
+  change its controller has not acted on yet is not seen as one until a
+  group has moved;
+- across a change of arguments the old saturated throughput still holds the
+  throughput floor -- it may hold the fleet, never grow it -- until the new
+  arguments measure their own, for at most 6.5 hours of serving;
+- a variant whose engine configuration was not read completely (flags from an
+  `envFrom`) gets its own figures back after a restart if it runs the same
+  unread configuration, and lower-only figures otherwise;
+- each measured capacity and throughput is checked against the arguments it
+  was itself measured under, not only the variant's: one measured before a
+  rollout the controller saw, and written after it, is restored as the old
+  arguments' figure, so it too is only a lower-only figure;
 - a parallel size computed when the pod starts -- llm-d's wide-EP
   LeaderWorkerSet passes `--data-parallel-size $((LWS_GROUP_SIZE *
   DP_SIZE_LOCAL))` -- does not stop a variant restoring its own state: the
   expression is compared as written. It only keeps the variant from sharing a
   latency line with another (`wva_engine_config`'s `sharing_unresolved`);
 - the first restart after an upgrade that changes how the configuration is
-  identified (the `fingerprint_version` label of `wva_engine_config`) starts
-  every variant cold once;
+  identified (the `fingerprint_version` label of `wva_engine_config`), or
+  from a release that did not record the engine arguments, restores each
+  variant's measured capacity only as that lower-only figure
+  (`restores_total{outcome="differs"}`, or `"prior"`, and `P2-prior` in the
+  cycle log); its saturated throughput, start time and latency baseline are
+  not restored, as for any change of arguments;
+- **rolling the controller back** to a release from before these records
+  starts every variant cold once: that release identifies configurations
+  differently, so it restores nothing, and it rewrites the document in its own
+  format. Upgrading again restores what it wrote as lower-only figures. The
+  exception is a variant's previous lower-only figure, which is also written
+  in the form the release before this one reads, so a rollback to it keeps
+  that figure. The
+  document keeps one key across releases on purpose: under a new key, the
+  older release would read the document it wrote before the upgrade and
+  install figures days stale as its own;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
-- a figure the new controller has already measured is never replaced.
+- a figure the new controller has already measured is never replaced;
+- a k2 borrow keeps its place across the restart: a borrow that has worn off
+  stays off, and the time the controller was down is not counted beyond a
+  few minutes' allowance for a missed cycle. This holds for a variant whose
+  engine configuration was not read completely too: a borrow can only make a
+  variant more conservative, for a bounded time, so it is restored without
+  the configuration check;
+- a variant forgotten on request (the `llm-d.ai/forget-learned-state`
+  annotation) stays forgotten, and the annotation is not acted on again.
 
 The log line `Learned state: snapshot restored` says how many variants are
-pending their first cycle; `learned state restored` or `learned state not
-restored` follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
+pending their first cycle; a `learned state restored` line (or, with nothing
+to keep, `learned state not restored`) follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
 `make setup-prereqs` installs; an install upgraded from before the store existed
 reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for

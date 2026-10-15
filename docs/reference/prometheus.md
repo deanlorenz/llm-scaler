@@ -459,13 +459,13 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_k2_source`
 - **Type**: Gauge
-- **Description**: 1 for the source of the k2 a variant is priced on, named as the [cycle log](cycle-log.md) names it: `P1-obs` (measured this cycle), `P2-hist` (the variant's own earlier measurement), `P2-borrow` (a sibling's measurement), `P3-k2` (derived from the engine flags) or `P4-k1` (no k2: the KV cache, or the stored capacity estimate for an engine that publishes no cache configuration). It reads `k1-bound` when the k2, from whichever source, is at or above k1: the KV cache prices the replica, and `analyzer-result`'s `reason` still names the k2's source. Taken from the lower-median replica by capacity, the one `reason` names; with an even replica count the price averages the central pair, and this is the lower of the two. One series per variant. Absent when no replica of the variant reported this cycle.
+- **Description**: 1 for the source of the k2 a variant is priced on, named as the [cycle log](cycle-log.md) names it: `P1-obs` (measured this cycle), `P2-hist` (the variant's own earlier measurement), `P2-borrow` (a sibling's measurement), `P2-prior` (the variant's own measurement under engine arguments it no longer runs), `P3-k2` (derived from the engine flags), `P4-k1` (no k2: the KV cache, or the stored capacity estimate for an engine that publishes no cache configuration) or `P1-obs-unadmitted` (a saturated warm-pool bridge or Pod that is not Ready, priced at its reading for one cycle where that is lower, and never recorded). It reads `k1-bound` when the k2, from whichever source, is at or above k1: the KV cache prices the replica, and `analyzer-result`'s `reason` still names the k2's source. Taken from the lower-median replica by capacity, the one `reason` names; with an even replica count the price averages the central pair, and this is the lower of the two. One series per variant. Absent when no replica of the variant reported this cycle.
 - **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`, `role`, `source`.
 - **Use Case**: Answers "is this variant priced on a measurement, and whose?" `P3-k2` and `P4-k1` mean nothing has been measured for the output length being served.
 
 ### `wva_learned_state_k2_age_seconds`
 - **Type**: Gauge
-- **Description**: Seconds since the k2 a variant is priced on was last measured: the variant's own window for `P1-obs` and `P2-hist`, the donor's for `P2-borrow`. It is the age of the measurement, not of its last use: a figure in use every cycle is read every cycle and still ages. Absent for `P3-k2`, `P4-k1` and `k1-bound`, where no measured k2 prices the replica. Like the other analyzer series, it is deleted on a cycle in which no replica of the model reported, and keeps its last value through a cycle whose collection or analysis failed -- so during a long collection outage it stops growing, and an alert on it does not fire; `WVAMetricsCollectionFailing` reports that outage instead.
+- **Description**: Seconds since the k2 a variant is priced on was last measured: the variant's own window for `P1-obs` and `P2-hist`, the donor's for `P2-borrow`, and the window the earlier measurement came from for `P2-prior`. It is the age of the measurement, not of its last use: a figure in use every cycle is read every cycle and still ages. Absent for `P3-k2`, `P4-k1`, `P1-obs-unadmitted` and `k1-bound`, where no measured k2 prices the replica. Like the other analyzer series, it is deleted on a cycle in which no replica of the model reported, and keeps its last value through a cycle whose collection or analysis failed -- so during a long collection outage it stops growing, and an alert on it does not fire; `WVAMetricsCollectionFailing` reports that outage instead.
 - **Labels**: as `wva_learned_state_k2_source`.
 - **Use Case**: A k2 is only ever measured while a replica is saturated, and a low k2 orders enough replicas that none saturates again -- so a too-low figure can price a fleet for weeks without anything correcting it. An old `P2-hist` at a large fleet is that case:
   ```promql
@@ -477,9 +477,14 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_restores_total`
 - **Type**: Counter
-- **Description**: Variants whose learned state was restored from the snapshot after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.
-- **Labels**: `outcome`: `installed`, or `rejected` -- the variant's engine configuration differs from the one the state was learned under, or could not be read completely. Both are published at 0 from startup.
-- **Use Case**: After a restart, `rejected` well above `installed` means the snapshot was mostly not used -- a rollout during the downtime, flags the controller cannot resolve, or an upgrade that changed how configurations are identified ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
+- **Description**: Variants whose restored learned state was checked against their engine configuration after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.
+- **Labels**: `outcome`, each published at 0 from startup:
+  - `whole`: the configuration matched; everything was restored;
+  - `args`: the arguments matched on another engine image; everything but the ITL baseline was restored;
+  - `prior`: the arguments differed; only the measured capacity was kept, as a lower-only figure (`P2-prior`);
+  - `incomplete`: the configuration could not be read completely; nothing was restored;
+  - `differs`: a snapshot from an older release whose configuration differs; nothing was restored.
+- **Use Case**: After a restart, `incomplete` or `differs` well above `whole` and `args` means the snapshot was mostly not used -- flags the controller cannot resolve, or an upgrade that changed how configurations are identified. Many `prior` means many rollouts while the controller was down ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
 
 ### `wva_learned_state_snapshot_errors_total`
 - **Type**: Counter
