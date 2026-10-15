@@ -48,13 +48,13 @@ func TestResetUnusableFieldsClearsNonFiniteNumbers(t *testing.T) {
 	up, down := 0.9, 0.6
 	finite := ScalingPolicy{
 		Priority: 5, KvCacheThreshold: 0.8, QueueLengthThreshold: 5, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.7,
-		Analyzers: []AnalyzerScoreConfig{{Name: "saturation", Score: 1e9, ScaleUpThreshold: &up, ScaleDownBoundary: &down}},
+		Analyzers: []AnalyzerScoreConfig{{Name: "saturation", Score: MaxPrecedence, ScaleUpThreshold: &up, ScaleDownBoundary: &down}},
 	}
 	before := finite
 	if ignored := finite.ResetUnusableFields(); len(ignored) != 0 {
 		t.Errorf("finite values reported as unusable: %+v", ignored)
 	}
-	if finite.Priority != before.Priority || finite.Analyzers[0].Score != 1e9 || *finite.Analyzers[0].ScaleUpThreshold != 0.9 {
+	if finite.Priority != before.Priority || finite.Analyzers[0].Score != MaxPrecedence || *finite.Analyzers[0].ScaleUpThreshold != 0.9 {
 		t.Errorf("finite values changed: %+v", finite)
 	}
 }

@@ -190,6 +190,12 @@ type modelWork struct {
 	limited   gpuLimitTracker      // variants the GPU budget cut short (see applyGPULimitAttribution)
 }
 
+// maxShareWeight bounds a model's weight in the fair share and in rescale, so
+// a sum of weights over any number of models stays finite. Configuration
+// already bounds priority and score (config.MaxPrecedence); this covers a
+// policy built in code, and a demand large enough to overflow the product.
+const maxShareWeight = 1e300
+
 // fairShareValue computes the fair-share priority metric for one model.
 // Phase 3: reads picker-local role-remaining (Score × Σ_role pickerState[role])
 // so the metric reflects actual per-role demand remaining rather than the
@@ -205,7 +211,9 @@ func fairShareValue(priority float64, e NamedAnalyzerResult, ps RolePairedState,
 			roleSum += ps[role]
 		}
 		if fsv := priority * roleSum * e.Score; fsv > 0 {
-			return fsv
+			// Bounded, so the mean across models stays finite: an infinite
+			// value made the model's target Inf - Inf = NaN and it got nothing.
+			return min(fsv, maxShareWeight)
 		}
 	}
 	// Fallback: max remaining demand across roles when Score=0 or priority=0.

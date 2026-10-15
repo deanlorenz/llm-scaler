@@ -795,6 +795,17 @@ func TruncateIgnoredValue(v string) string {
 // number.
 var errNotFinite = errors.New("must be a finite number")
 
+// MaxPrecedence is the largest priority or analyzer score a policy may set. A
+// priority of 5 already gives strict precedence under a GPU limiter, so the
+// bound loses nothing, and it keeps priority x score x demand finite: a
+// priority of 1e308 overflowed it to +Inf, and with rescale on the NaN share
+// that followed corrupted the GPU target of every model in the budget.
+const MaxPrecedence = 1e6
+
+// errAboveMaxPrecedence is the reason ResetUnusableFields gives for a priority
+// or score above MaxPrecedence.
+var errAboveMaxPrecedence = fmt.Errorf("must be at most %g", float64(MaxPrecedence))
+
 // isNonFinite reports whether v is NaN or infinite.
 func isNonFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
 
@@ -841,6 +852,7 @@ func (f IgnoredField) String() string {
 //     replicas away from other models (#171).
 //   - An analyzer score below zero, which AnalyzerScore read as 1 without a
 //     word.
+//   - A priority or analyzer score above MaxPrecedence.
 func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 	var ignored []IgnoredField
 	notFinite := func(field string, v float64) {
@@ -861,6 +873,15 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 		}
 	}
 	nonFinite("priority", &c.Priority)
+	aboveMax := func(field string, v *float64) {
+		if *v > MaxPrecedence {
+			ignored = append(ignored, IgnoredField{
+				Field: field, Value: strconv.FormatFloat(*v, 'g', -1, 64), Reason: errAboveMaxPrecedence,
+			})
+			*v = 0
+		}
+	}
+	aboveMax("priority", &c.Priority)
 	nonFinite("kvCacheThreshold", &c.KvCacheThreshold)
 	nonFinite("queueLengthThreshold", &c.QueueLengthThreshold)
 	nonFinite("scaleUpThreshold", &c.ScaleUpThreshold)
@@ -875,6 +896,7 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 			})
 			a.Score = 0
 		}
+		aboveMax(at+"score", &a.Score)
 		nonFinitePtr(at+"scaleUpThreshold", &a.ScaleUpThreshold)
 		nonFinitePtr(at+"scaleDownBoundary", &a.ScaleDownBoundary)
 	}

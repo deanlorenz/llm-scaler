@@ -98,6 +98,9 @@ when no variant of the model names a tier.
   such as 5 already gives strict precedence under a GPU limiter.
 - An analyzer `score` below zero. It is read as 1, as before; the change is
   that it is now reported.
+- A `priority` or analyzer `score` above 1000000. A `priority` of 5 already
+  gives strict precedence, and a larger value only risks overflowing the
+  fair-share arithmetic that every model in the GPU budget shares.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in
