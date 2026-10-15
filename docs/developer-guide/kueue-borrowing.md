@@ -145,6 +145,12 @@ and no node did is marked as node fit's cut (`markCut`), so the decision says
 only whole, both roles on borrowed capacity, never one role guaranteed and
 its partner borrowed.
 
+A reclaiming queue growing back into its own nominal is placed without a node
+hole only for the GPUs peers actually borrow on its flavor and Kueue would
+preempt for it: what a lender lends but nobody borrows is not reclaimable
+capacity, and with a node down an exemption sized by unused nominal ordered a
+pod that stayed Pending forever. The wake applies the same cap.
+
 The share planner plans after the pass on what it left
 (`PassLeft.NodeDebits`): the borrowed placements are charged to their models
 on the same view, so the idle fill does not place into a hole a borrowed

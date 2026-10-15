@@ -427,6 +427,16 @@ Kueue's [documented example](https://kueue.sigs.k8s.io/docs/concepts/cluster_que
 holds: team-a (`nominalQuota` 9, `borrowingLimit` 1) with an idle, reclaiming
 team-b (`nominalQuota` 12) reaches 10.
 
+**Growing back into lent nominal.** A queue whose lender can reclaim, and
+whose nominal peers are borrowing, may grow back into that nominal although
+no node has a free hole yet: Kueue preempts the borrowers' pods for it, and
+that frees their nodes. Only the GPUs peers actually borrow on the queue's
+flavor, and that Kueue would preempt for it, are placed without a hole. The
+rest of its growth must fit a node like any replica. Unused nominal that
+nobody borrows is no exemption: with a node down, growth into it is limited
+by `node-fit` instead of being ordered into a pod that stays Pending. A
+scale-from-zero wake is held to the same rule.
+
 **Co-resources.** Kueue admits a pod only when every resource its flavor's
 resource group covers fits, not the GPU alone. Each covered resource is
 computed the same way as the GPU, and the reach in replicas is the minimum
@@ -574,7 +584,10 @@ The manager ClusterRole of a cluster-scoped install carries `get`/`list` on
 in every namespace. Workloads are read cluster-wide through an informer,
 indexed by owner, which starts on the first borrowing check (a cluster
 without Kueue starts none). Until it has synced, or if `watch` is denied,
-every check lists Workloads from the API server instead. Namespace labels, for
+every check lists Workloads from the API server instead. A Workload read
+revoked while the controller runs is noticed within about 5 minutes; until
+then the cached Workloads are used, and then borrowing is withheld as
+`lenders-unreadable`. Namespace labels, for
 a `namespaceSelector`, are read with one `list` of Namespaces per Kueue read;
 where that is denied, with one `get` per namespace.
 
