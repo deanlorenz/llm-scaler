@@ -440,7 +440,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 
 	// Parse scaling policy entries
 	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
-	reportIgnoredFields(logger, ignored)
+	r.reportIgnoredFields(ctx, cm, ignored)
 	// The surviving entries replace the live set wholesale, so a rejected
 	// key would otherwise vanish: a bad "default" took every limiter and tuned
 	// threshold with it. The entry previously in force under that key stays.
@@ -487,7 +487,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		// Its ignored fields are recorded either way: retention and the hold
 		// are read from this ConfigMap, never from the policy namespace's.
 		if r.Config.PolicyNamespaceIsSeparate() {
-			r.Status.RecordIgnored(r.Config, ignored[config.GlobalDefaultsKey])
+			r.Status.RecordIgnored(r.Config, namespace, cm.GetName(), ignored[config.GlobalDefaultsKey])
 		} else {
 			r.Status.RecordPolicy(r.Config, namespace, cm.GetName(), cm.GetResourceVersion(),
 				rejected[config.GlobalDefaultsKey], ignored[config.GlobalDefaultsKey])

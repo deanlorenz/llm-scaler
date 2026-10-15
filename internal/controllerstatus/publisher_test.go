@@ -232,7 +232,7 @@ func TestRecordPolicy(t *testing.T) {
 		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
 	})
 	d = p.Data()
-	want := `scaleToZero.retentionPeriod="5 minutes": bad duration; shapeChangeHoldSeconds="-1": must be >= 0`
+	want := `policy-ns/wva-scaling-policy-config: scaleToZero.retentionPeriod="5 minutes": bad duration; shapeChangeHoldSeconds="-1": must be >= 0`
 	if d[KeyPolicyAccepted] != "true" || d[KeyPolicyIgnored] != want {
 		t.Errorf("policyIgnored = %q, want %q (data = %v)", d[KeyPolicyIgnored], want, d)
 	}
@@ -253,10 +253,10 @@ func TestSeparatePolicyKeepsIgnoredAndVersionApart(t *testing.T) {
 	ignored := []config.IgnoredField{
 		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
 	}
-	want := `shapeChangeHoldSeconds="-1": must be >= 0`
+	want := `own-ns/wva-scaling-policy-config: shapeChangeHoldSeconds="-1": must be >= 0`
 
 	p.RecordClusterPolicy(nil, "policy-ns", "wva-scaling-policy-config", "7", nil)
-	p.RecordIgnored(nil, ignored)
+	p.RecordIgnored(nil, "own-ns", "wva-scaling-policy-config", ignored)
 	d := p.Data()
 	if d[KeyPolicyResourceVersion] != "7" || d[KeyPolicyIgnored] != want {
 		t.Errorf("after RecordIgnored: data = %v", d)
@@ -268,10 +268,32 @@ func TestSeparatePolicyKeepsIgnoredAndVersionApart(t *testing.T) {
 		t.Errorf("a cluster policy load changed policyIgnored: data = %v", d)
 	}
 
-	p.RecordIgnored(nil, nil)
+	p.RecordIgnored(nil, "own-ns", "wva-scaling-policy-config", nil)
 	d = p.Data()
 	if d[KeyPolicyResourceVersion] != "8" || d[KeyPolicyIgnored] != "" {
 		t.Errorf("after a clean own ConfigMap: data = %v", d)
+	}
+}
+
+// policyIgnored names its source and lists at most ten fields: a tenant
+// decides how many entries the ConfigMap has.
+func TestPolicyIgnoredNamesItsSourceAndCapsTheList(t *testing.T) {
+	ignored := make([]config.IgnoredField, 13)
+	for i := range ignored {
+		ignored[i] = config.IgnoredField{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")}
+	}
+	got := ignoredText("own-ns", "cm", ignored)
+	if !strings.HasPrefix(got, "own-ns/cm: ") {
+		t.Errorf("policyIgnored = %q, want it to start with its source", got)
+	}
+	if n := strings.Count(got, "shapeChangeHoldSeconds"); n != 10 {
+		t.Errorf("policyIgnored lists %d fields, want 10", n)
+	}
+	if !strings.HasSuffix(got, "; +3 more") {
+		t.Errorf("policyIgnored = %q, want it to end with the count not listed", got)
+	}
+	if got := ignoredText("own-ns", "cm", nil); got != "" {
+		t.Errorf("policyIgnored with nothing ignored = %q, want empty", got)
 	}
 }
 
@@ -279,7 +301,7 @@ func TestNilPublisherIsSafe(t *testing.T) {
 	var p *Publisher
 	p.RecordPolicy(nil, "a", "b", "1", nil, nil)
 	p.RecordClusterPolicy(nil, "a", "b", "1", nil)
-	p.RecordIgnored(nil, nil)
+	p.RecordIgnored(nil, "a", "b", nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeOff, nil)
 	if p.Data() != nil {
 		t.Error("nil publisher returned data")

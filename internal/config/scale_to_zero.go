@@ -17,6 +17,11 @@ const (
 	// but no explicit retention period is specified.
 	DefaultScaleToZeroRetentionPeriod = 10 * time.Minute
 
+	// MinScaleToZeroRetentionPeriod is the shortest retention period accepted.
+	// A shorter one is ignored like any unusable value, and the layer below
+	// applies.
+	MinScaleToZeroRetentionPeriod = 30 * time.Second
+
 	// GlobalDefaultsKey is the "default" entry key shared by the scaling-policy
 	// ConfigMap: the entry every model inherits before its own per-model override
 	// is merged over it. An override is the entry whose BODY names this model; its
@@ -92,6 +97,10 @@ func ResolveScaleToZeroRetention(sat *ScalingPolicy) time.Duration {
 
 // ValidateRetentionPeriod validates a retention period string.
 // Returns the parsed duration and an error if validation fails.
+//
+// The error never repeats the value: the caller reports the value beside it,
+// truncated (IgnoredField), and a tenant-written string echoed in full by
+// time.ParseDuration would undo that.
 func ValidateRetentionPeriod(retentionPeriod string) (time.Duration, error) {
 	if retentionPeriod == "" {
 		return 0, errors.New("retention period cannot be empty")
@@ -99,11 +108,17 @@ func ValidateRetentionPeriod(retentionPeriod string) (time.Duration, error) {
 
 	duration, err := time.ParseDuration(retentionPeriod)
 	if err != nil {
-		return 0, fmt.Errorf("invalid duration format: %w", err)
+		return 0, errors.New("not a duration; write it as 90s, 5m or 1h")
 	}
 
 	if duration <= 0 {
 		return 0, fmt.Errorf("retention period must be positive, got %v", duration)
+	}
+	// A retention of a few seconds parks a model between two requests and wakes
+	// it on the next, over and over: a whole-node model would cycle all its
+	// GPUs. Too short to be anyone's intent, so it is unusable like a typo.
+	if duration < MinScaleToZeroRetentionPeriod {
+		return 0, fmt.Errorf("retention period must be at least %v, got %v", MinScaleToZeroRetentionPeriod, duration)
 	}
 
 	// Warn if retention period is unusually long (> 24 hours)

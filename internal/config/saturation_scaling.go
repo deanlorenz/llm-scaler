@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultPriority is the default model priority multiplier.
@@ -732,11 +733,30 @@ func (c *ScalingPolicy) Validate() error {
 	return nil
 }
 
+// MaxIgnoredValueLen is the most bytes of a value an IgnoredField keeps.
+const MaxIgnoredValueLen = 64
+
+// TruncateIgnoredValue cuts a value written in a ConfigMap to
+// MaxIgnoredValueLen bytes, on a character boundary, and says how much was cut.
+// The value is reported in the log, an Event and the controller status on every
+// read of the ConfigMap; written by a tenant it may be any length.
+func TruncateIgnoredValue(v string) string {
+	if len(v) <= MaxIgnoredValueLen {
+		return v
+	}
+	cut := MaxIgnoredValueLen
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...(%d more bytes)", v[:cut], len(v)-cut)
+}
+
 // IgnoredField is one setting ResetUnusableFields cleared.
 type IgnoredField struct {
 	// Field is the YAML path of the setting, e.g. "scaleToZero.retentionPeriod".
 	Field string
-	// Value is the value as the operator wrote it.
+	// Value is the value as the operator wrote it, truncated
+	// (TruncateIgnoredValue). Reason never repeats it.
 	Value string
 	// Reason says why the value cannot be used.
 	Reason error
@@ -759,7 +779,8 @@ func (f IgnoredField) String() string {
 // in a retention period would quietly switch off GPU quota enforcement.
 //
 // Cleared:
-//   - scaleToZero.retentionPeriod that does not parse or is not positive. Left
+//   - scaleToZero.retentionPeriod that does not parse or is shorter than
+//     MinScaleToZeroRetentionPeriod. Left
 //     in place it passed load and was reported on every cycle for every model
 //     resolving to it, then fell back to the default anyway.
 //   - shapeChangeHoldSeconds below zero. Merge copies any non-zero value, so a
@@ -770,7 +791,7 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
 			ignored = append(ignored, IgnoredField{
-				Field: "scaleToZero.retentionPeriod", Value: c.ScaleToZero.RetentionPeriod, Reason: err,
+				Field: "scaleToZero.retentionPeriod", Value: TruncateIgnoredValue(c.ScaleToZero.RetentionPeriod), Reason: err,
 			})
 			c.ScaleToZero.RetentionPeriod = ""
 		}

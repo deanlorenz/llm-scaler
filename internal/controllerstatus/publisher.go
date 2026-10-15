@@ -31,10 +31,16 @@
 //	                       accepted.
 //	policyIgnored          the fields of the "default" entry in the controller's
 //	                       OWN scaling-policy ConfigMap that were ignored
-//	                       because their value cannot be used, each as
-//	                       <field>="<value>": <reason>, joined by "; ". The
-//	                       entry still applies and those fields act as unset.
-//	                       Empty when none. That ConfigMap is where the fields
+//	                       because their value cannot be used, as
+//	                       <namespace>/<name>: then each field as
+//	                       <field>="<value>": <reason>, joined by "; ". Values
+//	                       are cut to 64 bytes and at most 10 fields listed,
+//	                       then "+<n> more". The entry still applies and those
+//	                       fields act as unset. Empty when none. It describes
+//	                       the entry parsed in the latest read only: when that
+//	                       entry is rejected and the previous one kept, it is
+//	                       empty and policyAccepted/policyError say why. That
+//	                       ConfigMap is where the fields
 //	                       that can be ignored (scale-to-zero retention, the
 //	                       shape-change hold) are read. With a separate policy
 //	                       namespace it is not the one policyConfigMap names,
@@ -68,6 +74,7 @@ package controllerstatus
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"strconv"
@@ -215,7 +222,7 @@ func (p *Publisher) RecordPolicy(cfg *config.Config, namespace, name, resourceVe
 	}
 	p.update(func(d map[string]string) {
 		recordPolicy(d, cfg, namespace, name, resourceVersion, rejected)
-		d[KeyPolicyIgnored] = ignoredText(ignored)
+		d[KeyPolicyIgnored] = ignoredText(namespace, name, ignored)
 	})
 }
 
@@ -237,13 +244,14 @@ func (p *Publisher) RecordClusterPolicy(cfg *config.Config, namespace, name, res
 // controller's own ConfigMap when a separate policy namespace holds the
 // policy, and refreshes the values derived from cfg. It does not touch the
 // recorded policy version: that belongs to the policy namespace's ConfigMap.
-func (p *Publisher) RecordIgnored(cfg *config.Config, ignored []config.IgnoredField) {
+// namespace/name is the controller's own ConfigMap, the source the value names.
+func (p *Publisher) RecordIgnored(cfg *config.Config, namespace, name string, ignored []config.IgnoredField) {
 	if p == nil {
 		return
 	}
 	p.update(func(d map[string]string) {
 		observe(d, cfg)
-		d[KeyPolicyIgnored] = ignoredText(ignored)
+		d[KeyPolicyIgnored] = ignoredText(namespace, name, ignored)
 	})
 }
 
@@ -464,13 +472,28 @@ func errText(err error) string {
 	return err.Error()
 }
 
-func ignoredText(ignored []config.IgnoredField) string {
-	parts := make([]string, len(ignored))
-	for i, f := range ignored {
-		parts[i] = f.String()
+// ignoredText is the policyIgnored value: the source ConfigMap, then each
+// field. Prefixed with its source because it sits beside the policy* keys,
+// which name the policy namespace's ConfigMap when one is separate, and this
+// is always the controller's own. Values are already truncated
+// (config.TruncateIgnoredValue); at most maxIgnoredFieldsListed are listed.
+func ignoredText(namespace, name string, ignored []config.IgnoredField) string {
+	if len(ignored) == 0 {
+		return ""
 	}
-	return strings.Join(parts, "; ")
+	shown := ignored[:min(len(ignored), maxIgnoredFieldsListed)]
+	parts := make([]string, 0, len(shown)+1)
+	for _, f := range shown {
+		parts = append(parts, f.String())
+	}
+	if more := len(ignored) - len(shown); more > 0 {
+		parts = append(parts, fmt.Sprintf("+%d more", more))
+	}
+	return namespace + "/" + name + ": " + strings.Join(parts, "; ")
 }
+
+// maxIgnoredFieldsListed caps the fields policyIgnored lists.
+const maxIgnoredFieldsListed = 10
 
 // sleep waits d or until ctx is done, reporting whether the full wait elapsed.
 func sleep(ctx context.Context, d time.Duration) bool {

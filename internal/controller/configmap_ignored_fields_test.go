@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -67,7 +70,8 @@ func TestParseReportsIgnoredFields(t *testing.T) {
 	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 0 {
 		t.Errorf("error metric after parsing alone = %v, want 0", got)
 	}
-	reportIgnoredFields(logr.Discard(), ignored)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "cm"}}
+	(&ConfigMapReconciler{}).reportIgnoredFields(context.Background(), cm, ignored)
 
 	// One count per ignored field of a kept entry: two in default, one in
 	// batch. The rejected entry's field is not counted; that entry is counted

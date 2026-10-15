@@ -337,6 +337,12 @@ const (
 	// counted here is usually a misspelling of one that was meant to apply.
 	WVAConfigUnknownKeys = "wva_config_unknown_keys"
 
+	// WVAConfigIgnoredFields is the number of fields, across the entries of one
+	// scaling-policy ConfigMap, whose value could not be used and act as unset
+	// (labels: namespace, configmap). The entries still apply; the setting the
+	// operator wrote does not.
+	WVAConfigIgnoredFields = "wva_config_ignored_fields"
+
 	// WVAPolicyNamespaceUnverified is 1 when the controller fell back to its own
 	// ConfigMap for limiters and quotas because reading the Namespaces that decide
 	// the policy source was Forbidden, and 0 otherwise. Set once at startup.
