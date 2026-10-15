@@ -132,7 +132,11 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 1. If `N` appears in `exclude`, the limiter **passes through** — the request is
    returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply.
+   still apply. The utilization-share optimizer does not share an excluded
+   namespace unless a finite `scope: cluster` quota also covers its
+   accelerator type: this quota does not bound it, so there is no budget to
+   share
+   ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace
@@ -483,13 +487,16 @@ not inputs to it. Two properties follow from that:
 > **Ceilings, not reservations.** A finite per-namespace cap guarantees a tenant
 > will never *exceed* it — it does **not** guarantee the tenant can *reach* it.
 > Under V2 the cluster aggregate is the **sum of the finite namespace caps**, and
-> an **unlimited (`-1`)** or **excluded** namespace competing for the same
-> accelerator type draws from that shared aggregate without contributing to it,
+> under today's optimizer an **unlimited (`-1`)** or **excluded** namespace
+> competing for the same accelerator type draws from that shared aggregate
+> without contributing to it,
 > so it can consume budget a finite-capped peer would otherwise have used (no
 > isolation breach — nobody exceeds their own authorization — but a real fairness
 > footgun). If you need a tenant's cap to behave like a floor, avoid mixing
 > unlimited/excluded namespaces on the same type, and give every type a finite
-> cluster-scope cap.
+> cluster-scope cap. The utilization-share optimizer does not share an excluded
+> namespace unless a `scope: cluster` quota covers it (see #169 for today's
+> optimizer).
 
 When a model is capped below its fair-share slot it takes only up to its quota;
 the unused remainder is **released to subsequent rounds**, where the

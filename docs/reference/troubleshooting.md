@@ -688,8 +688,10 @@ Work down the list in order.
    namespace-local scaling-policy map (not planned in the cluster group), or a
    namespace not in `clusterNamespaces`. These models are in no group at all
    and publish no role series: variants on more than one accelerator type, a
-   namespace with `enabled: false`, or only a `gpu-inventory` limiter without
-   `physicalGroups: true`.
+   namespace with `enabled: false`, only a `gpu-inventory` limiter without
+   `physicalGroups: true`, or a namespace a namespace quota lists in `exclude`
+   with no finite `scope: cluster` quota for its accelerator type (logged once
+   as `Utilization share: not sharing models no quota bounds`).
 4. **Is any role actionable?** `wva_utilization_share_actionable` is `1` only
    for a role outside its tolerance band *and* off its whole-replica target. All
    `0` means the fleet is where the optimizer wants it, or every imbalance is

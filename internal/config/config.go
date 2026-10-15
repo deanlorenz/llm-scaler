@@ -2,6 +2,7 @@ package config
 
 import (
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -765,6 +766,21 @@ func (c *Config) EffectiveQuotaEntries() []QuotaLimiterConfig {
 		}
 	}
 	return inline
+}
+
+// HasClusterQuota reports whether an enforced limiter entry is a quota with
+// cluster scope: a budget over every namespace. A namespace-scoped quota bounds
+// only the namespaces it caps, so a list of those alone has no cluster budget,
+// and a namespace it excludes is bound by no quota at all.
+// Thread-safe.
+func (c *Config) HasClusterQuota() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	// A cluster-scoped quota entry makes the mode quota, so the entry alone
+	// decides; the physical inventory (gpu-inventory) has no scope.
+	return slices.ContainsFunc(c.effectiveLimitersLocked(), func(l QuotaLimiterConfig) bool {
+		return l.Type == string(LimiterTypeQuota) && l.Scope == QuotaScopeCluster
+	})
 }
 
 // effectiveLimitersLocked returns the limiters that actually bound this cluster.

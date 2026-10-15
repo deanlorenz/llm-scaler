@@ -129,10 +129,12 @@ statement.
 
 **Ceilings, not reservations.** A finite cap guarantees a tenant never
 *exceeds* it, never that it can *reach* it. The cluster aggregate is the sum of
-the finite caps. A namespace that is unlimited (`-1`) or excluded draws from
-that aggregate without adding to it, and can use budget a capped peer would
-have used. Nobody exceeds their own authorization, but know this before you
-promise a team its number.
+the finite caps. Under today's optimizer, a namespace that is unlimited (`-1`)
+or excluded draws from that aggregate without adding to it, and can use budget
+a capped peer would have used. Nobody exceeds their own authorization, but know
+this before you promise a team its number. The utilization-share optimizer does
+not share an excluded namespace unless a `scope: cluster` quota covers it (see
+#169 for today's optimizer).
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.
