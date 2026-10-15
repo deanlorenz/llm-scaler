@@ -32,9 +32,8 @@ command -v go >/dev/null 2>&1 || { echo "FATAL: go is required to run this check
 # where the order is real, without renumbering the layers around it.
 # internal/signals/floor is the case: it composes the packages that only
 # measure, so an edge from one of them back to it is an inversion, and at one
-# shared number the check could not see it. Nothing else moves -- aggregation,
-# common and the measuring signals packages stay equals, as the proposal has
-# them.
+# shared number the check could not see it. Nothing else moves -- aggregation
+# and the measuring signals packages stay equals, as the proposal has them.
 layer_of() {
     case "$1" in
         internal/engines/steadystate|internal/engines/scalefromzero) echo 70 ;;
@@ -50,7 +49,7 @@ layer_of() {
         # floor and its subpackages and put them back at 30 -- silently, with
         # the clean tree still passing.
         internal/signals/floor|internal/signals/floor/*) echo 31 ;;
-        internal/engines/aggregation|internal/engines/common|internal/signals/*) echo 30 ;;
+        internal/engines/aggregation|internal/signals/*) echo 30 ;;
         internal/collector|internal/collector/*) echo 20 ;;
         internal/actuator|internal/scaler|internal/registry) echo 20 ;;
         internal/decision) echo 10 ;;

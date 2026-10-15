@@ -33,6 +33,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/go-logr/logr"
 	flag "github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -79,6 +80,7 @@ import (
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	inferencePoolV1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	inferencePoolV1alpha2 "sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
@@ -100,6 +102,138 @@ func init() {
 	utilruntime.Must(kedav1alpha1.AddToScheme(scheme))
 	// Note: LeaderWorkerSet scheme is added conditionally in main() after checking if CRD exists
 	// +kubebuilder:scaffold:scheme
+}
+
+// managerGracefulShutdownTimeout is how long the manager waits for runnables to
+// stop. It must stay below terminationGracePeriodSeconds in
+// config/base/manager/deployment.yaml (40s), which TestGracefulShutdownFitsGracePeriod
+// checks.
+const managerGracefulShutdownTimeout = 25 * time.Second
+
+// startupExitCode reports a failed startup step and returns the code the
+// process should exit with.
+//
+// Startup steps run under the signal context, so a SIGTERM during one cancels
+// it and the step returns the context's error. That is logged as an info line,
+// not as the step's own failure ("CRITICAL: Failed to connect to Prometheus"),
+// which would read as an outage the signal did not cause.
+//
+// It still exits non-zero, with exitCodeTerminated. The SIGTERM is not always
+// an operator's: the startup probe gives up after 60s, and a controller still
+// waiting for Prometheus then gets killed. Exiting 0 there would show a
+// Prometheus outage as "Completed".
+//
+// Both must hold: the context is done AND the step's error is that
+// cancellation. A step that failed for its own reason -- a Forbidden, a
+// refused connection -- just as a SIGTERM arrived is still a failure, and is
+// reported as one, with exit code 1.
+//
+// It lives in main.go, not a file of its own: `make build` and the Dockerfile
+// compile cmd/main.go alone, so a non-test helper in another file of package
+// main is undefined there.
+func startupExitCode(ctx context.Context, log logr.Logger, err error, msg string) int {
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		log.Info("Shutdown requested during startup; exiting", "step", msg, "error", err.Error())
+		return exitCodeTerminated
+	}
+	log.Error(err, msg)
+	return 1
+}
+
+// exitCodeTerminated is the exit code for a startup cut short by SIGTERM: 128
+// plus the signal number, the status a shell reports for a process SIGTERM
+// killed.
+const exitCodeTerminated = 143
+
+// optimizeLooper is an engine whose optimize loop runs until its context ends.
+type optimizeLooper interface {
+	StartOptimizeLoop(ctx context.Context)
+}
+
+// optimizeLoopRunnable is the manager runnable for one engine: setup builds
+// the engine, and the runnable then runs its loop.
+//
+// The loop runs IN the runnable, not in a goroutine it spawns: it blocks until
+// ctx ends, so the manager's graceful shutdown waits for an in-flight cycle
+// before it releases the lease. Returning at once told the manager this
+// runnable was finished while the loop was starting.
+//
+// A setup error is returned, never os.Exit: the manager stops on a runnable's
+// error, releases the lease and returns it from mgr.Start. So is a loop that
+// returns before ctx ends: returning nil would leave the manager running, and
+// holding the lease, with no engine -- a leader that scales nothing while no
+// other replica may take over.
+func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error)) manager.RunnableFunc {
+	return func(ctx context.Context) error {
+		engine, err := setup(ctx)
+		if err != nil {
+			return err
+		}
+		engine.StartOptimizeLoop(ctx)
+		if ctx.Err() == nil {
+			return fmt.Errorf("the %T optimize loop stopped while the manager is running", engine)
+		}
+		return nil
+	}
+}
+
+// registerMetricsSource adds src to reg under name.
+//
+// Returned, not os.Exit: this runs inside a manager runnable, and exiting there
+// skipped graceful shutdown and the lease release, so the successor waited out
+// the full LeaseDuration.
+func registerMetricsSource(reg *source.SourceRegistry, name string, src source.MetricsSource) error {
+	if err := reg.Register(name, src); err != nil {
+		return fmt.Errorf("registering the %s metrics source: %w", name, err)
+	}
+	return nil
+}
+
+// managerOptions builds the manager's options: leader election, probes,
+// metrics and webhook servers, and the shutdown budget. The cache is set by
+// the caller. A function of its own so a test can check what main hands the
+// manager, not only the constants it is built from.
+func managerOptions(cfg *config.Config, metricsServerOptions metricsserver.Options,
+	webhookServer webhook.Server) ctrl.Options {
+	// Configure leader election with configurable timeouts to prevent lease renewal failures
+	// Default values are: LeaseDuration=60s, RenewDeadline=50s, RetryPeriod=10s
+	// These can be overridden via command-line flags in manager.yaml
+	// Increased from controller-runtime defaults (15s, 10s, 2s) to provide more tolerance
+	// for network latency and API server delays
+
+	leaseDurationVal := cfg.LeaseDuration()
+	gracefulShutdownTimeout := managerGracefulShutdownTimeout
+	renewDeadlineVal := cfg.RenewDeadline()
+	retryPeriodVal := cfg.RetryPeriod()
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
+		WebhookServer:          webhookServer,
+		HealthProbeBindAddress: cfg.ProbeAddr(),
+		LeaderElection:         cfg.EnableLeaderElection(),
+		LeaderElectionID:       cfg.LeaderElectionID(),
+		// Leader election timeout configuration (from Config, can be overridden via flags/env/ConfigMap)
+		LeaseDuration: &leaseDurationVal,
+		RenewDeadline: &renewDeadlineVal,
+		RetryPeriod:   &retryPeriodVal,
+		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
+		// when the Manager ends. This requires the binary to immediately end when the
+		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
+		// speeds up voluntary leader transitions as the new leader don't have to wait
+		// LeaseDuration time first.
+		//
+		// This is safe to enable because the program ends immediately after the manager stops
+		// (see mgr.Start() call at the end of main()), and because the engine
+		// runnables block until their loops have returned, so the lease is not
+		// released while a cycle is still publishing. This enables fast failover
+		// during deployments and upgrades, reducing downtime from ~60s to ~1-2s.
+		LeaderElectionReleaseOnCancel: true,
+		// Set explicitly, and below the pod's terminationGracePeriodSeconds
+		// (config/base/manager/deployment.yaml): if runnables outlive the grace
+		// period the kubelet's SIGKILL lands before the lease is released, and
+		// the successor waits the full LeaseDuration with GetMetrics unanswered.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
+	}
 }
 
 // defaultLogVerbosity is the -v the shipped deployment runs at: config/base/manager
@@ -229,6 +363,13 @@ func main() {
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
 
+	// The process's ONE signal context. ctrl.SetupSignalHandler may be called only
+	// once (a second call panics), so it is taken here and handed to every
+	// startup step as well as to mgr.Start: a SIGTERM during a Prometheus
+	// validation retry or a ConfigMap bootstrap then ends the process at once,
+	// instead of after a backoff of unknown length.
+	signalCtx := ctrl.SetupSignalHandler()
+
 	// Get REST config early (needed for config loading)
 	restConfig := ctrl.GetConfigOrDie()
 
@@ -254,11 +395,8 @@ func main() {
 		setupLog.Error(err, "unable to build a client to resolve the cluster policy namespace")
 		os.Exit(1)
 	}
-	// Not ctrl.SetupSignalHandler(): that may be called only once per process, and
-	// mgr.Start() is its rightful owner. A second call panics.
-	if err := controller.ResolvePolicyNamespace(context.Background(), policyProbe, cfg); err != nil {
-		setupLog.Error(err, "unable to resolve where cluster policy comes from")
-		os.Exit(1)
+	if err := controller.ResolvePolicyNamespace(signalCtx, policyProbe, cfg); err != nil {
+		os.Exit(startupExitCode(signalCtx, setupLog, err, "unable to resolve where cluster policy comes from"))
 	}
 
 	// Conditionally add LeaderWorkerSet scheme if CRD exists
@@ -380,37 +518,7 @@ func main() {
 	// Use configurable REST client timeout from Config (default 60s, can be overridden via --rest-client-timeout flag)
 	restConfig.Timeout = cfg.RestTimeout()
 
-	// Configure leader election with configurable timeouts to prevent lease renewal failures
-	// Default values are: LeaseDuration=60s, RenewDeadline=50s, RetryPeriod=10s
-	// These can be overridden via command-line flags in manager.yaml
-	// Increased from controller-runtime defaults (15s, 10s, 2s) to provide more tolerance
-	// for network latency and API server delays
-
-	leaseDurationVal := cfg.LeaseDuration()
-	renewDeadlineVal := cfg.RenewDeadline()
-	retryPeriodVal := cfg.RetryPeriod()
-	mgrOptions := ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: cfg.ProbeAddr(),
-		LeaderElection:         cfg.EnableLeaderElection(),
-		LeaderElectionID:       cfg.LeaderElectionID(),
-		// Leader election timeout configuration (from Config, can be overridden via flags/env/ConfigMap)
-		LeaseDuration: &leaseDurationVal,
-		RenewDeadline: &renewDeadlineVal,
-		RetryPeriod:   &retryPeriodVal,
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// This is safe to enable because the program ends immediately after the manager stops
-		// (see mgr.Start() call at the end of main()). This enables fast failover during
-		// deployments and upgrades, reducing downtime from ~60s to ~1-2s.
-		LeaderElectionReleaseOnCancel: true,
-	}
+	mgrOptions := managerOptions(cfg, metricsServerOptions, webhookServer)
 
 	watchNS := cfg.WatchNamespace()
 	if watchNS != "" {
@@ -517,11 +625,9 @@ func main() {
 		Status:    controllerStatus,
 	}
 
-	ctx := context.Background()
-	ctx = ctrl.LoggerInto(ctx, setupLog)
+	ctx := ctrl.LoggerInto(signalCtx, setupLog)
 	if err = configMapReconciler.BootstrapInitialConfigMaps(ctx); err != nil {
-		setupLog.Error(err, "unable to bootstrap initial ConfigMaps")
-		os.Exit(1)
+		os.Exit(startupExitCode(ctx, setupLog, err, "unable to bootstrap initial ConfigMaps"))
 	}
 	setupLog.Info("Initial ConfigMap bootstrap completed")
 
@@ -544,7 +650,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	promURL, _ := url.Parse(cfg.PrometheusBaseURL()) // already validated above
+	promURL, err := url.Parse(cfg.PrometheusBaseURL())
+	if err != nil {
+		// ValidateTLSConfig above parses the same string, so this should be
+		// unreachable; it is checked rather than assumed because promURL is
+		// dereferenced on the next line.
+		setupLog.Error(err, "invalid Prometheus URL")
+		os.Exit(1)
+	}
 	setupLog.Info("Initializing Prometheus client",
 		"address", promURL.Redacted(),
 		"tlsEnabled", prometheusutil.IsHTTPS(cfg.PrometheusBaseURL()),
@@ -567,9 +680,9 @@ func main() {
 	promAPI := promv1.NewAPI(promClient)
 
 	// Validate that the API is working by testing a simple query with retry logic
-	if err := prometheusutil.ValidatePrometheusAPI(context.Background(), promAPI); err != nil {
-		setupLog.Error(err, "CRITICAL: Failed to connect to Prometheus - WVA requires Prometheus connectivity for autoscaling decisions")
-		os.Exit(1)
+	if err := prometheusutil.ValidatePrometheusAPI(ctx, promAPI); err != nil {
+		os.Exit(startupExitCode(ctx, setupLog, err,
+			"CRITICAL: Failed to connect to Prometheus - WVA requires Prometheus connectivity for autoscaling decisions"))
 	}
 	setupLog.Info("Prometheus client and API wrapper initialized and validated successfully")
 
@@ -618,7 +731,7 @@ func main() {
 	}
 
 	// Register optimization engine loops with the manager. Only start when leader.
-	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		sourceRegistry := source.NewSourceRegistry()
 		setupLog.Info("Initializing metrics source registry")
 
@@ -630,10 +743,11 @@ func main() {
 		// Register PrometheusSource with default config
 		promSource := prometheus.NewPrometheusSource(ctx, promAPI, prometheus.DefaultPrometheusSourceConfig())
 
-		// Register in global source registry
-		if err := sourceRegistry.Register("prometheus", promSource); err != nil {
+		// Register in global source registry (registerMetricsSource returns its
+		// error rather than exiting; see optimizeLoopRunnable).
+		if err := registerMetricsSource(sourceRegistry, "prometheus", promSource); err != nil {
 			setupLog.Error(err, "failed to register prometheus source in source registry")
-			os.Exit(1)
+			return nil, err
 		}
 
 		// Build the initial GPU limiter from the effective limiter mode — the
@@ -644,7 +758,7 @@ func main() {
 		gpuLimiter, err := allocation.NewLimiterFromConfig(cfg, mgr.GetClient())
 		if err != nil {
 			setupLog.Error(err, "failed to build GPU limiter")
-			return err
+			return nil, err
 		}
 		setupLog.Info("GPU limiter constructed", "type", cfg.EffectiveLimiterMode(), "name", gpuLimiter.Name())
 
@@ -721,7 +835,7 @@ func main() {
 		registration.RegisterAlwaysOnQueries(sourceRegistry)
 		if taRegistered {
 			if err := engine.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer()); err != nil {
-				return err
+				return nil, err
 			}
 			setupLog.Info("ThroughputAnalyzer registered (enabled in saturation config)")
 		} else {
@@ -729,8 +843,7 @@ func main() {
 				"enables 'throughput'. Add it to the analyzers config and restart the " +
 				"controller to enable it.")
 		}
-		go engine.StartOptimizeLoop(ctx)
-		return nil
+		return engine, nil
 	}))
 
 	if err != nil {
@@ -739,10 +852,10 @@ func main() {
 	}
 
 	// Register scale from zero engine loop with the manager. Only start when leader.
-	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		engine, err := scalefromzero.NewEngine(mgr.GetClient(), mgr.GetEventRecorderFor("workload-variant-autoscaler-scalezero-engine"), ds, cfg)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Same registry as the saturation engine: one call registers a workload for
 		// both. Its own Enricher, because the two loops run at different rates and
@@ -786,8 +899,7 @@ func main() {
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
 			return allocation.NewLimiterFromConfig(cfg, mgr.GetClient())
 		})
-		go engine.StartOptimizeLoop(ctx)
-		return nil
+		return engine, nil
 	}))
 
 	if err != nil {
@@ -1031,7 +1143,7 @@ func main() {
 		// Only deleting the pod would, and a transient Forbidden during RBAC
 		// propagation would have parked the controller permanently.
 		if err := nodeReadProbe(req.Context(), policyProbe); err != nil {
-			return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller may not list nodes: %w. "+
+			return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes: %w. "+
 				"Every variant would be charged to no accelerator pool, receive no GPU budget and never scale up. "+
 				"Grant its ServiceAccount get/list/watch on nodes, or remove the limiter from cluster policy", err)
 		}
@@ -1073,7 +1185,7 @@ func main() {
 	// outcome now so a fallback forced by a Forbidden Namespace read is alertable.
 	metrics.SetPolicyNamespaceUnverified(cfg.PolicySource() == config.PolicySourceLocalUnverified)
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
@@ -1090,22 +1202,55 @@ var (
 	nodeReadProbeOnce bool
 )
 
-// nodeReadProbe reports whether this controller can currently list nodes.
+// nodeReadProbeTimeout bounds the List inside the readiness probe. Shorter than
+// the probe's own timeoutSeconds (3s in config/base), so a slow API server yields
+// an answer here rather than a probe the kubelet abandons.
+const nodeReadProbeTimeout = 2 * time.Second
+
+// nodeReadProbe reports whether this controller may list nodes.
 //
 // It asks the API server rather than trusting a cached verdict from elsewhere in
 // the process, so that granting the RBAC recovers readiness on its own. `Limit: 1`
 // keeps it cheap: the question is whether the request is authorized, not what the
 // nodes contain.
+//
+// Only an authorization answer -- Forbidden or Unauthorized -- changes the
+// verdict. Any other error (a timeout, a 5xx, an API server restarting) says
+// nothing about RBAC, and failing readiness on it would take the pod out of the
+// external-scaler Service: with one replica that is the only endpoint KEDA can
+// reach, so an API-server blip became an actuation outage. Such an error keeps
+// the last verdict, Ready or not, and is retried after the TTL.
+//
+// Until the first definite answer there is no verdict to keep, and the probe
+// reports not ready: Ready before anyone has asked whether the controller may
+// list nodes would put a controller with no node access into service. Each
+// probe asks again until an answer arrives (the TTL applies only to answers).
+// This cannot hold up startup: the startup and liveness probes read /healthz,
+// not /readyz, so a slow API server delays readiness and kills nothing.
 func nodeReadProbe(ctx context.Context, c client.Reader) error {
 	nodeReadProbeMu.Lock()
 	defer nodeReadProbeMu.Unlock()
 	if nodeReadProbeOnce && time.Since(nodeReadProbeAt) < nodeReadProbeTTL {
 		return nodeReadProbeErr
 	}
+	listCtx, cancel := context.WithTimeout(ctx, nodeReadProbeTimeout)
+	defer cancel()
 	nodes := &corev1.NodeList{}
-	err := c.List(ctx, nodes, client.Limit(1))
-	nodeReadProbeAt, nodeReadProbeErr, nodeReadProbeOnce = time.Now(), err, true
-	return err
+	err := c.List(listCtx, nodes, client.Limit(1))
+	switch {
+	case err == nil, apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		nodeReadProbeAt, nodeReadProbeOnce = time.Now(), true
+		nodeReadProbeErr = err
+	case !nodeReadProbeOnce:
+		ctrl.Log.WithName("setup").Info("node-list readiness probe has had no answer yet; "+
+			"not ready until one arrives. No action unless it persists", "err", err.Error())
+		return fmt.Errorf("no answer yet from the API server on whether nodes may be listed: %w", err)
+	default:
+		nodeReadProbeAt = time.Now()
+		ctrl.Log.WithName("setup").Info("node-list readiness probe could not get an answer; "+
+			"keeping the previous verdict. No action unless it persists", "err", err.Error())
+	}
+	return nodeReadProbeErr
 }
 
 // runWarmPool reconciles the warm pools of ONE namespace until ctx ends.

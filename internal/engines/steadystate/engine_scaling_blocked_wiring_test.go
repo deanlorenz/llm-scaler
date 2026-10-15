@@ -111,7 +111,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 
 	It("reports variant-floor when scale-to-zero is enabled and a variant is floored", func() {
 		e, registry := engineFor(true)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, floored())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedVariantFloor))
@@ -119,7 +119,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 
 	It("reports policy-forbids-zero when every variant permits zero but the policy does not", func() {
 		e, registry := engineFor(false)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedPolicyForbidsZero))
@@ -133,7 +133,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 			"a": target("vllm/vllm-openai:latest"),
 			"b": target("lmsysorg/sglang:latest"),
 		}
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), mixed, permitsZero())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedEngineUnsupported))
@@ -141,7 +141,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 
 	It("reports nothing for a single-engine SGLang model", func() {
 		e, registry := engineFor(true)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), sglang, permitsZero())
 
 		Expect(publishedReasons(registry)).To(BeEmpty(),
@@ -150,7 +150,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 
 	It("publishes nothing for a coherent configuration", func() {
 		e, registry := engineFor(true)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(BeEmpty())
@@ -161,7 +161,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 	// discovered bounds and do not depend on there being a decision to enforce.
 	It("still reports when the optimizer produced no decisions at all", func() {
 		e, registry := engineFor(true)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			nil, vllm, floored())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedVariantFloor),
@@ -172,11 +172,11 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 	// operator fixes the configuration, not linger until the process restarts.
 	It("clears the reason once the contradiction is resolved", func() {
 		e, registry := engineFor(true)
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, floored())
 		Expect(publishedReasons(registry)).NotTo(BeEmpty())
 
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(BeEmpty())
@@ -190,7 +190,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 		decision.DefaultActivations.Mark(namespace, modelID)
 		DeferCleanup(func() { decision.DefaultActivations.Clear(namespace, modelID) })
 
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedActivationRetention))
@@ -201,7 +201,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 		decision.DefaultActivations.Mark(namespace, modelID)
 		decision.DefaultActivations.Clear(namespace, modelID)
 
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(BeEmpty(),
@@ -216,7 +216,7 @@ var _ = Describe("applyScaleToZeroEnforcement blocked-reason wiring", func() {
 			constants.ScalingBlockedReasonsWake,
 			[]string{constants.ScalingBlockedNoWakeSignal})
 
-		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			decisions(), vllm, permitsZero())
 
 		Expect(publishedReasons(registry)).To(ConsistOf(constants.ScalingBlockedNoWakeSignal))

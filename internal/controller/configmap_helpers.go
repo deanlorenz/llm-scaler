@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -33,18 +35,30 @@ import (
 // parseScalingPolicyConfig parses saturation scaling configuration from ConfigMap data.
 // Returns the parsed configs and count of successfully parsed entries.
 func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int) {
-	configs, count, _ := parseScalingPolicyConfigRejects(cmData, logger)
+	configs, count, _, _ := parseScalingPolicyConfigRejects(cmData, logger)
 	return configs, count
 }
+
+// ignoredFieldErrorType is the error_type a field cleared by
+// ResetUnusableFields is counted under, once per field per ConfigMap read.
+const ignoredFieldErrorType = "Ignored unusable saturation scaling config field"
 
 // parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
 // by key, why each entry that was dropped was dropped: a YAML error, or a
 // Normalize or Validate failure. An entry that parsed is never in it. A key the
 // schema does not define drops nothing (config.DecodeScalingPolicy); the
 // reconciler reports it (reportUnknownKeys).
-func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int, map[string]error) {
+//
+// ignored holds, by key, the fields of each KEPT entry that were cleared
+// because their value could not be used (ScalingPolicy.ResetUnusableFields).
+// The entry still applies; only those fields act as unset. A dropped entry is
+// reported in rejected only.
+func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (
+	config.ScalingPolicySet, int, map[string]error, map[string][]config.IgnoredField,
+) {
 	configs := make(config.ScalingPolicySet)
 	rejected := map[string]error{}
+	ignored := map[string][]config.IgnoredField{}
 	count := 0
 	for key, yamlStr := range cmData {
 		satConfig, err := config.DecodeScalingPolicy(yamlStr)
@@ -63,9 +77,15 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			rejected[key] = err
 			continue
 		}
-		// Apply defaults before validation (handles omitempty zero-values like scaleUpThreshold)
-		satConfig.ApplyDefaults()
-		if err := satConfig.Validate(); err != nil {
+		// An unusable value in one of these fields is ignored, not fatal:
+		// rejecting the entry would drop everything else in it, and for the
+		// default entry that includes its limiters. Cleared before Validate, so
+		// it cannot fail the entry.
+		fieldsIgnored := satConfig.ResetUnusableFields()
+		// Validated as a defaulted COPY. The stored entry keeps every field it
+		// does not set at zero ("unset"), so a tier or override inherits it in
+		// the merge; the resolved policy is fully defaulted after it.
+		if err := satConfig.ValidateEntry(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)
@@ -114,9 +134,64 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 				"key", key, "analyzers", slices.Sorted(maps.Keys(satConfig.AnalyzerDefinitions)))
 		}
 		configs[key] = satConfig
+		if len(fieldsIgnored) > 0 {
+			ignored[key] = fieldsIgnored
+		}
 		count++
 	}
-	return configs, count, rejected
+	return configs, count, rejected, ignored
+}
+
+// maxIgnoredFieldsReported is how many ignored fields of one ConfigMap are
+// logged and sent as Events on each read; the rest are summed in one line.
+// A ConfigMap is read on every edit and at every start, and a tenant writes
+// how many entries it has.
+const maxIgnoredFieldsReported = 10
+
+// reportIgnoredFields makes each field parseScalingPolicyConfigRejects cleared
+// as visible as a rejected entry or an unknown key: a log line carrying the
+// ignoredFieldErrorType text and the ConfigMap's identity, a Warning
+// ConfigFieldIgnored Event on the ConfigMap, a count in wva_errors_total under
+// ignoredFieldErrorType, and wva_config_ignored_fields for the ConfigMap. Only
+// kept entries have ignored fields: a dropped one is reported as rejected, and
+// nothing in it applies.
+//
+// Each value is already truncated (config.TruncateIgnoredValue). At most
+// maxIgnoredFieldsReported fields are listed per read; one more line says how
+// many were not. Every field is counted in both metrics.
+//
+// The caller decides whether to report: the policy namespace's ConfigMap is
+// parsed with the same function, but only its limiters and optimizer are read,
+// so a field cleared there would be reported for a value nothing uses.
+func (r *ConfigMapReconciler) reportIgnoredFields(ctx context.Context, cm *corev1.ConfigMap,
+	ignored map[string][]config.IgnoredField) {
+	logger := log.FromContext(ctx)
+	total := 0
+	for _, key := range slices.Sorted(maps.Keys(ignored)) {
+		for _, f := range ignored[key] {
+			total++
+			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
+			if total > maxIgnoredFieldsReported {
+				continue
+			}
+			logger.Info("WARNING: "+ignoredFieldErrorType+"; the field is treated as unset and the rest of the entry applies",
+				"namespace", cm.GetNamespace(), "configMap", cm.GetName(), "entry", key,
+				"field", f.Field, "value", f.Value, "reason", f.Reason.Error())
+			if r.Recorder != nil {
+				r.Recorder.Eventf(cm, corev1.EventTypeWarning, constants.K8SEventConfigFieldIgnored,
+					"entry %q: %s; the field acts as unset, the rest of the entry applies", key, f.String())
+			}
+		}
+	}
+	if more := total - maxIgnoredFieldsReported; more > 0 {
+		logger.Info("WARNING: "+ignoredFieldErrorType+fmt.Sprintf("; +%d more not listed", more),
+			"namespace", cm.GetNamespace(), "configMap", cm.GetName(), "ignoredFields", total)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(cm, corev1.EventTypeWarning, constants.K8SEventConfigFieldIgnored,
+				"+%d more fields act as unset (%d in all); see wva_config_ignored_fields", more, total)
+		}
+	}
+	metrics.SetConfigIgnoredFields(cm.GetNamespace(), cm.GetName(), total)
 }
 
 // isNamespaceConfigEnabled checks if a namespace has the opt-in label for namespace-local ConfigMaps.

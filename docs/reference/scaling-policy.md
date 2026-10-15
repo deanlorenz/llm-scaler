@@ -74,6 +74,58 @@ scaleToZero:
 | `enabled` | inherit | the `WVA_SCALE_TO_ZERO` deployment flag |
 | `retentionPeriod` | inherit | 10m (`DefaultScaleToZeroRetentionPeriod`) |
 
+You can set it in `default`, in a named tier, or in a per-model entry. When a
+model's variants name different tiers, the model parks only if every one of
+those tiers allows it. It then waits for the longest `retentionPeriod` among
+them. A model parks whole, so that longest retention holds the GPUs of every
+role, prefill and decode alike.
+
+A variant that names no tier follows the variants of its model that do. Tag
+only the decode of a P/D model with `pd-gpu`, and the untagged prefill parks,
+scales and wakes under `pd-gpu` too, not under `default`. `default` applies only
+when no variant of the model names a tier.
+
+**A bad value is skipped, not fatal.** This covers two fields:
+
+- `scaleToZero.retentionPeriod` that is not a duration (for example
+  `5 minutes`) or is shorter than 30s (for example `0s` or `10s`). A retention
+  that short would park a model between two requests and wake it on the next.
+- `shapeChangeHoldSeconds` below zero.
+
+The scaling manager acts as if the entry did not set the field. The model then
+gets the value of the layer below: the tier, then `default`, then the built-in
+value (10m for the retention). Everything else in the entry still applies.
+
+You can see a skipped value in these places:
+
+- a `ConfigFieldIgnored` Warning event on the ConfigMap;
+- `wva_config_ignored_fields` for the ConfigMap, which returns to 0 once fixed;
+- the controller log, each time the ConfigMap is read. The line starts with
+  `WARNING: Ignored unusable saturation scaling config field` and names the
+  namespace, ConfigMap, entry and field;
+- `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`;
+- the `policyIgnored` key of the
+  [controller-status ConfigMap](operations.md#what-the-controller-is-running-with).
+  This key shows only the `default` entry of the controller's own ConfigMap.
+
+<details>
+<summary>Details</summary>
+
+- Values are cut to 64 bytes in every report. At most 10 fields are listed per
+  read, in the log and as events; one more line counts the rest. The metrics
+  count every field.
+- `policyIgnored` starts with the ConfigMap it describes,
+  `<namespace>/<name>: `, because the `policy*` keys beside it may name the
+  policy namespace's ConfigMap instead.
+- `policyIgnored` describes the `default` entry as parsed in the latest read.
+  If that entry is rejected and the previous one stays in force, it is empty;
+  `policyAccepted` and `policyError` say why.
+- With a separate policy namespace, the ConfigMap there supplies only limiters
+  and the optimizer. A `retentionPeriod` in it has no effect, and a bad one
+  there is not reported.
+
+</details>
+
 #### How long until a model actually reaches zero
 
 **`retentionPeriod` and KEDA's `cooldownPeriod` add up.** They run one after
@@ -112,6 +164,16 @@ scaleFromZero: { requirePrefill: true }
 | key | default | meaning |
 | --- | --- | --- |
 | `requirePrefill` | `false` | Refuse to wake a P/D-disaggregated model unless a prefill variant can be placed alongside decode. |
+
+You can set it in `default`, in a named tier, or in a per-model entry. The more
+specific one wins: `default`, then the tier, then the per-model entry. When a
+model's variants name different tiers, the model waits for prefill if any one
+of them resolves to `requirePrefill: true`. A variant that names no tier
+follows the ones that do.
+
+With `requirePrefill: true`, a P/D model whose prefill cannot be placed stays
+at zero. It does not wake decode alone. A model with no prefill variant is not
+held: there is no prefill to wait for, and its decode wakes as usual.
 
 **Why the default is `false`.** When waking a model, decode is mandatory and
 prefill is best-effort. That follows the llm-d router: with no prefill endpoint
@@ -888,7 +950,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 
 | you set, in `default` | after a re-run |
 | --- | --- |
-| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
+| `scaleToZero` | repeat it, or set it on a named tier or a per-model entry (an entry whose body names the model); both are kept |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
 | `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
 | `limiters:` | kept when `WVA_LIMITER` is not passed, hand-written entries included; `WVA_LIMITER=none` removes it |
@@ -918,6 +980,8 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
+| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is skipped and the layer below applies; see [a bad value is skipped](#scaletozero) for where it is reported. | `0` (5 minutes) |
+| `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off. It cannot turn back on a hold that a lower layer (`default` or the tier) turned off. | `false` |
 
 ### Expected output length
 
@@ -1625,9 +1689,18 @@ triggers:
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
 
-Parking is the exception: `scaleToZero` is resolved without the variant's tier
-(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
-the tier `default.defaultPolicy` names, and the per-model override decide it.
+Parking is stricter, because it takes the whole model to zero. Each variant's
+tier has a say: a model parks only if every tier its variants name allows
+`scaleToZero`, and it waits for the longest `retentionPeriod` among them. When
+all variants name the same tier, this is just that tier's setting. When a tier
+stops a model from parking, the controller logs `Scale-to-zero is disabled by
+the scaling policy of a tier this model's variants name`, once per change, with
+the model's `tiers` and the ones that disable it (`disabledBy`).
+
+A variant that names no tier follows the variants that do, for parking,
+`requirePrefill` and the utilization-share weight, as it already did for the
+thresholds. `default` (and its `defaultPolicy`) applies only when no variant of
+the model names a tier.
 
 Two failure modes resolve deterministically, and both are reported:
 
@@ -1637,7 +1710,11 @@ Two failure modes resolve deterministically, and both are reported:
   entry.` (once per change, with `scalingPolicy` and `knownPolicies` fields).
 - **Disagreeing variants.** When variants of one model name different tiers, the
   lexicographically smallest wins, so every cycle and replica resolves the same
-  way instead of flipping with map order.
+  way instead of flipping with map order. This picks the thresholds. Two
+  settings look at every tier instead: the model parks only if every tier
+  allows it, and it waits for prefill if any tier sets `requirePrefill: true`.
+  The utilization-share weight comes from the same tier as the thresholds,
+  for the planner and for a scale-from-zero wake alike.
 
 ### 4. Per-Model Overrides
 
@@ -1696,14 +1773,16 @@ data:
 **Key points:**
 - An override entry is identified by its **body**: set `model_id` and `namespace`. Its ConfigMap key is arbitrary — pick something readable
 - `model_id` must equal the ScaledObject's `modelID` exactly, and `namespace` the workload's namespace
-- Overrides use **field-level merge**: only non-zero fields in the override replace the corresponding values from `default`; any field you omit (or set to its zero value) inherits from `default`. See `Merge()` in `internal/config/saturation_scaling.go`.
+- Overrides use **field-level merge**: only non-zero fields in the override replace the corresponding values from the layer below (the tier, then `default`); any field you omit (or set to its zero value) inherits from that layer. One exception: if the merged `scaleUpThreshold` is not above the merged `scaleDownBoundary`, both reset to the built-in 0.85 and 0.70. See `Merge()` in `internal/config/saturation_scaling.go`.
 - Multiple overrides can exist for different model/namespace combinations
 
 ### 5. Per-Model Overrides — Field-Level Inheritance
 
 Overrides are merged onto `default` field by field: only non-zero fields in the override
-replace values from `default`, and any field you omit inherits from `default`. To change
-just one threshold, specify only that field:
+replace values from `default`, and any field you omit inherits from `default`. This
+includes the band (`scaleUpThreshold`, `scaleDownBoundary`) and the `analyzers` list: an
+override that sets only `analyzerName: saturation` keeps `default`'s band and analyzers.
+To change just one threshold, specify only that field:
 
 ```yaml
   # Inherits queueLengthThreshold from `default`
@@ -1719,6 +1798,7 @@ just one threshold, specify only that field:
 >
 > - `analyzers: []` → inherits from `default` (cannot clear a non-empty analyzer list)
 > - `enableRescale: false` → inherits from `default` (cannot disable rescale per model)
+> - `disableShapeChangeHold: false` → inherits from `default` (cannot re-enable a hold `default` turned off)
 >
 > See `Merge()` in `internal/config/saturation_scaling.go`.
 
@@ -1746,6 +1826,11 @@ A key the schema does not define (`scaleUpThreshhold`, `modelID`) is ignored
 and the rest of the entry applies. It is logged, recorded as a
 `ConfigEntryUnknownKeys` Warning event on the ConfigMap, and counted in
 `wva_config_unknown_keys`.
+
+A `scaleToZero.retentionPeriod` or `shapeChangeHoldSeconds` whose value cannot
+be used is skipped and the rest of the entry applies. It is logged, recorded as
+a `ConfigFieldIgnored` Warning event, and counted in
+`wva_config_ignored_fields` (see [a bad value is skipped](#scaletozero)).
 
 An entry with an invalid value or a wrong type is rejected. The entry
 previously in force under the same key stays. Each rejection is logged,

@@ -443,15 +443,41 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 		p := parsePolicy(quotaLimiters)
 		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
-		zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m")
+		zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", nil)
 		Expect(ok).To(BeTrue())
 		Expect(zNs).To(Equal(-1.0))
 		Expect(zCl).To(Equal(-1.0))
 
 		c.UpdateScalingPolicyConfigForNamespace("tenant", map[string]ScalingPolicy{GlobalDefaultsKey: {WeightClass: "critical"}})
-		zNs, zCl, _ = c.UtilizationShareWakeScores("tenant", "m")
+		zNs, zCl, _ = c.UtilizationShareWakeScores("tenant", "m", nil)
 		Expect(zNs).To(BeNumerically("<", -1.0), "its own map counts in its own quota group")
 		Expect(math.IsInf(zCl, 1)).To(BeTrue(), "a tenant-set weight claims nothing cluster-wide")
+	})
+
+	It("weighs the model under the tier the planner uses, the smallest named", func() {
+		c := NewTestConfig()
+		p := parsePolicy(quotaLimiters)
+		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+			GlobalDefaultsKey: p,
+			"bulk":            {WeightClass: "best-effort"},
+			"hot":             {WeightClass: "critical"},
+		})
+		for _, tc := range []struct {
+			tiers []string
+			class string
+		}{
+			{[]string{"hot"}, "critical"},
+			{[]string{"bulk", "hot"}, "best-effort"},
+			{[]string{"hot", "", "bulk"}, "best-effort"},
+			{nil, "standard"},
+		} {
+			want := -DefaultWeightClasses[tc.class]
+			zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", tc.tiers)
+			Expect(ok).To(BeTrue())
+			Expect(zNs).To(Equal(want), "tiers %v", tc.tiers)
+			Expect(zCl).To(Equal(want), "tiers %v", tc.tiers)
+		}
 	})
 
 	It("is off in shadow mode", func() {
@@ -459,7 +485,7 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 		p := parsePolicy(quotaLimiters)
 		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare, UtilizationShare: &UtilizationShareConfig{Shadow: true}}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
-		_, _, ok := c.UtilizationShareWakeScores("ns", "m")
+		_, _, ok := c.UtilizationShareWakeScores("ns", "m", nil)
 		Expect(ok).To(BeFalse())
 	})
 })

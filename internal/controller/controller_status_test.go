@@ -107,6 +107,26 @@ optimizer:
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "false"))
 			Expect(d[controllerstatus.KeyPolicyError]).To(ContainSubstring("kvCacheThreshold"))
 		})
+
+		It("records the default entry's ignored fields, and clears them on a clean load", func() {
+			r := newReconciler(policyConfigMap(systemNS, "", quotaShadowPolicy+
+				"scaleToZero:\n  retentionPeriod: 5 minutes\nshapeChangeHoldSeconds: -1\n"))
+			reconcile(r, systemNS)
+
+			d := status.Data()
+			// Ignored, not rejected: the entry and its limiter still apply.
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "true"))
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "quota/install-quota"))
+			Expect(d[controllerstatus.KeyPolicyIgnored]).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+			Expect(d[controllerstatus.KeyPolicyIgnored]).To(ContainSubstring(`shapeChangeHoldSeconds="-1"`))
+
+			var cm corev1.ConfigMap
+			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &cm)).To(Succeed())
+			cm.Data[config.GlobalDefaultsKey] = quotaShadowPolicy
+			Expect(r.Reader.(client.Client).Update(ctx, &cm)).To(Succeed())
+			reconcile(r, systemNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+		})
 	})
 
 	Context("when a separate policy namespace holds the policy", func() {
@@ -137,6 +157,35 @@ optimizer:
 			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyResourceVersion, policy.ResourceVersion))
 		})
 
+		It("records the ignored fields of the controller's own default entry, not the policy namespace's", func() {
+			// Retention and the hold are read from the controller's own
+			// ConfigMap; in the policy namespace they have no effect, ignored
+			// or not.
+			r := newReconciler(
+				policyConfigMap(policyNS, "", quotaShadowPolicy+"shapeChangeHoldSeconds: -5\n"),
+				policyConfigMap(systemNS, "", "scaleToZero:\n  retentionPeriod: 5 minutes\n"),
+			)
+			reconcile(r, policyNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+
+			reconcile(r, systemNS)
+			ownIgnored := status.Data()[controllerstatus.KeyPolicyIgnored]
+			Expect(ownIgnored).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+			Expect(ownIgnored).NotTo(ContainSubstring("shapeChangeHoldSeconds"))
+
+			// A later load of the policy namespace does not clear it.
+			reconcile(r, policyNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ownIgnored))
+
+			// Fixing the controller's own ConfigMap does.
+			var own corev1.ConfigMap
+			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &own)).To(Succeed())
+			own.Data[config.GlobalDefaultsKey] = "scaleToZero:\n  retentionPeriod: 5m\n"
+			Expect(r.Reader.(client.Client).Update(ctx, &own)).To(Succeed())
+			reconcile(r, systemNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+		})
+
 		It("records a rejected default entry in the policy namespace", func() {
 			r := newReconciler(policyConfigMap(policyNS, "", rejectedPolicy))
 			reconcile(r, policyNS)
@@ -160,5 +209,27 @@ optimizer:
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "none"))
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyUtilizationShare, constants.UtilizationShareModeOff))
 		})
+
+		// The bootstrap read of the policy namespace records the policy's
+		// version, never policyIgnored: that key belongs to the controller's
+		// own ConfigMap, and writing it from here would wipe what that one
+		// reported.
+		DescribeTable("the bootstrap read of the policy namespace leaves policyIgnored alone",
+			func(withPolicy bool) {
+				objs := []client.Object{policyConfigMap(systemNS, "", "scaleToZero:\n  retentionPeriod: 5 minutes\n")}
+				if withPolicy {
+					objs = append(objs, policyConfigMap(policyNS, "", quotaShadowPolicy))
+				}
+				r := newReconciler(objs...)
+				reconcile(r, systemNS)
+				ownIgnored := status.Data()[controllerstatus.KeyPolicyIgnored]
+				Expect(ownIgnored).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+
+				Expect(r.bootstrapClusterPolicy(ctx)).To(Succeed())
+				Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ownIgnored))
+			},
+			Entry("a policy ConfigMap is present", true),
+			Entry("no policy ConfigMap exists", false),
+		)
 	})
 })
