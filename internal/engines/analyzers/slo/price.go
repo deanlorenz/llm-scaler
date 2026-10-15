@@ -28,8 +28,11 @@ type pricing struct {
 	// fill is the KV fill, as a fraction of physical KV, at which the line's
 	// mean ITL equals the target, clamped to [minFill, maxFill].
 	fill float64
-	// feasible is false when the line's ITL at minFill already exceeds the
-	// target: no fill in range meets it on this variant.
+	// target is that fill before the clamp, for the log: above maxFill the
+	// target is looser than the clamp lets the variant run.
+	target float64
+	// feasible is false when the line's ITL at minFill already reaches the
+	// target (equal counts): no fill in range meets it on this variant.
 	feasible bool
 	// ok is false when an input was missing or non-finite. Neither of the
 	// other two fields means anything then.
@@ -49,14 +52,14 @@ func priceTPOT(line itl.Model, targetSeconds float64) pricing {
 	if !(line.A > 0) || !(targetSeconds > 0) {
 		return pricing{}
 	}
-	if targetSeconds <= line.ITLAt(minFill) {
-		return pricing{ok: true}
-	}
 	k := (targetSeconds - line.B) / line.A
+	if targetSeconds <= line.ITLAt(minFill) {
+		return pricing{target: k, ok: true}
+	}
 	if !finite(k) {
 		return pricing{}
 	}
-	return pricing{fill: min(max(k, minFill), maxFill), feasible: true, ok: true}
+	return pricing{fill: min(max(k, minFill), maxFill), target: k, feasible: true, ok: true}
 }
 
 // replicaTokenRate is the generation tokens per second one replica sustains at

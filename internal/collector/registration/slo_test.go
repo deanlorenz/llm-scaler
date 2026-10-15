@@ -46,8 +46,10 @@ func TestSLORouterQueries(t *testing.T) {
 		QuerySLORouterTPOTCount: "llm_d_epp_request_streaming_tpot_seconds_count",
 	} {
 		q := build(name)
+		// The namespace too: without it the mean blends in a same-named
+		// model's streams from every other namespace.
 		if !strings.Contains(q, metric) || !strings.Contains(q, "sum by (model_name, target_model_name)") ||
-			!strings.Contains(q, "["+SLORouterWindow+"]") {
+			!strings.Contains(q, "["+SLORouterWindow+"]") || !strings.Contains(q, `namespace="ns"`) {
 			t.Errorf("%s: %s", name, q)
 		}
 		if strings.Contains(q, "streaming=") {

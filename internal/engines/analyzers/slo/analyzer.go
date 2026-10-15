@@ -38,9 +38,12 @@ import (
 // latency miss for someone, so the drain is short.
 const backlogDrainSeconds = 60.0
 
-// windowTimeout is how long a variant's ITL window outlives the last cycle
-// that saw the variant.
-const windowTimeout = 24 * time.Hour
+// defaultStateTimeout is how long a variant's learned state -- its ITL window
+// and intercept, its accelerator memo -- and a model's transient memo outlive
+// the last cycle that analyzed them or reported them present, unless the engine
+// sets another (WithStateTimeout). The saturation analyzer's default variant
+// timeout.
+const defaultStateTimeout = 24 * time.Hour
 
 // RouterLatencySource reads a model's request latency as the router measured
 // it. The collector implements it.
@@ -53,6 +56,8 @@ type Analyzer struct {
 	router RouterLatencySource
 	store  *capacity.Store
 	now    func() time.Time
+	// stateTimeout is how long unused learned state is kept (EvictStale).
+	stateTimeout time.Duration
 
 	// lines fits each generating variant's ITL(k), with the same itl.Tracker
 	// and so the same rules as the saturation analyzer. Its own instance:
@@ -89,12 +94,27 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		router:       router,
 		store:        store,
 		now:          time.Now,
+		stateTimeout: defaultStateTimeout,
 		lines:        itl.NewTracker(),
 		seen:         make(map[string]time.Time),
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
 	}
 }
+
+// WithStateTimeout sets how long unused learned state is kept: the engine
+// passes the saturation analyzer's variant timeout, so
+// LEARNED_STATE_VARIANT_TIMEOUT governs both. A non-positive d keeps the
+// default. Call it before the analyzer is used.
+func (a *Analyzer) WithStateTimeout(d time.Duration) *Analyzer {
+	if d > 0 {
+		a.stateTimeout = d
+	}
+	return a
+}
+
+// StateTimeout reports how long unused learned state is kept.
+func (a *Analyzer) StateTimeout() time.Duration { return a.stateTimeout }
 
 // Name implements domain.Analyzer.
 func (a *Analyzer) Name() string { return domain.SLOAnalyzerName }
@@ -142,7 +162,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SLOAnalyzerName)
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
-		vc, reading := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
+		vc, reading, d := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
 		if !shapeKnown && reading != nil {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
@@ -163,7 +183,16 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"variant", vs.VariantName, "role", vs.Role, "source", reading.Source,
 				"fill", reading.Fill, "predictedITL", reading.PredictedITL,
-				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason)
+				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason,
+				// Which line, and what it was fitted from: the window's key,
+				// the coefficients, and what the window was offered and held.
+				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
+				"held", d.line.Held, "offered", d.line.Offered, "belowBand", d.line.BelowBand,
+				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,
+				"notReady", d.line.NotReady, "declined", d.line.Declined,
+				// The fill before the clamp and the batch cap, and the cap's inputs.
+				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
+				"maxNumSeqs", d.maxSeqs)
 		}
 	}
 
@@ -171,8 +200,19 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	// A window that covered a wake or a starting replica is not judged: the
 	// requests in it waited out capacity no steady-state sizing could have had
 	// ready. The request count is still published, and the reason is.
-	ttftExcluded, tpotExcluded := a.noteTransient(input.Namespace+"/"+input.ModelID, input.VariantStates,
-		time.Duration(routerWindowSeconds(snap.Objectives))*time.Second, transientGrace(input.ReplicaMetrics), now)
+	window, grace := time.Duration(routerWindowSeconds(snap.Objectives))*time.Second, transientGrace(input.ReplicaMetrics)
+	ttftExcluded, tpotExcluded := a.noteTransient(input.Namespace+"/"+input.ModelID, input.VariantStates, window, grace, now)
+	if logger.V(logging.VERBOSE).Enabled() {
+		t := a.transientDetail(input.Namespace + "/" + input.ModelID)
+		// Why a window is not judged, and until when: the mark's reason and
+		// time, per scope, and the cycles since the model was last analyzed.
+		logger.V(logging.VERBOSE).Info("slo-transient",
+			"modelID", input.ModelID, "namespace", input.Namespace,
+			"ttftExcluded", ttftExcluded, "tpotExcluded", tpotExcluded,
+			"allMark", t.all.reason, "allMarkAt", t.all.at, "generatingMark", t.generating.reason,
+			"generatingMarkAt", t.generating.at, "holdFor", window+grace,
+			"cyclesSinceAnalyzed", t.cyclesSinceAnalyzed, "pendingSince", t.pendingSince)
+	}
 	for i := range snap.Objectives {
 		o := &snap.Objectives[i]
 		o.Excluded = tpotExcluded
@@ -195,11 +235,20 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	return result, nil
 }
 
+// pricingDetail is what a variant was priced from, for its log line.
+type pricingDetail struct {
+	line       itl.Reading
+	targetFill float64
+	capTokens  float64
+	maxSeqs    int64
+}
+
 // priceVariant fits the variant's line and prices one replica of it at the
 // TPOT target. The reading is nil for a variant the TPOT objective does not
 // describe: a prefill role, or a policy with no TPOT target.
 func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantReplicaState, key string,
-	fleet fleetReading, tpotTarget, scaleUp float64, now time.Time) (domain.VariantCapacity, *metrics.SLOVariantReading) {
+	fleet fleetReading, tpotTarget, scaleUp float64, now time.Time) (domain.VariantCapacity, *metrics.SLOVariantReading, pricingDetail) {
+	d := pricingDetail{targetFill: math.NaN(), capTokens: math.NaN()}
 	vc := domain.VariantCapacity{
 		VariantName:      vs.VariantName,
 		Role:             vs.Role,
@@ -214,40 +263,43 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// sidecar asks it for one token), and TTFT is not priced yet. Left as
 	// no-data, so a combiner treats it as undefined rather than as zero.
 	if !isGenerating(vs.Role) {
-		return vc, nil
+		return vc, nil, d
 	}
-	line, source := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, now)
+	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, now)
+	d.line = r
 	if !(tpotTarget > 0) {
-		return vc, nil
+		return vc, nil, d
 	}
 	reading := newVariantReading(vs.VariantName, source)
-	if source == constants.SLOSourceNoLine {
-		return vc, reading
+	if source == constants.SLOSourceNoLine || source == constants.SLOSourceDeclined {
+		return vc, reading, d
 	}
 	p := priceTPOT(line, tpotTarget)
+	d.targetFill = p.target
 	switch {
 	case !p.ok:
 		reading.Source = constants.SLOSourceInputInvalid
 		vc.Reason = domain.ReasonError
-		return vc, reading
+		return vc, reading, d
 	case !p.feasible:
 		// Abstain, never cap: holding an infeasible variant at its count would
 		// freeze a single-variant fleet as load rises.
 		reading.Source = constants.SLOSourceInfeasible
-		return vc, reading
+		return vc, reading, d
 	}
 	params := a.engineParams(input.Namespace, input.ModelID, vs.VariantName)
-	var maxSeqs int64
 	if params != nil {
-		maxSeqs = params.MaxNumSeqs
+		d.maxSeqs = params.MaxNumSeqs
 	}
+	maxSeqs := d.maxSeqs
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
+	d.capTokens = capTokens
 	fill := reachableFill(p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	rate := replicaTokenRate(line, fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	if !(rate > 0) {
 		reading.Source = constants.SLOSourceInputInvalid
 		vc.Reason = domain.ReasonError
-		return vc, reading
+		return vc, reading, d
 	}
 	vc.PerReplicaCapacity = rate
 	vc.Reason = "slo-" + source
@@ -255,7 +307,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if k := realisedFill(line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
 		reading.PredictedITL = line.ITLAt(k)
 	}
-	return vc, reading
+	return vc, reading, d
 }
 
 // newVariantReading is a variant's reading with every figure unknown: NaN,
@@ -270,23 +322,28 @@ func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 // fitLine fits one variant's ITL(k) = A*k + B with the shared itl.Tracker --
 // the saturation analyzer's rules, by construction -- and names where the line
 // came from: a full fit, B pinned to this key's own last full fit, or B pinned
-// to the default floor.
-func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, now time.Time) (itl.Model, string) {
+// to the default floor; or why there is none: the window held enough readings
+// and the pinned fit refused them, or it holds too few.
+func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, now time.Time) (itl.Model, string, itl.Reading) {
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
 	r := a.lines.Observe(key, variant, rows, now)
 	switch {
 	case r.Tier == itl.TierOLS:
-		return r.Model, constants.SLOSourceOwn
+		return r.Model, constants.SLOSourceOwn, r
 	case r.Tier == itl.TierPinnedB && r.BaselineLearned:
-		return r.Model, constants.SLOSourcePinned
+		return r.Model, constants.SLOSourcePinned, r
 	case r.Tier == itl.TierPinnedB:
 		// Not a measurement of this hardware: a constant for another card.
 		// Labelled apart, so the line it pins is not read as one.
-		return r.Model, constants.SLOSourcePinnedDefault
+		return r.Model, constants.SLOSourcePinnedDefault, r
+	case r.Declined:
+		// Not "too few yet": a steady state. Most often a fast card whose ITL
+		// sits below the pinned intercept, so the slope comes out negative.
+		return itl.Model{}, constants.SLOSourceDeclined, r
 	}
-	return itl.Model{}, constants.SLOSourceNoLine
+	return itl.Model{}, constants.SLOSourceNoLine, r
 }
 
 // routerWindowSeconds is the rate window the router figures were taken over:
@@ -373,16 +430,18 @@ func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.En
 }
 
 // EvictStale forgets the learned state of variants and models not analyzed or
-// reported present for windowTimeout. The engine calls it once per cycle with
-// the saturation analyzer's sweep, so it runs whether or not any model lists
-// this analyzer this cycle, and each key is visited once per cycle rather than
-// once per analyzed model.
+// reported present for the state timeout. The engine calls it with the
+// saturation analyzer's sweep on every cycle that has a model to plan, whether
+// or not any model lists this analyzer, so each key is visited once per cycle
+// rather than once per analyzed model. A cycle with no active model does not
+// sweep (the engine returns before it), so the timeout counts reconciled time,
+// as the saturation analyzer's does.
 func (a *Analyzer) EvictStale(now time.Time) Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	stale := func(key string) bool {
 		at, ok := a.seen[key]
-		return !ok || now.Sub(at) > windowTimeout
+		return !ok || now.Sub(at) > a.stateTimeout
 	}
 	var ev Evicted
 	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
@@ -392,13 +451,13 @@ func (a *Analyzer) EvictStale(now time.Time) Evicted {
 		}
 	}
 	for key, m := range a.transients {
-		if now.Sub(m.seenAt) > windowTimeout {
+		if now.Sub(m.seenAt) > a.stateTimeout {
 			delete(a.transients, key)
 			ev.Transients++
 		}
 	}
 	for key, m := range a.accelerators {
-		if now.Sub(m.lastUsed) > windowTimeout {
+		if now.Sub(m.lastUsed) > a.stateTimeout {
 			delete(a.accelerators, key)
 			ev.Accelerators++
 		}
@@ -435,7 +494,7 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 	defer a.mu.Unlock()
 	for _, name := range variantNames {
 		// The accelerator memo too, as saturation's presence does: a variant
-		// parked past windowTimeout would otherwise wake with no memo, and a
+		// parked past the state timeout would otherwise wake with no memo, and a
 		// first cycle of unresolved readings would key a new, empty line.
 		if m, ok := a.accelerators[namespace+"/"+name]; ok {
 			m.lastUsed = now
@@ -544,7 +603,7 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		}
 		// A row with any non-finite shape figure is no reading of the shape: one
 		// NaN summed in would turn the whole fleet's shape into NaN.
-		if !(w > 0) || !finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
+		if !(w > 0) || !finite(w) || !finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
 			!finite(rm.AvgInputTokens) || !finite(rm.PrefixCacheHitRate) {
 			continue
 		}

@@ -62,7 +62,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 
 		// Evicted by the engine's per-cycle sweep, not by another model's
 		// Analyze: once no model lists the analyzer, nothing would call that.
-		ev := a.EvictStale(clock.Add(windowTimeout + time.Minute))
+		ev := a.EvictStale(clock.Add(defaultStateTimeout + time.Minute))
 		Expect(ev.Lines).To(Equal(1))
 		Expect(ev.Baselines).To(Equal(1))
 		Expect(a.lines.WindowLens()).NotTo(HaveKey(key))
@@ -73,7 +73,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 	It("keeps a line seen within the timeout", func() {
 		a := newAt(nil)
 		warmWith(a, noop)
-		Expect(a.EvictStale(clock.Add(windowTimeout - time.Minute)).Any()).To(BeFalse())
+		Expect(a.EvictStale(clock.Add(defaultStateTimeout - time.Minute)).Any()).To(BeFalse())
 		Expect(a.lines.WindowLens()).To(HaveKey(windowKey("ns", "m", agg)))
 	})
 
@@ -81,15 +81,15 @@ var _ = Describe("Analyzer state and inputs", func() {
 		a := newAt(nil)
 		warmWith(a, noop)
 		key := windowKey("ns", "m", agg)
-		clock = clock.Add(windowTimeout - time.Minute)
+		clock = clock.Add(defaultStateTimeout - time.Minute)
 		a.NoteVariantsPresent("ns", "m", []string{"agg"})
 		Expect(a.EvictStale(clock.Add(2*time.Minute)).Lines).To(BeZero(),
 			"parked, so not analyzed, but present")
 		Expect(a.lines.Baselines()).To(HaveKey(key))
 		stamped := clock
-		clock = clock.Add(windowTimeout)
+		clock = clock.Add(defaultStateTimeout)
 		a.NoteVariantsPresent("ns", "m", []string{"ag"})
-		Expect(a.EvictStale(stamped.Add(windowTimeout+2*time.Minute)).Lines).To(Equal(1),
+		Expect(a.EvictStale(stamped.Add(defaultStateTimeout+2*time.Minute)).Lines).To(Equal(1),
 			`"ag" must not keep "agg" alive`)
 	})
 
@@ -112,7 +112,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 		a := newAt(nil)
 		warmWith(a, noop)
 		resolved := windowKey("ns", "m", agg)
-		clock = clock.Add(windowTimeout - time.Minute)
+		clock = clock.Add(defaultStateTimeout - time.Minute)
 		a.NoteVariantsPresent("ns", "m", []string{"agg"})
 		a.EvictStale(clock.Add(2 * time.Minute))
 		unresolved := agg
@@ -165,7 +165,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 
 		zeroCap := row("agg", "agg-a", 0.5)
 		zeroCap.TotalKvCapacityTokens = 0
-		_, reading := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
+		_, reading, _ := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
 			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 				ReplicaMetrics: []domain.ReplicaMetrics{zeroCap}}),
 			0.044, 0.85, clock)
@@ -183,7 +183,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			_, src = a.fitLine(key, rows, "agg", clock)
+			_, src, _ = a.fitLine(key, rows, "agg", clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourceOwn))
@@ -198,7 +198,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			m, src = a.fitLine(key, rows, "agg", clock)
+			m, src, _ = a.fitLine(key, rows, "agg", clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourcePinned))
@@ -285,6 +285,25 @@ var _ = Describe("Analyzer state and inputs", func() {
 			ReplicaMetrics: []domain.ReplicaMetrics{good, bad}})
 		Expect(finite(f.shape.AvgInputTokens)).To(BeTrue(), "one NaN row must not make the fleet's shape NaN")
 		Expect(f.shape.AvgOutputTokens).To(Equal(good.AvgOutputTokens))
+	})
+
+	It("does not weigh the shape by a request rate that is not finite", func() {
+		good := row("agg", "agg-a", 0.5)
+		bad := row("agg", "agg-b", 0.5)
+		bad.RequestRate, bad.AvgOutputTokens = math.Inf(1), 3000
+		f := readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
+			ReplicaMetrics: []domain.ReplicaMetrics{good, bad}})
+		Expect(f.shape.AvgOutputTokens).To(Equal(good.AvgOutputTokens), "an infinite weight made the shape NaN")
+	})
+
+	It("keeps state for the timeout it is given, not the default", func() {
+		a := newAt(nil).WithStateTimeout(72 * time.Hour)
+		Expect(a.StateTimeout()).To(Equal(72 * time.Hour))
+		warmWith(a, noop)
+		Expect(a.EvictStale(clock.Add(defaultStateTimeout+time.Hour)).Any()).To(BeFalse(),
+			"LEARNED_STATE_VARIANT_TIMEOUT of 72h keeps a line a day old")
+		Expect(a.EvictStale(clock.Add(72*time.Hour + time.Minute)).Lines).To(Equal(1))
+		Expect(New(nil, nil).WithStateTimeout(0).StateTimeout()).To(Equal(defaultStateTimeout))
 	})
 })
 

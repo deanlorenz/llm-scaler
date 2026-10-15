@@ -81,8 +81,11 @@ var _ = Describe("histogram", func() {
 
 var _ = Describe("minSamples", func() {
 	It("asks for ten requests beyond the percentile, and never fewer than 50", func() {
-		Expect(minSamples(90)).To(BeNumerically("~", 100, 1e-9))
-		Expect(minSamples(99)).To(BeNumerically("~", 1000, 1e-6))
+		// Exactly: a window of exactly the documented minimum is judged.
+		Expect(minSamples(90)).To(Equal(100.0))
+		Expect(minSamples(95)).To(Equal(200.0))
+		Expect(minSamples(99)).To(Equal(1000.0))
+		Expect(minSamples(80)).To(Equal(50.0))
 		Expect(minSamples(50)).To(Equal(50.0))
 		Expect(minSamples(0)).To(Equal(50.0))
 	})

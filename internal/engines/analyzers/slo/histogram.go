@@ -102,9 +102,12 @@ func (h histogram) fractionWithin(target float64) (float64, bool) {
 // (in percent) or an attainment at it is reported: max(50, 10/(1-p)). That is
 // 100 at p90 and 1000 at p99 -- ten requests beyond the percentile, so the tail
 // the figure describes is more than a handful of requests. A mean needs 50.
+// Computed as 1000/(100-p), exact for a whole p: 10/(1-0.9) is
+// 100.00000000000003 in floating point, and a window of exactly the documented
+// 100 was not judged.
 func minSamples(percentile int) float64 {
 	if percentile <= 0 || percentile >= 100 {
 		return 50
 	}
-	return max(50, 10/(1-float64(percentile)/100))
+	return max(50, 1000/float64(100-percentile))
 }

@@ -363,7 +363,8 @@ type presenceNoter interface {
 
 // beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
 // which a model it did not analyze on the cycle before is unobserved. Called
-// once per cycle, before any early return.
+// once per cycle that gets past its error returns: on the no-model return, and
+// before the models are analyzed.
 func (e *Engine) beginSLOCycle() {
 	if e.sloAnalyzer != nil {
 		e.sloAnalyzer.BeginCycle()
@@ -438,13 +439,15 @@ func (e *Engine) notePresentVariants(
 	note(utils.GroupVariantAutoscalingByModel(parked))
 }
 
-// evictStaleLearnedState sweeps the two stores of learned per-variant state
+// evictStaleLearnedState sweeps the stores of learned per-variant state
 // whose eviction functions existed with no caller at all.
 //
 // The saturation analyzer's EvictStaleHistory takes the k2 history and, beside
 // it, the accelerator memo, the saturated-throughput windows, the ITL windows
 // (with the learned baseline and start estimate keyed to them) and the
-// decode-saturation memory. The capacity store's EvictStale takes its records.
+// decode-saturation memory. The capacity store's EvictStale takes its records,
+// and the slo analyzer's EvictStale its lines, accelerator memos and
+// transient memos, on the same variant timeout.
 // Both are keyed by variant, so until now a renamed, deleted or recreated
 // variant left its entry behind for the lifetime of the process -- exactly the
 // leak the analyzer's own comment describes: "one window per variant that has

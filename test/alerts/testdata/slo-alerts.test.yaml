@@ -95,9 +95,9 @@ tests:
           - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
 
   # 5. A target set from t=0, replicas present, nothing ever judged. A new
-  #    model is quiet for its first hour (the target must have existed an hour
-  #    ago: 60 of the hour's 61 samples, true from 59m), then for: 15m:
-  #    firing from 74m.
+  #    model is quiet for its first hour (the target must have been set for
+  #    55 of the hour's minutes, true from 54m), then for: 15m: firing from
+  #    69m.
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -108,10 +108,10 @@ tests:
       - eval_time: 20m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 73m
+      - eval_time: 68m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 75m
+      - eval_time: 70m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
           - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
@@ -237,7 +237,7 @@ tests:
 
   # 12. A target set, removed at 21m, and set again at 56m, nothing ever
   #     judged: "set for an hour" counts the whole hour, so it stays quiet
-  #     until an hour after the target came back (pending ~115m, firing ~130m).
+  #     until 55 minutes after the target came back (pending 110m, firing 125m).
   #     A check of one instant an hour ago fired at 76m and flapped.
   - interval: 1m
     input_series:
@@ -292,7 +292,7 @@ tests:
         exp_alerts: []
 
   # 15. A fleet excluded the whole time (it keeps scaling up), with traffic:
-  #     firing from 74m (59m, then for: 15m).
+  #     firing from 69m (54m, then for: 15m).
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -304,16 +304,16 @@ tests:
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x150'
     alert_rule_test:
-      - eval_time: 73m
+      - eval_time: 68m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 75m
+      - eval_time: 70m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
           - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
-  # 16. TPOT sees no requests while TTFT sees plenty: clients do not send
-  #     include_usage. TPOT is unjudged and fires; TTFT, judged, does not.
+  # 16. TPOT sees no requests while the router serves plenty: clients do not
+  #     send include_usage. TPOT is unjudged and fires; TTFT, judged, does not.
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
@@ -328,6 +328,8 @@ tests:
         values: '1x150'
       - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
         values: '0x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="m",streaming="true"}'
+        values: '0+60x150'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x150'
     alert_rule_test:
@@ -384,9 +386,87 @@ tests:
         values: '0x150'
       - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
         values: '0x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="m",streaming="true"}'
+        values: '0x150'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '1x150'
     alert_rule_test:
       - eval_time: 100m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
+
+  # 20. A controller restart with a gap: the old pod's series go stale at 41m
+  #     and the new leader publishes from 43m. A sustained miss keeps firing
+  #     through it; an instant replicas gate was empty for the gap, resolved
+  #     the alert, and fired it again after for: 2m.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '5x40 stale'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x42 5x30'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '3x40 stale'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x42 3x30'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '300+1x40 stale'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x42 400+1x30'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m",pod="old"}'
+        values: '2x40 stale'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m",pod="new"}'
+        values: '_x42 2x30'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 42m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 44m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 21. A policy with a TPOT target alone, clients without include_usage: no
+  #     TTFT objective to compare with, but the router's own counter shows
+  #     streaming traffic. Fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
+        values: '0x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="m",streaming="true"}'
+        values: '0+60x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
+
+  # 22. Never judged, as in 15, through a controller restart that loses two
+  #     scrapes at 30m: still "set for the hour", still firing by 75m. Counting
+  #     all 60 minutes went quiet for an hour after every restart.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x29 stale _ 3x120'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x29 stale _ 330+1x120'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '1x29 stale _ 1x120'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x29 stale _ 2x120'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}

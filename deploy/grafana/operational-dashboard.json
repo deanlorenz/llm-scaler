@@ -2919,7 +2919,7 @@
           "id": 82,
           "title": "Where each variant's SLO pricing came from",
           "type": "state-timeline",
-          "description": "The source of each variant's TPOT pricing over time, one row per variant: own (a full fit), pinned (intercept from an earlier fit), pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid. A change of colour is the variant moving from one to another.",
+          "description": "The source of each variant's TPOT pricing over time, one row per variant: own (a full fit), pinned (intercept from an earlier fit), pinned-default (not a measurement), no-line (too few readings), declined (the fit refused them), no-output-length, infeasible, input-invalid. A change of colour is the variant moving from one to another.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2928,7 +2928,7 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, variant_name) ((wva_slo_source{$namespace_label=~\"$namespace\", source=\"own\"} == 1) * 1 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned\"} == 1) * 2 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned-default\"} == 1) * 3 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-line\"} == 1) * 4 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-output-length\"} == 1) * 5 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"infeasible\"} == 1) * 6 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"input-invalid\"} == 1) * 7)",
+              "expr": "max by ($namespace_label, model_name, variant_name) ((wva_slo_source{$namespace_label=~\"$namespace\", source=\"own\"} == 1) * 1 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned\"} == 1) * 2 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned-default\"} == 1) * 3 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-line\"} == 1) * 4 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"declined\"} == 1) * 5 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-output-length\"} == 1) * 6 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"infeasible\"} == 1) * 7 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"input-invalid\"} == 1) * 8)",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A",
               "datasource": {
@@ -2966,19 +2966,24 @@
                       "index": 3
                     },
                     "5": {
-                      "text": "no-output-length",
-                      "color": "orange",
+                      "text": "declined",
+                      "color": "light-purple",
                       "index": 4
                     },
                     "6": {
-                      "text": "infeasible",
-                      "color": "red",
+                      "text": "no-output-length",
+                      "color": "orange",
                       "index": 5
                     },
                     "7": {
+                      "text": "infeasible",
+                      "color": "red",
+                      "index": 6
+                    },
+                    "8": {
                       "text": "input-invalid",
                       "color": "dark-red",
-                      "index": 6
+                      "index": 7
                     }
                   }
                 }

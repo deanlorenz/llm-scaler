@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// The window's defaults, as the throughput analyzer builds it.
+// The window's defaults, as Tracker builds it.
 const (
 	// DefaultWindowMaxSize is the maximum number of (k, ITL) observations
 	// retained in the rolling window. When the window is full, the oldest
@@ -78,8 +78,9 @@ type Observation struct {
 // It accumulates observations from all replicas of the variant across reconcile
 // cycles to calibrate the linear ITL model: ITL(k) = A·k + B.
 //
-// The caller clears the window when the workload shape changes (see the
-// throughput analyzer and shape.Tracker) and prunes it by age (Prune).
+// Nothing clears the window when the workload shape changes: it is pruned by
+// age (Prune) and bounded in size, so a new shape replaces the old within
+// DefaultWindowMaxSize readings or DefaultObservationMaxAge.
 // Observations outside the valid k range [minK, maxK] are silently ignored.
 //
 // Not safe for concurrent use: the owner serialises access.

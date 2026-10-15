@@ -327,7 +327,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// collector does not read the store itself.
 	replicaCollector := collector.NewReplicaMetricsCollector(promSource, client, apiReader, recorder, podLocator)
 	replicaCollector.SetBridgeResolver(decision.DefaultBridges)
-	sloAnalyzer := slo.New(replicaCollector, capacityStore)
+	// The slo analyzer keeps its learned state as long as saturation keeps its
+	// own: LEARNED_STATE_VARIANT_TIMEOUT governs both.
+	sloAnalyzer := slo.New(replicaCollector, capacityStore).WithStateTimeout(satV2.Horizons().VariantTimeout)
 
 	engine = Engine{
 		client:                  client,
@@ -702,7 +704,6 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
 	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
 	metrics.SweepSLO(time.Now())       // drop the SLO series of a model no longer published
-	e.beginSLOCycle()                  // every cycle, so a model skipped on one is seen to be
 
 	if e.Config.ScaleToZeroEnabled() {
 		logger.Info("Scaling to zero is enabled")
@@ -717,6 +718,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	}
 
 	if len(activeVAs) == 0 {
+		// A cycle, though it analyzes nothing: the models parked through it
+		// were not watched, and the slo analyzer must see that it skipped them.
+		e.beginSLOCycle()
 		logger.Info("No active VariantAutoscalings found, skipping optimization")
 		metrics.PublishUtilizationShare(nil) // no group to report: the share gauges go too
 		// This cycle analyzes nothing, so no analyzer series gets refreshed and
@@ -792,6 +796,11 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		// always print inventory until optimizer consumes it
 		logger.Info("Collected cluster accelerator inventory (Limited Mode)", "inventory", inventory)
 	}
+	// The slo analyzer's cycle starts here, past every early error return: the
+	// executor retries a failed cycle within a fraction of a second, and
+	// counting the failure and its retry as two cycles read as a skipped one,
+	// leaving every SLO model unobserved for a window and its grace.
+	e.beginSLOCycle()
 
 	// Group VAs by model for per-model capacity analysis
 	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)

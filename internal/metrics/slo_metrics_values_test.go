@@ -116,7 +116,7 @@ var _ = Describe("PublishSLO values", func() {
 	It("lists every source the analyzer can report, so none goes unpublished", func() {
 		Expect(constants.SLOSources).To(ConsistOf(
 			constants.SLOSourceOwn, constants.SLOSourcePinned, constants.SLOSourcePinnedDefault,
-			constants.SLOSourceNoLine, constants.SLOSourceNoOutputLength, constants.SLOSourceInfeasible,
+			constants.SLOSourceNoLine, constants.SLOSourceDeclined, constants.SLOSourceNoOutputLength, constants.SLOSourceInfeasible,
 			constants.SLOSourceInputInvalid))
 		Expect(constants.SLOExcludedReasons).To(ConsistOf(
 			constants.SLOExcludedZeroReplicas, constants.SLOExcludedStarting, constants.SLOExcludedUnobserved))

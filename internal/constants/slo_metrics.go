@@ -14,9 +14,11 @@ const (
 	// Absent below the sample minimum, never 0 or 1 by default.
 	// Labels: namespace, model_name, objective, statistic.
 	WVASLOAttainmentRatio = "wva_slo_attainment_ratio"
-	// WVASLOFill is the KV fill, as a fraction of physical KV, at which a
-	// variant's mean inter-token latency meets the TPOT target -- the fill its
-	// SLO capacity is priced at. Absent when the variant could not be priced.
+	// WVASLOFill is the KV fill, as a fraction of physical KV, a variant's SLO
+	// capacity is priced at: where its mean inter-token latency meets the TPOT
+	// target, clamped to [0.15, 0.80] and lowered where max_num_seqs binds
+	// first, so the line's ITL there is at or below the target. Before any
+	// scale-up headroom. Absent when the variant could not be priced.
 	// Labels: namespace, model_name, variant_name, objective.
 	WVASLOFill = "wva_slo_fill"
 	// WVASLOPredictedITLSeconds is the mean inter-token latency the variant's
@@ -64,9 +66,10 @@ const (
 const (
 	// SLOSourceOwn: the variant's own ordinary least-squares ITL fit.
 	SLOSourceOwn = "own"
-	// SLOSourcePinned: a fit with the intercept pinned, because the fleet's
-	// readings did not span enough of k to fit both coefficients. A balanced
-	// fleet often sits here indefinitely.
+	// SLOSourcePinned: a fit with the intercept pinned to this variant's last
+	// full fit, because the fleet's readings did not span enough of k to fit
+	// both coefficients, or the full fit was not a valid line. A balanced fleet
+	// often sits here indefinitely.
 	SLOSourcePinned = "pinned"
 	// SLOSourcePinnedDefault: a pinned fit whose intercept is the built-in
 	// floor, not one this variant was ever measured at. Not a measurement of
@@ -76,8 +79,16 @@ const (
 	// SLOSourceNoOutputLength: no replica has reported an output length, so
 	// neither the demand nor the per-request KV footprint is known.
 	SLOSourceNoOutputLength = "no-output-length"
-	// SLOSourceNoLine: too few readings to fit any line.
+	// SLOSourceNoLine: too few readings in the window to fit any line: a new
+	// variant warming up, or replicas that report no ITL or run below a fill of
+	// 0.15 (an idle fleet), which can last indefinitely. The slo-variant log
+	// line counts which.
 	SLOSourceNoLine = "no-line"
+	// SLOSourceDeclined: the window held enough readings and the pinned fit
+	// refused them, most often because the variant's ITL sits below the pinned
+	// intercept (a fast card under the built-in floor) and the slope came out
+	// negative. A steady state, not a warm-up.
+	SLOSourceDeclined = "declined"
 	// SLOSourceInfeasible: no fill in the line's range meets the target.
 	SLOSourceInfeasible = "infeasible"
 	// SLOSourceInputInvalid: an input was missing, non-finite or non-positive.
@@ -100,6 +111,6 @@ var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting, 
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{
-	SLOSourceOwn, SLOSourcePinned, SLOSourcePinnedDefault, SLOSourceNoLine, SLOSourceNoOutputLength,
-	SLOSourceInfeasible, SLOSourceInputInvalid,
+	SLOSourceOwn, SLOSourcePinned, SLOSourcePinnedDefault, SLOSourceNoLine, SLOSourceDeclined,
+	SLOSourceNoOutputLength, SLOSourceInfeasible, SLOSourceInputInvalid,
 }

@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"maps"
 	"slices"
 	"time"
 
@@ -41,6 +42,9 @@ type transientMemo struct {
 	// pendingSince is when each variant with replicas pending began to have
 	// them, for boundPending.
 	pendingSince map[string]time.Time
+	// cyclesSinceAnalyzed is how many engine cycles passed between the last
+	// two analyses (1 when none was skipped, 0 on first sight), for the log.
+	cyclesSinceAnalyzed uint64
 }
 
 type transientMark struct {
@@ -137,7 +141,16 @@ func (a *Analyzer) noteTransient(key string, states []domain.VariantReplicaState
 	// is not judged until window+grace from now. Counted in cycles, not read
 	// from timing: a slow cycle is not a skipped one.
 	unobserved := fresh || a.cycle > m.analyzedCycle+1
+	if !fresh {
+		m.cyclesSinceAnalyzed = a.cycle - m.analyzedCycle
+	}
 	m.seenAt, m.analyzedCycle = now, a.cycle
+	if unobserved {
+		// Nothing here saw the variants pending through the gap, so it cannot
+		// say a group has been pending continuously: a group that started a
+		// minute ago would be judged as a stuck one.
+		m.pendingSince = nil
+	}
 	states = boundPending(m, states, now)
 
 	if unobserved {
@@ -159,9 +172,29 @@ func (a *Analyzer) noteTransient(key string, states []domain.VariantReplicaState
 	return held(m.all), held(m.generating)
 }
 
+// transientView is a copy of one model's transient memo, for the log.
+type transientView struct {
+	all, generating     transientMark
+	cyclesSinceAnalyzed uint64
+	pendingSince        map[string]time.Time
+}
+
+// transientDetail returns the model's transient memo as it stands, or the zero
+// view when there is none.
+func (a *Analyzer) transientDetail(key string) transientView {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m := a.transients[key]
+	if m == nil {
+		return transientView{}
+	}
+	return transientView{all: m.all, generating: m.generating, cyclesSinceAnalyzed: m.cyclesSinceAnalyzed,
+		pendingSince: maps.Clone(m.pendingSince)}
+}
+
 // boundPending applies the flap rule to a variant whose Pods have no ages. A
-// LeaderWorkerSet group lists no ages (discovery cannot tell which group a Pod
-// is in), so its pending replicas were all "starting" for as long as they
+// multi-Pod LeaderWorkerSet group lists no ages (discovery cannot tell which
+// group a Pod is in), so its pending replicas were all "starting" for as long as they
 // stayed pending -- a group that cannot be scheduled, unjudged for ever, when
 // that shortfall is exactly an SLO miss worth seeing. Pending continuously for
 // startingMaxAge, such a variant's pending replicas stop counting as starting,

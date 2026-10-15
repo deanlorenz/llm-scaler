@@ -229,6 +229,23 @@ var _ = Describe("noteTransient", func() {
 		}
 	})
 
+	It("does not carry a group's pending time across cycles it did not see", func() {
+		// Pending on one analyzed cycle, then 40 minutes not analyzed: a group
+		// pending on the way back may have started a minute ago, and must not
+		// be read as one pending all along -- that judged a slow start.
+		group := []domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0)}
+		a.noteTransient("ns/m", group, window, grace, clock)
+		back := clock.Add(40 * time.Minute)
+		a.BeginCycle()
+		a.BeginCycle()
+		ttft, _ := a.noteTransient("ns/m", group, window, grace, back)
+		Expect(ttft).To(Equal(constants.SLOExcludedStarting), "a start, not a group pending for 40 minutes")
+		for _, at := range ticks(back, back.Add(window+grace+cadence)) {
+			ttft, _ = a.noteTransient("ns/m", group, window, grace, at)
+		}
+		Expect(ttft).To(Equal(constants.SLOExcludedStarting), "pending for 7 minutes since the gap is a start")
+	})
+
 	It("judges a model at zero whose only Pod cannot be scheduled: a shortfall, not a wake", func() {
 		ttft, tpot := a.noteTransient("ns/m", []domain.VariantReplicaState{vs(domain.RoleBoth, 1, 1, 1)}, window, grace, clock)
 		Expect(ttft).To(BeEmpty())
@@ -277,7 +294,7 @@ var _ = Describe("noteTransient", func() {
 		a.noteTransient("ns/m", steady, window, grace, clock)
 		held := len(a.transients)
 		Expect(held).To(BeNumerically(">=", 1))
-		Expect(a.EvictStale(clock.Add(windowTimeout + time.Minute)).Transients).To(Equal(held))
+		Expect(a.EvictStale(clock.Add(defaultStateTimeout + time.Minute)).Transients).To(Equal(held))
 		Expect(a.transients).To(BeEmpty())
 	})
 })

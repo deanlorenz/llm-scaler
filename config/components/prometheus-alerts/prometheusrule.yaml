@@ -120,9 +120,13 @@ spec:
     #   overlap the new one's, and a many-to-many join errors at evaluation.
     # - changes(wva_slo_window_requests[5m]) gates on the analyzer still
     #   publishing, so series frozen after it stopped cannot fire.
+    # - The replicas gate reads max_over_time over 5m: on a restart or a
+    #   leader change the old pod's series go stale at once, and an instant
+    #   read is empty until the new leader publishes, which resolved every
+    #   firing alert and fired it again.
     # - test/alerts/testdata/slo-alerts.test.yaml pins each of these.
     - alert: WVAModelSLOMissed
-      expr: (count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) / on (exported_namespace, model_name, objective, statistic) count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)[30m:1m]) >= 0.5) and on (exported_namespace, model_name, objective, statistic) count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) >= 5 and on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (changes(wva_slo_window_requests[5m])) > 0 and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (wva_model_replicas) > 0
+      expr: (count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) / on (exported_namespace, model_name, objective, statistic) count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)[30m:1m]) >= 0.5) and on (exported_namespace, model_name, objective, statistic) count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) >= 5 and on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (changes(wva_slo_window_requests[5m])) > 0 and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (max_over_time(wva_model_replicas[5m])) > 0
       for: 2m
       labels:
         severity: warning
@@ -136,11 +140,16 @@ spec:
 
     # Fires only when there is something to act on: the fleet was excluded for
     # at least half the hour (it never holds still), the router's series are
-    # missing for the objective, or TPOT got no requests while TTFT did
-    # (clients without include_usage). Too little traffic -- a quiet model, a
+    # missing for the objective, or TPOT got no requests while the router
+    # served streaming requests (clients without include_usage). That last
+    # reads the router's own counter, not the TTFT objective, so a policy with
+    # a TPOT target alone is covered. Too little traffic -- a quiet model, a
     # diurnal lull -- is not judged and does not fire this.
+    # "Set for the hour" is 55 of the hour's minutes, not 60: Prometheus 3
+    # ranges are left-open (60 samples, not 61), so 60 failed on any one
+    # missed scrape, and a restart misses two.
     - alert: WVAModelSLOUnjudged
-      expr: (max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds) unless on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (last_over_time(wva_slo_observed_seconds[1h]))) and on (exported_namespace, model_name, objective, statistic) count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)[1h:1m]) >= 60 and on (exported_namespace, model_name, objective) (avg_over_time(max by (exported_namespace, model_name, objective) (wva_slo_excluded)[1h:1m]) >= 0.5 or (max by (exported_namespace, model_name, objective) (wva_slo_target_seconds) unless on (exported_namespace, model_name, objective) max by (exported_namespace, model_name, objective) (last_over_time(wva_slo_window_requests[1h]))) or (max by (exported_namespace, model_name, objective) (max_over_time(wva_slo_window_requests{objective="tpot"}[1h])) == 0 and on (exported_namespace, model_name) max by (exported_namespace, model_name) (max_over_time(wva_slo_window_requests{objective="ttft"}[1h])) > 0)) and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (wva_model_replicas) > 0
+      expr: (max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds) unless on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (last_over_time(wva_slo_observed_seconds[1h]))) and on (exported_namespace, model_name, objective, statistic) count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)[1h:1m]) >= 55 and on (exported_namespace, model_name, objective) (avg_over_time(max by (exported_namespace, model_name, objective) (wva_slo_excluded)[1h:1m]) >= 0.5 or (max by (exported_namespace, model_name, objective) (wva_slo_target_seconds) unless on (exported_namespace, model_name, objective) max by (exported_namespace, model_name, objective) (last_over_time(wva_slo_window_requests[1h]))) or (max by (exported_namespace, model_name, objective) (max_over_time(wva_slo_window_requests{objective="tpot"}[1h])) == 0 and on (exported_namespace, model_name) max by (exported_namespace, model_name) (label_replace(label_replace(increase(llm_d_epp_request_ttft_seconds_count{streaming="true"}[1h]), "model_name", "$1", "target_model_name", "(.+)"), "exported_namespace", "$1", "namespace", "(.*)")) > 0)) and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (max_over_time(wva_model_replicas[5m])) > 0
       for: 15m
       labels:
         severity: info

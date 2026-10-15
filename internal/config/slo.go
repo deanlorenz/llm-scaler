@@ -41,7 +41,22 @@ type SLOObjective struct {
 	// Percentile is the share of requests, in percent, that must meet Target.
 	// TTFT only: zero means DefaultTTFTPercentile. A TPOT objective is a mean
 	// and must leave it unset.
-	Percentile int `yaml:"percentile,omitempty"`
+	Percentile SLOPercentile `yaml:"percentile,omitempty"`
+}
+
+// SLOPercentile is a percentile in whole percent. A fraction is refused: the
+// int it decodes into would truncate 0.95 to 0, which is the default p90, and
+// 99.9 to 99, each judged without a word.
+type SLOPercentile int
+
+// UnmarshalYAML reads a whole number of percent.
+func (p *SLOPercentile) UnmarshalYAML(node *yaml.Node) error {
+	var n int
+	if node.Tag != "!!int" || node.Decode(&n) != nil {
+		return fmt.Errorf("percentile %q must be a whole number of percent from 50 to 99 (95, not 0.95)", node.Value)
+	}
+	*p = SLOPercentile(n)
+	return nil
 }
 
 // SLODuration is a time.Duration read from a Go duration string. A bare number
@@ -78,7 +93,7 @@ func (s *SLOPolicy) TTFTPercentile() int {
 	if s.TTFT.Percentile == 0 {
 		return DefaultTTFTPercentile
 	}
-	return s.TTFT.Percentile
+	return int(s.TTFT.Percentile)
 }
 
 // Validate checks every objective that is set. A malformed SLO is an error and,

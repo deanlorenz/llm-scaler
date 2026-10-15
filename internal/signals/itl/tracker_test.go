@@ -49,8 +49,9 @@ var _ = Describe("Tracker", func() {
 		Expect(r.NoITL).To(Equal(2), "an infinite ITL is not a reading either")
 		Expect(r.NoK).To(Equal(1))
 		Expect(r.AboveBand).To(Equal(1))
-		Expect(r.Offered).To(Equal(2), "the reading below the band is offered")
-		Expect(r.Held).To(Equal(1), "and dropped by the window itself")
+		Expect(r.Offered).To(Equal(1), "the reading the window kept")
+		Expect(r.BelowBand).To(Equal(1), "the one below the band, which the window itself drops")
+		Expect(r.Held).To(Equal(1))
 		Expect(r.Tier).To(BeEmpty())
 	})
 

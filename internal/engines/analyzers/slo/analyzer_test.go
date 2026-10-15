@@ -111,7 +111,7 @@ var _ = Describe("Analyzer", func() {
 	It("abstains on an infeasible target rather than capping the variant", func() {
 		cfg := policy(44*time.Millisecond, 0)
 		warm(cfg)
-		vc, reading := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
+		vc, reading, _ := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
 			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 				ReplicaMetrics: cycleRows("agg", 4)}),
 			0.010, 0.85, clock)
@@ -119,6 +119,33 @@ var _ = Describe("Analyzer", func() {
 		Expect(vc.Reason).To(Equal(domain.ReasonNoData))
 		Expect(vc.PerReplicaCapacity).To(BeZero())
 		Expect(math.IsNaN(reading.Fill)).To(BeTrue())
+	})
+
+	It("names a window the pinned fit refused as declined, not as too few readings", func() {
+		// A fast card: ITL flat at 3 ms, under the 6 ms default intercept, so
+		// the pinned slope comes out negative. That lasts, and "no-line" --
+		// documented as too few readings -- would have had the operator wait.
+		flat := func(i int) []domain.ReplicaMetrics {
+			rows := cycleRows("agg", i)
+			for j := range rows {
+				rows[j].KvUsageInstant = 0.5 + 0.01*float64(j)
+				rows[j].AvgITL = 0.003
+			}
+			return rows
+		}
+		cfg := policy(44*time.Millisecond, 0)
+		for i := range 5 {
+			analyze(cfg, []domain.VariantReplicaState{agg}, flat(i))
+			clock = clock.Add(15 * time.Second)
+		}
+		vc, reading, d := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
+			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
+				ReplicaMetrics: flat(5)}),
+			0.044, 0.85, clock)
+		Expect(reading.Source).To(Equal(constants.SLOSourceDeclined))
+		Expect(d.line.Declined).To(BeTrue())
+		Expect(d.line.Held).To(BeNumerically(">=", 10), "the window held enough readings")
+		Expect(vc.Reason).To(Equal(domain.ReasonNoData))
 	})
 
 	It("falls back to the default intercept, labelled as such, when the fleet never spanned enough of k", func() {

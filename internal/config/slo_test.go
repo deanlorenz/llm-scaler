@@ -30,6 +30,17 @@ var _ = Describe("SLOPolicy", func() {
 		Expect(err).To(MatchError(ContainSubstring("use a unit")))
 	})
 
+	DescribeTable("refuses a percentile that is not a whole number of percent",
+		func(value string) {
+			_, err := parse("slo:\n  ttft: {target: 3s, percentile: " + value + "}\n")
+			Expect(err).To(MatchError(ContainSubstring("whole number of percent")))
+		},
+		// 0.95 is the PromQL spelling, and truncated to 0 it was judged at p90.
+		Entry("a fraction", "0.95"),
+		Entry("a decimal percent", "99.9"),
+		Entry("a quoted number", `"95"`),
+	)
+
 	It("defaults the TTFT percentile to 90", func() {
 		p, err := parse("slo:\n  ttft: {target: 3s}\n")
 		Expect(err).NotTo(HaveOccurred())

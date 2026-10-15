@@ -124,6 +124,22 @@ var _ = Describe("PublishSLO", func() {
 		}
 	})
 
+	It("deletes one model's every series at once, and leaves the others", func() {
+		v := SLOVariantReading{Variant: "v", Source: constants.SLOSourceOwn, Fill: 0.6, PredictedITL: 0.04}
+		PublishSLO(snapshot("gone", v), t0)
+		PublishSLO(snapshot("kept", v), t0)
+		DeleteSLOModel("ns", "gone")
+		for _, name := range []string{constants.WVASLOTargetSeconds, constants.WVASLOObservedSeconds,
+			constants.WVASLOAttainmentRatio, constants.WVASLOFill, constants.WVASLOPredictedITLSeconds,
+			constants.WVASLOSource} {
+			ms := family(name)
+			Expect(ms).NotTo(BeEmpty(), name)
+			for _, m := range ms {
+				Expect(label(m, constants.LabelModelName)).To(Equal("kept"), name)
+			}
+		}
+	})
+
 	// The case a sweep inside PublishSLO missed: the only model publishing
 	// stops, so nothing publishes again and only the engine's per-cycle sweep
 	// can remove its series.

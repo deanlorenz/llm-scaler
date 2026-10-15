@@ -54,7 +54,9 @@ type Reading struct {
 	BaselineStored, BaselineLearned bool
 
 	// What the window was offered this cycle, by why a row was turned away.
-	Considered, NotReady, NoITL, NoK, AboveBand, Offered int
+	// Offered counts the readings the window kept; BelowBand those it dropped
+	// for a k below DefaultMinObservableK (an idle replica).
+	Considered, NotReady, NoITL, NoK, AboveBand, BelowBand, Offered int
 	// Held is the window's size after pruning, Ready its own confidence gate.
 	Held  int
 	Ready bool
@@ -96,8 +98,12 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 		case rm.KvUsageInstant > DefaultMaxObservableK:
 			r.AboveBand++
 		default:
-			w.Add(rm.KvUsageInstant, rm.AvgITL, now)
-			r.Offered++
+			// Add reports a reading it dropped: here, only a k below the band.
+			if w.Add(rm.KvUsageInstant, rm.AvgITL, now) {
+				r.BelowBand++
+			} else {
+				r.Offered++
+			}
 		}
 	}
 	w.Prune(now)

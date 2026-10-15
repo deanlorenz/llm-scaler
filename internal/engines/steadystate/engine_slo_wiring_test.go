@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -216,6 +217,106 @@ func TestEveryCycleBeginsAnSLOCycle(t *testing.T) {
 	}
 }
 
+// TestAFailedCycleAndItsRetryAreOneSLOCycle pins where the cycle count
+// starts: past the cycle's error returns. The executor retries a failed cycle
+// within a fraction of a second, and a count taken before the failure made
+// the failure and its retry two cycles -- a skipped one -- which left every
+// SLO model unobserved for a window and its grace.
+func TestAFailedCycleAndItsRetryAreOneSLOCycle(t *testing.T) {
+	e := sloWiringEngine(t)
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	e.Variants.Observe("ns", "m-wva", map[string]string{registry.ModelIDKey: "m"})
+	e.Variants.SetTarget("ns", "m-wva", registry.Target{APIVersion: "apps/v1", Kind: "Deployment", Name: "m"})
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := e.optimize(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cycle on a cancelled context returned %v, want context.Canceled", err)
+	}
+	if spy.cycles != 0 {
+		t.Fatalf("a cycle that failed before its models counted %d slo cycles, want 0", spy.cycles)
+	}
+}
+
+// fixedRouter returns the same router latency on every call.
+type fixedRouter struct{ rl domain.RouterLatency }
+
+func (r fixedRouter) CollectRouterLatency(context.Context, string, string) *domain.RouterLatency {
+	rl := r.rl
+	return &rl
+}
+
+// TestListingSLOLeavesTheDecisionUnchanged pins the observe-only promise where
+// the decision is made: the request the optimizer receives for a model is the
+// same whether or not its policy lists slo and sets targets, with the real
+// analyzer pricing and judging from live inputs. A change that lets the slo
+// result into the request -- a composite, a merge, the wrong entry picked --
+// fails here.
+func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	row := func(pod string, k, itlSec float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, ModelID: "m", Namespace: "ns", VariantName: "v", Ready: true,
+			KvUsageInstant: k, AvgITL: itlSec, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 2,
+			TotalKvCapacityTokens: 100000}
+	}
+	rows := []domain.ReplicaMetrics{row("p0", 0.3, 0.02), row("p1", 0.6, 0.03)}
+	states := []domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 2}}
+	router := fixedRouter{domain.RouterLatency{WindowSeconds: 300,
+		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}, {UpperBound: 3, Rate: 2}, {UpperBound: math.Inf(1), Rate: 2}},
+		TPOTSumRate: 0.08, TPOTCountRate: 2}}
+	request := func(policy config.ScalingPolicy) *allocation.ModelScalingRequest {
+		t.Helper()
+		sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{
+			AnalyzerName: domain.SaturationAnalyzerName, ModelID: "m", Namespace: "ns", TotalDemand: 400,
+			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleBoth, ReplicaCount: 2,
+				PerReplicaCapacity: 300, ObservedReplicas: 2}}}}
+		e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
+			{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", rows, policy, states, nil, nil, nil, nil, 2)
+		if err != nil || req == nil {
+			t.Fatalf("collectV2ModelRequest: %v, %v", req, err)
+		}
+		return req
+	}
+	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
+		Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}}}
+	withSLO := plain
+	withSLO.Analyzers = []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}
+	withSLO.SLO = &config.SLOPolicy{
+		TPOT: &config.SLOObjective{Target: config.SLODuration{Duration: 50 * time.Millisecond}},
+		TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 2 * time.Second}},
+	}
+	without := request(plain)
+	sloRan := false
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		sloRan = sloRan || strings.HasPrefix(mf.GetName(), "wva_slo_")
+	}
+	if sloRan {
+		t.Fatal("setup: the slo analyzer published for a policy that does not list it")
+	}
+	with := request(withSLO)
+	if mfs, err = reg.Gather(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		sloRan = sloRan || strings.HasPrefix(mf.GetName(), "wva_slo_")
+	}
+	if !sloRan {
+		t.Fatal("setup: the slo analyzer did not run, so the comparison proves nothing")
+	}
+	if !reflect.DeepEqual(without, with) {
+		t.Fatalf("listing slo changed the optimizer's request:\nwithout %+v\nwith    %+v",
+			without.CompositeSignal, with.CompositeSignal)
+	}
+}
+
 // countingRouter is a router latency source that counts what it was asked.
 type countingRouter struct{ calls int }
 
@@ -321,5 +422,42 @@ func TestPruneAnalyzerSeriesDeletesADepartedModelsSLOSeries(t *testing.T) {
 	e.pruneAnalyzerSeries(map[string]bool{"ns/kept": true})
 	if got := targets(); got["gone"] || !got["kept"] {
 		t.Fatalf("after the departed model's prune the SLO series are %v, want only kept", got)
+	}
+}
+
+// TestEvictAllAnalyzerSeriesDeletesTheSLOSeries is the same for the cycle on
+// which every model is gone: that path has its own delete list, and a model's
+// SLO series were left to the ten-minute sweep there.
+func TestEvictAllAnalyzerSeriesDeletesTheSLOSeries(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	metrics.PublishSLO(metrics.SLOModelSnapshot{Namespace: "ns", ModelName: "gone",
+		Objectives: []metrics.SLOObjectiveReading{{Objective: constants.SLOObjectiveTTFT, Statistic: "p90",
+			TargetSeconds: 3, Observed: 1, Attainment: 0.95, Requests: 300}},
+	}, time.Now())
+	count := func() int {
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, mf := range mfs {
+			if strings.HasPrefix(mf.GetName(), "wva_slo_") {
+				n += len(mf.GetMetric())
+			}
+		}
+		return n
+	}
+	if count() == 0 {
+		t.Fatal("setup: nothing published")
+	}
+	e := &Engine{metricsEmitter: metrics.NewMetricsEmitter(), lastAnalyzerSeries: map[string]analyzerSeries{
+		"ns/gone": {namespace: "ns", modelID: "gone"},
+	}}
+	e.evictAllAnalyzerSeries()
+	if n := count(); n != 0 {
+		t.Fatalf("with every model gone, %d wva_slo_* series remain", n)
 	}
 }
