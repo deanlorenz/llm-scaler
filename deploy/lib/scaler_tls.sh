@@ -41,7 +41,7 @@
 # does not.
 #
 # Requires vars: WVA_NS, ENVIRONMENT. Requires funcs: log_info, log_warning,
-# log_error, and kc_capture (common.sh) for KEDA's side; kubectl and jq on PATH
+# log_error, and kc_capture (common.sh) for the KEDA side; kubectl and jq on PATH
 # (openssl for the no-cert-manager path).
 
 WVA_SCALER_TLS_SECRET=wva-external-scaler-tls
