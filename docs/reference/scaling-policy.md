@@ -1578,12 +1578,17 @@ type. The built-in `slo` analyzer is registered by the engine itself, and the
 name is reserved. Each cycle the engine iterates every registered analyzer in
 registration order and invokes its `Analyze` method.
 
-> **Scope note.** Saturation drives every scaling decision on its own.
-> Non-saturation analyzers are registered and invoked, but their results
-> are **not yet consumed** — combine semantics and per-analyzer score
-> consumption land in a follow-up PR (`multi-analyzer-optimizer`). The
-> hooks below are wired so that follow-up can hang its behavior off them
-> without further engine changes.
+> **How listed analyzers combine.** Every analyzer the policy lists sizes
+> each variant: its demand divided by its per-replica capacity gives the
+> replicas it needs. The model is sized to the largest of those needs, so
+> scale-up follows the analyzer asking for most, and scale-down waits until
+> every listed analyzer agrees. Demand stays in saturation's units:
+> saturation runs for every model, listed or not, and when it is not listed
+> it only supplies the units and the variants. A variant no listed analyzer
+> can size falls back to saturation's own need; with that missing too, the
+> model reports `no-composite-signal`
+> ([Prometheus](prometheus.md#wva_model_scaling_blocked)). The decision is the
+> `composite` analyzer in `wva_analyzer_*` and in the cycle log.
 
 ### Registering Analyzers
 
@@ -1779,7 +1784,7 @@ The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` fo
 
 **P/D disaggregation.** The same formula and the same `(scaleUp, scaleDown)` values are applied to every `RoleCapacity` entry. Threshold configuration is common regardless of role — there are no per-role overrides. The optimizer receives fully calibrated per-role RC/SC and uses them for P/D replica allocation.
 
-**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer. An opt-out flag for analyzers with non-universal calibration math is deferred to a follow-up.
+**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer. Saturation's pair also sets the band of the combined decision, whose demand is in saturation's units. An opt-out flag for analyzers with non-universal calibration math is deferred to a follow-up.
 
 ### Saturation Always Runs
 

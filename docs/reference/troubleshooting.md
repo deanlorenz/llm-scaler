@@ -225,6 +225,7 @@ wva_model_scaling_blocked{model_name="<model>"}
 | `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or accept that it stays up |
 | `activation-retention` | just woken and held for its retention period; clears by itself |
 | `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
+| `no-composite-signal` | no listed analyzer could size any variant this cycle; check `wva_analyzer_target{model_name="<model>"}` for each listed analyzer |
 
 No reason, and still not parked? A model that has never served a request has
 no request counter yet, so the controller keeps it where it is. Send one

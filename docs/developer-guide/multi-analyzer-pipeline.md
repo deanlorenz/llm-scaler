@@ -332,15 +332,40 @@ analyzer's; an analyzer normally has no reason to call them.
 
 ## How results combine
 
-**Scale-down gate** (`needsScaleDownForRole`): the optimizer receives one
-result, saturation's (`CompositeSignal: namedResults[0]` in `collectV2ModelRequest`,
-`engine_v2.go`). A role scales down only when that entry is live and its `RoleSpare`
-for the role is above zero; `safeRemovalReplicasForRole` reads the same entry.
-Throughput and custom analyzers run, are scored and report metrics, but cannot
-veto scale-down. A version in which every live analyzer votes is kept in
-`internal/engines/allocation/multi_backup/` behind `//go:build ignore`; the
-"vote" and "veto" wording below describes that design, and today applies to
-saturation's entry alone.
+**The composite** (`buildComposite`, `steadystate/composite.go`): the
+optimizer receives one result, built in `collectV2ModelRequest` from every
+analyzer that ran. It starts as a copy of saturation's `AnalyzerResult` (every
+field, maps and slices cloned) and changes three things per variant:
+
+- **Need.** `allocation.ResolveSO` takes, for each eligible analyzer
+  (`allocation.Eligible`: live, informative, non-nil) that has the variant
+  without `ReasonNoData`/`ReasonError`, `N = D[role] / PRC` from the
+  analyzer's own demand and capacity (`allocation.TotalReplicas`), and keeps
+  the largest finite, non-negative one. Saturation is eligible only when the
+  policy lists it (`excludeByName`); with no contributor at all, saturation's
+  own `N` is the fallback. `Reason` records the path: `C0-agree` (several),
+  `C1-single`, `C2-sat-fallback`, `C4-no-signal`.
+- **PRC.** `D_sat[role] / N`, the capacity at which saturation's demand needs
+  `N` replicas. Saturation's own PRC is kept when saturation set `N` (`D/(D/P)`
+  is not always `P`), when `D_sat[role]` is zero, and on `C4-no-signal`.
+- **Utilization**, recomputed from that PRC.
+
+The composite is judged against saturation's thresholds
+(`AnalyzerThresholds(saturation)`), and recorded in the same
+`recordAnalyzerMetrics` call as the analyzers, once a cycle, as analyzer
+`composite`. Its `Score` is the largest analyzer score, which the cross-model
+fair share reads. `allocation.CompositeHasSignal` is false when every variant
+is `C4-no-signal`; the engine then sets the `no-composite-signal` blocked
+reason (`reportSignalReason`), and clears it on every cycle that builds no
+composite.
+
+**Scale-down gate** (`needsScaleDownForRole`): a role scales down only when
+the composite is live and its `RoleSpare` for the role is above zero;
+`safeRemovalReplicasForRole` reads the same entry. Because the composite's
+need is the largest analyzer need, scale-down requires every contributing
+analyzer to agree. A version in which every live analyzer votes separately is
+kept in `internal/engines/allocation/multi_backup/` behind `//go:build ignore`;
+the "vote" and "veto" wording below describes that design.
 
 **Liveness.** An analyzer is live for the current cycle iff it produced a
 non-error, capacity-bearing result within the staleness window (a fixed
