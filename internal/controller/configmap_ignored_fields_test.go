@@ -39,7 +39,7 @@ func TestParseReportsIgnoredFields(t *testing.T) {
 	}
 
 	fields := func(key string) []string {
-		var out []string
+		out := make([]string, 0, len(ignored[key]))
 		for _, f := range ignored[key] {
 			out = append(out, f.Field)
 		}

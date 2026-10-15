@@ -69,7 +69,9 @@ func (variantOfPodLocator) ResolveScaleTarget(context.Context, string, string) (
 	return autoscalingv2.CrossVersionObjectReference{}, false, nil
 }
 
-func (variantOfPodLocator) GetPodLabels(context.Context, string, string) map[string]string { return nil }
+func (variantOfPodLocator) GetPodLabels(context.Context, string, string) map[string]string {
+	return nil
+}
 
 // The tiers a model's variants name must reach the scale-to-zero stage of a
 // real cycle. scaleToZeroPolicy is correct on its own (scale_to_zero_tier_test.go),
@@ -139,11 +141,9 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var (
-				objs []client.Object
-				pods []string
-				vas  []llmdVariantAutoscalingV1alpha1.VariantAutoscaling
-			)
+			objs := make([]client.Object, 0, len(tc.tiers))
+			pods := make([]string, 0, len(tc.tiers))
+			vas := make([]llmdVariantAutoscalingV1alpha1.VariantAutoscaling, 0, len(tc.tiers))
 			for variant, tier := range tc.tiers {
 				objs = append(objs, &appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
