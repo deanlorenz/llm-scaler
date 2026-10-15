@@ -102,8 +102,17 @@ expect "budget: quotas per namespace with physicalGroups share nothing" namespac
 expect "budget: physicalGroups false shares nothing" namespace \
     "$(printf '%s\n' "$TUNED_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = false' | us_budget_scope)"
 EXCL_POLICY="$(printf '%s\n' "$QUOTA_POLICY" | yq '.limiters[0].exclude = ["ns-x", "ns-y"]')"
-expect "budget: a namespace excluded from the quota shares the cluster group" cluster \
+# An excluded namespace shares the cluster group only when a cluster-scoped
+# quota bounds it, as the controller now builds it: the sum of the namespace
+# quotas is no budget for a namespace they do not cap. Was cluster.
+expect "budget: excluded from the quota, no cluster quota: not shared" namespace \
     "$(printf '%s\n' "$EXCL_POLICY" | us_budget_scope)"
+expect "budget: excluded from the quota, with a cluster quota: shared" cluster \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]' | us_budget_scope)"
+# Equality, not substring: an exclude of team-a-prod does not exclude team-a.
+# Was "team-a".
+expect "budget: a namespace name that is a prefix of another is not excluded by it" "" \
+    "$(printf '%s\n' "$QUOTA_POLICY" | yq '.limiters[0].exclude = ["team-a"] | .limiters += [{"name": "q2", "type": "quota", "scope": "namespace", "exclude": ["team-a-prod"]}]' | us_excluded_namespaces)"
 expect "budget: the excluded namespaces are the ones that share" "ns-x ns-y" \
     "$(printf '%s\n' "$EXCL_POLICY" | us_excluded_namespaces | paste -sd' ' -)"
 # Two namespace-scoped entries: a namespace one of them still covers has its own group.
@@ -372,9 +381,10 @@ printf '%s\n' \
 run activate
 vcase "activate: quotas per namespace warn about no other namespace" \
     eval '[ $RC -eq 0 ] && ! says "pods in team-b" && says "no other namespace shares this budget"'
-# A namespace excluded from the quota shares the cluster group, so it is the
-# one named -- and only it: team-b is covered by the quota and shares nothing.
-fresh "$(printf '%s\n' "$TUNED_POLICY" | yq '.limiters[0].exclude = ["team-c"]')"
+# A namespace excluded from the quota, with a cluster quota bounding it, shares
+# the cluster group, so it is the one named -- and only it: team-b is covered by
+# the namespace quota and shares nothing.
+fresh "$(printf '%s\n' "$TUNED_POLICY" | yq '.limiters[0].exclude = ["team-c"] | .limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]')"
 printf '%s\n' \
     'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
     'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
@@ -382,6 +392,16 @@ printf '%s\n' \
 run activate
 vcase "activate: names the namespace excluded from the quota, and only it" \
     eval '[ $RC -eq 0 ] && says "may not patch pods in team-c" && says "make utilization-share-activate NAMESPACE=team-c CONTROLLER_NAMESPACE=team-a" && ! says "pods in team-b"'
+# With no cluster quota the excluded namespace shares nothing: the controller
+# plans it in no group, so activate does not send anyone to grant there. Was
+# warned about.
+fresh "$(printf '%s\n' "$TUNED_POLICY" | yq '.limiters[0].exclude = ["team-c"]')"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate
+vcase "activate: an excluded namespace with no cluster quota is not warned about" \
+    eval '[ $RC -eq 0 ] && ! says "pods in team-c" && says "no other namespace shares this budget"'
 # clusterNamespaces limits a cluster budget to the namespaces it lists. team-c
 # is listed and has no grant, so it is still warned about: a warning about
 # nobody must not pass.
@@ -588,7 +608,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=96
+CASES_EXPECTED=99
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi
