@@ -816,16 +816,22 @@ check_permissions() {
         fi
     fi
 
-    # The external scaler certificates (WVA_SCALER_TLS). Written by the
-    # controller phase beside the overlay rather than rendered in it, so the
-    # loop above never sees them -- and Secret is an admin-phase kind there,
-    # which a tenant phase would otherwise never be asked about.
+    # The external scaler certificates and KEDA's side of them (WVA_SCALER_TLS).
+    # Written beside the overlay rather than rendered in it, so the loop above
+    # never sees them. One "<resource> <namespace>" per line; "-" is cluster-scoped.
     if declare -F wva_scaler_tls_permission_needs >/dev/null; then
-        local tls_need
-        for tls_need in $(wva_scaler_tls_permission_needs); do
-            kubectl auth can-i create "$tls_need" -n "$ns" >/dev/null 2>&1 \
-                || denied+=("create $tls_need in $ns (external scaler TLS; WVA_SCALER_TLS=false skips it)")
-        done
+        local tls_res tls_ns tls_needs
+        tls_needs="$(wva_scaler_tls_permission_needs)"
+        while read -r tls_res tls_ns; do
+            [ -n "$tls_res" ] || continue
+            if [ "$tls_ns" = - ]; then
+                kubectl auth can-i create "$tls_res" >/dev/null 2>&1 \
+                    || { denied+=("create $tls_res, cluster-scoped (external scaler TLS; WVA_SCALER_TLS=false skips it)"); cluster_denied=1; }
+            else
+                kubectl auth can-i create "$tls_res" -n "$tls_ns" >/dev/null 2>&1 \
+                    || denied+=("create $tls_res in $tls_ns (external scaler TLS; WVA_SCALER_TLS=false skips it)")
+            fi
+        done <<< "$tls_needs"
     fi
 
     if [ ${#unknown[@]} -ne 0 ]; then

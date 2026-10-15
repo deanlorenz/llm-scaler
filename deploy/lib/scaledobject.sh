@@ -46,6 +46,41 @@ readonly SO_PLAN_HEADER=$'APPLY\tNAMESPACE\tKIND\tNAME\tMODELID\tMIN\tMAX\tCOST\
 # matters the first time a model gets a second variant.
 readonly SO_DEFAULT_VARIANT_COST=10.0
 
+# The scaler's address depends on whether it serves TLS (deploy/lib/scaler_tls.sh,
+# "KEDA's side"). Loaded here too, because make targets source this file alone.
+if ! declare -F wva_scaler_address >/dev/null && [ -f "$(dirname "${BASH_SOURCE[0]}")/scaler_tls.sh" ]; then
+    # shellcheck source=scaler_tls.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/scaler_tls.sh"
+fi
+
+# so_scaler_addr echoes the scalerAddress for the scaler in namespace $1: the
+# TLS form when that controller serves this installer's TLS, else the plaintext
+# form. A controller with hand-set TLS flags keeps the plaintext form; whoever
+# set them owns KEDA's side too.
+so_scaler_addr() {
+    local mode=plaintext
+    if declare -F wva_scaler_mode_of >/dev/null; then
+        mode="$(wva_scaler_mode_of "$1")"
+        [ "$mode" = tls ] || mode=plaintext
+    fi
+    if declare -F wva_scaler_address >/dev/null; then
+        wva_scaler_address "$1" "$mode"
+    else
+        printf 'wva-external-scaler.%s.svc.cluster.local:9090\n' "$1"
+    fi
+}
+
+# so_trigger_auth echoes the authenticationRef (JSON) a trigger on scalerAddress
+# $1 needs: this installer's ClusterTriggerAuthentication for the TLS form of a
+# scaler address, nothing otherwise.
+so_trigger_auth() {
+    local ns
+    declare -F wva_scaler_address >/dev/null || return 0
+    ns="$(so_address_ns "$1")"
+    [ -n "$ns" ] && [ "$1" = "$(wva_scaler_address "$ns" tls)" ] || return 0
+    wva_scaler_trigger_auth_json "$ns"
+}
+
 # so_plan_preamble writes the plan's header comment: what every field means, and
 # which values `apply` takes. It is generated with the plan and read in the editor,
 # which is the whole point of the file being YAML.
@@ -2812,7 +2847,8 @@ so_show_plan() {
 
 # so_apply_plan acts on every entry: creating for yes, repointing for adopt.
 so_apply_plan() {
-    local file="$1" scaler_addr="wva-external-scaler.${WVA_NS}.svc.cluster.local:9090"
+    local file="$1" scaler_addr
+    scaler_addr="$(so_scaler_addr "$WVA_NS")"
     local apply ns kind name model min max cost policy existing rows add_fallback fb_note
     local created=0 adopted=0 skipped=0 unresolved=0
 
@@ -2842,10 +2878,10 @@ so_apply_plan() {
     if [ -n "${write_nss// /}" ]; then
         # shellcheck disable=SC2086
         so_resolve_scaler_ns $write_nss
-        scaler_addr="wva-external-scaler.${SO_SCALER_NS}.svc.cluster.local:9090"
+        scaler_addr="$(so_scaler_addr "$SO_SCALER_NS")"
     fi
 
-    local kept kept_keys entry_addr old_addr old_ns old_state
+    local kept kept_keys entry_addr entry_auth old_addr old_ns old_state
     while IFS=$'\037' read -r apply ns kind name model min max cost policy; do
         [ -n "$name" ] || continue
         case "$apply" in
@@ -2934,8 +2970,17 @@ so_apply_plan() {
             add_fallback="$(so_adopt_needs_fallback "$ns" "$existing" "$min")"
             fb_note="$(so_adopt_fallback_note "$add_fallback" "$min")" || exit 1
 
+            # The trigger's authenticationRef: this installer's on the TLS
+            # address, else whatever the object already carried, which a patch
+            # replacing the trigger list would otherwise drop.
+            entry_auth="$(so_trigger_auth "$entry_addr")"
+            if [ -z "$entry_auth" ]; then
+                entry_auth=$(kubectl get scaledobject "$existing" -n "$ns" -o json 2>/dev/null \
+                    | jq -c '[.spec.triggers[]? | select((.metadata.scalerAddress // "") | startswith("wva-external-scaler.")) | .authenticationRef // empty] | first // empty' 2>/dev/null || true)
+            fi
+
             if kubectl patch scaledobject "$existing" -n "$ns" --type=merge \
-                -p "$(so_adopt_patch "$model" "$entry_addr" "$min" "$max" "$cost" "$policy" "$add_fallback" "$kept")" > /dev/null; then
+                -p "$(so_adopt_patch "$model" "$entry_addr" "$min" "$max" "$cost" "$policy" "$add_fallback" "$kept" "$entry_auth")" > /dev/null; then
                 log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max${kept_keys:+; kept: $kept_keys}) $fb_note"
                 adopted=$((adopted + 1))
             else
@@ -3158,8 +3203,9 @@ install_default_scaledobjects() {
 # under Value the HPA multiplies it), and the bounds.
 so_adopt_patch() {
     local model="$1" scaler_addr="$2" min="$3" max="$4" cost="$5" policy="${6:-}"
-    local add_fallback="${7:-}" kept="${8:-}" failures=0
+    local add_fallback="${7:-}" kept="${8:-}" auth="${9:-}" failures=0
     [ -n "$kept" ] || kept='{}'
+    [ -n "$auth" ] || auth='null'
     if [ "$add_fallback" = "yes" ]; then
         failures="$(so_fallback_failures)" || exit 1
     fi
@@ -3168,12 +3214,13 @@ so_adopt_patch() {
     # already says, and it would survive in the object long after anybody knew why.
     jq -nc --arg m "$model" --arg a "$scaler_addr" --arg c "$cost" --arg p "$policy" \
         --argjson min "$min" --argjson max "$max" --argjson kept "$kept" \
-        --arg fb "$add_fallback" --argjson n "$failures" \
+        --arg fb "$add_fallback" --argjson n "$failures" --argjson auth "$auth" \
         '{spec:({minReplicaCount:$min, maxReplicaCount:$max,
           triggers:[{type:"external-push",name:"wva-external-scaler",metricType:"AverageValue",
           metadata:(($kept | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy))
                     + {scalerAddress:$a, modelID:$m, variantCost:$c}
-                    + (if $p == "" then {} else {scalingPolicy:$p} end))}]}
+                    + (if $p == "" then {} else {scalingPolicy:$p} end))}
+                   + (if $auth == null then {} else {authenticationRef:$auth} end)]}
           + (if $fb == "yes"
              then {fallback:{failureThreshold:$n, replicas:$min,
                              behavior:"currentReplicasIfHigher"}}
@@ -3281,9 +3328,11 @@ so_value_trigger_warning() {
 # so unlike so_adopt_patch, which replaces `triggers` wholesale because adoption
 # must displace a competing scaler, this rewrites the list in place.
 so_repoint_stale() {
-    local dest want self
+    local dest want self auth
     dest=$(so_repoint_destination) || return 1
-    want="wva-external-scaler.${dest}.svc.cluster.local:9090"
+    want="$(so_scaler_addr "$dest")"
+    auth="$(so_trigger_auth "$want")"
+    [ -n "$auth" ] || auth=null
     self="wva-external-scaler.${dest}."
 
     local rows
@@ -3321,10 +3370,14 @@ so_repoint_stale() {
             fi
         fi
 
+        # The trigger follows the scaler's TLS mode: its authenticationRef is
+        # set on the TLS address and dropped on the plaintext one.
         triggers=$(kubectl get scaledobject "$name" -n "$ns" -o json 2>/dev/null \
-            | jq -c --arg a "$want" '[ .spec.triggers[]?
+            | jq -c --arg a "$want" --argjson r "$auth" '[ .spec.triggers[]?
                 | if ((.metadata.scalerAddress // "") | startswith("wva-external-scaler."))
-                  then .metadata.scalerAddress = $a else . end ]' 2>/dev/null)
+                  then (.metadata.scalerAddress = $a)
+                       | (if $r == null then del(.authenticationRef) else .authenticationRef = $r end)
+                  else . end ]' 2>/dev/null)
         if [ -z "$triggers" ] || [ "$triggers" = "null" ]; then
             log_warning "  $ns/$name: could not read its triggers — skipping."
             continue
@@ -3719,6 +3772,18 @@ render_scaledobject() {
             log_error "WVA_DEFAULT_SO_TEMPLATE renders fallback.replicas 0 with minReplicaCount 0 for $ns/$target. KEDA scales that object to zero on any trigger error once cooldownPeriod passes. Give the template's fallback a fixed replicas of at least 1, or leave the fallback out."
         fi
         printf '%s\n' "$out" | so_value_trigger_warning "$ns/$target (WVA_DEFAULT_SO_TEMPLATE)"
+        # A template written before the scaler served TLS has no
+        # authenticationRef; the trigger on the TLS address gets this
+        # installer's, and one the template sets is kept.
+        local tmpl_auth
+        tmpl_auth="$(so_trigger_auth "$scaler_addr")"
+        if [ -n "$tmpl_auth" ]; then
+            out="$(printf '%s\n' "$out" | SO_ADDR="$scaler_addr" SO_AUTH="$tmpl_auth" yq '
+                (select(.kind == "ScaledObject") | .spec.triggers[]
+                 | select(.metadata.scalerAddress == strenv(SO_ADDR)) | select(.authenticationRef == null)
+                 | .authenticationRef) = (strenv(SO_AUTH) | from_json)')" \
+                || log_error "WVA_DEFAULT_SO_TEMPLATE: could not add the scaler authenticationRef for $ns/$target."
+        fi
         printf '%s\n' "$out"
         return
     fi
@@ -3744,6 +3809,14 @@ render_default_scaledobject() {
     # mean the same thing to WVA, and only one of them says so to a reader.
     local policy_line=""
     [ -z "$policy" ] || policy_line=$'\n        scalingPolicy: "'"$policy"'"'
+
+    # On the TLS address KEDA must present its client certificate, which it
+    # finds through this installer's ClusterTriggerAuthentication.
+    local auth_block="" auth
+    auth="$(so_trigger_auth "$scaler_addr")"
+    if [ -n "$auth" ]; then
+        auth_block=$'\n      authenticationRef:\n        name: '"$(printf '%s' "$auth" | jq -r .name)"$'\n        kind: ClusterTriggerAuthentication'
+    fi
 
     # The fallback block, or nothing: WVA_SO_FALLBACK=false, a floor of 0, or a
     # KEDA without fallback.behavior. See "KEDA fallback" above for why.
@@ -3820,7 +3893,7 @@ ${fallback_block}  advanced:
       metadata:
         scalerAddress: ${scaler_addr}
         modelID: "${model}"
-        variantCost: "${cost:-$SO_DEFAULT_VARIANT_COST}"${policy_line}
+        variantCost: "${cost:-$SO_DEFAULT_VARIANT_COST}"${policy_line}${auth_block}
 EOF
 }
 

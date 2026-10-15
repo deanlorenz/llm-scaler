@@ -23,6 +23,8 @@ RED='[0;31m'
 NC='[0m'
 # shellcheck source=lib/common.sh
 source "$HERE/lib/common.sh"
+# shellcheck source=lib/scaler_tls.sh
+source "$HERE/lib/scaler_tls.sh"
 # NOTE: log_error EXITS. Nothing may follow it that needs to run.
 
 NAMESPACE=""
@@ -1305,11 +1307,29 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        scalerAddress: wva-external-scaler.${WVA_NAMESPACE}.svc.cluster.local:9090
+        scalerAddress: $(pool_scaler_addr)
         warmPoolName: ${POOL_NAME}
         warmPoolSleepMinSize: "${RESERVE}"
 $(pool_trigger_extra)
+$(pool_trigger_auth)
 YAML
+}
+
+# pool_scaler_addr echoes the scaler's address for the pool's ScaledObject: the
+# TLS form when the controller serves this installer's TLS (scaler_tls.sh).
+pool_scaler_addr() {
+    local mode
+    mode="$(wva_scaler_mode_of "$WVA_NAMESPACE")"
+    [ "$mode" = tls ] || mode=plaintext
+    wva_scaler_address "$WVA_NAMESPACE" "$mode"
+}
+
+# pool_trigger_auth emits the trigger's authenticationRef, at the trigger's
+# indentation, when the pool reaches the scaler on its TLS address; else nothing.
+pool_trigger_auth() {
+    [ "$(pool_scaler_addr)" = "$(wva_scaler_address "$WVA_NAMESPACE" tls)" ] || return 0
+    printf '      authenticationRef:\n        name: %s\n        kind: ClusterTriggerAuthentication\n' \
+        "$(wva_scaler_keda_auth_name "$WVA_NAMESPACE")"
 }
 
 # pool_trigger_extra emits the optional pool-type keys for a ScaledObject
@@ -1470,10 +1490,11 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        scalerAddress: wva-external-scaler.${WVA_NAMESPACE}.svc.cluster.local:9090
+        scalerAddress: $(pool_scaler_addr)
         warmPoolName: ${POOL_NAME}
         warmPoolSleepMinSize: "${RESERVE}"
 $(pool_trigger_extra)
+$(pool_trigger_auth)
 YAML
 }
 

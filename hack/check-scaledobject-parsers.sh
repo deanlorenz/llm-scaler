@@ -39,7 +39,7 @@ command -v jq >/dev/null 2>&1 || {
 # function definition, which looks exactly like every function being missing.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh scaledobject.sh; do
+for lib in common.sh scaler_tls.sh scaledobject.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 # common.sh requires these; without them the first log_warning dies under set -u.
@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=116
+EXPECT_CASES=120
 RAN=0
 FAILED=0
 
@@ -400,6 +400,20 @@ check 'adopt: add_fallback=yes adds the default block' \
     "$(so_adopt_patch m addr 2 8 10.0 '' yes | jq -r '.spec.fallback | [.failureThreshold, .replicas, .behavior] | map(tostring) | join(",")')"
 check 'adopt: without add_fallback the patch has no fallback key' \
     'false' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec | has("fallback")')"
+
+# The scaler's TLS address carries KEDA's ClusterTriggerAuthentication; the
+# plaintext one carries none (deploy/lib/scaler_tls.sh, "KEDA's side").
+check 'tls: a generated object on the TLS address references the ClusterTriggerAuthentication' \
+    'wva-external-scaler-wva/ClusterTriggerAuthentication' \
+    "$(render_default_scaledobject ns Deployment decode m wva-external-scaler.wva.svc:9090 1 8 '' '' | yq -o=json '.spec.triggers[0].authenticationRef' | jq -r '.name + "/" + .kind')"
+check 'tls: a generated object on the plaintext address has no authenticationRef' \
+    'null' \
+    "$(render_default_scaledobject ns Deployment decode m wva-external-scaler.wva.svc.cluster.local:9090 1 8 '' '' | yq -o=json '.spec.triggers[0].authenticationRef')"
+check 'tls: an adopt patch carries the authenticationRef it is given' \
+    'wva-external-scaler-wva' \
+    "$(so_adopt_patch m wva-external-scaler.wva.svc:9090 2 8 10.0 '' '' '' '{"name":"wva-external-scaler-wva","kind":"ClusterTriggerAuthentication"}' | jq -r '.spec.triggers[0].authenticationRef.name')"
+check 'tls: an adopt patch with none given writes none' \
+    'false' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec.triggers[0] | has("authenticationRef")')"
 SO_FIXTURE=''
 SO_FIXTURE_RC=0
 kubectl() { printf '%s' "$SO_FIXTURE"; return "$SO_FIXTURE_RC"; }

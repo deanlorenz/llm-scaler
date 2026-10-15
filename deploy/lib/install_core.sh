@@ -505,6 +505,11 @@ main() {
         fi
 
         deploy_scaler_backend
+
+        # KEDA's side of the scaler TLS, when this install just put KEDA there.
+        if [ "$DEPLOY_WVA" = "true" ] && declare -F wva_scaler_tls_after_keda >/dev/null; then
+            wva_scaler_tls_after_keda
+        fi
     fi
 
     if [ "$do_wva" = true ]; then
@@ -513,6 +518,12 @@ main() {
         elif [ "$phase" = "wva" ]; then
             require_prereqs_present
             WVA_APPLY_SCOPE=controller deploy_wva_controller
+        fi
+
+        # ScaledObjects that must follow the scaler to its new TLS mode
+        # (WVA_SCALER_TLS_MIGRATE=true), now that the controller has it.
+        if [ "$DEPLOY_WVA" = "true" ] && declare -F wva_scaler_tls_finish >/dev/null; then
+            wva_scaler_tls_finish
         fi
 
         # After the scaler backend: a ScaledObject is meaningless until KEDA is there

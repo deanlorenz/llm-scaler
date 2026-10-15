@@ -6,9 +6,18 @@
 #
 # What it pins, each of which parses cleanly and installs cleanly when wrong:
 #
-#   the default            a new install stays plaintext; a re-install keeps TLS
-#                          on; hand-set TLS flags and an unreadable Deployment
-#                          are refusals, not "off"
+#   the default            TLS, once KEDA's side is written and no ScaledObject
+#                          would be left behind; otherwise plaintext with a
+#                          warning (a refusal when WVA_SCALER_TLS=true); a
+#                          re-install keeps TLS on; hand-set TLS flags and an
+#                          unreadable Deployment are refusals, not "off"
+#   KEDA's side            the client Secret copied to KEDA's namespace, the
+#                          ClusterTriggerAuthentication, the marker the controller
+#                          phase reads; foreign objects refused; deferred until
+#                          this install puts KEDA there
+#   ScaledObjects          those naming the scaler on the plaintext address hold
+#                          TLS back unless WVA_SCALER_TLS_MIGRATE=true, which
+#                          moves them to the TLS address and authenticationRef
 #   openssl certificates   the serving certificate names both Service hosts and
 #                          chains to the CA; the client one carries the pinned
 #                          identity; a re-run changes nothing that is still
@@ -92,6 +101,30 @@ store_put_secret() {
     echo "secret/$name" >>"$WORK/writes"
 }
 
+# store_put <file>: a server-side apply. Secrets in $NS are the certificate
+# writes ($WORK/writes); everything of KEDA's side goes to $WORK/keda-writes.
+store_put() {
+    local kind name ns
+    kind="$(jq -r .kind "$1")"
+    name="$(jq -r .metadata.name "$1")"
+    ns="$(jq -r '.metadata.namespace // ""' "$1")"
+    case "$kind" in
+        Secret)
+            if [ -z "$ns" ] || [ "$ns" = "$NS" ]; then
+                store_put_secret "$1"
+            else
+                cp "$1" "$STORE/secret@${ns}__$name.json"
+                echo "secret@$ns/$name" >>"$WORK/keda-writes"
+            fi ;;
+        ConfigMap)
+            cp "$1" "$STORE/configmap__$name.json"
+            echo "configmap/$name" >>"$WORK/keda-writes" ;;
+        ClusterTriggerAuthentication)
+            cp "$1" "$STORE/clustertriggerauthentications.keda.sh__$name.json"
+            echo "cta/$name" >>"$WORK/keda-writes" ;;
+    esac
+}
+
 # cm_issue <manifest>: what cert-manager would do with the applied manifest --
 # store every Issuer and Certificate, and write each Certificate's Secret with
 # the secretTemplate labels and a stand-in CA.
@@ -125,6 +158,9 @@ cm_issue() {
 #   STUB_DRYRUN        fail makes the server-side dry run fail (webhook down)
 #   STUB_WAIT          fail makes the Certificate wait time out
 #   STUB_SO            FORBIDDEN makes ScaledObjects unreadable; else $WORK/so.json
+#   STUB_KEDA          present (default) | absent: KEDA's keda.sh/v1alpha1 API
+#   STUB_CANI          no makes every `auth can-i` answer no
+#   STUB_CANI_CTA      no makes only `auth can-i create clustertriggerauthentications` no
 stub_kubectl() {
     printf '%s\n' "$*" >>"$WORK/kubectl.log"
     local a="$*" tmp name
@@ -136,6 +172,30 @@ stub_kubectl() {
                 *) echo 'Unable to connect to the server: i/o timeout' >&2; return 1 ;;
             esac
             ;;
+        "get --raw /apis/keda.sh/v1alpha1")
+            case "${STUB_KEDA:-present}" in
+                present) echo '{"kind":"APIResourceList","resources":[{"name":"scaledobjects"},{"name":"clustertriggerauthentications"}]}' ;;
+                *) echo 'Error from server (NotFound): the server could not find the requested resource' >&2; return 1 ;;
+            esac
+            ;;
+        "auth can-i create clustertriggerauthentications.keda.sh"*)
+            [ "${STUB_CANI_CTA:-yes}" = yes ] && [ "${STUB_CANI:-yes}" = yes ]
+            ;;
+        "auth can-i "*) [ "${STUB_CANI:-yes}" = yes ] ;;
+        "get configmap openshift-service-ca.crt -n $NS -o jsonpath="*) printf 'FAKE-SERVICE-CA\n' ;;
+        "get clustertriggerauthentications.keda.sh "*" -o json")
+            set -- $a
+            store_get clustertriggerauthentications.keda.sh "$3"
+            ;;
+        "get secret "*" -n keda -o json")
+            set -- $a
+            store_get secret@keda "$3"
+            ;;
+        "get scaledobject "*" -n "*" -o json")
+            set -- $a
+            jq --arg n "$3" --arg ns "$5" '.items[] | select(.metadata.name == $n and .metadata.namespace == $ns)' "$WORK/so.json"
+            ;;
+        "patch scaledobject "*) printf '%s\n' "$a" >>"$WORK/patches" ;;
         "get deployment wva-controller-manager -n $NS -o json")
             [ "${STUB_DEPLOY:-}" != FORBIDDEN ] || { forbidden; return 1; }
             store_get deployment wva-controller-manager
@@ -157,7 +217,7 @@ stub_kubectl() {
         "apply --server-side "*)
             tmp="$WORK/apply.json"
             cat >"$tmp"
-            store_put_secret "$tmp"
+            store_put "$tmp"
             ;;
         "apply --dry-run=server -f "*)
             [ "${STUB_DRYRUN:-ok}" = ok ] || { echo 'Error from server (InternalError): failed calling webhook "webhook.cert-manager.io": connection refused' >&2; return 1; }
@@ -188,6 +248,8 @@ run() {
     : >"$WORK/info"
     : >"$WORK/refusal"
     : >"$WORK/writes"
+    : >"$WORK/keda-writes"
+    : >"$WORK/patches"
     : >"$WORK/vars"
     : >"$WORK/stdout"
     : >"$WORK/stderr"
@@ -209,6 +271,7 @@ run() {
         WVA_NS=$NS
         ENVIRONMENT=kubernetes
         WVA_SCOPE=namespace
+        WVA_SCALER_KEDA_NS=keda
         local kv
         for kv in "$@"; do eval "$kv"; done
         declare -F "${call%% *}" >/dev/null || { echo "${call%% *} is not defined" >"$WORK/refusal"; exit 2; }
@@ -216,12 +279,14 @@ run() {
         local st=$?
         # Plain assignments, not `declare -p`: sourced inside run, a declare
         # would make them local to it.
-        printf 'WVA_SCALER_TLS_ON=%q\nWVA_SCALER_TLS_PROVIDER_RESOLVED=%q\nWVA_SCALER_CLIENT_CA_HASH=%q\n' \
-            "${WVA_SCALER_TLS_ON:-}" "${WVA_SCALER_TLS_PROVIDER_RESOLVED:-}" "${WVA_SCALER_CLIENT_CA_HASH:-}" >"$WORK/vars"
+        printf 'WVA_SCALER_TLS_ON=%q\nWVA_SCALER_TLS_PROVIDER_RESOLVED=%q\nWVA_SCALER_CLIENT_CA_HASH=%q\nWVA_SCALER_TLS_WANTED=%q\nWVA_SCALER_TLS_MIGRATE_ROWS=%q\nWVA_SCALER_KEDA_DEFERRED=%q\n' \
+            "${WVA_SCALER_TLS_ON:-}" "${WVA_SCALER_TLS_PROVIDER_RESOLVED:-}" "${WVA_SCALER_CLIENT_CA_HASH:-}" \
+            "${WVA_SCALER_TLS_WANTED:-}" "${WVA_SCALER_TLS_MIGRATE_ROWS:-}" "${WVA_SCALER_KEDA_DEFERRED:-}" >"$WORK/vars"
         exit "$st"
     )
     RC=$?
     WVA_SCALER_TLS_ON="" WVA_SCALER_TLS_PROVIDER_RESOLVED="" WVA_SCALER_CLIENT_CA_HASH=""
+    WVA_SCALER_TLS_WANTED="" WVA_SCALER_TLS_MIGRATE_ROWS="" WVA_SCALER_KEDA_DEFERRED=""
     # shellcheck disable=SC1091
     . "$WORK/vars" 2>/dev/null || true
 }
@@ -269,21 +334,21 @@ CA=wva-external-scaler-ca
 WANT_SANS="wva-external-scaler.$NS.svc wva-external-scaler.$NS.svc.cluster.local "
 
 # ---------------------------------------------------------------- the default
-echo "== resolve: a new install stays plaintext"
+echo "== resolve: a new install wants TLS (the default)"
 reset_store
 run wva_resolve_scaler_tls
-ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ]' "new install: exit $RC, on=$WVA_SCALER_TLS_ON (want 0, false): $(cat "$WORK/refusal")"
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_WANTED" = true ] && [ "$WVA_SCALER_TLS_ON" = false ]' "new install: exit $RC, wanted=$WVA_SCALER_TLS_WANTED on=$WVA_SCALER_TLS_ON (want 0, true, false until prepare): $(cat "$WORK/refusal")"
 
 echo "== resolve: a re-install keeps TLS on, and its provider"
 reset_store
 put_deploy openssl
 run wva_resolve_scaler_tls STUB_CM=present
-ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ]' "re-install: on=$WVA_SCALER_TLS_ON, want true: $(cat "$WORK/refusal")"
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_WANTED" = true ]' "re-install: wanted=$WVA_SCALER_TLS_WANTED, want true: $(cat "$WORK/refusal")"
 ok '[ "$WVA_SCALER_TLS_PROVIDER_RESOLVED" = openssl ]' "re-install: provider $WVA_SCALER_TLS_PROVIDER_RESOLVED, want the live openssl even with cert-manager now present"
 
 echo "== resolve: WVA_SCALER_TLS=false turns a live TLS install off"
 run wva_resolve_scaler_tls WVA_SCALER_TLS=false
-ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ]' "explicit false: on=$WVA_SCALER_TLS_ON"
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_WANTED" = false ]' "explicit false: wanted=$WVA_SCALER_TLS_WANTED"
 
 echo "== resolve: an unreadable Deployment is a refusal, not plaintext"
 run wva_resolve_scaler_tls STUB_DEPLOY=FORBIDDEN
@@ -432,7 +497,7 @@ ok 'yqs "select(.metadata.name == \"wva-external-scaler-ca\") | .spec.isCA" "$CM
 ok '[ "$(grep -c "^wait --for=condition=Ready certificates.cert-manager.io/" "$WORK/kubectl.log")" = 3 ]' "cert-manager: did not wait for each of the 3 Certificates"
 printf 'FAKE-CERT-MANAGER-CA\n' >"$WORK/cmca"
 ok '[ "$WVA_SCALER_CLIENT_CA_HASH" = "$(sha_of "$WORK/cmca")" ]' "cert-manager: the digest is not the issued client CA's"
-ok '[ "$(grep -c "^apply --server-side" "$WORK/kubectl.log")" = 0 ]' "cert-manager: the installer wrote Secrets itself"
+ok '! grep -q "^secret/" "$WORK/writes"' "cert-manager: the installer wrote certificate Secrets itself: $(tr '\n' ' ' <"$WORK/writes")"
 ok 'grep -q "value: cert-manager" "$WORK/k/kustomization.yaml"' "cert-manager: the provider is not recorded on the pod template"
 
 echo "== cert-manager: a re-run accepts its own objects"
@@ -529,21 +594,28 @@ if render "$WORK/render" "$WORK/rendered.yaml" 2>"$WORK/err"; then
 else
     fail "verify: the TLS overlay does not render: $(head -3 "$WORK/err")"
 fi
-jq -n --arg p "wva-external-scaler.$NS.svc.cluster.local:9090" '{items: [
+jq -n --arg p "wva-external-scaler.$NS.svc.cluster.local:9090" --arg t "wva-external-scaler.$NS.svc:9090" --arg c "wva-external-scaler-$NS" '{items: [
     {metadata: {namespace: "wva-check", name: "plain"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $p}}]}},
-    {metadata: {namespace: "wva-check", name: "authed"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $p}, authenticationRef: {name: "x"}}]}},
+    {metadata: {namespace: "wva-check", name: "wrongref"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $t}, authenticationRef: {name: "x"}}]}},
+    {metadata: {namespace: "wva-check", name: "authed"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $t}, authenticationRef: {name: $c, kind: "ClusterTriggerAuthentication"}}]}},
     {metadata: {namespace: "wva-check", name: "other"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: "some-other-scaler:9090"}}]}}]}' >"$WORK/so.json"
 run wva_verify_scaler_tls
 ok '[ "$RC" = 0 ] && grep -q "mutual TLS, client identity wva-keda-client" "$WORK/info"' "verify mTLS: mode not reported: $(head -3 "$WORK/info")"
 ok 'grep -q "expires" "$WORK/info" && grep -q "wva-external-scaler.$NS.svc.cluster.local" "$WORK/info"' "verify mTLS: expiry or names not reported: $(grep serving "$WORK/info")"
-ok 'grep -q "no authenticationRef" "$WORK/warnings" && grep -q "wva-check/plain" "$WORK/stderr" && ! grep -q "wva-check/authed\|wva-check/other" "$WORK/stderr"' "verify mTLS: the unauthenticated ScaledObject is not named alone: $(cat "$WORK/warnings" "$WORK/stderr" | head -4)"
+ok 'grep -q "on the plaintext address or without authenticationRef" "$WORK/warnings" && grep -q "wva-check/plain" "$WORK/stderr" && grep -q "wva-check/wrongref" "$WORK/stderr" && ! grep -q "wva-check/authed\|wva-check/other" "$WORK/stderr"' "verify mTLS: plain and wrongref, and only they, should be named: $(cat "$WORK/warnings" "$WORK/stderr" | head -4)"
+ok 'grep -q "KEDA.s client certificate: ClusterTriggerAuthentication wva-external-scaler-$NS" "$WORK/info"' "verify mTLS: KEDA's side not reported: $(grep -i keda "$WORK/info" | head -2)"
 
 echo "== verify: every ScaledObject authenticated is quiet; unreadable ones are unknown"
-jq '.items |= map(select(.metadata.name != "plain"))' "$WORK/so.json" >"$WORK/so2.json" && mv "$WORK/so2.json" "$WORK/so.json"
+jq '.items |= map(select(.metadata.name != "plain" and .metadata.name != "wrongref"))' "$WORK/so.json" >"$WORK/so2.json" && mv "$WORK/so2.json" "$WORK/so.json"
 run wva_verify_scaler_tls
-ok '[ ! -s "$WORK/warnings" ] && grep -q "carries an authenticationRef" "$WORK/info"' "verify, all authenticated: $(head -2 "$WORK/warnings")"
+ok '[ ! -s "$WORK/warnings" ] && grep -q "Every ScaledObject naming this scaler uses wva-external-scaler.$NS.svc:9090" "$WORK/info"' "verify, all authenticated: $(head -2 "$WORK/warnings")"
 run wva_verify_scaler_tls STUB_SO=FORBIDDEN
 ok '[ ! -s "$WORK/warnings" ] && grep -q "Could not list ScaledObjects" "$WORK/info"' "verify, ScaledObjects unreadable: reported as none or as a warning"
+cp "$STORE/configmap__wva-scaler-keda-auth.json" "$WORK/marker.keep"
+rm -f "$STORE/configmap__wva-scaler-keda-auth.json"
+run wva_verify_scaler_tls
+ok 'grep -q "KEDA.s side is not usable" "$WORK/warnings"' "verify, no marker: KEDA's side not flagged: $(head -2 "$WORK/warnings")"
+cp "$WORK/marker.keep" "$STORE/configmap__wva-scaler-keda-auth.json"
 
 echo "== verify: a certificate missing the scalerAddress host is a warning"
 mint_serving 365 "wva-external-scaler.$NS.svc"
@@ -551,21 +623,160 @@ run wva_verify_scaler_tls
 ok 'grep -q "does not name wva-external-scaler.$NS.svc.cluster.local" "$WORK/warnings"' "verify: missing SAN not warned: $(head -2 "$WORK/warnings")"
 
 # ---------------------------------------------------------------- permissions, undeploy
-echo "== permissions: what the controller phase must be allowed to create"
+echo "== permissions: what each phase must be allowed to create"
 reset_store
 run 'wva_scaler_tls_permission_needs' WVA_SCALER_TLS=true STUB_CM=absent
-ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets " ]' "permissions, openssl: '$(tr '\n' ' ' <"$WORK/stdout")'"
+ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets $NS configmaps $NS clustertriggerauthentications.keda.sh - secrets keda " ]' "permissions, openssl: '$(tr '\n' ' ' <"$WORK/stdout")'"
 run 'wva_scaler_tls_permission_needs' WVA_SCALER_TLS=true STUB_CM=present
-ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets certificates.cert-manager.io issuers.cert-manager.io " ]' "permissions, cert-manager: '$(tr '\n' ' ' <"$WORK/stdout")'"
+ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets $NS certificates.cert-manager.io $NS issuers.cert-manager.io $NS configmaps $NS clustertriggerauthentications.keda.sh - secrets keda " ]' "permissions, cert-manager: '$(tr '\n' ' ' <"$WORK/stdout")'"
+run 'wva_scaler_tls_permission_needs' WVA_SCALER_TLS=true STUB_CM=absent INSTALL_PHASE=wva
+ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets $NS " ]' "permissions, controller phase: '$(tr '\n' ' ' <"$WORK/stdout")' (KEDA's side is the admin's)"
 run 'wva_scaler_tls_permission_needs'
-ok '[ "$RC" = 0 ] && [ ! -s "$WORK/stdout" ]' "permissions, TLS off: asked for '$(tr '\n' ' ' <"$WORK/stdout")'"
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/stdout" ]' "permissions, the default: asked for '$(tr '\n' ' ' <"$WORK/stdout")' (without the rights it stays plaintext)"
 put_deploy openssl
-run 'wva_scaler_tls_permission_needs'
-ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets " ]' "permissions, kept on: '$(tr '\n' ' ' <"$WORK/stdout")'"
+run 'wva_scaler_tls_permission_needs' INSTALL_PHASE=wva
+ok '[ "$(tr "\n" " " <"$WORK/stdout")" = "secrets $NS " ]' "permissions, kept on: '$(tr '\n' ' ' <"$WORK/stdout")'"
 
-echo "== undeploy: removes only what carries the installer label"
+
+# ---------------------------------------------------------------- KEDA's side, the default
+SO_PLAIN_ADDR="wva-external-scaler.$NS.svc.cluster.local:9090"
+SO_TLS_ADDR="wva-external-scaler.$NS.svc:9090"
+CTA="wva-external-scaler-$NS"
+# so_fixture <name> <address> [authenticationRef-json]: one ScaledObject in so.json.
+so_fixture() {
+    local ref="${3:-null}"
+    jq -n --arg n "$1" --arg a "$2" --argjson r "$ref" '{items: [{metadata: {namespace: "apps", name: $n},
+        spec: {triggers: [({type: "external-push", metadata: {scalerAddress: $a, modelID: "m"}}
+                           + (if $r == null then {} else {authenticationRef: $r} end))]}}]}' >"$WORK/so.json"
+}
+fresh_k() { printf 'namespace: %s\nresources:\n- ./base\npatches:\n' "$NS" >"$WORK/k/kustomization.yaml"; }
+
+echo "== default: a new install with KEDA present turns TLS on and writes KEDA's side"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ]' "default fresh: exit $RC, on=$WVA_SCALER_TLS_ON: $(cat "$WORK/refusal" "$WORK/warnings")"
+ok 'grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "default fresh: TLS flags not rendered"
+ok '[ "$(sort "$WORK/keda-writes" | tr "\n" " ")" = "configmap/wva-scaler-keda-auth cta/$CTA secret@keda/$CTA " ]' "default fresh: KEDA side wrote '$(sort "$WORK/keda-writes" | tr '\n' ' ')'"
+secret_file "$CLIENT" tls.crt "$WORK/client.pem"
+secret_file "$CLIENT" ca.crt "$WORK/client-ca.pem"
+jq -r '.data["tls.crt"]' "$STORE/secret@keda__$CTA.json" | base64 -d >"$WORK/copy.crt"
+jq -r '.data["ca.crt"]' "$STORE/secret@keda__$CTA.json" | base64 -d >"$WORK/copy.ca"
+ok 'cmp -s "$WORK/copy.crt" "$WORK/client.pem" && cmp -s "$WORK/copy.ca" "$WORK/client-ca.pem"' "default fresh: KEDA's copy is not the client certificate and its CA"
+ok '[ "$(jq -r ".metadata.labels[\"wva.llmd.ai/scaler-tls\"]" "$STORE/secret@keda__$CTA.json")" = keda-client ]' "default fresh: KEDA's copy is not labelled as the installer's"
+ok '[ "$(jq -c "[.spec.secretTargetRef[] | .parameter + \"=\" + .key]" "$STORE/clustertriggerauthentications.keda.sh__$CTA.json")" = "[\"caCert=ca.crt\",\"tlsClientCert=tls.crt\",\"tlsClientKey=tls.key\"]" ] && [ "$(jq -r "[.spec.secretTargetRef[].name] | unique | .[]" "$STORE/clustertriggerauthentications.keda.sh__$CTA.json")" = "$CTA" ]' "default fresh: ClusterTriggerAuthentication does not read caCert, tlsClientCert and tlsClientKey from its copy"
+ok '[ "$(jq -r .data.clientCertSha256 "$STORE/configmap__wva-scaler-keda-auth.json")" = "$(sha_of "$WORK/client.pem")" ] && jq -r .data.clientCert "$STORE/configmap__wva-scaler-keda-auth.json" | grep -q "BEGIN CERTIFICATE"' "default fresh: the marker does not record KEDA's certificate"
+ok '! jq -r .data.clientCert "$STORE/configmap__wva-scaler-keda-auth.json" | grep -q "PRIVATE KEY"' "default fresh: the marker carries a private key"
+cp -r "$STORE" "$WORK/store.admin"
+
+echo "== default: KEDA absent, and this install does not put it there: plaintext, with a warning"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA=absent
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && ! grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "default, no KEDA: exit $RC, on=$WVA_SCALER_TLS_ON"
+ok 'grep -q "stays on plaintext" "$WORK/warnings" && grep -q "KEDA is not installed" "$WORK/warnings"' "default, no KEDA: no warning saying why: $(cat "$WORK/warnings")"
+
+echo "== explicit: KEDA absent is a refusal"
+reset_store
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent STUB_KEDA=absent
+ok '[ "$RC" = 1 ] && grep -q "KEDA is not installed" "$WORK/refusal"' "explicit, no KEDA: exit $RC, $(cat "$WORK/refusal")"
+
+echo "== default: KEDA installed by this run: TLS on, KEDA's side written after KEDA"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA=absent KEDA_HELM_INSTALL=true
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && [ "$WVA_SCALER_KEDA_DEFERRED" = true ] && [ ! -s "$WORK/keda-writes" ]' "deferred: exit $RC, on=$WVA_SCALER_TLS_ON deferred=$WVA_SCALER_KEDA_DEFERRED, keda writes '$(tr '\n' ' ' <"$WORK/keda-writes")'"
+run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "cta/$CTA" "$WORK/keda-writes"' "deferred: after KEDA, exit $RC, wrote '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/refusal")"
+run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true STUB_CM=absent STUB_KEDA=absent
+ok '[ "$RC" = 1 ]' "deferred: KEDA still absent after its install is a refusal, whatever the default (exit $RC)"
+
+echo "== default: no right to create a ClusterTriggerAuthentication: plaintext, with a warning"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_CANI_CTA=no
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "may not create ClusterTriggerAuthentications" "$WORK/warnings" && [ ! -s "$WORK/keda-writes" ]' "default, no CTA right: exit $RC, on=$WVA_SCALER_TLS_ON, $(cat "$WORK/warnings")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_CANI=no
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && [ ! -s "$WORK/writes" ] && grep -q "may not create Secrets" "$WORK/warnings"' "default, no Secret right: exit $RC, on=$WVA_SCALER_TLS_ON, wrote '$(tr '\n' ' ' <"$WORK/writes")'"
+
+echo "== KEDA's side: objects this installer did not write are refused"
+reset_store
+jq -n --arg n "$CTA" '{kind: "ClusterTriggerAuthentication", metadata: {name: $n}}' >"$STORE/clustertriggerauthentications.keda.sh__$CTA.json"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent
+ok '[ "$RC" = 1 ] && grep -q "ClusterTriggerAuthentication $CTA was not created by this installer" "$WORK/refusal" && [ ! -s "$WORK/keda-writes" ]' "foreign CTA: exit $RC, $(cat "$WORK/refusal")"
+reset_store
+jq -n --arg n "$CTA" '{kind: "Secret", metadata: {name: $n}, data: {}}' >"$STORE/secret@keda__$CTA.json"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent
+ok '[ "$RC" = 1 ] && grep -q "Secret $CTA in keda was not created by this installer" "$WORK/refusal"' "foreign copy: exit $RC, $(cat "$WORK/refusal")"
+
+echo "== OpenShift: KEDA trusts the service CA, not the installer's"
+reset_store
+fresh_k
+put_foreign_secret "$SERVING" '{"service.beta.openshift.io/originating-service-name":"wva-external-scaler"}'
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent ENVIRONMENT=openshift
+ok '[ "$RC" = 0 ] && [ "$(jq -r ".data[\"ca.crt\"]" "$STORE/secret@keda__$CTA.json" | base64 -d)" = FAKE-SERVICE-CA ]' "OpenShift: KEDA's caCert is not the service CA: exit $RC, $(cat "$WORK/refusal")"
+
+echo "== ScaledObjects on the plaintext address hold the default back, and refuse an explicit true"
+reset_store
+fresh_k
+so_fixture app-so "$SO_PLAIN_ADDR"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && ! grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "default with a plaintext ScaledObject: exit $RC, on=$WVA_SCALER_TLS_ON"
+ok 'grep -q "apps/app-so" "$WORK/stderr" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/warnings"' "default with a plaintext ScaledObject: not named, or no fix given: $(cat "$WORK/warnings")"
+ok 'grep -q "cta/$CTA" "$WORK/keda-writes"' "default held back: KEDA's side should still be written, so the move is one step"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent
+ok '[ "$RC" = 1 ] && grep -q "apps/app-so" "$WORK/refusal" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/refusal"' "explicit with a plaintext ScaledObject: exit $RC, $(cat "$WORK/refusal")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent STUB_SO=FORBIDDEN
+ok '[ "$RC" = 1 ] && grep -q "Cannot list the ScaledObjects" "$WORK/refusal"' "explicit, ScaledObjects unreadable: exit $RC, $(cat "$WORK/refusal")"
+
+echo "== WVA_SCALER_TLS_MIGRATE=true moves them, after the controller has TLS"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent WVA_SCALER_TLS_MIGRATE=true
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && [ ! -s "$WORK/patches" ]' "migrate: exit $RC, on=$WVA_SCALER_TLS_ON rows='$WVA_SCALER_TLS_MIGRATE_ROWS', patched early: $(cat "$WORK/patches")"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls
+PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
+ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_TLS_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].authenticationRef | .name + \"/\" + .kind")" = "$CTA/ClusterTriggerAuthentication" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.modelID")" = m ]' "migrate: patch '$PATCHED'"
+
+echo "== explicit false on a TLS install moves the TLS ScaledObjects back, or refuses"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false
+ok '[ "$RC" = 1 ] && grep -q "apps/app-so" "$WORK/refusal"' "false with TLS ScaledObjects: exit $RC, $(cat "$WORK/refusal")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && ! grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "false + migrate: exit $RC, rows '$WVA_SCALER_TLS_MIGRATE_ROWS'"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=plaintext
+PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
+ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_PLAIN_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0] | has(\"authenticationRef\")")" = false ]' "back to plaintext: patch '$PATCHED'"
+
+echo "== controller phase: reads the admin's marker"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent WVA_APPLY_SCOPE=controller
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "setup-prereqs" "$WORK/warnings" && [ ! -s "$WORK/keda-writes" ]' "controller, no marker: exit $RC, on=$WVA_SCALER_TLS_ON, $(cat "$WORK/warnings")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent WVA_APPLY_SCOPE=controller
+ok '[ "$RC" = 1 ] && grep -q "has not written KEDA" "$WORK/refusal"' "controller, no marker, explicit: exit $RC, $(cat "$WORK/refusal")"
+rm -rf "$STORE"; cp -r "$WORK/store.admin" "$STORE"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent WVA_APPLY_SCOPE=controller
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && [ ! -s "$WORK/keda-writes" ]' "controller, admin's marker: exit $RC, on=$WVA_SCALER_TLS_ON, wrote KEDA objects '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/refusal" "$WORK/warnings")"
+jq '.data.clusterTriggerAuthentication = "someone-else"' "$STORE/configmap__wva-scaler-keda-auth.json" >"$WORK/m.json" && mv "$WORK/m.json" "$STORE/configmap__wva-scaler-keda-auth.json"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent WVA_APPLY_SCOPE=controller
+ok '[ "$WVA_SCALER_TLS_ON" = false ] && grep -q "someone-else" "$WORK/warnings"' "controller, marker for another install: on=$WVA_SCALER_TLS_ON"
+
+echo "== hand-set flags: WVA_SCALER_TLS=true takes them over, and says which"
+reset_store
+put_deploy manual
+run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "takes over" "$WORK/warnings" && grep -q -- "--external-scaler-cert-path=/mine" "$WORK/stderr"' "takeover: exit $RC, warnings '$(cat "$WORK/warnings")' stderr '$(cat "$WORK/stderr")'"
+
+echo "== undeploy: removes only what carries the installer label, and KEDA's side only from the admin phase"
 run wva_scaler_tls_undeploy STUB_CM=present
 ok 'grep -q "^delete secret -n $NS -l wva.llmd.ai/scaler-tls" "$WORK/kubectl.log" && grep -q "^delete certificates.cert-manager.io,issuers.cert-manager.io -n $NS -l wva.llmd.ai/scaler-tls" "$WORK/kubectl.log"' "undeploy: $(tr '\n' ';' <"$WORK/kubectl.log")"
+ok 'grep -q "^delete clustertriggerauthentications.keda.sh $CTA" "$WORK/kubectl.log" && grep -q "^delete secret $CTA -n keda" "$WORK/kubectl.log"' "undeploy, admin: KEDA's side not removed: $(tr '\n' ';' <"$WORK/kubectl.log")"
+run wva_scaler_tls_undeploy STUB_CM=present WVA_APPLY_SCOPE=controller
+ok '! grep -q "clustertriggerauthentications\|-n keda" "$WORK/kubectl.log"' "undeploy, controller phase: touched KEDA's side: $(tr '\n' ';' <"$WORK/kubectl.log")"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
