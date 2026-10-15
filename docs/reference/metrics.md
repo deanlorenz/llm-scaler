@@ -2,16 +2,14 @@
 
 ## Overview
 
-llm-scaling-manager checks that the vLLM metrics it needs are actually
-arriving before it decides anything, and degrades predictably when they are
-not. This page covers where you can see that judgement and what the controller
-does when a variant's metrics are missing or stale. It answers "scaling looks
-stuck and I do not know whether the problem is the decision or the data".
+Use this page when scaling looks stuck and you need to know whether the
+problem is the decision or the data. llm-scaling-manager checks that the vLLM
+metrics it needs are arriving before it decides anything, and holds steady when
+they are not.
 
-The scaling manager installs no CRD and writes no status condition you can
-`kubectl get`. The judgement reaches you three ways: the health gauges below,
-a `MetricsUnavailable` Warning Event on the workload's ScaledObject, and the
-controller log.
+There is no CRD or status condition to `kubectl get`. You see the metrics
+health in three places: the gauges below, a `MetricsUnavailable` Warning Event
+on the workload's ScaledObject, and the controller log.
 
 ## The gauges
 
@@ -60,7 +58,7 @@ kubectl get events -n <model-namespace> \
 The matching log line, every cycle while it lasts:
 
 ```bash
-kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 \
   | grep 'No saturation metrics available for model'
 ```
 

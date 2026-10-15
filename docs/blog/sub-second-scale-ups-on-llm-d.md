@@ -59,7 +59,9 @@ It can only be *not paid*. That is what a
 warm pool is: a Pod holding an accelerator with models already resident, lent to
 a model that is scaling up so it serves while its own replica starts. On a pool
 Pod with two models resident, on that H100 test cluster, four model switches
-took **435–440 ms, against a ~41 s cold start**.
+took **435–440 ms, against a ~41 s cold start**. That is the engine switch
+itself. A lend also waits for the scale-up decision: in the benchmark below the
+bridge was first seen lent 33–143 s after each traffic rise.
 
 ## What it costs, measured three ways
 

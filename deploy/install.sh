@@ -76,7 +76,6 @@ WVA_IMAGE_PULL_POLICY=${WVA_IMAGE_PULL_POLICY:-}
 # have to be handed a password, and this way the credential is created once by
 # whoever owns it and never passes through an install run.
 WVA_IMAGE_PULL_SECRET=${WVA_IMAGE_PULL_SECRET:-}
-SKIP_TLS_VERIFY=${SKIP_TLS_VERIFY:-"false"}
 WVA_LOG_LEVEL=${WVA_LOG_LEVEL:-"info"}
 # Optional: multi-controller isolation (sets controller_instance on metrics / selectors when non-empty).
 

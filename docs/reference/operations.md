@@ -18,22 +18,17 @@ This page is the operational entry point. Longer subjects have their own pages:
 ## Verifying the install
 
 Every command on this page uses `$NS` for the namespace the **controller** runs
-in — not a fixed name, since a per-team or cluster-scoped install can be
-anywhere.
-
-Start by running:
+in. Start with:
 
 ```bash
 make verify-deployment
 ```
 
-It reports the namespace it found the controller in ("WVA controller is
-running and ready in `<ns>`"), or — if there is more than one scaling-manager
-install on this cluster, or none — lists every candidate and stops rather than
-guess; choose yours from that list.
+It reports the controller's namespace ("WVA controller is running and ready
+in `<ns>`"). With several installs, or none, it lists every candidate and stops;
+pick yours from the list.
 
-Set `NS` to the controller's namespace. In a fresh shell, find it the way the
-controller check does, by its Deployment label:
+Set `NS` to the controller's namespace. To find it by the Deployment label:
 
 ```bash
 kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler \
@@ -42,12 +37,13 @@ NS=$(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler
   -o jsonpath='{.items[0].metadata.namespace}')
 ```
 
-With more than one install the second command takes the first one listed: pick
-yours from the first command's list and set `NS` by hand. A tenant without
-cluster-wide read sets it directly: `NS=<your-namespace>` for a
-namespace-scoped install (the controller runs in the namespace it manages), or
-the `WVA_NS` it was installed with. `MODEL_NS` below is the namespace your
-workloads run in, the same as `NS` for a namespace-scoped install:
+- With several installs, the second command takes the first one listed. Set
+  `NS` by hand from the first command's list.
+- Without cluster-wide read, set it directly: `NS=<your-namespace>` for a
+  namespace-scoped install, or the `WVA_NS` it was installed with.
+
+`MODEL_NS` is the namespace your workloads run in; for a namespace-scoped
+install it equals `NS`:
 
 ```bash
 MODEL_NS="$NS"   # or the namespace holding your ScaledObjects
@@ -59,7 +55,7 @@ Confirm registration matches what is actually serving:
 make verify-scaledobjects
 ```
 
-For more detail, straight from the controller and KEDA:
+For more detail, ask the controller and KEDA directly:
 
 ```bash
 kubectl get pods -n "$NS"                     # the controller is Running
@@ -67,12 +63,11 @@ kubectl get scaledobject -n "$MODEL_NS"       # your managed workloads
 kubectl get hpa -n "$MODEL_NS"                # KEDA created one per ScaledObject
 ```
 
-The whole chain works when the ScaledObject reads `READY True` and its HPA's
-`TARGETS` shows a number (`1/1 (avg)`): the scaling manager was called, decided,
-and KEDA received the answer. `<unknown>` in `TARGETS` means KEDA never got one —
-check the trigger's `scalerAddress` and that `modelID` is set. Do not use the
-HPA's `CurrentMetrics` as the check: it is populated, with an empty entry, even
-when nothing is being scaled.
+The chain works when the ScaledObject reads `READY True` and its HPA's
+`TARGETS` shows a number (`1/1 (avg)`). `<unknown>` in `TARGETS` means KEDA got
+no answer: check the trigger's `scalerAddress` and that `modelID` is set. Do not
+use the HPA's `CurrentMetrics` as the check. It holds an empty entry even when
+nothing is being scaled.
 
 If metrics are the problem, follow them forward:
 
@@ -85,12 +80,12 @@ curl -s http://localhost:8000/metrics | grep vllm:
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
 
 # 3. the scaling manager reads them and decides
-kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler | grep scaling-decision
+kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 | grep scaling-decision
 ```
 
-Step 3 also shows in two always-on gauges: `wva_metrics_pods_discovered` (pods
-found per model, should be > 0) and `wva_metrics_freshness_status{status="fresh"}`
-(should equal the pod count). See [Metrics health](metrics.md).
+Two gauges also show step 3: `wva_metrics_pods_discovered` (pods found per
+model, should be > 0) and `wva_metrics_freshness_status{status="fresh"}` (should
+equal the pod count). See [Metrics health](metrics.md).
 
 ## Testing autoscaling
 
@@ -100,12 +95,13 @@ One command, against what you already installed:
 make benchmark-smoke NAMESPACE=<namespace>
 ```
 
-Symmetric 1024-in/1024-out load at 15 req/s for five minutes, then a snapshot of
-the dashboard over exactly that window. It checks the whole chain first — KEDA, a scaling-manager
-controller that manages *this* namespace, model servers, an EPP, a ScaledObject
-— and reports every gap at once rather than one per five-minute run. It stands
-nothing up, so it is safe against a live namespace, and it needs no benchmark
-CLI. The snapshot is written only when there is a dashboard to snapshot.
+It sends 1024-in/1024-out requests at 15 req/s for five minutes, then
+snapshots the dashboard over that window (when there is a dashboard).
+
+- It first checks KEDA, a controller managing *this* namespace, model servers,
+  an EPP and a ScaledObject, and reports every gap at once.
+- It stands nothing up, so it is safe on a live namespace. It needs no
+  benchmark CLI.
 
 For runs whose numbers you intend to compare, use
 [Benchmark the scaling manager](../guides/benchmarking/). Full procedures, including the
@@ -118,7 +114,7 @@ simulator and the e2e suites, are in [Testing](../developer-guide/testing.md).
 | The scaling manager pod is not `Running` | image pull, resources, or Prometheus unreachable | `make verify-deployment`, then `kubectl describe pod -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler` |
 | a `MetricsUnavailable` Warning Event on the ScaledObject | the model's metrics stopped arriving: usually the ServiceMonitor or PodMonitor does not select the model pods, so the series never reach Prometheus | `kubectl get events -n <ns> --field-selector involvedObject.kind=ScaledObject,reason=MetricsUnavailable`, then `make verify-deployment`, `kubectl get servicemonitor,podmonitor -n <ns>` and Prometheus `/targets`. See [Metrics health](metrics.md#the-metricsunavailable-event) |
 | HPA exists but its `TARGETS` reads `<unknown>` | KEDA never got an answer — usually the trigger's `scalerAddress` or a missing `modelID` | `kubectl get scaledobject,hpa -n <ns>`, then `kubectl describe hpa -n <ns> keda-hpa-<so-name>` |
-| nothing scales, no errors | a limiter is declared and the workload's accelerator does not resolve, so it gets no GPU budget | `kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \| grep -i accelerator` |
+| nothing scales, no errors | a limiter is declared and the workload's accelerator does not resolve, so it gets no GPU budget | `kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 \| grep -i accelerator` |
 | a model never wakes from zero | the EPP flow-control queue is not reaching the scaling manager | see [Troubleshooting](troubleshooting.md) |
 | `READY False` on the ScaledObject, and the HPA's `TARGETS` reads `cpu: <unknown>/80%` | KEDA could not fetch the metric spec from the scaling manager, so it fell back to a CPU metric. The trigger names a scaler it cannot reach — most often a `scalerAddress` naming a **different install's namespace** than the controller actually runs in. `make scaledobjects-repoint` fixes exactly this: it rewrites `scalerAddress` on objects that ask for the scaling manager but name a namespace where no scaler runs, and leaves one pointing at a second live install alone | `kubectl get scaledobject -n <ns> -o custom-columns=NAME:.metadata.name,ADDR:.spec.triggers[0].metadata.scalerAddress`, then `kubectl get svc -n "$NS" wva-external-scaler` (the address must be `wva-external-scaler.$NS...`). Admin, across the cluster: the same with `-A` |
 | demand looks far too low for the load you are driving, and an `UnattributedReadyPods` Warning Event (`has N ready pod(s) but none attributed`) keeps recurring | FMA is in the namespace and nothing is scraping its launcher pods, so the traffic they serve is invisible | `kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods`, then `make verify-fma`, see also [FMA launcher pods](#fma-launcher-pods) |
@@ -130,11 +126,10 @@ simulator and the e2e suites, are in [Testing](../developer-guide/testing.md).
 
 ### `no children to pick from` after a reinstall
 
-KEDA's gRPC client backs off on a name that did not resolve, and keeps backing
-off for far longer than an uninstall/reinstall takes. So a ScaledObject that
-outlived an uninstall can stay `READY False` against a scaler that is now
-running perfectly — the name was NXDOMAIN while the scaling manager was gone,
-and KEDA has not re-resolved it yet.
+A ScaledObject that outlived an uninstall can stay `READY False` after the
+reinstall, against a healthy scaler. KEDA's gRPC client backs off on a name
+that did not resolve while the scaling manager was gone, for longer than the
+reinstall takes.
 
 Restart the KEDA operator (cluster admin: KEDA is shared by every tenant):
 
@@ -142,40 +137,38 @@ Restart the KEDA operator (cluster admin: KEDA is shared by every tenant):
 kubectl rollout restart deploy/keda-operator -n "${KEDA_NAMESPACE:-keda-system}"
 ```
 
-`keda-system` is the installer's default (`KEDA_NAMESPACE`), and what the
-commands on this page assume. A KEDA the cluster already had may live
-elsewhere; find it with `kubectl get pods -A -l app.kubernetes.io/name=keda-operator`
-(admin).
+`keda-system` is the installer's default (`KEDA_NAMESPACE`). A KEDA the cluster
+already had may live elsewhere; find it with
+`kubectl get pods -A -l app.kubernetes.io/name=keda-operator` (admin).
 
-Verified on kind: the ScaledObjects went `READY True` within a poll interval of
-the restart, with nothing else changed. Deleting the ScaledObjects before
-uninstalling avoids it — which `make undeploy-wva` now does for the ones it
-created. See [Upgrade and uninstall](upgrade-and-uninstall.md).
+The ScaledObjects go `READY True` within a poll interval of the restart.
+Deleting ScaledObjects before uninstalling avoids the problem; `make
+undeploy-wva` does that for the ones it created. See [Upgrade and
+uninstall](upgrade-and-uninstall.md).
 
 ### FMA launcher pods
 
-A namespace running Fast Model Actuation needs two things the scaling manager
-does not do by default, and both fail silently when missing:
+A namespace running Fast Model Actuation needs two things, and both fail
+silently when missing:
 
-- **the launcher pods must be scraped.** They declare no container ports, so a
-  PodMonitor selecting by port name generates no target for them at all — not a
-  failing target, no target. Fix with
+- **The launcher pods must be scraped.** They declare no container ports, so a
+  PodMonitor that selects by port name makes no target for them at all. Fix with
   `kubectl apply -k config/fma-launcher-metrics -n <ns>`.
-- **the plan must target the requester**, not a decode Deployment, when the
+- **The plan must target the requester**, not a decode Deployment, when the
   requester is the only serving workload there.
 
-Symptoms: demand far lower than the load you are driving, a recurring
+Symptoms: demand far below the load you drive, a recurring
 `UnattributedReadyPods` Warning Event (`has N ready pod(s) but none
 attributed`), or a variant flat at `minReplicaCount` while the queue grows. The
-text is the Event's, not a log line:
+text is in the Event, not the log:
 
 ```bash
 kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods
 ```
 
-The whole story — how attribution works, how to size `maxReplicas` from the
-launcher pool, why GPU accounting is a lower bound, and what to check — is in
-[the FMA post-mortem](../proposals/fma-post-mortem.md).
+How attribution works, how to size `maxReplicas` from the launcher pool, and
+why GPU accounting is a lower bound: [the FMA
+post-mortem](../proposals/fma-post-mortem.md).
 
 First stop for any of these:
 
@@ -188,17 +181,19 @@ Deeper diagnosis — EPP metrics, scale-from-zero, slow scale-up — is in
 
 ## Changing policy safely
 
-Thresholds, tiers, scale-to-zero and limiters live in the scaling-policy
-ConfigMap, `wva-scaling-policy-config` in the controller's namespace. The
-controller re-reads it live; no restart — unless it was installed out of reach
-(`WVA_WATCH_NS` naming another namespace), when it reads that ConfigMap only at
-start, as below. Cluster limits an admin publishes live
-in the same-named ConfigMap in the policy namespace (`wva-policy` by default),
-and editing that one is a cluster-admin action. The exception: a
-namespace-scoped controller does not watch a separate policy namespace, so it
-reads that policy once at start. After editing it, restart each such
-controller (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`);
-a cluster-scoped controller picks the edit up live.
+Thresholds, tiers, scale-to-zero and limiters live in
+`wva-scaling-policy-config` in the controller's namespace. Cluster limits an
+admin publishes live in the same-named ConfigMap in the policy namespace
+(`wva-policy` by default); editing that one is a cluster-admin action.
+
+When an edit takes effect:
+
+- **The controller's own ConfigMap:** live, no restart. Exception: a controller
+  installed out of reach (`WVA_WATCH_NS` naming another namespace) reads it only
+  at start.
+- **The policy namespace's ConfigMap:** live for a cluster-scoped controller. A
+  namespace-scoped controller reads it once at start, so restart each one
+  (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`).
 
 1. **Back up** (strip the fields that would block a later replace):
 
@@ -217,7 +212,7 @@ a cluster-scoped controller picks the edit up live.
 3. **Confirm it took**, within a cycle:
 
    ```bash
-   kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler --since=5m \
+   kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 --since=5m \
      | grep -E 'Updated global scaling policy from ConfigMap|Loaded cluster policy from the policy namespace|GPU limiter \(re\)built from config|Effective scaling policy'
    ```
 
@@ -228,8 +223,8 @@ a cluster-scoped controller picks the edit up live.
    | `GPU limiter (re)built from config` | a `limiters:` change took effect |
    | `Effective scaling policy` | which tier a model resolved to |
 
-   No line at all means the edit did not apply. Look for an error in the same
-   log window; a malformed block is the usual cause.
+   No line means the edit did not apply. Look for an error in the same log
+   window; usually a malformed block.
 
 4. **Roll back** if it misbehaves:
 
@@ -251,10 +246,9 @@ A restart has its own cost; see [Upgrade and uninstall](upgrade-and-uninstall.md
 
 ## What the controller is running with
 
-The controller publishes what it has actually read and decided in one
-ConfigMap, `wva-controller-status`, in its own namespace. Read it instead of
-the log to confirm that a policy edit took, or which policy governs a
-controller:
+The controller publishes what it has read and decided in the
+`wva-controller-status` ConfigMap in its own namespace. Read it, rather than the
+log, to confirm a policy edit took or to see which policy governs a controller:
 
 ```bash
 kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
@@ -275,9 +269,9 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `formatVersion` | `1`; bumped only for an incompatible change to these keys |
 
 Only the leader writes it, and only when a value changes. A failed write is
-logged and retried and never stops scaling, so a missing ConfigMap means the
-controller predates it or lacks the `wva-controller-status-role` grant — re-run
-`make setup-prereqs` as a cluster admin — not that it is not scaling.
+logged and retried and never stops scaling. A missing ConfigMap means the
+controller predates it or lacks the `wva-controller-status-role` grant (a
+cluster admin re-runs `make setup-prereqs`). It does not mean scaling stopped.
 
 ## Command cheatsheet
 
@@ -301,7 +295,7 @@ kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometh
 
 # === KEDA (admin; keda-system unless KEDA_NAMESPACE said otherwise) ===
 kubectl get pods -n "${KEDA_NAMESPACE:-keda-system}"
-kubectl logs -n "${KEDA_NAMESPACE:-keda-system}" -l app=keda-operator
+kubectl logs -n "${KEDA_NAMESPACE:-keda-system}" -l app=keda-operator --tail=-1
 
 # === vLLM / Application ===
 kubectl get pods -n <app-namespace>

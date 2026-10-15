@@ -401,6 +401,14 @@ cmd_create() {
     log_error "pool '${POOL_NAME}' already exists in ${NAMESPACE} as a ${other}, and --group-size ${GROUP_SIZE} would create the other kind. Both would supply Pods under the same pool label and the old one would go on holding its accelerators unseen. Remove it first: ${0##*/} delete -n ${NAMESPACE} --name ${POOL_NAME}"
   fi
 
+  # A re-run keeps what was set by hand on the pool's trigger. See
+  # warmpool_kept_trigger_meta; only a real apply reads the cluster, so
+  # --dry-run renders exactly what this command line asks for.
+  WARMPOOL_KEPT_META=""
+  if [ "$APPLY" -eq 1 ]; then
+    warmpool_kept_trigger_meta
+  fi
+
   local memory
   if [ -n "$MODELS" ] && [ -n "$MODEL_SIZE" ]; then
     # GPUS_PER_POD is ranks per Pod: every device the engine spans is a worker
@@ -1339,7 +1347,54 @@ pool_trigger_extra() {
   if [ -n "$MAX_HOLD" ]; then
     printf '        warmPoolMaxHold: "%s"\n' "$MAX_HOLD"
   fi
+  if [ -n "${WARMPOOL_KEPT_META:-}" ]; then
+    printf '%s\n' "$WARMPOOL_KEPT_META"
+  fi
   return 0
+}
+
+# warmpool_kept_trigger_meta reads the pool's live ScaledObject, if it has one,
+# and sets WARMPOOL_KEPT_META to every key of its trigger metadata that this run
+# does not write, as YAML lines at the metadata block's indentation.
+#
+# `kubectl apply` of a ScaledObject REPLACES its triggers list -- it is a custom
+# resource, so there is no strategic merge to keep list items -- and every
+# re-run of create silently dropped the switch knobs somebody had set on the
+# pool by hand: warmPoolSwitchSpareThreshold, warmPoolMinSwitchInterval,
+# warmPoolPreloadTop, warmPoolGPUMemoryUtilization, or any other. The pool went
+# back to the controller defaults with nothing said.
+#
+# What this run writes always wins. scalerAddress, warmPoolName and
+# warmPoolSleepMinSize are written every time; warmPoolRetained, warmPoolMinHold
+# and warmPoolMaxHold only when --type, --min-hold or --max-hold name them --
+# otherwise the live value is kept, like any other key.
+#
+# A ScaledObject that cannot be READ is a refusal, not "nothing to keep":
+# replacing it then would be exactly the loss this exists to prevent.
+warmpool_kept_trigger_meta() {
+  local rc=0 set_keys kept_keys
+  WARMPOOL_KEPT_META=""
+  kc_capture get scaledobject "wva-warm-pool-${POOL_NAME}" -n "$NAMESPACE" -o json || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    kc_not_found "$KC_ERR" && return 0
+    log_error "could not read the pool's existing ScaledObject wva-warm-pool-${POOL_NAME} in ${NAMESPACE} ($(printf '%s\n' "$KC_ERR" | head -1)), so the trigger keys set on it by hand cannot be kept. Refusing to replace it."
+  fi
+  set_keys='["scalerAddress","warmPoolName","warmPoolSleepMinSize"'
+  [ -z "$POOL_TYPE" ] || set_keys="${set_keys},\"warmPoolRetained\""
+  [ -z "$MIN_HOLD" ] || set_keys="${set_keys},\"warmPoolMinHold\""
+  [ -z "$MAX_HOLD" ] || set_keys="${set_keys},\"warmPoolMaxHold\""
+  set_keys="${set_keys}]"
+  WARMPOOL_KEPT_META="$(printf '%s' "$KC_OUT" | jq -r --argjson set "$set_keys" --arg p "$POOL_NAME" '
+      [ .spec.triggers[]? | .metadata // {} | select((.warmPoolName // "") == $p) ]
+      | first // {}
+      | to_entries[]
+      | select(.key as $k | ($set | index($k)) == null)
+      | "        " + (.key | tojson) + ": " + (.value | tostring | tojson)')" \
+    || log_error "could not parse the pool's existing ScaledObject wva-warm-pool-${POOL_NAME}; refusing to replace it and drop the trigger keys set on it."
+  if [ -n "$WARMPOOL_KEPT_META" ]; then
+    kept_keys="$(printf '%s\n' "$WARMPOOL_KEPT_META" | sed -E 's/^ *"([^"]*)".*/\1/' | paste -sd, - | sed 's/,/, /g')"
+    log_info "Keeping the trigger keys already set on wva-warm-pool-${POOL_NAME} that this command does not write: ${kept_keys}"
+  fi
 }
 
 # sizing answers the question that comes before "which pools" -- whether a given

@@ -96,7 +96,17 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		Expect(fixtures.EnsureModelServiceLWS(ctx, crClient, ns, msPrefill, msPrefill+"-pool", modelB, cfg.UseSimulator, 2, 1,
 			fixtures.WithLWSRole(domain.RolePrefill), fixtures.WithLWSGPUs(key, product, gpuResName, 1))).To(Succeed())
 		for _, ms := range []string{msA, msDecode, msPrefill} {
-			Expect(fixtures.EnsureService(ctx, k8sClient, ns, ms, ms+"-decode", 8000)).To(Succeed())
+			// The decode group's worker pod runs the simulator too. Routed to
+			// it, requests queue where no metric WVA reads can see them -- a
+			// replica is read from its leader -- and B's decode read idle for
+			// minutes under full load while its queue sat on the worker, long
+			// enough for A's spare to be returned instead of transferred. The
+			// Service sends traffic to the group leaders only, as llm-d does.
+			var opts []fixtures.ServiceOption
+			if ms == msDecode {
+				opts = append(opts, fixtures.WithServiceSelector(lwsv1.WorkerIndexLabelKey, "0"))
+			}
+			Expect(fixtures.EnsureService(ctx, k8sClient, ns, ms, ms+"-decode", 8000, opts...)).To(Succeed())
 			Expect(fixtures.EnsureServiceMonitor(ctx, crClient, cfg.MonitoringNS, ns, ms, ms+"-decode")).To(Succeed())
 			monitor := ms + "-monitor"
 			DeferCleanup(func() {
@@ -131,6 +141,15 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 				_ = fixtures.DeleteScaledObject(context.Background(), crClient, ns, so)
 			}
 		})
+		// A ScaledObject registered while the controller restarts -- the suite
+		// restarts it in BeforeSuite, and other specs do -- gets "got empty
+		// metric spec" and an HPA on the CPU default, and KEDA never asks
+		// again. Decode's HPA so latched never raises the LWS: the set's
+		// receiver ended fill-timeout, with WVA asking for 2 groups and 1 Ready.
+		By("Waiting for KEDA to wire WVA's metric onto all three HPAs")
+		for _, w := range []struct{ target, so string }{{depA, soA}, {lwsDecode, soD}, {lwsPrefill, soP}} {
+			waitForKEDAExternalMetricWired(ns, w.target, w.so)
+		}
 
 		// 40 minutes: the spec's waits add up to 30 at worst, and B must stay
 		// short for all of them. The namespace goes in cleanup, and the Job
@@ -149,12 +168,22 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "the optimizer never evaluated the namespace's group")
 
 		// Before A can give: a spare offered while B's decode is not yet seen
-		// short is returned to the quota, not transferred (roleShortOf).
-		By("Waiting until the controller sees B's decode short of a whole group")
+		// short is returned to the quota, not transferred (roleShortOf). The
+		// planner plans nothing for a new group's quiet period, so the readings
+		// that count are the ones it plans on: B's decode short on
+		// shortCycles analyzer results in a row after planning starts. A
+		// single short reading before the quiet period ends says nothing about
+		// the first cycles A can give in; a return needs only two of them that
+		// do not read short.
+		const shortCycles = 4
+		By(fmt.Sprintf("Waiting until the planner runs for the group and sees B's decode short %d cycles in a row", shortCycles))
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(ns, modelB, domain.RoleDecode, start.Add(-5*time.Minute))
+			from, ok := sharePlanningFrom(controllerLogsSince(start.Add(-5*time.Minute)), ns)
+			g.Expect(ok).To(BeTrue(), "no \"ledger started\" line for %s yet", ns)
+			g.Expect(time.Now()).To(BeTemporally(">", from), "the share planner's quiet period for %s runs until %s", ns, from)
+			short, read := roleShortFor(ns, modelB, domain.RoleDecode, from, shortCycles)
 			g.Expect(short).To(BeTrue(), read)
-		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "B's decode never read short, so A's spare would be returned, not transferred")
+		}, 10*time.Minute, 10*time.Second).Should(Succeed(), "B's decode never read short while the planner ran, so A's spare would be returned, not transferred")
 
 		By("Lowering A's floor to 1, so it has replicas to give")
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, ns, soA, depA, depA, 1, 4, cfg.MonitoringNS,
@@ -173,7 +202,8 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			members := map[string]int{}
 			receivers := map[string]string{}
 			returns := 0
-			for _, line := range strings.Split(controllerLogsSince(start), "\n") {
+			logs := controllerLogsSince(start)
+			for _, line := range strings.Split(logs, "\n") {
 				// Counted when a return STARTS, so one still draining, or
 				// called off, is seen too; the "spare returned" line comes
 				// only once the release lands.
@@ -198,9 +228,12 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			}
 			// The returns are the diagnosis of the failure this used to hit
 			// before roleShortOf gated the floor change: A's spare given back
-			// to the quota, and B grown from idle GPUs with no transfer.
-			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v; spare returns in %s: %d",
-				members, ns, returns)
+			// to the quota, and B grown from idle GPUs with no transfer. The
+			// planner's own lines and B's readings say why: a return goes
+			// while no role that can grow reads short, so the decode
+			// demand in the analyzer results is the first thing to read.
+			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v; spare returns in %s: %d\n%s",
+				members, ns, returns, sharePlannerLines(logs, ns, modelB, 80))
 		}, 12*time.Minute, 5*time.Second).Should(Succeed())
 		GinkgoWriter.Printf("donor set: %s\n", setID)
 
@@ -236,6 +269,57 @@ func logLineTime(line string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339Nano, ts)
 	return t, err == nil
+}
+
+// sharePlanningFrom is when the share planner starts planning the group of
+// namespace ns: the planningFrom of its latest "ledger started" line. Until
+// then the group is in its quiet period and nothing is planned for it.
+func sharePlanningFrom(logs, ns string) (time.Time, bool) {
+	from := regexp.MustCompile(`"planningFrom": "([^"]+)"`)
+	var at time.Time
+	found := false
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, "Utilization share: ledger started") || !strings.Contains(line, `"scope": "`+ns+`"`) {
+			continue
+		}
+		if m := from.FindStringSubmatch(line); m != nil {
+			if t, err := time.Parse(time.RFC3339Nano, m[1]); err == nil {
+				at, found = t, true
+			}
+		}
+	}
+	return at, found
+}
+
+// sharePlannerLines is the controller's account of the share planner for
+// namespace ns, for a failure message: its "Utilization share" lines, and the
+// saturation analyzer's results and shape holds for model, whose readings
+// decide whether a role reads short. The first limit lines -- what decides
+// whether A's spare is transferred or returned happens in the first minutes
+// after the floor drops, and the analyzer logs every cycle until the timeout
+// -- or a note that there were none.
+func sharePlannerLines(logs, ns, model string, limit int) string {
+	var out []string
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, ns) {
+			continue
+		}
+		forModel := strings.Contains(line, `"modelID": "`+model+`"`)
+		if strings.Contains(line, "Utilization share:") ||
+			(forModel && strings.Contains(line, "analyzer-result") && strings.Contains(line, `"analyzer": "saturation"`)) ||
+			(forModel && strings.Contains(line, "fleet-shape-hold")) {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return "no share-planner or analyzer lines for " + ns + " in the controller log"
+	}
+	head := fmt.Sprintf("share planner and %s analyzer lines for %s (%d", model, ns, len(out))
+	if len(out) > limit {
+		out = out[:limit]
+		head += fmt.Sprintf(", the first %d", limit)
+	}
+	return head + "):\n" + strings.Join(out, "\n")
 }
 
 // expectSetCompleted checks a donor set of two from the controller's log:

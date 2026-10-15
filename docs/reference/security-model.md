@@ -1,20 +1,20 @@
 # Security model
 
-What the scaling manager is trusted with, what it can read and write, what it
+What the scaling manager is trusted with, what it reads and writes, what it
 exposes on the network, and which failures leave scaling bounded or unbounded.
-Written for three readers: the **cluster admin** who grants its permissions, the
+For three readers: the **cluster admin** who grants its permissions, the
 **namespace tenant** who runs it with namespace rights only, and the **security
-reviewer** who has to sign off on both.
+reviewer** who signs off on both.
 
-Everything here is taken from the rendered overlays in `config/overlays/`, the
-installer in `deploy/lib/`, and the controller source. Where the current
-behaviour has a known gap, the page says so and gives the workaround.
+It is taken from the rendered overlays in `config/overlays/`, the installer in
+`deploy/lib/`, and the controller source. Known gaps are named, with the
+workaround.
 
 ## Trust boundaries
 
 | Boundary | Who is on each side | What crosses it |
 | --- | --- | --- |
-| Kubernetes API | controller ServiceAccount ↔ API server | reads of pods, workloads, nodes, ConfigMaps, InferencePools, ScaledObjects, Kueue queues; pod patches, Events, Leases, one ConfigMap |
+| Kubernetes API | controller ServiceAccount ↔ API server | reads of pods, workloads, nodes, ConfigMaps, InferencePools, ScaledObjects, Kueue queues; pod patches, Events, Leases, two ConfigMaps of its own |
 | KEDA → controller | KEDA operator ↔ gRPC on `:9090` | scale target names, trigger metadata (`modelID`, `variantCost`, ...); replica counts back |
 | Prometheus → controller | the scraping Prometheus ↔ `:8443` | the controller's own `wva_*` metrics |
 | Controller → Prometheus / Thanos | controller ↔ your Prometheus | PromQL queries, carrying the controller's own ServiceAccount token |
@@ -22,9 +22,9 @@ behaviour has a known gap, the page says so and gives the workaround.
 | Controller → warm-pool pods (only with a warm pool) | controller ↔ the pool's supervisor and engine ports | plain-HTTP commands to start, sleep, wake and stop engine instances |
 | Cluster admin ↔ tenant | whoever owns the controller's Deployment ↔ whoever is bounded by it | the scaling policy, and the GPU budget in it |
 
-The last row is the one that decides whether a GPU bound holds. Whoever can edit
-the controller's Deployment owns its image, args and env, so **nothing carried
-on the controller can bound the person who can edit it**. See
+The last row decides whether a GPU bound holds. Whoever can edit the
+controller's Deployment owns its image, args and env, so **nothing carried on
+the controller can bound the person who can edit it**. See
 [Multi-tenancy](#multi-tenancy).
 
 ## Identities
@@ -37,12 +37,14 @@ on the controller can bound the person who can edit it**. See
 | ServiceAccount `wva-metrics-scraper` | the prereqs phase, **OpenShift only** | the identity user-workload Prometheus scrapes the controller's `:8443` with. Its only grant is `get` on `/metrics` (the repointed `metrics-reader`) |
 | Secret `wva-metrics-scraper-token` | the prereqs phase, **OpenShift only** | a **legacy, non-expiring** token for `wva-metrics-scraper`, referenced by the ServiceMonitor's `bearerTokenSecret` (the prometheus-operator can only read a Secret) |
 
-Two things to know about the token Secrets. They do not expire and are not
-rotated: deleting the Secret and re-running the prereqs phase is the rotation.
-And anyone who can read Secrets in the controller's namespace holds them — on a
-default namespace-scoped install that is the tenant, so the tenant holds a token
-that can `get /metrics` on every component in the cluster that authorizes
-`/metrics` through the API server, including the API server's own.
+About the token Secrets:
+
+- They do not expire and are not rotated. To rotate one, delete the Secret and
+  re-run the prereqs phase.
+- Anyone who can read Secrets in the controller's namespace holds them. On a
+  default namespace-scoped install that is the tenant, who then holds a token
+  that can `get /metrics` on every component that authorizes `/metrics` through
+  the API server, the API server included.
 
 **On OpenShift the scrape token is not the controller's identity.** It used to
 be (`wva-controller-manager-token`, a non-expiring token for the controller's
@@ -67,22 +69,30 @@ overlay shows the unsuffixed names.
 
 | Overlay | ClusterRoles | ClusterRoleBindings | Roles | RoleBindings |
 | --- | --- | --- | --- | --- |
-| `namespace-scoped/kubernetes` | 5 | 5 | 3 | 3 |
-| `namespace-scoped/openshift` | 5 | 6 (adds `cluster-monitoring-view`) | 3 | 3 |
-| `cluster-scoped/kubernetes` | 4 | 4 | 2 | 2 |
-| `cluster-scoped/openshift` | 4 | 5 (adds `cluster-monitoring-view`) | 2 | 2 |
+| `namespace-scoped/kubernetes` | 6 | 6 | 4 | 4 |
+| `namespace-scoped/openshift` | 6 | 7 (adds `cluster-monitoring-view`) | 4 | 4 |
+| `cluster-scoped/kubernetes` | 4 | 4 | 3 | 3 |
+| `cluster-scoped/openshift` | 4 | 5 (adds `cluster-monitoring-view`) | 3 | 3 |
 
-So **no shipped overlay is free of cluster-scoped objects**. A namespace admin
-installs the controller; a cluster admin creates these first, once, with
-`make setup-prereqs`. Adding `config/components/unauthenticated-metrics` to a
-shipped overlay removes the metrics-auth, `/metrics` and EPP-scrape grants but **not**
-`node-reader` or `kueue-reader`, so the result is still not free of
-cluster-scoped objects. The one composition with nothing cluster-scoped is the
-test overlay `test/e2e/testdata/secondary-controller` (base +
-`namespace-scoped` + `tenant-installable` + `unauthenticated-metrics`, no
-`node-reader`, no `kueue-reader`); a controller built that way gives up
-authenticated metrics, the EPP scrape grant, the `gpu-inventory` limiter and
-the Kueue quota source.
+Namespace-scoped ClusterRoles: `metrics-auth`, `metrics-reader`,
+`epp-metrics-reader`, `node-reader`, `kueue-reader`, `policy-namespace-reader`.
+Roles: `manager`, `leader-election`, `controller-status`,
+`utilization-share-history`. Cluster-scoped has `manager` as a ClusterRole and no
+`node-reader`, `kueue-reader` or `policy-namespace-reader` (the manager role
+covers them).
+
+So **every shipped overlay has cluster-scoped objects**. A cluster admin creates
+them once with `make setup-prereqs`; a namespace admin then installs the
+controller.
+
+- Adding `config/components/unauthenticated-metrics` removes the metrics-auth,
+  `/metrics` and EPP-scrape grants, but **not** `node-reader`, `kueue-reader` or
+  `policy-namespace-reader`.
+- The only composition with nothing cluster-scoped is the test overlay
+  `test/e2e/testdata/secondary-controller` (base + `namespace-scoped` +
+  `tenant-installable` + `unauthenticated-metrics`). It gives up authenticated
+  metrics, the EPP scrape grant, the `gpu-inventory` limiter, the Kueue quota
+  source and finding a published cluster policy.
 
 ### Namespace-scoped, Kubernetes
 
@@ -124,16 +134,26 @@ re-run `make setup-prereqs` since they were added lacks them, which matters for
 policy resolution — see [Fail-open and fail-closed](#fail-open-and-fail-closed).
 
 **Who `metrics-reader` is bound to.** On Kubernetes the installer binds it to
-one ServiceAccount, chosen in this order: `PROMETHEUS_SA` when set; else the
-one non-default account the Prometheus CRs agree on in the namespace an
-explicitly set `PROMETHEUS_URL` addresses; else the kube-prometheus-stack this
-install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in
-`MONITORING_NAMESPACE`). A detected URL never creates it. With none of those,
-**no binding** is created, the installer warns, and `make check-prereqs` lists
-the binding as optional: it never binds a guessed account or `default`, because a grant to an account nobody
-chose waits for whoever creates it. Pass `PROMETHEUS_SA=<namespace>/<serviceaccount>`
-to have your Prometheus granted the scrape
-([configuration](configuration.md)).
+one ServiceAccount, the first of:
+
+1. `PROMETHEUS_SA`, when set;
+2. the one non-default account the Prometheus CRs agree on, in the namespace an
+   explicitly set `PROMETHEUS_URL` addresses;
+3. the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`,
+   with the URL in `MONITORING_NAMESPACE`).
+
+A detected URL never creates it. With none of those, **no binding** is created,
+the installer warns, and `make check-prereqs` lists it as optional. It never
+binds a guessed account or `default`: a grant to an account nobody chose waits
+for whoever creates it. Pass `PROMETHEUS_SA=<namespace>/<serviceaccount>` to
+grant your Prometheus the scrape ([configuration](configuration.md)).
+
+Only those sources write or repoint it. An admin re-run of `make setup-prereqs`
+with none of them **keeps** an existing binding and warns, naming its account
+and how to repoint it (`PROMETHEUS_SA=<namespace>/<serviceaccount>`) or remove
+it (`kubectl delete clusterrolebinding <name>`). A binding it cannot read is left
+alone and reported as unknown. The tenant phase (`make deploy-wva`) never reads,
+reports or patches it.
 
 ### Namespace-scoped, OpenShift
 
@@ -160,8 +180,8 @@ cluster-wide. The differences that matter for review:
 | get, list | clusterqueues, localqueues, resourceflavors | cluster | |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
-already covers them. Leases, Events and the history ConfigMap stay namespaced in
-the controller's own namespace. On OpenShift the `cluster-monitoring-view`
+already covers them. Leases, Events and the history and status ConfigMaps stay
+namespaced in the controller's own namespace. On OpenShift the `cluster-monitoring-view`
 binding and the `metrics-reader` repoint are added as above.
 
 ### Grants made after install
@@ -170,8 +190,8 @@ binding and the `metrics-reader` repoint are added as above.
 | --- | --- | --- |
 | `deploy/warmpool.sh create`, `make utilization-share-activate` | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
-| `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on the controller's managed Namespace only, by name | the same |
-| `make enable-physical-limiter` | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus a RoleBinding | each controller that reads policy from that namespace |
+| `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on Namespaces, by name: the namespace a namespace-scoped controller (tenant-owned or out of reach) manages, the same grant `make setup-prereqs` renders. Every Namespace only for a cluster-scoped controller whose ServiceAccount already reads every Namespace (an installer-made one does, through its manager ClusterRole) or whose namespace `WVA_LIMITER_TARGETS` names; a controller that looks cluster-scoped without that read is warned about, with the `make setup-prereqs` run for that install | the same |
+| `make enable-physical-limiter`, and `make setup-prereqs` when the policy namespace already exists | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus RoleBinding `wva-policy-reader-<suffix>` | each controller that reads policy from that namespace. `make setup-prereqs` grants it only to a controller that manages its own namespace. `make undeploy-wva` leaves both ([cleanup](upgrade-and-uninstall.md#policy-namespace-and-limiter-leftovers-cluster-admin)) |
 | `make dashboard` (OpenShift only; **not** part of a default install) | ServiceAccount `wva-grafana-datasource` with a **third legacy, non-expiring** token Secret (`wva-grafana-datasource-token`); RoleBinding to `view` on the namespace; a Role with get, list, **create** on `metrics.k8s.io` pods (the Thanos tenancy port checks `create` because Grafana POSTs) | the Grafana datasource, in the namespace the dashboard is created in. Whoever reads Secrets there can query that namespace's metrics and `view` its objects |
 
 "Targeted" is discovered by label unless you set `WVA_LIMITER_TARGETS` — see
@@ -191,6 +211,7 @@ ScaledObjects or HPAs**. KEDA does the scaling. What it does write:
 | Events | create, patch | warnings and decisions, mostly on ScaledObjects |
 | Leases | leader election | own namespace |
 | ConfigMap `wva-utilization-share-history` | the optimizer's need history | own namespace, utilization-share only |
+| ConfigMap `wva-controller-status` | the policy version, limiter and optimizer mode the controller runs with | own namespace, on every policy load |
 | ConfigMap `wva-learned-state` | the saturation analyzer's learned state | own namespace, `LEARNED_STATE_SNAPSHOT` only |
 | Warm-pool supervisor (HTTP, not the API) | start, sleep, wake and stop engine instances | warm pool only |
 
@@ -201,37 +222,58 @@ an InferencePool serves from, wherever warm pools exist.
 
 | Port | Protocol | Exposed by | Authentication | Notes |
 | --- | --- | --- | --- | --- |
-| `9090` | gRPC, **plaintext** by default; TLS with `--external-scaler-cert-path` | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace | **none** by default; mutual TLS with `--external-scaler-client-ca`, limited to named clients with `--external-scaler-client-san` | the KEDA external scaler |
+| `9090` | gRPC, **plaintext** by default; TLS with `--external-scaler-cert-path` | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace, where the admin phase wrote it (below) | **none** by default; mutual TLS with `--external-scaler-client-ca`, limited to named clients with `--external-scaler-client-san` | the KEDA external scaler |
 | `8443` | HTTPS | Service `wva-controller-manager-metrics-service` (ClusterIP) | TokenReview + SubjectAccessReview on `get /metrics` | self-signed certificate unless `--metrics-cert-path` is set (OpenShift sets it, from the service CA) |
 | `8081` | HTTP | no Service; the kubelet's probes | none | `/healthz`, `/readyz` |
-| `8001` (warm pool only) | HTTP, **plaintext** | the warm-pool pod's launcher (supervisor); also `8002` (proxy control) and `9001`-`9016` (engine instances) | **none** | the supervisor starts engine processes with **caller-supplied argv and env**, in a pod that mounts the shared model cache (`model-pvc`) **read-write**. The only protection is the pool's NetworkPolicy (`config/warmpool/warmpool-networkpolicy.yaml`), which admits these ports only from controller pods in `workload-variant-autoscaler-system` — so it holds only if your network plugin enforces NetworkPolicy, and anyone who can start a pod with the controller's labels in that namespace passes it |
+| `8001` (warm pool only) | HTTP, **plaintext** | the warm-pool pod's launcher (supervisor); also `8002` (proxy control) and `9001`-`9016` (engine instances) | **none** | the supervisor starts engine processes with **caller-supplied argv and env**, in a pod that mounts the shared model cache (`model-pvc`) **read-write**. The only protection is the pool's NetworkPolicy, see below |
+
+**The warm-pool NetworkPolicy.** `deploy/warmpool.sh` renders one per pool,
+`wva-warm-pool-<pool>`, in the pool's namespace:
+
+- `:8000` (serving) is admitted from **every pod in the pool's namespace**, and
+  from `MONITORING_NAMESPACE` when one is named.
+- `:8001`, `:8002` and `:9001`-`:9016` (control) are admitted only from
+  controller pods (`app.kubernetes.io/name=workload-variant-autoscaler`,
+  `control-plane=controller-manager`) in the namespace given as
+  `--wva-namespace`. Anyone who can start a pod with those labels there passes.
+- A pool whose unit spans several pods (`GROUP_SIZE` > 1) also admits **all
+  ports, `:8001` included,** from any pod carrying that pool's labels, so the
+  ranks can reach each other.
+
+It holds only where the network plugin enforces NetworkPolicy. The static sample
+in `config/warmpool/` names `workload-variant-autoscaler-system` as the
+controller namespace; for a controller anywhere else, including the out-of-reach
+`wva-<namespace>`, that sample blocks the controller. Use `deploy/warmpool.sh`, or
+edit the namespace.
 
 **The gRPC port is the one to close.** Without the TLS flags it has no
-authentication, and every call registers the ScaledObject it names, with the
-trigger metadata the caller sends. Any pod that can reach `:9090` can therefore
-register a workload or overwrite a registered one's trigger metadata —
-`modelID`, `variantCost` — until KEDA's next call replaces it, and can read the
-controller's decisions for any workload it names. So every shipped overlay
-includes a NetworkPolicy (`config/components/external-scaler-networkpolicy`)
-that admits `:9090` only from KEDA's namespace and leaves `:8443` and `:8081`
-open. It is written in the admin phase (`make setup-prereqs`), and only when the
-installer knows KEDA's namespace: `KEDA_NAMESPACE` set explicitly, the namespace
-serving the external-metrics APIService when that Service is KEDA's, or the one
-an existing `wva-external-scaler` policy admits, which is kept.
-`KEDA_HELM_INSTALL=true` makes `KEDA_NAMESPACE`'s default count only while that
-APIService is NotFound, because the install is then the one putting KEDA there.
-When it would only be a guess, **no policy is applied**, the installer warns
-that `:9090` is reachable from every Pod, and `make verify-deployment` prints
-`No NetworkPolicy: scaler port open`; close it with
-`KEDA_NAMESPACE=<namespace> NAMESPACE=<ns> make setup-prereqs` or the mutual-TLS
-flags below. `make check-prereqs` lists the policy as optional.
-`WVA_SCALER_NETWORKPOLICY=false` leaves it out on purpose; the controller-only
-`make deploy-wva` never deletes an existing one. A wrong namespace
-fails closed: KEDA is refused and nothing scales. The policy holds
-only where the network plugin enforces NetworkPolicy; for the rest, serve the
+authentication, and every call registers the ScaledObject it names with the
+trigger metadata the caller sends. So any pod that can reach `:9090` can
+register a workload, overwrite a registered one's `modelID` or `variantCost`
+until KEDA's next call replaces it, and read the controller's decisions for any
+workload it names.
+
+The NetworkPolicy and mutual TLS below prove the caller is **KEDA**. Nothing
+checks which namespace a call is for: the scaler registers whatever namespace
+and name KEDA sends (`internal/scaler/externalscaler.go`, `registry.Observe`).
+So any tenant can write a ScaledObject whose `scalerAddress` names another
+install's scaler, and KEDA relays its calls there. Per-namespace authorization
+does not exist yet.
+
+Every shipped overlay includes a NetworkPolicy
+(`config/components/external-scaler-networkpolicy`) that admits `:9090` only from
+KEDA's namespace and leaves `:8443` and `:8081` open. The admin phase
+(`make setup-prereqs`) writes it only when it knows KEDA's namespace. Otherwise
+**no policy is applied**, and both the installer and `make verify-deployment`
+warn that `:9090` is open to every Pod. Close it with `KEDA_NAMESPACE=<keda ns>`
+on `make setup-prereqs`, or with the mutual-TLS flags below. How the namespace
+is chosen, and which policies the installer leaves alone:
+[the external-scaler NetworkPolicy](upgrade-and-uninstall.md#the-external-scaler-networkpolicy).
+
+A wrong namespace fails closed: KEDA is refused and nothing scales. The policy
+holds only where the network plugin enforces NetworkPolicy; elsewhere, serve the
 scaler over TLS and require KEDA's client certificate
-([configuration](configuration.md#advanced)). The rule it ships is
-equivalent to:
+([configuration](configuration.md#advanced)). The shipped rule is equivalent to:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -257,25 +299,26 @@ spec:
           kubernetes.io/metadata.name: keda-system   # your KEDA operator's namespace
 ```
 
-`keda-system` is the shipped manifest's default; the Custom Metrics
-Autoscaler on OpenShift usually runs in `openshift-keda`, which the OpenShift
-overlays name. A policy applied by hand from an earlier version of this page,
-`wva-external-scaler-from-keda`, adds to the shipped one rather than replacing
-it; delete it ([upgrade](upgrade-and-uninstall.md#the-external-scaler-networkpolicy)). Applying an overlay by hand with KEDA anywhere else needs the
-`namespaceSelector` edited. Narrow the `8443` rule to your Prometheus's
-namespace if you want that port closed too; it is already authenticated. The
-shipped policy admits `8081` from every source, because kubelet probes come
-from the node, which no `from:` selector can name.
+- `keda-system` is the shipped default. The Custom Metrics Autoscaler on
+  OpenShift usually runs in `openshift-keda`, which the OpenShift overlays name.
+  Applying an overlay by hand with KEDA elsewhere needs the `namespaceSelector`
+  edited.
+- `wva-external-scaler-from-keda`, a policy applied by hand from an earlier
+  version of this page, adds to the shipped one rather than replacing it. Delete
+  it ([upgrade](upgrade-and-uninstall.md#the-external-scaler-networkpolicy)).
+- `8443` is already authenticated; narrow its rule to your Prometheus's
+  namespace if you want it closed too.
+- `8081` is admitted from every source, because kubelet probes come from the
+  node, which no `from:` selector can name.
 
 ## Data handled
 
 Metrics only. The controller reads Prometheus series, EPP and model-server
 `/metrics`, and Kubernetes object metadata and status. It sends no inference
-requests and reads no prompts or completions. With a warm pool, it calls the
-engines' control endpoints (`/sleep`, `/wake_up`, `/is_sleeping`, `/health`),
-never the request endpoints. The warm-pool **proxy** — a separate image running
-inside pool pods — does forward live requests; it is part of the data plane,
-not the controller.
+requests and reads no prompts or completions. With a warm pool it calls only the
+engines' control endpoints (`/sleep`, `/wake_up`, `/is_sleeping`, `/health`).
+The warm-pool **proxy**, a separate image inside pool pods, does forward live
+requests; it is part of the data plane, not the controller.
 
 The controller sends its own ServiceAccount token to Prometheus on every query.
 The shipped Kubernetes config sets `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`,
@@ -286,7 +329,7 @@ so that token goes to whatever answers at the configured address. Set it to
 
 | Image | Default | Recommendation |
 | --- | --- | --- |
-| Controller | `ghcr.io/ev-shindin/llm-scaling-manager:main`, a **floating** tag rebuilt on every push to main, pulled with `imagePullPolicy: Always` | pin a release tag or a digest: `IMG=ghcr.io/ev-shindin/llm-scaling-manager:<release>` or `IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>` (the digest form has not been verified end to end through the installer yet) ([upgrade and uninstall](upgrade-and-uninstall.md#pin-the-version)). A floating tag means any pod restart can run different code. A registry host with a port (`host:5000/...`) is not parsed correctly by the installer yet; use a Kustomize overlay for that until it is fixed |
+| Controller | `ghcr.io/ev-shindin/llm-scaling-manager:main`, a **floating** tag rebuilt on every push to main. The installer sets `imagePullPolicy: Always` for it; a kustomize or GitOps render keeps the manifest's `IfNotPresent`, so a node keeps whichever `:main` it pulled first | pin a release tag or a digest: `IMG=ghcr.io/ev-shindin/llm-scaling-manager:<release>` or `IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>` (the digest form has not been verified end to end through the installer yet) ([upgrade and uninstall](upgrade-and-uninstall.md#pin-the-version)). A floating tag means any pod restart can run different code. A registry host with a port (`host:5000/...`) is not parsed correctly by the installer yet; use a Kustomize overlay for that until it is fixed |
 | Warm-pool launcher | `ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher:v0.6.4@sha256:...` | pinned by digest in `config/warmpool/` |
 | Warm-pool proxy | `ghcr.io/ev-shindin/llm-scaler/warmpool-proxy:v11@sha256:...` | pinned by digest; a fork-built image |
 
@@ -295,17 +338,19 @@ installer never handles registry credentials itself.
 
 ## Multi-tenancy
 
-**Where policy comes from.** The limiters and the optimizer selection — the GPU
-budget — come from the policy namespace when one resolves, and otherwise from the
-controller's own `wva-scaling-policy-config`. Thresholds, tiers, per-model
-entries and utilization-share weights come from the controller's own ConfigMap
-**unless the managed namespace has its own** `wva-scaling-policy-config`: the
-controller watches the scaling-policy ConfigMap in the namespace it manages and
-reads it as a namespace-local map that **replaces** the controller's map for
-that namespace's models (`internal/controller/predicates.go`,
-`configmap_reconciler.go`, `internal/config/config.go`). Limiters and the
-optimizer selection are never taken from a namespace-local map. The policy
-source for the budget, run once at startup
+**Where policy comes from.**
+
+- **The GPU budget** (limiters and the optimizer selection) comes from the
+  policy namespace when one resolves, otherwise from the controller's own
+  `wva-scaling-policy-config`. It is never taken from a namespace-local map.
+- **Thresholds, tiers, per-model entries and utilization-share weights** come
+  from the controller's own ConfigMap, **unless the managed namespace has its
+  own** `wva-scaling-policy-config`. The controller reads that as a
+  namespace-local map that **replaces** its own map for that namespace's models
+  (`internal/controller/predicates.go`, `configmap_reconciler.go`,
+  `internal/config/config.go`).
+
+The budget's source is resolved once, at startup
 (`internal/controller/policy_namespace.go`):
 
 | Controller shape | Policy source |
@@ -315,22 +360,21 @@ source for the budget, run once at startup
 | namespace-scoped in the namespace it manages, can read Namespaces (on Kubernetes, the grant `make setup-prereqs` creates) | the `wva.llmd.ai/policy-namespace` label on its namespace, else `wva-policy` if it exists, else its own ConfigMap |
 | namespace-scoped in the namespace it manages, **cannot** read Namespaces — on **Kubernetes**, an install whose admin has not run `make setup-prereqs` since the grant was added | **its own ConfigMap** — the label and `wva-policy` are not seen; logged at Info with the fix, and `wva_policy_namespace_unverified` = 1 |
 
-The startup log says which applied, with one gap. The label and well-known
-branches log `Cluster policy comes from ...` at Info. The two "own ConfigMap"
-branches log the same prefix at **V(1)** only, which the default verbosity does
-not show; a self-managed controller that was denied the Namespace read
-instead logs `Could not read the managed Namespace` and `Cannot tell whether a
-cluster admin published policy` at Info, and sets
-`wva_policy_namespace_unverified` to 1:
+The startup log says which applied:
 
 ```bash
 kubectl logs -n <controller namespace> deploy/wva-controller-manager \
   | grep -E 'Cluster policy comes from|Could not read the managed Namespace|Cannot tell whether'
 ```
 
-`Cluster policy comes from the well-known namespace` (or `... the namespace this
-one is labelled with`) is the one that means a policy namespace governs this
-controller. No such line means its own ConfigMap does.
+| log line | policy source |
+| --- | --- |
+| `Cluster policy comes from the namespace this one is labelled with` | the admin's, from the labelled namespace |
+| `Cluster policy comes from the well-known namespace` | the admin's, from `wva-policy` |
+| `Cluster policy comes from this controller's own namespace` | its own ConfigMap; no admin policy found. Logged at V(1), which the default `-v=2` shows |
+| `Cannot tell whether a cluster admin published policy` | its own ConfigMap, because Namespaces could not be read; `wva_policy_namespace_unverified` = 1 |
+
+A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 
 **What a tenant can influence**, beyond their own workloads:
 
@@ -346,6 +390,7 @@ controller. No such line means its own ConfigMap does.
 | An InferencePool selector | decides which labels the controller writes onto warm-pool pods in that namespace | by design, minus the guarded identity labels |
 | A Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` | `make enable-physical-limiter` treats it as a controller only if it runs as the controller ServiceAccount (`WVA_CONTROLLER_SA`) and has a `manager` container from a controller image repository (`WVA_CONTROLLER_IMAGE_REPOS`; a namespace named in `WVA_LIMITER_TARGETS` relaxes the image check). Anything else is `SKIPPED`, granted nothing, and listed as NOT bound under the banner. A verified one gets its ServiceAccount node read (and Kueue read), a `kubectl rollout restart` of that named Deployment when it must re-resolve its policy namespace (it could not read its Namespace, or started before the policy namespace existed), and `limiters` in the ConfigMap its policy resolves to, the `wva.llmd.ai/policy-namespace` label honoured | signals, not proof: any tenant can satisfy them. Where tenants are not trusted, run their controllers out of reach and name exactly those namespaces in `WVA_LIMITER_TARGETS` |
 | Reaching `:9090` | register or overwrite trigger metadata; read decisions | closed by the shipped NetworkPolicy, above, where it was applied and the network plugin enforces it. Scaler mutual TLS closes it on any network only with `--external-scaler-client-san` pinning KEDA's identity, and only where an admin owns the controller's Deployment: in the tenant-owned shape the tenant owns its args, and so the TLS flags |
+| A ScaledObject whose `scalerAddress` names another install's scaler | KEDA relays its calls, and that controller registers and sizes the workload | **open**: both controls above authenticate KEDA, not the tenant. No per-namespace authorization exists |
 
 **For a tenant you do not trust, bound the namespace at admission**: a
 `ResourceQuota` on `requests.nvidia.com/gpu`. The limiter bounds what the
@@ -358,12 +403,12 @@ scaling manager asks for; the quota bounds what the cluster admits
 | --- | --- | --- |
 | No limiter declared (the shipped policy) | scaling is bounded only by each workload's `maxReplicaCount`; scale-from-zero wakes without a capacity check | **open** |
 | A limiter entry that fails validation | the whole `default` policy is rejected, thresholds included, and no limiter is built; logged at ERROR | **open** |
-| Policy namespace resolved, its ConfigMap exists but cannot be read | the controller refuses to start (`refusing to start unbounded`) | closed |
+| Policy namespace resolved, reading its ConfigMap fails with any error other than NotFound | the controller refuses to start (`refusing to start unbounded`) | closed |
 | Policy namespace resolved, no ConfigMap in it | empty policy: no limiters | **open** |
 | Cannot tell whether `wva-policy` exists (an API error other than NotFound or Forbidden) | refuses to start | closed |
-| Forbidden reading Namespaces (namespace-scoped, Kubernetes, no `make setup-prereqs` grant) | not treated as "no policy namespace": it uses its own ConfigMap, logs `Cannot tell whether a cluster admin published policy` with the fix at Info, and sets `wva_policy_namespace_unverified` = 1 (alert `WVAPolicyNamespaceUnverified`) | **open**, and reported |
+| Forbidden reading Namespaces (namespace-scoped, Kubernetes, no `make setup-prereqs` grant) | not treated as "no policy namespace": it uses its own ConfigMap, logs `Cannot tell whether a cluster admin published policy` with the fix at Info, and sets `wva_policy_namespace_unverified` = 1 (alert `WVAPolicyNamespaceUnverified`, installed only with `DEPLOY_ALERTING_RULES=true`) | **open**, and reported |
 | A ClusterQueue with a `namespaceSelector`, the managed Namespace's labels unreadable | that queue's grant is withheld from the namespace | closed |
-| `gpu-inventory` declared, node read denied | NotReady via the `gpu-policy` readiness check; `wva_node_access_denied` = 1 | closed |
+| `gpu-inventory` declared, node read denied | NotReady via the `gpu-policy` readiness check; `wva_node_access_denied` = 1 (alert `WVANodeAccessDenied` with `DEPLOY_ALERTING_RULES=true`) | closed |
 | Quota entry with no entry for an accelerator type | that type is denied | closed |
 | Kueue unreadable, never read since start | the static quota entry alone; with `-1` that is no cap | **open** |
 | Kueue unreadable after a good read | the last good snapshot stays in force | held |

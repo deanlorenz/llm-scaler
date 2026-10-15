@@ -20,9 +20,9 @@ manager never changes a replica count itself.
   15 seconds it reads those metrics from Prometheus. For a model parked at zero
   replicas it also reads the EPP's queue directly, so a waiting request wakes
   the model at once. Its settings (thresholds, tiers, limiters) live in the
-  `wva-scaling-policy-config` ConfigMap and are re-read without a restart
-  (except by a namespace-scoped controller whose policy ConfigMap is outside
-  the namespace it manages: that one reads it at startup).
+  `wva-scaling-policy-config` ConfigMap and are re-read without a restart.
+  The exception is a namespace-scoped controller whose policy ConfigMap is
+  outside the namespace it manages: it reads it only at startup.
 - **The GPU budget is optional.** Without one, each model is sized on its own.
   With one, every decision has to fit: the GPUs physically free on the
   cluster, a quota you declare, or a quota read from Kueue.
@@ -126,6 +126,7 @@ optimization](modeling-and-optimization.md).
 | Service `wva-controller-manager-metrics-service`, port 8443 | its own `wva_*` metrics, for Prometheus |
 | ConfigMap `wva-scaling-policy-config` | thresholds, tiers, limiters; re-read live (at startup only, for a namespace-scoped controller reading it outside the namespace it manages) |
 | ConfigMap `wva-manager-config` | Prometheus address and the cycle interval; changes need a restart |
+| ConfigMap `wva-controller-status` | written by the controller: which policy it loaded and whether it accepted it, the limiter in force, the utilization-share mode |
 | Roles and ClusterRoles | read pods, workloads, ScaledObjects, InferencePools, nodes and (optionally) Kueue queues; patch pods only in a namespace that runs a warm pool or the utilization-share optimizer |
 
 It has **no write access** to Deployments, ScaledObjects or HPAs. It patches
@@ -140,13 +141,19 @@ managing only the model servers there. A cluster admin runs a one-time setup
 for the cluster-wide pieces first. Both steps are in [install in a
 namespace](../guides/install-in-namespace/). A [cluster-wide
 install](../guides/install-cluster-wide/) runs one controller for every
-namespace. A cluster admin can also publish one policy in the `wva-policy`
-namespace, which self-managed controllers read in place of their own. Two
-kinds do not read it: a namespace-scoped controller on Kubernetes without the
-Namespace read `make setup-prereqs` grants (it keeps its own ConfigMap and
-reports `wva_policy_namespace_unverified`), and admin-owned controllers (cluster-scoped, or out of the tenant's reach) read
-their own ConfigMap by design, which the admin's command writes for them.
-Each controller logs which source it took at startup: [bound every install by
+namespace.
+
+A cluster admin can also publish one policy in the `wva-policy` namespace.
+Self-managed controllers read it in place of their own. Two kinds do not:
+
+- a namespace-scoped controller on Kubernetes without the Namespace read that
+  `make setup-prereqs` grants. It keeps its own ConfigMap and reports
+  `wva_policy_namespace_unverified`.
+- admin-owned controllers (cluster-scoped, or out of the tenant's reach). By
+  design they read their own ConfigMap, which the admin's command writes for
+  them.
+
+Each controller logs at startup which source it took: [bound every install by
 real GPUs](../guides/admin-gpu-bounding/).
 
 ## What it writes back

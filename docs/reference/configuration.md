@@ -1,6 +1,6 @@
 # Deployment configuration reference
 
-Every option `deploy/install.sh` reads. Verified against the script: each entry here is read by something, and every `VAR=${VAR:-default}` in `install.sh` and `deploy/lib/*.sh` appears below.
+Every option `deploy/install.sh` reads. Each entry is read by something, and every `VAR=${VAR:-default}` in `install.sh` and `deploy/lib/*.sh` is listed.
 
 > Part of the [the scaling manager deployment guide](../../deploy/).
 
@@ -15,13 +15,13 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ENVIRONMENT` | Deployment environment (`kubernetes` or `openshift`) | `kubernetes` |
-| `WVA_SCOPE` | `cluster` or `namespace` — see [Scope](../guides/install-cluster-wide/). `namespace` everywhere, including `deploy/install.sh` run directly. It used to be inferred from the platform (`namespace` on OpenShift, `cluster` elsewhere); that inference is gone. Cluster scope still works and warns that it is WIP | `namespace` (`SCOPE=cluster` to change it) |
-| `WVA_LIMITER` | `none`, `gpu-inventory` or `quota` — declares the limiter in the scaling-policy ConfigMap | `none` |
+| `WVA_SCOPE` | `cluster` or `namespace`; see [Scope](../guides/install-cluster-wide/). The default is `namespace` everywhere, including `deploy/install.sh` run directly; it is no longer inferred from the platform. Cluster scope works and warns that it is WIP | `namespace` (`SCOPE=cluster` to change it) |
+| `WVA_LIMITER` | `none`, `gpu-inventory` or `quota` — declares the limiter in the scaling-policy ConfigMap. Unset on a re-run keeps the limiter already there; `none` removes it | unset (a fresh install has none) |
 | `WVA_QUOTAS` | Required by `WVA_LIMITER=quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
 | `WVA_QUOTA_SCOPE` | `namespace` (each managed namespace gets the budget) or `cluster` (one budget across all of them) | `namespace` |
 | `WVA_QUOTA_KUEUE` | With `WVA_LIMITER=quota`: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue nominal quota and `WVA_QUOTAS` applies. Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
-| `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when that differs from the one it runs in. Setting it puts the controller outside the namespace it manages, so the workloads' owner does not administer the controller — the arrangement where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold) | the controller's own namespace |
-| `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: an install that is not told picks the half left to do — `wva` when the caller cannot create cluster-scoped objects, or when the admin half is already in place. `make setup-prereqs` is the `prereqs` phase — see [deploy/](../../deploy/) | auto |
+| `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when it differs from the one it runs in. The workloads' owner then does not administer the controller, which is where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold) | the controller's own namespace |
+| `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: the install picks the half left to do, `wva` when the caller cannot create cluster-scoped objects or the admin half is already in place. `make setup-prereqs` is the `prereqs` phase; see [deploy/](../../deploy/) | auto |
 | `WVA_PROJECT` | Repository root the script installs from | `$PWD` |
 
 ## Image
@@ -34,8 +34,8 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | `WVA_IMAGE_PULL_POLICY` | Image pull policy | by reference: `IfNotPresent` for a digest or a `vX.Y.Z` tag, `Always` for anything else |
 
 `main`, `latest`, `dev` and `nightly` are floating tags: the same install deploys a
-different binary after the next push. The installer warns when it deploys one. For
-anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release tag.
+different binary after the next push, and the installer warns. To reproduce a
+deployment, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 
 ## Namespaces
 
@@ -43,7 +43,7 @@ anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release t
 |----------|-------------|---------|
 | `WVA_NS` | the scaling manager controller namespace | `workload-variant-autoscaler-system` |
 | `MONITORING_NAMESPACE` | Prometheus namespace | `workload-variant-autoscaler-monitoring` |
-| `NAMESPACE` | Where llm-d runs — **llm-d's own variable**, exported by its guides. `deploy/install-epp.sh` installs EPP there, `DEPLOY_LLMD_NS=true` creates it, and setting it **defaults `WVA_NS` for the `*-namespace-on-*` targets** (an explicit `WVA_NS` wins; cluster-scoped targets are unaffected). It is never passed to the controller — the scaling manager has no watch and no listing, and ScaledObject discovery does not read it — see [Which namespace is which](#which-namespace-is-which). **Required in namespace scope**, which is the default: the install refuses rather than guess which namespace it manages, so the fallback below applies only to cluster scope and `kind-emulator` | `llm-d-optimized-baseline` (cluster scope only) |
+| `NAMESPACE` | Where llm-d runs; **llm-d's own variable**, exported by its guides. `deploy/install-epp.sh` installs EPP there, `DEPLOY_LLMD_NS=true` creates it, and it **defaults `WVA_NS` for the `*-namespace-on-*` targets** (an explicit `WVA_NS` wins; cluster-scoped targets are unaffected). It is never passed to the controller; see [Which namespace is which](#which-namespace-is-which). **Required in namespace scope**, the default: the install refuses to guess. The fallback applies only to cluster scope and `kind-emulator` | `llm-d-optimized-baseline` (cluster scope only) |
 | `LLMD_NS` | **Deprecated** alias for `NAMESPACE`, this repo's own former name for it. Still honoured, with a warning | — |
 
 ## Deployment flags
@@ -56,12 +56,12 @@ anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release t
 | `DEPLOY_LWS` | Deploy LeaderWorkerSet (needed only for full e2e suite; skip for smoke, benchmarks, or pre-installed clusters) | `false` |
 | `DEPLOY_ALERTING_RULES` | Install the PrometheusRule alerts | `false` |
 | `WVA_FMA_LAUNCHER_METRICS` | Apply a PodMonitor that scrapes FMA launcher pods, which nothing else does — they declare no container ports, so a port-name endpoint generates no target for them. Applied to the **workload** namespace (`WVA_WATCH_NS`, else `WVA_NS`), and skipped if another PodMonitor already scrapes launchers there. See [FMA launcher pods](operations.md#fma-launcher-pods) | `false` |
-| `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front. Useful only for a demo that wants it to exist before anything is deployed into it; `deploy/install-epp.sh` creates its own when it deploys EPP. The scaling manager does not watch namespaces, so this creates a namespace nothing is looking at | `false` |
+| `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front, for a demo that wants it before anything is deployed. `deploy/install-epp.sh` creates its own when it deploys EPP, and the scaling manager does not watch namespaces | `false` |
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
 | `SKIP_CHECKS` | Turn the preflight's refusals (no model servers in the namespace, model servers or EPP not scraped, the EPP `flowControl` gate off, missing permissions) into warnings: findings are still reported. It does not skip the guard against a second install on the cluster, or the post-install verification | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
-| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, the policy's namespace is found, in order: the namespace serving the `v1beta1.external.metrics.k8s.io` APIService when that Service is KEDA's; else, with `KEDA_HELM_INSTALL=true` and that APIService NotFound, this default (the install puts KEDA there); else the namespace an existing `wva-external-scaler` policy already admits, which is kept. With none, **no NetworkPolicy is applied** and the installer warns that `:9090` is reachable from every Pod, with the fix (`KEDA_NAMESPACE=<ns> NAMESPACE=<ns> make setup-prereqs`, or the scaler mutual-TLS flags) — never a guessed namespace. A source you cannot read counts as unknown, not absent. The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is no policy | `keda-system` for the KEDA install; detected for the NetworkPolicy |
-| `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision. `false` removes an existing policy only in the admin phase (`make setup-prereqs`, or `INSTALL_PHASE=all`); the controller-only `make deploy-wva` leaves it in place | `true` |
+| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, that namespace is detected, never guessed; with no answer **no NetworkPolicy is applied**, and the installer warns that `:9090` is reachable from every Pod and prints the fix for the install's shape. How it is detected, and which existing policies are left as `state UNKNOWN`: [the external-scaler NetworkPolicy](upgrade-and-uninstall.md#the-external-scaler-networkpolicy). The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is none | `keda-system` for the KEDA install; detected for the NetworkPolicy |
+| `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision. `false` removes an existing policy only in the admin phase (`make setup-prereqs`, or `INSTALL_PHASE=all`); the controller-only `make deploy-wva` leaves it in place and reports it `state UNKNOWN`, printing the admin's `make setup-prereqs WVA_SCALER_NETWORKPOLICY=false` command | `true` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
 | `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus | `92.7.0` |
@@ -69,9 +69,9 @@ anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release t
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |
 | `CHECK_ONLY` | Run the prerequisite and permission checks, then exit without deploying. Set by `--check` / `make check-prereqs` | `false` |
-| `WVA_REPLICAS` | Controller replicas. The manifest already elects a leader, so extra replicas are **warm standbys, not extra throughput** — only the leader runs the optimization loops. Two turns a node drain from "no decisions until rescheduled" into a lease timeout | `1` |
-| `UNDEPLOY_SCALEDOBJECTS` | On uninstall, remove the ScaledObjects **this installer created** (KEDA then restores each workload to its pre-autoscaling replica count). Objects you adopted are never removed — they were not this installer's to make — but are listed, because their trigger now calls a scaler that is gone | `true` |
-| `UNDEPLOY_SHARED` | With `UNDEPLOY=true`, also remove Prometheus, the scaler backend and EPP. **Off by default**: they are shared, this install may not have created them, and removing them takes out everything else on the cluster that uses them | `false` |
+| `WVA_REPLICAS` | Controller replicas. Extra replicas are **warm standbys, not extra throughput**: only the elected leader runs the optimization loops. Two turn a node drain from "no decisions until rescheduled" into a lease timeout | `1` |
+| `UNDEPLOY_SCALEDOBJECTS` | On uninstall, remove the ScaledObjects **this installer created** (KEDA then restores each workload's pre-autoscaling replica count). Adopted objects are never removed, but are listed, because their trigger now calls a scaler that is gone | `true` |
+| `UNDEPLOY_SHARED` | With `UNDEPLOY=true`, also remove Prometheus, the scaler backend and EPP. **Off by default**: they are shared, and removing them breaks everything else on the cluster that uses them | `false` |
 
 > `make deploy-e2e-infra` passes `ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED)`,
 > whose Makefile default is **`false`** — the opposite of `install.sh`'s. So an
@@ -83,19 +83,16 @@ ScaledObjects, HPA stabilization (`spec.advanced.horizontalPodAutoscalerConfig.b
 
 ## Default ScaledObjects
 
-**Read this if the scaling manager is installed and nothing is scaling.** A ScaledObject is how a
-workload *registers* with the scaling manager: the controller has no watch and no listing, so it
-only ever learns about workloads KEDA calls it about. An install with no
-ScaledObject anywhere is a controller that is never asked anything — idle, and
-reporting itself healthy.
+**Read this if the scaling manager is installed and nothing is scaling.** A
+ScaledObject is how a workload *registers*: the controller has no watch and no
+listing, so it only learns about workloads KEDA calls it about. With no
+ScaledObject, the controller is idle and reports itself healthy.
 
-These options create one per llm-d model server, so you do not have to hand-write
-them. A model server is any Deployment or LeaderWorkerSet labelled
-`llm-d.ai/inferenceServing=true`; its model is read from `--served-model-name`, or
-`--model` where it sets no other.
+These options create one per llm-d model server: any Deployment or
+LeaderWorkerSet labelled `llm-d.ai/inferenceServing=true`. Its model is read from
+`--served-model-name`, or `--model` when that is the only one.
 
-It works as **plan then apply**, because creating autoscaling objects across a
-cluster is not something to discover the shape of afterwards.
+It works as **plan, then apply**, so you see what will be created first:
 
 ```bash
 # 1. See what would be created. Nothing is applied.
@@ -108,9 +105,8 @@ $EDITOR wva-plan.yaml
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 
-The plan is YAML, and carries its own documentation — every field it accepts is
-explained in the comments it is written with, so editing it needs nothing open
-next to it. Printed as a table on the way past, and written like this:
+The plan is YAML, and its comments explain every field. It is also printed as a
+table. It looks like this:
 
 ```yaml
 # llm-scaling-manager ScaledObject plan. Nothing here has been applied yet.
@@ -148,28 +144,27 @@ plan:
     # inferencePool: (none)
 ```
 
-Two things the entries carry that are not fields. The `apply:` line lists the
-values **that entry** accepts — `adopt` appears only where there is something to
-adopt. And anything informational is a comment, so that editing it cannot change
-what happens: `# scaledObject:` names the object `adopt` would repoint, and
-`# inferencePool:` the EPP queue the workload sits behind.
+- The `apply:` line lists the values **that entry** accepts; `adopt` appears only
+  where there is something to adopt.
+- Anything informational is a comment, so editing it changes nothing:
+  `# scaledObject:` names the object `adopt` would repoint, and
+  `# inferencePool:` the EPP queue the workload sits behind.
 
 | field | |
 | --- | --- |
-| `apply` | `yes` creates, `no` skips, `adopt` repoints a ScaledObject the workload already has. Never both: two ScaledObjects on one target is two HPAs writing the same replica count, so `yes` on a workload that already has one is refused rather than quietly adopted |
-| `modelID` | **Required.** What the container serves, and the grouping key — entries sharing a `modelID` are sized against each other. An entry with none is never applied: an object created without it registers a variant of a model nobody runs |
-| `minReplicas` / `maxReplicas` | What KEDA holds the workload between; the scaling manager decides within them. Default 1 and 10, and for `adopt` they are read from the object being adopted, so applying it unedited changes only who decides the count |
+| `apply` | `yes` creates, `no` skips, `adopt` repoints a ScaledObject the workload already has. Two ScaledObjects on one target are two HPAs writing one replica count, so `yes` on a workload that already has one is refused, not quietly adopted |
+| `modelID` | **Required.** What the container serves, and the grouping key: entries sharing a `modelID` are sized against each other. An entry without one is never applied |
+| `minReplicas` / `maxReplicas` | What KEDA holds the workload between; the scaling manager decides within them. Default 1 and 10. For `adopt` they are read from the adopted object, so applying it unedited changes only who decides the count |
 | `variantCost` | The relative price of one replica of this variant. Only the ratio between variants of one model matters, so with one variant it changes nothing |
-| `scalingPolicy` | Optional, and commented out by default. Names a reusable policy tier — `interactive`, `standard`, `batch` — from the scaling-policy ConfigMap. Leaving it out means "whatever the cluster default says", which an admin can then change for every workload at once; naming one opts this workload out of that. A name no tier matches falls back to the `default` entry and is logged once per change: `Scaling policy not found; this variant is scaling under the default entry`, with the name and the known tiers |
-| `inferencePool` | Informational, a comment, never applied: the EPP queue that workload sits behind, resolved by matching pod labels against each pool's selector — the same way the scaling manager resolves it. `(none)` means no pool has adopted it |
+| `scalingPolicy` | Optional, commented out by default. Names a policy tier (`interactive`, `standard`, `batch`) from the scaling-policy ConfigMap. Left out, the workload follows the cluster default, which an admin can change for every workload at once. A name no tier matches falls back to the `default` entry and is logged once per change: `Scaling policy not found; this variant is scaling under the default entry`, with the name and the known tiers |
+| `inferencePool` | A comment, never applied: the EPP queue the workload sits behind, found by matching pod labels against each pool's selector, as the scaling manager does. `(none)` means no pool selects it |
 
-Entries that cannot be applied are marked `no` **and kept**, with the reason,
-rather than dropped: the file is then the whole truth about what was found, and
-turning a `no` into a `yes` is a deliberate act.
+Entries that cannot be applied are kept as `no`, with the reason, so the file
+shows everything that was found.
 
-If you would rather review interactively, `make scaledobjects-edit` opens the same
-plan in `$EDITOR` and asks before applying. It needs a terminal; everything it can
-do is also reachable through plan-then-apply, which does not.
+To review interactively, `make scaledobjects-edit` opens the plan in `$EDITOR`
+and asks before applying. It needs a terminal; plan-then-apply does the same
+without one.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -193,15 +188,12 @@ Scope follows the same rules as the ScaledObject plan above: `NAMESPACE=<ns>`
 pins the scan to one namespace, and without it a cluster-scoped install walks
 every namespace holding model servers.
 
-The scaling behaviour is written into every generated ScaledObject rather than
-inherited. Kubernetes' own defaults happen to match the windows above, so on a
-stock cluster only the policy periods differ — but those defaults belong to the
-API server, and a cluster that retunes them would quietly change how every
-workload the scaling manager creates scales, with nothing in the object to show it. The
-asymmetry is deliberate: scale-up acts immediately because the wait is already
-paid in cold start, while scale-down is patient because removing a replica too
-early costs that cold start on the next request and keeping one too long only
-costs money.
+The scaling behaviour is written into every generated ScaledObject, not
+inherited. Kubernetes' defaults match the windows above, but they belong to the
+API server, and a cluster that retunes them would silently change every
+generated workload. Scale-up acts at once because the wait is already paid in
+cold start. Scale-down is patient because removing a replica too early costs a
+cold start, and keeping one too long only costs money.
 
 **Adopting an existing ScaledObject leaves its behaviour alone.** `apply: adopt`
 repoints the triggers and bounds; polling interval, cooldown, fallback and
@@ -209,9 +201,10 @@ repoints the triggers and bounds; polling interval, cooldown, fallback and
 with no `fallback` at all gets the default one, unless `WVA_SO_FALLBACK=false`,
 its floor is `0`, or KEDA is older than 2.17. One that has a fallback keeps it
 unchanged, with a warning if it is `replicas: 0` on a floor of `0` or if its
-`replicas` is above the new floor. An object the installer cannot read keeps
-whatever fallback it has, with a warning and `(fallback unchanged: could not
-read it)`. The adopted trigger is written with `metricType: AverageValue`.
+`replicas` is above the new floor. The adopted trigger is written with
+`metricType: AverageValue`, and keeps every key set on it by hand
+(`defaultOutputTokens`, `warmPool`, ...). An object the installer cannot read
+is not patched at all, with a warning.
 
 Set them on a deploy to do this during install:
 
@@ -220,25 +213,25 @@ make deploy-wva-on-k8s WVA_DEFAULT_SO=plan   # install, then show what it would 
 make deploy-wva-on-k8s WVA_DEFAULT_SO=true WVA_DEFAULT_SO_NS=all
 ```
 
-Two things it will never do. It **does not touch a workload that already has a
-ScaledObject** — that one may be hand-tuned or GitOps-managed, and two
-ScaledObjects on one target is two HPAs fighting over a replica count. And it
-**skips any workload whose model it cannot determine** rather than guessing,
-because a wrong `modelID` groups a workload with a model it does not serve and
-mis-scales both.
+It never does two things:
 
-Generated objects use an `external-push` trigger, so KEDA holds a stream open and
-the scaling manager pushes activation the moment it decides — the difference between waking a
-parked workload in about the detection interval and waiting out a poll.
+- **Touch a workload that already has a ScaledObject.** That one may be
+  hand-tuned or GitOps-managed, and two ScaledObjects on one target make two
+  HPAs fight over one replica count.
+- **Guess a model.** A workload whose model it cannot determine is skipped: a
+  wrong `modelID` groups it with a model it does not serve and mis-scales both.
+
+Generated objects use an `external-push` trigger. KEDA holds a stream open and
+the scaling manager pushes activation as soon as it decides, so a parked
+workload wakes in about the detection interval instead of waiting for a poll.
 
 ### Workload readiness (`make workload-patch`)
 
-Two pod-spec settings decide whether autoscaling a model server is safe to turn
-on: a preStop hook, so a removed replica finishes what it is writing, and weights
-that land on a mounted volume, so a new replica does not re-download them.
-Neither belongs to the scaling manager — they belong to the chart that owns the pod spec — so
-`make workload-patch` writes a patch and, on request, applies the half that is
-safe to apply. Full description in
+Two pod-spec settings make autoscaling a model server safe: a preStop hook, so
+a removed replica finishes what it is writing, and weights on a mounted volume,
+so a new replica does not re-download them. Both belong to the chart that owns
+the pod spec, so `make workload-patch` writes a patch and, on request, applies
+the half that is safe to apply. Full description in
 [After the install](workload-preparation.md#writing-the-patch-make-workload-patch).
 
 | Variable | Description | Default |
@@ -299,7 +292,7 @@ shipped default and **exits at startup** if nothing answers there
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
-| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: the one non-default `serviceAccountName` the Prometheus CRs agree on in the namespace an explicitly set `PROMETHEUS_URL` addresses, else the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in `MONITORING_NAMESPACE`). Never a Prometheus the installer only auto-detected, never another namespace's, and never `default`; with no such answer no binding is created (`--check` lists it as optional) and the installer says so | none |
+| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset, the installer picks only from sources you set, never an auto-detected Prometheus or `default`, and otherwise creates no binding and says so (`--check` lists it as optional). A `make setup-prereqs` re-run without it keeps an existing binding; `make deploy-wva` never touches it. Full rules: [who `metrics-reader` is bound to](security-model.md#namespace-scoped-kubernetes) | none |
 | `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `false` in the shipped config; the installer sets `true` on Kubernetes, where it has no CA for the Prometheus it deploys |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
@@ -314,14 +307,13 @@ Three namespaces appear in these options and they do different jobs:
 | `MONITORING_NAMESPACE` | Prometheus and Grafana, if this install deploys them | the installer |
 
 **Which namespaces get ScaledObjects follows the scope, not `NAMESPACE`.** A
-cluster-scoped install scans every namespace holding model servers, because it can
-manage them all; a namespace-scoped install scans its own, because that is the only
-namespace it can read. `WVA_DEFAULT_SO_NS` narrows it if you want less.
+cluster-scoped install scans every namespace holding model servers; a
+namespace-scoped install scans the one it can read. `WVA_DEFAULT_SO_NS` narrows
+it.
 
-`NAMESPACE` not reaching the controller is not an oversight. The scaling manager has no watch and no
-listing: it learns about a workload when KEDA calls its external scaler about it,
-from any namespace. It never goes looking in a namespace, so it has no use for the
-name of one.
+`NAMESPACE` never reaches the controller, on purpose. The scaling manager has no
+watch and no listing: it learns about a workload when KEDA calls its external
+scaler, from any namespace, so it has no use for a namespace name.
 
 ### What the scope actually changes
 
@@ -338,70 +330,67 @@ admin (counted from `kubectl kustomize config/overlays/<scope>/<platform>`):
 
 | overlay | ClusterRoles | ClusterRoleBindings | what they are for |
 | --- | --- | --- | --- |
-| `namespace-scoped/kubernetes` | 5 | 5 | metrics authn (`metrics-auth`), the Prometheus scrape (`metrics-reader`), EPP metrics (`epp-metrics-reader`), nodes (`node-reader`), Kueue (`kueue-reader`) |
-| `namespace-scoped/openshift` | 5 | 6 | the same, plus a binding to the platform's `cluster-monitoring-view` so the controller can query Thanos |
+| `namespace-scoped/kubernetes` | 6 | 6 | metrics authn (`metrics-auth`), the Prometheus scrape (`metrics-reader`), EPP metrics (`epp-metrics-reader`), nodes (`node-reader`), Kueue (`kueue-reader`), and the namespace label check for cluster policy (`policy-namespace-reader`) |
+| `namespace-scoped/openshift` | 6 | 7 | the same, plus a binding to the platform's `cluster-monitoring-view` so the controller can query Thanos |
 | `cluster-scoped/kubernetes` | 4 | 4 | `manager-role` (every read and the pod patch, cluster-wide), `metrics-auth`, `metrics-reader`, `epp-metrics-reader` |
 | `cluster-scoped/openshift` | 4 | 5 | the same, plus `cluster-monitoring-view` |
 
-None of that stops a namespace admin owning a namespace-scoped controller: an
-admin creates the cluster-scoped half once with
-`make setup-prereqs` (`INSTALL_PHASE=prereqs`), and the controller phase needs
-none of it. Every verb, resource and binding subject is listed in the
-[security model](security-model.md#permissions).
+Each overlay also carries namespaced Roles in the controller's namespace:
+4 Roles and 4 RoleBindings for namespace-scoped (`manager`, `leader-election`,
+`controller-status`, `utilization-share-history`), 3 and 3 for cluster-scoped (the
+same without `manager`, which is a ClusterRole there).
 
-Whichever combination you have, `./deploy/install.sh --check` answers it for your
-install specifically: it renders the overlay this install would apply and asks
-whether you may create each kind in it, rather than assuming from the scope name.
+A namespace admin can still own a namespace-scoped controller: a cluster admin
+creates the cluster-scoped half once with `make setup-prereqs`
+(`INSTALL_PHASE=prereqs`), and the controller phase needs none of it. Every verb,
+resource and binding subject is in the [security model](security-model.md#permissions).
 
-KEDA performs the actuation, so the scaling manager never writes Deployments,
-ScaledObjects or HPAs. It is not read-only, though: it patches pods (deletion
+`./deploy/install.sh --check` answers for your install specifically: it renders
+the overlay this install would apply and asks whether you may create each kind
+in it.
+
+KEDA does the actuation, so the scaling manager never writes Deployments,
+ScaledObjects or HPAs. It is not read-only, though. It patches pods (deletion
 cost, utilization-share marks, and warm-pool InferencePool labels, which move
-live traffic), and writes Events, Leases and one ConfigMap — see
+live traffic), and writes Events, Leases and two ConfigMaps of its own
+(`wva-controller-status`, `wva-utilization-share-history`); see
 [what it writes](security-model.md#what-it-writes). The cluster-scoped read a
-namespace-scoped install depends on is **nodes**, used to resolve each variant's
-accelerator, which is why the `gpu-inventory` limiter needs the node-reader
-ClusterRole the prereqs phase creates — see
-[GPU limiter](gpu-limiter.md#permission-nodes).
+namespace-scoped install depends on is **nodes**, to resolve each variant's
+accelerator; that is why the `gpu-inventory` limiter needs the node-reader
+ClusterRole the prereqs phase creates
+([GPU limiter](gpu-limiter.md#permission-nodes)).
 
-> **The constraint that follows, and it is easy to get wrong:** a namespace-scoped
-> scaling manager can only manage model servers **in its own namespace**. Installing one into
-> `wva-system` while your models run in `llm-d-prod` gives you a controller that
-> KEDA will call and that cannot read the workload it is being asked about. For a
-> namespace-scoped install, either put the controller in the namespace with the
-> models, or point it at that namespace with `WVA_WATCH_NS`.
->
-> Cluster-scoped has no such constraint: models can be anywhere.
+> **Easy to get wrong:** a namespace-scoped scaling manager manages model servers
+> **only in the namespace it watches**. One installed in `wva-system` while the
+> models run in `llm-d-prod` is called by KEDA but cannot read the workload. Put
+> the controller in the models' namespace, or point it there with `WVA_WATCH_NS`.
+> A cluster-scoped install has no such constraint.
 
 ## Living beside what the cluster already has
 
-**KEDA is never overwritten.** On `kubernetes` and `openshift` the install does not
-Helm-install KEDA at all — it checks that `scaledobjects.keda.sh` exists and fails
-with instructions if it does not. Your KEDA, its version and its configuration are
-untouched. `KEDA_HELM_INSTALL=true` is the opt-in that would install one; even then
-it skips when a working KEDA (CRD + running operator + metrics APIService) is
-already there. `SCALER_BACKEND=none` skips the check entirely.
+**KEDA is never overwritten.** On `kubernetes` and `openshift` the install does
+not Helm-install KEDA. It checks that `scaledobjects.keda.sh` exists, and fails
+with instructions if not. `KEDA_HELM_INSTALL=true` opts in to installing one,
+and even then it skips when a working KEDA (CRD, running operator, metrics
+APIService) is present. `SCALER_BACKEND=none` skips the check.
 
-**Uninstalling the scaling manager does not uninstall KEDA, Prometheus or EPP.** Removing the scaling manager is the
-job; removing what the scaling manager was pointed at is a separate decision, and an explicit one —
-`UNDEPLOY_SHARED=true`.
+**Uninstalling the scaling manager leaves KEDA, Prometheus and EPP.** Removing
+them is a separate, explicit decision: `UNDEPLOY_SHARED=true`.
 
-**Several installs can share a cluster when all of them are namespace-scoped.** The installer
-(`deploy/lib/single_install.sh`) allows any number of namespace-scoped installs,
-at most one per namespace, side by side. It refuses only an overlap with a
-cluster-scoped install: a second install beside a cluster-scoped one, or a
-cluster-scoped one beside existing namespace-scoped ones, because a
-cluster-scoped controller manages every namespace. Workloads never overlap — each
-registers with the scaler address its trigger names — but GPU budgets do:
-namespace-scoped controllers each read the same nodes and allocate without seeing
-each other's claims, so bound them with quota limiters or separate GPU nodes.
+**Several namespace-scoped installs can share a cluster**, at most one per
+namespace (`deploy/lib/single_install.sh`). The installer refuses only an
+overlap with a cluster-scoped install, in either order, because a cluster-scoped
+controller manages every namespace. Workloads never overlap (each registers with
+the scaler address its trigger names), but GPU budgets do: each controller reads
+the same nodes and allocates without seeing the others' claims. Bound them with
+quota limiters or separate GPU nodes.
 
-The refusal depends on the installer being able to **see** the other installs,
-which takes listing Deployments cluster-wide. A namespace admin cannot, so a
-tenant-run `make deploy-wva` logs `Cannot check whether another WVA is already
-installed` and **carries on**. Run `make check-prereqs` as a cluster admin for
-that namespace first (it runs the same check with the rights to see), or confirm
-no cluster-scoped controller exists — any row whose args lack
-`--watch-namespace`:
+The refusal needs the installer to **see** the other installs, which takes
+listing Deployments cluster-wide. A namespace admin cannot, so a tenant-run
+`make deploy-wva` logs `Cannot check whether another WVA is already installed`
+and **carries on**. Run `make check-prereqs` as a cluster admin for that
+namespace first, or confirm no cluster-scoped controller exists (any row whose
+args lack `--watch-namespace`):
 
 ```bash
 kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
@@ -416,53 +405,50 @@ Deploy the model server, then re-run:
 make scaledobjects-apply NAMESPACE=<your namespace>
 ```
 
-It creates a ScaledObject for the **new** workload and leaves every existing one
-alone — a workload that already has one is reported as such and skipped, so this is
-safe to run as often as you like:
+It creates a ScaledObject for the **new** workload and reports and skips every
+workload that already has one, so it is safe to re-run:
 
 ```text
 [SUCCESS]   llm-d-sim/model-new (Deployment) -> ScaledObject model-new-wva (modelID: org/new-model)
 [SUCCESS] Default ScaledObjects: 1 created, 1 not applied
 ```
 
-Use `make scaledobjects-plan` first if you want to see the list before anything is
-created. Nothing about the controller needs restarting or reconfiguring: it learns
-about the workload from the first KEDA call.
+Run `make scaledobjects-plan` first to see the list. The controller needs no
+restart: it learns about the workload from the first KEDA call.
 
 ## High availability
 
-The controller elects a leader (`--leader-elect=true`, with tunable lease, renew and
-retry durations), so more than one replica is safe — but the extra replicas are
-**standbys**. Only the leader runs the collection and optimization loops; the others
-wait on the lease. A standby does answer KEDA on one point: it tells KEDA which
-metric to put on the HPA (`GetMetricSpec`), because the answer KEDA gets when it
-reconciles a ScaledObject decides what the HPA carries, and an HPA created
-without one scales on CPU until the ScaledObject is edited. Everything that needs a decision it refuses
-with `Unavailable`, which KEDA reports as a trigger error and does not act on,
-and it cycles the connection every few seconds so KEDA re-dials and reaches the
-leader. The same applies to a single replica during a rollout, in the window
-between the new pod being Ready and the old pod's lease being released. Until
-its first cycle has decided each model, the new leader answers `GetMetrics`
-with each target's current replica count, so the HPA holds its count across the
-whole hand-off; see [before
-the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+The controller elects a leader (`--leader-elect=true`, with tunable lease, renew
+and retry durations), so more than one replica is safe, but the extra replicas
+are **standbys**. Only the leader runs the collection and optimization loops.
+
+A standby answers KEDA on one point: which metric to put on the HPA
+(`GetMetricSpec`). KEDA asks that when it reconciles a ScaledObject, and an HPA
+created without an answer scales on CPU until the ScaledObject is edited.
+Anything that needs a decision it refuses with `Unavailable`, which KEDA reports
+as a trigger error and does not act on. It also drops the connection every few
+seconds, so KEDA re-dials and reaches the leader. A single replica behaves the
+same during a rollout, between the new pod being Ready and the old pod releasing
+the lease. Until its first cycle has decided a model, the new leader answers
+`GetMetrics` with the target's current replica count, so the HPA holds through
+the hand-off ([before the first
+decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 
 ```bash
 make deploy-wva-on-k8s WVA_REPLICAS=2
 ```
 
-What that buys is failover: a node drain or a crash costs you a lease timeout rather
-than the time to reschedule a pod. What it does not buy is throughput — the scaling
-manager's cycle is one process reasoning about everything it manages at once,
-deliberately, because a GPU budget cannot be split across controllers that cannot
-see each other's decisions. That is also the caveat on running several
-namespace-scoped installs side by side: each one's budget is its own.
+That buys failover: a node drain or a crash costs a lease timeout, not a pod
+reschedule. It does not buy throughput. The cycle is one process reasoning about
+everything it manages, on purpose: a GPU budget cannot be split across
+controllers that cannot see each other's decisions. For the same reason,
+namespace-scoped installs side by side each have their own budget.
 
 ## Advanced
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SKIP_TLS_VERIFY` | Skip Prometheus TLS verification | `false`, forced to `true` on OpenShift and for in-cluster self-signed Prometheus |
+| `SKIP_TLS_VERIFY` | **Inert.** The installer sets it but nothing reads it. To skip or require Prometheus certificate checks, set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` (see [TLS configuration](prometheus.md#tls-configuration)) | — |
 | `WVA_STICKY_SCALE_DOWN` | Hold a published scale-down against demand noise until utilization at the published count would reach the scale-up threshold, so the fleet actually descends. Off, a model idling near the scale-down boundary flips its target N ↔ N−1 cycle to cycle and KEDA's 300 s window keeps the N-th replica for as long as the noise lasts. Turn off only to compare | `true` |
 | `WVA_LOG_LEVEL` | **Inert.** The installer sets it but nothing reads it, and the controller's `LOG_LEVEL` env var is not read either. Verbosity is the controller's `--v=N` argument (default `2`; `4` is debug) — edit the Deployment's args to change it | `info` |
 | `LEARNED_STATE_EPISODE_GAP` | How long a gap in saturated observations before the next one starts a **new window** instead of blending into the old one. A variant that goes quiet over a weekend should not average Monday's capacity with Friday's | `24h` |
@@ -471,19 +457,17 @@ namespace-scoped installs side by side: each one's budget is its own.
 | `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from, one per variant and traffic-shape bucket — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
-| `PROM_CA_CERT_PATH` | Where the extracted Prometheus CA is written | `/tmp/prometheus-ca.crt` |
+| `PROM_CA_CERT_PATH` | Local file where the installer saves the Prometheus CA to check it. The controller never sees this file; to verify Prometheus, mount the CA as in [TLS configuration](prometheus.md#tls-configuration) | `/tmp/prometheus-ca.crt` |
 | `GATEWAY_API_VERSION` | Gateway API version installed for llm-d | `v1.2.0` |
 | `LWS_NAMESPACE` | Namespace for LeaderWorkerSet installation | `lws-system` |
 | `LWS_CHART_VERSION` | LeaderWorkerSet Helm chart version | `0.8.0` |
 
-The three `LEARNED_STATE_*` horizons are the ages the saturation analyzer keeps what
-it has learned on, and they default to the figures above. They are replaced field by
-field, not all or nothing: a value that is unset, negative, below one minute, or
-written without a unit (`24` parses as 24 **nanoseconds**) goes back to its own
-default and the controller logs which ones it replaced. The horizons in force are
-logged once at startup as `learned-state horizons`, so the log says what is actually
-running rather than what was asked for. Shortening them is how this is exercised on
-a cluster inside a test run instead of over a week.
+The three `LEARNED_STATE_*` horizons are how long the saturation analyzer keeps
+what it has learned. Each is checked on its own: a value that is unset, negative,
+below one minute, or has no unit (`24` parses as 24 **nanoseconds**) goes back
+to its default, and the controller logs which it replaced. The horizons in force
+are logged once at startup as `learned-state horizons`. Shorten them to exercise
+this inside a test run instead of over a week.
 
 None of the `LEARNED_STATE_*` variables is set by the installer: they are read from
 the controller's own environment, so set them on its Deployment
@@ -491,23 +475,26 @@ the controller's own environment, so set them on its Deployment
 which restarts it.
 
 The external scaler serves **plaintext** gRPC by default and relies on the
-NetworkPolicy above. Two controller flags add TLS: `--external-scaler-cert-path`
-(a directory holding `tls.crt` and `tls.key`, reloaded on rotation) serves TLS, and
-KEDA then needs `caCert` in the trigger's TriggerAuthentication;
-`--external-scaler-client-ca` (a PEM bundle, read once) also requires every client
-to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`;
-`--external-scaler-client-san` (comma-separated) then accepts only clients whose
-certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
-All are off by default, and the shipped manifests do not set them.
+NetworkPolicy above. Three controller flags add TLS, all off by default and not
+set by the shipped manifests:
+
+- `--external-scaler-cert-path`: a directory holding `tls.crt` and `tls.key`,
+  reloaded on rotation. Serves TLS; KEDA then needs `caCert` in the trigger's
+  TriggerAuthentication.
+- `--external-scaler-client-ca`: a PEM bundle, read once. Every client must also
+  present a certificate it signed (KEDA's `tlsClientCert` and `tlsClientKey`).
+- `--external-scaler-client-san` (comma-separated): accepts only clients whose
+  certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
 
 Before turning TLS on:
 
 - **Every ScaledObject that names this scaler needs a TriggerAuthentication
-  first.** The ScaledObjects `make scaledobjects-apply` generates or adopts carry
-  no `authenticationRef`, so with `--external-scaler-cert-path` set KEDA keeps
-  dialling plaintext and every one goes not-Ready. KEDA's external scaler reads
-  `caCert`, `tlsClientCert` and `tlsClientKey` from the trigger's authentication
-  (TLS is on whenever one of them is set):
+  first.** Those `make scaledobjects-apply` generates or adopts carry no
+  `authenticationRef`, so with `--external-scaler-cert-path` set KEDA keeps
+  dialling plaintext and every one goes not-Ready. In KEDA v2.18 the external
+  scaler dials TLS when `caCert` is set, when **both** `tlsClientCert` and
+  `tlsClientKey` are set (one alone leaves the connection plaintext), or when
+  the trigger's metadata sets `enableTLS: "true"`:
   ```yaml
   apiVersion: keda.sh/v1alpha1
   kind: TriggerAuthentication
@@ -578,29 +565,26 @@ If `SCALE_UP_THRESHOLD` and/or `SCALE_DOWN_BOUNDARY` are set in the environment,
 
 ## What a change needs: a restart, or not
 
-The controller loads one `Config`, and it has two halves. Which half a setting
-lives in decides whether editing it costs a restart.
+The controller's configuration has two halves, and which one a setting is in
+decides whether a change needs a restart.
 
-**Static** — read once at startup, so a change needs the controller restarted:
-the metrics and probe addresses, leader election, the Prometheus URL and its TLS
-material, the feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`),
-**the learned-state horizons** (`LEARNED_STATE_*`, read once when the analyzer is
-built) and **the Prometheus cache settings**. The last two read as though they were
-dynamic and are not: the interval is fixed at load and only a test helper writes
-it afterwards, and nothing outside tests calls the cache updater.
+**Static**: read once at startup, so a change needs a restart. The metrics and
+probe addresses, leader election, the Prometheus URL and its TLS material, the
+feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`), **the
+learned-state horizons** (`LEARNED_STATE_*`, read when the analyzer is built)
+and **the Prometheus cache settings**. The interval and cache settings look
+dynamic but are not: only test code changes them after load.
 
-**Dynamic** — re-read when the ConfigMap changes, so a change applies in place:
-the scaling thresholds, the analyzer selection and tiers, scale-to-zero, and the
-limiter. The exception is a namespace-scoped controller reading a policy
-ConfigMap outside the namespace it manages — cluster policy in `wva-policy` (or
-a labelled policy namespace), or, for an out-of-reach install (`WVA_WATCH_NS`),
-its own ConfigMap in its install namespace. Its cache holds only the managed
-namespace (`cmd/main.go`), so it reads that ConfigMap at startup, and an edit
-needs a restart.
+**Dynamic**: re-read when the ConfigMap changes, so a change applies in place.
+The scaling thresholds, the analyzer selection and tiers, scale-to-zero, and the
+limiter. The exception: a namespace-scoped controller reading a policy ConfigMap
+outside the namespace it manages (cluster policy in `wva-policy` or a labelled
+policy namespace, or, for an out-of-reach install, its own ConfigMap). Its cache
+holds only the managed namespace (`cmd/main.go`), so it reads that ConfigMap at
+startup, and an edit needs a restart.
 
-The limiter is the one people expect to be a flag and it is not. It is selected
-by the `limiters:` list on the scaling-policy ConfigMap's `default` entry — there
-is no CLI flag and no environment variable:
+The limiter is not a flag or an environment variable. It is the `limiters:` list
+on the scaling-policy ConfigMap's `default` entry:
 
 - no `limiters:` list — no limiter: scaling is bounded only by each workload's
   `maxReplicaCount`. This is what ships.
@@ -609,8 +593,7 @@ is no CLI flag and no environment variable:
 - `{type: quota, ...}` — enforce operator-declared per-accelerator caps, at
   cluster or namespace scope, declared inline.
 
-Because it is dynamic, the engine rebuilds the limiter when the ConfigMap
-changes and no restart is involved, except for the startup-read case above,
-where `make enable-physical-limiter` and `make disable-physical-limiter` restart
-the controller for you. The schema, the scopes and the validation
-rules are in the [quota limiter reference](quota-limiter.md).
+The engine rebuilds the limiter when the ConfigMap changes, with no restart,
+except in the startup-read case above, where `make enable-physical-limiter` and
+`make disable-physical-limiter` restart the controller for you. The schema,
+scopes and validation rules are in the [quota limiter reference](quota-limiter.md).

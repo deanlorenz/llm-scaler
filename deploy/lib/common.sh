@@ -39,6 +39,62 @@ containsElement() {
     return 1
 }
 
+# kc_capture runs `kubectl "$@"` and keeps its two streams apart: KC_OUT is
+# stdout, KC_ERR is stderr, and the status is kubectl's.
+#
+# A read that merged them with 2>&1 parsed whatever kubectl printed on stderr as
+# the answer. kubectl prints warnings there on SUCCESS -- a deprecated API, an
+# admission webhook, a client-side throttling notice -- so a label read came
+# back as "Warning: ...", and a count read as a YAML document that yq could not
+# parse. Match NotFound and Forbidden against KC_ERR, read data from KC_OUT only.
+#
+# Sets variables rather than echoing, so the caller stays in its own shell: call
+# it as `kc_capture get ... || rc=$?`, never inside `$( )`.
+kc_capture() {
+    local errf rc=0
+    KC_OUT="" KC_ERR=""
+    errf="$(mktemp)" || { KC_ERR="mktemp failed"; return 125; }
+    KC_OUT="$(kubectl "$@" 2>"$errf")" || rc=$?
+    KC_ERR="$(cat "$errf")"
+    rm -f "$errf"
+    return "$rc"
+}
+
+# kc_not_found reports whether stderr text $1 is the API server saying the
+# object does not exist -- and nothing else (Forbidden, timeouts, a webhook
+# error) is.
+kc_not_found() {
+    case "$1" in
+        *NotFound*|*"not found"*) return 0 ;;
+    esac
+    return 1
+}
+
+# wva_make_cmd echoes the make command that repeats THIS install's shape for
+# target $1; any VAR=value arguments after it are put in front.
+#
+# A remedy printed as `NAMESPACE=$WVA_NS make setup-prereqs` was wrong for two of
+# the three shapes: in the out-of-reach one (controller in wva-<ns>, managing
+# <ns>) it named the controller's namespace as the one to manage, and in
+# cluster scope it dropped SCOPE=cluster, so the admin who ran it set up a
+# namespace-scoped install nobody asked for.
+#
+#   namespace scope, self-managed   NAMESPACE=<ns> make <target>
+#   namespace scope, out of reach   NAMESPACE=<managed> make <target> WVA_NS=<ctl> WVA_WATCH_NS=<managed>
+#   cluster scope                   make <target> SCOPE=cluster WVA_NS=<ctl>
+wva_make_cmd() {
+    local target="$1" pre="" kv
+    shift
+    for kv in "$@"; do pre="$pre$kv "; done
+    if [ "$(wva_install_scope)" = cluster ]; then
+        printf '%smake %s SCOPE=cluster WVA_NS=%s\n' "$pre" "$target" "$WVA_NS"
+    elif [ -n "${WVA_WATCH_NS:-}" ] && [ "$WVA_WATCH_NS" != "$WVA_NS" ]; then
+        printf '%sNAMESPACE=%s make %s WVA_NS=%s WVA_WATCH_NS=%s\n' "$pre" "$WVA_WATCH_NS" "$target" "$WVA_NS" "$WVA_WATCH_NS"
+    else
+        printf '%sNAMESPACE=%s make %s\n' "$pre" "$WVA_NS" "$target"
+    fi
+}
+
 # wva_install_scope echoes the install scope: "cluster" or "namespace".
 #
 # The two differ in WHO CAN INSTALL as much as in what the controller reads:
@@ -132,9 +188,35 @@ wva_scaler_namespaces() {
         printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | sort -u
         return 0
     fi
-    # No cluster-wide list. The one namespace we can name is still worth checking.
-    kubectl get svc wva-external-scaler -n "$WVA_NS" > /dev/null 2>&1 && echo "$WVA_NS"
+    # No cluster-wide list. The one namespace we can name is still worth checking
+    # -- and a Forbidden answer there is said, not folded into "none".
+    local rc=0
+    wva_scaler_svc_state "$WVA_NS" || rc=$?
+    case "$rc" in
+        0) echo "$WVA_NS" ;;
+        1) : ;;
+        *) log_warning "Cannot list Services cluster-wide, and cannot verify (Forbidden or unreadable) a wva-external-scaler Service in $WVA_NS either: ${WVA_SCALER_SVC_ERR:-no detail}. Pass WVA_NS=<namespace> to name the install." ;;
+    esac
     return 0
+}
+
+# wva_scaler_svc_state reports on the wva-external-scaler Service in namespace $1:
+# 0 it is there, 1 the API server says it is not, 2 could not look -- Forbidden,
+# or any other error. On 2, WVA_SCALER_SVC_ERR holds kubectl's first error line.
+#
+# Three answers because two of them were being read as one. A tenant whose
+# controller runs in a namespace they may not read gets Forbidden for a Service
+# that is there and answering, and treating that as "no scaler" either refused a
+# correct WVA_NS or rewrote a working address. Call it directly, not in $( ):
+# the variable is the caller's.
+wva_scaler_svc_state() {
+    local rc=0
+    WVA_SCALER_SVC_ERR=""
+    kc_capture get svc wva-external-scaler -n "$1" -o name || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    kc_not_found "$KC_ERR" && return 1
+    WVA_SCALER_SVC_ERR="$(printf '%s\n' "$KC_ERR" | grep -v '^[[:space:]]*$' | head -1)"
+    return 2
 }
 
 # wva_any_pod_ready reports whether any pod matching selector $2 in namespace $1
@@ -222,14 +304,14 @@ wva_scaler_has_endpoints() {
 # APIService is served by something that is not KEDA (prometheus-adapter); the
 # Service it names is then echoed as "<namespace>/<name>" for the message.
 wva_keda_apiservice_ns() {
-    local out rc=0 ns name
-    out=$(kubectl get apiservice v1beta1.external.metrics.k8s.io \
-        -o jsonpath='{.spec.service.namespace}{" "}{.spec.service.name}' 2>&1) || rc=$?
+    local rc=0 ns name
+    kc_capture get apiservice v1beta1.external.metrics.k8s.io \
+        -o jsonpath='{.spec.service.namespace}{" "}{.spec.service.name}' || rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf '%s' "$out" | grep -qi 'notfound\|not found' && return 1
+        printf '%s' "$KC_ERR" | grep -qi 'notfound\|not found' && return 1
         return 2
     fi
-    read -r ns name <<< "$out"
+    read -r ns name <<< "$KC_OUT"
     [ -n "$ns" ] || return 1
     case "$name" in
         *keda*) printf '%s\n' "$ns"; return 0 ;;
@@ -239,22 +321,23 @@ wva_keda_apiservice_ns() {
 
 # wva_scaler_np_keda_ns echoes the namespace an existing wva-external-scaler
 # NetworkPolicy in $1 admits to :9090. Returns 1 when there is no such policy,
-# or it admits :9090 from anything other than exactly one namespace.
+# 2 when it could not be read, and 4 when it EXISTS but admits :9090 from
+# anything other than exactly one namespace -- present, so not "no policy".
 wva_scaler_np_keda_ns() {
-    local ns="$1" out rc=0 found
-    out=$(kubectl get networkpolicy wva-external-scaler -n "$ns" \
-        -o jsonpath='{range .spec.ingress[*]}{range .ports[*]}{.port}{" "}{end}{"|"}{range .from[*]}{.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}{" "}{end}{"\n"}{end}' 2>&1) || rc=$?
+    local ns="$1" rc=0 found
+    kc_capture get networkpolicy wva-external-scaler -n "$ns" \
+        -o jsonpath='{range .spec.ingress[*]}{range .ports[*]}{.port}{" "}{end}{"|"}{range .from[*]}{.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}{" "}{end}{"\n"}{end}' || rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf '%s' "$out" | grep -qi 'notfound\|not found' && return 1
+        printf '%s' "$KC_ERR" | grep -qi 'notfound\|not found' && return 1
         return 2
     fi
-    found="$(printf '%s\n' "$out" | awk -F'|' '{
+    found="$(printf '%s\n' "$KC_OUT" | awk -F'|' '{
             n = split($1, p, " "); hit = 0
             for (i = 1; i <= n; i++) if (p[i] == "9090") hit = 1
             if (hit) { m = split($2, f, " "); for (j = 1; j <= m; j++) print f[j] }
         }' | sort -u)"
-    [ -n "$found" ] || return 1
-    [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" = 1 ] || return 1
+    [ -n "$found" ] || return 4
+    [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" = 1 ] || return 4
     printf '%s\n' "$found"
 }
 
@@ -331,6 +414,54 @@ wva_ns_suffix() {
     else
         printf '%s' "$1" | shasum -a 256 | cut -c1-8
     fi
+}
+
+# wva_kueue_reader_names sets WVA_KUEUE_READER_NAMES to the Namespaces, space
+# separated, that the Kueue reader of the controller installed in $1 may `get`:
+# $2 first (the namespace it manages), then every name the live ClusterRole
+# wva-kueue-reader-role-<suffix> already carries on its Namespace rule.
+#
+# ONE answer for the two commands that write that ClusterRole: the installer's
+# prereqs phase (wva_append_kueue_reader_scope_patch) and
+# `make enable-physical-limiter` (pl_grant_kueue_read). Each used to compute its
+# own set -- the installer the managed namespace, enable the controller's own --
+# so for a controller in wva-foo managing foo every enable took `get
+# namespaces/foo` away, its Kueue source bounded foo at nothing, and the next
+# setup-prereqs gave it back. Both now start from the managed namespace and keep
+# what is there: a name an admin added by hand survives either command. A rule
+# with no resourceNames adds nothing -- narrowing an unrestricted read to the
+# managed namespace is what the installer always did.
+#
+# Only DNS-label names are kept, since they are written into YAML. Sets
+# variables rather than echoing (call it as `wva_kueue_reader_names ... ||
+# rc=$?`). A role that exists and cannot be read RETURNS non-zero with the
+# reason in KC_ERR: Forbidden is not absent, and writing the role without
+# knowing what it holds may remove a name.
+wva_kueue_reader_names() {
+    local ns="$1" managed="$2" rc=0 n existing="" seen=" "
+    WVA_KUEUE_READER_NAMES=""
+    KC_ERR=""
+    kc_capture get clusterrole "wva-kueue-reader-role-$(wva_ns_suffix "$ns")" -o yaml || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        kc_not_found "$KC_ERR" || { KC_ERR="${KC_ERR:-kubectl exited $rc}"; return 1; }
+    elif [ -n "$KC_OUT" ]; then
+        if ! existing="$(printf '%s\n' "$KC_OUT" \
+            | yq '.rules[] | select((.resources // [])[] == "namespaces") | (.resourceNames // [])[]' 2>&1)"; then
+            KC_ERR="could not parse it: $existing"
+            return 1
+        fi
+    fi
+    local -a all
+    # read -a, not an unquoted expansion: a `*` in a hand-edited role must not
+    # glob into the names of files in the working directory.
+    read -r -a all <<< "$managed $(printf '%s' "$existing" | tr '\n' ' ')"
+    for n in "${all[@]}"; do
+        case "$n" in ''|*[!a-z0-9-]*) continue ;; esac
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        WVA_KUEUE_READER_NAMES="${WVA_KUEUE_READER_NAMES:+$WVA_KUEUE_READER_NAMES }$n"
+    done
+    return 0
 }
 
 # WVA_LEGACY_CLUSTER_ROLE_BINDINGS are cluster-scoped bindings this project used
@@ -749,7 +880,9 @@ NAMESPACE is llm-d's own variable, so if you followed one of its guides it is al
 exported in that shell.
 
 (WVA_NS is a different setting: it names where the CONTROLLER is installed, which
-only differs from the managed namespace in the cluster-wide shape.)"
+differs from the managed namespace in the cluster-wide shape, and when the controller
+is installed out of reach in a namespace of its own: then pass both, as
+NAMESPACE=<managed> WVA_NS=<controller namespace> WVA_WATCH_NS=<managed>.)"
 }
 
 wva_resolve_namespace() {
@@ -855,8 +988,22 @@ wva_render_manifests() {
 }
 
 # wva_rendered_kinds echoes, one per line, each distinct Kind this install would
-# create.
+# create. With $1=controller, only the kinds of the objects the controller-only
+# phase (INSTALL_PHASE=wva) applies: everything wva_prereq_kind_filter does not
+# give to the admin.
+#
+# Filtered by OBJECT, not by kind name. NetworkPolicy/wva-external-scaler is
+# the only NetworkPolicy in the render and is admin-owned by name
+# (WVA_PREREQ_NAMED); dropping only WVA_PREREQ_KINDS left NetworkPolicy in the
+# tenant's list, so INSTALL_PHASE=wva and --check demanded `create
+# networkpolicies` for an object that phase never applies.
 wva_rendered_kinds() {
+    if [ "${1:-}" = controller ]; then
+        wva_render_manifests \
+            | yq "$(wva_prereq_kind_filter exclude) | .kind" 2>/dev/null \
+            | grep -Ev '^(---|null|)$' | sort -u || true
+        return 0
+    fi
     # Only column 0 — `kind:` also appears indented under roleRef, and with a
     # leading dash under subjects.
     wva_render_manifests | awk '/^kind: /{print $2}' | sort -u || true

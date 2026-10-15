@@ -2,21 +2,22 @@
 
 ## Overview
 
-llm-scaling-manager supports saturation-based scaling using KV cache utilization and queue length metrics. This feature is enabled by default and configured via a ConfigMap.
+llm-scaling-manager scales on saturation, from KV cache utilization and queue
+length. It is on by default and configured in a ConfigMap:
 
-**Key features:**
-- ✅ ConfigMap-based configuration with global defaults and per-model overrides
-- ✅ **Efficient caching** with single read on startup (zero API calls during reconciliation)
-- ✅ **Automatic reload** via ConfigMap watch (immediate response to changes)
-- ✅ **Thread-safe** concurrent access with RWMutex
-- ✅ Graceful degradation if ConfigMap missing (the analyzer has hardcoded defaults — see [Default Configuration](#default-configuration))
+- global defaults, plus per-model overrides;
+- read once at startup and cached, so reconciling makes no API calls;
+- reloaded on change through a ConfigMap watch;
+- thread-safe (RWMutex);
+- a missing ConfigMap degrades gracefully to hardcoded defaults (see
+  [Default Configuration](#default-configuration)).
 
 ## Analyzer Selection
 
-There is one saturation analyzer: the token/capacity-based analyzer. The V1
+There is one saturation analyzer, the token/capacity-based one. The V1
 percentage/spare-capacity analyzer was removed, so `analyzerName` and the
-`analyzers:` list no longer select between engines — see the note on
-`analyzerName` in `internal/config/saturation_scaling.go`.
+`analyzers:` list no longer choose between engines (see the note on
+`analyzerName` in `internal/config/saturation_scaling.go`).
 
 ### Threshold ownership
 
@@ -32,9 +33,9 @@ What each threshold controls:
 ## ScalingPolicy Schema (Phase 1)
 
 Phase 1 of the [ScalingPolicy proposal](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1245)
-extends this ConfigMap — additively, with no CRD, migration, or new install steps —
-with a plugin envelope on each entry. Existing flat entries keep working unchanged;
-adoption is optional per entry.
+adds a plugin envelope to each entry of this ConfigMap. It is additive: no CRD,
+no migration, no new install step. Flat entries keep working; adopt it per entry
+if you want.
 
 ### Analyzer plugin envelope (`type` / `parameters`)
 
@@ -46,22 +47,21 @@ analyzers:
     parameters: { scaleUpThreshold: 0.95 }
 ```
 
-- `type` selects the analyzer plugin (`saturation`, `queueing-model`, `throughput`).
-  It falls back to `name` when omitted, so the legacy `- name: saturation` form still
-  works and is treated as `type: saturation`.
-- `parameters` carries plugin configuration. The well-known keys `scaleUpThreshold`,
-  `scaleDownBoundary`, `score`, and `enabled` are equivalent to the corresponding
-  top-level/typed fields (an explicit typed field wins over the same key in
-  `parameters`). Unknown keys are tolerated (forward-compatible); a wrongly-typed
-  known key fails validation and the entry is skipped.
+- `type` picks the analyzer plugin (`saturation`, `queueing-model`, `throughput`).
+  Omitted, it falls back to `name`, so the legacy `- name: saturation` form still
+  works as `type: saturation`.
+- `parameters` holds plugin settings. The keys `scaleUpThreshold`,
+  `scaleDownBoundary`, `score` and `enabled` equal the matching typed fields; an
+  explicit typed field wins. Unknown keys are tolerated (forward-compatible); a
+  known key with the wrong type fails validation and the entry is skipped.
 
-There is nothing to opt out to: the token/capacity-based analyzer runs whether or
-not `analyzers:` is set — see [Analyzer Selection](#analyzer-selection).
+There is nothing to opt out to: the token/capacity-based analyzer runs whether
+or not `analyzers:` is set (see [Analyzer Selection](#analyzer-selection)).
 
 ### `scaleToZero`
 
-An entry carries the whole scale-to-zero policy, and is the only per-model surface
-for it:
+An entry holds the whole scale-to-zero policy; it is the only per-model place to
+set it:
 
 ```yaml
 scaleToZero:
@@ -76,8 +76,8 @@ scaleToZero:
 
 #### How long until a model actually reaches zero
 
-**`retentionPeriod` and KEDA's `cooldownPeriod` add up.** They are sequential, not
-overlapping, and neither knob alone predicts the result:
+**`retentionPeriod` and KEDA's `cooldownPeriod` add up.** They run one after
+the other, so neither alone predicts the result:
 
 ```text
 last request ──┬─ retentionPeriod ─┬─ ≤1 optimize interval ─┬─ cooldownPeriod ─┬─ 0 replicas
@@ -85,20 +85,21 @@ last request ──┬─ retentionPeriod ─┬─ ≤1 optimize interval ─�
                │                   │  trigger goes inactive)│                  │
 ```
 
-The scaling manager's external scaler reports the trigger active *unless the scaling manager has decided the model
-needs zero replicas*, so KEDA's cooldown clock cannot start until the scaling manager has already
-decided to park — and the scaling manager decides that only once `increase(...[retentionPeriod])`
-reads zero. With both defaults that is **10m + 300s ≈ 15 minutes**, plus up to one
-`GLOBAL_OPT_INTERVAL` (15s). A fleet that "will not park" is often just this sum.
+The external scaler reports the trigger active *unless the scaling manager has
+decided the model needs zero replicas*. So KEDA's cooldown cannot start until the
+scaling manager has decided to park, which it does only once
+`increase(...[retentionPeriod])` reads zero. With both defaults that is
+**10m + 300s ≈ 15 minutes**, plus up to one `GLOBAL_OPT_INTERVAL` (15s). A fleet
+that "will not park" is often just this sum.
 
-This applies to the **deactivation step only** — the final drop to
-`minReplicaCount`/`idleReplicaCount` once the trigger reports inactive. An ordinary
-scale-down while the trigger is still active (10 → 3) goes through the HPA and is
-governed by its own stabilization behaviour; neither KEDA cooldown is consulted.
+This applies only to the **deactivation step**: the final drop to
+`minReplicaCount`/`idleReplicaCount` once the trigger reports inactive. An
+ordinary scale-down while the trigger is active (10 → 3) goes through the HPA and
+its own stabilization; neither KEDA cooldown applies.
 
-The scaling manager adds no hold of its own here. KEDA already guards that one transition, per
-ScaledObject, from cluster state — the same reason the scaling manager reads `minReplicaCount`
-off the object rather than duplicating it into trigger metadata.
+The scaling manager adds no hold of its own. KEDA already guards that transition
+per ScaledObject from cluster state, which is also why the scaling manager reads
+`minReplicaCount` off the object rather than copying it into trigger metadata.
 
 ### `scaleFromZero`
 
@@ -112,45 +113,42 @@ scaleFromZero: { requirePrefill: true }
 | --- | --- | --- |
 | `requirePrefill` | `false` | Refuse to wake a P/D-disaggregated model unless a prefill variant can be placed alongside decode. |
 
-**Why the default is `false`.** When the scale-from-zero engine picks which
-variants to wake, decode is mandatory and prefill is best-effort. That follows
-from how the llm-d router behaves rather than from a preference: with no prefill
-endpoint selected it routes the request to a decode endpoint, and the decode
-worker runs both stages locally. The router already declines disaggregation on
-its own for short prompts and high prefix-cache hits, so decode-only is a normal
-serving mode, not a failure mode. If prefill cannot be placed — no free GPUs on
-its accelerator, or a namespace quota that excludes it — waking decode alone
-still serves the queued request, whereas refusing to wake trades a slower model
-for no model at all.
+**Why the default is `false`.** When waking a model, decode is mandatory and
+prefill is best-effort. That follows the llm-d router: with no prefill endpoint
+it sends the request to a decode endpoint, which runs both stages itself. The
+router already skips disaggregation for short prompts and high prefix-cache hits,
+so decode-only is a normal mode, not a failure. If prefill cannot be placed (no
+free GPUs on its accelerator, or a namespace quota excludes it), waking decode
+alone still serves the queued request; refusing would trade a slower model for no
+model.
 
-Set `requirePrefill: true` when degraded prefill performance is worse than
-unavailability for this model: a strict TTFT SLO, or decode nodes that must not
-absorb prefill load. With it set, a model whose prefill cannot be placed is left
-at zero and the engine logs why at INFO:
+Set `requirePrefill: true` when slow prefill is worse than no service for this
+model: a strict TTFT SLO, or decode nodes that must not take prefill load. Then a
+model whose prefill cannot be placed stays at zero, and the engine logs why at
+INFO:
 
 ```text
 Scale-from-zero: no variant woken for a model with pending requests
   namespace=... modelID=... reason=prefill-required
 ```
 
-Other `reason` values are `no-decode-candidate` (the model has no inactive
-decode/`both` variant to wake) and `no-capacity` (nothing fit the GPU budget).
-Each is logged once per verdict change, not once per poll. A model that is
-already serving is not a refusal and is not reported here at all.
+Other `reason` values: `no-decode-candidate` (no inactive decode/`both` variant
+to wake) and `no-capacity` (nothing fit the GPU budget). Each is logged once per
+change of verdict, not per poll. A model already serving is not a refusal and is
+not reported.
 
 Role comes from the `llm-d.ai/role` pod-template label (`prefill`, `decode`, or
-absent/`both`). A model with no prefill variants is unaffected by this setting.
+absent/`both`). A model with no prefill variants is unaffected.
 
 **Placement.** Selection prefers a variant that can actually get GPUs, checked
-against the same GPU/quota limiters the optimizer honours (see
-[`limiters`](#limiters-cluster-default-only-live)) and evaluated on the **sum**
-of the variants being woken together — prefill and decode can each fit alone
-while the pair does not.
+against the same GPU/quota limiters the optimizer uses (see
+[`limiters`](#limiters-cluster-default-only-live)), on the **sum** of the
+variants woken together: prefill and decode can each fit alone while the pair
+does not.
 
-The check is **best-effort**: when the GPU budget cannot be determined it is
-skipped rather than denying the wake, because refusing to serve a queued request
-on the strength of a missing measurement is the worse failure. It is skipped
-when any of these hold:
+The check is **best-effort**. When the GPU budget cannot be known it is skipped
+rather than denying the wake, because refusing a queued request over a missing
+measurement is the worse failure. It is skipped when:
 
 | condition | why |
 | --- | --- |
@@ -159,43 +157,43 @@ when any of these hold:
 | a provider failed to compute constraints | a partial view would deny any accelerator type the surviving providers happen not to mention, turning "could not reach this provider" into "cannot place this variant" |
 | — | *(An unresolved accelerator does not skip the check: that candidate simply contributes no demand, and the rest of the set is still checked. A variant with no nodeSelector/nodeAffinity GPU key cannot be charged to any pool, so it is not counted rather than denied.)* |
 
-> **The GPU budget can still over-state free capacity**, affecting the
-> GPU-aware optimizer as well as scale-from-zero: usage on an unresolved
-> accelerator is charged to no pool, and the physical `Limit` counts every
-> *installed* GPU rather than what is actually available. Both are described,
-> with their fixes and current status, in
-> [GPU Capacity Accounting](../concepts/gpu-capacity-accounting.md). The short version: make
-> the accelerator resolvable with a `nodeSelector`/`nodeAffinity` GPU key — the scaling manager
-> emits an `AcceleratorNotResolved` event otherwise, and resolves a RUNNING
-> variant by observing the nodes its pods landed on — and declare an explicit
-> quota limiter if you need a hard ceiling.
+> **The GPU budget can still over-state free capacity**, for the GPU-aware
+> optimizer and scale-from-zero alike: usage on an unresolved accelerator is
+> charged to no pool, and the physical `Limit` counts every *installed* GPU, not
+> what is available. Both, with fixes and status, are in
+> [GPU Capacity Accounting](../concepts/gpu-capacity-accounting.md). In short:
+> make the accelerator resolvable with a `nodeSelector`/`nodeAffinity` GPU key
+> (otherwise the scaling manager emits an `AcceleratorNotResolved` event, and
+> resolves a RUNNING variant from the nodes its pods landed on), and declare an
+> explicit quota limiter if you need a hard ceiling.
 
-Note the usage snapshot is published independently of the optimizer branch, so
+The usage snapshot is published independently of the optimizer branch, so
 scale-from-zero can check placement on a cycle the optimizer never reached.
 
-There is no separate enable flag: the `limiters` list below is the whole answer.
+There is no separate enable flag; the `limiters` list below is the whole answer.
 Declaring a limiter selects the GPU-aware optimizer (`GreedyByScore`) *and* arms
-the scale-from-zero capacity check; declaring none leaves both off. `enableLimiter`
-used to gate only the first of those, so a quota could be declared and silently
-never enforced, while scale-from-zero consulted a limiter nobody had asked for.
+the scale-from-zero capacity check; declaring none leaves both off. (The old
+`enableLimiter` gated only the first, so a quota could be declared and never
+enforced, while scale-from-zero consulted a limiter nobody asked for.)
 
 ### `limiters` (cluster-default only, live)
 
-The `default` entry selects the GPU limiter for the scaling pipeline. This is the
-**sole source** — there is no `--limiter-type` flag or quota config file — and it is
-applied **live**: editing the ConfigMap switches the limiter without a controller
-restart (the engine rebuilds it on the next optimization cycle). **The exception:**
-when a separate policy namespace resolves (see
+The `default` entry selects the GPU limiter. It is the **only source** (no
+`--limiter-type` flag, no quota config file), and it is **live**: editing the
+ConfigMap switches the limiter without a restart; the engine rebuilds it on the
+next cycle.
+
+**The exception:** when a separate policy namespace resolves (see
 [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound)),
 a **namespace-scoped** controller (`--watch-namespace` set) reads that
 namespace's ConfigMap once at start and does not watch it, because its cache
-cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
-effect only when the controller restarts
-(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). The same
-holds for an out-of-reach controller (`WVA_WATCH_NS` naming another namespace)
-and its own ConfigMap in its install namespace. `make enable-physical-limiter`
-and `make disable-physical-limiter` do those restarts. A cluster-scoped
-controller watches the policy namespace and picks the edit up live.
+cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there needs a
+restart (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`).
+The same holds for an out-of-reach controller (`WVA_WATCH_NS` naming another
+namespace) and its own ConfigMap in its install namespace.
+`make enable-physical-limiter` and `make disable-physical-limiter` do those
+restarts. A cluster-scoped controller watches the policy namespace and picks the
+edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 
@@ -219,20 +217,21 @@ default: |
       quotas: { H100: 32 }
 ```
 
-- **Single mode.** If a list contains both a `quota` and a `gpu-inventory` entry, the
-  quota entry wins and the `gpu-inventory` entry is ignored — only one limiter is built.
-  (Composition of physical + quota caps is tracked separately in #1003.)
-- `type: quota` uses the **same schema** as `QuotaLimiterConfig`, so `scope`, `quotas`,
-  `namespaceQuotas`, and `exclude` all apply; multiple quota entries are composed.
-  A quota entry may also set `kueue: { enabled: true }` to be bounded by the quotas
-  Kueue declares — see [Kueue as a quota source](quota-limiter.md#kueue-as-a-quota-source).
-- **Cluster-default only.** The list is read only from the global (system-namespace)
-  `default` entry — or, when a policy namespace resolves, from the `default` entry
-  of the ConfigMap there, which then replaces the system-namespace copy's say —
-  a budget-scope setting, like `enableRescale`, so a tenant cannot
-  widen a cap via a per-model entry or a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map). A `limiters:` block placed on any
-  other entry parses and validates but is **silently ignored** at runtime.
-- With no `limiters:` block **nothing bounds scaling** — that is the shipped
+- **Single mode.** With both a `quota` and a `gpu-inventory` entry, the quota
+  wins and `gpu-inventory` is ignored; only one limiter is built. (Composing
+  physical and quota caps is tracked in #1003.)
+- `type: quota` uses the **same schema** as `QuotaLimiterConfig`: `scope`,
+  `quotas`, `namespaceQuotas` and `exclude` all apply, and several quota entries
+  compose. A quota entry may set `kueue: { enabled: true }` to be bounded by
+  Kueue's quotas (see [Kueue as a quota source](quota-limiter.md#kueue-as-a-quota-source)).
+- **Cluster-default only.** The list is read only from the global
+  (system-namespace) `default` entry, or, when a policy namespace resolves, from
+  the `default` entry there, which then overrides the system-namespace copy. It
+  is a budget-scope setting like `enableRescale`, so a tenant cannot widen a cap
+  through a per-model entry or a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map).
+  A `limiters:` block on any other entry parses and validates but is **silently
+  ignored**.
+- With no `limiters:` block **nothing bounds scaling**. That is the shipped
   default, and the controller says so at startup: "scaling is UNCONSTRAINED".
 
 ### `optimizer` (cluster-default only, live)
@@ -409,8 +408,9 @@ A model left out this way is listed in the log line's `frozen` field as
 
 **Where the block is read.** Like `limiters:`, only from the cluster `default`
 entry (or the policy namespace's, when one resolves), and live: an edit takes
-effect on the next cycle, except in a policy namespace read by a
-namespace-scoped controller, which reads it at start only (see
+effect on the next cycle, except where a namespace-scoped controller reads it
+outside the namespace it manages (a policy namespace, or an out-of-reach
+controller's own ConfigMap), which it reads at start only (see
 [`limiters`](#limiters-cluster-default-only-live)).
 An `optimizer:` block in a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) has no effect; the controller logs
 `ignoring optimizer blocks in namespace-local scaling-policy maps` with the
@@ -837,22 +837,24 @@ lines and uninstall: see
 
 ### ConfigMap Structure
 
-The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in llm-scaling-manager controller's namespace. The exception is `limiters:` and `optimizer:`: when a policy namespace resolves, those two are read from the ConfigMap there and the controller's own copy loses its say over them — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
+The configuration lives in the ConfigMap `wva-scaling-policy-config` in the
+controller's namespace. The exception is `limiters:` and `optimizer:`: when a
+policy namespace resolves, those two come from the ConfigMap there, and the
+controller's own copy no longer counts for them (see
+[who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound)).
 
 **Location:** `deploy/configmap-scaling-policy.yaml`
 
 ### Namespace-local scaling-policy map
 
-A **namespace-local scaling-policy map** is a ConfigMap with the same name,
-`wva-scaling-policy-config`, in a model namespace rather than in the
-controller's namespace. For the models in that namespace it **replaces the
-global map whole**: the controller reads that namespace's entries and nothing
-from the controller's copy — no field-by-field merge, so a namespace-local
-`default` entry has to carry every threshold it wants, and tiers and per-model
-entries defined only in the global map do not exist for that namespace
-(`internal/config/config.go`, `resolveScalingPolicyConfigMap`). Deleting the
-ConfigMap returns the namespace to the global map. It cannot set `limiters:` or
-`optimizer:`; those are read from the cluster `default` entry only.
+A **namespace-local scaling-policy map** is a ConfigMap of the same name,
+`wva-scaling-policy-config`, in a model namespace instead of the controller's.
+For that namespace's models it **replaces the global map whole**. There is no
+field-by-field merge: its `default` entry must carry every threshold it wants,
+and tiers and per-model entries that exist only in the global map do not exist
+there (`internal/config/config.go`, `resolveScalingPolicyConfigMap`). Deleting
+it returns the namespace to the global map. It cannot set `limiters:` or
+`optimizer:`; those come from the cluster `default` entry only.
 
 A namespace gets one when the controller reads a ConfigMap of that name there:
 
@@ -876,9 +878,11 @@ namespace from the shipped manifest on every run, upgrades included. The
 `default` entry comes back exactly as shipped — thresholds and analyzers, and
 **no** `scaleToZero`, `defaultPolicy`, `optimizer:` block or `limiters:` — while
 every other key (named tiers, per-model entries) is saved before the apply and
-restored after it (`deploy/lib/infra_wva.sh`). The installer then writes a
-limiter back into `default` only when `WVA_LIMITER` (and, for a quota,
-`WVA_QUOTAS`) is passed on that run.
+restored after it (`deploy/lib/infra_wva.sh`). The `limiters:` list is the
+exception: with `WVA_LIMITER` unset, the installer reads the live list before
+the apply and writes it back after, and says so. `WVA_LIMITER=gpu-inventory|quota`
+replaces it, and `WVA_LIMITER=none` removes it. If the live list cannot be read
+and `WVA_LIMITER` is unset, the install refuses.
 
 So anything you changed in `default` by hand is gone after a re-run:
 
@@ -887,7 +891,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 | `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
 | `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
-| `limiters:` | kept only if `WVA_LIMITER`/`WVA_QUOTAS` are passed again; a hand-written entry has to be re-added |
+| `limiters:` | kept when `WVA_LIMITER` is not passed, hand-written entries included; `WVA_LIMITER=none` removes it |
 
 This touches only the controller's own ConfigMap. A policy published in
 `wva-policy` by `make enable-physical-limiter` is not re-applied — but that
@@ -931,9 +935,9 @@ triggers:
 ```
 
 The scaling manager prices each request waiting in the router queue at the
-generation length it expects that request to produce: a queued request owes the
-decode role `O` tokens of work, and that is what makes a growing queue worth
-ordering capacity for. `O` is the first of these that is a positive number:
+output length it expects: a queued request owes the decode role `O` tokens of
+work, which is what makes a growing queue worth ordering capacity for. `O` is
+the first positive number of:
 
 | source | what it is |
 | --- | --- |
@@ -942,40 +946,34 @@ ordering capacity for. `O` is the first of these that is a positive number:
 | `defaultOutputTokens` | this key |
 | the built-in default | 512 tokens |
 
-Set it when the deployment's generations are materially longer than a chat
-completion. Until a replica has completed a generation there is no reading to
-use — the first cycles after a restart, after a scale from zero, or after the
-arriving traffic changes shape — and the built-in 512 under-states a
-6000-token workload by a factor of twelve. A queue priced low is a queue that
-does not order, and that is paid in time-to-first-token.
+Set it when generations are much longer than a chat completion. Until a
+replica completes a generation there is no reading (the first cycles after a
+restart, after a scale from zero, or after the traffic changes shape), and the
+built-in 512 under-states a 6000-token workload twelvefold. A queue priced low
+does not order capacity, and that costs time-to-first-token.
 
-It is a seed for that window only. The fleet's own measurement displaces it as
-soon as one exists, so a figure of the right order is what matters and an exact
-one buys nothing.
+It only seeds that window. The fleet's own measurement replaces it as soon as
+one exists, so the right order of magnitude is enough.
 
-A value the scaling manager cannot read as a whole number of tokens is
-**rejected at the trigger that carried it**, with an error naming the key and
-quoting the value — `"lots"`, `"-1"` and `"6000.5"` are all refused rather than
-read as zero, because the only view an operator gets of a bad value is that
-error. `"0"` is the one exception: it is accepted and means *unset*, exactly as
-leaving the key out does, so the table above falls through to the built-in
-default. Prefer omitting the key to writing `"0"` — the two behave identically
-and the omission says so.
+A value that is not a whole number of tokens is **rejected at its trigger**, with
+an error naming the key and quoting the value: `"lots"`, `"-1"` and `"6000.5"`
+are refused, not read as zero, because that error is the operator's only view of
+a bad value. `"0"` is the exception: it means *unset*, like leaving the key out,
+so the table falls through to the built-in default. Prefer omitting the key.
 
 **Why the trigger and not this ConfigMap.** The figure is a fact about one
-workload's traffic, not a threshold a class of workloads shares — a
-fleet-wide generation length is already what the built-in 512 is. The trigger
-also declares `replicaStartSeconds`, a second per-workload seed, but that key is
-**reserved: nothing reads it yet**, and the analyzer uses its own default until it
-measures a replica start ([trigger reference](scaledobject-trigger.md)).
+workload's traffic, not a threshold shared by a class of workloads; a fleet-wide
+figure is what the built-in 512 already is. The trigger also declares
+`replicaStartSeconds`, another per-workload seed, but that key is **reserved:
+nothing reads it yet**; the analyzer uses its own default until it measures a
+replica start ([trigger reference](scaledobject-trigger.md)).
 
-**When a model's variants disagree.** A model under P/D has a ScaledObject per
-role, so the key can be written twice. The **largest** figure wins, and the
-disagreement is logged with every figure that was named. Largest, because only
-one role generates tokens: a prefill trigger carrying nothing must not pull
-decode's figure down to the built-in fallback, and under-pricing a queue is the
-failure the key exists to fix. Writing it on one variant and leaving it off the
-others is the simplest way to get this right.
+**When a model's variants disagree.** A P/D model has a ScaledObject per role,
+so the key can appear twice. The **largest** figure wins, and the disagreement is
+logged with every figure. Largest, because only one role generates tokens: a
+prefill trigger without the key must not pull decode's figure down to the
+fallback, and under-pricing the queue is what the key exists to prevent. Setting
+it on one variant only is the simplest way to get this right.
 
 ### `enableLearnedStateReuse`
 
@@ -990,10 +988,9 @@ default:
   enableLearnedStateReuse: true
 ```
 
-It resolves through the normal per-entry overlay, so it can also be set on a
-named tier or a per-model entry. A per-model entry is a ConfigMap data key of
-its own, identified by the `model_id` and `namespace` in its **body** — the key
-itself is arbitrary:
+It resolves like any per-entry field, so a named tier or a per-model entry can
+also set it. A per-model entry is its own ConfigMap data key, identified by the
+`model_id` and `namespace` in its **body**; the key name is arbitrary:
 
 ```yaml
 llama-8b-prod:
@@ -1002,36 +999,34 @@ llama-8b-prod:
   enableLearnedStateReuse: true
 ```
 
-Both `model_id` and `namespace` are load-bearing: an entry missing either one
-matches no model. It does not fail loudly — the parse is not strict, so an
-entry whose body names no model is registered as a selectable policy **tier**
-instead, under its own key. See
-[Per-Model Overrides](#4-per-model-overrides) for the full schema.
+Both `model_id` and `namespace` are required: an entry missing either matches
+no model. It does not fail loudly: the parse is not strict, so an entry naming no
+model becomes a selectable policy **tier** under its own key. Full schema:
+[Per-Model Overrides](#4-per-model-overrides).
 
-The granularity is `(model_id, namespace)`, not a single variant. On a P/D model
-decode and prefill are two variants of one model and resolve the same answer,
-so this cannot enable reuse for one of them alone.
+The granularity is `(model_id, namespace)`, not a variant. Decode and prefill of
+a P/D model resolve the same answer, so you cannot enable reuse for one alone.
 
 One direction only: an entry can turn reuse **on** where the default leaves it
-off, but cannot turn it back **off** where a `default:` entry turned it on —
-to do that, change the `default:` entry. Check the `Effective scaling policy`
-log line for `enableLearnedStateReuse` to confirm what a model resolved to; a
-typo in the key name is silently nothing, which now means "still off".
+off, but cannot turn it **off** where the `default:` entry turned it on; change
+the `default:` entry for that. The `Effective scaling policy` log line shows what
+a model resolved `enableLearnedStateReuse` to. A typo in the key silently does
+nothing, which means "still off".
 
 #### What it turns on
 
-A variant with nothing measured yet is priced from a sibling that runs the
-**same engine configuration** on the same accelerator and GPU count, so that a
-scaled-out variant can price its first decision from something other than a
-guess. That happens two ways, and this key governs **both**:
+A variant with nothing measured yet is priced from a sibling running the
+**same engine configuration** on the same accelerator and GPU count, so a
+scaled-out variant's first decision is not a guess. Two paths, and this key
+governs **both**:
 
 | path | what is reused |
 | --- | --- |
 | the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
 | the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
 
-It does not control learning. A variant learns from its own readings either
-way, and nothing already stored is cleared when the key changes.
+It does not control learning: a variant learns from its own readings either
+way, and changing the key clears nothing stored.
 
 #### What it does not govern
 
@@ -1058,24 +1053,21 @@ back to the defaults, for example — can hold extra replicas, for up to the
 #### Why it is off
 
 Reuse rests on an equality: two variants share only if a digest over the engine
-flags the scaling manager could read from their deployments matches. **That
-equality is not sound.** Five rounds of adversarial review found seven measured
-ways to produce a false match or to destroy a true one, and two attempts to
-close them inside the flag parser were reverted for costing more than they
-bought — one of them denied sharing to ordinary deployments because a shell
-preamble contained `grep -q`, while `-qfp8` still hashed as no flag at all.
+flags read from their deployments matches. **That equality is not sound.** Five
+rounds of adversarial review found seven measured ways to make a false match or
+break a true one. Two attempts to fix them in the flag parser were reverted for
+costing more than they bought; one denied sharing to ordinary deployments because
+a shell preamble contained `grep -q`, while `-qfp8` still hashed as no flag.
 
-The sharpest case is that a configuration the manager reads *wrong* rather than
-not at all still produces a confident digest: SGLang flags parsed as vLLM read
-as a complete set of vLLM defaults, and would match every other default
-configuration of that model.
+Worst, a configuration read *wrongly* (not just partly) still gives a confident
+digest: SGLang flags parsed as vLLM read as a complete set of vLLM defaults, and
+match every other default configuration of that model.
 
-So everything that merely **describes** a configuration ships on by default —
-the digest, the `wva_engine_config` metric, the drift checks. Only the act of
-letting one variant's reading price another's decision waits for you to ask for
-it. The intended replacement is graded sharing by **similarity** rather than by
-proven identity, where a flag the parser cannot read becomes a distance penalty
-instead of a false equality; see
+So everything that only **describes** a configuration is on by default: the
+digest, the `wva_engine_config` metric, the drift checks. Letting one variant's
+reading price another's decision waits for you to ask. The planned replacement
+shares by **similarity**, not proven identity, so an unreadable flag becomes a
+distance penalty instead of a false equality; see
 [learned-state sharing by similarity](../proposals/learned-state-sharing-by-similarity.md).
 
 #### What it costs to leave off
@@ -1088,18 +1080,15 @@ estimate. Expect a slower first ramp on a newly scaled-out variant.
 
 #### Before turning it on
 
-Check what the manager actually read, because the two paths degrade
-differently and the difference decides what you are buying into:
+Check what the manager read; the two paths degrade differently:
 
-- the **shared ITL line** is refused outright when flags could not be read. An
-  incomplete read produces no sharing key at all, so nothing is borrowed and
-  nothing lent.
-- the **cross-variant capacity figure** is *not* gated on a complete read, and
-  that is deliberate rather than an oversight — gating it was tried and cost a
-  30× capacity over-estimate, because refusing a sibling's measured figure
-  falls back to an estimate that is higher, and a higher capacity orders fewer
-  replicas. So with this key on, a variant whose flags were only partly read
-  **is** still priced from a sibling's capacity figure.
+- the **shared ITL line** is refused when flags could not be read. An incomplete
+  read gives no sharing key, so nothing is borrowed or lent.
+- the **cross-variant capacity figure** is *not* gated on a complete read, on
+  purpose. Gating it was tried and caused a 30× capacity over-estimate: refusing
+  a sibling's measured figure falls back to a higher estimate, and higher
+  capacity orders fewer replicas. So with this key on, a variant whose flags were
+  only partly read **is** still priced from a sibling's capacity figure.
 
 Read `wva_engine_config` to tell the cases apart:
 
@@ -1130,10 +1119,10 @@ kvCacheThreshold: 0.80
 queueLengthThreshold: 5
 ```
 
-Every field has a hardcoded default, so a missing ConfigMap (or a missing
-`default` entry) degrades gracefully rather than pinning the analyzer at zero
-thresholds. Deploying the ConfigMap with a `default` entry is still recommended
-so the values are explicit and reviewable.
+Every field has a hardcoded default, so a missing ConfigMap (or `default`
+entry) degrades gracefully instead of pinning the analyzer at zero thresholds.
+Still deploy the ConfigMap with a `default` entry, so the values are explicit and
+reviewable.
 
 ## Multi-Analyzer Registration
 
@@ -1364,34 +1353,35 @@ the scaling decision.
 
 ### What is End Point Picker (EPP)?
 
-The **End Point Picker (EPP)** is an intelligent request routing component in the InferenceScheduler that selects the optimal inference server replica to handle each incoming request. EPP monitors replica capacity metrics (KV cache utilization, queue depth), as well as other replica metrics and uses scoring algorithms to route requests to replicas.
+The **End Point Picker (EPP)** is the InferenceScheduler's request router. It
+picks the replica for each request, scoring replicas on capacity metrics (KV
+cache utilization, queue depth) and others.
 
 ### Deployment Architecture
 
-**EPP Deployment Model**: Each model has a **1-to-1 relationship** with its EPP instance. Every model served by the inference infrastructure has a dedicated EPP component that routes requests specifically to that model's replicas.
+Each model has **its own EPP instance**, which routes only to that model's
+replicas. For example:
 
-**Example deployment pattern:**
-- Model: `Qwen/Qwen3-0.6B` in namespace `<your-namespace>` → Dedicated EPP instance `gaie-workload-autoscaler-epp`
-- Model: `ibm/granite-13b` in namespace `production` → Dedicated EPP instance `gaie-production-epp`
-- Each model deployment has its own EPP instance (naming follows namespace/workload convention)
+- `Qwen/Qwen3-0.6B` in `<your-namespace>` → EPP `gaie-workload-autoscaler-epp`
+- `ibm/granite-13b` in `production` → EPP `gaie-production-epp`
 
-This 1-to-1 architecture means that saturation detection and request routing decisions are **model-specific**, with each EPP instance monitoring only its associated model's replicas.
+(Names follow the namespace/workload convention.) So saturation detection and
+routing are **per model**.
 
 ### Threshold Alignment Recommendation
 
-**For optimal cluster performance, we strongly recommend using the same threshold values for both the scaling manager (llm-scaling-manager) and InferenceScheduler (End Point Picker) for each model deployment.**
+**Use the same thresholds in the scaling manager and in each model's EPP.**
+Aligned thresholds keep capacity management consistent and avoid dropped
+requests:
 
-Using aligned thresholds ensures consistent capacity management across the cluster and prevents request drop situations.
-
-**Why threshold alignment matters:**
-
-1. **Reduced Request Drop Rates**: When the scaling manager and EPP use the same saturation thresholds, the scheduler will avoid routing requests to replicas that the scaling manager already considers saturated. This prevents the scheduler from overloading replicas that are about to trigger scale-up.
-
-2. **Consistent Capacity Assessment**: Both components evaluate replica capacity using the same criteria (KV cache utilization and queue length), ensuring coordinated behavior across the entire inference stack.
-
-3. **Improved GPU Utilization**: Aligned thresholds allow the cluster to maintain optimal GPU utilization without oversaturation. The scheduler respects the same capacity boundaries that drive autoscaling decisions.
-
-4. **Faster Response to Load Changes**: When both components agree on saturation thresholds, the system responds more quickly to load changes with coordinated routing and scaling actions.
+1. **Fewer dropped requests.** The EPP stops routing to replicas the scaling
+   manager already counts as saturated, instead of overloading replicas about to
+   trigger a scale-up.
+2. **One view of capacity.** Both judge replicas on the same criteria (KV cache
+   utilization and queue length).
+3. **Better GPU use.** The router respects the same capacity limits that drive
+   scaling, so GPUs stay busy without oversaturation.
+4. **Faster response.** Routing and scaling react to load changes together.
 
 ### Configuration Comparison
 
@@ -1415,9 +1405,9 @@ data:
 
 #### EPP Saturation Detector Configuration
 
-The InferenceScheduler EPP component uses the [gateway-api-inference-extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/epp-configuration/config-text.md) saturation detector to identify cluster overload.
-
-**Per-Model Configuration**: Since each model has its own dedicated EPP instance, saturation detection is configured **per model deployment**. This allows different models to have different saturation thresholds based on their specific characteristics and SLO requirements.
+The EPP detects overload with the [gateway-api-inference-extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/epp-configuration/config-text.md)
+saturation detector. Each model has its own EPP, so the thresholds are set **per
+model deployment**, and models can differ by their traffic and SLOs.
 
 ```yaml
 # EPP Saturation Detector Configuration (per-model EPP instance)
@@ -1428,11 +1418,11 @@ saturationDetector:
   ...
 ```
 
-**Configuration Notes**:
-- All parameters are optional; omitting them applies the documented defaults
-- EPP configuration is **read only on startup** - changes require EPP pod restart
-- Unlike the scaling manager, EPP does not currently support live ConfigMap updates
-- **Each EPP instance** (one per model) can have different threshold values
+**Notes:**
+- Every parameter is optional; omitted ones take the documented defaults.
+- The EPP reads its configuration **only at startup**: restart the EPP pod after
+  a change. Unlike the scaling manager, it has no live ConfigMap reload.
+- **Each EPP instance** (one per model) can have its own thresholds.
 
 ### Parameter Mapping and Alignment
 
@@ -1440,12 +1430,12 @@ saturationDetector:
 |---------|-----------|-----------|-----------------|-------------|
 | **KV Cache Saturation** | `kvCacheThreshold` | `kvCacheUtilThreshold` | **0.80** (80%) | Replica is saturated when KV cache ≥ threshold |
 | **Queue Saturation** | `queueLengthThreshold` | `queueDepthThreshold` | **5** | Replica is saturated when queue length ≥ threshold |
-| **Scale-Up Trigger (KV)** | **Scale-Up Trigger (Queue)** 
+
 ### Configuration Workflow
 
 #### Step 1: Define Thresholds
 
-Choose thresholds based on your workload characteristics and SLO requirements:
+Choose thresholds for your workload and SLOs:
 
 | Workload Type | kvCacheThreshold | queueLengthThreshold | Rationale |
 |---------------|------------------|----------------------|-----------|
@@ -1461,13 +1451,15 @@ Update `wva-scaling-policy-config` ConfigMap:
 kubectl edit cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
-Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads). Thresholds are read from this copy in the controller's namespace; `limiters:` and `optimizer:` are not, when a policy namespace resolves — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
+Changes apply **immediately** (the scaling manager watches the ConfigMap), except
+on an out-of-reach controller (`WVA_WATCH_NS`), which reads it at start: restart
+that one after the edit. Thresholds come from this copy in the controller's
+namespace; `limiters:` and `optimizer:` do not, when a policy namespace resolves
+(see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound)).
 
 #### Step 3: Apply to EPP
 
-**Important**: Since each model has its own dedicated EPP instance (1-to-1 relationship), you must configure the EPP instance for **each specific model deployment** separately.
-
-**Current approach:**
+Each model has its own EPP, so configure **each model's** EPP separately:
 
 1. Identify the EPP instance for your target model:
    ```bash
@@ -1516,13 +1508,12 @@ kubectl logs -n production deployment/gaie-granite-13b-epp --all-containers | gr
    - **Important**: Since each model has its own EPP instance, ensure thresholds align for **each model deployment** individually
 
 2. **Per-Model Configuration Strategy**:
-   - Use the scaling manager's per-model override feature to set model-specific thresholds
-   - Configure the corresponding EPP instance with matching thresholds
+   - Use the scaling manager's per-model overrides for model-specific thresholds
+   - Give the model's EPP the same thresholds
    - Document the threshold mapping for each model deployment
-   - Example: If `ibm/granite-13b` uses `kvCacheThreshold: 0.85` in the scaling manager, its dedicated EPP must use `kvCacheUtilThreshold: 0.85`
+   - Example: if `ibm/granite-13b` uses `kvCacheThreshold: 0.85` in the scaling manager, its EPP must use `kvCacheUtilThreshold: 0.85`
 
-
-4. **Testing Threshold Changes**:
+3. **Testing Threshold Changes**:
    - Test in development environment first
    - Monitor impact on request drop rate and latency for the specific model
    - Adjust based on observed behavior
@@ -1575,18 +1566,15 @@ no `limiters:` and names its own namespace, so applying it replaces the installe
 `default` entry and silently removes the GPU limit the installer wrote. Edit the
 installed ConfigMap instead, or re-run the install with your `WVA_LIMITER`.
 
-**Note:** Changes take effect immediately! The controller watches the ConfigMap and automatically:
-1. Reloads the cache when changes are detected
-2. Triggers a reconcile of every discovered variant
-3. Applies the new configuration without requiring pod restart
+Changes apply at once, with no pod restart: the controller watches the
+ConfigMap, reloads its cache, and reconciles every discovered variant.
 
 ### 3. Named Policy Tiers
 
-A tier is a reusable entry — `interactive`, `standard`, `batch` — that a variant
-selects **by name** from its ScaledObject. A tier carries no model identity, which
-is the whole point: one tier serves many models, and retuning the tier retunes all
-of them at once. Per-model entries cannot express that, because they bind settings
-to identity, so a fleet-wide change becomes an edit per model.
+A tier is a reusable entry (`interactive`, `standard`, `batch`) that a variant
+selects **by name** from its ScaledObject. A tier names no model, so one tier
+serves many models and retuning it retunes them all. Per-model entries bind
+settings to one model, so a fleet-wide change would be one edit per model.
 
 An entry is a tier when its key is not `default` and its body sets no `model_id`
 (`PolicyEntryKey`).
@@ -1610,8 +1598,8 @@ data:
     priority: 0.5
 ```
 
-A variant selects its tier through KEDA trigger metadata — the trigger is already
-the registration, so this needs nothing watched, listed, or matched:
+A variant selects its tier in its KEDA trigger metadata. The trigger is already
+the registration, so nothing needs to be watched, listed or matched:
 
 ```yaml
 triggers:
@@ -1638,17 +1626,15 @@ Parking is the exception: `scaleToZero` is resolved without the variant's tier
 (`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
 the tier `default.defaultPolicy` names, and the per-model override decide it.
 
-Two failure modes are resolved deterministically rather than silently, and both
-are reported:
+Two failure modes resolve deterministically, and both are reported:
 
-- **Unknown tier** — a `scalingPolicy` naming no entry falls back to `default`.
-  That is the right outcome and the wrong silence, so it is logged against the
-  variants that asked for it, listing the tiers that do exist: `Scaling policy not
-  found; this variant is scaling under the default entry.` (once per change, with
-  `scalingPolicy` and `knownPolicies` fields).
-- **Disagreeing variants** — when variants of one model name different tiers, the
-  lexicographically smallest wins, so the allocation resolves the same way on
-  every cycle and every replica rather than flipping with map order.
+- **Unknown tier.** A `scalingPolicy` naming no entry falls back to `default`,
+  and the controller logs it against the variants that asked, listing the tiers
+  that exist: `Scaling policy not found; this variant is scaling under the default
+  entry.` (once per change, with `scalingPolicy` and `knownPolicies` fields).
+- **Disagreeing variants.** When variants of one model name different tiers, the
+  lexicographically smallest wins, so every cycle and replica resolves the same
+  way instead of flipping with map order.
 
 ### 4. Per-Model Overrides
 
@@ -1694,16 +1680,15 @@ data:
     queueLengthThreshold: 20
 ```
 
-> **The `model_id` and `namespace` lines are not decoration — they are what makes
-> this an override.** An entry whose body names no model is registered as a named
-> policy *tier* instead (`PolicyEntryKey` in `internal/config/scaling_policy.go`),
-> so it will never apply to the model you meant and will silently be selectable by
-> any variant that names its key.
+> **The `model_id` and `namespace` lines make this an override.** An entry whose
+> body names no model becomes a named policy *tier* instead (`PolicyEntryKey` in
+> `internal/config/scaling_policy.go`): it never applies to the model you meant,
+> and any variant naming its key can select it.
 >
-> Nor can identity live in the key: a ConfigMap data key admits only
+> Identity cannot live in the key either: a ConfigMap data key allows only
 > `[-._a-zA-Z0-9]`, so the `{modelID}#{namespace}` form earlier versions of this
-> document showed — `"ibm/granite-13b#production"` — is rejected by the API server
-> and could never be applied. `ModelOverrideKey()` suggests a legal, readable key.
+> page showed (`"ibm/granite-13b#production"`) is rejected by the API server.
+> `ModelOverrideKey()` suggests a legal, readable key.
 
 **Key points:**
 - An override entry is identified by its **body**: set `model_id` and `namespace`. Its ConfigMap key is arbitrary — pick something readable
@@ -1771,7 +1756,7 @@ WARN Invalid saturation scaling config entry, skipping key=invalid-config error=
 
 ### Caching Architecture
 
-The controller uses an **efficient caching mechanism** with ConfigMap watch for optimal performance:
+The controller caches the configuration and watches the ConfigMap for changes:
 
 **Initialization (on controller startup):**
 
@@ -1812,12 +1797,8 @@ The `ConfigMapReconciler` watches the `wva-scaling-policy-config` ConfigMap for 
 | Latency Impact | Network round-trip per reconcile | Zero (memory access) |
 | Concurrency | Serial API calls | Thread-safe concurrent reads |
 
-**Cache benefits:**
-- ✅ **Single read on startup** instead of per-reconciliation
-- ✅ **Zero API calls during reconciliation** (cached access)
-- ✅ **Event-driven updates** (immediate response to changes)
-- ✅ **Thread-safe concurrent access** (RWMutex)
-- ✅ **Defensive copying** prevents external modification
+Reads are thread-safe (RWMutex) and return defensive copies, so callers cannot
+modify the cache.
 
 ## Troubleshooting
 
