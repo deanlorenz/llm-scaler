@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // Candidate is one inactive variant that could be woken, reduced to what
@@ -51,6 +52,9 @@ type Candidate struct {
 	DomainKey   string
 	// Cost is the variant's declared cost, used to rank equally-feasible options.
 	Cost float64
+	// target is the variant's scale target, read to count its placed pods for
+	// the in-flight ledger; nil in tests.
+	target scaletarget.ScaleTargetAccessor
 }
 
 // SelectionOutcome explains what selection decided, for logging and metrics.

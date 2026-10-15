@@ -142,6 +142,11 @@ type Engine struct {
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per cycle.
 	layouts allocation.LayoutLog
+	// cycleFitted is whether this cycle's optimizer pass was fitted to nodes,
+	// and cyclePlanned the models the utilization share planned in it: what
+	// admitInFlight needs once the decisions are final. Set by decideV2.
+	cycleFitted  bool
+	cyclePlanned map[string]bool
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
@@ -1322,6 +1327,10 @@ func (e *Engine) selectV2Optimizer(
 	// node, not just the pool. A physical limiter that was skipped is not
 	// among them, and its node fit goes with it (the skip is reported above).
 	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, time.Now())
+	// The pass sizes every variant from its current replicas and re-places
+	// the growth whose pods are not created yet: the holes the ledger holds
+	// for those replicas are theirs to re-place.
+	allocation.DefaultInFlight.ReleaseUncreated(nodes, createdReplicas(requests))
 	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Nodes = nodes.WithLayoutLog(&e.layouts)
@@ -1575,6 +1584,12 @@ func (e *Engine) optimizeV2(
 			modelScaleTargets[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			req.VariantStates,
 		)
+	}
+
+	// The holes this cycle ordered replicas into stay held, from both
+	// engines, until the replicas' pods hold their nodes.
+	if e.cycleFitted {
+		e.admitInFlight(requests, allDecisions, e.cyclePlanned, variantScaleTargets, time.Now())
 	}
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.

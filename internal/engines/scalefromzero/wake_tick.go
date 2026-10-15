@@ -6,8 +6,10 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 )
 
 // A wake is judged against fresh constraints: the usage the cluster reports
@@ -18,10 +20,14 @@ import (
 // (tickNodes). Models are decided concurrently, so the check and the debit are
 // one step under wakeMu (decideWake).
 //
-// Across ticks, nothing carries a wake: the next tick's usage counts the
-// wake's pods once they hold a node (scheduled, or nominated for one after a
-// preemption), and not while they wait unscheduled. That window is the limit
-// of the check.
+// Across ticks, the in-flight ledger (allocation.DefaultInFlight) carries a
+// wake that was fitted to nodes: its node hole stays held, from both engines,
+// until its pods hold a node (scheduled, or nominated for one after a
+// preemption) or allocation.InFlightTTL passes. A wake's pool demand is not
+// carried across ticks: a quota counts it once the steady-state engine next
+// publishes what WVA's variants hold, and the physical pool once its pods
+// land. Under a physical limiter the held hole refuses the next wake anyway;
+// under a quota alone that window is the limit of the check.
 
 // tickNodeView is a tick's node view, built on first use.
 type tickNodeView struct {
@@ -56,6 +62,23 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 		e.recordWake(ctx, group, place, selected)
 	}
 	return place, selected, outcome
+}
+
+// admitInFlight holds each woken replica's node hole in the in-flight ledger
+// until its pods hold a node. Caller holds wakeMu.
+func (e *Engine) admitInFlight(namespace string, selected []Candidate) {
+	now := time.Now()
+	for _, c := range selected {
+		if !constants.IsAcceleratorResolved(c.Accelerator) {
+			continue
+		}
+		var placed func() (int, bool)
+		if cl, acc := e.client, c.target; cl != nil && acc != nil {
+			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), cl, namespace, acc) }
+		}
+		key := namespace + "/" + c.VariantName
+		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c), 1, 0, placed, now)
+	}
 }
 
 // debitTick records a wake's demand against this tick's later wakes. Caller

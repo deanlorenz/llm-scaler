@@ -75,6 +75,56 @@ func heldReplicaCount(ctx context.Context, k8sClient client.Client, namespace st
 	return len(groups), filled, true
 }
 
+// PlacedReplicas counts a variant's replicas every pod of which holds a node or
+// is about to: scheduled to one, or, while Pending, nominated for one after a
+// preemption -- as the usage walk counts a pod on its node. Pods being deleted
+// or finished do not count. On a LeaderWorkerSet a replica is a group, placed
+// when all its group size is. ok is false when the pods cannot be listed.
+func PlacedReplicas(ctx context.Context, k8sClient client.Client, namespace string,
+	scaleTarget scaletarget.ScaleTargetAccessor) (placed int, ok bool) {
+	if k8sClient == nil || scaleTarget == nil {
+		return 0, false
+	}
+	pods, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
+	if err != nil {
+		return 0, false
+	}
+	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
+	groups := map[string]int{}
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp != nil || !holdsOrNominated(p) {
+			continue
+		}
+		if !group {
+			placed++
+			continue
+		}
+		if idx, ok := p.Labels[lwsv1.GroupIndexLabelKey]; ok {
+			groups[idx]++
+		}
+	}
+	if !group {
+		return placed, true
+	}
+	size := max(int(scaleTarget.GetGroupSize()), 1)
+	for _, n := range groups {
+		if n >= size {
+			placed++
+		}
+	}
+	return placed, true
+}
+
+// holdsOrNominated reports whether a pod holds its GPUs (holdsGPUs) or, while
+// Pending, has a node nominated for it.
+func holdsOrNominated(p *corev1.Pod) bool {
+	if holdsGPUs(p) {
+		return true
+	}
+	return p.Status.Phase == corev1.PodPending && p.Status.NominatedNodeName != ""
+}
+
 // holdsGPUs reports whether a pod holds the GPUs it requested: it is bound to a
 // node and its containers have not finished. Deletion does not change that.
 func holdsGPUs(p *corev1.Pod) bool {

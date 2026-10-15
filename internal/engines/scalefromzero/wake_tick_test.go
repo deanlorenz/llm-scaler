@@ -57,18 +57,24 @@ func TestTwoWakesInOneTickShareTheFamilyBudget(t *testing.T) {
 	}
 }
 
-// publishNodes publishes 8-GPU HBM3 nodes with the given free GPUs.
+// publishNodes publishes 8-GPU HBM3 nodes with the given free GPUs, as a new
+// scenario: the in-flight ledger, which the wakes of an earlier one filled, is
+// emptied, now and after the test.
 //
-// The node store and the usage store are process-wide, so the tests that use
-// them must not run in parallel (no t.Parallel).
+// The node store, the usage store and the in-flight ledger are process-wide,
+// so the tests that use them must not run in parallel (no t.Parallel).
 func publishNodes(t *testing.T, free ...int) {
 	t.Helper()
 	nodes := map[string]decision.NodeGPU{}
 	for i, f := range free {
 		nodes[fmt.Sprintf("n%d", i)] = decision.NodeGPU{Accelerator: wakeHBM3, Capacity: 8, Used: 8 - f}
 	}
+	allocation.DefaultInFlight.Reset()
 	decision.DefaultNodeGPUs.Publish(nodes, time.Now())
-	t.Cleanup(func() { decision.DefaultNodeGPUs.Publish(nil, time.Time{}) })
+	t.Cleanup(func() {
+		decision.DefaultNodeGPUs.Publish(nil, time.Time{})
+		allocation.DefaultInFlight.Reset()
+	})
 }
 
 // physicalEngine is an engine whose only limiter is the physical one, with

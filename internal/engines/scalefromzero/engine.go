@@ -719,15 +719,18 @@ func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placeme
 	} else if place.constraints != nil {
 		e.debitTick(group.namespace, demandOf(selected))
 	}
-	// What the wake takes on the nodes, for the next wake in this tick. A set
-	// that passed the node check (fits) places by construction, so the result
-	// is not read. Two kinds of wake bypass that check and place only what
-	// fits now: a claimed share transfer (claimShareTransfer funds the wake
-	// from a donor's pods still releasing, which the snapshot shows in use; the
-	// transfer holds that hole); and a wake checked against a remembered
-	// snapshot, or not at all, which has no node view (decideWake builds one
-	// for this tick's constraints only).
-	place.nodes.PlaceReplicas(replicaShapes(group.namespace, selected), true)
+	// What the wake takes on the nodes, for the next wake in this tick, and in
+	// the in-flight ledger for every later decision of either engine until its
+	// pods hold a node. A set that passed the node check (fits) places by
+	// construction. Two kinds of wake bypass that check, and place and hold
+	// only what fits now: a claimed share transfer (claimShareTransfer funds
+	// the wake from a donor's pods still releasing, which the snapshot shows
+	// in use -- the transfer, not the ledger, holds that hole); and a wake
+	// checked against a remembered snapshot, or not at all, which has no node
+	// view (decideWake builds one for this tick's constraints only).
+	if place.nodes.PlaceReplicas(replicaShapes(group.namespace, selected), true) && place.nodes != nil {
+		e.admitInFlight(group.namespace, selected)
+	}
 	if place.unchecked {
 		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
 		log.FromContext(ctx).Info("Scale-from-zero: woke WITHOUT a GPU capacity check; every declared limiter is unavailable and no recent snapshot exists",

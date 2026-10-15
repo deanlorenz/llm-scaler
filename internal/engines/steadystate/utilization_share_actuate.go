@@ -722,6 +722,7 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// receiver's own pod is not even queued until its target is raised.
 	promised := decision.LatestSharePromised(e.utilizationShare.clock())
 	g, greedy := optimizer.(*allocation.GreedyByScoreOptimizer)
+	e.cycleFitted = greedy && g.Nodes != nil
 	if greedy {
 		// The same promises held on the nodes: a node freed for a receiver
 		// whose pod is still Pending looks free in the snapshot.
@@ -747,11 +748,11 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// which already withheld the promises made before it, less what it
 	// ordered for the models the share plans: their targets are the share's,
 	// and its fills are among the promises.
+	e.cyclePlanned = plannedByOverrides(requests, overrides)
 	if len(constraints) > 0 {
 		now := e.utilizationShare.clock()
 		latest := decision.LatestSharePromised(now)
-		planned := plannedByOverrides(requests, overrides)
-		if !greedy || !g.RepublishHeadroom(planned, newlyPromised(promised, latest), now) {
+		if !greedy || !g.RepublishHeadroom(e.cyclePlanned, newlyPromised(promised, latest), now) {
 			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, latest), now)
 		}
 	}

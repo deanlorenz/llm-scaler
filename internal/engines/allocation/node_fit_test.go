@@ -15,9 +15,9 @@ import (
 // pair, and the prefill sat Pending forever. A replica must fit a node; every
 // case below is in whole 8-GPU units.
 
-// The node-fit tests read and write process-wide state (the stores NodeViewFor
-// reads and a pass publishes to), so none of them runs in parallel (no
-// t.Parallel).
+// The node-fit tests read and write process-wide state (DefaultInFlight, which
+// NodeViewFor applies; decision.DefaultHeadroom, which a pass publishes to), so
+// none of them runs in parallel (no t.Parallel).
 
 // h100Nodes is one 8-GPU H100 node per free figure, holding 8-free in use.
 func h100Nodes(free ...int) map[string]decision.NodeGPU {

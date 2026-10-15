@@ -150,6 +150,9 @@ func (v *NodeView) WithLayoutLog(l *LayoutLog) *NodeView {
 // non-empty when the physical limiter bounds the decision but no node snapshot
 // younger than decision.NodeGPUsMaxAge exists, so node fit is skipped: the
 // caller reports it.
+//
+// The view holds what the in-flight ledger (DefaultInFlight) holds: the holes
+// of replicas admitted earlier whose pods hold no node yet.
 func NodeViewFor(constraints []*ResourceConstraints, store *decision.NodeGPUStore, now time.Time) (view *NodeView, reason string) {
 	if !PhysicalBounds(constraints) {
 		return nil, ""
@@ -163,6 +166,7 @@ func NodeViewFor(constraints []*ResourceConstraints, store *decision.NodeGPUStor
 		return nil, "no node snapshot younger than " + decision.NodeGPUsMaxAge.String() +
 			": replicas are fitted to the pool, not to nodes"
 	}
+	DefaultInFlight.holdOn(view, now)
 	return view, ""
 }
 

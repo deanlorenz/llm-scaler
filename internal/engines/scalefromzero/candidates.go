@@ -128,6 +128,7 @@ func (e *Engine) buildCandidates(
 			Tolerations:     scaletarget.PodTolerations(scaleTarget),
 			DomainKey:       scaletarget.ExclusiveTopology(scaleTarget),
 			Cost:            resolveVariantCost(ctx, va),
+			target:          scaleTarget,
 		})
 	}
 
