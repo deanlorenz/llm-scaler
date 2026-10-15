@@ -202,6 +202,38 @@ var _ = Describe("learned state across a restart", func() {
 			"a restart on the arguments the figures were learned under restored nothing")
 	})
 
+	It("tags what it learned after an image-only rollout with the new image", func() {
+		load := func(store *capacity.Store, image string) {
+			store.LoadFromScaleTarget("test-ns", "test-model", "variant-a", "H100", 1,
+				scaletarget.NewDeploymentAccessor(&appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "vllm", Image: image, Command: []string{"vllm", "serve", "test-model"},
+						Args: []string{"--max-num-seqs", "256"},
+					}}}},
+				}}))
+		}
+		saturate := func(a *SaturationAnalyzer) {
+			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		store := capacity.NewStore()
+		load(store, "registry.example/vllm:v0.11.0")
+		first := NewSaturationAnalyzer(store)
+		saturate(first)
+
+		load(store, "registry.example/vllm:v0.11.1")
+		saturate(first)
+		saved := carry(first.ExportLearnedState())
+
+		restarted := capacity.NewStore()
+		load(restarted, "registry.example/vllm:v0.11.1")
+		second := NewSaturationAnalyzer(restarted)
+		second.RestoreLearnedState(saved)
+		Expect(capacityOf(second)).To(Equal(float64(4000)),
+			"the snapshot named the replaced release, and a restart on the new one restored nothing")
+	})
+
 	It("writes back what is still pending, so a second restart does not lose it", func() {
 		// The first write after a restart is a minute in; a model parked at
 		// zero has not been analysed by then.

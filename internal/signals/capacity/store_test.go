@@ -175,11 +175,85 @@ var _ = Describe("Store", func() {
 				// 12,800 measured.
 				loadImage("registry.example/vllm:v0.11.0", "--max-num-seqs=256")
 				goLive()
+				before := store.Get("ns-1", "model-a", "variant-h100").EngineParams.Fingerprint()
 				loadImage("registry.example/vllm:v0.11.1", "--max-num-seqs=256")
 
 				got := store.Get("ns-1", "model-a", "variant-h100")
 				Expect(got.LearnedFrom).To(Equal(LearnedFromLive), "a routine image bump discarded the measured capacity")
 				Expect(got.EffectiveCapacity).To(Equal(int64(12800)))
+				// The parameters still move to the new release: left on the
+				// old one, the fingerprint and the snapshot's tag named it,
+				// and the next restart restored nothing.
+				Expect(got.EngineParams.Image).To(Equal("registry.example/vllm:v0.11.1"),
+					"the live record kept naming the release it replaced")
+				Expect(got.EngineParams.Fingerprint()).NotTo(Equal(before))
+			})
+
+			It("keeps what it carried on the next cycle's re-read", func() {
+				// LoadFromScaleTarget runs every cycle and writes a record
+				// that is not live afresh; the carry held for one cycle.
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=64")
+				load("--max-num-seqs=64")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.TotalKvCapacityTokens).To(Equal(int64(16000)), "the carried k1 was lost a cycle later")
+				Expect(got.PriorLiveCapacity).To(Equal(int64(12800)), "the ceiling was lost a cycle later")
+			})
+
+			It("keeps the last measured capacity as a ceiling when the cache changed shape", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=256", "--gpu-memory-utilization=0.85")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive))
+				Expect(got.PriorLiveCapacity).To(Equal(int64(12800)),
+					"a parked variant was left with no bound but the derived figure")
+			})
+
+			It("does not carry the KV total to a larger per-step budget", func() {
+				// A larger profiling peak leaves the cache smaller; the old
+				// total would over-state it.
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=512")
+				Expect(store.Get("ns-1", "model-a", "variant-h100").TotalKvCapacityTokens).To(BeZero(),
+					"a KV total measured at --max-num-seqs=256 bounded an engine capturing graphs for 512")
+
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=256", "--max-num-batched-tokens=65536")
+				Expect(store.Get("ns-1", "model-a", "variant-h100").TotalKvCapacityTokens).To(BeZero(),
+					"a KV total measured at the default budget bounded an engine profiled at 65536")
+			})
+
+			loadOn := func(accelerator string, gpus int) {
+				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", accelerator, gpus,
+					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=256")))
+			}
+
+			It("replaces it when the variant moves to other hardware, with no KV total carried", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				loadOn("H200", 1)
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive), "an H100 measurement kept pricing an H200 engine")
+				Expect(got.TotalKvCapacityTokens).To(BeZero())
+
+				load("--max-num-seqs=256")
+				goLive()
+				loadOn("H100", 2)
+				Expect(store.Get("ns-1", "model-a", "variant-h100").LearnedFrom).NotTo(Equal(LearnedFromLive),
+					"a one-GPU measurement kept pricing a two-GPU engine")
+			})
+
+			It("does not take an unresolved accelerator for a move", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				loadOn("", 1)
+				Expect(store.Get("ns-1", "model-a", "variant-h100").LearnedFrom).To(Equal(LearnedFromLive))
 			})
 
 			It("carries the measured KV capacity as k1 across a scheduler-flag change", func() {

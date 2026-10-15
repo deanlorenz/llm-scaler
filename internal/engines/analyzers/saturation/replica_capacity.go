@@ -234,6 +234,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 
 	// Update capacity store with live data, preserving EngineParams from any
 	// existing record (parsed from deployment args and needed for FindCompatible).
+	// During a rollout the record already carries the NEW arguments
+	// (LoadFromScaleTarget runs first in the cycle) while old pods still
+	// report, so a figure measured on an old pod is filed under the new
+	// arguments and fingerprint. The new pods' readings replace it as they
+	// are priced; only a variant parked before any new pod reported keeps it.
 	var existingParams *capacity.EngineParams
 	if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
 		existingParams = existing.EngineParams
@@ -755,6 +760,15 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				}
 			}
 
+			// Bound by what this variant was last measured at, under
+			// arguments a rollout has since replaced: a ceiling only, so a
+			// parked variant whose cache changed shape is never priced above
+			// its last measurement, and never held below a smaller derivation.
+			if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < bounded {
+				bounded = rec.PriorLiveCapacity
+				boundedBy = "prior-live"
+			}
+
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
 			//
 			// The reuse switch DELIBERATELY DOES NOT REACH HERE, and a
@@ -789,13 +803,18 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		}
 	}
 
-	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from LoadFromDeployment)
+	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from
+	// LoadFromDeployment), under the same prior-live ceiling.
+	fallback := rec.EffectiveCapacity
+	if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < fallback {
+		fallback = rec.PriorLiveCapacity
+	}
 	logger.Info("zero-replica-capacity-estimate",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"source", "deployment-stored-fallback",
 		"reason", "no workload averages or derivation available; using raw stored EffectiveMaxBatchedTokens",
-		"perReplicaCapacity", rec.EffectiveCapacity)
-	return float64(rec.EffectiveCapacity)
+		"perReplicaCapacity", fallback)
+	return float64(fallback)
 }
 
 // estimateCapacityFromParams computes a capacity estimate using the k2 derivation

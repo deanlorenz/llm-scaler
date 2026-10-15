@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -46,6 +47,13 @@ type Record struct {
 	// variant at: min(k1, k2) when learned live, a conservative lower bound
 	// (the per-step token budget) when derived from a deployment.
 	EffectiveCapacity int64
+	// PriorLiveCapacity is the EffectiveCapacity the variant was last
+	// measured at under engine arguments it no longer runs, kept when
+	// LoadFromScaleTarget replaces a live record after a rollout. It is only
+	// ever a CEILING on the estimate a parked variant is priced from
+	// (estimateStoredCapacity), never a floor and never k1. The next live
+	// write builds a fresh record and so drops it.
+	PriorLiveCapacity int64
 	// EngineParams are the parsed deployment params for k2 derivation.
 	EngineParams *EngineParams
 	// LearnedFrom is LearnedFromLive for a record written from live metrics,
@@ -181,27 +189,59 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	// IsCapacityCompatible already holds -- and replacing the record on it
 	// priced a variant parked at zero from the derived figure on every
 	// rollout: 320,000 tokens against a measured 12,800 at the defaults, so
-	// its first scale-from-zero order was sized ~25x too small.
-	var carriedKv int64
-	if existing, ok := s.records[key]; ok && existing.LearnedFrom == LearnedFromLive {
-		if existing.EngineParams == nil || sameArguments(*existing.EngineParams, params) {
+	// its first scale-from-zero order was sized ~25x too small. The
+	// PARAMETERS do take the new image: left on the old one, the
+	// fingerprint, wva_engine_config and the snapshot's configuration tag
+	// kept naming the old release, and the next restart, reading the new
+	// image, restored nothing.
+	//
+	// The hardware is compared too: a variant moved to another GPU product,
+	// or to another GPU count, was measured on hardware it no longer runs on.
+	// An unresolved accelerator on either side is not a move. Data and
+	// pipeline parallelism are not parsed (EngineParams has neither), so a
+	// reshape that changes only them is not seen here -- a known limit.
+	//
+	// This function writes the record afresh every cycle, so what it carried
+	// from the live record it replaced is carried again from its own record
+	// on the next cycle; otherwise the bound held for one cycle only.
+	var carriedKv, priorLive int64
+	existing, ok := s.records[key]
+	sameHW := ok && sameHardware(existing, accelerator, gpuCount)
+	if ok && existing.LearnedFrom == LearnedFromLive {
+		if existing.EngineParams == nil {
 			return
 		}
-		// What the KV cache holds is a property of the memory, not of the
-		// scheduler flags. While nothing that shapes it changed, the measured
-		// total stays this variant's k1, so the derived estimate a parked
-		// variant falls back to is bounded by it (estimateStoredCapacity's
-		// own-k1 bound) rather than by nothing.
-		if sameKVGeometry(*existing.EngineParams, params) {
-			carriedKv = existing.TotalKvCapacityTokens
+		if sameHW && sameArguments(*existing.EngineParams, params) {
+			if existing.EngineParams.Image != params.Image {
+				// A copy: Get hands out the store's own record.
+				swapped := *existing
+				swapped.EngineParams = &params
+				s.records[key] = &swapped
+			}
+			return
 		}
+		// What the variant was last measured at stays a ceiling on what it
+		// is priced at until it is measured again. The derived estimate it
+		// falls back to otherwise has no bound at all when the cache's
+		// geometry changed and no sibling runs the new flags yet.
+		priorLive = existing.EffectiveCapacity
+	} else if ok {
+		priorLive = existing.PriorLiveCapacity
+	}
+	// What the KV cache holds is a property of the memory, not of the
+	// scheduler flags. While nothing that shapes it changed, the measured
+	// total stays this variant's k1, so the derived estimate a parked variant
+	// falls back to is bounded by it (estimateStoredCapacity's own-k1 bound).
+	if sameHW && existing.EngineParams != nil && kvTotalCarries(*existing.EngineParams, params) {
+		carriedKv = existing.TotalKvCapacityTokens
 	}
 	record := &Record{
-		AcceleratorName: accelerator,
-		GpuCount:        gpuCount,
-		EngineParams:    &params,
-		LearnedFrom:     "deployment", // same for deployment and LWS
-		LearnedAt:       time.Now(),
+		AcceleratorName:   accelerator,
+		GpuCount:          gpuCount,
+		EngineParams:      &params,
+		PriorLiveCapacity: priorLive,
+		LearnedFrom:       "deployment", // same for deployment and LWS
+		LearnedAt:         time.Now(),
 	}
 
 	// k1: the measured KV total carried across a flag change, or, if
@@ -344,16 +384,41 @@ func sameArguments(a, b EngineParams) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// sameKVGeometry reports whether two parses size the KV cache alike: the
-// engine and image, the model's dtypes and quantization, the memory share,
-// the block size, the parallelism, and the overrides that set it outright.
-// Scheduler flags -- --max-num-seqs, the batch-token budget, the context
-// length -- decide how the cache is used, not how big it is.
-func sameKVGeometry(a, b EngineParams) bool {
-	return a.Engine == b.Engine && a.Image == b.Image &&
-		a.WeightDtype == b.WeightDtype && a.Quantization == b.Quantization &&
-		a.GpuMemoryUtilization == b.GpuMemoryUtilization && a.BlockSize == b.BlockSize &&
-		a.KvCacheDtype == b.KvCacheDtype && a.TensorParallelSize == b.TensorParallelSize &&
-		a.NumGpuBlocksOverride == b.NumGpuBlocksOverride && a.TotalKvTokensOverride == b.TotalKvTokensOverride &&
-		a.EnforceEager == b.EnforceEager
+// sameHardware reports whether a record was learned on the hardware a
+// variant now runs on. An unresolved accelerator, or an unknown GPU count, on
+// either side is not taken as a difference: the reading flips with pod
+// placement, and a move is only a move when both ends are known.
+func sameHardware(rec *Record, accelerator string, gpuCount int) bool {
+	if constants.IsAcceleratorResolved(rec.AcceleratorName) && constants.IsAcceleratorResolved(accelerator) &&
+		rec.AcceleratorName != accelerator {
+		return false
+	}
+	return rec.GpuCount <= 0 || gpuCount <= 0 || rec.GpuCount == gpuCount
+}
+
+// kvTotalCarries reports whether a KV total measured under prev still bounds
+// an engine started with cur, so it may stand as the new engine's k1.
+//
+// The cache must be sized alike: the engine, the model's dtypes and
+// quantization, the memory share, the block size, the tensor parallelism,
+// CUDA graphs, and the overrides that set it outright. The image is not
+// compared: a release can move the cache a little either way, and the
+// carried total is then off by as much -- the same allowance
+// IsCapacityCompatible makes.
+//
+// The per-step budgets are compared one way. vLLM sizes the cache from what
+// its profiling run leaves free, and that run's peak grows with the batch-token
+// budget and, through the CUDA graphs it captures, with --max-num-seqs. A
+// smaller budget leaves the cache no smaller, so the old total under-states
+// it and orders more replicas, not fewer; a larger one can shrink it, and the
+// old total would over-state it, so it is not carried. The context length
+// decides how the cache is used, not how big it is.
+func kvTotalCarries(prev, cur EngineParams) bool {
+	return prev.Engine == cur.Engine &&
+		prev.WeightDtype == cur.WeightDtype && prev.Quantization == cur.Quantization &&
+		prev.GpuMemoryUtilization == cur.GpuMemoryUtilization && prev.BlockSize == cur.BlockSize &&
+		prev.KvCacheDtype == cur.KvCacheDtype && prev.TensorParallelSize == cur.TensorParallelSize &&
+		prev.NumGpuBlocksOverride == cur.NumGpuBlocksOverride && prev.TotalKvTokensOverride == cur.TotalKvTokensOverride &&
+		prev.EnforceEager == cur.EnforceEager &&
+		cur.EffectiveMaxBatchedTokens <= prev.EffectiveMaxBatchedTokens && cur.MaxNumSeqs <= prev.MaxNumSeqs
 }
