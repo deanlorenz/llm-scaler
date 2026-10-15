@@ -1244,9 +1244,12 @@ floor rather than drive anything: these are observations of arithmetic the
 analyzer already does, and none of them is a scaling input for KEDA or an HPA
 to threshold. All are set from one record per variant per cycle, beside
 `wva_analyzer_target`, and a series is deleted when its variant or model stops
-being analyzed, and on any cycle where the model has no scraped replica (a
+being analyzed, and on a cycle whose collection returned no replica rows (a
 model scaled to zero, or one whose pods are not scraped), so a parked fleet
-does not keep its last rate.
+does not keep its last rate. A cycle whose metrics query or analysis fails
+deletes nothing: these series keep their last values, as `wva_analyzer_target`
+does, so during a Prometheus outage they show the last cycle that priced the
+model, not the current one.
 
 Labels are the ones `wva_analyzer_target` and `wva_engine_config` carry, so the
 three join directly. `namespace` is the **model's** namespace and arrives in
@@ -1281,7 +1284,7 @@ per pod.
 - **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included, and absent while none of its replicas reports. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
-- **Example**: decode variants still without a line of their own:
+- **Example**: serving decode variants with no usable line this cycle, their own or a borrowed one:
   ```promql
   wva_itl_line_samples unless on (exported_namespace, model_name, variant_name) wva_itl_line_slope
   ```

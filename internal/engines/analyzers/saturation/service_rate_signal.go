@@ -47,10 +47,10 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 		name := variants[i].VariantName
 		sig := &domain.ServiceRateSignal{Role: canonicalRole(c.rolesByVariant[name])}
 		serving := variants[i].ObservedReplicas > 0
-		// Present for every variant that keeps a window, zero included. A
-		// window holding nothing is the commonest reason a decode variant has
-		// no line -- the ~28 cycles a fit takes from load start -- and a
-		// series that vanished with the line could not say so.
+		// Present for every serving variant that keeps a window, zero
+		// included. A window holding nothing is the commonest reason a decode
+		// variant has no line -- the ~28 cycles a fit takes from load start --
+		// and a series that vanished with the line could not say so.
 		if n, ok := c.itlSamples[name]; ok && serving {
 			sig.ITLWindowed = true
 			sig.LineSamples = n

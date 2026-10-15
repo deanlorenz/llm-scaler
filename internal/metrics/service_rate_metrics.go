@@ -50,8 +50,9 @@ func registerServiceRateMetrics(registry prometheus.Registerer) error {
 		return prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: name, Help: help}, labels)
 	}
 	itlLineSlope = gauge(constants.WVAITLLineSlope,
-		"Slope A of the ITL(k) = A*k + B line a decode variant is priced on this cycle (own or borrowed), "+
-			"in seconds per unit of KV utilization. Absent while the variant has no line; see wva_itl_line_samples.",
+		"Slope A of the ITL(k) = A*k + B line a decode variant would derive its service rate from this cycle "+
+			"(own or borrowed), in seconds per unit of KV utilization. Absent while the variant has no line positive "+
+			"at wva_pricing_k, and while none of its replicas reports; see wva_itl_line_samples.",
 		variantLabels)
 	itlLineIntercept = gauge(constants.WVAITLLineIntercept,
 		"Intercept B of the ITL(k) line a decode variant is priced on, in seconds: the inter-token latency at an "+
@@ -62,13 +63,15 @@ func registerServiceRateMetrics(registry prometheus.Registerer) error {
 			"is priced at. Absent while the variant has no line.",
 		variantLabels)
 	itlLineSamples = gauge(constants.WVAITLLineSamples,
-		"How many (k, ITL) readings a decode variant's own ITL window holds. Published with no line too, zero "+
-			"included: a line needs enough readings spread far enough apart in k, and this is what explains its absence.",
+		"How many (k, ITL) readings a decode variant's own ITL window holds, while its replicas report. Published "+
+			"with no line too, zero included: a line needs enough readings spread far enough apart in k, and this is "+
+			"what explains its absence.",
 		variantLabels)
 	serviceRatePerReplica = gauge(constants.WVAServiceRatePerReplica,
 		"Saturated completion rate (requests/s) one replica of a variant is priced at: the median over its own "+
-			"replicas, never a bridge. source is derived (from the ITL line), measured (the variant's own "+
-			"saturated window for the shape served) or neighbour (a neighbouring shape bucket's window). "+
+			"replicas, never a bridge. source is derived (from the variant's own ITL line), borrowed-line (from a "+
+			"line a sibling with the same engine configuration fitted), measured (the variant's own saturated "+
+			"window for the shape served) or neighbour (a neighbouring shape bucket's window). "+
 			"Absent while no replica has a rate. A diagnostic, not a scaling input.",
 		rateLabels)
 	pricingK = gauge(constants.WVAPricingK,

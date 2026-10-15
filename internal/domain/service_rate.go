@@ -40,10 +40,12 @@ const (
 // wva_service_rate_per_replica series (docs/proposals/signals-as-metrics.md,
 // "Making it not rot"). Diagnostic only: nothing sizes capacity from it.
 type ServiceRateSignal struct {
-	// HasLine is set when the variant was priced on an ITL(k) = A*k + B line
-	// this cycle, its own or a borrowed one. LineSlope is A and LineIntercept
-	// is B, in seconds; ITLAtPricingK is the line evaluated at the pricing k
-	// (AnalyzerResult.PricingK). All three are zero when HasLine is false.
+	// HasLine is set when the variant has an ITL(k) = A*k + B line this
+	// cycle, its own or a borrowed one, that is positive at the pricing k --
+	// the line a derived rate would come from -- and has replicas reporting.
+	// LineSlope is A and LineIntercept is B, in seconds; ITLAtPricingK is the
+	// line evaluated at the pricing k (AnalyzerResult.PricingK). All three are
+	// zero when HasLine is false.
 	HasLine       bool
 	LineSlope     float64
 	LineIntercept float64
@@ -51,9 +53,11 @@ type ServiceRateSignal struct {
 
 	// ITLWindowed is set for a variant that keeps an ITL window -- decode
 	// only, because ITL is the gap between generated tokens and a prefill
-	// replica generates one. LineSamples is how many (k, ITL) readings the
-	// variant's OWN window holds, published even when it is zero and there is
-	// no line: it is the number that explains an absent one.
+	// replica generates one -- and has replicas reporting: a variant parked at
+	// zero keeps its window for a while and publishes none of it. LineSamples
+	// is how many (k, ITL) readings the variant's OWN window holds, published
+	// even when it is zero and there is no line: it is the number that
+	// explains an absent one.
 	ITLWindowed bool
 	LineSamples int
 

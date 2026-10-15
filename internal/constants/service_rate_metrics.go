@@ -8,10 +8,11 @@ package constants
 // for KEDA or an HPA to threshold.
 const (
 	// WVAITLLineSlope is a per-variant gauge: A of the ITL(k) = A*k + B line
-	// a decode variant is priced on this cycle, its own or one borrowed from a
-	// sibling with the same engine configuration. Seconds per unit of KV
-	// utilization. Absent while the variant has no line. Labels: namespace,
-	// model_name, variant_name.
+	// a decode variant would derive its service rate from this cycle, its own
+	// or one borrowed from a sibling with the same engine configuration.
+	// Seconds per unit of KV utilization. Absent while the variant has no line
+	// positive at the pricing k, and while none of its replicas reports.
+	// Labels: namespace, model_name, variant_name.
 	WVAITLLineSlope = "wva_itl_line_slope"
 	// WVAITLLineIntercept is B of the same line, in seconds: the inter-token
 	// latency at an empty cache. Same labels and absence as WVAITLLineSlope.
@@ -21,14 +22,16 @@ const (
 	// and absence as WVAITLLineSlope.
 	WVAITLSecondsAtPricingK = "wva_itl_seconds_at_pricing_k"
 	// WVAITLLineSamples is a per-variant gauge: how many (k, ITL) readings a
-	// decode variant's OWN ITL window holds. Published while the variant has
-	// no line, zero included, because it is what explains the absence.
+	// decode variant's OWN ITL window holds, while its replicas report.
+	// Published while the variant has no line, zero included, because it is
+	// what explains the absence.
 	// Labels: namespace, model_name, variant_name.
 	WVAITLLineSamples = "wva_itl_line_samples"
 	// WVAServiceRatePerReplica is a per-variant gauge: the saturated
 	// completion rate (requests/s) one replica is priced at -- the median over
 	// the variant's own replicas that have one. One series per variant;
-	// source names the path that answered (derived, measured, neighbour).
+	// source names the path that answered (derived, borrowed-line, measured,
+	// neighbour).
 	// Absent while no own replica has a rate. Labels: namespace, model_name,
 	// variant_name, role, source.
 	WVAServiceRatePerReplica = "wva_service_rate_per_replica"
