@@ -21,8 +21,13 @@ set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/deploy/warmpool.sh"
 FAILED=0
 
-ok()   { printf 'ok    %s\n' "$1"; }
-fail() { printf 'FAIL  %s\n' "$1"; FAILED=1; }
+# Every case reports ok or FAIL exactly once. A run that ends early, or a case
+# that silently stops running, otherwise passes having checked less than it
+# says. Change this deliberately with the cases.
+EXPECT_CASES=66
+CASES=0
+ok()   { CASES=$((CASES + 1)); printf 'ok    %s\n' "$1"; }
+fail() { CASES=$((CASES + 1)); printf 'FAIL  %s\n' "$1"; FAILED=1; }
 
 # render prints the manifests for a pool, or nothing if the script failed.
 render() {
@@ -49,7 +54,7 @@ ok "create --dry-run produces manifests"
 
 # Parseable. A rendering bug usually shows up here first, and as a YAML error
 # rather than as anything about pools.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if printf '%s\n' "$POOL" | python3 -c '
 import sys, yaml
 docs = list(yaml.safe_load_all(sys.stdin))
@@ -59,6 +64,8 @@ sys.exit(0 if all(d for d in docs) else 1)
   else
     fail "a rendered document does not parse as YAML"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 [ "$(count_kind "$POOL" Deployment)" = 1 ] \
@@ -107,7 +114,7 @@ fi
 # assertion below still passed, and a drain that drains nothing says nothing. So
 # this compares the DELIVERED program with the manifest's, character for
 # character, which is the only comparison that could have failed.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if printf '%s\n' "$POOL" | python3 -c '
 import ast, sys, yaml
 
@@ -159,6 +166,8 @@ for where, program in sorted(got.items()):
   else
     fail "an embedded python program was corrupted in rendering, or no longer matches the manifest"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 # THE ONE THAT SHIPPED BROKEN. A pool with no ScaledObject is not a pool: it is
@@ -370,7 +379,7 @@ fi
 #
 # The SERVING rule specifically: the control rule below it names a namespace on
 # purpose, and must go on doing so.
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   if python3 -c '
 import sys, yaml
 
@@ -392,6 +401,8 @@ sys.exit(0)
   else
     fail "the shipped NetworkPolicy admits a namespace on the serving port; only the installer knows which one"
   fi
+else
+  fail "python3 with PyYAML is required for this check; install it (pip install pyyaml)"
 fi
 
 # --- the e2e suite must not leave the policy behind ------------------------
@@ -699,6 +710,10 @@ else
 fi
 rm -rf "$WP_STUB"
 
+if [ "$CASES" -ne "$EXPECT_CASES" ]; then
+  echo "FAIL  $CASES case(s) ran, $EXPECT_CASES expected -- the run did not finish, or a case was added without updating EXPECT_CASES"
+  FAILED=1
+fi
 if [ "$FAILED" -eq 0 ]; then
   echo "Warm pool manifest checks passed."
 else
