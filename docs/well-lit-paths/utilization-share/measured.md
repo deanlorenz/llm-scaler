@@ -19,7 +19,7 @@ The tables below are that report's, unedited, except where a row says it came
 from the controller log. Five later runs, on a scenario with different burst
 shapes, follow in
 [their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
-they found failures the first scenario could not show. Two runs with both models
+they found failures the first scenario could not show. Three runs with both models
 [P/D-disaggregated](#pd-two-disaggregated-models-under-one-quota) close the
 page. Every run used 1 GPU per replica.
 
@@ -480,14 +480,17 @@ whether the cluster scenario's second burst recovers.
 
 The same three arms ran on two P/D-disaggregated models, each with its own
 prefill and decode Deployment, so **four roles** competed for one quota. It
-ran twice. The second run, on 2026-10-14 to 2026-10-15, is the result below.
-It sent Llama shorter prompts (15 000 tokens) and let the router queue a
-request for 60 s. The [first run](#the-first-pd-run-20-000-token-prompts-30-s-router-ttl)
+ran three times. The second run (2026-10-14 to 2026-10-15) and the third
+(2026-10-15) used the same settings, and they are the result below, side by
+side. Both sent Llama 15 000-token prompts and let the router queue a request
+for 60 s. The [first run](#the-first-pd-run-20-000-token-prompts-30-s-router-ttl)
 sent 20 000-token prompts and dropped requests after 30 s; it is kept below.
-Both runs used the same controller, deployed by digest
+All three runs used the same controller, deployed by digest
 (`sha256:13c196c6…`), and the same scenario file,
 `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`, with the
-differences above.
+differences above. One more attempt, between the second and third runs, was
+thrown away: in its `today` arm, other workloads on the cluster preempted 8 of
+the engine Pods, so its numbers measured the cluster, not the scaling manager.
 
 | | |
 | --- | --- |
@@ -500,59 +503,94 @@ differences above.
 | router | EPP v0.11.0, flow control on, `defaultRequestTTL: 60s` |
 | engine CPU | 4 CPU requested per Pod, no CPU limit |
 | time to first token | measured at the client: the load generator, on streamed responses, through the gateway |
-| guards | each arm was checked for outside disruption: no engine preempted, nothing outside the benchmark scaled a role down, and no role at 0 ready Pods for over 120 s. All three arms passed |
+| guards | each arm was checked for outside disruption: no engine preempted, nothing outside the benchmark scaled a role down, and no role at 0 ready Pods for over 120 s. All three arms of both runs passed |
 
 ### Time to first token, per rise (ms)
 
-| model | arm | served | failed | p50 | p95 | max |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Llama (A) | today | 844 | 116 | 55 427 | 95 551 | 106 427 |
-| Llama (A) | shadow | 931 | 29 | 46 073 | 71 966 | 79 013 |
-| Llama (A) | share | 960 | 0 | 1 257 | **6 013** | 8 346 |
-| Qwen (B) | today | 240 | 0 | 13 786 | 51 164 | 60 330 |
-| Qwen (B) | shadow | 240 | 0 | 132 | 46 893 | 61 474 |
-| Qwen (B) | share | 240 | 0 | 79 | **90** | 131 |
+Each rise is the first 240 s of a burst: 960 Llama requests, 240 Qwen
+requests. Each cell is second run / third run.
 
-Whole run, p95 (today / shadow / share): Llama 62 508 / 54 456 / 2 441 ms,
-Qwen 21 716 / 14 041 / 87 ms.
+| model | arm | failed | p50 | p95 | max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Llama (A) | today | 116 / 123 | 55 427 / 53 060 | 95 551 / 99 850 | 106 427 / 109 246 |
+| Llama (A) | shadow | 29 / 9 | 46 073 / 47 333 | 71 966 / 68 241 | 79 013 / 75 327 |
+| Llama (A) | share | 0 / 0 | 1 257 / 1 043 | **6 013 / 3 530** | 8 346 / 6 415 |
+| Qwen (B) | today | 0 / 0 | 13 786 / 34 592 | 51 164 / 73 252 | 60 330 / 90 299 |
+| Qwen (B) | shadow | 0 / 0 | 132 / 6 293 | 46 893 / 50 950 | 61 474 / 56 544 |
+| Qwen (B) | share | 0 / 0 | 79 / 80 | **90 / 93** | 131 / 3 816 |
+
+Whole run, p95 (today / shadow / share): Llama 62 508 / 54 456 / 2 441 ms in
+the second run and 62 779 / 55 118 / 2 079 ms in the third; Qwen 21 716 /
+14 041 / 87 ms and 47 724 / 20 622 / 88 ms.
+
+### When each model started growing
+
+From the fleet sampler (one sample about every 5 s), in seconds after the load
+generator started the burst. Each cell is second run / third run.
+
+| model | arm | at the burst (prefill + decode) | asked for more | first new replica ready | most replicas ready |
+| --- | --- | --- | ---: | ---: | --- |
+| Llama (A) | today | 1 + 1 | +31 / +48 | +118 / +106 | 6 at +357 / 6 at +324 |
+| Llama (A) | shadow | 1 + 1 | +37 / +28 | +93 / +86 | 6 at +126 / 7 at +334 |
+| Llama (A) | share | **2 + 2** | +57 / +44 | +109 / +97 | 7 at +271 / 7 at +247 |
+| Qwen (B) | today | 1 + 1 | +50 / +62 | +101 / +113 | 5 at +161 / 5 at +173 |
+| Qwen (B) | shadow | 1 + 1 | +59 / +50 | +107 / +109 | 5 at +176 / 5 at +164 |
+| Qwen (B) | share | **1 + 2** | +42 / +58 | +97 / +109 | 6 at +952 / 6 at +1027 |
 
 ### Accelerators
 
 | arm | GPU-seconds | peak GPUs |
 | --- | ---: | ---: |
-| today | 18 961 | 10 |
-| shadow | 18 879 | 10 |
-| share | 26 332 (+38.9%) | 10 |
+| today | 18 961 / 18 336 | 10 / 8 |
+| shadow | 18 879 / 19 541 | 10 / 9 |
+| share | 26 332 (+38.9%) / 26 242 (+43.1%) | 10 / 10 |
 
 ### What the optimizer did
 
-In the share arm, sharing moved a GPU 10 times, and every move finished.
-For 2880 model-seconds a model was kept from growing: 2730 s because its floor
-was pinned (`floor-pinned`) and 150 s while a GPU was being released
-(`awaiting-release`). The shadow arm planned moves for 2790 s and made none.
+In the share arm of each run, sharing finished 10 moves, cancelled one and
+aborted none. In both runs a model was kept from growing for 2880
+model-seconds, nearly all because its floor was pinned (`floor-pinned`: 2730 s
+and 2775 s); the rest waited while a GPU was being released
+(`awaiting-release`: 150 s and 105 s). The shadow arm planned moves for 2790 s
+in each run and made none.
 
 ### What this says, and how far it goes
 
-- **Both bursts were served with sharing.** Qwen's output-heavy burst: p95
-  90 ms against 51 s today. Llama's prompt-heavy burst: p95 6.0 s against
-  96 s today, and no failed requests against 116.
-- **Sharing cost 39% more GPU-seconds.** The quota was binding (peak 10 of 10)
-  in every arm. The extra GPU-seconds are GPUs the quota allowed and today's
-  optimizer did not use. Here sharing made bursts faster and cost GPUs; it
-  did not save any.
+- **Sharing served both bursts, in both runs.** Qwen's output-heavy burst:
+  p95 90 ms and 93 ms, against 51 s and 73 s today. Llama's prompt-heavy
+  burst: p95 6.0 s and 3.5 s, against 96 s and 100 s today, with no failed
+  requests against 116 and 123.
+- **Where it loses is GPUs.** Sharing cost 39% more GPU-seconds in the second
+  run and 43% in the third. It made bursts faster and cost GPUs; it did not
+  save any.
+- **Llama was not held back at the swap.** In both runs it began its burst on
+  2 prefill and 2 decode replicas instead of 1 and 1, and asked for more
+  within a minute, as under today's optimizer. Its first new replica was ready
+  about as soon as today's (97–109 s against 106–118 s). The swap delay seen
+  in the first scenario on this page did not appear here.
 - **The failures are requests the router dropped.** Every failed request was a
   429 (the report files it as "Rate Limit"); the load generator's per-request
   records give the router's reason, `request evicted from queue: request TTL
-  expired`, after 60 s in its queue. A dropped request is missing from the percentiles, so today's
-  and shadow's Llama p95 are lower bounds.
-- **The spread between arms is large.** Shadow moves nothing, so it should
-  match today, yet its Llama p95 was 24 s lower. The share arm's gap (96 s to
-  6 s) is far larger than that, but this is one run with one rise per model.
-- **The two runs cannot be compared on prompt length alone.** In the first
-  run, with 20 000-token prompts, Llama's burst was overloaded in every arm,
-  share included (p95 59 s). This run changed two things: shorter prompts and
-  a longer router TTL (and the first run's CPU setting is not recorded). A
-  second run at this load was in progress on 2026-10-15.
+  expired`, after 60 s in its queue. A dropped request is missing from the
+  percentiles, so today's and shadow's Llama p95 are lower bounds.
+- **The two runs agree on the direction and on the cost.** Share was far
+  ahead on both rises in both runs, served every request, and cost 39–43%
+  more GPU-seconds.
+- **They disagree on the arms that should match.** Shadow moves nothing, so it
+  should match today. Its Llama p95 was 24 s lower in the second run and 32 s
+  lower in the third. On Qwen's rise, today's median went from 14 s to 35 s
+  between runs, and shadow's from 0.13 s to 6.3 s. Share's own gap from today
+  is far larger than this spread, but two runs are two samples, not a
+  distribution.
+- **The quota did not bind every arm in the third run.** In the second run
+  every arm peaked at 10 of 10 GPUs. In the third, today peaked at 8 and
+  shadow at 9, so the quota was not what slowed their bursts there.
+- **Share's Qwen tail had one outlier in the third run**: a maximum of 3.8 s
+  against 131 ms, while its p95 stayed at 93 ms.
+- **Prompt length and router TTL both changed from the first run.** With
+  20 000-token prompts, Llama's burst was overloaded in every arm, share
+  included (p95 59 s). So the first run cannot be compared with the other two
+  on prompt length alone (and its CPU setting is not recorded).
 
 ### The first P/D run (20 000-token prompts, 30 s router TTL)
 
