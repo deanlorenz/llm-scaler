@@ -35,12 +35,23 @@ type modelGroup struct {
 	namespace string
 	modelID   string
 	variants  []wvav1alpha1.VariantAutoscaling
+	// modelTiers are the tiers the WHOLE model resolves under, running variants
+	// included (config.ModelTiers). nil means only variants is known.
+	modelTiers []string
 }
 
 // tiers returns the policy tiers the model is resolved under: the ones its
 // variants name, or "" (the default entry) when none names one
 // (config.ModelTiers).
+//
+// The tiers come from all of the model's variants, running ones included, as
+// the steady-state planner resolves them. The inactive variants alone are not
+// enough: a P/D model whose decode is tagged and running and whose prefill is
+// untagged and parked would otherwise wake its prefill under the default entry.
 func (g modelGroup) tiers() []string {
+	if g.modelTiers != nil {
+		return g.modelTiers
+	}
 	named := make([]string, 0, len(g.variants))
 	for i := range g.variants {
 		named = append(named, g.variants[i].Spec.ScalingPolicy)
@@ -59,9 +70,14 @@ func modelKey(namespace, modelID string) string {
 
 // groupInactiveByModel buckets inactive variants by (namespace, model). Groups
 // are returned in a stable order so repeated ticks process models the same way.
-func groupInactiveByModel(vas []wvav1alpha1.VariantAutoscaling) []modelGroup {
+//
+// active are the variants that are running. They form no group, but they name
+// tiers too: each group's tiers come from all of its model's variants, so a
+// wake resolves the model under the same tiers as the planner.
+func groupInactiveByModel(inactive, active []wvav1alpha1.VariantAutoscaling) []modelGroup {
 	byKey := make(map[string]*modelGroup)
-	for _, va := range vas {
+	named := make(map[string][]string)
+	for _, va := range inactive {
 		key := modelKey(va.Namespace, va.Spec.ModelID)
 		g, ok := byKey[key]
 		if !ok {
@@ -69,10 +85,18 @@ func groupInactiveByModel(vas []wvav1alpha1.VariantAutoscaling) []modelGroup {
 			byKey[key] = g
 		}
 		g.variants = append(g.variants, va)
+		named[key] = append(named[key], va.Spec.ScalingPolicy)
+	}
+	for _, va := range active {
+		key := modelKey(va.Namespace, va.Spec.ModelID)
+		if _, ok := byKey[key]; ok {
+			named[key] = append(named[key], va.Spec.ScalingPolicy)
+		}
 	}
 
 	groups := make([]modelGroup, 0, len(byKey))
-	for _, g := range byKey {
+	for key, g := range byKey {
+		g.modelTiers = config.ModelTiers(named[key])
 		groups = append(groups, *g)
 	}
 	sort.Slice(groups, func(i, j int) bool {

@@ -295,7 +295,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// and every variant of a model shares one EPP queue, so grouping also
 	// collapses what used to be one EPP scrape per inactive variant into one per
 	// model.
-	groups := groupInactiveByModel(inactiveVAs)
+	groups := groupInactiveByModel(inactiveVAs, activeVAs)
 	logger.V(logging.DEBUG).Info("Grouped inactive variants by model", "models", len(groups))
 
 	// Keep the refusal bookkeeping to the models still under consideration; it
