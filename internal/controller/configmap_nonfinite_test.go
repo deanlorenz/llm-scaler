@@ -45,3 +45,35 @@ func TestNonFinitePriorityAndScoreAreClearedAtLoad(t *testing.T) {
 			got.Priority, got.AnalyzerScore("saturation"), got.AnalyzerScore("throughput"))
 	}
 }
+
+// A cleared value inherits the layer below: a tier or per-model entry that
+// writes .inf or .nan gets the default entry's value, not the built-in one.
+// An analyzers list replaces the default's whole, so a cleared score there
+// is the built-in 1.
+func TestClearedNonFiniteValueInheritsTheDefaultEntry(t *testing.T) {
+	data := map[string]string{
+		"default":  "priority: 7\nkvCacheThreshold: 0.8\nanalyzers:\n  - name: saturation\n    score: 3\n",
+		"batch":    "priority: .inf\nkvCacheThreshold: .nan\n",
+		"team-b":   "model_id: m\nnamespace: team-b\npriority: .nan\n",
+		"scored":   "analyzers:\n  - name: saturation\n    score: .inf\n",
+		"negative": "analyzers:\n  - name: saturation\n    parameters:\n      score: -2\n",
+	}
+	configs, _, rejected, ignored := parseScalingPolicyConfigRejects(data, logr.Discard())
+	if len(rejected) != 0 {
+		t.Fatalf("rejected %v, want every entry kept", rejected)
+	}
+	tier := config.ResolveScalingPolicyForTier(configs, "other", "ns", "batch")
+	if tier.Priority != 7 || tier.KvCacheThreshold != 0.8 || tier.AnalyzerScore("saturation") != 3 {
+		t.Errorf("tier resolved priority %v, kvCacheThreshold %v, score %v; want 7, 0.8, 3",
+			tier.Priority, tier.KvCacheThreshold, tier.AnalyzerScore("saturation"))
+	}
+	if got := config.ResolveScalingPolicyForTier(configs, "m", "team-b", ""); got.Priority != 7 {
+		t.Errorf("per-model entry resolved priority %v, want the default entry's 7", got.Priority)
+	}
+	if got := config.ResolveScalingPolicyForTier(configs, "other", "ns", "scored"); got.AnalyzerScore("saturation") != 1 {
+		t.Errorf("tier analyzers list resolved score %v, want the built-in 1", got.AnalyzerScore("saturation"))
+	}
+	if n := ignored["negative"]; len(n) != 1 || n[0].Field != "analyzers[0].score" || n[0].Value != "-2" {
+		t.Errorf("negative parameters.score ignored %+v, want analyzers[0].score=-2", n)
+	}
+}

@@ -94,14 +94,19 @@ when no variant of the model names a tier.
 - A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
   `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
   `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
-  `scaleDownBoundary`. An infinite `priority` or `score` does not put a model
-  first: under a GPU limiter it put the model last. For strict precedence, a
-  finite `priority` such as 5 is enough.
-- An analyzer `score` below zero.
+  `scaleDownBoundary`. Do not use `.inf` for precedence: a finite `priority`
+  such as 5 already gives strict precedence under a GPU limiter.
+- An analyzer `score` below zero. It is read as 1, as before; the change is
+  that it is now reported.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in
 value (10m for the retention). Everything else in the entry still applies.
+
+An analyzer's fields are the exception. The `analyzers` list is never merged
+with the layer below; an entry that sets it replaces it whole. So a skipped
+analyzer `score` is 1, and a skipped analyzer `scaleUpThreshold` or
+`scaleDownBoundary` uses the same policy's own band.
 
 You can see a skipped value in these places:
 
