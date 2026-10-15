@@ -67,7 +67,7 @@ done
 unset ENVIRONMENT_EXPLICIT PROMETHEUS_URL_EXPLICIT DEPLOY_PROMETHEUS \
       WVA_IMAGE_REPO WVA_IMAGE_TAG WVA_IMAGE_DIGEST WVA_DEFAULT_IMAGE_REF WVA_WATCH_NS
 
-EXPECT_CASES=140
+EXPECT_CASES=146
 RAN=0
 FAILED=0
 
@@ -240,6 +240,17 @@ check 'tls: prometheus-operated named by the caller is not assumed to be ours: v
         'https://prometheus-operated.our-mon.svc.cluster.local:9090')"
 check 'tls: the default Service named by the caller is still the own stack' 'true' \
     "$(skip_for kubernetes "$OWN_URL" '' true "$OWN_URL")"
+# The host is what the URL connects to. With userinfo, the stack name sits
+# before the "@" and the connection goes after it: these were judged the own
+# stack, and the token went to evil.example.com unverified.
+check 'tls: userinfo naming the stack is not the own stack (port-like)' 'unset' \
+    "$(skip_for kubernetes 'https://kube-prometheus-stack-prometheus.our-mon.svc:443@evil.example.com/' '')"
+check 'tls: userinfo naming the stack is not the own stack (user:password)' 'unset' \
+    "$(skip_for kubernetes 'https://kube-prometheus-stack-prometheus.our-mon.svc:x@evil.example.com:9090' '')"
+check 'tls: the stack name in the path is not the own stack' 'unset' \
+    "$(skip_for kubernetes 'https://evil.example.com/kube-prometheus-stack-prometheus.our-mon.svc.cluster.local:9090' '')"
+check 'tls: a query or fragment is not the own stack' 'unset|unset' \
+    "$(skip_for kubernetes "$OWN_URL?x=1" '')|$(skip_for kubernetes "$OWN_URL#f" '')"
 
 # An UPGRADE. Earlier releases shipped verification off for every Prometheus,
 # and the installer re-renders the whole config.yaml, so a controller that
@@ -363,26 +374,44 @@ check 'tls upgrade: the own stack with live true stays off, no upgrade warning' 
 
 # The write path after the apply: what it patches into the live config. A stub
 # kubectl answers the read-back; patch_manager_config records each expression.
-write_tls() { # write_tls <live skip> <live CA> <URL>: prints the patches, then the warnings seen
+write_tls() { # write_tls <live skip> <live CA> <URL>: prints <skip>;<CA> as patched, then the warnings seen
     (
         P="$(mktemp)"
-        patch_manager_config() { printf '%s\n' "$1" >> "$P"; }
+        printf '%s\n' "$SHIPPED_CFG" > "$P"
+        # Each patch is APPLIED, with the environment the caller gave it, so a
+        # value passed through strenv is checked as well as a spliced one.
+        patch_manager_config() { local c; c="$(yq "$1" "$P" 2>/dev/null)" && printf '%s\n' "$c" > "$P"; }
         kubectl() { printf '%s\n' "$SHIPPED_CFG"; }
         WVA_NS=wns WVA_SCOPE=namespace INSTALL_PHASE_EXPLICIT='' ENVIRONMENT=kubernetes
         WVA_LIVE_PROM_TLS=read WVA_LIVE_SKIP_VERIFY="$1" WVA_LIVE_CA_PATH="$2" WVA_LIVE_PROM_URL="$3"
         PROMETHEUS_URL="$3" PROMETHEUS_URL_EXPLICIT="$3" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' PROMETHEUS_CA_CERT_PATH=''
         DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
         out="$(wva_write_prometheus_settings 2>&1)"
-        grep -E 'SKIP_VERIFY|CA_CERT' "$P" | paste -sd';' -
+        printf '%s;%s\n' "$(yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' "$P")" "$(yq -r '.PROMETHEUS_CA_CERT_PATH // ""' "$P")"
         printf '%s\n' "$out" | grep -c 'stays OFF, as it was before this upgrade'
+        [ -z "${WRITE_TLS_URL_OUT:-}" ] || yq -r '.PROMETHEUS_BASE_URL' "$P" > "$WRITE_TLS_URL_OUT"
         rm -f "$P"
     )
 }
 check 'tls write: live true, no CA, same Prometheus: patches true and says it stays off' \
-    "$(printf '%s\n%s' '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true"' 1)" "$(write_tls true '' "$EXT_URL")"
+    "$(printf '%s\n%s' 'true;' 1)" "$(write_tls true '' "$EXT_URL")"
 check 'tls write: live CA: patches verify and the CA path' \
-    "$(printf '%s\n%s' '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false";.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)' 0)" \
+    "$(printf '%s\n%s' 'false;/etc/ca/ca.crt' 0)" \
     "$(write_tls false /etc/ca/ca.crt "$EXT_URL")"
+# The URL goes in through strenv. Spliced into the program text, a quote in it
+# was yq syntax: the patch failed, or did what the URL said.
+QUOTE_URL='https://prom.obs.svc:9090/x" | .PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "true'
+WRITE_TLS_URL_OUT="$WORK/url.out" write_tls false '' "$QUOTE_URL" >/dev/null
+check 'tls write: a quote in the URL is data, not yq' "$QUOTE_URL" "$(cat "$WORK/url.out" 2>/dev/null)"
+check 'tls render: a quote in the URL is data, not yq' "$QUOTE_URL|false" \
+    "$( (R="$(mktemp -d)"; : > "$R/kustomization.yaml"
+         WVA_PROJECT="$ROOT" WVA_LIVE_PROM_TLS=absent ENVIRONMENT=kubernetes PROMETHEUS_URL="$QUOTE_URL"
+         PROMETHEUS_TLS_INSECURE_SKIP_VERIFY='' PROMETHEUS_CA_CERT_PATH='' DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=our-mon
+         PROMETHEUS_URL_EXPLICIT="$QUOTE_URL"
+         wva_render_manager_config_patch "$R" >/dev/null 2>&1
+         tr -d '\r' < "$R/manager-config-patch.yaml" 2>/dev/null | yq '.data."config.yaml"' \
+             | yq -r '.PROMETHEUS_BASE_URL + "|" + (.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // "")'
+         rm -rf "$R") )"
 
 # Unreadable is unknown, never a new install, and the install cannot choose for
 # the operator: it stops before anything is written. Was: verify, with a warning.

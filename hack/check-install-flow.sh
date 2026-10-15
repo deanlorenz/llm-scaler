@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=63
+EXPECT_CASES=66
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -498,6 +498,13 @@ ns-u 10.0.0.9:9090 - llama"
     else
         fail "POD WRITES: a patch rule with resourceNames must read as unknown (an empty list still counts)"
     fi
+    # Pods are in the core group. A rule on apps/pods grants nothing on them.
+    if [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 PW_ROLE_RULES='["apps"] ["pods"] ["patch"]' \
+            wva_pod_writes_allowed ns-a wva-system) )" = unknown ]; then
+        ok "POD WRITES: a patch rule in another API group is not the grant"
+    else
+        fail "POD WRITES: a patch rule on apps/pods must read as unknown: pods are in the core group"
+    fi
 
     # Before the apply that removes the old grant, and only where the
     # installer applies cluster RBAC.
@@ -798,6 +805,21 @@ if [ "$(kps_version_used)" = "$kps_default" ] && ! grep -q 'newer than this inst
     ok "an older installed kube-prometheus-stack is upgraded to the pin, quietly"
 else
     fail "an older installed release must be upgraded to the pin $kps_default" "$(kps_version_used); $(cat "$WORK/kps.out")"
+fi
+# Versions compare as versions, not as text: 92.10.0 is newer than 92.9.0.
+KPS_LIST='[{"name":"kube-prometheus-stack","chart":"kube-prometheus-stack-92.10.0"}]'
+KUBE_PROMETHEUS_STACK_CHART_VERSION=92.9.0 KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT='' kps_run
+if [ "$(kps_version_used)" = 92.10.0 ] && grep -q 'newer than this install' "$WORK/kps.out"; then
+    ok "an installed 92.10.0 is newer than a 92.9.0 pin: kept"
+else
+    fail "92.10.0 installed against a 92.9.0 pin must be kept (a text sort calls it older)" "$(kps_version_used); $(cat "$WORK/kps.out")"
+fi
+KPS_LIST='[{"name":"kube-prometheus-stack","chart":"kube-prometheus-stack-92.9.0"}]'
+KUBE_PROMETHEUS_STACK_CHART_VERSION=92.10.0 KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT='' kps_run
+if [ "$(kps_version_used)" = 92.10.0 ] && ! grep -q 'newer than this install' "$WORK/kps.out"; then
+    ok "an installed 92.9.0 is older than a 92.10.0 pin: upgraded, quietly"
+else
+    fail "92.9.0 installed against a 92.10.0 pin must be upgraded to the pin" "$(kps_version_used); $(cat "$WORK/kps.out")"
 fi
 # A list that failed is not "no release". Read as one, a transient error or a
 # Forbidden list installed the pin over a newer shared release.

@@ -137,8 +137,8 @@ wva_render_manager_config_patch() {
     skip="$(wva_prometheus_skip_verify)"
     ca="$(wva_prometheus_ca_path)"
     rendered="$(yq '.data."config.yaml"' "$src" \
-        | yq ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\"" \
-        | if [ -n "$skip" ]; then yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$skip\""; else cat; fi \
+        | WVA_URL="$PROMETHEUS_URL" yq '.PROMETHEUS_BASE_URL = strenv(WVA_URL)' \
+        | if [ -n "$skip" ]; then WVA_SKIP="$skip" yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'; else cat; fi \
         | if [ -n "$ca" ]; then WVA_CA="$ca" yq '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'; else cat; fi)" || return 0
     [ -n "$rendered" ] || return 0
 
@@ -518,12 +518,30 @@ wva_same_prometheus_as_live() {
 # Not "any URL in MONITORING_NAMESPACE": a Thanos, or a second Prometheus, in
 # that namespace is somebody else's, and was being sent the controller's token
 # with verification off.
+#
+# prometheus-operated is trusted on the name alone, unlike the default: it is
+# the Service the Prometheus operator makes for ANY Prometheus CR in that
+# namespace, not only the one this install's chart creates. Not checked against
+# the Helm release because this is asked in many subshells and before the stack
+# exists (INSTALL_PHASE=all); the URL reaches here only when nobody set one and
+# the installer detected it, and MONITORING_NAMESPACE is this install's own.
+#
+# A URL holding userinfo, a query, a fragment or a backslash is never the own
+# stack. Read naively, https://kube-prometheus-stack-prometheus.<mon>.svc:443@evil.example.com/
+# names the stack before the "@" and connects to evil.example.com after it --
+# with verification off and the controller's token. The host is also read
+# after the last "@", so a URL that slips past the first rule still names the
+# host it connects to.
 wva_prometheus_is_own_stack() {
     [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] || return 1
     local mon="${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}" host
     host="${PROMETHEUS_URL:-}"
+    case "$host" in
+        *@*|*\?*|*\#*|*\\*) return 1 ;;
+    esac
     host="${host#*://}"
     host="${host%%/*}"
+    host="${host##*@}"
     host="${host%%:*}"
     case "$host" in
         "kube-prometheus-stack-prometheus.$mon.svc"|"kube-prometheus-stack-prometheus.$mon.svc.cluster.local")
@@ -598,6 +616,11 @@ wva_read_live_prometheus_tls() {
 # wva_prometheus_tls_kept_from_live reports whether the live controller skips
 # verification with no CA path for the Prometheus this install points at -- the
 # state an upgrade keeps rather than break.
+#
+# The no-CA term never decides today: both callers have already returned for a
+# live CA on the same Prometheus (wva_prometheus_ca_path), and a different one
+# fails the URL term. It is kept so the function means what its name says on
+# its own, for a caller that does not check the CA first.
 wva_prometheus_tls_kept_from_live() {
     [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] \
         && [ "${WVA_LIVE_SKIP_VERIFY:-}" = "true" ] \
@@ -1089,13 +1112,15 @@ wva_write_prometheus_settings() {
 
     if [ -n "${PROMETHEUS_URL:-}" ]; then
         log_info "Pointing WVA at Prometheus: $PROMETHEUS_URL"
-        patch_manager_config ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\""
+        # strenv, never spliced into the program: a quote in the URL would
+        # otherwise be yq syntax.
+        WVA_URL="$PROMETHEUS_URL" patch_manager_config '.PROMETHEUS_BASE_URL = strenv(WVA_URL)'
         wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
     fi
     local skip_verify ca_path
     skip_verify="$(wva_prometheus_skip_verify)"
     if [ -n "$skip_verify" ]; then
-        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${skip_verify}\""
+        WVA_SKIP="$skip_verify" patch_manager_config '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'
     fi
     ca_path="$(wva_prometheus_ca_path)"
     if [ -n "$ca_path" ]; then
