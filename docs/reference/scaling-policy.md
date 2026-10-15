@@ -1989,7 +1989,12 @@ tier has a say: a model parks only if every tier its variants name allows
 all variants name the same tier, this is just that tier's setting. When a tier
 stops a model from parking, the controller logs `Scale-to-zero is disabled by
 the scaling policy of a tier this model's variants name`, once per change, with
-the model's `tiers` and the ones that disable it (`disabledBy`).
+the model's `tiers` and the ones that disable it (`disabledBy`). Each tier is
+resolved with the model's per-model entry merged in, so a per-model
+`scaleToZero.enabled: false` disables every tier. The line then says
+`disabledByPerModelEntry=true`, and its `fix` field says to enable it on that
+entry. When no variant names a tier, `disabledBy` is `[default]` and `fix`
+names the `default` entry.
 
 A variant that names no tier follows the variants that do, for parking,
 `requirePrefill` and the utilization-share weight, as it already did for the

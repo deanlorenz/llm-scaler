@@ -1202,8 +1202,9 @@ var (
 
 // nodeReadProbeTimeout bounds the List inside the readiness probe. Shorter than
 // the probe's own timeoutSeconds (3s in config/base), so a slow API server yields
-// an answer here rather than a probe the kubelet abandons.
-const nodeReadProbeTimeout = 2 * time.Second
+// an answer here rather than a probe the kubelet abandons. A var so a test can
+// shorten it.
+var nodeReadProbeTimeout = 2 * time.Second
 
 // nodeReadProbe reports whether this controller may list nodes.
 //
@@ -1225,6 +1226,10 @@ const nodeReadProbeTimeout = 2 * time.Second
 // probe asks again until an answer arrives (the TTL applies only to answers).
 // This cannot hold up startup: the startup and liveness probes read /healthz,
 // not /readyz, so a slow API server delays readiness and kills nothing.
+//
+// The mutex is held across the List on purpose. Probes that arrive meanwhile
+// queue behind it and then read the answer it stored, rather than each sending
+// its own List. The wait is bounded by nodeReadProbeTimeout per List.
 func nodeReadProbe(ctx context.Context, c client.Reader) error {
 	nodeReadProbeMu.Lock()
 	defer nodeReadProbeMu.Unlock()

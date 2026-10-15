@@ -87,7 +87,7 @@ func ResolveScaleToZeroRetention(sat *ScalingPolicy) time.Duration {
 	duration, err := ValidateRetentionPeriod(sat.ScaleToZero.RetentionPeriod)
 	if err != nil {
 		ctrl.Log.Info("Invalid scaleToZero.retentionPeriod, using the system default",
-			"retentionPeriod", sat.ScaleToZero.RetentionPeriod,
+			"retentionPeriod", TruncateIgnoredValue(sat.ScaleToZero.RetentionPeriod),
 			"default", DefaultScaleToZeroRetentionPeriod,
 			"error", err)
 		return DefaultScaleToZeroRetentionPeriod

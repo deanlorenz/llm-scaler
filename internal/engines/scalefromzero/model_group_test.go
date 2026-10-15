@@ -50,7 +50,7 @@ func TestGroupInactiveByModel(t *testing.T) {
 		va("elsewhere", "aaa-ns", "llama", "elsewhere-deploy"),
 	}
 
-	groups := groupInactiveByModel(vas)
+	groups := groupInactiveByModel(vas, nil)
 	if len(groups) != 3 {
 		t.Fatalf("got %d groups, want 3 (llama@chat, mistral@chat, llama@aaa-ns)", len(groups))
 	}
@@ -80,9 +80,9 @@ func TestGroupInactiveByModelIsStable(t *testing.T) {
 		va("v2", "ns-a", "m1", "t2"),
 		va("v3", "ns-a", "m2", "t3"),
 	}
-	want := groupInactiveByModel(vas)
+	want := groupInactiveByModel(vas, nil)
 	for i := 0; i < 20; i++ {
-		got := groupInactiveByModel(vas)
+		got := groupInactiveByModel(vas, nil)
 		for j := range want {
 			if got[j].key() != want[j].key() {
 				t.Fatalf("iteration %d: group %d = %s, want %s", i, j, got[j].key(), want[j].key())
