@@ -616,6 +616,10 @@ diff before.txt after.txt
 
 Other changes you may notice:
 
+- **The TTFT SLO alert is `WVAModelSLOAttainmentLow`.** `WVAModelSLOMissed`
+  now covers the TPOT mean only. Move any Alertmanager route or silence that
+  matches `WVAModelSLOMissed` for TTFT to the new name, or TTFT misses go
+  unrouted, or page where they were silenced.
 - A scale-from-zero wake records one `ScaledUp` Event. It used to record one
   on every 100ms tick until KEDA scaled the target, so a dashboard that counts
   `ScaledUp` Events will show far fewer.

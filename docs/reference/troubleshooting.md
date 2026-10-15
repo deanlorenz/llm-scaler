@@ -992,7 +992,7 @@ Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uni
 
 **Symptom**: `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed` (warning), or `WVAModelSLOUnjudged` (info)
 fires, or the SLO dashboard row stays empty for a model whose policy sets
-targets. Both alerts carry `component: slo`, so they can be routed apart from
+targets. All three carry `component: slo`, so they can be routed apart from
 pages.
 
 **On this release the slo analyzer only observes**, so neither alert means the
@@ -1007,11 +1007,13 @@ The `wva_slo_*` series carry the model's namespace as `exported_namespace`
 
 ### `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed`
 
-- `WVAModelSLOAttainmentLow` (TTFT): over the last 30 minutes, and the last 5,
-  fewer requests met the target than the objective promises (90% for `p90`),
-  every judged request counted once.
+- `WVAModelSLOAttainmentLow` (TTFT): over the last 30 minutes fewer requests
+  met the target than the objective promises (90% for `p90`), every judged
+  request counted once. It needs at least 15 judged minutes, holding at least
+  half the half hour's requests: at p99 a window needs 1000 requests to be
+  judged, and a model judged only in its busy bursts is not judged at all.
 - `WVAModelSLOMissed` (TPOT): the mean was over target in at least half of the
-  judged minutes of the last 30, and in at least 6.
+  judged minutes of the last 30, and in at least 7.
 
 **1. Check the target can be met at all.** If it cannot, more replicas do not
 help: loosen the target, or move the model to faster hardware.
@@ -1023,12 +1025,13 @@ wva_slo_source{model_name="<model>", source="infeasible"} == 1
 # out; at or above the TTFT target, no replica count meets it. Use the same
 # percentile as the objective (0.90 for p90): a mean under the target hides a
 # tail of long prompts that no replica count can make faster.
-histogram_quantile(0.90, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{namespace="<ns>"}[5m])))
+histogram_quantile(0.90, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{namespace="<ns>", model_name="<model>"}[5m])))
 ```
 
-The prefill buckets are coarse (2.5s, then 5s, around common targets), so a
-reading in the bucket that holds the target is inconclusive. On P/D, the KV
-transfer to decode is extra time on top.
+The prefill buckets are coarse above 2s (2.5s, then 5s), so a reading in the
+bucket that holds the target is inconclusive. On P/D, read the prefill pods
+alone (decode pods report almost no prefill time and pull the percentile
+down), and the KV transfer to decode is extra time on top.
 
 `infeasible` read from a `pinned-default` line is not reliable: that line's
 intercept is a default for no particular card.
@@ -1063,11 +1066,14 @@ low-priority band back on purpose, that wait counts as a miss too. Only
 completed requests count, so under shedding the alert can resolve while
 requests are refused: read `llm_d_epp_request_error_total` too.
 
-`WVAModelSLOAttainmentLow` resolves once the last 5 minutes meet the objective.
+`WVAModelSLOAttainmentLow` resolves once a judged reading of the last 5
+minutes meets the objective. A window excluded while a replica starts does not
+resolve it, so the miss that brought the replica on stays one alert. It also
+ends when too few minutes are judged to hold half the requests.
 `WVAModelSLOMissed` resolves once the judged minutes that meet the target
 outnumber the misses in the last 30, so it stays up for a while after a fix.
-Changing the tier's TTFT percentile leaves the old percentile's alert up for
-about 5 minutes.
+Changing the tier's TTFT percentile clears the old percentile's alert at once;
+the new one needs 15 judged minutes before it can fire.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 

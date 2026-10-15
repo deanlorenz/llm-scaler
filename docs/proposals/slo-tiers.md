@@ -477,7 +477,7 @@ records.
 ## Observability
 
 The `wva_slo_*` metrics are listed in [prometheus](../reference/prometheus.md)
-(*SLO Analyzer Metrics*), and the two alerts are explained in
+(*SLO Analyzer Metrics*), and the alerts are explained in
 [troubleshooting](../reference/troubleshooting.md). The design choices behind
 them:
 

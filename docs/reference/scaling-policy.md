@@ -1410,8 +1410,9 @@ share of the last day a model was not excluded, for either objective, is
 judged either).
 
 **Judged attainment reads higher than what users saw.** The windows left out are
-the ones around a scale-up, which are when misses happen, so attainment and
-`WVAModelSLOMissed` describe the fleet in steady state. To score what clients
+the ones around a scale-up, which are when misses happen, so attainment,
+`WVAModelSLOAttainmentLow` and `WVAModelSLOMissed` describe the fleet in steady
+state. To score what clients
 got over a whole run, score their own per-request records.
 
 **Rules**
