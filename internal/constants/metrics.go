@@ -971,4 +971,8 @@ var EngineConfigFlagLabels = []string{
 	// written: a parallel size computed at start-up. A variant with anything
 	// here is not used as a key for sharing a latency line.
 	"sharing_unresolved",
+	// Flags that size or reshape what one replica holds and that no label
+	// above names (--kv-cache-memory-bytes, redundant experts, the expert
+	// all-to-all backend, SGLang's DP attention), as sorted key=value pairs.
+	"memory_layout",
 }

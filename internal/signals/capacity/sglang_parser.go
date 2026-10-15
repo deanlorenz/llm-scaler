@@ -170,6 +170,13 @@ func applySGLangParam(key, value string, params *EngineParams) applyResult {
 		return applyOffloadSize(value, params)
 	case "disable_radix_cache":
 		params.PrefixCachingDisabled = true
+	case "enable_dp_attention":
+		addLayoutPart(params, key, "true")
+	case "moe_a2a_backend":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		addLayoutPart(params, key, value)
 	case "model_path", "model":
 		applyModel(value, &params.ModelPath, params)
 	case "revision":

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -207,15 +209,14 @@ type EngineParams struct {
 	// and a model given as a variable is common enough that withholding on it
 	// would start such fleets cold on every restart, the TTFT direction.
 	//
-	// It withholds the shared latency line (engineFingerprint) and nothing
-	// else. IsCapacityCompatible compares the ModelPath both sides hold, so
-	// two unread checkpoints compare EQUAL there, as every checkpoint did
-	// before the checkpoint was compared at all. That is deliberate, because
-	// of what the predicate's callers do with a refusal: borrowedK2 would
-	// lose a lower-only borrow and the zero-replica estimate a max clamp, and
-	// both raise capacity. The one caller where a sibling's record becomes
-	// the estimate, lookupCompatibleCapacity, is behind
-	// enableLearnedStateReuse, off by default.
+	// It withholds what is SHARED and nothing of the variant's own: the
+	// shared latency line (engineFingerprint), and a sibling's capacity --
+	// IsCapacityCompatible refuses a pair where either side's checkpoint is
+	// unread, since two unread checkpoints may be an FP8 and a BF16 build of
+	// one model, ~2x apart in KV. Refusing costs at most a lower-only k2
+	// borrow, which leaves the variant on its own figure as if it had no
+	// sibling. The zero-replica estimate's max clamp is NOT refused: it is
+	// found under IsCapacityClampCompatible, which does not read this field.
 	ModelUnresolved bool
 
 	// SharingUnresolved lists the flags read for identity whose value could
@@ -229,14 +230,37 @@ type EngineParams struct {
 	// Like ModelUnresolved it is NOT in Unresolved: putting it there made
 	// every such wide-EP variant's read incomplete, so its own learned state
 	// was neither exported nor restored -- cold on every restart. It
-	// withholds only the shared latency line (engineFingerprint). It is
-	// hashed and compared with the text as written, so an expression that
-	// changes is a configuration that changes. What it cannot see is an env
-	// value the expression reads changing under the same text; a reshape
-	// that changes the GPUs per replica changes the learned-state key anyway.
+	// withholds what is shared: the latency line (engineFingerprint) and a
+	// sibling's capacity (IsCapacityCompatible refuses a pair where either
+	// side has an entry, because 2x8 and 4x8 groups written as the same
+	// `$((LWS_GROUP_SIZE*...))` text are different engines). It is hashed
+	// with the text as written, so an expression that changes is a
+	// configuration that changes for the variant's own restore and KV carry.
+	// What it cannot see is an env value the expression reads changing under
+	// the same text; a reshape that changes the GPUs per replica changes the
+	// learned-state key anyway.
 	//
 	// Sorted, one entry per key, so it is stable enough to hash.
 	SharingUnresolved []string
+
+	// MemoryLayout holds the flags that size or reshape what one replica
+	// holds and that no field above describes, as sorted key=value pairs
+	// joined by ";" -- the same form as SGLang's speculative flags:
+	//
+	//   - vLLM --kv-cache-memory-bytes: sets the KV cache outright, in place
+	//     of the --gpu-memory-utilization share
+	//   - vLLM --enable-eplb, --num-redundant-experts and --eplb-config:
+	//     redundant experts take GPU memory the KV cache would otherwise get
+	//   - vLLM --all2all-backend and the VLLM_ALL2ALL_BACKEND env var, and
+	//     SGLang --moe-a2a-backend: the expert all-to-all's buffers
+	//   - SGLang --enable-dp-attention: attention runs data-parallel, which
+	//     changes how the KV cache is laid out across the group
+	//
+	// Kept as one text rather than a field each because none is read for its
+	// value -- each only has to tell two engines apart. Hashed, published as
+	// the memory_layout label, compared for capacity and for the KV carry.
+	// A value that cannot be read lands in SharingUnresolved.
+	MemoryLayout string
 }
 
 // parallelSize is a parallel size as the engine runs it: unset is 1, its
@@ -318,6 +342,7 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 				// Any other value (including "1", empty) keeps V1 = true
 			}
 		}
+		applyAll2AllEnv(&container, &params)
 
 		// Collect all args from Command + Args, handling shell commands
 		allArgs := collectArgs(container.Command, container.Args)
@@ -468,6 +493,10 @@ var mappedValueKeys = map[string]struct{}{
 	"kv_transfer_config":      {},
 	"kv_offloading_size":      {},
 	"kv_offloading_backend":   {},
+	"kv_cache_memory_bytes":   {},
+	"num_redundant_experts":   {},
+	"eplb_config":             {},
+	"all2all_backend":         {},
 	// SGLang
 	"mem_fraction_static":  {},
 	"page_size":            {},
@@ -491,6 +520,7 @@ var mappedValueKeys = map[string]struct{}{
 	"speculative_eagle_topk":          {},
 	"speculative_draft_model_path":    {},
 	"disaggregation_transfer_backend": {},
+	"moe_a2a_backend":                 {},
 }
 
 // modelKeys are the flags that name the checkpoint. They are not in
@@ -514,7 +544,19 @@ var sharingOnlyKeys = map[string]struct{}{
 	"ep_size":                {},
 	"ep":                     {},
 	"expert_parallel_size":   {},
+	// The memory-layout flags (EngineParams.MemoryLayout): an unreadable one
+	// withholds sharing, not the variant's own restore.
+	"kv_cache_memory_bytes": {},
+	"num_redundant_experts": {},
+	"eplb_config":           {},
+	"all2all_backend":       {},
+	"moe_a2a_backend":       {},
+	envAll2AllKey:           {},
 }
+
+// envAll2AllKey is the key VLLM_ALL2ALL_BACKEND is recorded under, in
+// MemoryLayout or SharingUnresolved.
+const envAll2AllKey = "env.VLLM_ALL2ALL_BACKEND"
 
 // The dotted spelling of vLLM's JSON flags, `--speculative-config.method
 // eagle`: one key of the JSON per flag.
@@ -881,6 +923,26 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 			return applyUnusable
 		}
 		params.KVConnector = value
+	case "kv_cache_memory_bytes", "all2all_backend":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		addLayoutPart(params, key, value)
+	case "num_redundant_experts":
+		v, err := strconv.Atoi(value)
+		if err != nil || v < 0 {
+			return applyUnusable
+		}
+		addLayoutPart(params, key, strconv.Itoa(v))
+	case "eplb_config":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		addLayoutPart(params, key, canonicalJSON(value))
+	case "enable_eplb":
+		addLayoutPart(params, key, "true")
+	case "no_enable_eplb":
+		removeLayoutPart(params, "enable_eplb")
 	default:
 		// `--speculative-config.<key> <value>`, one JSON key per flag: kept
 		// as sorted key=value pairs, as SGLang's --speculative-* flags are.
@@ -1050,6 +1112,55 @@ func addSpeculativePart(params *EngineParams, key, value string) {
 	params.SpeculativeConfig = strings.Join(parts, ";")
 }
 
+// addLayoutPart records one memory-layout flag in MemoryLayout, replacing an
+// earlier occurrence of the same key (the engine takes the last), kept as
+// sorted key=value pairs so flag order does not change it.
+func addLayoutPart(params *EngineParams, key, value string) {
+	parts := layoutParts(params, key)
+	parts = append(parts, key+"="+value)
+	slices.Sort(parts)
+	params.MemoryLayout = strings.Join(parts, ";")
+}
+
+// removeLayoutPart drops key from MemoryLayout, for a negative boolean form.
+func removeLayoutPart(params *EngineParams, key string) {
+	params.MemoryLayout = strings.Join(layoutParts(params, key), ";")
+}
+
+// layoutParts is MemoryLayout split into its pairs, without key's.
+func layoutParts(params *EngineParams, key string) []string {
+	var parts []string
+	if params.MemoryLayout != "" {
+		parts = strings.Split(params.MemoryLayout, ";")
+	}
+	return slices.DeleteFunc(parts, func(p string) bool { return strings.HasPrefix(p, key+"=") })
+}
+
+// applyAll2AllEnv reads VLLM_ALL2ALL_BACKEND from the container's env into
+// MemoryLayout. A value set by valueFrom, or a literal that references
+// something unresolvable, is not readable here: it lands in
+// SharingUnresolved, which withholds sharing and not the variant's own
+// restore. A value supplied by envFrom is not seen at all -- a known limit.
+func applyAll2AllEnv(container *corev1.Container, params *EngineParams) {
+	env := envValues(container)
+	for _, e := range container.Env {
+		if e.Name != "VLLM_ALL2ALL_BACKEND" {
+			continue
+		}
+		if e.ValueFrom != nil {
+			noteSharingUnresolved(params, envAll2AllKey, "valueFrom")
+			continue
+		}
+		v, ok := resolveRefs(e.Value, env)
+		if !ok || !usableWord(v) {
+			noteSharingUnresolved(params, envAll2AllKey, e.Value)
+			continue
+		}
+		clearSharingUnresolved(params, envAll2AllKey)
+		addLayoutPart(params, envAll2AllKey, v)
+	}
+}
+
 // IsCapacityCompatible checks whether two EngineParams configurations
 // would produce equivalent per-replica capacity (both k1 and k2).
 // Used by Store.FindCompatible to identify variants
@@ -1067,11 +1178,23 @@ func addSpeculativePart(params *EngineParams, key, value string) {
 //     prefill is the default -- it is otherwise invisible to this predicate.
 //
 // The parallel layout, expert parallelism, speculative decoding, the KV
-// connector, KV offloading, prefix caching and the checkpoint are compared:
-// each changes what one replica holds or how fast it drains, so a figure
-// measured with one is not taken as the other's. SharingUnresolved is
-// compared as text: two layouts written as the same expression compare
-// equal, as they would have before the layout was compared at all.
+// connector, KV offloading, prefix caching, the memory layout and the
+// checkpoint are compared: each changes what one replica holds or how fast it
+// drains, so a figure measured with one is not taken as the other's.
+//
+// AN UNREAD IDENTITY IS NOT AN EQUALITY. A pair where either side has an
+// unread checkpoint (ModelUnresolved) or an identity flag it could not
+// interpret (SharingUnresolved) is refused, even a configuration compared
+// with itself. Two `$((LWS_GROUP_SIZE*8))` texts describe a 2x8 group and a
+// 4x8 group alike, and two unread checkpoints an FP8 and a BF16 build of one
+// model; comparing them as equal licensed a borrow across engines up to ~2x
+// apart. The refusal costs a lower-only borrow, which leaves the variant on
+// its own figure as if it had no sibling -- never a ceiling, which is found
+// under IsCapacityClampCompatible. The reflexivity this gives up is the
+// point: the predicate is "known to be the same engine", and these fields
+// say it is not known. Unresolved keeps reflexivity (see
+// TestCapacityCompatibilityStaysReflexive): it is the variant's own
+// incomplete read, gated where sharing is decided.
 //
 // That makes this the equality for taking a sibling's figure AS this
 // variant's -- a borrow, or a record that becomes the estimate. It is not the
@@ -1099,7 +1222,7 @@ func addSpeculativePart(params *EngineParams, key, value string) {
 // existed. Unresolved is therefore recorded and not yet acted on. Its first
 // consumer is the learned-state sharing key, which is not in this change.
 func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
-	if p == nil || other == nil {
+	if p == nil || other == nil || !p.identityRead() || !other.identityRead() {
 		return false
 	}
 	return p.Engine == other.Engine &&
@@ -1114,6 +1237,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.MaxModelLen == other.MaxModelLen &&
 		p.WeightDtype == other.WeightDtype &&
 		p.Quantization == other.Quantization &&
+		p.MemoryLayout == other.MemoryLayout &&
 		parallelSize(p.DataParallelSize) == parallelSize(other.DataParallelSize) &&
 		parallelSize(p.PipelineParallelSize) == parallelSize(other.PipelineParallelSize) &&
 		p.ExpertParallel == other.ExpertParallel &&
@@ -1123,8 +1247,13 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.KVOffloadingBackend == other.KVOffloadingBackend &&
 		p.PrefixCachingDisabled == other.PrefixCachingDisabled &&
 		p.ModelPath == other.ModelPath &&
-		p.ModelRevision == other.ModelRevision &&
-		slices.Equal(p.SharingUnresolved, other.SharingUnresolved)
+		p.ModelRevision == other.ModelRevision
+}
+
+// identityRead reports whether the fields that identify an engine for
+// sharing were all read: the checkpoint, and every identity flag.
+func (p *EngineParams) identityRead() bool {
+	return !p.ModelUnresolved && len(p.SharingUnresolved) == 0
 }
 
 // IsCapacityClampCompatible is the looser equality the zero-replica estimate

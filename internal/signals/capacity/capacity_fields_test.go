@@ -44,7 +44,11 @@ var (
 		"PrefixCachingDisabled",
 		"ModelPath",
 		"ModelRevision",
+		// Not compared as values: either side unread refuses the pair (see
+		// IsCapacityCompatible), so a differing value refuses it too.
+		"ModelUnresolved",
 		"SharingUnresolved",
+		"MemoryLayout",
 	}
 	// Each of these needs its reason, because "ignored" is the dangerous half
 	// of the list and an unexplained entry here is how a field gets dropped.
@@ -72,11 +76,6 @@ var (
 		// record removes a MAX clamp, which over-states capacity. The latency
 		// fingerprint hashes it instead.
 		"Image": "a tag changes every rebuild; refusing records removes a max clamp",
-		// Provenance, as Unresolved: two variants whose checkpoint could not
-		// be read compare by the ModelPath both hold, as every checkpoint did
-		// before the checkpoint was compared. Refusing them would withhold a
-		// lower-only borrow, which raises capacity; see the field.
-		"ModelUnresolved": "provenance; withholds sharing in engineFingerprint instead",
 	}
 )
 
@@ -159,6 +158,8 @@ func TestEveryComparedFieldChangesTheAnswer(t *testing.T) {
 		"SharingUnresolved": func(p *EngineParams) {
 			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
 		},
+		"ModelUnresolved": func(p *EngineParams) { p.ModelUnresolved = true },
+		"MemoryLayout":    func(p *EngineParams) { p.MemoryLayout = testMemoryLayout },
 	}
 
 	for _, name := range capacityCompared {

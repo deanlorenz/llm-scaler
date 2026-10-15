@@ -17,5 +17,6 @@ const (
 	testKVConnector       = "NixlConnector"
 	testOffloadBackend    = "native"
 	testModelPath         = "org/model-FP8"
+	testMemoryLayout      = "kv_cache_memory_bytes=40G"
 	testModelRevision     = "abc123"
 )

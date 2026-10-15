@@ -796,7 +796,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			// layout, speculative decoding, the KV connector, offloading, prefix
 			// caching and the checkpoint, and refusing a sibling on those removed
 			// the ceiling rather than tightening it.
-			if compatible := a.capacityStore.FindClampBound(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
+			if compatible := a.capacityStore.FindClampBound(namespace, modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
 					boundedBy = "compatible-variant-live"

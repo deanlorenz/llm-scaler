@@ -54,6 +54,8 @@ var fingerprintHashed = []string{
 	"ModelUnresolved",
 	// What was read for identity and not interpreted, as written.
 	"SharingUnresolved",
+	// Flags that size or reshape what one replica holds.
+	"MemoryLayout",
 }
 
 // All three are excluded on one rule: they exist only to resolve
@@ -160,6 +162,7 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"SharingUnresolved": func(p *EngineParams) {
 			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
 		},
+		"MemoryLayout": func(p *EngineParams) { p.MemoryLayout = testMemoryLayout },
 	}
 
 	if len(mutations) != len(fingerprintHashed) {
@@ -379,6 +382,7 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"sharing_unresolved": func(p *EngineParams) {
 			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
 		},
+		"memory_layout": func(p *EngineParams) { p.MemoryLayout = testMemoryLayout },
 	}
 
 	names := FingerprintFields()

@@ -124,7 +124,10 @@ func TestAnUnreadableParallelSizeWithholdsOnlySharing(t *testing.T) {
 		[]string{"/bin/sh", "-c", "vllm serve org/m --data-parallel-size $((LWS_GROUP_SIZE * 4))"})))
 	assert.NotEqual(t, a.ArgsFingerprint(), b.ArgsFingerprint())
 	assert.False(t, a.IsCapacityCompatible(&b))
-	assert.True(t, a.IsCapacityCompatible(&a))
+	assert.False(t, a.IsCapacityCompatible(&a),
+		"an expression nothing evaluated is not known to be the same engine, even as itself: "+
+			"the same text is a 2x8 group in one LWS and a 4x8 group in another")
+	assert.True(t, a.IsCapacityClampCompatible(&a), "and is still a ceiling")
 
 	// The KV total measured under one expression is not carried to another.
 	assert.True(t, kvTotalCarries(a, a))

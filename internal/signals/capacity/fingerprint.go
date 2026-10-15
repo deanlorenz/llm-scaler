@@ -43,8 +43,9 @@ import (
 // expert parallelism), speculative decoding, the KV connector, KV offloading,
 // prefix caching and the checkpoint served -- one bump for both, so the one
 // cold start after the upgrade is paid once -- and the flags read for identity
-// but not interpreted (SharingUnresolved), within the same version since no
-// release carried version 3 without them.
+// but not interpreted (SharingUnresolved) and the memory layout
+// (MemoryLayout), within the same version since no release carried version 3
+// without them.
 const FingerprintVersion = 3
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
@@ -142,6 +143,7 @@ func (p *EngineParams) Fingerprint() string {
 		// The text of what was read but not interpreted, so a changed
 		// expression is a changed configuration.
 		"sharing_unresolved=" + joinQuoted(p.SharingUnresolved),
+		"memory_layout=" + p.MemoryLayout,
 	}
 
 	h := sha256.New()
@@ -164,10 +166,17 @@ func (p *EngineParams) Fingerprint() string {
 }
 
 // ArgsFingerprint is the fingerprint of the engine's arguments alone: the
-// configuration with the image left out, the identity sameArguments compares
-// (store.go). A learned capacity, throughput or start time survives a
+// configuration with the image left out. It is THE definition of "the same
+// arguments": sameArguments (store.go), which decides whether a rollout keeps
+// a live record, is equality of this digest, and so is the restore's
+// arguments gate. A learned capacity, throughput or start time survives a
 // routine image bump as a live record does; a latency line does not, and is
 // keyed on Fingerprint.
+//
+// What it covers is Fingerprint's field list less the image, so it shares
+// Fingerprint's exclusions: MaxNumBatchedTokens, IsV1Engine and
+// ChunkedPrefillEnabled count only through the EffectiveMaxBatchedTokens they
+// resolve to. Writing the default budget out explicitly is not a change.
 func (p *EngineParams) ArgsFingerprint() string {
 	if p == nil {
 		return ""
@@ -245,6 +254,7 @@ func (p *EngineParams) FingerprintValues() []string {
 		p.ModelRevision,
 		strconv.FormatBool(p.ModelUnresolved),
 		joinQuoted(p.SharingUnresolved),
+		p.MemoryLayout,
 	}
 }
 

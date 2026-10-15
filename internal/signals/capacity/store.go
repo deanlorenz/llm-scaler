@@ -2,7 +2,6 @@ package capacity
 
 import (
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -325,12 +324,52 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 	return s.findCompatible(modelID, accelerator, gpuCount, params, (*EngineParams).IsCapacityCompatible)
 }
 
-// FindClampBound is FindCompatible under the looser equality a max clamp
-// takes (EngineParams.IsCapacityClampCompatible), for a ceiling on a
-// zero-replica estimate: a sibling that differs in the layout or feature
-// flags the borrow's equality compares is still a ceiling.
-func (s *Store) FindClampBound(modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
-	return s.findCompatible(modelID, accelerator, gpuCount, params, (*EngineParams).IsCapacityClampCompatible)
+// FindClampBound returns the live record whose measured capacity bounds a
+// zero-replica estimate from above, under the looser equality a max clamp
+// takes (EngineParams.IsCapacityClampCompatible): a sibling that differs in
+// the layout or feature flags the borrow's equality compares is still a
+// ceiling.
+//
+// Among several, the LOWEST live EffectiveCapacity is taken, from namespace's
+// own variants when any qualify and from every namespace otherwise; ties go
+// to the smaller key. It took the first match in map order, so with several
+// candidates the ceiling changed from cycle to cycle. The lowest is the
+// tightest ceiling, and a ceiling only lowers an estimate.
+func (s *Store) FindClampBound(namespace, modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var best, bestOwnNS *Record
+	var bestKey, bestOwnNSKey string
+	lower := func(rec *Record, key string, cur *Record, curKey string) bool {
+		return cur == nil || rec.EffectiveCapacity < cur.EffectiveCapacity ||
+			(rec.EffectiveCapacity == cur.EffectiveCapacity && key < curKey)
+	}
+	for key, rec := range s.records {
+		parts := strings.SplitN(key, "|", 3)
+		if len(parts) < 3 || parts[1] != modelID {
+			continue
+		}
+		if rec.AcceleratorName != accelerator || rec.GpuCount != gpuCount {
+			continue
+		}
+		if rec.LearnedFrom != LearnedFromLive || rec.EffectiveCapacity <= 0 {
+			continue
+		}
+		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityClampCompatible(params) {
+			continue
+		}
+		if lower(rec, key, best, bestKey) {
+			best, bestKey = rec, key
+		}
+		if parts[0] == namespace && lower(rec, key, bestOwnNS, bestOwnNSKey) {
+			bestOwnNS, bestOwnNSKey = rec, key
+		}
+	}
+	if bestOwnNS != nil {
+		return bestOwnNS
+	}
+	return best
 }
 
 func (s *Store) findCompatible(modelID, accelerator string, gpuCount int, params *EngineParams,
@@ -416,10 +455,14 @@ func (s *Store) findCompatible(modelID, accelerator string, gpuCount int, params
 }
 
 // sameArguments reports whether two parses describe the same engine arguments,
-// leaving out the image: see LoadFromScaleTarget.
+// leaving out the image: see LoadFromScaleTarget. It is ArgsFingerprint
+// equality, the one definition the restore's arguments gate uses too -- a
+// change the live path keeps a record across is a change a restart restores
+// across. It was a DeepEqual over the struct, which also compared the inputs
+// EffectiveMaxBatchedTokens is resolved from, so writing the default budget
+// out explicitly replaced a live record that a restart would have restored.
 func sameArguments(a, b EngineParams) bool {
-	a.Image, b.Image = "", ""
-	return reflect.DeepEqual(a, b)
+	return a.ArgsFingerprint() == b.ArgsFingerprint()
 }
 
 // sameHardware reports whether a record was learned on the hardware a
@@ -464,6 +507,6 @@ func kvTotalCarries(prev, cur EngineParams) bool {
 		parallelSize(prev.PipelineParallelSize) == parallelSize(cur.PipelineParallelSize) &&
 		prev.ExpertParallel == cur.ExpertParallel && prev.SpeculativeConfig == cur.SpeculativeConfig &&
 		prev.ModelPath == cur.ModelPath && prev.ModelRevision == cur.ModelRevision &&
-		slices.Equal(prev.SharingUnresolved, cur.SharingUnresolved) &&
+		slices.Equal(prev.SharingUnresolved, cur.SharingUnresolved) && prev.MemoryLayout == cur.MemoryLayout &&
 		cur.EffectiveMaxBatchedTokens <= prev.EffectiveMaxBatchedTokens && cur.MaxNumSeqs <= prev.MaxNumSeqs
 }
