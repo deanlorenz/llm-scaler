@@ -985,6 +985,18 @@ EOF
         all|prereqs) wva_apply_watch_namespace_rbac "$tmp_overlay" ;;
     esac
 
+    # Before the apply that takes `patch` on pods out of the ClusterRole: an
+    # earlier install's warm pools and utilization-share marks still need it,
+    # and nothing else would grant it again (lib/pod_writer.sh). A
+    # namespace-scoped controller keeps `patch` in its own Role.
+    case "${WVA_APPLY_SCOPE:-all}" in
+        all|prereqs)
+            if [ "$(wva_install_scope)" = "cluster" ]; then
+                wva_regrant_pod_writers "$WVA_NS"
+            fi
+            ;;
+    esac
+
     # A private registry needs the pull secret on the ServiceAccount, not on the
     # Deployment: patching the SA covers the controller and anything else that
     # runs as it, and survives a re-apply of the Deployment from the overlay.

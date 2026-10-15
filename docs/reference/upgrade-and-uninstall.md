@@ -157,6 +157,37 @@ they enable. Do this, in order:
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
 
+#### Patch on pods moves to Role `wva-pod-writer`
+
+The controller's ClusterRole no longer lets it patch pods. Each namespace that
+needs it gets Role `wva-pod-writer` instead. Only warm pools and the
+utilization-share optimizer patch pods. A namespace-scoped controller keeps
+`patch` in its own Role, so nothing changes for it.
+
+For a cluster-scoped controller, the upgrade grants `wva-pod-writer` before it
+removes the old grant. It does so in each namespace that holds:
+
+- a warm pool that calls this controller, or
+- a pod with a utilization-share transfer mark, of a model that calls this
+  controller.
+
+It prints each namespace it granted in. Then read its warnings:
+
+- **`Could not grant the controller patch on pods in <namespace>`**: that warm
+  pool stops lending, or the optimizer cannot clear its marks there. A cluster
+  admin runs the command the warning prints.
+- **`... are UNKNOWN`**: the installer could not list ScaledObjects or pods
+  across the cluster. Re-run the upgrade as a cluster admin, or grant by hand in
+  each namespace with a warm pool or an active optimizer:
+  ```bash
+  bash deploy/lib/pod_writer.sh <namespace> <controller namespace> | kubectl apply -f -
+  ```
+
+If the optimizer is active, also run `make utilization-share-activate` once for
+each namespace of its models. The upgrade only finds namespaces that already
+hold a mark. Activate grants in its own namespace and names any other
+namespace that still lacks the grant.
+
 ### The external-scaler NetworkPolicy
 
 `wva-external-scaler` admits `:9090` only from KEDA's namespace. The admin phase
@@ -257,6 +288,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | `wva-manager-config` and `wva-scaling-policy-config` | back up your policy first |
 | the install's ClusterRoles and ClusterRoleBindings | suffixed per install, so other installs keep theirs. Cluster-scoped: a namespace owner gets Forbidden on these, and the uninstall says which are left for a cluster admin |
 | the controller's Role and RoleBinding in a namespace it managed from outside (`WVA_WATCH_NS`) | |
+| RoleBinding `wva-pod-writer-<suffix>` in every workload namespace, and Role `wva-pod-writer` where no other controller's binding uses it | made by `deploy/warmpool.sh create`, utilization-share activate, and the upgrade to this release |
 | `wva-utilization-share-history` and `wva-controller-status` | written by the controller, not rendered, so deleted by name |
 | the ScaledObjects **this installer created** | KEDA restores each workload to its pre-autoscaling replica count as they go. Keep them with `UNDEPLOY_SCALEDOBJECTS=false` |
 
@@ -271,6 +303,8 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the dashboard ConfigMap `wva-operation-dashboard` | shared by every install on the cluster | (cluster admin, if it is in a shared monitoring namespace) `kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>` |
 | cluster policy in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding `wva-policy-reader-<suffix>` | the ConfigMap is written by `make enable-physical-limiter`; the Role and RoleBinding by it and by `make setup-prereqs` (for a controller that manages its own namespace, when the policy namespace exists) | (cluster admin) see below |
 | ClusterRoles and bindings from an install older than per-install suffixes | they may be bound by another install | (cluster admin) delete by hand once no install uses them |
+| Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` the uninstall could not read or delete | it may not list RoleBindings across the cluster, or delete them there. It lists each one, or says it could not look | (cluster admin) `kubectl get rolebinding -A \| grep wva-pod-writer-<suffix>`, then delete each binding, and the Role once no other `wva-pod-writer-*` binding is left in that namespace |
+| Role `wva-pod-writer` in a namespace another controller also uses | that controller's binding still needs it | nothing; it goes with that controller |
 | utilization-share transfer marks on pods | written while the optimizer acted | [Transfer marks left on pods](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade); set `shadow: true` and wait a cycle **before** uninstalling to avoid them |
 
 ### Adopted ScaledObjects

@@ -20,10 +20,14 @@ set -u
 ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 FAIL=0
 PASS=0
+# Every case below reports ok or FAIL exactly once. A run that ends early --
+# a sourced lib that exits, a section that stops -- otherwise passes having
+# checked less than it says. Change this deliberately with the cases.
+EXPECT_CASES=35
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh constants.sh prereqs.sh scaler_runtime.sh infra_scaler_backend.sh install_core.sh verify.sh; do
+for lib in common.sh constants.sh prereqs.sh scaler_runtime.sh infra_scaler_backend.sh install_core.sh verify.sh pod_writer.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 
@@ -34,7 +38,7 @@ KEDA_CHART_VERSION="2.19.0"
 KEDA_NAMESPACE="keda-system"
 REQUIRED_TOOLS=(kubectl)
 # shellcheck disable=SC1090
-for lib in common.sh constants.sh prereqs.sh scaler_runtime.sh infra_scaler_backend.sh install_core.sh verify.sh; do
+for lib in common.sh constants.sh prereqs.sh scaler_runtime.sh infra_scaler_backend.sh install_core.sh verify.sh pod_writer.sh; do
     . "$WORK/$lib"
 done
 
@@ -233,6 +237,168 @@ else
     fail "print_prereqs_summary must report the measured KEDA state" "$summary"
 fi
 
+# --- POD WRITES ---------------------------------------------------------------
+#
+# This release moves `patch` on pods out of the controller's ClusterRole into
+# role/wva-pod-writer, made per namespace (deploy/lib/pod_writer.sh). An upgrade
+# took the old grant away and nothing made the new one: an existing warm pool
+# stopped lending, and an active utilization-share optimizer could not clear
+# the marks it had written. And an uninstall left every grant behind.
+#
+# The stub, driven by variables:
+#   PW_SOS            ScaledObject triggers as the go-template renders them
+#   PW_MARKED         namespaces holding a pod with the transfer mark
+#   PW_RBS            "namespace name" of each labelled RoleBinding
+#   PW_*_FORBIDDEN    that call is refused (a list of namespaces for apply,
+#                     delete and the per-namespace RoleBinding list)
+pw_kubectl() {
+    printf '%s\n' "$*" >> "$KUBECTL_LOG"
+    local body ns
+    case "$*" in
+        "get scaledobject -A"*)
+            [ -z "${PW_SO_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects" at the cluster scope' >&2; return 1; }
+            printf '%s\n' "${PW_SOS:-}" ;;
+        "get pods -A"*)
+            [ -z "${PW_PODS_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): pods is forbidden: User "u" cannot list resource "pods" at the cluster scope' >&2; return 1; }
+            printf '%s\n' "${PW_MARKED:-}" ;;
+        "apply -f -")
+            body="$(cat)"
+            ns="$(printf '%s\n' "$body" | sed -n 's/^  namespace: //p' | sed -n 1p)"
+            case " ${PW_APPLY_FORBIDDEN:-} " in
+                *" $ns "*) echo "Error from server (Forbidden): roles.rbac.authorization.k8s.io \"wva-pod-writer\" is forbidden: User \"u\" cannot create resource \"roles\" in the namespace \"$ns\"" >&2; return 1 ;;
+            esac
+            echo "APPLIED $ns" >> "$KUBECTL_LOG" ;;
+        "get rolebinding -A"*)
+            [ -z "${PW_RB_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): rolebindings.rbac.authorization.k8s.io is forbidden: User "u" cannot list resource "rolebindings" at the cluster scope' >&2; return 1; }
+            printf '%s\n' "${PW_RBS:-}" ;;
+        "get rolebinding -n "*)
+            case " ${PW_RB_NS_FORBIDDEN:-} " in
+                *" $4 "*) echo "Error from server (Forbidden): rolebindings is forbidden in the namespace \"$4\"" >&2; return 1 ;;
+            esac
+            printf '%s\n' "${PW_RBS:-}" | awk -v n="$4" '$1 == n' ;;
+        "delete rolebinding "*|"delete role "*)
+            case " ${PW_DELETE_FORBIDDEN:-} " in
+                *" $5 "*) echo "Error from server (Forbidden): $2 is forbidden in the namespace \"$5\"" >&2; return 1 ;;
+            esac ;;
+    esac
+    return 0
+}
+
+# pw_case <function> <args...> -- runs it against the stub, in a subshell;
+# leaves out (its log) and the stub's call log in KUBECTL_LOG.
+pw_case() {
+    : > "$KUBECTL_LOG"
+    out="$( (kubectl() { pw_kubectl "$@"; }; "$@") 2>&1 )"
+}
+applied() { grep '^APPLIED ' "$KUBECTL_LOG" | cut -d' ' -f2 | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+PW_ADDR="wva-external-scaler.wva-system.svc.cluster.local:9090"
+PW_OTHER="wva-external-scaler.other.svc.cluster.local:9090"
+PW_SUFFIX="$(printf '%s' wva-system | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8)"
+
+if ! declare -F wva_regrant_pod_writers >/dev/null; then
+    fail "POD WRITES: wva_regrant_pod_writers is not defined -- an upgrade takes patch on pods away and grants it nowhere"
+else
+    # A pool in ns-p and a marked model in ns-m call this controller. ns-q
+    # holds a model with no mark; ns-x holds a mark of another controller's.
+    PW_SOS="ns-p $PW_ADDR pool-a
+ns-m $PW_ADDR -
+ns-q $PW_ADDR -
+ns-x $PW_OTHER -"
+    PW_MARKED="ns-m
+ns-x"
+    pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-m ns-p" ]; then
+        ok "POD WRITES: an upgrade grants in the warm-pool and marked namespaces of this controller, and no others"
+    else
+        fail "POD WRITES: an upgrade must grant in ns-m and ns-p only, got [$(applied)]" "$out"
+    fi
+
+    PW_APPLY_FORBIDDEN="ns-p" pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-m" ] && printf '%s' "$out" | grep -q 'pod_writer.sh ns-p wva-system | kubectl apply -f -'; then
+        ok "POD WRITES: a namespace the installer may not grant in is named, with the command an admin runs"
+    else
+        fail "POD WRITES: a refused grant must name ns-p and the admin command" "$out"
+    fi
+
+    PW_SO_FORBIDDEN=1 pw_case wva_regrant_pod_writers wva-system
+    if [ -z "$(applied)" ] && printf '%s' "$out" | grep -q 'UNKNOWN'; then
+        ok "POD WRITES: unreadable ScaledObjects are UNKNOWN and warned, not taken for none"
+    else
+        fail "POD WRITES: an unreadable ScaledObject list must warn as unknown" "$out"
+    fi
+
+    PW_PODS_FORBIDDEN=1 pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-p" ] && printf '%s' "$out" | grep -q 'transfer marks are UNKNOWN' \
+        && printf '%s' "$out" | grep -q 'ns-m ns-q'; then
+        ok "POD WRITES: unreadable pods still grant the pools, and name the model namespaces to check"
+    else
+        fail "POD WRITES: unreadable pods must warn and list the model namespaces" "$out"
+    fi
+    unset PW_SOS PW_MARKED
+
+    # Before the apply that removes the old grant, and only where the
+    # installer applies cluster RBAC.
+    iw="$(tr -d '\r' < "$ROOT/deploy/lib/infra_wva.sh")"
+    regrant_at="$(printf '%s\n' "$iw" | grep -nE '^[[:space:]]+wva_regrant_pod_writers ' | head -1 | cut -d: -f1)"
+    apply_at="$(printf '%s\n' "$iw" | grep -nE 'kubectl apply -k "\$tmp_overlay"' | head -1 | cut -d: -f1)"
+    if [ -n "$regrant_at" ] && [ -n "$apply_at" ] && [ "$regrant_at" -lt "$apply_at" ] \
+        && tr -d '\r' < "$ROOT/deploy/install.sh" | grep -q 'source "$DEPLOY_LIB_DIR/pod_writer.sh"'; then
+        ok "POD WRITES: deploy_wva_controller re-grants before its apply, and install.sh sources pod_writer.sh"
+    else
+        fail "POD WRITES: wva_regrant_pod_writers must run before the overlay apply (line ${regrant_at:-none} vs ${apply_at:-none}), from an install.sh that sources it"
+    fi
+fi
+
+if ! declare -F wva_remove_pod_writers >/dev/null; then
+    fail "POD WRITES: wva_remove_pod_writers is not defined -- an uninstall leaves role/wva-pod-writer in every workload namespace"
+else
+    # Ours in ns-a alone, ours beside another controller's in ns-b, only
+    # another's in ns-c.
+    PW_RBS="ns-a wva-pod-writer-$PW_SUFFIX
+ns-b wva-pod-writer-$PW_SUFFIX
+ns-b wva-pod-writer-0000abcd
+ns-c wva-pod-writer-0000abcd"
+    pw_case wva_remove_pod_writers wva-system
+    dels="$(grep '^delete' "$KUBECTL_LOG" | sort | tr '\n' ';')"
+    want="delete role wva-pod-writer -n ns-a --ignore-not-found;delete rolebinding wva-pod-writer-$PW_SUFFIX -n ns-a --ignore-not-found;delete rolebinding wva-pod-writer-$PW_SUFFIX -n ns-b --ignore-not-found;"
+    if [ "$dels" = "$want" ]; then
+        ok "POD WRITES: uninstall removes this controller's bindings, and the Role only where no other controller binds it"
+    else
+        fail "POD WRITES: uninstall deleted the wrong things" "got:  $dels
+want: $want"
+    fi
+
+    PW_RB_FORBIDDEN=1 pw_case wva_remove_pod_writers wva-system
+    if ! grep -q '^delete' "$KUBECTL_LOG" && printf '%s' "$out" | grep -q 'Could not list RoleBindings in: cluster-wide'; then
+        ok "POD WRITES: an unreadable RoleBinding list is reported, with how to find the leftovers"
+    else
+        fail "POD WRITES: an unreadable list must be reported, not passed over" "$out"
+    fi
+
+    PW_RB_FORBIDDEN=1 pw_case wva_remove_pod_writers wva-system ns-a ns-z
+    if grep -q "^delete rolebinding wva-pod-writer-$PW_SUFFIX -n ns-a" "$KUBECTL_LOG" \
+        && ! printf '%s' "$out" | grep -q 'Could not list'; then
+        ok "POD WRITES: a namespace-scoped uninstall searches the namespaces it was given"
+    else
+        fail "POD WRITES: refused cluster-wide, the given namespaces must be searched" "$out"
+    fi
+
+    PW_DELETE_FORBIDDEN="ns-a" pw_case wva_remove_pod_writers wva-system
+    if printf '%s' "$out" | grep -q "rolebinding/wva-pod-writer-$PW_SUFFIX in ns-a"; then
+        ok "POD WRITES: a grant the uninstall may not delete is listed"
+    else
+        fail "POD WRITES: a refused delete must be listed" "$out"
+    fi
+    unset PW_RBS
+
+    if tr -d '\r' < "$ROOT/deploy/lib/cleanup.sh" | grep -qE '^[[:space:]]+wva_remove_pod_writers '; then
+        ok "POD WRITES: undeploy_wva_controller removes the grants"
+    else
+        fail "POD WRITES: cleanup.sh never calls wva_remove_pod_writers"
+    fi
+fi
+
 # --- GO -----------------------------------------------------------------------
 #
 # The install targets must apply the committed manifests. A prerequisite on
@@ -330,4 +496,8 @@ fi
 
 echo ""
 echo "check-install-flow: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]
+if [ $((PASS + FAIL)) -ne "$EXPECT_CASES" ]; then
+    echo "check-install-flow: $((PASS + FAIL)) case(s) ran, $EXPECT_CASES expected -- the run did not finish, or a case was added without updating EXPECT_CASES"
+    exit 1
+fi
+[ "$FAIL" -eq 0 ]

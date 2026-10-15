@@ -77,6 +77,14 @@ wva_undeploy_watch_namespace_rbac() {
 undeploy_wva_controller() {
     log_info "Uninstalling Workload-Variant-Autoscaler..."
     wva_undeploy_watch_namespace_rbac
+    # The pod-write grant deploy/warmpool.sh, utilization-share activate and
+    # an upgrade made in workload namespaces. Not rendered, so the delete
+    # below never names it. See lib/pod_writer.sh.
+    if [ "$(wva_install_scope)" = "namespace" ]; then
+        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
+    else
+        wva_remove_pod_writers "$WVA_NS"
+    fi
 
     local kustomize_overlay
     kustomize_overlay="$(wva_overlay_dir)"

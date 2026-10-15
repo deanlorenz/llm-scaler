@@ -11,18 +11,23 @@
 # image is mutable on a live Pod, so that one verb let a stolen controller token
 # run code as any ServiceAccount in the cluster, kube-system included. The
 # ClusterRole now only reads pods; these functions grant `patch` in the
-# namespaces that opted in, and nowhere else. Sourced by deploy/warmpool.sh and
-# deploy/utilization-share.sh. Needs only kubectl.
+# namespaces that opted in, and nowhere else. Sourced by deploy/warmpool.sh,
+# deploy/utilization-share.sh and deploy/install.sh.
 #
 # The Role is the same in every namespace; the RoleBinding is named for the
 # controller namespace, so two controllers granted in one namespace do not
 # overwrite each other's subject.
+#
+# Every function up to wva_pod_writer_marked_namespaces needs only kubectl. The
+# installer's two (wva_regrant_pod_writers, wva_remove_pod_writers) also log
+# through log_info and log_warning, which deploy/install.sh defines.
 #
 # Run as a script, it prints the grant for an admin to apply:
 #
 #   bash deploy/lib/pod_writer.sh <namespace> <controller-namespace> | kubectl apply -f -
 
 WVA_POD_WRITER_ROLE="wva-pod-writer"
+WVA_POD_WRITER_LABEL="app.kubernetes.io/name=workload-variant-autoscaler"
 WVA_TRANSFER_MARK="llm-d.ai/utilization-share-transfer"
 
 # wva_pod_writer_suffix echoes the 8-character suffix for controller namespace $1.
@@ -175,6 +180,117 @@ wva_pod_writer_marked_namespaces() {
     local tmpl='{{range .items}}{{$ns := .metadata.namespace}}{{with .metadata.annotations}}{{if index . "'"$WVA_TRANSFER_MARK"'"}}{{$ns}}{{"\n"}}{{end}}{{end}}{{end}}'
     out="$(kubectl get pods -A -o go-template="$tmpl" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     printf '%s\n' "$out" | grep -v '^$' | sort -u || true
+}
+
+# wva_regrant_pod_writers carries the pod-write grant across an upgrade of the
+# cluster-scoped controller in $1.
+#
+# An install from before role/wva-pod-writer had `patch` on pods in its
+# ClusterRole, and this release's apply takes it away. A warm pool created then
+# brought no grant of its own, so its controller disables it; an active
+# utilization-share optimizer can no longer clear the marks it wrote, which stay
+# on the pods. So the grant is made here, BEFORE the apply that removes the old
+# one, in each namespace that holds a warm pool calling this controller or a
+# marked pod of a model calling it. Where it cannot be made, each namespace is
+# named with the command an admin runs. Where the namespaces cannot be read,
+# that is said too: unknown is not none.
+wva_regrant_pod_writers() {
+    local controller_ns="$1" pools models marked want ns err="" unread=0 hint
+    hint="$(wva_pod_writer_admin_hint '<namespace>' "$controller_ns")"
+    if ! pools="$(wva_pod_writer_namespaces "$controller_ns" pools 2>&1)"; then
+        unread=1 err="$pools"
+    elif ! models="$(wva_pod_writer_namespaces "$controller_ns" models 2>&1)"; then
+        unread=1 err="$models"
+    fi
+    if [ "$unread" -eq 1 ]; then
+        log_warning "Could not list ScaledObjects cluster-wide, so the namespaces whose warm pool or utilization-share optimizer needs role/${WVA_POD_WRITER_ROLE} are UNKNOWN: $err"
+        log_warning "  This release removes patch on pods from the controller's ClusterRole. In each namespace with a warm pool or an active optimizer, run: $hint"
+        return 0
+    fi
+    want="$pools"
+    if ! marked="$(wva_pod_writer_marked_namespaces 2>&1)"; then
+        log_warning "Could not list pods cluster-wide, so the namespaces holding utilization-share transfer marks are UNKNOWN: $marked"
+        if [ -n "$models" ]; then
+            log_warning "  If the optimizer is active, run this for each namespace of its models ($(printf '%s ' $models)): $hint"
+        fi
+    else
+        # Marked pods of models this controller scales. A mark in a namespace
+        # it does not scale belongs to another controller.
+        want="$(printf '%s\n%s\n' "$want" "$(comm -12 <(printf '%s\n' "$marked" | sort -u) <(printf '%s\n' "$models" | sort -u))")"
+    fi
+    want="$(printf '%s\n' "$want" | grep -v '^$' | sort -u || true)"
+    [ -n "$want" ] || return 0
+    for ns in $want; do
+        if err="$(wva_grant_pod_writes "$ns" "$controller_ns" 2>&1)"; then
+            log_info "Kept the controller's patch on pods in $ns (role/${WVA_POD_WRITER_ROLE}): its warm pool or utilization-share marks need it"
+        else
+            log_warning "Could not grant the controller patch on pods in $ns (role/${WVA_POD_WRITER_ROLE}): $err"
+            log_warning "  Its warm pool stops lending, or the optimizer cannot clear its marks there, until an admin runs: $(wva_pod_writer_admin_hint "$ns" "$controller_ns")"
+        fi
+    done
+}
+
+# wva_remove_pod_writers removes, on uninstall, the grant made for the
+# controller in $1 in every namespace: its RoleBinding, and the Role once no
+# other controller's binding uses it. Found by label across the cluster;
+# whatever cannot be read or deleted is listed, never passed over.
+#
+# Extra arguments are namespaces to search one by one when the cluster-wide
+# list is refused -- for a namespace-scoped install, the namespaces it runs in
+# and manages, which are the only ones its grant is ever made in. With none,
+# or when one of them cannot be read either, the leftovers are UNKNOWN, and
+# the warning says how to find them.
+wva_remove_pod_writers() {
+    local controller_ns="$1" binding list one ns others removed="" failed="" err unread=""
+    shift
+    if ! binding="$(wva_pod_writer_binding "$controller_ns" 2>&1)"; then
+        log_warning "Left role/${WVA_POD_WRITER_ROLE} and its RoleBindings in place: $binding"
+        return 0
+    fi
+    local tmpl='{{range .items}}{{.metadata.namespace}} {{.metadata.name}}{{"\n"}}{{end}}'
+    if ! list="$(kubectl get rolebinding -A -l "$WVA_POD_WRITER_LABEL" -o go-template="$tmpl" 2>&1)"; then
+        unread="cluster-wide ($list)" list=""
+        if [ $# -gt 0 ]; then
+            unread=""
+            for ns in $(printf '%s\n' "$@" | grep -v '^$' | sort -u); do
+                if one="$(kubectl get rolebinding -n "$ns" -l "$WVA_POD_WRITER_LABEL" -o go-template="$tmpl" 2>&1)"; then
+                    list="$list
+$one"
+                else
+                    unread="$unread $ns ($one)"
+                fi
+            done
+        fi
+    fi
+    if [ -n "$unread" ]; then
+        log_warning "Could not list RoleBindings in: ${unread# }. role/${WVA_POD_WRITER_ROLE} and rolebinding/${binding} may be left there."
+        log_warning "  A cluster admin finds them with: kubectl get rolebinding -A | grep ${binding}"
+    fi
+    for ns in $(printf '%s\n' "$list" | awk -v b="$binding" '$2 == b {print $1}' | sort -u); do
+        if ! err="$(kubectl delete rolebinding "$binding" -n "$ns" --ignore-not-found 2>&1 >/dev/null)"; then
+            failed="$failed
+    rolebinding/$binding in $ns: $err"
+            continue
+        fi
+        others="$(printf '%s\n' "$list" | awk -v n="$ns" -v b="$binding" -v p="${WVA_POD_WRITER_ROLE}-" \
+            '$1 == n && $2 != b && index($2, p) == 1 {print $2}')"
+        if [ -n "$others" ]; then
+            removed="$removed $ns(binding; role kept for $(printf '%s ' $others | sed 's/ $//'))"
+            continue
+        fi
+        if err="$(kubectl delete role "$WVA_POD_WRITER_ROLE" -n "$ns" --ignore-not-found 2>&1 >/dev/null)"; then
+            removed="$removed $ns"
+        else
+            removed="$removed $ns(binding)"
+            failed="$failed
+    role/${WVA_POD_WRITER_ROLE} in $ns: $err"
+        fi
+    done
+    [ -z "$removed" ] || log_info "Removed the controller's patch on pods (role/${WVA_POD_WRITER_ROLE}, rolebinding/${binding}) in:${removed}"
+    if [ -n "$failed" ]; then
+        log_warning "Could not remove the controller's pod-write grant here:${failed}"
+        log_warning "  A cluster admin deletes them by hand."
+    fi
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

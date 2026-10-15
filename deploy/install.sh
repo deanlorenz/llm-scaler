@@ -186,6 +186,8 @@ source "$DEPLOY_LIB_DIR/limiter_policy.sh"
 # Function definitions only; the prereqs phase uses its policy-read grant.
 # shellcheck source=lib/physical_limiter.sh
 source "$DEPLOY_LIB_DIR/physical_limiter.sh"
+# shellcheck source=lib/pod_writer.sh
+source "$DEPLOY_LIB_DIR/pod_writer.sh"
 # shellcheck source=lib/infra_wva.sh
 source "$DEPLOY_LIB_DIR/infra_wva.sh"
 # shellcheck source=lib/infra_epp.sh
