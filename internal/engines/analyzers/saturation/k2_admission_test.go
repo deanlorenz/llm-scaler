@@ -219,7 +219,7 @@ func TestK2Admission_ABridgeDoesNotStartTheBorrowClock(t *testing.T) {
 		defer analyzer.mu.Unlock()
 		n := 0
 		for k := range analyzer.k2BorrowedSince {
-			if ns, v, _, ok := splitVariantKey(k); ok && ns == "test-ns" && v == "variant-b" {
+			if ns, v, _, ok := splitVariantKey(k); ok && ns == "test-ns" && v == states[1].VariantName {
 				n++
 			}
 		}
