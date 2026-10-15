@@ -373,7 +373,13 @@ it, the PRC of each variant another analyzer decided, and the holds:
   - *Scale-down* is bounded by every frame (`boundSpare`): shedding X of the
     chosen frame's capacity sheds at most `X x r` of frame f's, `r` the largest
     `PRC_f / PRC_chosen` over the running variants, so the role's spare (the
-    model's on an aggregated model) is capped at `spare_f / r` for each f.
+    model's on an aggregated model) is capped at `spare_f / r` for each f. The
+    optimizer releases up to the larger of the spare and `RoleReleasable`, so
+    the bound is also published as `ReleaseBound`, which `initRoleState` caps
+    `RoleReleasable` at; and a role the bound lowered gets a `NoScaleDown` hold
+    (after `applyHolds`, so the spare stays bounded rather than zeroed) for the
+    share optimizer and rescale, which size from demand and never read the
+    spare.
     *Scale-up* follows the chosen frame alone: a variant it grows may leave
     another frame short for one cycle, until the new replicas are read.
   - With one variant per role every frame gives saturation's PRC. A need
@@ -395,7 +401,9 @@ it, the PRC of each variant another analyzer decided, and the holds:
   the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
   such a model exactly its current GPUs in the water-fill, so the rest of the
   budget goes to the others; no role is reclaimed or filled in a direction it
-  is held against.
+  is held against. A growing role's share is rounded to whole replicas
+  (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
+  model's two roles on 8-GPU pods, neither a pod, and stayed free.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply is still

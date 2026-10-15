@@ -660,11 +660,15 @@ ConfigMap, and work through this list.
      can size holds where it is. A list of `slo` alone holds the model.
 
    The `Effective scaling policy` line does not show the list, so the check
-   below cannot catch this. After the upgrade, a model reporting
-   `wva_model_scaling_blocked{reason="no-composite-signal"} == 1`, or a
-   `composite holds a role` log line, names each model affected. Dashboards
-   and alerts on `wva_analyzer_*` must filter on `analyzer_name`: the series
-   gain `analyzer_name="CompositeSignal"`.
+   below cannot catch this. After the upgrade:
+   - a held model reports `wva_model_scaling_blocked{reason="no-composite-signal"} == 1`
+     or logs `composite holds a role`;
+   - a model another analyzer now sizes above saturation shows a composite
+     demand above saturation's:
+     `wva_analyzer_demand{analyzer_name="CompositeSignal"} > on (exported_namespace, model_name, role) wva_analyzer_demand{analyzer_name="saturation"}`.
+
+   Dashboards and alerts on `wva_analyzer_*` must filter on `analyzer_name`:
+   the series gain `analyzer_name="CompositeSignal"`.
 
 After the upgrade, compare the controller's `Effective scaling policy` log
 lines with the ones you saved in `before.txt`:
