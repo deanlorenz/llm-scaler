@@ -55,8 +55,10 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 	}, withInstance(constants.LabelNamespace, constants.LabelVariantName))
 	kueuePreemptedPods = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAKueuePreemptedPodsTotal,
-		Help: "Preempted Workloads of a model (a Workload evicted, reason Preempted) in a namespace that counts " +
-			"borrowing: one per Workload, so a LeaderWorkerSet or pod group counts once.",
+		Help: "Kueue preemptions of a model (a Workload evicted, reason Preempted) in a namespace that counts " +
+			"borrowing, one per event: Workloads of the model preempted within a minute of each other count " +
+			"once, so a P/D pair, a LeaderWorkerSet or a pod group counts once. 0 from the first cycle that " +
+			"counts borrowing for the model.",
 	}, withInstance(constants.LabelNamespace, constants.LabelModelName))
 	kueueLenderWaiting = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueLenderWaitingSeconds,
@@ -66,8 +68,9 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 	}, withInstance(constants.LabelCohort, constants.LabelClusterQueue))
 	borrowReleases = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVABorrowReleasesTotal,
-		Help: "Variant targets lowered to give borrowed Kueue capacity back, one per release record, by cause: " +
-			"placement-timeout (a borrowed replica did not place in time).",
+		Help: "Releases of borrowed Kueue capacity by a model, one per model and cycle whatever the number of " +
+			"variants lowered, so a P/D pair counts once; by cause: placement-timeout (a borrowed replica did " +
+			"not place in time). 0 from the first cycle that counts borrowing for the model.",
 	}, withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelCause))
 	kueueBorrowDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowDriftGPUs,
@@ -360,7 +363,29 @@ func PublishKueueLenderWaiting(lenders []WaitingLender) {
 		})
 }
 
-// CountBorrowRelease counts one release record of borrowed capacity.
+// InitBorrowLossSeries creates a model's loss counters at 0: its releases, by
+// each of causes, and its Kueue preemptions. A counter created by its first
+// increment starts at 1, and increase() over a range holding its first sample
+// sees nothing, so the thrashing alert would miss the first loss of each kind.
+func InitBorrowLossSeries(namespace, modelName string, causes ...string) {
+	if borrowReleases == nil || kueuePreemptedPods == nil {
+		return
+	}
+	l := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelName}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	kueuePreemptedPods.With(l).Add(0)
+	for _, cause := range causes {
+		withCause := prometheus.Labels{constants.LabelCause: cause}
+		for k, v := range l {
+			withCause[k] = v
+		}
+		borrowReleases.With(withCause).Add(0)
+	}
+}
+
+// CountBorrowRelease counts one release of borrowed capacity by a model.
 func CountBorrowRelease(namespace, modelID, cause string) {
 	if borrowReleases == nil {
 		return
@@ -372,7 +397,7 @@ func CountBorrowRelease(namespace, modelID, cause string) {
 	borrowReleases.With(l).Inc()
 }
 
-// CountKueuePreemptedPods counts n preempted Workloads of a model.
+// CountKueuePreemptedPods counts n Kueue preemption events of a model.
 func CountKueuePreemptedPods(namespace, modelName string, n int) {
 	if kueuePreemptedPods == nil || n <= 0 {
 		return

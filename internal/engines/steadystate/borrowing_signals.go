@@ -214,9 +214,15 @@ func waitingLenders(waits []allocation.LenderWait, borrowing map[string]bool, no
 	return out
 }
 
+// preemptionEventWindow is how close two preemptions of one model must be to
+// count as one event on wva_kueue_preempted_pods_total, as the governor's
+// backoff judges one event (allocation sameEvent).
+const preemptionEventWindow = time.Minute
+
 // recordReclaim counts a Kueue preemption of a model's pods -- once per
 // preempted Workload, by key (preemptionKey), so a LeaderWorkerSet or pod
-// group whose pods arrive one by one counts once -- and holds the
+// group whose pods arrive one by one counts once, and once per model within
+// preemptionEventWindow, so a P/D pair counts once too -- and holds the
 // lender-reclaimed reason for the cooldown after it. A preemption older than
 // the cooldown, one a restart finds again, counts nothing.
 func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now time.Time, key string) {
@@ -252,6 +258,20 @@ func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now t
 		return
 	}
 	st.preemptCounted[key] = now
+	// One event per model per preemption: the two Workloads of a P/D pair,
+	// preempted together, arrive one by one and are one loss (R7).
+	if st.preemptEventAt == nil {
+		st.preemptEventAt = map[string]time.Time{}
+	}
+	for k, last := range st.preemptEventAt {
+		if now.Sub(last) > cooldown {
+			delete(st.preemptEventAt, k)
+		}
+	}
+	if last, ok := st.preemptEventAt[modelKey]; ok && at.Sub(last).Abs() < preemptionEventWindow {
+		return
+	}
+	st.preemptEventAt[modelKey] = at
 	ns, model, _ := strings.Cut(modelKey, "/")
 	metrics.CountKueuePreemptedPods(ns, model, 1)
 }

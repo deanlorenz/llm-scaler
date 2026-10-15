@@ -87,6 +87,10 @@ type borrowingState struct {
 	// preemptCounted is the preemptions already counted in
 	// wva_kueue_preempted_pods_total, by preemptionKey, kept for the cooldown.
 	preemptCounted map[string]time.Time
+	// preemptEventAt is, per "namespace/model", when the last preemption
+	// event counted on wva_kueue_preempted_pods_total happened; kept for the
+	// cooldown (recordReclaim).
+	preemptEventAt map[string]time.Time
 	// preemptErrLogged and eventsErrLogged are the namespaces whose
 	// preemption or cluster-autoscaler Event read failed and was logged, until
 	// a read succeeds.

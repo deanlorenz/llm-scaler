@@ -134,6 +134,10 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		return
 	}
 	logger := ctrl.LoggerFrom(ctx)
+	initLossSeries(st.cycle)
+	// One release per model and cycle, however many variants it lowers: a
+	// P/D pair is one loss, as a LeaderWorkerSet group is (R7).
+	counted := map[string]bool{}
 	for _, r := range st.governor.Releases(st.cycle, decisions) {
 		logger.Info("Releasing borrowed capacity",
 			"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
@@ -143,7 +147,10 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 				"the smallest unit that keeps the model serviceable is larger than what it borrows",
 				"namespace", r.Namespace, "modelID", r.ModelID, "cause", string(r.Cause), "guaranteedGPUs", r.GuaranteedGPUs)
 		}
-		metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
+		if k := r.Namespace + "/" + r.ModelID + "/" + string(r.Cause); !counted[k] {
+			counted[k] = true
+			metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
+		}
 		acc := scaleTargets[r.Namespace+"/"+r.Variant]
 		e.borrowReleasedEvent(r, acc)
 		if acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
@@ -151,6 +158,26 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		}
 	}
 	e.persistBorrowLedger(ctx)
+}
+
+// initLossSeries creates, at 0, the loss counters of every model in a
+// namespace the cycle counts borrowing for, so the first release or
+// preemption of each is an increase the thrashing alert sees.
+func initLossSeries(cycle allocation.BorrowCycle) {
+	borrowing := map[string]bool{}
+	for _, c := range cycle.Constraints {
+		if c == nil {
+			continue
+		}
+		for ns := range c.NamespaceBorrow {
+			borrowing[ns] = true
+		}
+	}
+	for _, r := range cycle.Requests {
+		if borrowing[r.Namespace] {
+			metrics.InitBorrowLossSeries(r.Namespace, r.ModelID, string(allocation.ReleasePlacementTimeout))
+		}
+	}
 }
 
 // restoreHeldReleases is for a process whose first cycles count no borrowing:
