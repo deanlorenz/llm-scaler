@@ -2,15 +2,7 @@ name: admin-gpu-bounding
 
 prerequisites:
   accelerators:
-    note: |
-      Check accelerators resolve FIRST. A GPU-aware optimizer gives no budget to a
-      variant whose accelerator it cannot resolve, and it then never scales up.
-      The event is the signal to trust: it is re-emitted for as long as the
-      condition holds, and the API server folds the repeats into one entry with a
-      count. It hangs on the ScaledObject, so it is in the MODEL's namespace, not
-      the controller's -- hence -A. The log line says the same thing but is printed once per
-      CHANGE, so on a controller that has been up a while it may have scrolled
-      away: an empty grep is not an all-clear.
+    note: List workloads whose accelerator could not be resolved. Empty is good.
     # AcceleratorNotResolved is an event REASON, never log text: it goes through the
     # recorder, so grepping the log for it finds nothing on a healthy cluster and
     # nothing on a broken one. The events do land -- variant.EventTarget hangs them
@@ -22,70 +14,38 @@ prerequisites:
     # docs/reference/gpu-limiter.md greps the same form.
     run: |
       kubectl get events -A --field-selector reason=AcceleratorNotResolved
-      # Corroborates, never clears: this line is logged once per change.
-      kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -i "Accelerator not resolved"
+      # The same, from the controller log (logged once per change, so it may have rotated)
+      kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 | grep -i "Accelerator not resolved"
 
 deploy:
   enable:
-    note: |
-      Publishes cluster policy AND grants every controller that passes
-      verification the node read it then requires — grants first, because
-      declaring the limiter without them takes out every install that lacks node
-      access at once. Read the list it prints first: it names any controller it
-      will restart, and the summary names any it skipped as NOT bound.
+    note: Grant every controller the node read, then publish the limiter. Read the list it prints first.
     run: make enable-physical-limiter
 
 verify:
   controllers:
-    note: A controller that is not Ready is one this did not reach.
+    note: Every controller should be Ready.
     run: kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
   source:
-    note: |
-      Which policy each controller actually reads -- the truth, whatever the
-      enable command printed. The controller publishes it in the
-      wva-controller-status ConfigMap in its own namespace: the policy
-      namespace, the limiter in force, and whether the policy was accepted.
-      A controller that predates that ConfigMap, or lacks the Role to write it,
-      falls back to its startup log: "the well-known namespace" (or "the
-      namespace this one is labelled with") means a policy namespace governs
-      it. The own-ConfigMap branch logs only at V(1), so at the default
-      verbosity NO such line means the controller reads its own ConfigMap;
-      "Could not read the managed Namespace" or "Cannot tell whether" means it
-      never saw wva-policy. Logged once at startup, so a long-running
-      controller's line may have rotated out; a restart prints it again.
+    note: Print the policy namespace, limiter and acceptance each controller reports.
     run: |
       for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
           -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
         echo "== $ns"
         kubectl get cm wva-controller-status -n "$ns" \
           -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}' 2>/dev/null \
-          || kubectl logs -n "$ns" deploy/wva-controller-manager \
+          || kubectl logs -n "$ns" deploy/wva-controller-manager --tail=-1 \
           | grep -E 'Cluster policy comes from|Could not read the managed Namespace|Cannot tell whether' \
-          || echo "   (no status, no line: reads its own ConfigMap in $ns)"
+          || echo "   (no status and no startup line: restart the controller to print it)"
       done
   budget:
-    note: |
-      The ConfigMap is the fact; the log line is not. "GPU budgets available" is
-      emitted only by the scale-from-zero engine while it judges a wake, so a
-      correctly bounded cluster with nothing parked at zero prints nothing and
-      looks like a failure. Read the policy instead, and treat the log as a
-      bonus when scale-from-zero is in play.
-      Neither of those says the controller ACCEPTED the entry, which is the
-      thing that fails silently: a malformed one is rejected on read, costs the
-      whole default policy, and leaves the controller with NO limiter while this
-      command still prints a healthy-looking ConfigMap. The last line answers it.
-      -A12 rather than -A3: a quota entry is eight lines and -A3 cut off
-      namespaceQuotas and every number, so the budget that was just
-      published could not be read back from the verification step.
-      The policy namespace is the policyNamespace a controller publishes in
-      its wva-controller-status ConfigMap (above), else wva-policy.
+    note: Show the published limiter, then whether the controller built it.
     run: |
       POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> \
         -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
       kubectl get configmap wva-scaling-policy-config -n "${POLICY_NS:-wva-policy}" \
         -o jsonpath='{.data.default}' | grep -A12 limiters
-      kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep "GPU budgets available"
-      kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
+      kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
         | grep -E 'GPU limiter constructed|Invalid saturation scaling'
 
 cleanup:

@@ -1,27 +1,25 @@
 # Testing Guide
 
-Comprehensive guide for testing the Workload-Variant-Autoscaler (the scaling manager).
+How to run and write tests for the scaling manager.
 
-## Overview
+There are three layers:
 
-The scaling manager has a multi-layered testing strategy:
-
-1. **Unit Tests** - Fast, isolated tests for individual packages and functions
-2. **Integration Tests** - Tests for component interactions within the controller
-3. **E2E Tests** - Environment-agnostic end-to-end tests (Kind emulated or OpenShift), with smoke and full tiers
+1. **Unit tests** - fast tests for one package.
+2. **Integration tests** - envtest suites: a real API server, no controllers.
+3. **E2E tests** - one suite, run on Kind (emulated GPUs) or OpenShift/Kubernetes, in a smoke tier and a full tier.
 
 ## Unit Tests
 
 ### Running Unit Tests
 
 ```bash
-# Run all unit tests (also runs check-import-direction and check-doc-comment-owner)
+# All unit tests
 make test
 
-# Run specific package
+# One package
 go test ./internal/engines/analyzers/saturation/...
 
-# Run with verbose output
+# Verbose
 go test -v ./internal/controller/...
 
 # Coverage. Never `go test ./...`: it also runs test/e2e against your current
@@ -30,10 +28,10 @@ go test -coverprofile=coverage.out $(go list ./... | grep -v -e /e2e -e /benchma
 go tool cover -html=coverage.out -o coverage.html
 ```
 
-`make test` builds that same package list (it excludes `/e2e` and
-`/benchmark`, then adds `./test/e2e/fixtures/`), sets `KUBEBUILDER_ASSETS`
-for the envtest suites, and first runs `hack/check-import-direction.sh` and
-`hack/check-doc-comment-owner.py`.
+`make test` runs `hack/check-import-direction.sh` and
+`hack/check-doc-comment-owner.py` first. It then tests every package except
+`/e2e` and `/benchmark`, plus `./test/e2e/fixtures/`, with `KUBEBUILDER_ASSETS`
+set for the envtest suites.
 
 ### Run one test
 
@@ -53,43 +51,42 @@ go test ./internal/engines/steadystate/ -run TestSaturationEngine \
 Three packages start an envtest API server and need `KUBEBUILDER_ASSETS`:
 `internal/controller`, `internal/actuator` and `internal/engines/steadystate`.
 
-Check the spec count in the output. A focus that matches nothing runs 0 specs
-and exits 0, and e2e specs `Skip()` at runtime on environment flags (for
-example the scale-from-zero suites without `SCALE_TO_ZERO_ENABLED=true`). A
-skip also reports as success, so always run with `-ginkgo.v` and read what ran.
+Always read the spec count. A focus that matches nothing runs 0 specs and
+exits 0. E2E specs also `Skip()` at runtime on environment flags (for example
+the scale-from-zero suites without `SCALE_TO_ZERO_ENABLED=true`), and a skip
+reports as success. Run with `-ginkgo.v` and check what ran.
 
 ### Shell checks in `deploy/` and `hack/`
 
-The installer decides what to autoscale by parsing pod specs in shell. That
-parsing has no Go test and never touches a cluster, so it is covered by
-fixture-executing checks under `hack/`. One target runs them all, and CI runs
-it on every PR (`deploy-scripts-check`):
+The installer parses pod specs in shell. That code has no Go test, so
+fixture-driven `hack/check-*` scripts cover it. One target runs them all, and
+CI runs it on every PR (`deploy-scripts-check`):
 
 ```bash
 make lint-deploy-scripts
 ```
 
-It runs every `hack/check-*` script listed in the target (26 at the time of
-writing: 23 shell, 3 Python; parsers, manifests, make recipes, quoted
-`jq`/`yq` programs, ...) besides `bash -n` on the deploy scripts. The other
-`hack/check-*` scripts (doc links, dashboards, import direction, doc-comment
-owners) run from their own targets. They need `jq` and `yq` and fail rather than skip without them,
-because a skip is how a green run comes to mean nothing. CI pins yq v4.44.3;
-some yq behaviour differs in newer releases, so reproduce a CI failure with
-that version.
+It runs `bash -n` on the deploy scripts and every `hack/check-*` script listed
+in the target: parsers, manifests, make recipes, quoted `jq`/`yq` programs and
+more. Other `hack/check-*` scripts (doc links, dashboards, import direction,
+doc-comment owners) run from their own targets.
 
-- `check-install-defaults.sh` -- what a plain install ships: how `IMG` is
+- The checks need `jq` and `yq`. They fail, not skip, when either is missing:
+  a skip would make a green run meaningless.
+- CI pins yq v4.44.3. Newer yq behaves differently in places, so reproduce a
+  CI failure with that version.
+- `check-install-defaults.sh` covers what a plain install ships: how `IMG` is
   split (registry ports, digests), the pull policy for a reference, the
   floating-tag and unverified-Prometheus-TLS warnings, and which Prometheus
-  ServiceAccount is granted the controller's `/metrics`.
+  ServiceAccount may read the controller's `/metrics`.
 
-Both need `jq` (and the first needs `yq`) and fail rather than skip without
-them, because a skip is how a green run comes to mean nothing.
+A new fixture check follows the same convention (see AGENTS.md): a
+`hack/check-*.sh` script, called from `lint-deploy-scripts`. A check behind a
+new make target is one CI never runs.
 
-`check-rendered-manifests.sh` needs kustomize as well, so it runs in the
-`kustomize-build` CI job rather than under `make lint-deploy-scripts`. It
-renders the overlays -- and the overlay the installer wraps around them -- and
-asserts what they contain, where the builds alone only prove they render:
+`check-rendered-manifests.sh` also needs kustomize, so it runs in the
+`kustomize-build` CI job instead. It renders the overlays, and the overlay the
+installer wraps around them, and asserts what they contain:
 
 ```bash
 make kustomize && KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
@@ -97,32 +94,27 @@ make kustomize && KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
 
 ### Unit Test Structure
 
-Unit tests are co-located with the code they test:
+Tests sit next to the code they test. For example:
 
 ```text
 internal/
-├── controller/
-│   ├── variantautoscaling_controller.go
-│   └── variantautoscaling_controller_test.go
-├── saturation/
-│   ├── analyzer.go
-│   └── analyzer_test.go
-├── collector/
-│   ├── collector.go
-│   └── collector_test.go
-└── queueing/
-    └── analyzer/
-        ├── queueanalyzer.go
-        └── queueanalyzer_test.go
+├── engines/
+│   ├── steadystate/
+│   │   ├── engine_v2.go
+│   │   ├── engine_v2_test.go
+│   │   └── suite_test.go          # Ginkgo suite TestSaturationEngine (envtest)
+│   └── analyzers/
+│       └── saturation/
+│           ├── analyzer.go
+│           └── analyzer_test.go
+└── collector/
+    ├── replica_metrics.go
+    └── replica_metrics_test.go
 ```
-
-A new fixture check follows the same convention (see AGENTS.md): a
-`hack/check-*.sh` script, called from `lint-deploy-scripts`. A check behind
-a new make target is one CI never runs.
 
 ### Writing Unit Tests
 
-Example unit test structure:
+A Ginkgo suite looks like this:
 
 ```go
 package solver_test
@@ -141,240 +133,216 @@ func TestSolver(t *testing.T) {
 var _ = Describe("Solver", func() {
     Context("when optimizing single variant", func() {
         It("should calculate optimal replicas", func() {
-            // Test implementation
             Expect(result).To(Equal(expected))
         })
     })
 })
 ```
 
-### Unit Test Best Practices
+Good unit tests:
 
-- **Use table-driven tests** for testing multiple scenarios
-- **Mock external dependencies** (Kubernetes API, Prometheus, etc.)
-- **Test edge cases** (zero values, negative numbers, nil pointers, etc.)
-- **Keep tests fast** - unit tests should run in milliseconds
-- **Use descriptive test names** - clearly state what is being tested
-- **Follow AAA pattern** - Arrange, Act, Assert
+- use tables for many scenarios;
+- mock external dependencies (Kubernetes API, Prometheus);
+- cover edge cases (zero, negative, nil);
+- run in milliseconds;
+- have names that say what they check.
 
 ## Integration Tests
 
-Integration tests validate component interactions within the controller using envtest.
-
-### Running Integration Tests
+Integration tests use controller-runtime's envtest: a real Kubernetes API
+server with no controllers. The project installs no CRD, so the suites load
+none. See `internal/controller/suite_test.go` for the setup.
 
 ```bash
-# Run integration tests (included in make test)
+# Included in make test
 make test
 
-# Run only controller integration tests
+# Only the controller suite (needs KUBEBUILDER_ASSETS; see Run one test)
 go test ./internal/controller/... -v
 ```
 
-### envtest Setup
-
-Integration tests use controller-runtime's envtest, a real Kubernetes API
-server with no controllers. The project installs no CRD, so the suites load
-none; see `internal/controller/suite_test.go` for the setup, and
-[Run one test](#run-one-test) for running a suite by hand.
-
 ## End-to-End Tests
 
-The scaling manager provides a **single consolidated E2E suite** that runs on multiple environments (Kind with emulated GPUs, or OpenShift/kubernetes with real infrastructure). Tests are environment-agnostic and parameterized via environment variables; they create ScaledObjects, HPAs and model services dynamically as part of the test workflow.
+One suite in `test/e2e/` runs on Kind with emulated GPUs, or on
+OpenShift/Kubernetes. Environment variables select the environment. The tests
+create their own ScaledObjects, HPAs and model services.
 
-- **Location**: `test/e2e/`
-- **Environments**: Kind (emulated), OpenShift, or generic Kubernetes
-- **Tiers**: Smoke (~5–10 min) for PRs; full suite (~15–25 min) for comprehensive validation
+- **Smoke** (~5-10 min): run on every PR.
+- **Full** (~15-25 min): the deeper correctness checks.
 
-### Scope
-
-E2E is intended to be a **deterministic correctness signal**: resource wiring, reconciliation, and stable invariants (e.g., ScaledObjects become Ready, KEDA creates the HPA, scalers are created and point at the right targets/metrics). Traffic generation and performance/benchmarking scenarios should live outside `test/e2e/`.
-
-### Controller state between runs
-
-`BeforeSuite` restarts the scaling manager controller before anything else runs. This is required for determinism, not hygiene.
-
-The saturation analyzer's capacity knowledge store is **in-memory and lives for the process lifetime**. It is keyed by `(namespace, model, variant)`, and the suites all reuse the same model ID, so a per-replica capacity learned by one suite — or by an earlier run against the same cluster — survives into the next and is preferred over live observation (the `P2-hist` capacity source in the `analyzer-result` log line).
-
-Without the restart, results depend on run history rather than on the code. A degenerate learned capacity has been observed to pin utilization at `1.0`, at which point the engine *correctly* refuses to scale down and a scale-down spec fails against code that is fine — reproducibly on a reused pod, and not at all on a fresh one.
-
-Two consequences worth knowing:
-
-- Re-running the suite against an already-deployed controller is only trustworthy because of that restart. If you invoke specs some other way and skip `BeforeSuite`, expect history-dependent results.
-- Redeploying with the **same image tag** does not restart the pod (`imagePullPolicy: IfNotPresent` plus an unchanged pod spec), so rebuilt code silently does not run. Bump the tag when redeploying — check the pod's name/age, not just the image string.
-
-The restart is best-effort: if patching the Deployment is not permitted, the suite warns and continues rather than failing.
-
-### E2E shared fixtures
-
-Code lives under `test/e2e/fixtures`. The `fixtures` package holds reusable helpers to create, ensure (idempotent setup), and delete Kubernetes objects used by the e2e suite (KEDA ScaledObjects, HPAs, model services, Services, ServiceMonitors, InferenceObjective, etc.). Package-level documentation and naming conventions (`Create*` / `Ensure*` / `Delete*`, `baseName` vs full resource names) live in the package doc:
-
-```bash
-go doc ./test/e2e/fixtures
-```
-
-After changing fixture APIs or generated object shape, compile e2e without running specs:
-
-```bash
-go test ./test/e2e/... -run TestDoesNotExist
-```
-
-### Infra-Only Setup (Required Before Running Tests)
-
-Tests expect **the scaling manager + monitoring + scaler + llm-d EPP/gateway** to be deployed; they create ScaledObjects, HPAs and model workloads themselves. Use **`make deploy-e2e-infra`** (runs `deploy/install.sh` then `deploy/install-epp.sh`) or invoke those scripts with the same environment variables the Makefile sets.
-
-This deploys:
-- The scaling manager controller (via Kustomize)
-- llm-d EPP (GAIE standalone chart) via `deploy/install-epp.sh`
-- Prometheus stack and KEDA
-- **No** ScaledObject or HPA (tests create these)
-
-When `ENABLE_SCALE_TO_ZERO=true` (set by `make deploy-e2e-infra` when `SCALE_TO_ZERO_ENABLED=true`), **`install-epp.sh`** enables the **flowControl feature gate** on the EPP so it exposes `inference_extension_flow_control_queue_size`. The **InferenceObjective** `e2e-default` is created by the scale-from-zero tests (`test/e2e/fixtures`), not by the install scripts.
-
-**Kueue CRDs (full suite on kind).** `kueue_quota_test.go` (label `kueue-quota`)
-proves a quota entry bounded by Kueue against a real API server. It needs only
-the three Kueue **CRDs** (ClusterQueue, LocalQueue, ResourceFlavor), not Kueue's
-controller — the reader lists objects and never talks to Kueue.
-`make test-e2e-full-with-setup` installs them on kind through
-`deploy/ci-pr-checks/install-kueue-crds.sh` (pinned `KUEUE_VERSION`). On kind
-the spec **fails rather than skips** when the kinds are absent, so a missing
-setup step is never read as coverage; run the script by hand before a bare
-`make test-e2e-full` on kind. On any other cluster (the OpenShift CI included)
-nothing installs them, and the spec runs when the cluster serves the kinds and
-skips — saying so in the `-v` output — when it does not. The script leaves a
-cluster that already has the CRDs untouched and exits 0.
-
-**Utilization-share optimizer (full suite).** `utilization_share_test.go`
-(label `utilization-share`) runs the optimizer of
-[the proposal](../proposals/utilization-share-optimizer.md) against a real
-ReplicaSet, HPA and KEDA. It needs nothing beyond the standard infra.
-- **Setup:** one namespace has a 4-GPU quota on the discovered accelerator. An
-  idle model A holds 3 GPUs, and model B, under load, holds 1.
-- **Shadow phase, the negative control:** the group must be evaluated (the
-  `wva_utilization_share_*` series appear, with B short), and no pod is marked.
-- **Active phase:**
-  - an A pod gets the donor mark;
-  - the ReplicaSet removes exactly that pod;
-  - B is raised only once the marked pod starts terminating;
-  - the transfer ends `done`.
-- **Duration:** about 7 minutes. Run it alone with
-  `FOCUS="Utilization share" make test-e2e-full`.
-
-Two more specs share the label and the `FOCUS`. All three skip when no
-schedulable node carries a GPU product label, and the two below also skip when
-no node has enough GPUs of one product. A skip reports as success, so read the
-`-v` output: on the kind emulator all three must run.
-- **`utilization_share_pd_test.go`, a P/D model on LeaderWorkerSets.**
-  - Setup: a 7-GPU quota. Idle model A has four 1-GPU replicas. Model B's
-    decode LWS runs one group of two 1-GPU pods, and its prefill LWS one pod.
-  - B's decode grows by a group. Two of A's replicas fund it as one donor set,
-    and the decode LWS is raised only after both have released.
-  - The set is read from the controller's log (`transfer started`, `released,
-    raising the receiver`, `transfer ended`), because it can finish within
-    about 30 seconds, faster than a poll reliably catches the donor marks.
-- **`utilization_share_nodes_test.go`, node-aware donor sets.**
-  - Setup: a 6-GPU quota. Idle model A has four 1-GPU replicas, pinned to the
-    product's largest node so that two of them share it, and model B one
-    2-GPU replica.
-  - Every other free GPU on the product's nodes is taken by a
-    `registry.k8s.io/pause` pod in a separate namespace, outside WVA.
-  - No single A pod holds B's pod, so only the node-aware search can fund it:
-    the controller must log a set of two A pods with `"planned": true`, raise
-    B only after both have released, and B's second pod must run.
-  - The fill is what makes the node search matter. On an emulator with spare
-    GPUs, the receiver's pods would fit free GPUs and the search would defer to
-    the node-blind one.
-
-**Install script tuning (optional, same variables as `deploy/install.sh`):**
-
-- **`SKIP_HELM_REPO_UPDATE`**: When set to **`true`**, `helm repo update` is skipped during installs (faster, less network churn). Default runs `helm repo update` to refresh repo indexes.
-
-Alternatively, use the Makefile to deploy infra and run tests in one go:
-
-```bash
-# Kind: create cluster, deploy infra, run smoke tests
-make test-e2e-smoke-with-setup
-
-# Kind: deploy infra only (if cluster already exists), then run full suite
-make deploy-e2e-infra
-make test-e2e-full
-```
-
-See the [E2E Test Suite README](../../test/e2e/) for full configuration options and examples.
+E2E is a **deterministic correctness signal**: resource wiring,
+reconciliation and stable invariants (ScaledObjects become Ready, KEDA creates
+the HPA, scalers point at the right targets). Traffic and performance
+scenarios belong outside `test/e2e/`.
 
 ### Quick Start
 
 ```bash
-# Smoke tests (recommended for every PR)
-make test-e2e-smoke
+# Kind: create a cluster, deploy infra, run the smoke tier
+CREATE_CLUSTER=true make test-e2e-smoke-with-setup
 
-# Full suite (on-demand)
+# Existing Kind cluster: deploy infra, then run the full tier
+make deploy-e2e-infra
 make test-e2e-full
 
-# OpenShift: point at cluster and run
+# Smoke tier against infra that is already deployed
+make test-e2e-smoke
+
+# OpenShift
 export KUBECONFIG=/path/to/openshift/kubeconfig
 export ENVIRONMENT=openshift
-make test-e2e-smoke
-# or make test-e2e-full
+make test-e2e-smoke          # or make test-e2e-full
 
-# Run a specific test by name (a Describe or It text, e.g. in smoke_keda_test.go)
+# One spec by name (a Describe or It text)
 FOCUS="Basic Autoscaling" make test-e2e-smoke
 ```
 
-`test-e2e-smoke` filters on label `smoke` and `test-e2e-full` on
-`full && !smoke && !flaky`, so a `FOCUS` must name a spec in the tier you run. Either
-way, check `Ran N of M Specs` in the output: a focus that matches nothing runs
-0 specs and exits green.
+- `test-e2e-smoke` runs label `smoke`; `test-e2e-full` runs
+  `full && !smoke && !flaky`. The tiers are disjoint, so run both for full
+  coverage. Specs labelled `flaky` run in neither.
+- A `FOCUS` must name a spec in the tier you run. Check `Ran N of M Specs`:
+  a focus that matches nothing runs 0 specs and exits green.
+- Both targets port-forward Prometheus to `https://localhost:9090` for the
+  run. Without it, the metric assertions skip.
+- The `-with-setup` targets never delete the cluster. Delete it with
+  `kind delete cluster --name kind-wva-gpu-cluster` (or your `CLUSTER_NAME`).
 
-### What the Suite Validates
+See the [E2E Test Suite README](../../test/e2e/) for every option.
 
-- **Smoke (label `smoke`)**: Infrastructure readiness, basic autoscaling through the KEDA external scaler, error handling
-- **Full (label `full`, run as `full && !smoke && !flaky`)**: Deterministic correctness checks (scale-from-zero, limiter, pod scraping, etc.). The tiers are disjoint: `test-e2e-full` does not re-run the smoke specs, and specs labelled `flaky` run in neither. Run both targets for complete coverage.
+### Infra the suite needs
+
+`make deploy-e2e-infra` deploys the scaling manager, Prometheus, KEDA and the
+llm-d EPP (`deploy/install-epp.sh`). It creates no ScaledObject or HPA; the
+tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
+`llm-d-sim` on every environment.
+
+- **Scale to zero.** With `SCALE_TO_ZERO_ENABLED=true`, `install-epp.sh`
+  enables the EPP flowControl feature gate, so it exposes
+  `inference_extension_flow_control_queue_size`. The scale-from-zero tests
+  create the `e2e-default` InferenceObjective themselves.
+- **Kueue CRDs (full tier).** `kueue_quota_test.go` (label `kueue-quota`)
+  needs the three Kueue CRDs (ClusterQueue, LocalQueue, ResourceFlavor), not
+  Kueue's controller. `make test-e2e-full-with-setup` installs them on Kind
+  with `deploy/ci-pr-checks/install-kueue-crds.sh` (pinned `KUEUE_VERSION`).
+  On Kind the spec **fails** when the CRDs are absent, so run that script by
+  hand before a bare `make test-e2e-full`. On other clusters the spec skips
+  (and says so in `-v` output) when the kinds are not served. The script
+  leaves existing CRDs alone and exits 0.
+- **Helm repo updates.** `SKIP_HELM_REPO_UPDATE=true` skips `helm repo update`
+  during the install. It is faster, but the repo indexes must already exist.
+
+### Utilization-share specs (full tier)
+
+All three share the label `utilization-share`. Run them alone with
+`FOCUS="Utilization share" make test-e2e-full`. All three skip when no
+schedulable node has a GPU product label; the last two also skip when no node
+has enough GPUs of one product. On the Kind emulator all three must run, so
+read the `-v` output.
+
+- **`utilization_share_test.go`** runs the optimizer of
+  [the proposal](../proposals/utilization-share-optimizer.md) against a real
+  ReplicaSet, HPA and KEDA. About 7 minutes.
+  - Setup: one namespace has a 4-GPU quota. Idle model A holds 3 GPUs; model
+    B, under load, holds 1.
+  - Shadow phase (the negative control): the `wva_utilization_share_*` series
+    appear with B short, and no pod is marked.
+  - Active phase: an A pod gets the donor mark, the ReplicaSet removes exactly
+    that pod, B rises only once that pod starts terminating, and the transfer
+    ends `done`.
+- **`utilization_share_pd_test.go`**, a P/D model on LeaderWorkerSets.
+  - Setup: a 7-GPU quota. Idle A has four 1-GPU replicas. B's decode LWS runs
+    one group of two 1-GPU pods; its prefill LWS runs one pod.
+  - B's decode grows by a group. Two A replicas fund it as one donor set, and
+    decode rises only after both have released.
+  - The test reads the set from the controller log (`transfer started`,
+    `released, raising the receiver`, `transfer ended`). The transfer can
+    finish in about 30 seconds, too fast to poll for the donor marks.
+- **`utilization_share_nodes_test.go`**, node-aware donor sets.
+  - Setup: a 6-GPU quota. Idle A has four 1-GPU replicas pinned to the
+    product's largest node, so two share it. B has one 2-GPU replica.
+  - `registry.k8s.io/pause` pods in another namespace take every other free
+    GPU on the product's nodes. Without that fill, B's pods would fit free GPUs
+    and the node-aware search would never run.
+  - No single A pod frees enough for B, so the controller must log a set of two
+    A pods with `"planned": true`, raise B only after both release, and B's
+    second pod must run.
+
+### Controller state between runs
+
+`BeforeSuite` restarts the controller first. This is needed for determinism.
+
+The saturation analyzer keeps learned capacity **in memory for the life of
+the process**, keyed by `(namespace, model, variant)`. All suites use the same
+model ID, so capacity learned by one suite, or by an earlier run, carries into
+the next and wins over live observation (the `P2-hist` capacity source in the
+`analyzer-result` log line). A bad learned capacity has pinned utilization at
+`1.0`, so the engine correctly refused to scale down and a scale-down spec
+failed against good code.
+
+- Without the restart, results depend on run history. If you run specs in a
+  way that skips `BeforeSuite`, expect that.
+- Redeploying the **same image tag** does not restart the pod
+  (`IfNotPresent` and an unchanged pod spec), so rebuilt code does not run.
+  Bump the tag, and check the pod's age, not just its image.
+- The restart is best-effort: if the suite may not patch the Deployment, it
+  warns and continues.
+
+### E2E shared fixtures
+
+`test/e2e/fixtures` holds helpers that create, ensure (idempotent) and delete
+the objects the suite uses: ScaledObjects, HPAs, model services, Services,
+ServiceMonitors, InferenceObjective. The naming rules (`Create*` / `Ensure*` /
+`Delete*`, `baseName` vs full names) are in the package doc:
+
+```bash
+go doc ./test/e2e/fixtures
+
+# Compile the e2e package without running specs
+go test ./test/e2e/... -run TestDoesNotExist
+```
 
 ### Configuration
 
-Key environment variables (see [E2E Test Suite README](../../test/e2e/) for the full list):
+The main variables (full list in the [E2E README](../../test/e2e/)):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENVIRONMENT` | `kind-emulator` | `kind-emulator`, `openshift`, or `kubernetes` |
 | `USE_SIMULATOR` | `true` | Emulated GPUs (true) or real vLLM (false) |
-| `SCALE_TO_ZERO_ENABLED` | `false` | Enable scale-to-zero tests (Kind supports both enabled and disabled) |
-| `SCALER_BACKEND` | `keda` | `keda` (ScaledObject) or `none` (skip install, use pre-installed backend) |
+| `SCALE_TO_ZERO_ENABLED` | `false` | Enable scale-to-zero tests |
+| `SCALER_BACKEND` | `keda` | `keda` (ScaledObject) or `none` (use a pre-installed backend) |
 | `POD_READY_TIMEOUT` / `SCALE_UP_TIMEOUT` | `300` / `600` | Model ready vs longest scale/job waits (seconds) |
-| `E2E_EVENTUALLY_STANDARD`, etc. | see README | Optional `Eventually` timeouts and poll intervals (`E2E_EVENTUALLY_*`, `E2E_EVENTUALLY_POLL*`) |
+| `E2E_EVENTUALLY_*`, `E2E_EVENTUALLY_POLL*` | see README | Optional `Eventually` timeouts and poll intervals |
 
-Deploy-time knobs: `SKIP_HELM_REPO_UPDATE`, optional `SCALE_UP_THRESHOLD` / `SCALE_DOWN_BOUNDARY` (Makefile patches the `wva-scaling-policy-config` ConfigMap when set) — see **Install script tuning** above.
+Deploy-time knobs: `SKIP_HELM_REPO_UPDATE`, and `SCALE_UP_THRESHOLD` /
+`SCALE_DOWN_BOUNDARY` (when set, the Makefile patches the
+`wva-scaling-policy-config` ConfigMap).
 
-For running multiple test runs in parallel, a controller can be given a
-`CONTROLLER_INSTANCE` name: it then manages only workloads whose ScaledObject
-carries `wva.llmd.ai/controller-instance` with that name. It is set by an env var on
-the manager container, so it needs its own overlay — see the secondary overlay the
-multi-controller suite uses (`WVA_E2E_SECONDARY_OVERLAY_PATH`). It is a **test
-isolation** mechanism, not an install option: `install.sh` does not offer it, because
-two controllers on one cluster still allocate from one pool of GPUs (see
-`deploy/lib/single_install.sh`).
+**Parallel runs.** A controller given a `CONTROLLER_INSTANCE` name manages only
+workloads whose ScaledObject carries `wva.llmd.ai/controller-instance` with
+that name. It is an env var on the manager container, so it needs its own
+overlay; see the one the multi-controller suite uses
+(`WVA_E2E_SECONDARY_OVERLAY_PATH`). It is for **test isolation** only:
+`install.sh` does not offer it, because two controllers on one cluster still
+share one pool of GPUs (see `deploy/lib/single_install.sh`).
 
 ## Test Comparison Matrix
 
-| Aspect | Unit Tests | Integration Tests | E2E Consolidated (Kind emulated) | E2E Consolidated (OpenShift) |
-|--------|-----------|-------------------|----------------------------------|------------------------------|
-| **Speed** | Fast (<1min) | Fast (1-3min) | Smoke 5-10min / Full 15-25min | Smoke 5-10min / Full 15-25min |
+| Aspect | Unit | Integration | E2E (Kind emulated) | E2E (OpenShift) |
+|--------|------|-------------|---------------------|-----------------|
+| **Speed** | <1 min | 1-3 min | Smoke 5-10 / Full 15-25 min | Smoke 5-10 / Full 15-25 min |
 | **Isolation** | Complete | Partial | Complete (Kind) | Shared cluster |
-| **GPU Required** | No | No | No (emulated) | Yes (real) |
-| **Infrastructure** | None | envtest | Kind + infra-only deploy | OpenShift + infra-only deploy |
-| **Realism** | Low | Medium | High (emulated) | Production-like |
-| **CI-Friendly** | Yes | Yes | Yes | Requires cluster |
-| **Local Dev** | Yes | Yes | Yes | Cluster access needed |
+| **GPU required** | No | No | No (emulated) | Yes |
+| **Infrastructure** | None | envtest | Kind + infra deploy | OpenShift + infra deploy |
 
 ## Continuous Integration
 
-Two workflows gate a pull request. Every job maps to a make target you can run
-locally; run the same target before you push.
+Two workflows gate a pull request. Each job maps to a make target; run it
+before you push.
 
-`ci-pr-checks.yaml` runs only on pull requests whose base is `main` or `dev`
-(plus pushes to `main` and manual dispatch). A PR stacked on another branch gets
-no build, test, lint or e2e at all, so retarget it to `main` before review.
+`ci-pr-checks.yaml` runs only on PRs whose base is `main` or `dev` (plus pushes
+to `main` and manual dispatch). A PR stacked on another branch gets no build,
+test, lint or e2e, so retarget it to `main` before review.
 
 | Workflow / job | What it runs | Reproduce locally |
 |----------------|--------------|-------------------|
@@ -389,277 +357,102 @@ no build, test, lint or e2e at all, so retarget it to `main` before review.
 On a push to `main`, only `lint-and-test`, `deploy-scripts-check`, `docs-check`
 and `kustomize-build` run; the e2e jobs are PR-only.
 
-`ci-e2e-openshift.yaml` (the GPU OpenShift run) is currently manual
+`ci-e2e-openshift.yaml` (the GPU OpenShift run) is manual
 (`workflow_dispatch` only); its PR and `/ok-to-test` triggers are disabled.
 
 Every commit also needs a DCO sign-off (`git commit -s`); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#commits).
 
-## Testing Best Practices
+## Ginkgo/Gomega Patterns
 
-### General Guidelines
-
-1. **Write tests first** (TDD approach) - helps design better APIs
-2. **Test behavior, not implementation** - tests should survive refactoring
-3. **Keep tests independent** - tests should not depend on each other
-4. **Use meaningful assertions** - prefer specific matchers over generic equality
-5. **Clean up resources** - always clean up in AfterEach/AfterAll blocks
-6. **Document complex tests** - add comments explaining non-obvious test logic
-
-### Ginkgo/Gomega Patterns
-
-#### Use Descriptive Test Names
+Test behavior, not implementation; keep tests independent; clean up in
+`AfterEach`/`AfterAll`.
 
 ```go
-// ✅ Good
-It("should recommend scale-up when KV cache exceeds 70% threshold", func() {
-    // ...
-})
+// Name says what it checks
+It("should recommend scale-up when KV cache exceeds 70% threshold", func() { /* ... */ })
 
-// ❌ Bad
-It("should work", func() {
-    // ...
-})
-```
-
-#### Use Eventually for Async Operations
-
-```go
-// ✅ Good - waits for condition to become true
+// Eventually: wait for an async condition (a bare Get-then-Expect is racy)
 Eventually(func(g Gomega) {
     dep := &appsv1.Deployment{}
-    err := k8sClient.Get(ctx, key, dep)
-    g.Expect(err).NotTo(HaveOccurred())
+    g.Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
     g.Expect(*dep.Spec.Replicas).To(BeNumerically(">=", 2))
 }, timeout, interval).Should(Succeed())
 
-// ❌ Bad - may fail due to timing
-dep := &appsv1.Deployment{}
-k8sClient.Get(ctx, key, dep)
-Expect(*dep.Spec.Replicas).To(BeNumerically(">=", 2))
-```
-
-#### Use Consistently for Stable State
-
-```go
-// Verify replicas remain stable for 30 seconds
+// Consistently: a state holds for a period (here 30s)
 Consistently(func(g Gomega) {
-    deploy := &appsv1.Deployment{}
-    err := k8sClient.Get(ctx, key, deploy)
-    g.Expect(err).NotTo(HaveOccurred())
-    g.Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
+    dep := &appsv1.Deployment{}
+    g.Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+    g.Expect(*dep.Spec.Replicas).To(Equal(int32(2)))
 }, 30*time.Second, 5*time.Second).Should(Succeed())
-```
 
-#### Use Ordered for Sequential Tests
-
-```go
+// Ordered: specs run in order and share state
 var _ = Describe("Scale-up workflow", Ordered, func() {
-    // These tests run in order and share state
     It("should create resources", func() { /* ... */ })
     It("should detect saturation", func() { /* ... */ })
     It("should scale up", func() { /* ... */ })
 })
 ```
 
-### Test Organization
-
-#### Use Contexts for Grouping
-
-```go
-var _ = Describe("Optimizer", func() {
-    Context("with single variant", func() {
-        It("should optimize for cost", func() { /* ... */ })
-        It("should meet SLO requirements", func() { /* ... */ })
-    })
-
-    Context("with multiple variants", func() {
-        It("should prefer cheaper variant", func() { /* ... */ })
-        It("should distribute load evenly", func() { /* ... */ })
-    })
-})
-```
-
-#### Use BeforeEach/AfterEach for Setup/Teardown
-
-```go
-var _ = Describe("Controller", func() {
-    var (
-        namespace string
-        cleanup   func()
-    )
-
-    BeforeEach(func() {
-        namespace = "test-" + randomString()
-        // Setup test resources
-    })
-
-    AfterEach(func() {
-        // Clean up test resources
-        if cleanup != nil {
-            cleanup()
-        }
-    })
-
-    It("should reconcile resources", func() {
-        // Test implementation
-    })
-})
-```
-
 ## Debugging Tests
 
-### Debugging Unit Tests
+### Unit tests
 
 ```bash
-# Run with verbose output
-go test -v ./internal/engines/allocation/...
-
-# Enable Ginkgo trace
+# Ginkgo trace
 go test -v ./internal/engines/steadystate/ -ginkgo.v -ginkgo.trace
 
-# Run with debugger (delve)
+# Debugger (delve)
 dlv test ./internal/controller/... -- -ginkgo.v
 ```
 
-### Debugging E2E Tests
+### E2E tests
 
-#### View Test Logs
+Run through the make targets; they set the namespaces and the Prometheus
+port-forward the suite needs:
 
 ```bash
-# Consolidated E2E suite (smoke or full)
-go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="smoke"
-go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !smoke && !flaky" -timeout 35m
+FOCUS="Basic Autoscaling" make test-e2e-smoke
+FOCUS="Utilization share" make test-e2e-full
 ```
 
-#### Access Test Cluster
+A bare `go test ./test/e2e/` needs the same environment by hand:
+`WVA_NAMESPACE=llm-d-sim` (and the other variables the target sets) plus
+`kubectl port-forward -n <monitoring-ns> svc/kube-prometheus-stack-prometheus 9090:9090`.
+
+Inspect the cluster:
 
 ```bash
-# For Kind E2E tests (default cluster name: kind-wva-gpu-cluster or from CLUSTER_NAME)
-export KUBECONFIG=~/.kube/config   # or path from kind get kubeconfig
 kubectl get pods -A
-kubectl logs -n llm-d-sim deploy/wva-controller-manager
-
-# For OpenShift E2E tests (same CONTROLLER_NAMESPACE, default llm-d-sim)
-oc get pods -A
-oc logs -n "${CONTROLLER_NAMESPACE:-llm-d-sim}" deploy/wva-controller-manager
+kubectl logs -n "${CONTROLLER_NAMESPACE:-llm-d-sim}" deploy/wva-controller-manager
 ```
 
-`deploy-e2e-infra` installs the controller in `CONTROLLER_NAMESPACE`, which
-defaults to `llm-d-sim` on every environment, not in
-`workload-variant-autoscaler-system`.
+### Common failures
 
-#### Keep Cluster Alive After Failure
+| Symptom | Likely causes | Check |
+|---------|---------------|-------|
+| Test times out | controller stuck, HPA not reading metrics, Prometheus not scraping, quota blocks pods | `kubectl get events -A --sort-by='.lastTimestamp'`; `kubectl describe scaledobject -n <ns>`; controller logs |
+| No external metric | KEDA operator down, bad labels | `kubectl describe hpa -n <ns> keda-hpa-<scaledobject>` |
+| HPA wants replicas, Deployment does not grow | CPU/memory/GPU short, node capacity, PDB | `kubectl describe deploy -n <ns>`; events; `kubectl top nodes` |
 
-```bash
-# Run tests; on failure, cluster is kept by default (DELETE_CLUSTER=false)
-make test-e2e-smoke-with-setup
-# Inspect: kubectl get all -A
-# To delete cluster after: DELETE_CLUSTER=true make test-e2e-smoke-with-setup
-# Or manually: kind delete cluster --name <CLUSTER_NAME>
-```
+KEDA serves `external.metrics.k8s.io` per ScaledObject. `wva_desired_replicas`
+is a Prometheus gauge, not an external metric: read it from Prometheus, or read
+the HPA KEDA drives from it.
 
-### Common Test Failures
+## Coverage and contributing tests
 
-#### Test Times Out
-
-**Symptoms**: Test hangs or exceeds timeout
-
-**Possible causes**:
-- Controller stuck in reconciliation loop
-- HPA not reading metrics
-- Prometheus not scraping metrics
-- Resource quotas preventing pod creation
-
-**Debugging steps**:
-```bash
-kubectl get events -A --sort-by='.lastTimestamp'
-kubectl describe scaledobject -n <namespace>
-kubectl logs -n llm-d-sim deploy/wva-controller-manager   # Kind e2e; else the controller's namespace
-```
-
-#### Metrics Not Available
-
-**Symptoms**: External metrics API returns empty or error
-
-**Possible causes**:
-- KEDA operator not running
-- Metrics not being scraped
-- Incorrect metric labels or selectors
-
-**Debugging steps**:
-```bash
-# Check external metrics API
-# KEDA owns external.metrics.k8s.io and serves per-ScaledObject metrics there;
-# wva_desired_replicas is a Prometheus gauge, not an external metric. Read it via
-# Prometheus, or read the HPA KEDA drives from it.
-kubectl describe hpa -n <namespace> keda-hpa-<scaledobject-name>
-
-# Check Prometheus
-kubectl port-forward -n workload-variant-autoscaler-monitoring svc/prometheus-operated 9090:9090
-# Query: wva_desired_replicas{variant_name="..."}
-```
-
-#### Deployment Not Scaling
-
-**Symptoms**: HPA shows desired replicas but deployment doesn't scale
-
-**Possible causes**:
-- Resource constraints (CPU/memory/GPU)
-- Node capacity exceeded
-- PDB preventing scale-up
-- Deployment controller issues
-
-**Debugging steps**:
-```bash
-kubectl describe hpa -n <namespace>
-kubectl describe deploy -n <namespace>
-kubectl get events -n <namespace> --sort-by='.lastTimestamp'
-kubectl top nodes
-```
-
-## Performance / Benchmarking
-
-Performance and benchmarking scenarios (traffic generation, throughput/latency measurement, scale-up latency, etc.) are intentionally **out of scope** for `test/e2e/` so that e2e remains deterministic. Use the project’s dedicated benchmarking tooling/workflows instead.
-
-## Test Coverage Goals
-
-Current coverage targets:
-- **Unit tests**: 70%+ code coverage
-- **Integration tests**: All controller operations
-- **E2E tests**: Critical user workflows
-
-### Checking Coverage
+Targets: 70%+ unit coverage, integration tests for controller operations, e2e
+for critical user workflows. Before pushing, run `make test` and
+`make test-e2e-smoke` (or `make test-e2e-full`).
 
 ```bash
-# Generate coverage report (never ./...: that runs test/e2e on your kube context)
+# Never ./...: that runs test/e2e on your kube context
 go test -coverprofile=coverage.out $(go list ./... | grep -v -e /e2e -e /benchmark)
-
-# View summary
 go tool cover -func=coverage.out
-
-# Generate HTML report
-go tool cover -html=coverage.out -o coverage.html
-
-# View in browser
-open coverage.html  # macOS
-xdg-open coverage.html  # Linux
 ```
-
-## Contributing Tests
-
-When contributing, please ensure:
-
-1. ✅ **All new code has unit tests** - aim for 70%+ coverage
-2. ✅ **Critical paths have integration tests** - especially controller logic
-3. ✅ **New features have E2E tests** - validate end-to-end behavior
-4. ✅ **Tests are documented** - explain what is being tested and why
-5. ✅ **Tests follow naming conventions** - use descriptive names
-6. ✅ **Tests clean up resources** - no resource leaks in tests
-7. ✅ **Tests pass locally before pushing** - run `make test` and `make test-e2e-smoke` (or `make test-e2e-full`)
 
 ## Related Documentation
 
-- [Development Guide](development.md) - Development environment setup
-- [E2E Test Suite README](../../test/e2e/) - Consolidated E2E tests (Kind, OpenShift, infra-only setup)
-- [Contributing Guide](../../CONTRIBUTING.md) - Contribution guidelines
+- [Development Guide](development.md) - development environment setup
+- [E2E Test Suite README](../../test/e2e/) - every e2e option
+- [Contributing Guide](../../CONTRIBUTING.md) - contribution guidelines

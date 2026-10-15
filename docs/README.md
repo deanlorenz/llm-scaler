@@ -36,13 +36,13 @@ index, then follow the guide that path links to. Nothing installed yet? The
    `flowControl` feature gate on, plus KEDA and Prometheus on the cluster.
    Nothing serving yet? [Install a small llm-d model](guides/install-small-model/) first.
 2. **Install the scaling manager** into that namespace. A cluster admin runs
-   the one-time setup; the namespace owner runs the rest. On a shared
-   cluster, have a cluster admin run the controller out of the tenant's reach
-   (`WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>` on `setup-prereqs` and `deploy-wva`);
-   see [Cluster-admin setup](guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach).
-   The tenant-owned default below is for single-team or trusted clusters.
-   Either way, the bound that actually holds is a GPU ResourceQuota on the
-   namespace: [bound the namespace's GPUs at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission).
+   the one-time setup; the namespace owner runs the rest. That default suits a
+   single team or a trusted cluster. On a shared cluster, the admin runs the
+   controller out of the tenant's reach: `WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>`
+   on `setup-prereqs` and `deploy-wva`
+   ([cluster-admin setup](guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)).
+   Either way, the bound that holds is a GPU ResourceQuota on the namespace
+   ([bound at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
 
    ```bash
    export NAMESPACE=<the namespace running llm-d>
@@ -59,9 +59,8 @@ index, then follow the guide that path links to. Nothing installed yet? The
    make scaledobjects-apply    # creates the ScaledObjects
    ```
 
-   The router (EPP) must run with `featureGates: [flowControl]` in its
-   EndpointPickerConfig; `make check-prereqs` refuses the install when it can
-   see the gate is off.
+   With the controller out of your reach, add `WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>`
+   to both, so every trigger names the controller in `wva-<ns>`.
 
 The full walk-through, with what each step checks:
 [install the scaling manager in a namespace](guides/install-in-namespace/).
@@ -75,7 +74,9 @@ kubectl get scaledobject,hpa -n $NAMESPACE
 Each ScaledObject shows `READY True`, and its HPA's `TARGETS` shows a number
 such as `1/1 (avg)`. `cpu: <unknown>/80%` means KEDA could not reach the
 scaling manager: [first-line troubleshooting](reference/operations.md#first-line-troubleshooting).
-After a cycle or two, the controller's log shows its decisions:
+After a cycle or two, the controller's log shows its decisions (its namespace
+is `$NAMESPACE`, or `wva-$NAMESPACE` when the admin keeps it out of your reach;
+then ask the admin, or read `wva_desired_replicas` in Prometheus):
 
 ```bash
 kubectl logs -n $NAMESPACE deploy/wva-controller-manager | grep scaling-decision

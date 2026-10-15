@@ -6,8 +6,8 @@ and where a competitor's decision logic is closed the comparison says so rather
 than guessing.
 
 - **[KEDA alone](keda-alone.md)** — the one most operators weigh first: llm-d's
-  own KEDA recipes against llm-scaling-manager, need by need, with a July 2026
-  measured study and what has changed since.
+  own KEDA recipes against llm-scaling-manager, need by need, with one July 2026
+  study of five scenarios, one run each, and what has changed since.
 - **[NVIDIA Dynamo, Mooncake and SGLang](autoscaling-nvidia-mooncake-sglang-vs-wva.md)**
   — the detailed comparison. Dynamo's Planner is the only true peer autoscaler
   of the three, and the only one with forecasting; Mooncake is a load-shedding
@@ -18,7 +18,8 @@ than guessing.
   one scales on, and how many of them you are allowed to use at once.
 
 The Dynamo, Mooncake and SGLang pages benchmark nothing. The only measured
-head-to-head is against KEDA thresholds, from July 2026, on an older controller
+head-to-head is against KEDA thresholds: one July 2026 study of five scenarios,
+one run each, on an older controller
 and recipe; [KEDA alone](keda-alone.md#measured-against-keda-alone) says what
 still holds.
 
