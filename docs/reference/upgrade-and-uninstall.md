@@ -159,22 +159,25 @@ they enable. Do this, in order:
 
 ### External scaler TLS on upgrade
 
-Mutual TLS on the scaler port is now the default. An upgrade from a plaintext
-install turns it on only if nothing would break:
+Mutual TLS on the scaler port is now the default. Most installs already have
+ScaledObjects, and a plain upgrade leaves those on plaintext and lists them.
+To move to TLS, run:
 
-- KEDA's side must be in place. A cluster admin writes it with
-  `make setup-prereqs`. A tenant's `make deploy-wva` cannot, and stays on
-  plaintext until the admin has.
-- No ScaledObject may still name the scaler on the plaintext address. If any
-  do, the upgrade stays on plaintext and lists them. To move them too:
+```bash
+make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
+```
 
-  ```bash
-  make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
-  ```
+It moves the controller and its ScaledObjects together. Each ScaledObject is
+not-Ready for a few seconds while it moves.
 
-  Each is not-Ready for a few seconds while it moves. ScaledObjects that GitOps
-  manages must be changed at the source: the
-  [new trigger](configuration.md#external-scaler-mutual-tls).
+- **Split install:** KEDA's side must be in place first. A cluster admin runs
+  `make setup-prereqs`; then the tenant runs the command above. A tenant's
+  `make deploy-wva` cannot write KEDA's side, and stays on plaintext until the
+  admin has.
+- **GitOps:** run the command, then commit the
+  [new trigger](configuration.md#external-scaler-mutual-tls) (the TLS address
+  and the `authenticationRef`) to git right away. Otherwise GitOps puts the old
+  one back and those ScaledObjects go not-Ready.
 
 To stay on plaintext, set `WVA_SCALER_TLS=false`. Check the result with
 `make verify-deployment`.

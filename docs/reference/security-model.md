@@ -454,7 +454,9 @@ scaling manager asks for; the quota bounds what the cluster admits
 | TLS is the default, but KEDA's side is missing or ScaledObjects would be left behind | the install stays on plaintext and says why; `WVA_SCALER_TLS=true` refuses instead | **open**, and reported |
 | KEDA's copy of the client certificate expired (no `make setup-prereqs` since) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
 | Scaler TLS on, the serving certificate expired (no cert-manager, no re-install) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
-| The installer finds a Secret, Issuer or Certificate it did not create, or cannot read one | it refuses to install TLS and changes nothing | closed |
+| The installer finds a Secret, Issuer or Certificate it did not create, or cannot read one, in the controller namespace or on KEDA's side (KEDA's copy, the ClusterTriggerAuthentication, the `wva-scaler-keda-auth` ConfigMap) | it refuses to install TLS and changes nothing: every one is checked before the first write | closed |
+| TLS is the default, but cert-manager does not accept or issue the certificates, or you may not read or create them | the install stays on plaintext and says why; `WVA_SCALER_TLS=true`, or a controller that already has TLS, refuses instead | **open**, and reported |
+| KEDA's certificate carries another client identity than the controller pins (`WVA_SCALER_CLIENT_SAN` changed on a split install) | the default stays on plaintext, `WVA_SCALER_TLS=true` refuses, and a controller that has TLS keeps it with a warning; the fix is `make setup-prereqs` and a KEDA restart | closed |
 
 ## Production hardening checklist
 
