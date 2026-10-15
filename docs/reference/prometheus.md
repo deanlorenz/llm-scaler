@@ -61,7 +61,7 @@ spec:
 |----------|----------|-------------|---------|
 | `PROMETHEUS_BASE_URL` | Yes | Prometheus server URL (HTTPS only in production) | - |
 | `PROMETHEUS_ALLOW_HTTP` | No | Allow a plain `http://` `PROMETHEUS_BASE_URL` (dev/test only; cannot be combined with TLS settings or bearer token auth) | `false` |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification. The binary and the shipped config (`config/base/manager/manager-configmap.yaml`) default to `false`; the installer sets `"true"` on Kubernetes, where it has no CA for the Prometheus it deploys. In production set `"false"` and point `PROMETHEUS_CA_CERT_PATH` at the CA that signed Prometheus's certificate | `false`; `"true"` when the installer deploys on Kubernetes |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification. The binary and the shipped config (`config/base/manager/manager-configmap.yaml`) default to `false`. The installer sets `"true"` only for the kube-prometheus-stack it deploys itself on Kubernetes, which has no CA to give the controller. Any other HTTPS Prometheus stays verified. In production set `"false"` and point `PROMETHEUS_CA_CERT_PATH` at the CA that signed Prometheus's certificate | `false`; `"true"` for the Prometheus the installer deploys on Kubernetes |
 | `PROMETHEUS_CA_CERT_PATH` | No | Path to CA certificate for TLS verification | - |
 | `PROMETHEUS_CLIENT_CERT_PATH` | No | Path to client certificate for mutual TLS | - |
 | `PROMETHEUS_CLIENT_KEY_PATH` | No | Path to client private key for mutual TLS | - |
@@ -169,12 +169,24 @@ Only those sources write or repoint the binding:
 ### TLS Configuration
 
 **What ships:** the manager ConfigMap verifies (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"`).
-On Kubernetes the installer turns verification off: the kube-prometheus-stack it
-deploys serves a self-signed certificate that nothing mounts into the
-controller, so verifying would fail with `x509: certificate signed by unknown
-authority`. Pass `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false` once the CA is
-mounted. The OpenShift overlays verify against the service CA. The installer
-warns at the end of any install that connects over HTTPS without verifying.
+On Kubernetes the installer turns verification off for one Prometheus only: the
+kube-prometheus-stack it deploys itself (`DEPLOY_PROMETHEUS=true`, in
+`MONITORING_NAMESPACE`). That stack serves a self-signed certificate that nothing
+mounts into the controller, so verifying would fail with `x509: certificate
+signed by unknown authority`. Pass `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false`
+once the CA is mounted.
+
+Any other HTTPS Prometheus stays verified, because the controller sends it a
+token. If its certificate comes from a private CA, the controller cannot connect
+until you do one of these:
+
+- mount the CA and set `PROMETHEUS_CA_CERT_PATH` (steps below), or
+- re-run the install with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true`, on a
+  development cluster only.
+
+The installer warns about both cases at the end of the install: an HTTPS
+connection it does not verify, and one it verifies with no CA set. The OpenShift
+overlays verify against the service CA.
 
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)

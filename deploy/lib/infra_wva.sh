@@ -413,37 +413,59 @@ wva_warn_floating_image() {
 # this install writes into the manager config, or nothing to leave the shipped
 # one ("false", verify) in place.
 #
-# The shipped config verifies. On Kubernetes the installer has no CA to give the
-# controller -- the certificate of the kube-prometheus-stack it deploys is
-# self-signed and generated on the workstation, and nothing mounts it into the
-# controller -- so it turns verification OFF there, explicitly, and
-# wva_warn_prometheus_tls says so at the end of the install. A manifest applied
-# without the installer keeps verification on. An explicit
-# PROMETHEUS_TLS_INSECURE_SKIP_VERIFY wins; OpenShift verifies against the
-# service CA; plain http:// takes no TLS settings at all.
+# The shipped config verifies. The installer turns verification OFF in one case
+# only: the kube-prometheus-stack it deploys itself (DEPLOY_PROMETHEUS=true, and
+# a URL in MONITORING_NAMESPACE -- the same rule wva_prometheus_scraper_sa uses).
+# That stack's certificate is self-signed on the workstation and nothing mounts
+# it into the controller, so there is no CA to verify against;
+# wva_warn_prometheus_tls says so at the end of the install.
+#
+# Any other https:// Prometheus keeps verification on. The controller sends it
+# a bearer token, and a Prometheus nobody named is no place to send one
+# unverified. If its certificate is from a private CA, the controller cannot
+# connect until the CA is mounted, and wva_warn_prometheus_tls says how.
+#
+# An explicit PROMETHEUS_TLS_INSECURE_SKIP_VERIFY wins; OpenShift verifies
+# against the service CA; plain http:// takes no TLS settings at all.
 wva_prometheus_skip_verify() {
     if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
         printf '%s' "$PROMETHEUS_TLS_INSECURE_SKIP_VERIFY"
         return 0
     fi
     [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] || return 0
     case "${PROMETHEUS_URL:-}" in
-        https://*) printf 'true' ;;
+        https://*) ;;
+        *) return 0 ;;
     esac
+    [ "$(wva_prometheus_url_namespace "$PROMETHEUS_URL")" = "${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}" ] || return 0
+    printf 'true'
 }
 
 # wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
-# Prometheus without verifying its certificate. $1 is the manager config.yaml.
-# OpenShift ships verification on (service CA) and never reaches the warning.
+# Prometheus without verifying its certificate, and when it will verify one
+# with no CA configured -- which fails for a private CA. $1 is the manager
+# config.yaml. OpenShift verifies against the service CA, mounted by its
+# overlay, and never reaches either warning.
 wva_warn_prometheus_tls() {
     local cfg="$1" url skip ca
     [ -n "$cfg" ] || return 0
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
     url="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null || true)"
     skip="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null || true)"
     ca="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null || true)"
     case "$url" in https://*) ;; *) return 0 ;; esac
-    [ "$skip" = "true" ] || return 0
     [ -z "$ca" ] || return 0
+    if [ "$skip" != "true" ]; then
+        log_warning "=================================================================="
+        log_warning "WVA will VERIFY the TLS certificate of $url against the public roots only (no PROMETHEUS_CA_CERT_PATH)."
+        log_warning "  The installer turns verification off only for the Prometheus it deploys itself."
+        log_warning "  If its certificate comes from a private CA, the controller cannot connect. Fix it one of two ways:"
+        log_warning "    1. Mount the CA into the controller and set PROMETHEUS_CA_CERT_PATH=<file> (docs/reference/prometheus.md#tls-configuration)."
+        log_warning "    2. Re-run with PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true, for a development cluster only."
+        log_warning "=================================================================="
+        return 0
+    fi
     log_warning "WVA will NOT verify the TLS certificate of $url (PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true, no PROMETHEUS_CA_CERT_PATH)."
     log_warning "  Fine for a development cluster. In production, mount the CA that signed the Prometheus certificate into the"
     log_warning "  controller and set PROMETHEUS_CA_CERT_PATH=<file> and PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false."

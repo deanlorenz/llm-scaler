@@ -321,9 +321,12 @@ The warm-pool **proxy**, a separate image inside pool pods, does forward live
 requests; it is part of the data plane, not the controller.
 
 The controller sends its own ServiceAccount token to Prometheus on every query.
-The shipped Kubernetes config sets `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`,
-so that token goes to whatever answers at the configured address. Set it to
-`false` and give a CA with `PROMETHEUS_CA_CERT_PATH`.
+The shipped config verifies the Prometheus certificate. The installer turns
+verification off for one Prometheus only: the kube-prometheus-stack it deploys
+on Kubernetes, which has no CA to give the controller. There the token goes to
+whatever answers at that address. Set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to
+`false` and give a CA with `PROMETHEUS_CA_CERT_PATH`. See
+[TLS configuration](prometheus.md#tls-configuration).
 
 ## Supply chain
 

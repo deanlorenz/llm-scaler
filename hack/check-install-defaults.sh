@@ -53,7 +53,7 @@ for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_war
     }
 done
 
-EXPECT_CASES=63
+EXPECT_CASES=71
 RAN=0
 FAILED=0
 
@@ -185,11 +185,26 @@ SHIPPED_CFG="$(tr -d '\r' < "$ROOT/config/base/manager/manager-configmap.yaml" |
 check 'tls: the shipped config verifies' 'false' \
     "$(printf '%s\n' "$SHIPPED_CFG" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY')"
 # What the installer writes over it, and that its choice is announced.
-skip_for() { ( ENVIRONMENT="$1" PROMETHEUS_URL="$2" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="$3" wva_prometheus_skip_verify ); }
-k8s_skip="$(skip_for kubernetes https://p:9090 '')"
-check 'tls: Kubernetes install, no CA to give: verification off' 'true' "$k8s_skip"
+# skip_for <ENVIRONMENT> <URL> <explicit skip> [DEPLOY_PROMETHEUS]; the
+# installer's own stack lives in MONITORING_NAMESPACE=our-mon.
+skip_for() {
+    ( ENVIRONMENT="$1" PROMETHEUS_URL="$2" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="$3" \
+        DEPLOY_PROMETHEUS="${4:-true}" MONITORING_NAMESPACE=our-mon wva_prometheus_skip_verify )
+}
+OWN_URL='https://kube-prometheus-stack-prometheus.our-mon.svc.cluster.local:9090'
+k8s_skip="$(skip_for kubernetes "$OWN_URL" '')"
+check 'tls: the stack this install deploys, no CA to give: verification off' 'true' "$k8s_skip"
+check 'tls: the same stack, found again by a re-run, stays off' 'true' \
+    "$(skip_for kubernetes 'https://prometheus-operated.our-mon.svc.cluster.local:9090' '')"
+# Was 'true' for ANY https URL: the controller then sent its token, unverified,
+# to a Prometheus nobody had vouched for.
+check 'tls: any other https Prometheus keeps verification on' '' "$(skip_for kubernetes https://prom.obs.svc:9090 '')"
+check 'tls: an external https Prometheus keeps verification on' '' "$(skip_for kubernetes https://prom.example.com:9090 '')"
+check 'tls: DEPLOY_PROMETHEUS=false keeps verification on, even in MONITORING_NAMESPACE' '' \
+    "$(skip_for kubernetes "$OWN_URL" '' false)"
 check 'tls: OpenShift keeps the shipped verification (service CA)' '' "$(skip_for openshift https://t:9091 '')"
-check 'tls: an explicit choice wins' 'false' "$(skip_for kubernetes https://p:9090 false)"
+check 'tls: an explicit choice wins' 'false' "$(skip_for kubernetes "$OWN_URL" false)"
+check 'tls: an explicit true is honoured for any Prometheus' 'true' "$(skip_for kubernetes https://prom.obs.svc:9090 true)"
 INSTALLED_CFG="$(printf '%s\n' "$SHIPPED_CFG" | yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$k8s_skip\"")"
 check 'tls: the installer choice on Kubernetes is warned about' '1' "$(tls_warned "$INSTALLED_CFG")"
 check 'tls: a CA path silences it' '0' \
@@ -198,6 +213,14 @@ check 'tls: verification on is quiet' '0' \
     "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false"')")"
 check 'tls: plain HTTP is not this warning' '0' \
     "$(tls_warned "$(printf 'PROMETHEUS_BASE_URL: "http://p:9090"\nPROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"\n')")"
+# Verified with no CA: a private-CA certificate fails to connect, so both fixes
+# are named. Not on OpenShift, whose overlay mounts the service CA.
+ca_warned() { wva_warn_prometheus_tls "$1" 2>&1 | grep -cE 'PROMETHEUS_CA_CERT_PATH=<file>|PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true' || true; }
+VERIFIED_CFG="$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_BASE_URL = "https://prom.obs.svc:9090" | .PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false"')"
+check 'tls: verified with no CA names both fixes' '2' "$( (ENVIRONMENT=kubernetes; ca_warned "$VERIFIED_CFG") )"
+check 'tls: verified with a CA path is quiet' '0' \
+    "$( (ENVIRONMENT=kubernetes; ca_warned "$(printf '%s\n' "$VERIFIED_CFG" | yq '.PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')") )"
+check 'tls: OpenShift is never warned (service CA)' '0' "$( (ENVIRONMENT=openshift; ca_warned "$VERIFIED_CFG") )"
 
 # ----------------------------------------------------------------------------
 # Who may read the controller's /metrics: the Prometheus actually here
