@@ -656,8 +656,12 @@ wva_kueue_borrow_wanted() {
         [ -n "$WVA_KUEUE_KEPT_NS" ] || WVA_KUEUE_KEPT_NS="$(printf '%s\n' "$doc" | policy_kueue_namespace)"
         if [ "$ns" = "$WVA_NS" ] && [ -n "${WVA_LIMITER:-}" ]; then
             # This install rewrites its own entry.
-            limiter_set_has "$(limiter_types_of "$WVA_LIMITER" 2>/dev/null)" quota || continue
-            [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] || continue
+            # A WVA_LIMITER limiter_types_of refuses names no quota here; the
+            # install refuses it on its own.
+            if ! limiter_set_has "$(limiter_types_of "$WVA_LIMITER" 2>/dev/null)" quota \
+                || [ "${WVA_QUOTA_KUEUE:-false}" != "true" ]; then
+                continue
+            fi
             case "${WVA_QUOTA_KUEUE_BORROW:-}" in
                 false) continue ;;
                 true) ans=yes; continue ;;
