@@ -24,7 +24,7 @@ FAILED=0
 # Every case reports ok or FAIL exactly once. A run that ends early, or a case
 # that silently stops running, otherwise passes having checked less than it
 # says. Change this deliberately with the cases.
-EXPECT_CASES=66
+EXPECT_CASES=67
 CASES=0
 ok()   { CASES=$((CASES + 1)); printf 'ok    %s\n' "$1"; }
 fail() { CASES=$((CASES + 1)); printf 'FAIL  %s\n' "$1"; FAILED=1; }
@@ -706,6 +706,13 @@ if grep -q "kubectl delete rolebinding wva-pod-writer-${WVA_SUFFIX} -n tenant" "
   ok "delete names this controller's binding exactly (wva-pod-writer-${WVA_SUFFIX}), with no xargs -r"
 else
   fail "delete must print a removal for this controller's binding only, without xargs -r"
+  sed 's/^/    /' "$WP_STUB/out"
+fi
+# A warning, not an info line: the grant outlives the pool.
+if grep -q 'WARNING.*Kept role/wva-pod-writer' "$WP_STUB/out"; then
+  ok "delete warns that the pod-write grant is kept"
+else
+  fail "delete must WARN that role/wva-pod-writer is kept"
   sed 's/^/    /' "$WP_STUB/out"
 fi
 rm -rf "$WP_STUB"

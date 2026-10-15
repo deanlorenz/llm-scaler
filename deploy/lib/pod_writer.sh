@@ -96,7 +96,7 @@ YAML
 # wva_pod_writer_admin_hint echoes the command an admin runs to make the grant
 # in namespace $1 for the controller in $2.
 wva_pod_writer_admin_hint() {
-    printf 'bash deploy/lib/pod_writer.sh %s %s | kubectl apply -f -\n' "$1" "$2"
+    printf 'bash deploy/lib/pod_writer.sh %s %s | kubectl apply -f -   # from the repository root\n' "$1" "$2"
 }
 
 # wva_grant_pod_writes applies that grant. Returns kubectl's status, with its
@@ -120,14 +120,25 @@ wva_pod_writes_allowed() {
         no|"no "*) echo no; return 0 ;;
     esac
     # Not allowed to ask. The grant this file makes is the next best answer,
-    # and it is both halves: a RoleBinding whose Role was deleted grants nothing.
+    # and it is both halves: a RoleBinding whose Role was deleted grants
+    # nothing, and neither does a Role of that name that was edited, or made
+    # by someone else, without patch on pods.
     binding="$(wva_pod_writer_binding "$controller_ns" 2>/dev/null)" || { echo unknown; return 0; }
     if kubectl get rolebinding "$binding" -n "$ns" -o name >/dev/null 2>&1 \
-        && kubectl get role "$WVA_POD_WRITER_ROLE" -n "$ns" -o name >/dev/null 2>&1; then
+        && wva_pod_writer_role_grants_patch "$ns"; then
         echo yes
     else
         echo unknown
     fi
+}
+
+# wva_pod_writer_role_grants_patch reports whether role/wva-pod-writer in $1
+# has a rule granting patch on pods (wildcards count).
+wva_pod_writer_role_grants_patch() {
+    local rules
+    rules="$(kubectl get role "$WVA_POD_WRITER_ROLE" -n "$1" \
+        -o jsonpath='{range .rules[*]}{.apiGroups}{" "}{.resources}{" "}{.verbs}{"\n"}{end}' 2>/dev/null)" || return 1
+    printf '%s\n' "$rules" | grep -qE '^\[[^]]*(""|"\*")[^]]*\] \[[^]]*("pods"|"\*")[^]]*\] \[[^]]*("patch"|"\*")[^]]*\]'
 }
 
 # wva_ensure_pod_writes makes sure the controller in $2 may patch pods in $1:
@@ -369,12 +380,15 @@ $one"
     fi
     if [ -n "$unread" ]; then
         log_warning "Could not list RoleBindings in: ${unread# }. role/${WVA_POD_WRITER_ROLE} and rolebinding/${binding} may be left there."
-        log_warning "  A cluster admin finds them with: kubectl get rolebinding -A | grep ${binding}"
+        log_warning "  A cluster admin finds them with:"
+        log_warning "    kubectl get rolebinding -A --field-selector metadata.name=${binding} -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name"
+        log_warning "  and deletes each: kubectl delete rolebinding ${binding} -n <namespace>"
     fi
     for ns in $(printf '%s\n' "$list" | awk -v b="$binding" '$2 == b {print $1}' | sort -u); do
         if ! err="$(kubectl delete rolebinding "$binding" -n "$ns" --ignore-not-found 2>&1 >/dev/null)"; then
             failed="$failed
-    rolebinding/$binding in $ns: $err"
+    rolebinding/$binding in $ns: $err
+      kubectl delete rolebinding $binding -n $ns"
             continue
         fi
         others="$(printf '%s\n' "$list" | awk -v n="$ns" -v b="$binding" -v p="${WVA_POD_WRITER_ROLE}-" \
@@ -388,13 +402,13 @@ $one"
         else
             removed="$removed $ns(binding)"
             failed="$failed
-    role/${WVA_POD_WRITER_ROLE} in $ns: $err"
+    role/${WVA_POD_WRITER_ROLE} in $ns: $err
+      kubectl delete role ${WVA_POD_WRITER_ROLE} -n $ns"
         fi
     done
     [ -z "$removed" ] || log_info "Removed the controller's patch on pods (role/${WVA_POD_WRITER_ROLE}, rolebinding/${binding}) in:${removed}"
     if [ -n "$failed" ]; then
-        log_warning "Could not remove the controller's pod-write grant here:${failed}"
-        log_warning "  A cluster admin deletes them by hand."
+        log_warning "Could not remove the controller's pod-write grant here. A cluster admin runs the command under each:${failed}"
     fi
 }
 

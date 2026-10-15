@@ -234,7 +234,8 @@ It prints each namespace it granted in. Then read its warnings:
   admin runs the command the warning prints.
 - **`... are UNKNOWN`**: the installer could not list ScaledObjects or pods
   across the cluster. Re-run the upgrade as a cluster admin, or grant by hand in
-  each namespace with a warm pool or an active optimizer:
+  each namespace with a warm pool or an active optimizer, from the repository
+  root:
   ```bash
   bash deploy/lib/pod_writer.sh <namespace> <controller namespace> | kubectl apply -f -
   ```
@@ -364,10 +365,33 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the dashboard ConfigMap `wva-operation-dashboard` | shared by every install on the cluster | (cluster admin, if it is in a shared monitoring namespace) `kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>` |
 | cluster policy in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding `wva-policy-reader-<suffix>` | the ConfigMap is written by `make enable-physical-limiter`; the Role and RoleBinding by it and by `make setup-prereqs` (for a controller that manages its own namespace, when the policy namespace exists) | (cluster admin) see below |
 | ClusterRoles and bindings from an install older than per-install suffixes | they may be bound by another install | (cluster admin) delete by hand once no install uses them |
-| Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` the uninstall could not read or delete | it may not list RoleBindings across the cluster, or delete them there. It lists each one, or says it could not look | (cluster admin) `kubectl get rolebinding -A \| grep wva-pod-writer-<suffix>`, then delete each binding, and the Role once no other `wva-pod-writer-*` binding is left in that namespace |
+| Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` the uninstall could not read or delete | it may not list RoleBindings across the cluster, or delete them there. It lists each one with its `kubectl delete` command, or says it could not look | (cluster admin) see [Leftover pod-write grants](#leftover-pod-write-grants) |
 | Role `wva-pod-writer` in a namespace another controller also uses | that controller's binding still needs it | nothing; it goes with that controller |
 | Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` everywhere, when the controller Deployment is still there | the delete failed, or its result could not be read. A running controller still needs the grant | remove the Deployment, then run the uninstall again |
 | utilization-share transfer marks on pods | written while the optimizer acted | [Transfer marks left on pods](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade); set `shadow: true` and wait a cycle **before** uninstalling to avoid them |
+
+### Leftover pod-write grants
+
+List the pod-write bindings, and the controller namespace each one is for:
+
+```bash
+kubectl get rolebinding -A -l app.kubernetes.io/name=workload-variant-autoscaler \
+  -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ROLE:.roleRef.name,CONTROLLER:.subjects[0].namespace \
+  | grep -E '^NAMESPACE|wva-pod-writer'
+```
+
+For each row whose `CONTROLLER` is the namespace you uninstalled:
+
+```bash
+kubectl delete rolebinding <NAME> -n <NAMESPACE>
+```
+
+Then delete the Role in that namespace, once no other `wva-pod-writer-*`
+binding is left there:
+
+```bash
+kubectl delete role wva-pod-writer -n <NAMESPACE>
+```
 
 ### Adopted ScaledObjects
 

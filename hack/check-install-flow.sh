@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=51
+EXPECT_CASES=54
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -312,7 +312,9 @@ pw_kubectl() {
         "get rolebinding wva-pod-writer-"*)
             [ -n "${PW_HAS_RB:-}" ] || { echo 'Error from server (NotFound): rolebindings.rbac.authorization.k8s.io not found' >&2; return 1; } ;;
         "get role wva-pod-writer "*)
-            [ -n "${PW_HAS_ROLE:-}" ] || { echo 'Error from server (NotFound): roles.rbac.authorization.k8s.io "wva-pod-writer" not found' >&2; return 1; } ;;
+            [ -n "${PW_HAS_ROLE:-}" ] || { echo 'Error from server (NotFound): roles.rbac.authorization.k8s.io "wva-pod-writer" not found' >&2; return 1; }
+            # Its rules, as the jsonpath prints them. PW_ROLE_RULES overrides.
+            printf '%s\n' "${PW_ROLE_RULES:-[\"\"] [\"pods\"] [\"patch\"]}" ;;
         "get pods -A"*)
             [ -z "${PW_PODS_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): pods is forbidden: User "u" cannot list resource "pods" at the cluster scope' >&2; return 1; }
             printf '%s\n' "${PW_MARKED:-}" ;;
@@ -455,6 +457,15 @@ ns-u 10.0.0.9:9090 - llama"
     else
         fail "POD WRITES: a RoleBinding whose Role is gone must read as unknown, so the grant is made again"
     fi
+    # A Role of that name that does not grant patch on pods grants nothing.
+    if [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 PW_ROLE_RULES='[""] ["pods"] ["get","list"]' \
+            wva_pod_writes_allowed ns-a wva-system) )" = unknown ] \
+        && [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 PW_ROLE_RULES='["*"] ["*"] ["*"]' \
+            wva_pod_writes_allowed ns-a wva-system) )" = yes ]; then
+        ok "POD WRITES: the Role counts only when a rule grants patch on pods (wildcards count)"
+    else
+        fail "POD WRITES: a wva-pod-writer Role without patch on pods must read as unknown"
+    fi
 
     # Before the apply that removes the old grant, and only where the
     # installer applies cluster RBAC.
@@ -522,6 +533,18 @@ want: $want"
         ok "POD WRITES: a grant the uninstall may not delete is listed"
     else
         fail "POD WRITES: a refused delete must be listed" "$out"
+    fi
+    # Listed WITH the command, not "a cluster admin deletes them by hand".
+    if printf '%s' "$out" | grep -q "kubectl delete rolebinding wva-pod-writer-$PW_SUFFIX -n ns-a"; then
+        ok "POD WRITES: each grant the uninstall may not delete comes with its delete command"
+    else
+        fail "POD WRITES: a refused delete must print kubectl delete rolebinding <b> -n <ns>" "$out"
+    fi
+    PW_RB_FORBIDDEN=1 pw_case wva_remove_pod_writers wva-system
+    if printf '%s' "$out" | grep -q "kubectl get rolebinding -A --field-selector metadata.name=wva-pod-writer-$PW_SUFFIX"; then
+        ok "POD WRITES: an unreadable list names the exact listing command for the leftovers"
+    else
+        fail "POD WRITES: an unreadable list must print the field-selector listing" "$out"
     fi
     unset PW_RBS
 

@@ -106,9 +106,15 @@ cover are failing, and the pool is hiding it.
 
 **The pool does not start at all.** The log says
 `the warm pool is disabled: this controller may not patch Pods`.
-`deploy/warmpool.sh create` grants that in the pool namespace (Role
-`wva-pod-writer`). Re-run it. A namespace-scoped controller then needs a
-restart; a cluster-scoped one retries on its own.
+Grant it in the pool namespace (Role `wva-pod-writer`). From the repository
+root, as someone who may create Roles there:
+
+```bash
+bash deploy/lib/pod_writer.sh <pool namespace> <controller namespace> | kubectl apply -f -
+```
+
+A namespace-scoped controller then needs a restart; a cluster-scoped one
+retries on its own.
 
 **A model never gets a warm copy in a multi-pool namespace.** The log says
 `variant will get no warm copy`, with the reason: it named no pool, or one that

@@ -1610,11 +1610,13 @@ cmd_delete() {
   if [ -n "$WVA_NAMESPACE" ]; then
     binding="$(wva_pod_writer_binding "$WVA_NAMESPACE" 2>/dev/null)" || binding="wva-pod-writer-<suffix>"
   fi
-  log_info "Kept role/wva-pod-writer and rolebinding/${binding} in ${NAMESPACE} (the controller's patch on pods here). With no other pool and no utilization-share optimizer in this namespace, remove this controller's binding:"
-  log_info "    kubectl delete rolebinding ${binding} -n ${NAMESPACE}"
-  log_info "  and the Role too, once no other controller's binding remains (this lists none):"
-  log_info "    kubectl get rolebinding -n ${NAMESPACE} -o name | grep /wva-pod-writer-"
-  log_info "    kubectl delete role wva-pod-writer -n ${NAMESPACE}"
+  # A warning, not info: the grant outlives the pool, and it lets the
+  # controller patch any Pod here until someone removes it.
+  log_warning "Kept role/wva-pod-writer and rolebinding/${binding} in ${NAMESPACE}: the controller can still patch pods here. With no other pool and no utilization-share optimizer in this namespace, remove this controller's binding:"
+  log_warning "    kubectl delete rolebinding ${binding} -n ${NAMESPACE}"
+  log_warning "  and the Role too, once no other controller's binding remains (this lists none):"
+  log_warning "    kubectl get rolebinding -n ${NAMESPACE} -o name | grep /wva-pod-writer-"
+  log_warning "    kubectl delete role wva-pod-writer -n ${NAMESPACE}"
 }
 
 if [ $# -lt 1 ]; then
