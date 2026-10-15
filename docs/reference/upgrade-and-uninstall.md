@@ -604,7 +604,10 @@ ConfigMap, and work through this list.
    analyzer `score`; and a `priority` or `score` above 1000000. An entry that
    was rejected before only because of such a value (for example
    `scaleUpThreshold: .inf`) now applies, with that field from the layer below.
-   A `priority: .nan` used to act as 1 and now takes the layer below's value.
+   A `priority: .nan` used to act as 1 in the fair share, and under rescale
+   gave the model nothing above its floor; it now takes the layer below's
+   value, so under rescale such a model can grow and take GPUs from the others
+   in its budget.
 
 4. **`terminationGracePeriodSeconds` patches below 40.** The controller now
    takes up to 40s to stop: it finishes the running cycle, then releases its
