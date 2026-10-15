@@ -141,7 +141,11 @@
 # under it. It exits non-zero when any node lacks a key, when a node has no
 # Ready preparer, or when a read could not be made -- a Forbidden exec is
 # "could not check", never "absent". It reads as the preparer's user, root
-# on Kubernetes.
+# on Kubernetes, which can read any file; so a file without read permission
+# for other users (or a directory without read and search) is reported
+# unreadable as well -- the engine may run as another UID. It checks the
+# torch.compile cache only: the flashinfer/ and triton/ directories beside
+# vllm/ are not read.
 #
 # The claim is named engine-cache, one per namespace (the caches inside are
 # keyed by a hash of the engine config, so every model and flag set in the
@@ -1019,9 +1023,15 @@ cmd_keys() {
 # `sh -c SCRIPT sh ROOT SPEC...`, each SPEC a KEY[@RANK[+RANK...]]: per
 # spec, one line "ecv <result> <spec> [detail]" -- present (with the file
 # count), absent (with the rank directories missing, when ranks were named),
-# empty, or unreadable (with the first path that could not be read). Every
-# file is read in full, so a directory listed but unreadable is not called
-# present. A quoted heredoc, like the others; dash has `local`.
+# empty, unreadable ("read PATH" for a file the read failed on, "mode PATH"
+# for one another UID could not read), or unchecked (no find to read the
+# modes with). Every file is read in full, so a directory listed but
+# unreadable is not called present. The read runs as the preparer's user,
+# root on Kubernetes, which reads any file; the engine may run as another
+# UID, so a file or directory without the read (and search) bit for other
+# users is unreadable too. Symbolic links are not followed or counted: a
+# link to a file outside the node cache is not the cache. A quoted heredoc,
+# like the others; dash has `local`.
 verify_script() {
     cat <<'VERIFY'
 root="$1"; shift
@@ -1030,13 +1040,19 @@ walk() {
   if [ ! -r "$1" ] || [ ! -x "$1" ]; then bad="$1"; return; fi
   for e in "$1"/* "$1"/.[!.]*; do
     [ -e "$e" ] || continue
-    if [ -d "$e" ] && [ ! -L "$e" ]; then
+    if [ -L "$e" ]; then
+      continue
+    elif [ -d "$e" ]; then
       walk "$e"
     elif [ -f "$e" ]; then
       if cat "$e" > /dev/null 2>&1; then files="$files."; else bad="$e"; fi
     fi
     [ -z "$bad" ] || return 0
   done
+}
+private() {
+  if ! command -v find > /dev/null 2>&1; then echo "?"; return; fi
+  find "$1" \( -type f ! -perm -004 \) -o \( -type d ! -perm -005 \) 2> /dev/null | head -n 1
 }
 hasfile() {
   local e
@@ -1060,13 +1076,26 @@ for s in "$@"; do
     elif ! hasfile "$d/$r"; then missing="$missing${missing:+,}$r(empty)"; fi
   done
   IFS="$old"
-  if [ -n "$bad" ]; then echo "ecv unreadable $s ${bad#"$root"/}"
+  if [ -n "$bad" ]; then echo "ecv unreadable $s read ${bad#"$root"/}"
   elif [ -n "$missing" ]; then echo "ecv absent $s $missing"
   elif [ -z "$files" ]; then echo "ecv empty $s"
-  else echo "ecv present $s ${#files}"; fi
+  else
+    p="$(private "$d")"
+    if [ "$p" = "?" ]; then echo "ecv unchecked $s no-find"
+    elif [ -n "$p" ]; then echo "ecv unreadable $s mode ${p#"$root"/}"
+    else echo "ecv present $s ${#files}"; fi
+  fi
 done
 VERIFY
 }
+
+# VERIFY_WRAP is what kubectl exec runs: `sh -c WRAP sh SCRIPT ROOT SPEC...`.
+# It runs the verify script under the preparer image's own timeout when the
+# image has one that takes `timeout SECS CMD` (GNU coreutils, newer
+# busybox), so a walk that hangs on a stuck mount ends inside the pod and
+# not only on this side of the exec.
+VERIFY_REMOTE_SECONDS=280
+VERIFY_WRAP='s="$1"; shift; if timeout 5 true 2> /dev/null; then exec timeout '"${VERIFY_REMOTE_SECONDS}"' /bin/sh -c "$s" sh "$@"; fi; exec /bin/sh -c "$s" sh "$@"'
 
 # cmd_verify reads every key on every usable node the DaemonSet covers,
 # through the Ready preparer on that node, and exits non-zero unless every
@@ -1091,7 +1120,11 @@ cmd_verify() {
         log_error "cannot list the engine-cache preparer pods in ${NAMESPACE}: ${why}; nothing was checked"
     fi
     local timeout=()
-    command -v timeout >/dev/null 2>&1 && timeout=(timeout 300)
+    if command -v timeout >/dev/null 2>&1; then
+        timeout=(timeout 300)
+    else
+        log_warning "no timeout command here (stock macOS has none; coreutils provides it): an exec that hangs is cut off only by the preparer's own limit (${VERIFY_REMOTE_SECONDS} s, when its image has timeout)"
+    fi
     echo "${EC_PATH}/vllm  (keys: ${#keys[@]}; nodes: $(accelerator_selector_text "$EC_SELECTOR"))"
     printf '  %-28s %-20s %s\n' NODE RESULT KEY
     accelerator_print_excluded "$EC_EXCLUDED"
@@ -1108,21 +1141,31 @@ cmd_verify() {
             continue
         fi
         xrc=0
-        out="$(${timeout[@]+"${timeout[@]}"} kubectl exec -n "$NAMESPACE" "$pod" -c prepare -- /bin/sh -c "$(verify_script)" sh /engine-cache/vllm "${keys[@]}" 2>"$err_file" < /dev/null)" || xrc=$?
+        out="$(${timeout[@]+"${timeout[@]}"} kubectl exec -n "$NAMESPACE" "$pod" -c prepare -- /bin/sh -c "$VERIFY_WRAP" sh "$(verify_script)" /engine-cache/vllm "${keys[@]}" 2>"$err_file" < /dev/null)" || xrc=$?
         why=""
         if grep -q Forbidden "$err_file"; then
             why="exec Forbidden: reading the cache needs pods/exec on the preparer pods in ${NAMESPACE}"
+        elif [ "$xrc" -eq 124 ]; then
+            why="the read on ${pod} timed out (${VERIFY_REMOTE_SECONDS} s in the preparer, 300 s here): a stuck mount, or a cache too large to read in that time"
         elif [ "$xrc" -ne 0 ]; then
             why="exec into ${pod} failed (exit ${xrc}): $(head -1 "$err_file")"
         fi
         for k in "${keys[@]}"; do
-            line="$(printf '%s\n' "$out" | awk -v k="$k" '$1 == "ecv" && $3 == k { print $2 " " $4; exit }')"
-            result="${line%% *}"; detail="${line#* }"
+            line="$(printf '%s\n' "$out" | awk -v k="$k" '$1 == "ecv" && $3 == k { s = $2; for (i = 4; i <= NF; i++) s = s " " $i; print s; exit }')"
+            result="${line%% *}"; detail=""
+            case "$line" in *" "*) detail="${line#* }" ;; esac
             case "$result" in
                 present) printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail} files)"; present=$((present + 1)) ;;
                 absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k${detail:+  (rank directory missing or empty: ${detail})}"; absent=$((absent + 1)) ;;
                 empty) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k  (an empty directory)"; absent=$((absent + 1)) ;;
-                unreadable) printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
+                unreadable)
+                    case "$detail" in
+                        "read "*) detail="${detail#read }: cannot be read" ;;
+                        "mode "*) detail="${detail#mode }: not readable by other users (the engine may run as another UID)" ;;
+                        not-a-directory) detail="not a directory" ;;
+                    esac
+                    printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
+                unchecked) printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k  (the preparer image has no find to read file modes with)"; unchecked=$((unchecked + 1)) ;;
                 *) printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k"; unchecked=$((unchecked + 1))
                    [ -n "$why" ] || why="no answer from ${pod} for this key (exit ${xrc})" ;;
             esac

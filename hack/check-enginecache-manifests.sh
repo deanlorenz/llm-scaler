@@ -652,17 +652,17 @@ grep -q '^delete ' "$T/calls" && fail "delete --dry-run deleted something" || ok
 # ---------------------------------------------------------------------------
 cat > "$T/exec-stub.sh" <<'EOF'
 #!/usr/bin/env bash
-# kubectl exec -n NS POD -c prepare -- /bin/sh -c SCRIPT sh ROOT KEY...
+# kubectl exec -n NS POD -c prepare -- /bin/sh -c WRAP sh SCRIPT ROOT KEY...
 pod="$4"
 case " ${STUB_EXEC_FORBIDDEN:-} " in *" $pod "*)
     echo "Error from server (Forbidden): pods \"$pod\" is forbidden: User \"tenant\" cannot create resource \"pods/exec\" in API group \"\" in the namespace \"check-ns\"" >&2; exit 1 ;; esac
 case " ${STUB_EXEC_FAIL:-} " in *" $pod "*)
     echo "error: unable to upgrade connection: container not found (\"prepare\")" >&2; exit 1 ;; esac
 [ "$5 $6 $7 $8 $9" = "-c prepare -- /bin/sh -c" ] || { echo "stub kubectl: exec is not sh -c in the prepare container: $*" >&2; exit 2; }
-[ "${11}" = sh ] && [ "${12}" = /engine-cache/vllm ] || { echo "stub kubectl: exec root is not /engine-cache/vllm: ${12}" >&2; exit 2; }
-script="${10}"
-shift 12
-exec "$STUB_SH" -c "$script" sh "$STUB_EC_ROOT/$pod/vllm" "$@"
+[ "${11}" = sh ] && [ "${13}" = /engine-cache/vllm ] || { echo "stub kubectl: exec root is not /engine-cache/vllm: ${13}" >&2; exit 2; }
+wrap="${10}"; script="${12}"
+shift 13
+exec "$STUB_SH" -c "$wrap" sh "$script" "$STUB_EC_ROOT/$pod/vllm" "$@"
 EOF
 ECV_SH=sh; command -v dash >/dev/null 2>&1 && ECV_SH=dash
 mkdir -p "$T/engine-logs" "$T/engine-root"
@@ -674,6 +674,7 @@ ecv_reset() {  # every node holds both keys, two ranks each
     for p in ec-a ec-b ec-c ec-d; do for k in "$K1" "$K2"; do for r in rank_0_0 rank_1_0; do
         mkdir -p "$T/ecv/$p/vllm/$k/$r/backbone"; echo artefact > "$T/ecv/$p/vllm/$k/$r/backbone/model.py"
     done; done; done
+    chmod -R u=rwX,go=rX "$T/ecv"  # the modes a preparer leaves, whatever the umask here
 }
 ecv_pod() {  # ecv_pod NAME NODE READY
     printf '{"metadata":{"name":"%s","labels":{"wva.llmd.ai/engine-cache":"engine-cache"}},"spec":{"nodeName":"%s"},"status":{"phase":"Running","containerStatuses":[{"ready":%s,"state":{"running":{}}}]}}' "$1" "$2" "$3"
@@ -685,7 +686,7 @@ printf '{"items":[%s,%s,%s,%s]}' "$(ecv_pod ec-a n-a true)" "$(ecv_pod ec-b n-b 
 ecv() {  # ecv OUTFILE ARGS... -- verify against the fixture; prints the exit code
     local out="$1"; shift
     STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_NODES_FILE="${ECV_NODES:-$T/ecv-nodes.json}" STUB_PODS_FILE="${ECV_PODS:-$T/ecv-pods.json}" \
-        PATH="$STUB_PATH" bash deploy/enginecache.sh verify -n check-ns "$@" > "$out" 2>&1
+        PATH="${ECV_PATH:-$STUB_PATH}" bash deploy/enginecache.sh verify -n check-ns "$@" > "$out" 2>&1
     echo $?
 }
 ecv_row() { grep -qE "^  $2 +$3 +${4//+/\\+}( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY (a + in KEY is literal)
@@ -748,14 +749,53 @@ if [ "$rc" != 0 ] && ecv_row "$T/ecv-nopod.out" n-d "COULD NOT CHECK" "$K1" && e
     && ecv_row "$T/ecv-nopod.out" n-a present "$K1" && ! grep -q '^exec -n check-ns ec-d' "$T/calls"; then
     ok "verify: a node with no Ready preparer (not ready, or no pod) fails as could-not-check, and is not exec-ed into"
 else fail "verify no Ready preparer: rc=$rc $(grep -E 'n-d|n-e' "$T/ecv-nopod.out" | tr '\n' ';')"; fi
-# a file that cannot be read: unreadable (needs a non-root runner)
-if [ "$(id -u)" = 0 ]; then ok "verify: (the unreadable-file case needs a non-root check runner)"; else
-    ecv_reset; chmod 000 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
-    rc="$(ecv "$T/ecv-unread.out" --keys "$K1")"
-    chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
-    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py\)" "$T/ecv-unread.out" \
-        && ok "verify: a key with a file that cannot be read is unreadable, naming the file" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
-fi
+# a file only its owner may read: the check runs as root in the preparer and
+# reads it, but an engine running as another UID cannot -- unreadable, for
+# any check runner (the owner reads it here too)
+ecv_reset; chmod 600 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+rc="$(ecv "$T/ecv-mode.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by other users \(the engine may run as another UID\)\)" "$T/ecv-mode.out" \
+    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-mode.out" \
+    && ok "verify: a file not readable by other users is unreadable, naming the file (the read itself runs as root)" || fail "verify mode 600: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode.out" | tr '\n' ';')"
+ecv_reset; chmod 700 "$T/ecv/ec-b/vllm/$K2/rank_0_0"
+rc="$(ecv "$T/ecv-dmode.out" --keys "$K2")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K2  \($K2/rank_0_0: not readable by other users" "$T/ecv-dmode.out" \
+    && ok "verify: a directory other users cannot search is unreadable, naming it" || fail "verify dir mode 700: rc=$rc $(grep n-b "$T/ecv-dmode.out")"
+# a file no one but root can read: as root the read passes and the mode
+# check names it; as any other runner the read itself fails -- unreadable
+# either way, never present
+ecv_reset; chmod 000 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+rc="$(ecv "$T/ecv-unread.out" --keys "$K1")"
+chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+if [ "$(id -u)" = 0 ]; then why000='not readable by other users \(the engine may run as another UID\)'; else why000='cannot be read'; fi
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: $why000\)" "$T/ecv-unread.out" \
+    && ok "verify: a file with mode 000 is unreadable, naming the file (runner uid $(id -u): ${why000//\\/})" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
+# a key whose files are all symbolic links is not a cache: links are not counted
+ecv_reset
+for r in rank_0_0 rank_1_0; do
+    f="$T/ecv/ec-b/vllm/$K1/$r/backbone/model.py"; mv "$f" "$T/elsewhere-$r.py"; ln -s "$T/elsewhere-$r.py" "$f"
+done
+rc="$(ecv "$T/ecv-links.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +ABSENT +$K1  \(an empty directory\)" "$T/ecv-links.out" \
+    && ok "verify: a key holding only symbolic links is absent (links are not the cache)" || fail "verify symlinks: rc=$rc $(grep n-b "$T/ecv-links.out")"
+# the read runs under a time limit on both sides of the exec: timeout 300
+# here, and the preparer's own timeout around the script inside the pod
+ecv_reset; mkdir -p "$T/tbin"
+printf '#!/bin/sh\necho "$*" | cut -c1-24 >> "%s"\nshift\nexec "$@"\n' "$T/timeout.calls" > "$T/tbin/timeout"; chmod +x "$T/tbin/timeout"
+: > "$T/timeout.calls"
+rc="$(ECV_PATH="$T/tbin:$STUB_PATH" ecv "$T/ecv-timeout.out" --keys "$K1")"
+[ "$rc" = 0 ] && grep -q '^300 kubectl exec' "$T/timeout.calls" && grep -q '^280 /bin/sh -c' "$T/timeout.calls" \
+    && ok "verify: timeout 300 around the exec here, timeout 280 around the script in the preparer" || fail "verify time limits: rc=$rc calls=$(tr '\n' ';' < "$T/timeout.calls")"
+# no timeout here (stock macOS): a warning, and the check still runs
+mkdir -p "$T/notimeout"
+IFS=: read -r -a pdirs <<< "$STUB_PATH"
+for d in "${pdirs[@]}"; do for f in "$d"/*; do
+    b="${f##*/}"; [ "$b" = timeout ] || [ -e "$T/notimeout/$b" ] || ln -s "$f" "$T/notimeout/$b"
+done; done
+[ ! -e "$T/notimeout/timeout" ] || fail "verify no timeout: the stripped PATH still has timeout"
+rc="$(ECV_PATH="$T/notimeout" ecv "$T/ecv-notimeout.out" --keys "$K1")"
+[ "$rc" = 0 ] && grep -q 'no timeout command here (stock macOS has none' "$T/ecv-notimeout.out" \
+    && ok "verify: without a timeout command it warns there is no limit on this side, and still checks" || fail "verify no timeout: rc=$rc $(grep -iE 'timeout|VERIFIED' "$T/ecv-notimeout.out" | tr '\n' ';')"
 # the preparer pods cannot be listed: an error, nothing called absent
 rc="$(STUB_PODS_ERROR='Error from server (Forbidden): pods is forbidden: stub' ecv "$T/ecv-podsforb.out" --keys "$K1")"
 [ "$rc" != 0 ] && grep -q 'cannot list the engine-cache preparer pods in check-ns: Error from server (Forbidden)' "$T/ecv-podsforb.out" && grep -q 'nothing was checked' "$T/ecv-podsforb.out" && ! grep -q ABSENT "$T/ecv-podsforb.out" \
@@ -770,6 +810,15 @@ refuse "a key with '..'" verify -n check-ns --keys "torch_compile_cache/../x"
 refuse "an absolute key" verify -n check-ns --keys /engine-cache/vllm/x
 refuse "a key with a space" verify -n check-ns --keys "a b"
 refuse "an empty key in the list" verify -n check-ns --keys "a,,b"
+refuse_key() {  # refuse_key "<why>" KEY -- refused as a key, before any cluster read
+    if PATH="$STUB_PATH" STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_NODES_FILE="$T/ecv-nodes.json" STUB_PODS_FILE="$T/ecv-pods.json" \
+        bash deploy/enginecache.sh verify -n check-ns --keys "$2" > "$T/refkey.out" 2>&1; then fail "accepted: $1"
+    elif grep -q 'not a compile cache key' "$T/refkey.out"; then ok "refused as a key: $1"
+    else fail "refused, but not as a key: $1: $(tail -1 "$T/refkey.out")"; fi
+}
+refuse_key "a key whose last component is ." "torch_compile_cache/."
+refuse_key "a key with a . component" "torch_compile_cache/./${K1#*/}"
+refuse_key "a key that is ." "."
 refuse "a rank that is not rank_<r>_<dp>" verify -n check-ns --keys "$K1@rank_x"
 refuse "an empty rank list" verify -n check-ns --keys "$K1@"
 refuse "an empty rank in the list" verify -n check-ns --keys "$K1@rank_0_0++rank_1_0"
