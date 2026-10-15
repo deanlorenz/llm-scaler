@@ -167,8 +167,10 @@ def _thanos_fallback(namespace, model_id, start, stop):
 
     if model_id:
         for series in _thanos_query_range(
+            # Saturation's demand only: the slo analyzer publishes its own
+            # under the same name, and a sum over both counts the demand twice.
             f'sum(wva_analyzer_demand{{exported_namespace="{namespace}", '
-            f'model_name="{model_id}"}}) by (model_name)', start_ts, end_ts,
+            f'model_name="{model_id}", analyzer_name="saturation"}}) by (model_name)', start_ts, end_ts,
         ):
             for ts, v in series.get("values", []):
                 bucket(ts)["totalDemand"] = float(v)

@@ -157,7 +157,9 @@ A fit is refused unless it is usable (`ValidModel`): `A` and `B` finite,
 `A > 1e-12` (a flat or falling line is not this physics), and
 `A x 0.85 + B > 0`.
 
-The window (`itl.Window`) will not hand over a line until it has evidence:
+The window and the fit's rules live in `itl.Tracker`, which the slo analyzer
+uses too ([the slo analyzer](slo-analyzer.md#itltracker)). A full fit needs
+evidence:
 
 | constant | value | why |
 | --- | --- | --- |

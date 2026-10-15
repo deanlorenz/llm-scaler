@@ -217,9 +217,12 @@ one-minute max with an instantaneous latency would fit the line against the
 wrong `k`.
 
 A fit is refused unless `A` and `B` are finite, `A > 1e-12` (a flat or falling
-line is not this physics) and `A·0.85 + B > 0`. The window withholds a line
-below `DefaultMinSamples` 10 or a `k` spread under `DefaultMinKSpread` 0.30 —
-samples clustered at one `k` fix an intercept, not a slope.
+line is not this physics) and `A·0.85 + B > 0`. A full fit needs
+`DefaultMinSamples` 10 readings spanning `DefaultMinKSpread` 0.30 of `k` —
+samples clustered at one `k` fix an intercept, not a slope. Short of the
+spread, with 10 readings, `itl.Tracker` fits the slope alone with the intercept
+pinned to the key's last full fit, or to `DefaultBaselineSec` before it has
+one: on a balanced fleet that is the normal case.
 
 `GPSErrorPct` compares `TokenRate` against the observed `GenerationTokenRate`
 and **reports without acting**: a disagreement means the line is suspect, not

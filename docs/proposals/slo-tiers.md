@@ -167,13 +167,13 @@ The engines' series say which variant to price, and how full it may run.
 
 ## What exists today
 
-From `main` at `fee45eb52` (this PR's base), with what this branch changed:
+From `main` at `fee45eb52`, where this work started, with what this branch changed:
 
 | | Where | What it means here |
 | --- | --- | --- |
 | A tier resolves per **model** | `modelPolicy` in `steadystate/engine.go`; variants that disagree get the lexicographically smallest tier | The target is per model, and the fill is per variant |
 | `analyzers:` is replaced whole by an overlay, and an absent name is disabled | `ScalingPolicy.Merge`; `ScalingPolicy.AnalyzerEnabled` returns false for an unlisted name | Dangerous for mode selection; see [Configuration](#configuration) |
-| **An entry that lists `analyzers:` resets the scaling band** | `ScalingPolicy.ApplyDefaults` fills `scaleUpThreshold 0.85 / scaleDownBoundary 0.70` per V2-shaped entry; `Merge` copies them over a tuned `default` band | A tier that only adds `slo` changes saturation's sizing. Pre-existing; a separate fix. Until then a tier listing `slo` must restate the band |
+| ~~An entry that lists `analyzers:` resets the scaling band~~ **Fixed in #154** | At `fee45eb52`, `ApplyDefaults` filled `0.85 / 0.70` into each stored V2-shaped entry and `Merge` copied it over `default`'s band. Since #154 a stored entry is validated as a defaulted copy (`ValidateEntry`) and left unset, so a tier inherits the band | A tier listing `slo` restates only saturation's analyzer entry, because the list is replaced whole |
 | A `Validate` error drops the **whole tier entry** | `parseScalingPolicyConfigRejects` in `controller/configmap_helpers.go` | A bad `slo` block drops the tier, not one key |
 | Every enabled analyzer runs; **only saturation's result is used** | `runAnalyzersAndScore`; `collectV2ModelRequest` sets `CompositeSignal: namedResults[0]` | The rest reach only `recordAnalyzerMetrics` (`wva_analyzer_*`), liveness and the cycle log. Observe mode is free |
 | `AvgTTFT` is diagnostic by decision | `domain.ReplicaMetrics.AvgTTFT` | A `TTFT(T) = A·T + B` fit was built and removed: queue wait landed in the intercept (82 s) |
@@ -184,8 +184,6 @@ From `main` at `fee45eb52` (this PR's base), with what this branch changed:
 ```yaml
 data:
   interactive: |
-    scaleUpThreshold: 0.85          # restated: see "resets the scaling band" above
-    scaleDownBoundary: 0.70
     analyzers:
       - name: saturation
       - name: slo
