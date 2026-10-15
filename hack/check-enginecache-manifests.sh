@@ -658,11 +658,17 @@ case " ${STUB_EXEC_FORBIDDEN:-} " in *" $pod "*)
     echo "Error from server (Forbidden): pods \"$pod\" is forbidden: User \"tenant\" cannot create resource \"pods/exec\" in API group \"\" in the namespace \"check-ns\"" >&2; exit 1 ;; esac
 case " ${STUB_EXEC_FAIL:-} " in *" $pod "*)
     echo "error: unable to upgrade connection: container not found (\"prepare\")" >&2; exit 1 ;; esac
+# STUB_EXEC_EXIT="POD:CODE ...": the command in POD ended with CODE, as a
+# timeout in the preparer ends it (kubectl exec passes the code through)
+for x in ${STUB_EXEC_EXIT:-}; do case "$x" in "$pod:"*)
+    echo "command terminated with exit code ${x#*:}" >&2; exit "${x#*:}" ;; esac; done
 [ "$5 $6 $7 $8 $9" = "-c prepare -- /bin/sh -c" ] || { echo "stub kubectl: exec is not sh -c in the prepare container: $*" >&2; exit 2; }
 [ "${11}" = sh ] && [ "${13}" = /engine-cache/vllm ] || { echo "stub kubectl: exec root is not /engine-cache/vllm: ${13}" >&2; exit 2; }
 wrap="${10}"; script="${12}"
 shift 13
-exec "$STUB_SH" -c "$wrap" sh "$script" "$STUB_EC_ROOT/$pod/vllm" "$@"
+# STUB_EXEC_PATH: the PATH inside the preparer (an image without find)
+sh_bin="$(command -v "$STUB_SH")"
+PATH="${STUB_EXEC_PATH:-$PATH}" exec "$sh_bin" -c "$wrap" sh "$script" "$STUB_EC_ROOT/$pod/vllm" "$@"
 EOF
 ECV_SH=sh; command -v dash >/dev/null 2>&1 && ECV_SH=dash
 mkdir -p "$T/engine-logs" "$T/engine-root"
@@ -770,14 +776,24 @@ chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
 if [ "$(id -u)" = 0 ]; then why000='not readable by other users \(the engine may run as another UID\)'; else why000='cannot be read'; fi
 [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: $why000\)" "$T/ecv-unread.out" \
     && ok "verify: a file with mode 000 is unreadable, naming the file (runner uid $(id -u): ${why000//\\/})" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
-# a key whose files are all symbolic links is not a cache: links are not counted
+# vLLM writes no symbolic link: one under the key is unreadable, never
+# followed or skipped -- a link to a file, a dangling link, and a directory
+# on the way to the key
 ecv_reset
-for r in rank_0_0 rank_1_0; do
-    f="$T/ecv/ec-b/vllm/$K1/$r/backbone/model.py"; mv "$f" "$T/elsewhere-$r.py"; ln -s "$T/elsewhere-$r.py" "$f"
-done
+f="$T/ecv/ec-b/vllm/$K1/rank_1_0/backbone/model.py"; mv "$f" "$T/elsewhere.py"; ln -s "$T/elsewhere.py" "$f"
 rc="$(ecv "$T/ecv-links.out" --keys "$K1")"
-[ "$rc" != 0 ] && grep -qE "^  n-b +ABSENT +$K1  \(an empty directory\)" "$T/ecv-links.out" \
-    && ok "verify: a key holding only symbolic links is absent (links are not the cache)" || fail "verify symlinks: rc=$rc $(grep n-b "$T/ecv-links.out")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: a symlink under the cache; vLLM writes none\)" "$T/ecv-links.out" \
+    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-links.out" \
+    && ok "verify: a symbolic link to a file under the key is unreadable, naming it" || fail "verify symlink: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-links.out" | tr '\n' ';')"
+ecv_reset; ln -s "$T/no-such-file" "$T/ecv/ec-a/vllm/$K2/rank_0_0/backbone/extra.py"
+rc="$(ecv "$T/ecv-dangling.out" --keys "$K2")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K2  \($K2/rank_0_0/backbone/extra.py: a symlink under the cache" "$T/ecv-dangling.out" \
+    && ok "verify: a dangling symbolic link under the key is unreadable, not skipped" || fail "verify dangling symlink: rc=$rc $(grep n-a "$T/ecv-dangling.out")"
+ecv_reset; mv "$T/ecv/ec-c/vllm/torch_compile_cache" "$T/elsewhere-tcc"; ln -s "$T/elsewhere-tcc" "$T/ecv/ec-c/vllm/torch_compile_cache"
+rc="$(ecv "$T/ecv-dirlink.out" --keys "$K1@rank_0_0+rank_1_0")"
+rm -rf "$T/elsewhere-tcc"
+[ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$K1@rank_0_0\+rank_1_0  \(torch_compile_cache: a symlink under the cache; vLLM writes none\)" "$T/ecv-dirlink.out" \
+    && ok "verify: a symlinked directory on the way to the key is unreadable, not followed" || fail "verify symlinked component: rc=$rc $(grep n-c "$T/ecv-dirlink.out")"
 # the read runs under a time limit on both sides of the exec: timeout 300
 # here, and the preparer's own timeout around the script inside the pod
 ecv_reset; mkdir -p "$T/tbin"
@@ -796,6 +812,24 @@ done; done
 rc="$(ECV_PATH="$T/notimeout" ecv "$T/ecv-notimeout.out" --keys "$K1")"
 [ "$rc" = 0 ] && grep -q 'no timeout command here (stock macOS has none' "$T/ecv-notimeout.out" \
     && ok "verify: without a timeout command it warns there is no limit on this side, and still checks" || fail "verify no timeout: rc=$rc $(grep -iE 'timeout|VERIFIED' "$T/ecv-notimeout.out" | tr '\n' ';')"
+# the preparer's timeout ends the read: 124 from GNU timeout, 143 or 137
+# (the TERM or KILL status of the script) from busybox timeout -- each is
+# timed out, could not check, never absent
+for code in 124 143 137; do
+    rc="$(STUB_EXEC_EXIT="ec-b:$code" ecv "$T/ecv-rto-$code.out" --keys "$K1")"
+    if [ "$rc" != 0 ] && ecv_row "$T/ecv-rto-$code.out" n-b "COULD NOT CHECK" "$K1" && grep -q 'the read on ec-b timed out (280 s in the preparer, 300 s here)' "$T/ecv-rto-$code.out" \
+        && ! grep -q ABSENT "$T/ecv-rto-$code.out" && grep -q '2 present, 0 absent, 0 unreadable, 1 could not check' "$T/ecv-rto-$code.out"; then
+        ok "verify: a read the preparer ends with exit ${code} is timed out, could not check"
+    else fail "verify remote exit ${code}: rc=$rc $(grep -E 'n-b|ec-b|present,' "$T/ecv-rto-$code.out" | tr '\n' ';')"; fi
+done
+# a preparer image with no find cannot read the modes: could not check, never present
+mkdir -p "$T/nofind"
+for f in "$T/notimeout"/*; do b="${f##*/}"; [ "$b" = find ] || [ -e "$T/nofind/$b" ] || ln -s "$(readlink "$f")" "$T/nofind/$b"; done
+[ ! -e "$T/nofind/find" ] || fail "verify no find: the stripped PATH still has find"
+rc="$(STUB_EXEC_PATH="$T/nofind" ecv "$T/ecv-nofind.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image has no find to read file modes with\)" "$T/ecv-nofind.out" \
+    && grep -q '0 present, 0 absent, 0 unreadable, 3 could not check' "$T/ecv-nofind.out" && grep -q 'NOT VERIFIED' "$T/ecv-nofind.out" \
+    && ok "verify: a preparer image with no find is could-not-check on every node, never present" || fail "verify no find: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-nofind.out" | tr '\n' ';')"
 # the preparer pods cannot be listed: an error, nothing called absent
 rc="$(STUB_PODS_ERROR='Error from server (Forbidden): pods is forbidden: stub' ecv "$T/ecv-podsforb.out" --keys "$K1")"
 [ "$rc" != 0 ] && grep -q 'cannot list the engine-cache preparer pods in check-ns: Error from server (Forbidden)' "$T/ecv-podsforb.out" && grep -q 'nothing was checked' "$T/ecv-podsforb.out" && ! grep -q ABSENT "$T/ecv-podsforb.out" \

@@ -1024,13 +1024,16 @@ cmd_keys() {
 # spec, one line "ecv <result> <spec> [detail]" -- present (with the file
 # count), absent (with the rank directories missing, when ranks were named),
 # empty, unreadable ("read PATH" for a file the read failed on, "mode PATH"
-# for one another UID could not read), or unchecked (no find to read the
-# modes with). Every file is read in full, so a directory listed but
-# unreadable is not called present. The read runs as the preparer's user,
-# root on Kubernetes, which reads any file; the engine may run as another
-# UID, so a file or directory without the read (and search) bit for other
-# users is unreadable too. Symbolic links are not followed or counted: a
-# link to a file outside the node cache is not the cache. A quoted heredoc,
+# for one another UID could not read, "link PATH" for a symbolic link), or
+# unchecked (no find to read the modes with). Every file is read in full, so
+# a directory listed but unreadable is not called present. The read runs as
+# the preparer's user, root on Kubernetes, which reads any file; the engine
+# may run as another UID, so a file or directory without the read (and
+# search) bit for other users is unreadable too. That is conservative: an
+# engine running as root, or as the owning UID or group, can read what this
+# calls unreadable. vLLM writes no symbolic link, so one anywhere under the
+# key, or as a directory on the way to it, is unreadable and never followed:
+# a link to a file outside the node cache is not the cache. A quoted heredoc,
 # like the others; dash has `local`.
 verify_script() {
     cat <<'VERIFY'
@@ -1039,15 +1042,24 @@ walk() {
   local e
   if [ ! -r "$1" ] || [ ! -x "$1" ]; then bad="$1"; return; fi
   for e in "$1"/* "$1"/.[!.]*; do
+    if [ -L "$e" ]; then link="$e"; return 0; fi
     [ -e "$e" ] || continue
-    if [ -L "$e" ]; then
-      continue
-    elif [ -d "$e" ]; then
+    if [ -d "$e" ]; then
       walk "$e"
     elif [ -f "$e" ]; then
       if cat "$e" > /dev/null 2>&1; then files="$files."; else bad="$e"; fi
     fi
-    [ -z "$bad" ] || return 0
+    [ -z "$bad$link" ] || return 0
+  done
+}
+# linked prints the first component of KEY under ROOT that is a symbolic link
+linked() {
+  local p="$1" rest="$2" c
+  while [ -n "$rest" ]; do
+    c="${rest%%/*}"
+    if [ "$c" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    p="$p/$c"
+    if [ -L "$p" ]; then echo "$p"; return; fi
   done
 }
 private() {
@@ -1065,8 +1077,10 @@ hasfile() {
 }
 for s in "$@"; do
   k="${s%%@*}"; ranks=""; [ "$k" = "$s" ] || ranks="${s#*@}"
-  d="$root/$k"; files=""; bad=""; missing=""
-  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then echo "ecv unreadable $s not-a-directory"; continue; fi
+  d="$root/$k"; files=""; bad=""; link=""; missing=""
+  l="$(linked "$root" "$k")"
+  if [ -n "$l" ]; then echo "ecv unreadable $s link ${l#"$root"/}"; continue; fi
+  if [ -e "$d" ] && [ ! -d "$d" ]; then echo "ecv unreadable $s not-a-directory"; continue; fi
   if [ ! -e "$d" ]; then echo "ecv absent $s"; continue; fi
   walk "$d"
   old="$IFS"; IFS=+
@@ -1076,7 +1090,8 @@ for s in "$@"; do
     elif ! hasfile "$d/$r"; then missing="$missing${missing:+,}$r(empty)"; fi
   done
   IFS="$old"
-  if [ -n "$bad" ]; then echo "ecv unreadable $s read ${bad#"$root"/}"
+  if [ -n "$link" ]; then echo "ecv unreadable $s link ${link#"$root"/}"
+  elif [ -n "$bad" ]; then echo "ecv unreadable $s read ${bad#"$root"/}"
   elif [ -n "$missing" ]; then echo "ecv absent $s $missing"
   elif [ -z "$files" ]; then echo "ecv empty $s"
   else
@@ -1145,7 +1160,9 @@ cmd_verify() {
         why=""
         if grep -q Forbidden "$err_file"; then
             why="exec Forbidden: reading the cache needs pods/exec on the preparer pods in ${NAMESPACE}"
-        elif [ "$xrc" -eq 124 ]; then
+        elif [ "$xrc" -eq 124 ] || [ "$xrc" -eq 143 ] || [ "$xrc" -eq 137 ]; then
+            # 124: GNU timeout here or in the preparer; 143/137: busybox
+            # timeout, which exits with the TERM/KILL status of the script
             why="the read on ${pod} timed out (${VERIFY_REMOTE_SECONDS} s in the preparer, 300 s here): a stuck mount, or a cache too large to read in that time"
         elif [ "$xrc" -ne 0 ]; then
             why="exec into ${pod} failed (exit ${xrc}): $(head -1 "$err_file")"
@@ -1162,6 +1179,7 @@ cmd_verify() {
                     case "$detail" in
                         "read "*) detail="${detail#read }: cannot be read" ;;
                         "mode "*) detail="${detail#mode }: not readable by other users (the engine may run as another UID)" ;;
+                        "link "*) detail="${detail#link }: a symlink under the cache; vLLM writes none" ;;
                         not-a-directory) detail="not a directory" ;;
                     esac
                     printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
