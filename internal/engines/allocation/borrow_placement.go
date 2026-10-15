@@ -81,6 +81,9 @@ type borrowState struct {
 	// replicas, so the pass re-places those very replicas. They are the
 	// variant's to re-place, not another draw on the pool (A4).
 	credit map[string]map[string]int
+	// flavors is every replica the pass placed on a Kueue flavor's nodes, in
+	// order (PlacedFlavors); rolled back with the placement.
+	flavors []flavorUse
 	// blocked reports a variant that may not borrow this pass; nil blocks none.
 	blocked func(namespace, modelID, variant string) bool
 	// blockedIn reports a model that may not draw on one cohort's pools this
@@ -229,6 +232,69 @@ type borrowSave struct {
 	draws      int
 	guaranteed map[string]int
 	credit     map[string]map[string]int
+	flavors    int
+}
+
+// flavorUse is one replica placed on a Kueue flavor's nodes.
+type flavorUse struct {
+	variant   string // "namespace/variant"
+	placement *kueue.FlavorPlacement
+	gpus      int
+}
+
+// queueFlavor is the flavor Kueue admits ns's replicas of acc on within its
+// guaranteed figure (W5): the one flavor its cohorts' chunks serve acc on --
+// every chunk naming the same node labels and tolerations. Nil when the
+// namespace is not known to be Kueue-managed (neither counted nor carrying
+// its queues' nominal figures), or its queues offer acc on more than one
+// placement: Kueue then picks, and the replica is fitted by its templates
+// alone.
+func (bs *borrowState) queueFlavor(ns, acc string) *kueue.FlavorPlacement {
+	_, counted := bs.borrow[ns]
+	_, read := bs.lent[ns]
+	if !counted && !read {
+		return nil
+	}
+	var got *kueue.FlavorPlacement
+	for _, c := range bs.cohortChunks(ns, acc) {
+		switch {
+		case got == nil:
+			got = &c.FlavorPlacement
+		case !maps.Equal(got.NodeLabels, c.NodeLabels) || !slices.Equal(got.Tolerations, c.Tolerations):
+			return nil
+		}
+	}
+	return got
+}
+
+// PlacedFlavors is, per "namespace/variant", the Kueue flavor the last pass
+// placed the most of its replicas' GPUs on (guaranteed or borrowed), the
+// first on a tie; nil when it placed none on a flavor. The in-flight ledger
+// holds the variant's holes on that flavor's nodes; it keeps one flavor per
+// variant, so a variant split across two flavors in one pass is held on the
+// larger.
+func (o *GreedyByScoreOptimizer) PlacedFlavors() map[string]*kueue.FlavorPlacement {
+	if len(o.flavors) == 0 {
+		return nil
+	}
+	gpus := map[string]map[*kueue.FlavorPlacement]int{}
+	var order []flavorUse
+	for _, f := range o.flavors {
+		if gpus[f.variant] == nil {
+			gpus[f.variant] = map[*kueue.FlavorPlacement]int{}
+		}
+		if _, seen := gpus[f.variant][f.placement]; !seen {
+			order = append(order, f)
+		}
+		gpus[f.variant][f.placement] += f.gpus
+	}
+	out := map[string]*kueue.FlavorPlacement{}
+	for _, f := range order {
+		if best, ok := out[f.variant]; !ok || gpus[f.variant][f.placement] > gpus[f.variant][best] {
+			out[f.variant] = f.placement
+		}
+	}
+	return out
 }
 
 // setCredit takes the variants' own draws in flight as credit (A4).
@@ -259,7 +325,7 @@ func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
 }
 
 func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
-	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit)}
+	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), flavors: len(bs.flavors)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
 		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
@@ -279,6 +345,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	bs.nodes.restoreDebits(s.nodes)
 	bs.draws = bs.draws[:s.draws]
 	bs.credit = s.credit
+	bs.flavors = bs.flavors[:s.flavors]
 	clear(guaranteed)
 	maps.Copy(guaranteed, s.guaranteed)
 }
@@ -518,8 +585,18 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
 			return p.refuse(variant, false), false
 		}
-		if !bs.nodes.place(r) && !reclaim {
+		// Kueue applies its queue's flavor -- node labels, tolerations -- to
+		// every pod it admits, within guaranteed too (W5).
+		qf := bs.queueFlavor(p.namespace, acc)
+		if qf != nil {
+			r.flavor = qf
+		}
+		onNode := bs.nodes.place(r)
+		if !onNode && !reclaim {
 			return p.refuse(variant, true), false
+		}
+		if qf != nil && onNode {
+			bs.flavors = append(bs.flavors, flavorUse{variant: p.namespace + "/" + variant, placement: qf, gpus: g})
 		}
 		if left >= 0 {
 			p.guaranteed[key] = left - g
@@ -585,6 +662,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			d.CreditGPUs, d.CreditReplicas = fromOwn, 1
 		}
 		bs.draws = append(bs.draws, d)
+		bs.flavors = append(bs.flavors, flavorUse{variant: p.namespace + "/" + variant, placement: &c.FlavorPlacement, gpus: g})
 		return true, true
 	}
 	if len(chunks) > 0 && !open {

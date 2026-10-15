@@ -83,6 +83,9 @@ type GreedyByScoreOptimizer struct {
 
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
+	// flavors is what the last non-shadow pass placed on Kueue flavors'
+	// nodes (PlacedFlavors).
+	flavors []flavorUse
 }
 
 // BorrowDraws returns what the last Optimize pass drew from the cohorts'
@@ -220,8 +223,13 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		bs.setCredit(o.BorrowCredit)
 	}
 	if !o.quiet {
-		o.draws = nil
-		defer func() { o.draws = bs.drawsByVariant() }()
+		o.draws, o.flavors = nil, nil
+		defer func() {
+			o.draws = bs.drawsByVariant()
+			if bs != nil {
+				o.flavors = bs.flavors
+			}
+		}()
 	}
 
 	// Rescale pre-pass: for enabled, contended (type, budget-scope) groups, compute

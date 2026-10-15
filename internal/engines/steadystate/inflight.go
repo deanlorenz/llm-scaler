@@ -33,9 +33,10 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 // The models the utilization share plans are left out: a fill's hole is held
 // as a promise (allocation.ReservePromised) until its receiver's pods land.
 //
-// A variant with borrowed growth in flight (allocation.BorrowInFlight) has its
-// holes held on its Kueue flavor's nodes, where the placer fitted them, with
-// its pod templates' placement (borrowedFlavors). The ledger holds the node;
+// A variant the pass placed on a Kueue flavor -- its queue's, within
+// guaranteed, or a borrowed chunk's -- or with borrowed growth in flight
+// (allocation.BorrowInFlight) has its holes held on that flavor's nodes, where
+// the placer fitted them, with its pod templates' placement (borrowedFlavors). The ledger holds the node;
 // the shared pool's GPUs are held apart, by the borrowed draw until the pods
 // exist and by the gated-pod deduction while Kueue's admission gate holds them
 // (prepareBorrowing): one is a hole on a node, the other GPUs of a cohort's
@@ -43,7 +44,7 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
 	states := map[string]domain.VariantReplicaState{}
-	flavors := e.borrowedFlavors()
+	flavors := e.borrowedFlavors(now)
 	for _, req := range requests {
 		if planned[utils.GetNamespacedKey(req.Namespace, req.ModelID)] {
 			continue

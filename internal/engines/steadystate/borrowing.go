@@ -44,6 +44,9 @@ type borrowingState struct {
 	// credit is this cycle's draws in flight on open cohorts, each its
 	// variant's to re-place (GreedyByScoreOptimizer.BorrowCredit).
 	credit []allocation.BorrowDraw
+	// passFlavors is the Kueue flavor this cycle's pass placed each variant's
+	// replicas on (GreedyByScoreOptimizer.PlacedFlavors).
+	passFlavors map[string]*kueue.FlavorPlacement
 	// gatedSeen is the managed pods seen at Kueue's admission gate, kept
 	// past the gate until a read shows them (gatedGPUs); gatedErrLogged the
 	// namespaces whose pod list failed and was logged, until one succeeds.
@@ -231,10 +234,12 @@ func (e *Engine) warnBorrowNamespacesSplit(ctx context.Context, constraints []*a
 // target of 0 the engine decided is known, unlike a desired count read back
 // as 0 (W6).
 func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisions []domain.VariantDecision, now time.Time) []allocation.BorrowDraw {
+	e.borrowing.passFlavors = nil
 	g, ok := optimizer.(*allocation.GreedyByScoreOptimizer)
 	if !ok || e.borrowing.inFlight == nil {
 		return nil
 	}
+	e.borrowing.passFlavors = g.PlacedFlavors()
 	targets := decidedTargets(decisions)
 	var draws []allocation.BorrowDraw
 	for _, d := range g.BorrowDraws() {
@@ -269,14 +274,17 @@ func decidedTargets(decisions []domain.VariantDecision) map[string]int {
 	return out
 }
 
-// borrowedFlavors is, per "namespace/variant", the flavor placement of the
-// borrowed growth still in flight: the in-flight node ledger holds that
-// variant's holes on the flavor's nodes (admitInFlight). A variant drawing on
-// several flavors is held on the one it drew the most GPUs from, the first in
-// the record's order on a tie.
-func (e *Engine) borrowedFlavors() map[string]*kueue.FlavorPlacement {
-	entries := e.borrowing.inFlight.Entries()
-	if len(entries) == 0 {
+// borrowedFlavors is, per "namespace/variant", the Kueue flavor placement the
+// in-flight node ledger holds the variant's holes on (admitInFlight): the one
+// this cycle's pass placed its replicas on, guaranteed or borrowed (W5), else
+// that of its borrowed growth still in flight or lagging -- so a hole stays
+// on its flavor while a read has not shown the replica, also when later
+// growth names none (W8). The ledger keeps one flavor per variant: a variant
+// drawing on several is held on the one it drew the most GPUs from, the first
+// in the record's order on a tie.
+func (e *Engine) borrowedFlavors(now time.Time) map[string]*kueue.FlavorPlacement {
+	entries := e.borrowing.inFlight.Unreserved(now).InFlight
+	if len(entries) == 0 && len(e.borrowing.passFlavors) == 0 {
 		return nil
 	}
 	out := map[string]*kueue.FlavorPlacement{}
@@ -290,6 +298,7 @@ func (e *Engine) borrowedFlavors() map[string]*kueue.FlavorPlacement {
 			out[key], most[key] = d.Placement, d.GPUs
 		}
 	}
+	maps.Copy(out, e.borrowing.passFlavors)
 	return out
 }
 
