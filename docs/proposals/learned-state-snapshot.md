@@ -96,11 +96,16 @@ stored, so a restart does not restart a borrow at full strength.
    (#151): the check is by how much still holds. The same arguments on a new
    image restore everything but the ITL baseline, as a live capacity record
    survives a routine image bump; changed arguments restore only the old k2,
-   as a lower-only prior that expires like a borrowed k2 (#132), and nothing
-   else. A document with no `args` keeps the whole-configuration rule. The
-   prior is written back with its borrow clock, so a second restart inside its
-   life resumes it; its life runs on that clock from a bucket's first use, and
-   a prior no bucket uses goes after the bucket retention. An entry
+   as a lower-only figure that expires like a borrowed k2 (#132), and nothing
+   else. A document with no `args` keeps the whole-configuration rule. Since
+   the windows record the arguments they were written under, the k2 check is
+   per window: each is installed under its own arguments, and its first read
+   turns one from other arguments into that lower-only figure, the same rule
+   a live rollout gets (learned-state-sharing-by-similarity.md, "One lower
+   bound per key"). The figure is written back with its clock, so a second
+   restart inside its life resumes it; its life runs on that clock from a
+   bucket's first use, and one no bucket uses goes after the bucket
+   retention. An entry
    whose variant cannot be named -- a key from before per-variant keys (#132)
    -- cannot be checked, and is not restored. Nor is one whose configuration
    was not read **completely**, on either side: a flag the controller could

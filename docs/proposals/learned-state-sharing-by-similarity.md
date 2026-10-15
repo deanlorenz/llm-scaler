@@ -294,6 +294,183 @@ The engine image is the one break this proposal does not address. It wants its
 own change: hash the image into the digest, or make an image change a tier-2
 distance.
 
+## One lower bound per key, and windows keyed by their arguments
+
+Built on #151, #163 and #152 together with the borrow controls first proposed
+in #165, after a review found that their mechanisms disagreed once combined. Three of
+them each meant "a figure from somewhere else may only make this variant more
+conservative, for a while": the sibling k2 borrow (#132, #165), the restored
+prior (#151), and the ceiling a parked variant keeps after a rollout (#151).
+Each had its own clock and its own expiry. Forgetting a variant, turning the
+borrow off, trimming the snapshot and the image check each knew some of them
+and not the others, and each gap was a bug: an image-only rollout re-armed a
+spent borrow, a prior was swept during a park, a forget left an unused prior
+behind.
+
+**One record per bucket.** Every k2 history key (variant, bucket, role,
+hardware) has at most one lower bound. It names where its figure comes from:
+a sibling variant, or the variant itself under engine arguments it no longer
+runs. It holds the figure, a clock that counts serving time only, and what it
+last ran on. There is one rule for all of them:
+
+- it is used only below what the variant would get without it;
+- it holds for 30 minutes of serving time, then relaxes to the variant's own
+  figure over 6 hours of serving time;
+- once spent, it stays spent until there is new evidence: the variant's
+  engine arguments changed, or a figure is now more than 20% lower than the
+  lowest one on offer while the bound ran. A donor that measured higher, a
+  donor that went and came back, a figure that was on offer all along, an
+  image-only rollout, and a fingerprint from another `FingerprintVersion` are
+  not new evidence. Neither is a configuration that was not read completely:
+  a bound armed under one records no arguments;
+- a change of arguments restarts it, even mid-run: the new arguments get a
+  full hold, not what was left of a bound armed on another engine hours ago;
+- a replica that may not arm it (a warm-pool bridge, a Pod that is not Ready)
+  reads it as it stood at the last serving cycle, or as the fresh bound it is
+  about to be when there is new evidence;
+- a sibling's figure is a candidate only from a window written under the
+  arguments that sibling runs now, and only when the sibling's measured KV
+  total is within 3% of the replica's own live one;
+- it goes when its variant goes.
+
+`disableK2Borrow` turns off sibling figures only. The variant's own figure
+from its previous arguments is not a borrow, and turning the borrow off does
+not drop a variant to k1. Forgetting a variant drops its own previous figure
+and ends any running borrow as spent.
+
+**Windows carry their arguments.** Each k2 and throughput window records the
+engine arguments (`ArgsFingerprint`, the configuration without the image) it
+was written under. The key does not change, so this costs no cold start. When
+a variant's arguments change, the next read or write of a window written
+under the old ones puts the window aside under them, for a bucket retention,
+and starts a fresh one. Its k2 becomes the bucket's lower bound as the
+variant's own previous figure, in place of any older one (below).
+Its throughput is not read: a service rate is never borrowed, from a sibling
+or from the past.
+
+A rollback is not a new engine. A variant returned to arguments it ran before
+gets the windows put aside under them back as its own, k2 and service rate,
+with full authority; relaxing its own measurement away, or pricing it from
+the figure of the arguments it was rolled back from, was what a rollback
+cost before.
+
+A configuration that was not read completely is still a configuration: its
+windows are tagged with its fingerprint marked incomplete, so moving to or
+from it is a change. Only two equal incomplete fingerprints are taken as the
+same engine. A window with no recorded arguments, from before this change, is
+taken as written under the arguments the variant runs now.
+
+While the variant is mid-rollout, nothing is written to a window: a
+saturated pod may be an old one, and the record already names the new
+arguments. Mid-rollout is what the scale target reports this cycle -- a
+Deployment's updated replicas or unobserved generation, a LeaderWorkerSet's
+`UpdateInProgress` condition -- or the variant's own replicas reporting more
+than one pod template revision. The rule has no memory, so an undo, a
+restart, a failover or a forget in mid-rollout reads the same as any other
+cycle. An earlier version remembered where a rollout began and gated only
+argument changes; each review found another way that memory was lost or
+wrong (an undo, a restart, a LeaderWorkerSet status lag), and every gap
+recorded old pods as the new engine's own.
+
+A LeaderWorkerSet's status counts are not the test. Its controller leaves a
+group whose worker StatefulSet does not exist yet out of `UpdatedReplicas`,
+while `Replicas` counts the group's Pending leader, and the worker
+StatefulSet is created only once the leader is Ready or scheduled -- so
+fewer updated groups than groups is every scale-up of a set with the
+`LeaderReady` startup policy or exclusive placement, and gating on it held
+back every reading for as long as the new group took to start, which is
+when the variant saturates. Nor do its conditions carry a generation, so a
+template change its controller has not acted on cannot be told from the
+status; the pods' revisions tell it once any group has moved. The window
+before that -- the controller not yet reconciled, or down -- is not covered.
+
+A rollout's readings price nothing. The fleet is priced from what the
+variant already holds: its own window under the arguments it runs, or --
+when the rollout changed the arguments -- its previous figure, on a bound
+the rollout freezes; a sibling's figure only below either, as ever. An
+earlier version folded the readings into the previous figure, first as the
+lowest single reading, then as the median of a few. The lowest gave one
+outlier all the weight and held the fleet at it for 6.5 hours after the
+rollout. The median needed readings that one cycle rarely gives, and the
+per-cycle sweep dropped what a cycle had collected before the next added
+to it; where it did fold, the figure was dropped the cycle the rollout
+ended, so the hold it promised after the rollout never came. The cost of
+the simple rule is that a rollout which lowers capacity -- a new image
+that holds less -- is priced on the figure from before it until the new
+pods saturate after it ends, and an image-only rollout records nothing
+until it ends either. Known limits: a LeaderWorkerSet held part way by a
+partition reports two revisions for as long as it is held, so nothing is
+learned for the variant until it is let through; and a template change
+its controller has not acted on for any group is not seen as a rollout,
+so the first readings of that window are recorded under the new
+arguments.
+
+The lower bound waits for the rollout. Its hold and relaxation are what the
+variant spends measuring itself, and with every reading held back nothing
+can be measured: a clock that ran relaxed the variant toward derived or k1
+above what its pods demonstrably held for as long as a rollout stuck on a
+pending surge pod. Frozen, a bound the change of arguments restarted keeps
+its whole hold for the variant's first serving cycle after the rollout.
+
+The previous figure is the variant's LATEST measurement, under the arguments
+it just left: a later change replaces it, lower or not, and the variant's
+first measurement under the arguments it runs retires it. It ages as the
+window it stands in for: a bucket retention after it was last offered to a
+decision. An earlier version aged it from when it became one, so a bound
+frozen by a rollout, or used by a variant serving a few minutes a day, lost
+it at full strength in one cycle. A rollback is the stash's case, which puts
+the window measured under the arguments rolled back to in front of any
+previous figure.
+
+Across a change of arguments the old saturated throughput still holds the
+floor, with the authority of a neighbouring bucket's: the floor may hold the
+fleet on it, never grow it, until the new arguments measure their own -- for
+at most the hold and relaxation of a lower bound, 6.5 hours of serving, and
+read without touching it, so it ages from the change. Dropped, the change
+switched off the one floor that can only add replicas; unbounded and
+touched, a change that doubled the service rate held the old engine's fleet,
+at half load, for as long as the load was steady.
+
+This is the same whether the arguments changed while the controller ran or
+while it was down. A restore installs each window with the arguments it was
+written under, and the first read applies the rule above -- under a
+configuration not read completely too, and for a document that recorded no
+arguments at all (an upgrade from a release without them, or past a
+FingerprintVersion bump), whose windows are tagged with no configuration's
+arguments and so each becomes a previous figure. The separate prior of #151
+is gone; a document a #151 build wrote has its priors read as previous
+figures. What a restart keeps is decided per window, not per variant,
+so a window learned before a live rollout and exported after it is no longer
+restored as if it described the new arguments.
+
+The snapshot exports a window under its variant's arguments with no tag of
+its own, and a window still tagged with other arguments put aside, with the
+previous figure a read would have made of it -- from the document alone and
+on the window's own clocks: it became a figure when the window was last
+written and was last used when the window was last read, so two exports a
+minute apart are the same document and the figure survives a restart as
+long as the window would have. Stamped from the last write alone, a restore
+dropped the figure of every window a coping fleet kept alive by reading it.
+A running bound is exported unarmed so that a restore arms it afresh, as the
+live path restarts it. A controller from before the tags ignores the
+put-aside windows, so a rollback never installs one as the variant's own. A
+variant whose configuration was not read completely is exported under it,
+tagged as unread: it restores only into the same unread configuration.
+
+**What stays per variant.** The ceiling a parked variant keeps after a rollout
+(`PriorLiveCapacity`) stays on the capacity record. It is the last measured
+`min(k1, k2)` for the whole variant, and the windows hold k2 alone, per bucket,
+and are moved only when they are read, which a parked variant never does.
+Reading the windows instead would drop the k1 part of the ceiling for a
+k1-bound variant. The restore keeps its per-variant check only for what is
+not per window: the ITL baseline needs the whole configuration, image
+included, and the start-time estimate needs the same arguments.
+
+**What it reports.** `wva_learned_state_k2_source` names the variant's own
+previous figure `P2-prior`, distinct from a sibling's `P2-borrow`, with its
+age. `wva_learned_state_restores_total` counts each restore by its outcome:
+`whole`, `args`, `prior`, `incomplete` or `differs`.
+
 ## Order of work
 
 1. **Merge #126 as it is.** It ships the digest and `wva_engine_config` with
@@ -325,8 +502,15 @@ distance.
    measured gets its own hold. Keyed per variant, a variant past its first
    6.5 hours went straight to its own k1 in a new bucket (3.2x in review),
    which is this gap again; per bucket, the cost is at most one hold per
-   bucket, in replicas. A retention after a clock ends the variant may borrow
-   again (a weekly re-probe), and a restart clears it.
+   bucket, in replicas. The clock counts serving time only -- cycles where a
+   Ready replica of the variant's own serves the bucket -- so a parked
+   canary does not wake with its hold spent, and a warm-pool bridge reads a
+   borrow without starting it. A spent borrow stays spent: the clock keeps
+   the figure and the borrower's engine arguments it last ran on, and
+   re-arms only on a figure more than 20% lower, or other arguments (see
+   "One lower bound per key" above). An earlier version dropped the clock a
+   retention after it ended, which re-armed the borrow at full strength once
+   a week with no new evidence.
    One side effect, accepted: the priced capacity is written to the capacity
    store as a live record, and `Store.FindCompatible` reads records across
    namespaces for zero-replica variants. A borrowed figure can reach another
