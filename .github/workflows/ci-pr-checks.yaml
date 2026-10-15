@@ -56,7 +56,9 @@ jobs:
           filters: |
             code:
               - '**'
-              - '!docs/**'
+              - '!docs/**/*.md'
+              - '!docs/**/*.png'
+              - '!docs/**/*.svg'
               - '!README.md'
               - '!CONTRIBUTING.md'
               - '!LICENSE'
@@ -76,37 +78,39 @@ jobs:
 
   lint-and-test:
     runs-on: ubuntu-latest
-    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
-    # skipped as a whole reports no conclusion, which a required check reads as
-    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # Skipped step by step on a docs-only PR, not by a job-level `if`, because
+    # e2e-tests-full needs lint-and-test to succeed and decides for itself what
+    # to skip. `!cancelled()` and `!= 'false'` fail closed: if
+    # check-code-changes itself fails, every step here still runs. On push and
     # dispatch has_code_changes is always true, so everything runs there.
     needs: check-code-changes
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout source
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         uses: actions/checkout@v6
 
       - name: Sanity check repo contents
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: ls -la
 
       - name: Extract Go version from go.mod
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
 
       - name: Set up Go with cache
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         uses: actions/setup-go@v6
         with:
           go-version: "${{ env.GO_VERSION }}"
           cache-dependency-path: ./go.sum
 
       - name: Install dependencies
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: go mod download
 
       - name: Install golangci-lint
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.8.0
@@ -118,27 +122,29 @@ jobs:
           verify: false
 
       - name: Run make build
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         shell: bash
         run: |
           make build
 
       - name: Run make test
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         shell: bash
         run: |
           make test
 
   deploy-scripts-check:
     runs-on: ubuntu-latest
-    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
-    # skipped as a whole reports no conclusion, which a required check reads as
-    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # Skipped step by step on a docs-only PR, not by a job-level `if`, because
+    # e2e-tests-full needs lint-and-test to succeed and decides for itself what
+    # to skip. `!cancelled()` and `!= 'false'` fail closed: if
+    # check-code-changes itself fails, every step here still runs. On push and
     # dispatch has_code_changes is always true, so everything runs there.
     needs: check-code-changes
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout source
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         uses: actions/checkout@v6
 
       # The deploy libraries are ~5k lines of shell that no Go test covers, and
@@ -154,7 +160,7 @@ jobs:
       # PR went red before a single check had run. --retry-all-errors covers
       # HTTP 5xx, which plain --retry does not; the six attempts span ~2 min.
       - name: Install yq
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: |
           sudo curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
@@ -162,7 +168,7 @@ jobs:
           yq --version
 
       - name: Run make lint-deploy-scripts
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: make lint-deploy-scripts
 
   docs-check:
@@ -196,36 +202,38 @@ jobs:
 
   kustomize-build:
     runs-on: ubuntu-latest
-    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
-    # skipped as a whole reports no conclusion, which a required check reads as
-    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # Skipped step by step on a docs-only PR, not by a job-level `if`, because
+    # e2e-tests-full needs lint-and-test to succeed and decides for itself what
+    # to skip. `!cancelled()` and `!= 'false'` fail closed: if
+    # check-code-changes itself fails, every step here still runs. On push and
     # dispatch has_code_changes is always true, so everything runs there.
     needs: check-code-changes
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout source
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         uses: actions/checkout@v6
 
       - name: Install kustomize
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: make kustomize
 
       - name: Build kubernetes overlay
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: bin/kustomize build config/overlays/cluster-scoped/kubernetes > /dev/null
 
       - name: Build openshift overlay
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: bin/kustomize build config/overlays/namespace-scoped/openshift > /dev/null
 
       - name: Build namespace-scoped kubernetes overlay
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: bin/kustomize build config/overlays/namespace-scoped/kubernetes > /dev/null
 
       # The builds above prove each overlay renders; this asserts what it
       # renders. Same yq pin and retries as deploy-scripts-check.
       - name: Install yq
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: |
           sudo curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
@@ -233,7 +241,7 @@ jobs:
           yq --version
 
       - name: Check the rendered manifests
-        if: needs.check-code-changes.outputs.has_code_changes == 'true'
+        if: needs.check-code-changes.outputs.has_code_changes != 'false'
         run: KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
 
   # E2E smoke tests - run automatically on every PR with code changes.
@@ -241,7 +249,10 @@ jobs:
   e2e-tests-smoke:
     runs-on: ubuntu-latest
     needs: [lint-and-test, check-code-changes]
-    if: github.event_name == 'pull_request' && needs.check-code-changes.outputs.has_code_changes == 'true'
+    if: >-
+      !cancelled() && needs.lint-and-test.result == 'success'
+      && github.event_name == 'pull_request'
+      && needs.check-code-changes.outputs.has_code_changes != 'false'
     timeout-minutes: 60
     permissions:
       contents: read
@@ -304,13 +315,14 @@ jobs:
     #
     # has_code_changes is deliberately no longer part of this condition. What
     # this job should skip is now decided INSIDE it, in the first step, because
-    # this one is meant to be a required status check: a job skipped by a
-    # job-level `if` reports no conclusion at all, and GitHub does not read that
-    # as a pass -- the PR waits on a check that never arrives. A docs-only diff
-    # still costs nothing; it returns in under a minute.
+    # this one is meant to be a required status check, and a run that says why
+    # it skipped is clearer than a job skipped by its `if`. A docs-only diff
+    # still costs nothing; it returns in under a minute. `!cancelled()` and the
+    # lint-and-test result let it run when only check-code-changes failed.
     if: >-
-      github.event_name == 'pull_request'
-      || (github.event_name == 'workflow_dispatch' && inputs.run_full_tests)
+      !cancelled() && needs.lint-and-test.result == 'success'
+      && (github.event_name == 'pull_request'
+      || (github.event_name == 'workflow_dispatch' && inputs.run_full_tests))
     timeout-minutes: 90
     permissions:
       contents: read
