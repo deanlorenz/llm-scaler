@@ -901,6 +901,35 @@ PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-prefill-0 > "$T
 [ "$rc" = 0 ] && [ "$(cat "$T/keys-slash.out")" = "$K2@rank_0_0" ] && ! grep -q WARNING "$T/keys-slash.err" \
     && ok "keys: a VLLM_CACHE_ROOT with a trailing / is the same root, not a fall-back" || fail "keys trailing slash: rc=$rc err=$(tr '\n' ' ' < "$T/keys-slash.err")"
 printf /engine-cache/vllm > "$T/engine-root/pd-prefill-0"
+# the AOT save line names the key; a failed save, or a failed load that
+# compiled again, does not (vLLM v0.31.0 decorators.py)
+AOT2=torch_compile_cache/torch_aot_compile/0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e
+printf 'INFO 10-14 [decorators.py:330] saved AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model\n' "$AOT" > "$T/engine-logs/aot-saved"
+{ printf 'WARNING 10-14 [decorators.py:335] unable to save AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model: OSError\n' "$AOT2"
+  printf "INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1"; } > "$T/engine-logs/aot-unsaved"
+{ printf 'WARNING 10-14 [decorators.py:320] Compiling model again due to a load failure from /engine-cache/vllm/%s/rank_0_0/model, reason: EOFError\n' "$AOT"
+  printf 'INFO 10-14 [decorators.py:330] saved AOT compiled function to /engine-cache/vllm/%s/rank_0_0/model\n' "$AOT"; } > "$T/engine-logs/aot-reload"
+for p in aot-saved aot-unsaved aot-reload; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-saved > "$T/keys-aots.out" 2> "$T/keys-aots.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aots.out")" = "$AOT@rank_0_0" ] && ! grep -q WARNING "$T/keys-aots.err" \
+    && ok "keys: an AOT save line (saved AOT compiled function to ...) names its key" || fail "keys AOT saved: rc=$rc out=$(cat "$T/keys-aots.out") err=$(tr '\n' ' ' < "$T/keys-aots.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-unsaved > "$T/keys-aotu.out" 2> "$T/keys-aotu.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aotu.out")" = "$K1@rank_0_0" ] && grep -q "aot-unsaved: the engine could not save its AOT compile to /engine-cache/vllm/$AOT2/rank_0_0; that line gives no key" "$T/keys-aotu.err" \
+    && ok "keys: a failed AOT save gives no key, and says the save failed" || fail "keys AOT unsaved: rc=$rc out=$(tr '\n' ' ' < "$T/keys-aotu.out") err=$(tr '\n' ' ' < "$T/keys-aotu.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot-reload > "$T/keys-aotr.out" 2> "$T/keys-aotr.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aotr.out")" = "$AOT@rank_0_0" ] && grep -q "aot-reload: the AOT compile at /engine-cache/vllm/$AOT/rank_0_0 failed to load and was compiled again; that line gives no key" "$T/keys-aotr.err" \
+    && ok "keys: a failed AOT load warns; the save that follows still names the key" || fail "keys AOT reload: rc=$rc out=$(tr '\n' ' ' < "$T/keys-aotr.out") err=$(tr '\n' ' ' < "$T/keys-aotr.err")"
+# VLLM_CACHE_ROOT=/ is the root /, not unset
+printf "INFO 10-14 [backends.py:550] Using cache directory: /%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1" > "$T/engine-logs/root-slash"
+printf / > "$T/engine-root/root-slash"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns root-slash > "$T/keys-rs.out" 2> "$T/keys-rs.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-rs.out")" = "$K1@rank_0_0" ] && ! grep -q WARNING "$T/keys-rs.err" \
+    && ok "keys: VLLM_CACHE_ROOT=/ is the root /, and its key is found" || fail "keys root /: rc=$rc out=$(cat "$T/keys-rs.out") err=$(tr '\n' ' ' < "$T/keys-rs.err")"
+printf / > "$T/engine-root/fell-back"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/keys-rsf.out" 2> "$T/keys-rsf.err"
+grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/ ' "$T/keys-rsf.err" && ! grep -q 'sets no VLLM_CACHE_ROOT' "$T/keys-rsf.err" \
+    && ok "keys: an engine that fell back off VLLM_CACHE_ROOT=/ is told apart from one with no VLLM_CACHE_ROOT" || fail "keys root / fell back: err=$(tr '\n' ' ' < "$T/keys-rsf.err")"
+printf /engine-cache/vllm > "$T/engine-root/fell-back"
 if PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns no-compile > "$T/keys4.out" 2>&1; then fail "keys must fail on a log with no cache directory"; else
     grep -q 'no compile cache directory in its log' "$T/keys4.out" && ok "keys: a log with no cache directory is a failure, not an empty answer" || fail "keys no line: $(tail -1 "$T/keys4.out")"; fi
 if STUB_ENGINE_LOG_ERROR='Error from server (Forbidden): pods "pd-decode-0" is forbidden: cannot get resource "pods/log"' PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys5.out" 2>&1; then fail "keys must fail when the log cannot be read"; else

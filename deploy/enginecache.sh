@@ -939,8 +939,13 @@ EOF
 #                                                             decorators.py (VLLM_USE_AOT_COMPILE), logged as
 #     "Directly load AOT compilation from path %s" or "saved AOT compiled function to %s"
 # The key is the path between VLLM_CACHE_ROOT and the rank directory; the
-# root is whatever precedes the first /torch_compile_cache/.
-KEY_RE='/[A-Za-z0-9._/-]*/torch_compile_cache/(torch_aot_compile/)?[A-Za-z0-9_-]+/rank_[0-9]+_[0-9]+'
+# root is whatever precedes the first /torch_compile_cache/ (/ when nothing
+# does).
+KEY_RE='/([A-Za-z0-9._/-]*/)?torch_compile_cache/(torch_aot_compile/)?[A-Za-z0-9_-]+/rank_[0-9]+_[0-9]+'
+# KEY_FAILED_RE matches the decorators.py lines that name an AOT path the
+# engine did not leave a usable cache at: a save that failed, and a load that
+# failed and compiled again. No key is taken from them.
+KEY_FAILED_RE='unable to save AOT compiled function to |Compiling model again due to a load failure from '
 
 # normalize_key prints KEY[@RANK[+RANK...]] with KEY as a directory under
 # VLLM_CACHE_ROOT: a bare hash is torch_compile_cache/<hash>. Each RANK is a
@@ -974,7 +979,7 @@ normalize_key() {
 cmd_keys() {
     [ -n "$NAMESPACE" ] || log_error "keys needs -n NAMESPACE"
     [ "${#PODS[@]}" -gt 0 ] || log_error "keys needs the engine pod(s): enginecache.sh keys -n NAMESPACE POD [POD...]"
-    local pod root log found path base rest pairs="" warned all rc=0 err_file
+    local pod root log found path base rest pairs="" warned all rc=0 err_file line
     err_file="$(mktemp)"
     for pod in "${PODS[@]}"; do
         if ! root="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"${CONTAINER}\")].env[?(@.name==\"VLLM_CACHE_ROOT\")].value}" 2>"$err_file")"; then
@@ -985,16 +990,25 @@ cmd_keys() {
             log_warning "cannot read the log of ${pod} (container ${CONTAINER}): $(tr '\n' ' ' < "$err_file")"
             rc=1; continue
         fi
-        found="$(printf '%s\n' "$log" | grep -oE "$KEY_RE" || true)"
+        while IFS= read -r line; do
+            path="$(printf '%s\n' "$line" | grep -oE "$KEY_RE" | head -n 1 || true)"
+            [ -n "$path" ] || continue
+            case "$line" in
+                *"unable to save"*) log_warning "${pod}: the engine could not save its AOT compile to ${path}; that line gives no key" ;;
+                *) log_warning "${pod}: the AOT compile at ${path} failed to load and was compiled again; that line gives no key" ;;
+            esac
+        done < <(printf '%s\n' "$log" | grep -E "$KEY_FAILED_RE" || true)
+        found="$(printf '%s\n' "$log" | grep -vE "$KEY_FAILED_RE" | grep -oE "$KEY_RE" || true)"
         if [ -z "$found" ]; then
             log_warning "${pod}: no compile cache directory in its log (no \"Using cache directory\" or AOT load/save line under a torch_compile_cache directory: the log rotated, the engine does not compile, or its cache_dir is set by hand)"
             rc=1; continue
         fi
-        while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+        while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root="${root%/}"; done
         warned=" "
         for path in $found; do
             base="${path%%/torch_compile_cache/*}"
             rest="${path#"$base"/}"
+            [ -n "$base" ] || base=/
             # one "KEY RANK" line per rank directory the log names
             pairs="${pairs}${rest%/*} ${rest##*/}"$'\n'
             case "$warned" in *" ${base} "*) continue ;; esac
