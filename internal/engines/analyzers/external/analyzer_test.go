@@ -3,6 +3,7 @@ package external_test
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,10 +16,15 @@ import (
 
 // fakeSource is a minimal source.MetricsSource for tests: a real QueryList (so
 // query registration is exercised) plus canned Refresh results.
+//
+// Like the Prometheus source, Refresh returns an error alongside the results
+// when every requested query failed. resultOnlyErrors turns that off, for a
+// source that reports a query's failure only in its result.
 type fakeSource struct {
-	ql      *source.QueryList
-	results map[string]*source.MetricResult
-	err     error
+	ql               *source.QueryList
+	results          map[string]*source.MetricResult
+	err              error
+	resultOnlyErrors bool
 }
 
 func newFakeSource() *fakeSource {
@@ -27,9 +33,21 @@ func newFakeSource() *fakeSource {
 
 func (f *fakeSource) QueryList() *source.QueryList { return f.ql }
 
-func (f *fakeSource) Refresh(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+func (f *fakeSource) Refresh(_ context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.resultOnlyErrors {
+		return f.results, nil
+	}
+	var failed []error
+	for _, q := range spec.Queries {
+		if r := f.results[q]; r != nil && r.HasError() {
+			failed = append(failed, r.Error)
+		}
+	}
+	if len(spec.Queries) > 0 && len(failed) == len(spec.Queries) {
+		return f.results, fmt.Errorf("all %d queries failed: %w", len(failed), failed[0])
 	}
 	return f.results, nil
 }
@@ -226,13 +244,25 @@ var _ = Describe("external.Analyzer", func() {
 			Expect(res).To(BeNil())
 		})
 
-		It("treats a failed query result as zero demand", func() {
+		// Zero demand permits a scale-down, so a failed query must never read as
+		// zero: that would shrink a model during a Prometheus outage.
+		It("fails, rather than reporting zero demand, when the query failed", func() {
 			a, _ := external.New(agnosticDef(), fs)
 			fs.results[agnosticQueryName] = &source.MetricResult{Error: errors.New("query failed")}
 
 			res, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(res.TotalDemand).To(BeZero())
+			Expect(err).To(MatchError(ContainSubstring("query failed")))
+			Expect(res).To(BeNil())
+		})
+
+		It("fails when the source reports the query's failure only in its result", func() {
+			a, _ := external.New(agnosticDef(), fs)
+			fs.resultOnlyErrors = true
+			fs.results[agnosticQueryName] = &source.MetricResult{Error: errors.New("query failed")}
+
+			res, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"})
+			Expect(err).To(MatchError(ContainSubstring("query failed")))
+			Expect(res).To(BeNil())
 		})
 
 		It("propagates a source Refresh error", func() {
