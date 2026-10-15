@@ -480,8 +480,12 @@ which restarts it.
 
 KEDA calls the scaling manager's external scaler on `:9090`. By default the
 install serves it over **mutual TLS**: the scaler proves who it is to KEDA, and
-KEDA proves who it is to the scaler. Nothing else can register a workload or
-read a decision.
+KEDA proves who it is to the scaler. Only KEDA can call it.
+
+This authenticates KEDA, not whoever wrote a ScaledObject. Anyone who may
+create a ScaledObject can point it at the scaler with this install's
+`authenticationRef`, and KEDA then calls the scaler for them. Who may create
+ScaledObjects is still your RBAC.
 
 **What you do:** nothing, on a new install. The installer turns TLS on when it
 can, and says why when it cannot.
@@ -551,12 +555,24 @@ plaintext.
 
 **Rotation.**
 
-- cert-manager renews its certificates. The controller reloads the serving
-  certificate without a restart, and restarts only when the CA changes.
-- Without cert-manager, re-run `make deploy-wva`. It re-issues a certificate
-  that expires within 30 days or names the wrong hosts.
-- KEDA's copy is refreshed only by `make setup-prereqs`. An older copy keeps
-  working until it expires. `make verify-deployment` warns 30 days before.
+- The serving certificate lasts a year. cert-manager renews it; without
+  cert-manager, re-run `make deploy-wva`. The controller reloads it without a
+  restart.
+- KEDA's client certificate lasts as long as the CA (10 years). KEDA reads it
+  once per connection and never again, so it is not renewed sooner.
+- **When the CA changes, restart KEDA's operator.** That happens when the CA
+  nears its end, after an uninstall and reinstall, or when you switch
+  certificate provider. KEDA keeps the old CA and certificate until it
+  restarts, and every handshake fails. `make setup-prereqs` prints the command
+  when it sees the change:
+
+  ```bash
+  kubectl rollout restart deployment -n <KEDA namespace> -l app=keda-operator
+  ```
+
+- **OpenShift** rotates its service CA by itself. When it does, a cluster admin
+  re-runs `make setup-prereqs`, then restarts KEDA's operator.
+  `make verify-deployment` warns when KEDA trusts an old CA.
 
 **Check it.** `make verify-deployment` prints:
 
