@@ -73,22 +73,22 @@ thing here.
 
 ```text
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
-  "analyzer": "CompositeSignal", "live": true, "supply": 2170173, "demand": 2240000, "util": 1.03,
-  "rc": 465121, "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
-  "variants": [{"name":"primary","prc":960000,"role":"both","reason":"C0-agree"},
+  "analyzer": "CompositeSignal", "live": true, "supply": 2362173, "demand": 2688000, "util": 1.14,
+  "rc": 800180, "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
+  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"C0-agree"},
                {"name":"v2","prc":403391,"role":"both","reason":"C1-single"}]}
 ```
 
-`demand` is in **saturation's units** (`D_sat`) always — the composite holds
-demand fixed at saturation's own value and lets the aggregated replica count
-determine `prc` per variant, so the numbers here are directly comparable to
-saturation's own `analyzer-result` line above. `prc` may differ from
-saturation's for a variant another analyzer disagreed with (`primary` above:
-960000 vs. saturation's 1152000, because another analyzer asked for more
-replicas than saturation alone would have). This is the same cycle as the
-saturation line: `demand` is the same 2240000, `supply` is one `primary` at
-960000 plus three `v2` at 403391, and the lower `prc` turns saturation's `rc`
-of 273121 into 465121.
+`demand` is in **saturation's units** always, and `prc` is always
+saturation's, so the numbers here are directly comparable to saturation's own
+`analyzer-result` line above. When another analyzer asks for more replicas
+than saturation, the composite raises `demand` to what that many replicas are
+worth at saturation's `prc`, so on this line `demand` is a target, not a
+measurement. Above, another analyzer needs 2.33 `primary` replicas, which at
+1152000 each is 2688000 against saturation's measured 2240000. This is the
+same cycle as the saturation line: `supply` is the same one `primary` at
+1152000 plus three `v2` at 403391, and the higher `demand` turns saturation's
+`rc` of 273121 into 800180.
 
 `variants[].reason` on the composite row is **not** an analyzer's capacity
 provenance (`P0-store`, `T1-ols`, ...) — it is the composite's own decision

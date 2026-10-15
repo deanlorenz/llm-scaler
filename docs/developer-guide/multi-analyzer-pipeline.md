@@ -335,7 +335,8 @@ analyzer's; an analyzer normally has no reason to call them.
 **The composite** (`buildComposite`, `steadystate/composite.go`): the
 optimizer receives one result, built in `collectV2ModelRequest` from every
 analyzer that ran. It starts as a copy of saturation's `AnalyzerResult` (every
-field, maps and slices cloned) and changes three things per variant:
+field, maps and slices cloned) and changes the need, the demand that carries
+it, and the holds. Every PRC stays saturation's:
 
 - **Need.** `allocation.ResolveSO` takes, for each eligible analyzer
   (`allocation.Eligible`: live, informative, non-nil) that has the variant
@@ -345,10 +346,19 @@ field, maps and slices cloned) and changes three things per variant:
   policy lists it (`ScalingPolicy.SaturationListed`: listed and enabled, or no
   `analyzers` section at all), and `slo` never is: it only observes. `Reason`
   records the path: `C0-agree` (several), `C1-single`, `C4-no-signal` (none).
-- **PRC.** `D_sat[role] / N`, the capacity at which saturation's demand needs
-  `N` replicas. Saturation's own PRC is kept when saturation set `N` (`D/(D/P)`
-  is not always `P`), when `D_sat[role]` is zero, and on `C4-no-signal`.
-- **Utilization**, recomputed from that PRC.
+- **Demand** (`scaleDemand`), in saturation's units. A role's demand is the
+  largest of `D_sat[role]`, exactly, when saturation contributed for one of
+  its variants, and `N x PRC_sat(variant)` for each variant another analyzer's
+  `N` was read for (`Decision.Others`). The second holds when `D_sat[role]` is
+  zero, so another analyzer can grow a role saturation sees as idle. A need on
+  a variant saturation has no PRC for, or whose demand overflows, sizes
+  nothing. The model's `TotalDemand` moves with the role (or is the role's
+  demand, aggregated); the role's variants share it in saturation's
+  proportions (evenly when saturation attributed none), and their utilization
+  is recomputed from it. `HeldRoleDemand` is raised to the other analyzers'
+  demand where it is larger, and dropped for a role saturation did not size.
+  PRC is never rewritten, so variants on different accelerators keep their
+  relative worth in the cost-aware optimizer.
 - **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
   saturation unlisted, a role none of whose variants has a need is held both
   ways. A listed analyzer other than saturation that is live but not eligible

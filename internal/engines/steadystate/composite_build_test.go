@@ -129,8 +129,8 @@ func TestBuildCompositeKeepsSaturationPRCExactly(t *testing.T) {
 }
 
 // TestBuildCompositePricesTheLargestNeed: another analyzer needing more
-// replicas than saturation sets the PRC that makes saturation's demand need
-// that many, D_sat / N.
+// replicas than saturation sets the demand that need comes to at
+// saturation's own PRC, N x PRC_sat; the PRC is saturation's.
 func TestBuildCompositePricesTheLargestNeed(t *testing.T) {
 	sat := liveEntry(domain.SaturationAnalyzerName, 800, 200) // needs 4
 	other := liveEntry("throughput", 60, 10)                  // needs 6
@@ -140,8 +140,10 @@ func TestBuildCompositePricesTheLargestNeed(t *testing.T) {
 
 	vc := composite.Result.VariantCapacities[0]
 	assert.Equal(t, string(allocation.DecisionAgree), vc.Reason)
-	assert.InDelta(t, 800.0/6, vc.PerReplicaCapacity, 1e-9)
-	assert.InDelta(t, 800/(3*(800.0/6)), vc.Utilization, 1e-9)
+	assert.Equal(t, 200.0, vc.PerReplicaCapacity)
+	assert.InDelta(t, 1200, composite.Result.TotalDemand, 1e-9)
+	assert.InDelta(t, 1200, vc.TotalDemand, 1e-9)
+	assert.InDelta(t, 1200.0/(3*200), vc.Utilization, 1e-9)
 }
 
 // TestBuildCompositeIgnoresANonFiniteNeed: one analyzer's +Inf or NaN demand
@@ -156,21 +158,27 @@ func TestBuildCompositeIgnoresANonFiniteNeed(t *testing.T) {
 
 		vc := composite.Result.VariantCapacities[0]
 		assert.Equal(t, 200.0, vc.PerReplicaCapacity, "demand %v", demand)
+		assert.Equal(t, 800.0, composite.Result.TotalDemand, "demand %v", demand)
 		assert.Equal(t, string(allocation.DecisionSingle), vc.Reason, "demand %v", demand)
 	}
 }
 
-// TestBuildCompositeKeepsPRCWhenSaturationSeesNoDemand: with no saturation
-// demand there is nothing to divide; a PRC of zero would read as "no basis to
-// size" and hold the model whatever the other analyzer asks for.
-func TestBuildCompositeKeepsPRCWhenSaturationSeesNoDemand(t *testing.T) {
+// TestBuildCompositeGrowsARoleSaturationSeesAsIdle: with no saturation demand
+// another analyzer's need still reaches the optimizer, as N x PRC_sat. Under
+// the PRC rewrite there was nothing to divide, saturation's PRC was kept, and
+// the need was lost.
+func TestBuildCompositeGrowsARoleSaturationSeesAsIdle(t *testing.T) {
 	sat := liveEntry(domain.SaturationAnalyzerName, 0, 200)
-	other := liveEntry("throughput", 60, 10)
+	other := liveEntry("throughput", 60, 10) // needs 6
 	named := []allocation.NamedAnalyzerResult{sat, other}
 
 	composite := buildComposite(context.Background(), named, named, 0.85, 0.7)
 
-	assert.Equal(t, 200.0, composite.Result.VariantCapacities[0].PerReplicaCapacity)
+	vc := composite.Result.VariantCapacities[0]
+	assert.Equal(t, 200.0, vc.PerReplicaCapacity)
+	assert.InDelta(t, 1200, composite.Result.TotalDemand, 1e-9)
+	assert.InDelta(t, 1200, vc.TotalDemand, 1e-9, "the only variant carries all of it")
+	assert.Positive(t, composite.RequiredCapacity, "6 replicas wanted, 3 running")
 }
 
 func TestExcludeByName(t *testing.T) {

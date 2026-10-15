@@ -269,13 +269,14 @@ saturation's, not shared. `O` scales both `D` and `P`, so it largely cancels in
 2. **Saturation disabled only by an explicit `enabled: false`** (above).
 3. **`shadow: true`** (above), also left out of `maxScore`, or a shadowed
    `score` still moves cross-model priority.
-4. **Warm-pool pressure and supply from the composite**, not from saturation's
-   result. Supply is in saturation's units: scale it by `P_com ÷ P_sat`
-   whenever `N_com > 0`.
-5. **Never erase supply on zero demand.** When `D_sat[role] ≤ 0`, the composite
-   takes its saturation-PRC fallback instead of `P_com = 0`.
+4. **Warm-pool pressure from the composite**, not from saturation's result.
+   The composite keeps saturation's PRC, so supply is the same in both; only
+   demand differs.
+5. **Size a role saturation sees as idle** (built, #167). The composite
+   expresses a need as demand at saturation's PRC, `N_com × P_sat`, which is
+   defined when `D_sat[role] = 0`.
 6. **Hysteresis on the deciding source** (bound 6): per-SO memory of the last
-   `P_com` and decision path, which `buildComposite` does not keep.
+   composite demand and decision path, which `buildComposite` does not keep.
 7. **The SLO count is a floor for utilization-share.** In guard mode the
    [utilization-share](utilization-share-optimizer.md) pass must not hand away
    capacity below the SLO's count.
@@ -676,13 +677,14 @@ relies on. The design is on the
 N_i(SO)      = D_i[role(SO)] ÷ P_i(SO)                each eligible analyzer, in its own units, no threshold
 N_com(SO)    = max over contributors of N_i(SO)        undefined skipped; P ≤ 0 or Reason no-data/error is undefined
                saturation contributes when listed; unlisted, a role nothing sized holds
-P_com(SO)    = D_sat[role] ÷ N_com(SO)                 back in saturation's units, by definition
-RC, SC       = applyUniversalThreshold on P_com, with the model-level scaleUp / scaleDown
+D_com[role]  = max(D_sat[role] if saturation contributed, max over SO of N_i(SO) × P_sat(SO) for i ≠ sat)
+               saturation's PRC is never rewritten
+RC, SC       = applyUniversalThreshold on D_com, with the model-level scaleUp / scaleDown
 ```
 
 With saturation eligible, the max lets the SLO only tighten (guard); with it
 disabled, the result may come out below saturation alone (sizer). An SO the
 SLO cannot price lands on `C1-single` (guard) or `C4-no-signal`, and its role
 holds (sizer). A
-defined `N_slo = 0` falls back to saturation's own PRC, the right answer for an
-idle variant; `D_sat = 0` is [item 5](#what-the-composite-needs-before-phase-1).
+defined `N_slo = 0` contributes zero demand, the right answer for an idle
+variant; `D_sat = 0` is [item 5](#what-the-composite-needs-before-phase-1).

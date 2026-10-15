@@ -60,9 +60,14 @@ type Decision struct {
 	Path DecisionPath
 	// Contributors names every analyzer whose need was considered.
 	Contributors []string
-	// FromSaturation is whether saturation's own need is N, so saturation's
-	// own per-replica capacity already prices it exactly.
-	FromSaturation bool
+	// Saturation is whether saturation is among the contributors. Its need is
+	// its own demand, which the composite keeps exactly rather than as
+	// N x PRC.
+	Saturation bool
+	// Others is the largest need among the contributors other than
+	// saturation; defined only when OthersOK.
+	Others   float64
+	OthersOK bool
 }
 
 // ResolveSO decides one variant's replica need from entries, the analyzers
@@ -70,7 +75,7 @@ type Decision struct {
 // TotalReplicas for the variant contributes, and N is the largest. A
 // non-finite need is no reading: one analyzer's +Inf demand would otherwise
 // price every replica at zero. sat only names saturation's entry, for
-// FromSaturation; saturation contributes only from entries.
+// Saturation and Others; saturation contributes only from entries.
 func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant string) Decision {
 	var d Decision
 	for _, e := range entries {
@@ -86,12 +91,13 @@ func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant 
 			continue
 		}
 		d.Contributors = append(d.Contributors, e.Name)
-		switch {
-		case !d.OK || n > d.N:
+		if !d.OK || n > d.N {
 			d.N, d.OK = n, true
-			d.FromSaturation = sat != nil && e.Name == sat.Name
-		case n == d.N && sat != nil && e.Name == sat.Name:
-			d.FromSaturation = true
+		}
+		if sat != nil && e.Name == sat.Name {
+			d.Saturation = true
+		} else if !d.OthersOK || n > d.Others {
+			d.Others, d.OthersOK = n, true
 		}
 	}
 	switch len(d.Contributors) {

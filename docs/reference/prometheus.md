@@ -1091,7 +1091,11 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 publishes in its own units, and `analyzer_name="CompositeSignal"` repeats the
 decision in saturation's units, so a sum counts demand at least twice. For
 what the optimizer acted on, filter on `analyzer_name="CompositeSignal"`; for
-one analyzer's own reading, filter on its name.
+one analyzer's own reading, filter on its name. The composite's
+`wva_analyzer_target` is always saturation's. When another analyzer asks for
+more replicas, the composite's `wva_analyzer_demand` is raised to what those
+replicas are worth at that target, so it is a target rather than a measured
+load; saturation's own series still shows the measured demand.
 
 ### SLO Analyzer Metrics
 

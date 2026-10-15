@@ -359,10 +359,10 @@ var _ = Describe("buildComposite — end-to-end with a higher-demand contributor
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
-		// N_com = max(5, 20) = 20 -> PRC_com = 1000/20 = 50, well below
-		// saturation's own PRC of 200, correctly reflecting the higher
-		// replica requirement spy is asking for.
-		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(50.0))
+		// N_com = max(5, 20) = 20 -> demand 20 x 200 = 4000 at saturation's
+		// own PRC, which is kept.
+		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(200.0))
+		Expect(composite.Result.TotalDemand).To(Equal(4000.0))
 		Expect(composite.RequiredCapacity).To(BeNumerically(">", 0))
 	})
 })
