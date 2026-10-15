@@ -91,11 +91,12 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 
 	// Step 3: Expose per-type availability
 	rc := &ResourceConstraints{
-		ProviderName: l.name,
-		Pools:        l.inventory.GetResourcePools(),
-		TotalLimit:   l.inventory.TotalLimit(),
-		TotalUsed:    l.inventory.TotalUsed(),
-		TotalAvail:   l.inventory.TotalAvailable(),
+		ProviderName:    l.name,
+		Pools:           l.inventory.GetResourcePools(),
+		TotalLimit:      l.inventory.TotalLimit(),
+		TotalUsed:       l.inventory.TotalUsed(),
+		TotalAvail:      l.inventory.TotalAvailable(),
+		NamespaceScoped: namespaceScopedOf(l.inventory),
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
@@ -113,12 +114,18 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		activeNamespaces := slices.Collect(maps.Keys(usageByNamespace))
 		nsPools := nai.NamespaceResourcePools(activeNamespaces)
 		// A namespace-scoped inventory answers with a map, empty when none of
-		// the active namespaces is capped; a cluster-scoped one with nil.
-		rc.NamespaceScoped = nsPools != nil
+		// the active namespaces is capped; a cluster-scoped one with nil. An
+		// inventory that declares its scope (NamespaceScopedInventory) is
+		// read as it declares, whichever answer it gives here.
+		rc.NamespaceScoped = rc.NamespaceScoped || nsPools != nil
 		if len(nsPools) > 0 {
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)
+			// The aggregate is reported, never merged as a cluster bound: each
+			// namespace it holds is bounded by its own allowlist, and one it
+			// excludes bypasses it.
+			rc.NamespaceScoped = true
 		}
 	}
 	return rc, nil

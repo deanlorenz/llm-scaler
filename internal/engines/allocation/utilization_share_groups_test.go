@@ -319,11 +319,12 @@ var _ = Describe("BuildShareGroups: scopes and bounds", func() {
 		Expect(groups[0].Scope).To(BeEmpty())
 		// The cluster's free 8 less team-a's claim of 4, + B's 8.
 		Expect(groups[0].Budget).To(Equal(4 + 8))
-		Expect(groups[0].PhysicalFree).To(Equal(4))
+		Expect(groups[0].ClusterFree).To(Equal(4))
 		Expect(groups[1].Scope).To(Equal("team-a"))
 		Expect(groups[1].Budget).To(Equal(4 + 4)) // team-a's free 4 + A's 4
-		// A namespace group is bounded by the whole cluster free.
-		Expect(groups[1].PhysicalFree).To(Equal(8))
+		// The two groups share the cluster free 8 (splitClusterFree): each
+		// fills at most what it could claim, 4 and 4.
+		Expect(groups[1].ClusterFree).To(Equal(4))
 	})
 
 	It("builds a namespace-quota group even when the cluster budget is the physical inventory", func() {

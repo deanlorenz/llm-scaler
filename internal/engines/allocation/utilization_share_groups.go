@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
@@ -89,13 +90,36 @@ type ShareGroup struct {
 	// Variants lists every variant of each planned role. Once the optimizer is
 	// active it owns all their targets, not only the ones a transfer touches.
 	Variants map[string][]ShareVariant
-	// PhysicalFree bounds what a fill may place this cycle: the free GPUs of
-	// the type in the budget over every namespace (a cluster quota or the
-	// physical inventory), which a namespace quota can exceed (as in
-	// applyRescale). math.MaxInt when no such budget bounds the type: the sum
-	// of the namespace quotas is not one. The cluster group's is what that
-	// budget leaves after the namespace groups' claims (BuildShareGroups).
-	PhysicalFree int
+	// ClusterFree bounds what a fill may place this cycle: the free GPUs of the
+	// type under every cluster bound -- the physical inventory and a
+	// cluster-scope quota, intersected (mergeConstraints) -- which a namespace
+	// quota can exceed (as in applyRescale). math.MaxInt when no cluster bound
+	// is in force.
+	//
+	// It was PhysicalFree. Once a physical limiter and quotas compose it is no
+	// longer physical: it is the tightest cluster-wide figure, and a
+	// namespace-scope quota's aggregate (the sum of its namespace caps) is not
+	// one -- that quota bounds a namespace group through its own budget instead.
+	//
+	// Groups that draw on one cluster key share it: two groups on two products
+	// of one family (a cluster quota of {NVIDIA-H100-80GB-HBM3: 8,
+	// NVIDIA-H100-SXM5-80GB: 8} on 8 physical H100s), or two namespace groups on
+	// one type, would each fill the whole figure. Their ClusterFree is that key's
+	// free split between them (splitClusterFree), so the fills together never
+	// place more than it holds.
+	//
+	// So with a namespace-scope quota alone ClusterFree is unbounded, and that
+	// is safe: a namespace group's Budget is its own cap (net of what it holds)
+	// and the idle fill never places past Budget (shareIdle, fillIdleShare), so
+	// every namespace stays within its own cap and their sum within the sum of
+	// the caps. The old aggregate-free bound was tighter in one case only: when
+	// ANOTHER namespace already holds more than its own cap, the aggregate's
+	// free figure fell below this namespace's, coupling one tenant's fill to
+	// another's overage. That coupling is gone.
+	//
+	// The cluster group's is what the cluster bounds leave after the namespace
+	// groups' claims (BuildShareGroups), before that split.
+	ClusterFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
 	// Thresholds is each role's scale-up threshold k_r.
@@ -180,8 +204,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	if len(constraints) == 0 {
 		return nil
 	}
-	available, namespaceQuota := clusterBudgets(constraints)
-	availableByNS := mergeNamespaceConstraints(constraints)
+	declared := declaredAccelerators(requests)
+	available, namespaceQuota := clusterBudgets(constraints, declared...)
+	availableByNS := mergeNamespaceConstraints(constraints, declared...)
 
 	type key struct{ acc, scope string }
 	groups := make(map[key]*ShareGroup)
@@ -217,19 +242,22 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if !single {
 			continue // multi-accelerator: a fixed consumer; its GPUs are already out of the free budget
 		}
-		_, nsScoped := availableByNS[req.Namespace]
+		nsBudget, nsScoped := availableByNS[req.Namespace]
 		scope := ""
+		budgets := available
 		if nsScoped {
 			if opts.NamespaceEnabled != nil && !opts.NamespaceEnabled(req.Namespace) {
 				continue
 			}
 			scope = req.Namespace
+			budgets = nsBudget
 		} else {
 			// Every active namespace a namespace-scoped quota does not exclude
 			// is in its pools, so a namespace outside them is excluded. Only a
-			// cluster-scoped budget bounds it; without one it is not shared,
+			// cluster bound bounds it; without a finite one it is not shared,
 			// whatever ClusterIsQuota and PhysicalGroups say.
-			if free, ok := available[acc]; namespaceQuota && (!ok || free > MaxShareBudgetGPUs) {
+			free, ok := available[budgetKey(available, acc)]
+			if namespaceQuota && (!ok || isUnboundedBudget(free) || free > MaxShareBudgetGPUs) {
 				if opts.Unshared != nil {
 					opts.Unshared(req, UnsharedExcludedNamespace(acc))
 				}
@@ -239,6 +267,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				continue
 			}
 		}
+		// The group takes the budget's spelling of the accelerator, so models that
+		// spell one GPU differently share one group and its budget is found below.
+		acc = budgetKey(budgets, acc)
 		g := group(acc, scope)
 
 		why := ""
@@ -299,9 +330,11 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// leave a free node unused by every group. (Capping each claim at the
 	// cluster free first gives the same remainder: once one claim reaches it,
 	// nothing is left either way.) This keeps the cluster group from counting
-	// GPUs a namespace group may also fill. It does not bound the namespace
-	// groups against each other: each keeps the whole cluster free as its
-	// PhysicalFree.
+	// GPUs a namespace group may also fill. A claim is charged to the cluster
+	// key that bounds the namespace group's type (budgetKey), the key the
+	// cluster group of that type is formed on. The namespace groups are
+	// bounded against each other, and against the cluster group, by
+	// splitClusterFree.
 	claimed := map[string]int{}
 	for _, k := range keys {
 		nsFree, ok := availableByNS[k.scope][k.acc]
@@ -310,7 +343,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			if step := smallestReplicaGPUs(groups[k]); step > 0 {
 				nsFree -= nsFree % step
 			}
-			claimed[k.acc] += nsFree
+			claimed[budgetKey(available, k.acc)] += nsFree
 		}
 	}
 
@@ -324,17 +357,17 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if !ok || free < 0 || free > MaxShareBudgetGPUs {
 			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
 		}
-		physicalFree := math.MaxInt
-		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
-			physicalFree = pf
+		clusterFree := math.MaxInt
+		if cf, bounded := clusterBudgetFor(available, k.acc); bounded && cf >= 0 && cf < math.MaxInt {
+			clusterFree = cf
 		}
 		if k.scope == "" {
 			free = max(0, free-claimed[k.acc])
-			physicalFree = free
+			clusterFree = min(clusterFree, free)
 		}
 		// free is net of what the group's planned roles hold by replica
 		// count: a namespace group's is its own namespace's quota, and the
-		// cluster group's a budget over every namespace (clusterBudgets) -- a
+		// cluster group's a budget over every namespace (mergeConstraints) -- a
 		// cluster quota, charged what WVA's variants hold, or the physical
 		// inventory, charged every GPU on the nodes. So the budget adds back
 		// that count -- not the held figure, which also counts terminating
@@ -345,11 +378,12 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
-		g.PhysicalFree = physicalFree
+		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
 		out = append(out, *g)
 	}
+	splitClusterFree(out, available)
 	return out
 }
 
@@ -367,26 +401,109 @@ func smallestReplicaGPUs(g *ShareGroup) int {
 	return step
 }
 
-// clusterBudgets returns, per accelerator type, the free GPUs of the providers
-// whose pools bound every namespace -- a cluster-scoped quota, or the physical
-// inventory -- and whether any provider is a namespace-scoped quota. A
-// namespace-scoped quota's pools are the sum of the caps of the namespaces it
-// lists and are net of only their holdings: a namespace it excludes holds GPUs
-// that sum never counts, so the cluster group planned over it would grow its
-// budget one for one with what that namespace holds.
-func clusterBudgets(constraints []*ResourceConstraints) (map[string]int, bool) {
-	var cluster []*ResourceConstraints
-	namespaced := false
-	for _, c := range constraints {
-		switch {
-		case c == nil:
-		case c.NamespaceScoped || len(c.NamespacePools) > 0:
-			namespaced = true
-		default:
-			cluster = append(cluster, c)
+// clusterBudgets returns, per accelerator key, the free GPUs under the
+// providers whose pools bound every namespace -- a cluster-scoped quota, or
+// the physical inventory, intersected (mergeConstraints) -- and whether any
+// provider is namespace-scoped. A namespace-scoped quota's pools are the sum of
+// the caps of the namespaces it lists and are net of only their holdings: a
+// namespace it excludes holds GPUs that sum never counts, so a cluster group
+// planned over it would grow its budget one for one with what that namespace
+// holds.
+func clusterBudgets(constraints []*ResourceConstraints, declared ...string) (map[string]int, bool) {
+	namespaced := slices.ContainsFunc(constraints, func(c *ResourceConstraints) bool {
+		return c != nil && !isClusterBound(c)
+	})
+	return mergeConstraints(constraints, declared...), namespaced
+}
+
+// splitClusterFree divides each finite cluster key's free GPUs between the
+// groups that draw on it -- every group whose accelerator the key covers
+// (accelerator.Covers: the key itself, or the family key of a product) -- when
+// more than one does, so their fills together stay within it. Each group gets a
+// share in proportion to the GPUs it could fill, its Budget less what it
+// commits (an even split when none could), never more than its own figure;
+// the remainder goes to the largest claims first, then in group order.
+//
+// Claims and shares are whole replicas of each group's smallest variant
+// (smallestReplicaGPUs), as the namespace groups' claims on the cluster group
+// are in BuildShareGroups: a share of 4 GPUs to a group of 8-GPU replicas
+// places nothing, and splitting one free 8-GPU node 4 and 4 left it unused by
+// every group. The remainder is handed out a replica at a time, round robin.
+func splitClusterFree(groups []ShareGroup, available map[string]int) {
+	for _, key := range slices.Sorted(maps.Keys(available)) {
+		free := available[key]
+		if isUnboundedBudget(free) {
+			continue
+		}
+		var sharing []int
+		for i := range groups {
+			if accelerator.Covers(key, budgetKey(available, groups[i].AcceleratorType)) {
+				sharing = append(sharing, i)
+			}
+		}
+		if len(sharing) < 2 {
+			continue
+		}
+		claims := make([]int, len(sharing))
+		steps := make([]int, len(sharing))
+		total := 0
+		for j, i := range sharing {
+			steps[j] = max(1, smallestReplicaGPUs(&groups[i]))
+			claims[j] = min(groups[i].ClusterFree, idleClaim(groups[i]))
+			claims[j] -= claims[j] % steps[j]
+			total += claims[j]
+		}
+		if total <= free {
+			// Every group's fill already fits beside the others'.
+			for j, i := range sharing {
+				groups[i].ClusterFree = min(groups[i].ClusterFree, max(claims[j], 0))
+			}
+			continue
+		}
+		shares := make([]int, len(sharing))
+		given := 0
+		for j := range sharing {
+			if total > 0 {
+				shares[j] = free * claims[j] / total
+			} else {
+				shares[j] = free / len(sharing)
+			}
+			shares[j] -= shares[j] % steps[j]
+			given += shares[j]
+		}
+		order := make([]int, len(sharing))
+		for j := range order {
+			order[j] = j
+		}
+		slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(claims[b], claims[a]) })
+		for progress := true; progress && given < free; {
+			progress = false
+			for _, j := range order {
+				if given+steps[j] > free || (total > 0 && shares[j]+steps[j] > claims[j]) {
+					continue
+				}
+				shares[j] += steps[j]
+				given += steps[j]
+				progress = true
+			}
+			if total == 0 {
+				break // an even split: one replica more at most, as before
+			}
+		}
+		for j, i := range sharing {
+			groups[i].ClusterFree = min(groups[i].ClusterFree, shares[j])
 		}
 	}
-	return mergeConstraints(cluster), namespaced
+}
+
+// idleClaim is the GPUs a group's idle fill could want this cycle: its Budget
+// less what its roles commit, never negative.
+func idleClaim(g ShareGroup) int {
+	idle := g.Budget
+	for _, c := range g.Committed {
+		idle -= c
+	}
+	return max(0, idle)
 }
 
 type shareRoleInput struct {
@@ -583,13 +700,17 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 // poolCarve is a group's share of the warm pools' unheld target: a namespace
 // group's own namespace's, the cluster group every namespace's -- a pool in a
 // namespace with its own quota spends the cluster's quota too.
+//
+// A pool's accelerator is matched by identity, since the group carries the
+// budget's spelling and the pool its own.
 func poolCarve(unheld map[string]map[string]int, acc, scope string) int {
 	if scope != "" {
-		return max(0, unheld[scope][acc])
+		byType := unheld[scope]
+		return max(0, byType[budgetKey(byType, acc)])
 	}
 	sum := 0
 	for _, byType := range unheld {
-		sum += max(0, byType[acc])
+		sum += max(0, byType[budgetKey(byType, acc)])
 	}
 	return sum
 }
