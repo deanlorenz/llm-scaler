@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -32,9 +33,6 @@ type K8sWithGpuOperator struct {
 	podsDenied atomic.Bool
 }
 
-// podListPageSize bounds each page of an uncached pod list.
-const podListPageSize = 500
-
 // NewK8sWithGpuOperator creates a new K8sWithGpuOperator instance.
 func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
 	return &K8sWithGpuOperator{
@@ -43,14 +41,15 @@ func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
 	}
 }
 
-// WithPodReader makes the usage walk list Pods through r, uncached and paged,
-// instead of through Client, and returns d.
+// WithPodReader makes the usage walk list Pods through r, outside the
+// controller's cache, instead of through Client, and returns d.
 //
 // A namespace-scoped controller needs it. Its cache holds Pods of the managed
 // namespace only, and a list through it answers silently with that subset, so
 // GPUs that other tenants' Pods hold on the same nodes read as free and a
 // scale-up is admitted onto a full node. Reading uncached, the walk sees every
-// Pod on the GPU nodes when RBAC lets it list Pods cluster-wide. When it does
+// Pod on the GPU nodes when RBAC lets it list Pods cluster-wide. The list is
+// served from the API server's watch cache, not etcd; see listAllPods. When it does
 // not, the walk falls back to the cache and reports the undercount
 // (wva_pod_access_denied and an error log); see listPods.
 func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator {
@@ -330,7 +329,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 }
 
 // listPods returns every Pod the usage walk considers: through Client, or,
-// when a pod reader is set, through it, uncached and page by page.
+// when a pod reader is set, through it (listAllPods).
 //
 // A Forbidden list through the pod reader falls back to Client, which counts
 // the Pods this controller's cache holds and no others, and says so: the
@@ -341,7 +340,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 // a reported undercount keeps the cap at the nodes' capacity and is visible.
 func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error) {
 	if d.podReader != nil {
-		pods, err := listPodsPaged(ctx, d.podReader)
+		pods, err := listAllPods(ctx, d.podReader)
 		if err == nil {
 			metrics.SetPodAccessDenied(false)
 			d.podsDenied.Store(false)
@@ -366,20 +365,31 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 	return list.Items, nil
 }
 
-// listPodsPaged lists every Pod through r in pages of podListPageSize.
-func listPodsPaged(ctx context.Context, r client.Reader) ([]corev1.Pod, error) {
-	var pods []corev1.Pod
-	cont := ""
-	for {
-		var page corev1.PodList
-		if err := r.List(ctx, &page, client.Limit(podListPageSize), client.Continue(cont)); err != nil {
-			return nil, err
-		}
-		pods = append(pods, page.Items...)
-		if cont = page.Continue; cont == "" {
-			return pods, nil
-		}
+// listAllPods lists every Pod through r in one request, with resourceVersion
+// "0".
+//
+// "0" lets the API server answer from its watch cache instead of reading etcd,
+// which matters because this runs every refresh interval and lists every Pod in
+// the cluster. The answer may be slightly behind etcd, by as much as the watch
+// cache is; the usage walk is a periodic observation and tolerates that.
+//
+// It does not page. A paged list from the watch cache is not supported on every
+// API server version, and paging through etcd instead adds a failure this
+// path would need its own fallback for: a continue token that expires between
+// pages (410 Gone) on a large cluster.
+func listAllPods(ctx context.Context, r client.Reader) ([]corev1.Pod, error) {
+	var list corev1.PodList
+	if err := r.List(ctx, &list, podListFromWatchCache()); err != nil {
+		return nil, err
 	}
+	return list.Items, nil
+}
+
+// podListFromWatchCache is the list option listAllPods sends. A new one per
+// call: the client writes into Raw while building the request, so a shared one
+// would race between concurrent refreshes.
+func podListFromWatchCache() *client.ListOptions {
+	return &client.ListOptions{Raw: &metav1.ListOptions{ResourceVersion: "0"}}
 }
 
 // discoverNodeGPUTypes returns a map of node name to GPU type (model name).

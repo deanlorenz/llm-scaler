@@ -169,6 +169,41 @@ func TestForbiddenPodListIsReported(t *testing.T) {
 	}
 }
 
+// TestPodListIsServedFromTheWatchCache: the uncached list runs every refresh
+// and lists every Pod in the cluster. It must ask for resourceVersion "0", so
+// the API server answers from its watch cache instead of etcd, and it must not
+// page: a continue token that expires between pages (410 Gone) has no fallback.
+func TestPodListIsServedFromTheWatchCache(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	node := gpuNode("gpu-1")
+	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
+	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	var sent []metav1.ListOptions
+	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(gpuPod("theirs-0", "other-tenant", 4)).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			sent = append(sent, *(&client.ListOptions{}).ApplyOptions(opts).AsListOptions())
+			return c.List(ctx, list, opts...)
+		}}).Build()
+
+	byType, _, err := NewK8sWithGpuOperator(cached).WithPodReader(reader).DiscoverUsageByNamespace(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := byType[testGPUProduct]; got != 4 {
+		t.Errorf("usage = %d, want the 4 GPUs the reader's Pod holds", got)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("pod lists sent = %d, want exactly 1", len(sent))
+	}
+	if got := sent[0]; got.ResourceVersion != "0" || got.Limit != 0 || got.Continue != "" {
+		t.Errorf("list options = resourceVersion %q, limit %d, continue %q; want \"0\", 0, \"\"",
+			got.ResourceVersion, got.Limit, got.Continue)
+	}
+}
+
 func gauge(t *testing.T, registry *prometheus.Registry, name string) float64 {
 	t.Helper()
 	families, err := registry.Gather()
