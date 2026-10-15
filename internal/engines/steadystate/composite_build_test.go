@@ -196,14 +196,17 @@ func TestExcludeByName(t *testing.T) {
 		{"empty", nil, "a", []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			before := len(tc.in)
-			out := excludeByName(tc.in, tc.drop)
-			names := make([]string, 0, len(out))
-			for _, nr := range out {
-				names = append(names, nr.Name)
+			namesOf := func(in []allocation.NamedAnalyzerResult) []string {
+				names := make([]string, 0, len(in))
+				for _, nr := range in {
+					names = append(names, nr.Name)
+				}
+				return names
 			}
-			assert.Equal(t, tc.names, names)
-			assert.Len(t, tc.in, before, "the input is not modified")
+			before := namesOf(tc.in)
+			out := excludeByName(tc.in, tc.drop)
+			assert.Equal(t, tc.names, namesOf(out))
+			assert.Equal(t, before, namesOf(tc.in), "the input is not modified")
 		})
 	}
 }

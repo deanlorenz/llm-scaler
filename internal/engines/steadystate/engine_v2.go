@@ -181,11 +181,6 @@ func (e *Engine) runAnalyzers(
 	// that measures per-replica capacity; it is deliberately absent from every
 	// supply total above.
 	publishWarmPoolSupply(namespace, namedResults[0])
-	// How hard each variant is being pushed, for the retained pool's switching
-	// decision. Published from saturation's result and with saturation's own
-	// scale-up threshold, so the pool never switches for a variant the optimizer
-	// considers comfortable, nor sits still for one it is already growing.
-	publishVariantPressure(namespace, namedResults[0], satUp)
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
 			continue
@@ -1279,6 +1274,12 @@ func (e *Engine) collectV2ModelRequest(
 	eligibleAnalyzers = append(eligibleAnalyzers, e.listedInGrace(namespace, modelID, config, namedResults)...)
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+	// How hard each variant is being pushed, for the retained pool's switching
+	// decision. Published from the composite, the result the optimizer acts on,
+	// with saturation's scale-up threshold, so the pool never switches for a
+	// variant the optimizer considers comfortable, nor sits still for one it is
+	// already growing.
+	publishVariantPressure(namespace, composite, satUp)
 
 	// One record per cycle, the composite included: two calls each evicted
 	// what the other had published, and each variant's engine configuration
@@ -1873,9 +1874,11 @@ func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult,
 		// carrying its load raises it rather than hiding it -- which is what
 		// makes this the right number for deciding whether the pool should be
 		// serving this model instead of another.
+		// A role the composite holds against growth is not being grown, however
+		// hard it is pushed.
 		decision.PublishPressure(namespace, vc.VariantName, decision.Pressure{
 			SpareFraction: 1 - vc.Utilization,
-			NeedsScaleUp:  vc.Utilization > scaleUp,
+			NeedsScaleUp:  vc.Utilization > scaleUp && !nr.Holds[domain.RoleOfVC(vc)].NoScaleUp,
 			At:            now,
 		})
 	}

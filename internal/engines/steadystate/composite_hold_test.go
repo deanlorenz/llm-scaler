@@ -70,45 +70,6 @@ func TestCompositeHoldsWhatNoListedAnalyzerSizes(t *testing.T) {
 	}
 }
 
-// TestCompositeHoldsOnlyTheRoleNoListedAnalyzerSizes: on P/D, a listed
-// analyzer that sizes decode only leaves prefill held and decode sized.
-func TestCompositeHoldsOnlyTheRoleNoListedAnalyzerSizes(t *testing.T) {
-	sat := allocation.NamedAnalyzerResult{
-		Name: domain.SaturationAnalyzerName,
-		Live: true,
-		Result: &domain.AnalyzerResult{
-			AnalyzerName: domain.SaturationAnalyzerName,
-			TotalDemand:  1300,
-			RoleDemand:   map[string]float64{domain.RolePrefill: 400, domain.RoleDecode: 900},
-			VariantCapacities: []domain.VariantCapacity{
-				{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 2, PerReplicaCapacity: 100, Reason: "measured"},
-				{VariantName: "d", Role: domain.RoleDecode, ReplicaCount: 2, PerReplicaCapacity: 300, Reason: "measured"},
-			},
-		},
-	}
-	other := allocation.NamedAnalyzerResult{
-		Name: "throughput",
-		Live: true,
-		Result: &domain.AnalyzerResult{
-			AnalyzerName: "throughput",
-			RoleDemand:   map[string]float64{domain.RoleDecode: 900},
-			VariantCapacities: []domain.VariantCapacity{
-				{VariantName: "d", Role: domain.RoleDecode, PerReplicaCapacity: 300, Reason: "measured"},
-			},
-		},
-	}
-
-	composite := buildComposite(context.Background(), []allocation.NamedAnalyzerResult{sat, other},
-		[]allocation.NamedAnalyzerResult{other}, 0.85, 0.7)
-
-	assert.Equal(t, map[string]allocation.RoleHold{domain.RolePrefill: {NoScaleUp: true, NoScaleDown: true}}, composite.Holds)
-	prefill, decode := composite.RoleCapacities[domain.RolePrefill], composite.RoleCapacities[domain.RoleDecode]
-	assert.Zero(t, prefill.RequiredCapacity, "prefill 400 against 200 of supply would grow")
-	assert.Zero(t, prefill.SpareCapacity)
-	assert.InDelta(t, 900/0.85-600, decode.RequiredCapacity, 1e-9, "decode is sized")
-	assert.Positive(t, composite.RequiredCapacity, "one role sized: the model-level signal stands")
-}
-
 // TestCompositeGraceBlocksScaleDown: a listed analyzer inside its grace with
 // no reading cannot ask for more this cycle, so the model does not shrink on
 // the others' smaller need. Out of its grace, it no longer counts.

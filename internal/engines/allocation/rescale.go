@@ -374,22 +374,36 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	curByRole := make(map[string]int, len(roles))
 	demByRole := make(map[string]int, len(roles))
 	floorByRole := make(map[string]int, len(roles))
+	// A role the composite holds both ways keeps what it has, and the others
+	// share what is left: its demand is a figure the policy does not size on.
+	budget := targetGPUs
+	var split, pinned []string
 	for _, role := range roles {
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
+		if h := satNamed.Holds[role]; h.NoScaleUp && h.NoScaleDown {
+			budget -= curByRole[role]
+			pinned = append(pinned, role)
+		} else {
+			split = append(split, role)
+		}
 	}
-	tgtByRole := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
+	tgtByRole := distributeGPUsByWeight(max(budget, 0), split, demByRole, curByRole, floorByRole)
+	for _, role := range pinned {
+		tgtByRole[role] = curByRole[role]
+	}
 
 	limited := make(gpuLimitTracker)
 	// grown is what each role's fill added, per variant, in the order added.
 	grown := map[string][]roleGrowth{}
 	for _, role := range roles {
 		rt, rc := tgtByRole[role], curByRole[role]
+		hold := satNamed.Holds[role]
 		switch {
-		case rt < rc:
+		case rt < rc && !hold.NoScaleDown:
 			reclaimRole(ctx, req.CompositeSignal, records, role, stateMap, targets, rc-rt)
-		case rt > rc:
+		case rt > rc && !hold.NoScaleUp:
 			want := rt - rc
 			// The role's rescale target needs more GPUs than this cycle can
 			// free (reclaims only free capacity for the NEXT cycle), so the

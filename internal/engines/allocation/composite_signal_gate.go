@@ -3,7 +3,7 @@ package allocation
 // CompositeHasSignal reports whether composite carries a real capacity
 // signal: a non-nil Result with at least one VariantCapacity whose decision
 // path is not C4-no-signal. On the composite, Reason carries the decision
-// path (C0-agree/C1-single/C2-sat-fallback/C4-no-signal), not an analyzer's
+// path (C0-agree/C1-single/C4-no-signal), not an analyzer's
 // own no-data/error/P0-store vocabulary.
 //
 // It tests whether the composite carries a usable signal, never which

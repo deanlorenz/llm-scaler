@@ -74,6 +74,10 @@ func buildComposite(
 	}
 
 	warnModelLevelOnly(ctx, *sat, eligibleAnalyzers)
+	if len(eligibleAnalyzers) == 0 {
+		logger.Info("no listed analyzer can size this model this cycle, so it holds where it is",
+			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace)
+	}
 
 	satDemand := make(map[string]float64)
 	for _, role := range rolesPresent(sat.Result.VariantCapacities) {
@@ -100,6 +104,11 @@ func buildComposite(
 		role := domain.RoleOfVC(vc)
 		if _, ok := satDemand[role]; ok {
 			needs[role] = needs[role].add(d, vc.PerReplicaCapacity)
+		}
+		if d.OthersOK && !(vc.PerReplicaCapacity > 0) {
+			logger.Info("a listed analyzer's need is dropped: saturation has no per-replica capacity for the variant",
+				"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
+				"variant", vc.VariantName, "totalReplicas", d.Others)
 		}
 
 		logger.V(logging.VERBOSE).Info("composite-contributors",
@@ -201,7 +210,10 @@ func (n roleNeed) sized() bool {
 // HeldRoleDemand is saturation's demand before its own hold. It is kept for a
 // role saturation sized, raised to the other analyzers' demand when theirs is
 // larger (a hold on saturation's figure does not lower theirs), and dropped
-// for a role saturation did not size, where its hold did not set the demand.
+// where the hold did not set the demand: a role saturation did not size, or
+// one where the other analyzers ask for at least the held figure. Kept there,
+// the share optimizer would still treat the role as held and give nothing
+// from it.
 func scaleDemand(result *domain.AnalyzerResult, satDemand map[string]float64, needs map[string]roleNeed) {
 	for role, n := range needs {
 		if !n.sized() {
@@ -209,7 +221,7 @@ func scaleDemand(result *domain.AnalyzerResult, satDemand map[string]float64, ne
 		}
 		if before, held := result.HeldRoleDemand[role]; held {
 			switch {
-			case !n.saturation:
+			case !n.saturation, n.othersOK && n.others >= satDemand[role]:
 				delete(result.HeldRoleDemand, role)
 			case n.othersOK:
 				result.HeldRoleDemand[role] = max(before, n.others)
@@ -285,6 +297,16 @@ func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.Na
 		for _, role := range roles {
 			if !sized[role] {
 				holds[role] = allocation.RoleHold{NoScaleUp: true, NoScaleDown: true}
+			}
+		}
+		// On P/D a role that cannot grow stops the other growing too: decode
+		// grown against a frozen prefill is capacity prefill cannot feed. The
+		// share optimizer freezes such a model whole for the same reason.
+		if len(holds) > 0 && len(roles) > 1 {
+			for _, role := range roles {
+				h := holds[role]
+				h.NoScaleUp = true
+				holds[role] = h
 			}
 		}
 	}
