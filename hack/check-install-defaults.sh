@@ -31,7 +31,7 @@ command -v yq >/dev/null 2>&1 || {
 # every function being missing.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh cli.sh infra_wva.sh scaledobject.sh; do
+for lib in common.sh cli.sh infra_wva.sh scaledobject.sh verify.sh scaler_tls.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
@@ -43,17 +43,22 @@ source "$WORK/cli.sh"
 source "$WORK/infra_wva.sh"
 # shellcheck source=/dev/null
 source "$WORK/scaledobject.sh"
+# shellcheck source=/dev/null
+source "$WORK/verify.sh"
+# shellcheck source=/dev/null
+source "$WORK/scaler_tls.sh"
 
 for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_warn_floating_image \
           wva_warn_prometheus_tls wva_prometheus_scraper_sa wva_prometheus_url_namespace \
-          wva_append_metrics_reader_decision render_default_scaledobject; do
+          wva_append_metrics_reader_decision render_default_scaledobject \
+          wva_image_ref print_summary wva_summary_scaledobjects; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=59
+EXPECT_CASES=68
 RAN=0
 FAILED=0
 
@@ -133,6 +138,66 @@ check 'fields: registry port with tag' 'localhost:5000/w|dev|' "$(wva_image_ref_
 check 'fields: ref-<sha> tag' 'ghcr.io/o/w|ref-abc|' "$(wva_image_ref_fields ghcr.io/o/w:ref-abc)"
 check 'fields: digest' "ghcr.io/o/w||$DIGEST" "$(wva_image_ref_fields "ghcr.io/o/w@$DIGEST")"
 check 'fields: bare repo pulls latest' 'ghcr.io/o/w|latest|' "$(wva_image_ref_fields ghcr.io/o/w)"
+
+# ----------------------------------------------------------------------------
+# The install summary: the image it names, and whether it says nothing scales
+# ----------------------------------------------------------------------------
+# ref <IMG>: the reference wva_image_ref rebuilds from IMG's split.
+ref() {
+    (
+        WVA_IMAGE_REPO='' WVA_IMAGE_TAG='' WVA_IMAGE_DIGEST=''
+        wva_split_image_ref "$1" || { printf 'rejected'; exit 0; }
+        wva_image_ref
+    )
+}
+check 'image ref: repo:tag' 'ghcr.io/o/wva:main' "$(ref ghcr.io/o/wva:main)"
+check 'image ref: a digest is repo@digest' "ghcr.io/o/wva@$DIGEST" "$(ref "ghcr.io/o/wva@$DIGEST")"
+check 'image ref: tag and digest' "localhost:5000/wva:v1@$DIGEST" "$(ref "localhost:5000/wva:v1@$DIGEST")"
+
+# summary <ScaledObject list JSON, or FORBIDDEN> <IMG>: print_summary against a
+# kubectl that answers only the ScaledObject list.
+summary() {
+    (
+        SUMMARY_SO="$1"
+        WVA_IMAGE_REPO='' WVA_IMAGE_TAG='' WVA_IMAGE_DIGEST=''
+        wva_split_image_ref "$2" || exit 1
+        kubectl() {
+            case "$*" in
+                "get scaledobjects.keda.sh "*)
+                    if [ "$SUMMARY_SO" = FORBIDDEN ]; then
+                        echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "tenant" cannot list resource "scaledobjects"' >&2
+                        return 1
+                    fi
+                    printf '%s' "$SUMMARY_SO" ;;
+                *) return 1 ;;
+            esac
+        }
+        wva_prometheus_endpoint() { return 1; }
+        WVA_NS=wva-sum WVA_SCOPE=namespace WVA_WATCH_NS='' SCALER_BACKEND=keda
+        DEPLOY_OPERATIONAL_DASHBOARD=false MONITORING_NAMESPACE=wva-mon
+        print_summary 2>/dev/null
+    )
+}
+NO_SO='{"items":[]}'
+OUR_SO='{"items":[{"metadata":{"namespace":"wva-sum","name":"chat"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.wva-sum.svc:9090"}}]}}]}'
+OTHER_SO='{"items":[{"metadata":{"namespace":"wva-sum","name":"chat"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.elsewhere.svc:9090"}}]}}]}'
+
+# A digest IMG printed "(ghcr.io/...:)" on a real cluster: the tag, empty.
+check 'summary: a digest IMG names repo@digest' "  Controller:   wva-sum  (ghcr.io/o/wva@$DIGEST)" \
+    "$(summary "$NO_SO" "ghcr.io/o/wva@$DIGEST" | grep 'Controller:')"
+check 'summary: a tag IMG names repo:tag' '  Controller:   wva-sum  (ghcr.io/o/wva:main)' \
+    "$(summary "$NO_SO" ghcr.io/o/wva:main | grep 'Controller:')"
+
+# "nothing scales yet" printed on a re-install with a ScaledObject in place.
+check 'summary: no ScaledObject says nothing scales yet' 1 \
+    "$(summary "$NO_SO" ghcr.io/o/wva:main | grep -c 'NEXT: nothing scales yet')"
+check 'summary: one naming this scaler is counted, and no NEXT' '0|1' \
+    "$(out="$(summary "$OUR_SO" ghcr.io/o/wva:main)"; printf '%s|%s' "$(printf '%s\n' "$out" | grep -c 'NEXT:')" "$(printf '%s\n' "$out" | grep -c 'ScaledObjects: 1 name this scaler')")"
+check 'summary: one naming another scaler does not count' 1 \
+    "$(summary "$OTHER_SO" ghcr.io/o/wva:main | grep -c 'NEXT: nothing scales yet')"
+# Forbidden is not "none".
+check 'summary: an unreadable list is not called none' '0|1' \
+    "$(out="$(summary FORBIDDEN ghcr.io/o/wva:main)"; printf '%s|%s' "$(printf '%s\n' "$out" | grep -c 'NEXT: nothing scales yet')" "$(printf '%s\n' "$out" | grep -c 'could not be listed')")"
 
 # The Makefile itself, evaluated by make: the recipe and the repository list run
 # exactly these expressions.

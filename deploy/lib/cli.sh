@@ -181,6 +181,16 @@ wva_split_image_ref() {
   WVA_IMAGE_DIGEST=""
 }
 
+# wva_image_ref echoes the image reference WVA_IMAGE_REPO, WVA_IMAGE_TAG and
+# WVA_IMAGE_DIGEST name: repo@digest, repo:tag@digest, or repo:tag. Gluing
+# repo and tag alone printed "repo:" for a digest, which names nothing.
+wva_image_ref() {
+  local ref="$WVA_IMAGE_REPO"
+  [ -z "${WVA_IMAGE_TAG:-}" ] || ref="$ref:$WVA_IMAGE_TAG"
+  [ -z "${WVA_IMAGE_DIGEST:-}" ] || ref="$ref@$WVA_IMAGE_DIGEST"
+  printf '%s\n' "$ref"
+}
+
 # wva_image_ref_fields echoes "<repo>|<tag>|<digest>" for an image reference,
 # split by wva_split_image_ref. A reference with neither tag nor digest is
 # repo|latest|, which is what a container runtime pulls for it.

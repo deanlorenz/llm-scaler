@@ -668,6 +668,11 @@ run wva_verify_scaler_tls
 ok '[ "$RC" = 0 ] && grep -q "mutual TLS, client identity wva-keda-client" "$WORK/info"' "verify mTLS: mode not reported: $(head -3 "$WORK/info")"
 ok 'grep -q "expires" "$WORK/info" && grep -q "wva-external-scaler.$NS.svc.cluster.local" "$WORK/info"' "verify mTLS: expiry or names not reported: $(grep serving "$WORK/info")"
 ok 'grep -q "on the plaintext address or without authenticationRef" "$WORK/warnings" && grep -q "wva-check/plain" "$WORK/stderr" && grep -q "wva-check/wrongref" "$WORK/stderr" && ! grep -q "wva-check/authed\|wva-check/other" "$WORK/stderr"' "verify mTLS: plain and wrongref, and only they, should be named: $(cat "$WORK/warnings" "$WORK/stderr" | head -4)"
+# On a real cluster such a ScaledObject was Ready and scaled, riding the
+# connection an authenticated one opened: "not-Ready" was wrong. The warning
+# says it depends on order, what a KEDA restart can do, and the fix.
+ok 'grep -q "depends on order" "$WORK/warnings" && grep -q "After a KEDA operator restart" "$WORK/warnings" && grep -q "EVERY ScaledObject on that address" "$WORK/warnings" && ! grep -q "not-Ready" "$WORK/warnings"' "verify mTLS: the warning does not explain the order dependence: $(cat "$WORK/warnings")"
+ok 'grep -q "add that authenticationRef and the address wva-external-scaler.$NS.svc:9090" "$WORK/warnings" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/warnings" && grep -q "^=====" "$WORK/warnings"' "verify mTLS: the warning lacks the fix or its banner: $(cat "$WORK/warnings")"
 ok 'grep -q "KEDA.s client certificate: ClusterTriggerAuthentication wva-external-scaler-$NS" "$WORK/info"' "verify mTLS: KEDA's side not reported: $(grep -i keda "$WORK/info" | head -2)"
 
 echo "== verify: every ScaledObject authenticated is quiet; unreadable ones are unknown"
@@ -810,6 +815,7 @@ so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAu
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false
 ok '[ "$RC" = 1 ] && grep -q "apps/app-so" "$WORK/refusal"' "false with TLS ScaledObjects: exit $RC, $(cat "$WORK/refusal")"
+ok 'grep -q "depends on order" "$WORK/refusal" && ! grep -q "not-Ready" "$WORK/refusal" && grep -q "WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true NAMESPACE=$NS make deploy-wva" "$WORK/refusal"' "false with TLS ScaledObjects: the refusal does not explain the order dependence or give the docs' command: $(cat "$WORK/refusal")"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true
 ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && ! grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "false + migrate: exit $RC, rows '$WVA_SCALER_TLS_MIGRATE_ROWS'"
 run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=plaintext
@@ -879,7 +885,7 @@ reset_store
 fresh_k
 so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent WVA_APPLY_SCOPE=controller
-ok '[ "$WVA_SCALER_TLS_ON" = false ] && grep -q "stays on plaintext, so they are not-Ready" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "stranded TLS ScaledObject not named: $(cat "$WORK/warnings")"
+ok '[ "$WVA_SCALER_TLS_ON" = false ] && grep -q "but it stays on plaintext:" "$WORK/warnings" && grep -q "depends on order" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "stranded TLS ScaledObject not named: $(cat "$WORK/warnings")"
 
 echo "== the CA KEDA trusts moved on (OpenShift rotates its service CA)"
 reset_store
@@ -1008,7 +1014,7 @@ stranded_case() {
     put_deploy plaintext
     so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
     run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' "$@"
-    ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "stays on plaintext, so they are not-Ready" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "$label: exit $RC, on=$WVA_SCALER_TLS_ON, stranded ScaledObject not named: $(cat "$WORK/warnings" "$WORK/refusal")"
+    ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "but it stays on plaintext:" "$WORK/warnings" && grep -q "depends on order" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "$label: exit $RC, on=$WVA_SCALER_TLS_ON, stranded ScaledObject not named: $(cat "$WORK/warnings" "$WORK/refusal")"
 }
 stranded_case "openssl is missing" STUB_CM=absent "PATH=$WORK/noopenssl"
 stranded_case "Secrets may not be created" STUB_CM=absent STUB_CANI=no
@@ -1021,6 +1027,7 @@ put_deploy plaintext
 so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
 run wva_verify_scaler_tls
 ok '[ "$RC" = 0 ] && grep -q "is on plaintext, but these ScaledObjects use its TLS address" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "verify plaintext: stranded ScaledObject not named: $(cat "$WORK/warnings")"
+ok 'grep -q "depends on order" "$WORK/warnings" && ! grep -q "not-Ready" "$WORK/warnings"' "verify plaintext: the warning does not explain the order dependence: $(cat "$WORK/warnings")"
 
 # ---------------------------------------------------------------- the CA KEDA trusts, from the controller phase
 # store_tls_controller: the admin and controller phases have run, and the
@@ -1047,6 +1054,19 @@ marker_edit '.data.caSha256 = "0000"'
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_APPLY_SCOPE=controller STUB_CM=absent
 ok '[ "$RC" = 0 ] && grep -q "KEDA trusts a different CA" "$WORK/warnings" && grep -q "setup-prereqs" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "controller phase, stale CA: exit $RC, $(cat "$WORK/warnings" "$WORK/refusal")"
+run wva_verify_scaler_tls
+ok 'grep -q "KEDA trusts a different CA" "$WORK/warnings" && ! grep -q "KEDA trusts the current CA" "$WORK/info"' "verify, stale CA: warning missing, or the positive line printed too: $(cat "$WORK/warnings" "$WORK/info")"
+
+# The docs say verify prints whether KEDA trusts the current CA. On a healthy
+# real cluster it printed nothing about it: only a mismatch had a line.
+echo "== verify: KEDA trusting the current CA is said; an unreadable CA is not called current"
+store_tls_controller
+run wva_verify_scaler_tls
+ok 'grep -q "KEDA trusts the current CA" "$WORK/info" && ! grep -q "different CA" "$WORK/warnings"' "verify, current CA: no positive line: $(cat "$WORK/info")"
+jq 'del(.data["ca.crt"])' "$STORE/secret__$CLIENT.json" >"$WORK/client.json" && mv "$WORK/client.json" "$STORE/secret__$CLIENT.json"
+run wva_verify_scaler_tls
+ok 'grep -q "current CA could not be read" "$WORK/info" && ! grep -q "KEDA trusts the current CA" "$WORK/info"' "verify, CA unreadable: called current, or not said: $(cat "$WORK/info")"
+store_tls_controller
 
 echo "== controller phase and verify: a marker with no caSha256 is reported as cannot tell"
 marker_edit 'del(.data.caSha256)'
@@ -1149,7 +1169,7 @@ put_deploy plaintext
 so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true WVA_APPLY_SCOPE=controller
 ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && [ "$WVA_SCALER_TLS_MIGRATE_MODE" = plaintext ]' "plaintext + migrate: exit $RC, on=$WVA_SCALER_TLS_ON rows='$WVA_SCALER_TLS_MIGRATE_ROWS' mode='$WVA_SCALER_TLS_MIGRATE_MODE' (want apps/app-so, plaintext): $(cat "$WORK/refusal" "$WORK/warnings")"
-ok '! grep -q "not-Ready" "$WORK/warnings"' "plaintext + migrate: still warns that they are stranded: $(cat "$WORK/warnings")"
+ok '! grep -q "but it stays on plaintext:" "$WORK/warnings"' "plaintext + migrate: still warns that they are stranded: $(cat "$WORK/warnings")"
 run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=plaintext
 PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
 ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_PLAIN_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0] | has(\"authenticationRef\")")" = false ]' "plaintext + migrate: patch '$PATCHED'"
@@ -1259,10 +1279,15 @@ cm_fail_case "a Certificate that never becomes Ready" STUB_WAIT=fail
 # ---------------------------------------------------------------- the migrate command
 echo "== the migrate command is a real make target, in this run's phase"
 reset_store
-run 'wva_scaler_tls_migrate_cmd true'
+run 'wva_scaler_tls_migrate_cmd true' INSTALL_PHASE_EXPLICIT=all
 ok 'grep -q "make deploy-wva" "$WORK/stdout" && grep -q "INSTALL_PHASE=all" "$WORK/stdout" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/stdout" && ! grep -q "make install" "$WORK/stdout"' "single-pass install: '$(cat "$WORK/stdout")'"
-run 'wva_scaler_tls_migrate_cmd false' WVA_APPLY_SCOPE=controller
+run 'wva_scaler_tls_migrate_cmd false' WVA_APPLY_SCOPE=controller INSTALL_PHASE_EXPLICIT=wva
 ok 'grep -q "make deploy-wva" "$WORK/stdout" && grep -q "INSTALL_PHASE=wva" "$WORK/stdout" && grep -q "WVA_SCALER_TLS=false" "$WORK/stdout"' "controller phase: '$(cat "$WORK/stdout")'"
+# A phase the installer worked out itself is not repeated: on a real cluster
+# the refusal said INSTALL_PHASE=wva while the docs gave the command without
+# it, and both work.
+run 'wva_scaler_tls_migrate_cmd false' WVA_APPLY_SCOPE=controller
+ok '[ "$(cat "$WORK/stdout")" = "WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true NAMESPACE=$NS make deploy-wva" ]' "resolved phase: '$(cat "$WORK/stdout")', want the docs' command"
 
 # ---------------------------------------------------------------- the client identity KEDA holds
 echo "== controller phase: KEDA's certificate names another identity than the controller pins"

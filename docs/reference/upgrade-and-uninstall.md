@@ -167,8 +167,8 @@ To move to TLS, run:
 make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
 ```
 
-It moves the controller and its ScaledObjects together. Each ScaledObject is
-not-Ready for a few seconds while it moves.
+It moves the controller and its ScaledObjects together. KEDA's calls for each
+ScaledObject may fail for a few seconds while it moves.
 
 - **Split install:** KEDA's side must be in place first. A cluster admin runs
   `make setup-prereqs`; then the tenant runs the command above. A tenant's
@@ -177,7 +177,7 @@ not-Ready for a few seconds while it moves.
 - **GitOps:** run the command, then commit the
   [new trigger](configuration.md#external-scaler-mutual-tls) (the TLS address
   and the `authenticationRef`) to git right away. Otherwise GitOps puts the old
-  one back and those ScaledObjects go not-Ready.
+  one back and those ScaledObjects stop reaching the scaler.
 
 To stay on plaintext, set `WVA_SCALER_TLS=false`. Check the result with
 `make verify-deployment`.

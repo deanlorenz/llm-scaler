@@ -429,9 +429,12 @@ wva_verify_scaler_tls() {
             rc=0
             unauth="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
             if [ "$rc" = 0 ] && [ -n "$unauth" ]; then
-                log_warning "The external scaler is on plaintext, but these ScaledObjects use its TLS address or authenticationRef $(wva_scaler_keda_auth_name): they go not-Ready, so NOTHING they target scales:"
+                log_warning "=================================================================="
+                log_warning "The external scaler is on plaintext, but these ScaledObjects use its TLS address or authenticationRef $(wva_scaler_keda_auth_name):"
                 printf '%s\n' "$unauth" | head -10 | sed 's/^/    /' >&2
-                log_warning "  Turn TLS on, or move them back:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true)"
+                log_warning "  $(wva_scaler_mixed_risk)"
+                log_warning "  Fix: turn TLS on, or move them back:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true)"
+                log_warning "=================================================================="
             fi
         fi
         return 0
@@ -490,6 +493,12 @@ wva_verify_scaler_tls() {
                 log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)  and then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
             fi
             wva_scaler_keda_ca_report log_warning
+            # Say so when it matches, too: the docs promise this line, and
+            # silence read as "not checked".
+            case "${WVA_SCALER_KEDA_CA_STALE:-}" in
+                false) log_info "  KEDA trusts the current CA: the one that signs the scaler's certificate now." ;;
+                unread) log_info "  The scaler's current CA could not be read, so whether KEDA trusts it is not checked." ;;
+            esac
             if [ "$WVA_SCALER_KEDA_EXPIRING" = true ]; then
                 log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
             fi
@@ -509,12 +518,24 @@ wva_verify_scaler_tls() {
     if [ "$rc" != 0 ]; then
         log_info "  Could not list ScaledObjects, so whether every one reaches this scaler over TLS is not checked."
     elif [ -n "$unauth" ]; then
-        log_warning "TLS is on, but these ScaledObjects name this scaler on the plaintext address or without authenticationRef $(wva_scaler_keda_auth_name): they go not-Ready, so NOTHING they target scales:"
+        log_warning "=================================================================="
+        log_warning "TLS is on, but these ScaledObjects name this scaler on the plaintext address or without authenticationRef $(wva_scaler_keda_auth_name) (kind ClusterTriggerAuthentication):"
         printf '%s\n' "$unauth" | head -10 | sed 's/^/    /' >&2
-        log_warning "  Move them:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true)"
+        log_warning "  $(wva_scaler_mixed_risk)"
+        log_warning "  Fix: add that authenticationRef and the address $(wva_scaler_address "$WVA_NS" tls), or move them:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true)"
+        log_warning "=================================================================="
     else
         log_info "  Every ScaledObject naming this scaler uses $(wva_scaler_address "$WVA_NS" tls) and authenticationRef $(wva_scaler_keda_auth_name)."
     fi
+}
+
+# wva_summary_scaledobjects echoes <namespace>/<name> of every ScaledObject,
+# in the namespaces this install watches, with a trigger naming this install's
+# scaler on either address. Exits 2 when they cannot be listed, or the lister
+# is not loaded: unknown, not none.
+wva_summary_scaledobjects() {
+    declare -F wva_scaler_plaintext_scaledobjects >/dev/null || return 2
+    wva_scaler_plaintext_scaledobjects any
 }
 
 # print_summary is the most-read text this install produces: it is what someone
@@ -528,7 +549,7 @@ print_summary() {
     echo " Workload-Variant-Autoscaler installed"
     echo "=========================================="
     echo ""
-    echo "  Controller:   $WVA_NS  ($WVA_IMAGE_REPO:$WVA_IMAGE_TAG)"
+    echo "  Controller:   $WVA_NS  ($(wva_image_ref))"
     echo "  Scope:        $(wva_install_scope)-scoped"
     if [ "$(wva_install_scope)" = "cluster" ]; then
         echo "  Manages:      every namespace"
@@ -596,18 +617,32 @@ print_summary() {
     echo ""
 
     # The step everyone misses. WVA has no watch and no listing: it is asked about
-    # a workload by KEDA, or it never hears of it.
-    echo "  NEXT: nothing scales yet."
-    echo ""
-    echo "  A ScaledObject is how a workload registers with WVA. Until one exists,"
-    echo "  the controller is running and idle. To see what it would create:"
-    echo ""
-    echo "      make scaledobjects-plan"
-    echo ""
-    echo "  then apply it, or an edited copy of it:"
-    echo ""
-    echo "      make scaledobjects-apply"
-    echo ""
+    # a workload by KEDA, or it never hears of it. Said only when no ScaledObject
+    # names this scaler: on a re-install with ScaledObjects in place, "nothing
+    # scales yet" is false. A list that cannot be read is not "none".
+    local named rc=0
+    named="$(wva_summary_scaledobjects)" || rc=$?
+    if [ "$rc" = 0 ] && [ -n "$named" ]; then
+        echo "  ScaledObjects: $(printf '%s\n' "$named" | wc -l | tr -d ' ') name this scaler. Check them:  make verify-scaledobjects"
+        echo ""
+    else
+        if [ "$rc" = 0 ]; then
+            echo "  NEXT: nothing scales yet."
+        else
+            echo "  NEXT: the ScaledObjects could not be listed, so whether any names this"
+            echo "  scaler is not known. If none does, nothing scales yet."
+        fi
+        echo ""
+        echo "  A ScaledObject is how a workload registers with WVA. Until one exists,"
+        echo "  the controller is running and idle. To see what it would create:"
+        echo ""
+        echo "      make scaledobjects-plan"
+        echo ""
+        echo "  then apply it, or an edited copy of it:"
+        echo ""
+        echo "      make scaledobjects-apply"
+        echo ""
+    fi
 
     echo "  Worth knowing:"
     case "$(effective_limiter_summary)" in

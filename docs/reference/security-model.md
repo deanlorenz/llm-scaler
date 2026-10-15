@@ -332,6 +332,12 @@ holds on any network. It is on by default, once KEDA's side is in place
   KEDA then calls the scaler for them
   ([what a ScaledObject needs](configuration.md#external-scaler-mutual-tls)).
   Who may create ScaledObjects is still your RBAC.
+- A ScaledObject on the TLS address **without** the `authenticationRef` gets no
+  access, but can cost everyone scaling. KEDA shares one connection per
+  address; after a KEDA restart, if that ScaledObject connects first, the
+  connection opens without KEDA's certificate, and every ScaledObject on that
+  address stops scaling until it is fixed and KEDA is restarted
+  ([multi-tenancy](#multi-tenancy)).
 
 These Secrets are as sensitive as the port. Anyone who can read one can call
 the scaler as KEDA:
@@ -425,6 +431,7 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 | A Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` | `make enable-physical-limiter` treats it as a controller only if it runs as the controller ServiceAccount (`WVA_CONTROLLER_SA`) and has a `manager` container from a controller image repository (`WVA_CONTROLLER_IMAGE_REPOS`; a namespace named in `WVA_LIMITER_TARGETS` relaxes the image check). Anything else is `SKIPPED`, granted nothing, and listed as NOT bound under the banner. A verified one gets its ServiceAccount node read (and Kueue read), a `kubectl rollout restart` of that named Deployment when it must re-resolve its policy namespace (it could not read its Namespace, or started before the policy namespace existed), and `limiters` in the ConfigMap its policy resolves to, the `wva.llmd.ai/policy-namespace` label honoured | signals, not proof: any tenant can satisfy them. Where tenants are not trusted, run their controllers out of reach and name exactly those namespaces in `WVA_LIMITER_TARGETS` |
 | Reaching `:9090` | register or overwrite trigger metadata; read decisions | closed by the shipped NetworkPolicy, above, where it was applied and the network plugin enforces it. Scaler mutual TLS closes it on any network only with `--external-scaler-client-san` pinning KEDA's identity, and only where an admin owns the controller's Deployment: in the tenant-owned shape the tenant owns its args, and so the TLS flags |
 | A ScaledObject whose `scalerAddress` names another install's scaler | KEDA relays its calls, and that controller registers and sizes the workload | **open**: both controls above authenticate KEDA, not the tenant. No per-namespace authorization exists |
+| A ScaledObject on a shared controller's TLS address **without** its `authenticationRef` (or with a CA-only TriggerAuthentication) | **availability, not access.** The scaler still refuses it in the TLS handshake. But KEDA keeps one connection per address: after a KEDA operator restart, if this ScaledObject connects first, that connection opens without KEDA's certificate, and every ScaledObject on that address, in every namespace, stops scaling until it is fixed and KEDA is restarted | **open**: neither the NetworkPolicy nor the address limits it. KEDA connects from its own namespace, which the policy admits, and the address is predictable. `make verify-deployment` names such ScaledObjects in the namespaces it watches. To close it, limit who may create ScaledObjects, or add an admission policy that requires the `authenticationRef` on triggers naming that address |
 
 **For a tenant you do not trust, bound the namespace at admission**: a
 `ResourceQuota` on `requests.nvidia.com/gpu`. The limiter bounds what the
@@ -450,7 +457,7 @@ scaling manager asks for; the quota bounds what the cluster admits
 | Two limiter kinds declared | only the quota is built; the physical limiter is dropped and named as `notEnforced` | **open** on physical capacity |
 | The installer cannot tell where KEDA runs | no external-scaler NetworkPolicy is applied; the installer warns and `make verify-deployment` reports `:9090` open | **open**, and reported |
 | The external-scaler NetworkPolicy names a namespace KEDA does not run in | KEDA's calls are dropped; ScaledObjects go not-Ready and nothing scales | closed |
-| Scaler TLS on, a ScaledObject on the plaintext address or without KEDA's `authenticationRef` | KEDA dials it in plaintext, the handshake fails; it goes not-Ready and nothing it targets scales. `make verify-deployment` names it | closed |
+| Scaler TLS on, a ScaledObject on the plaintext address or without KEDA's `authenticationRef` | the scaler refuses it in the handshake and logs the refusal. On the TLS address it may still work, riding the connection an authenticated ScaledObject opened; after a KEDA restart, if it connects first, every ScaledObject on that address stops scaling. `make verify-deployment` names it | closed to access; **open** to that outage |
 | TLS is the default, but KEDA's side is missing or ScaledObjects would be left behind | the install stays on plaintext and says why; `WVA_SCALER_TLS=true` refuses instead | **open**, and reported |
 | KEDA's copy of the client certificate expired (no `make setup-prereqs` since) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
 | Scaler TLS on, the serving certificate expired (no cert-manager, no re-install) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |

@@ -667,6 +667,15 @@ PATCH
 
 WVA_SCALER_KEDA_MARKER=wva-scaler-keda-auth
 
+# wva_scaler_mixed_risk echoes, for a message, what a ScaledObject whose
+# trigger does not match the scaler's mode risks. It is not simply "broken":
+# on a real cluster, one on the TLS address without the authenticationRef was
+# Ready and scaled, because it rode the connection an authenticated one had
+# opened. Which one dials first after KEDA starts decides it.
+wva_scaler_mixed_risk() {
+    printf '%s' "This is unsupported, and depends on order. KEDA keeps ONE connection per scaler address, opened with the settings of whichever ScaledObject dials first after KEDA starts. These may work now only because another ScaledObject opened that connection. After a KEDA operator restart, if one of them dials first, the connection is opened wrong and EVERY ScaledObject on that address can stop scaling, until they are fixed and KEDA is restarted again."
+}
+
 # wva_scaler_keda_auth_name echoes the name of the ClusterTriggerAuthentication,
 # and of the Secret copy it reads, for the controller in namespace $1 (WVA_NS).
 wva_scaler_keda_auth_name() {
@@ -1008,7 +1017,8 @@ wva_scaler_keda_not_ready() {
 # WVA_SCALER_KEDA_EXPIRING whether that is within WVA_SCALER_RENEW_DAYS.
 # WVA_SCALER_KEDA_CA_STALE is true when KEDA trusts another CA than the one
 # that signs the serving certificate now, and unknown when the marker does not
-# record it (an older installer wrote it). WVA_SCALER_KEDA_MARKER_NS is where
+# record it (an older installer wrote it), unread when the current CA cannot be
+# read, and false when the two match. WVA_SCALER_KEDA_MARKER_NS is where
 # the marker says KEDA's copy went.
 #
 # WVA_SCALER_KEDA_SAN_STALE is true when the identity KEDA's certificate carries
@@ -1082,9 +1092,12 @@ wva_scaler_keda_marker_state() {
     [ -s "$d/ca" ] && want="$(wva_scaler_sha256 "$d/ca")"
     rm -rf "$d"
     # A marker from an installer that did not record the CA: cannot tell.
+    # The current CA unreadable: not "the same", which verify would print.
     if [ -z "$cas" ]; then
         WVA_SCALER_KEDA_CA_STALE=unknown
-    elif [ -n "$want" ] && [ "$cas" != "$want" ]; then
+    elif [ -z "$want" ]; then
+        WVA_SCALER_KEDA_CA_STALE=unread
+    elif [ "$cas" != "$want" ]; then
         WVA_SCALER_KEDA_CA_STALE=true
     fi
 }
@@ -1094,7 +1107,8 @@ wva_scaler_keda_marker_state() {
 # this install's scaler that would NOT reach it over this installer's TLS: the
 # plaintext address, or no authenticationRef to the ClusterTriggerAuthentication.
 # With $1 = plaintext, the reverse: triggers still on the TLS address or
-# reference. Exits 2 when the ScaledObjects cannot be read: unknown, not none.
+# reference. With $1 = any, every one naming this scaler. Exits 2 when the
+# ScaledObjects cannot be read: unknown, not none.
 wva_scaler_plaintext_scaledobjects() {
     local want="${1:-tls}" out rc=0 err
     err="$(mktemp)"
@@ -1117,7 +1131,7 @@ wva_scaler_plaintext_scaledobjects() {
          | ((.metadata.scalerAddress == $a)
             and ((.authenticationRef.name // "") == $n)
             and ((.authenticationRef.kind // "") == "ClusterTriggerAuthentication")) as $tls
-         | select(if $w == "tls" then ($tls | not) else ((.metadata.scalerAddress == $a) or (.authenticationRef != null)) end)
+         | select(if $w == "any" then true elif $w == "tls" then ($tls | not) else ((.metadata.scalerAddress == $a) or (.authenticationRef != null)) end)
          | ($so.metadata.namespace + "/" + $so.metadata.name)] | unique | .[]' 2>/dev/null || return 2
 }
 
@@ -1245,9 +1259,16 @@ wva_scaler_tls_give_up() {
 }
 
 # wva_scaler_tls_migrate_cmd echoes the command that moves the ScaledObjects
-# with the install, for a message: the same phase as this run, all (admin and
-# controller in one pass) or wva (the controller alone, after setup-prereqs).
+# with the install, for a message. It names INSTALL_PHASE only when the caller
+# set it on this run, and then in this run's phase: all (admin and controller
+# in one pass) or wva (the controller alone, after setup-prereqs). Otherwise
+# the installer works the phase out again, as it did this time, and the
+# command matches the one the docs give.
 wva_scaler_tls_migrate_cmd() {
+    if [ -z "${INSTALL_PHASE_EXPLICIT:-}" ]; then
+        wva_make_cmd deploy-wva "WVA_SCALER_TLS=$1" WVA_SCALER_TLS_MIGRATE=true
+        return 0
+    fi
     local phase=all
     [ "${WVA_APPLY_SCOPE:-all}" = all ] || phase=wva
     wva_make_cmd deploy-wva "WVA_SCALER_TLS=$1" WVA_SCALER_TLS_MIGRATE=true "INSTALL_PHASE=$phase"
@@ -1282,8 +1303,9 @@ wva_scaler_tls_check_scaledobjects() {
     local what="TLS" verb="carry no authenticationRef to ClusterTriggerAuthentication $(wva_scaler_keda_auth_name) on the TLS address"
     [ "$mode" = plaintext ] && { what="plaintext"; verb="still use the TLS address or an authenticationRef"; }
     if [ "$asked" = true ]; then
-        log_error "These ScaledObjects name this scaler and $verb, so moving it to $what would leave them not-Ready, and nothing they target would scale:
+        log_error "These ScaledObjects name this scaler and $verb, so moving it to $what would leave them on the other mode:
 $(printf '%s\n' "$rows" | head -20 | sed 's/^/    /')
+$(wva_scaler_mixed_risk)
 Move them with the install:  $(wva_scaler_tls_migrate_cmd "$( [ "$mode" = tls ] && echo true || echo false)")"
     fi
     log_warning "The external scaler stays on plaintext gRPC. TLS is the default, but these ScaledObjects name it and would need to move with it:"
@@ -1426,8 +1448,9 @@ wva_scaler_tls_prepare() {
                 WVA_SCALER_TLS_MIGRATE_ROWS="$rows"
                 WVA_SCALER_TLS_MIGRATE_MODE=tls
             else
-                log_warning "These ScaledObjects name this scaler on the plaintext address or without the authenticationRef, so they are not-Ready:"
+                log_warning "These ScaledObjects name this scaler on the plaintext address or without the authenticationRef $(wva_scaler_keda_auth_name):"
                 printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
+                log_warning "  $(wva_scaler_mixed_risk)"
                 log_warning "  Move them:  $(wva_scaler_tls_migrate_cmd true)"
             fi
         fi
@@ -1465,7 +1488,7 @@ wva_scaler_tls_stay_plaintext() {
 }
 
 # wva_scaler_tls_warn_stranded warns about ScaledObjects on the TLS address or
-# reference while the scaler stays on plaintext: they are not-Ready. With
+# reference while the scaler stays on plaintext (wva_scaler_mixed_risk). With
 # WVA_SCALER_TLS_MIGRATE=true it moves them back to the plaintext address
 # instead, once the controller is applied (WVA_SCALER_TLS_MIGRATE_ROWS).
 wva_scaler_tls_warn_stranded() {
@@ -1479,8 +1502,9 @@ wva_scaler_tls_warn_stranded() {
         printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
         return 0
     fi
-    log_warning "These ScaledObjects use the scaler's TLS address or authenticationRef, but it stays on plaintext, so they are not-Ready:"
+    log_warning "These ScaledObjects use the scaler's TLS address or authenticationRef, but it stays on plaintext:"
     printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
+    log_warning "  $(wva_scaler_mixed_risk)"
     log_warning "  Fix what keeps TLS off (above), or move them back:  $(wva_scaler_tls_migrate_cmd false)"
 }
 
@@ -1511,7 +1535,7 @@ wva_scaler_tls_finish() {
     wva_scaler_migrate_scaledobjects "$WVA_SCALER_TLS_MIGRATE_ROWS" "$WVA_SCALER_TLS_MIGRATE_MODE"
     WVA_SCALER_TLS_MIGRATE_ROWS=""
     if [ -n "$WVA_SCALER_MIGRATE_FAILED" ]; then
-        log_warning "These ScaledObjects could not be moved to the $WVA_SCALER_TLS_MIGRATE_MODE scaler address and are not-Ready until they are (GitOps may also put the old trigger back; change it at the source):"
+        log_warning "These ScaledObjects could not be moved to the $WVA_SCALER_TLS_MIGRATE_MODE scaler address. Until they are, they may stop scaling, and after a KEDA restart they can stop the others on their address too (GitOps may also put the old trigger back; change it at the source):"
         printf '%s' "$WVA_SCALER_MIGRATE_FAILED" | sed 's/^/    /' >&2
     fi
 }

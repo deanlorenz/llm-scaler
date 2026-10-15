@@ -518,7 +518,9 @@ make deploy-wva WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true
 
 This moves the ScaledObjects back to the plaintext address. Without
 `WVA_SCALER_TLS_MIGRATE=true` it refuses while any ScaledObject still uses TLS.
-With `WVA_SCALER_TLS` unset, a controller that has TLS keeps it.
+With `WVA_SCALER_TLS` unset, a controller that has TLS keeps it. Add
+`INSTALL_PHASE=wva` only if you pass `INSTALL_PHASE` on your installs; otherwise
+the installer picks the phase itself.
 
 **What a ScaledObject needs** on a TLS install. The installer writes this into
 every ScaledObject it creates or adopts, and the warm pool's:
@@ -533,9 +535,20 @@ triggers:
       kind: ClusterTriggerAuthentication
 ```
 
-Use that address exactly. A plaintext ScaledObject uses
-`...svc.cluster.local:9090` instead. A ScaledObject that mixes the two is
-not-Ready, and nothing it targets scales; `make verify-deployment` names it.
+Use that address and that `authenticationRef` exactly. A plaintext
+ScaledObject uses `...svc.cluster.local:9090` and no `authenticationRef`.
+
+**Do not mix them.** A ScaledObject on the TLS address without the
+`authenticationRef`, or with a TriggerAuthentication that carries only a CA,
+is unsupported. It may seem to work: KEDA keeps one connection per address,
+so it can ride the connection an authenticated ScaledObject opened. But after
+a KEDA operator restart, if it is the first to connect, that one connection
+opens without KEDA's certificate. Then **every** ScaledObject on that address
+stops scaling, until the bad one is fixed and KEDA is restarted again.
+
+`make verify-deployment` lists such ScaledObjects by name. To fix them, add the
+`authenticationRef` above, or run the command under "Moving existing
+ScaledObjects".
 
 **Moving existing ScaledObjects.**
 
@@ -544,8 +557,9 @@ make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
 ```
 
 Once the new controller is running, this rewrites each ScaledObject's scaler
-trigger in place: the address, and the `authenticationRef`. Each is not-Ready
-for a few seconds while the two catch up; the fallback holds its replicas. If
+trigger in place: the address, and the `authenticationRef`. KEDA's calls for
+each may fail for a few seconds while the two catch up; the fallback holds its
+replicas. If
 the controller rollout does not finish, nothing is moved, and the installer
 prints the command to run once it has. The same flag with
 `WVA_SCALER_TLS=false` moves them back. It also moves them back whenever the
@@ -568,6 +582,15 @@ GitOps puts the old one back.
 KEDA keeps one connection per address string, built for whichever ScaledObject
 connected first, and never closes it. So the two modes need two different
 addresses for the same Service.
+
+The same pooling is why mixing is order-dependent. On a real cluster, a
+ScaledObject on the TLS address with no `authenticationRef`, and one whose
+TriggerAuthentication held only a CA, were both Ready and scaled: they shared
+the connection an authenticated ScaledObject had opened. The scaler itself
+refuses such clients in the TLS handshake (no certificate, a wrong name, an
+unknown CA), and logs each refusal at most once per remote host per minute.
+The failure after a KEDA restart is not covered by an automated test: it needs
+a KEDA restart, and control over which ScaledObject KEDA connects first.
 
 | Object | Written by | Where |
 | --- | --- | --- |
@@ -629,7 +652,11 @@ plaintext.
 - the mode (plaintext, TLS, mutual TLS);
 - the certificates' expiry;
 - whether KEDA's side is in place, and whether KEDA trusts the current CA;
-- every ScaledObject that would not reach the scaler, in either mode.
+- every ScaledObject whose address or `authenticationRef` does not match the
+  mode, in either mode.
+
+The controller log also names each client the scaler refuses in the TLS
+handshake (`refused a TLS handshake`), with its address and the reason.
 
 **Undo.** `make undeploy-wva` removes what carries the `wva.llmd.ai/scaler-tls`
 label. The admin's uninstall also removes KEDA's side, again only what carries
