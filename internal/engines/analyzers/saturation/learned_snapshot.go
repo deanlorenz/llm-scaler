@@ -41,11 +41,14 @@ import (
 //   - the arguments but not the image (a rollout of a new release while the
 //     controller was down): everything but the per-variant ITL baseline is
 //     installed -- latency is the engine's code;
-//   - neither: only the k2 windows are installed, under the arguments they
-//     were written under, so their first read makes each the variant's own
-//     lower-only, expiring figure (P2-prior, k2_borrow.go). Throughput, the
-//     start-time estimate and the ITL baseline describe the engine the
-//     variant no longer runs, and are not.
+//   - neither: only the k2 and throughput windows are installed, under the
+//     arguments they were written under, so their first read makes each k2
+//     the variant's own lower-only, expiring figure (P2-prior, k2_borrow.go)
+//     and puts each throughput window aside, where the old service rate
+//     holds the demand floor hold-only for a bounded serving time
+//     (throughput_floor.go), as after a live rollout. The start-time
+//     estimate and the ITL baseline describe the engine the variant no
+//     longer runs, and are not.
 //
 // A document written before the arguments were recorded (no Args entry) gets
 // the old rule: the whole configuration or nothing.
@@ -186,6 +189,10 @@ type LowerBoundSnapshot struct {
 	PriorSince      time.Time `json:"priorSince,omitzero"`
 	PriorAgeSeconds float64   `json:"priorAgeSeconds,omitempty"`
 	PriorUsed       time.Time `json:"priorUsed,omitzero"`
+	// RearmPending is lowerBound.rearmPending: kept, so a restart between a
+	// change of arguments and the first serving cycle after it does not cost
+	// the new arguments part of their hold.
+	RearmPending bool `json:"rearmPending,omitempty"`
 }
 
 func (lb *lowerBound) snapshot() LowerBoundSnapshot {
@@ -194,7 +201,7 @@ func (lb *lowerBound) snapshot() LowerBoundSnapshot {
 		Donor: lb.donor, Own: lb.own, DonorK2: lb.donorK2, Args: lb.args,
 		ArgsVersion: lb.argsVersion, Offered: lb.offered,
 		Prior: lb.prior, PriorSince: lb.priorSince, PriorAgeSeconds: lb.priorAge.Seconds(),
-		PriorUsed: lb.priorUsed,
+		PriorUsed: lb.priorUsed, RearmPending: lb.rearmPending,
 	}
 }
 
@@ -268,7 +275,8 @@ const (
 	// RestoredArgs: the arguments matched on another image; everything but
 	// the ITL baseline installed.
 	RestoredArgs RestoreOutcome = "args"
-	// RestoredPrior: the arguments differed; only the k2 windows installed,
+	// RestoredPrior: the arguments differed; only the k2 and throughput
+	// windows installed (installPreviousK2Locked),
 	// under the arguments they were written under, each to become the
 	// variant's own lower-only figure on its first read (possibly none, when
 	// no window was recent enough or none can be read on the hardware the
@@ -312,6 +320,14 @@ type RestoredVariant struct {
 	// variant's own under the same unread configuration (RestoredIncomplete
 	// with Installed) are counted in Entries, not here.
 	Priors int
+	// Throughput is how many throughput windows were installed beside them,
+	// each to hold the demand floor hold-only once read under the arguments
+	// the variant runs now. Zero for RestoredDiffers, whose windows hold
+	// none.
+	Throughput int
+	// NoArgs is a RestoredIncomplete whose document recorded no arguments for
+	// the variant: no window could be checked, and none was installed.
+	NoArgs bool
 	// Entries is how many entries were installed, or rejected.
 	Entries int
 }
@@ -832,9 +848,17 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			rep.Aged++
 		}
 	}
+	// A forgotten variant's RUNNING bounds are installed spent, as the forget
+	// would have left them had the restore come first (spendLowerBoundsLocked):
+	// skipped, the bound was simply absent, and the variant's next serving
+	// cycle armed the sibling's figure afresh at full strength -- the very
+	// borrow the forget had ended. What it held of its own goes.
 	for k, lb := range s.LowerBounds {
 		if forgottenKey(k) {
 			rep.Forgotten++
+			if lb.Armed {
+				a.installLowerBoundLocked(k, spentLowerBound(lb, now), now)
+			}
 			continue
 		}
 		count(a.installLowerBoundLocked(k, lb, now))
@@ -883,6 +907,9 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		switch {
 		case forgottenKey(k):
 			rep.Forgotten++
+			if inTime && !since.IsZero() {
+				a.installLowerBoundLocked(k, spentLowerBound(LowerBoundSnapshot{Armed: true, Since: since}, now), now)
+			}
 		case since.IsZero() || !inTime:
 			rep.Unusable++
 		case now.Sub(since) > borrowLife:
@@ -1000,22 +1027,27 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 		out.Entries = a.installLocked(p.state, windowsUnder, false)
 	case prior:
 		out.Outcome = RestoredPrior
-		out.Priors = a.installPreviousK2Locked(p.state, windowsUnder, rec)
+		out.Priors, out.Throughput = a.installPreviousK2Locked(p.state, windowsUnder, rec)
 	case !complete:
 		out.Outcome = RestoredIncomplete
-		if p.expectArgs != "" {
-			n := a.installPreviousK2Locked(p.state, p.expectArgs, rec)
+		out.NoArgs = p.expectArgs == ""
+		if !out.NoArgs {
+			n, tp := a.installPreviousK2Locked(p.state, p.expectArgs, rec)
 			// Under the same unread configuration the windows are the
 			// variant's own (window_args.go), not previous figures.
 			if p.expectArgs == windowArgs(rec.EngineParams) {
-				out.Installed, out.Entries = n > 0, n
+				out.Installed, out.Entries = n+tp > 0, n+tp
 			} else {
-				out.Priors = n
+				out.Priors, out.Throughput = n, tp
 			}
 		}
 	default:
+		// Its throughput windows are installed under the legacy tag too, and
+		// dropped on their first read without being put aside
+		// (throughputWindowUnderLocked): they hold no floor, and are not
+		// reported as if they did.
 		out.Outcome = RestoredDiffers
-		out.Priors = a.installPreviousK2Locked(p.state, legacyArgsPrefix+p.expect, rec)
+		out.Priors, _ = a.installPreviousK2Locked(p.state, legacyArgsPrefix+p.expect, rec)
 	}
 	return out, true
 }
@@ -1028,8 +1060,9 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 // arguments is put aside, and one written under the arguments the variant
 // runs now (it had been rolled back to them) is its own. A window the variant
 // already has one of, or filed under hardware it no longer runs on (rec), is
-// left out. Returns how many k2 windows it installed. Callers hold a.mu.
-func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnder string, rec *capacity.Record) int {
+// left out. Returns how many k2 and throughput windows it installed. Callers
+// hold a.mu.
+func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnder string, rec *capacity.Record) (k2, throughput int) {
 	wall := time.Now()
 	kept := 0
 	for k, w := range s.K2 {
@@ -1065,9 +1098,10 @@ func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnde
 			if finitePositive(w.LastRead) {
 				a.throughputLastRead[k] = w.LastRead
 			}
+			throughput++
 		}
 	}
-	return kept
+	return kept, throughput
 }
 
 // installAcceleratorsLocked installs a variant's restored accelerator memo
@@ -1168,6 +1202,18 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 	return kept
 }
 
+// spentLowerBound is a stored running bound as a forget leaves it: armed, its
+// hold and relaxation run, keeping what it last ran on, its own previous
+// figure dropped (spendLowerBoundsLocked).
+func spentLowerBound(s LowerBoundSnapshot, now time.Time) LowerBoundSnapshot {
+	if spentAt := now.Add(-(BorrowedK2Hold + BorrowedK2Relax)); s.Since.IsZero() || s.Since.After(spentAt) {
+		s.Since = spentAt
+	}
+	s.Tick, s.Seen, s.RearmPending = now, now, false
+	s.Prior, s.PriorSince, s.PriorAgeSeconds, s.PriorUsed = 0, time.Time{}, 0, time.Time{}
+	return s
+}
+
 // boundInstall is what installLowerBoundLocked did with one lower bound.
 type boundInstall int
 
@@ -1216,7 +1262,7 @@ func (a *SaturationAnalyzer) installLowerBoundLocked(k string, s LowerBoundSnaps
 	lb := &lowerBound{
 		armed: s.Armed && !since.IsZero(), since: since, tick: tick, seen: seen,
 		donor: s.Donor, own: s.Own, donorK2: s.DonorK2, args: s.Args, argsVersion: s.ArgsVersion,
-		offered: max(s.Offered, 0),
+		offered: max(s.Offered, 0), rearmPending: s.RearmPending && s.Armed,
 	}
 	if s.Prior > 0 && !priorSince.IsZero() {
 		lb.prior, lb.priorSince, lb.priorUsed = s.Prior, priorSince, priorUsed

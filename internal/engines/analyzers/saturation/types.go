@@ -23,6 +23,13 @@ type admission struct {
 	// is priced from what it already holds. Since nothing can be recorded,
 	// the bound's clock does not run either (serving).
 	rollout bool
+	// idle is a row with no work this cycle: nothing resident, nothing
+	// queued, and no completions. Its variant is not using the bound it
+	// would be priced from, so the bound's clock waits (serving), as it does
+	// for a parked variant: one Ready replica idle overnight at minReplicas
+	// otherwise spent the whole hold and relaxation, and the morning's
+	// traffic met the variant at its own, unprotected figure.
+	idle bool
 }
 
 // admitted reports a row whose reading may be recorded, rollout aside: a Ready
@@ -30,14 +37,14 @@ type admission struct {
 func (ad admission) admitted() bool { return ad.why == "" }
 
 // serving reports a row that runs a lower bound's clock, and arms, re-arms or
-// ends a bound: admitted, and not mid-rollout. With every saturated reading
+// ends a bound: admitted, not mid-rollout, and not idle. With every saturated reading
 // held back for the rollout, a clock that ran would relax the bound toward
 // derived or k1 above what the fleet demonstrably holds -- for as long as a
 // rollout stuck on a pending surge pod or held at a partition lasted -- and a
 // normal-length one would hand the new arguments only what was left of their
 // hold. Frozen, a bound the arguments' change restarted keeps its whole hold
 // for the first serving cycle after the rollout (notePreviousFigureLocked).
-func (ad admission) serving() bool { return ad.why == "" && !ad.rollout }
+func (ad admission) serving() bool { return ad.why == "" && !ad.rollout && !ad.idle }
 
 // admissionOf is the admission rule: a row's reading is the variant's own
 // only from a Ready Pod of the variant's own -- the rows its saturated
@@ -51,7 +58,7 @@ func admissionOf(rm domain.ReplicaMetrics) admission {
 	case !rm.Ready:
 		return admission{why: "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"}
 	}
-	return admission{}
+	return admission{idle: rm.TokensInUse <= 0 && rm.QueueLength <= 0 && rm.RequestRate <= 0}
 }
 
 // revisionsMixed names the variants whose own replicas -- warm-pool bridges

@@ -69,7 +69,13 @@ import (
 // A SPENT BOUND STAYS SPENT until there is new evidence (lowerBound.rearms):
 // the variant's engine ARGUMENTS changed -- ArgsFingerprint, so an image-only
 // rollout is not evidence about capacity -- or a figure now on offer is more
-// than BorrowedK2RearmChange below what the bound last ran on. A donor that
+// than BorrowedK2RearmChange below what the bound last ran on. A change of
+// arguments is new evidence about a SIBLING's figure, which is measured
+// afresh; it is not about the variant's OWN previous figure, which is the
+// same measurement whatever the variant runs next. That one restarts only
+// when a newer figure replaces it (rearmPending): restarted on every change,
+// a figure measured once kept a full hold for as long as the arguments kept
+// changing faster than the bound relaxed. A donor that
 // measured higher, a donor that went and came back, and the passage of time
 // are not new evidence: dropping a spent clock used to re-arm the borrow at
 // full strength once a week, about 42 GPU-hours per replica per bucket on
@@ -164,6 +170,14 @@ type lowerBound struct {
 	// priorUsed is when the previous figure was last offered to a decision:
 	// it ages on it, as the window it stands in for ages on its last read.
 	priorUsed time.Time
+	// rearmPending says a newer previous figure replaced the one the bound
+	// ran on, or the arguments changed under a running bound
+	// (notePreviousFigureLocked): its next serving cycle arms it afresh,
+	// with its whole hold. Restarted in place instead, the first serving
+	// cycle read the time since the restart as a gap and moved the start
+	// forward by all of it but one tick gap -- half the hold on a five-minute
+	// interval.
+	rearmPending bool
 }
 
 // clearPrior drops the variant's previous figure.
@@ -188,13 +202,23 @@ func (lb *lowerBound) argsChanged(args string) bool {
 	return args != "" && lb.args != "" && lb.argsVersion == capacity.FingerprintVersion && args != lb.args
 }
 
+// newArgs says whether args, the variant's arguments now, are new evidence for
+// a bound offered a figure that is, or is not, the variant's own: they changed
+// (argsChanged), and the figure is a sibling's, or the bound last ran on one.
+// The variant's own previous figure is the same measurement under any
+// arguments the variant runs next; only a newer figure replacing it is new
+// (rearmPending).
+func (lb *lowerBound) newArgs(args string, own bool) bool {
+	return lb.argsChanged(args) && !(own && lb.own)
+}
+
 // rearms says whether a spent bound may start again on a figure of donorK2
-// under the variant's arguments args: the arguments are not the ones it last
-// ran under, or the figure is more than BorrowedK2RearmChange below the
+// under the variant's arguments args: the arguments are new evidence
+// (newArgs), or the figure is more than BorrowedK2RearmChange below the
 // lowest it had on offer -- a donor that measured lower, or a new, lower
 // donor. A figure already on offer while it ran is not new.
-func (lb *lowerBound) rearms(donorK2 int64, args string) bool {
-	if lb.argsChanged(args) {
+func (lb *lowerBound) rearms(donorK2 int64, args string, own bool) bool {
+	if lb.newArgs(args, own) {
 		return true
 	}
 	ref := lb.donorK2
@@ -278,6 +302,21 @@ func (a *SaturationAnalyzer) BorrowTickGap() time.Duration {
 	return max(a.borrowTickGap, BorrowedK2TickGap)
 }
 
+// HoldLowerBounds holds every lower bound as it stands while held is true: a
+// serving cycle reads a bound, but does not arm, advance, re-arm or end one.
+// The engine holds them from its first cycle until the learned-state snapshot
+// has been read: a cycle that ran while the first read failed armed a bound
+// at full strength, and the restore then kept that one -- it was live -- over
+// the document's, spent or half relaxed, for another whole hold and
+// relaxation of extra replicas. A bound read while held is priced as an
+// unarmed one, at full strength: the conservative side, for as long as the
+// engine holds them.
+func (a *SaturationAnalyzer) HoldLowerBounds(held bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.boundsHeld = held
+}
+
 // noteBorrowServing advances the clock of a history key's lower bound on a
 // cycle where a Ready replica of the variant's own serves it. A key with no
 // armed bound is left alone: serving does not start a bound, pricing from one
@@ -292,7 +331,7 @@ func (a *SaturationAnalyzer) noteBorrowServing(key string, now time.Time, siblin
 // noteBorrowServingLocked is noteBorrowServing for a caller holding a.mu.
 func (a *SaturationAnalyzer) noteBorrowServingLocked(key string, now time.Time, siblings bool) {
 	lb := a.lowerBounds[key]
-	if lb == nil || !lb.armed || (!siblings && !lb.own) {
+	if lb == nil || !lb.armed || (!siblings && !lb.own) || a.boundsHeld {
 		return
 	}
 	lb.tickLocked(now, max(a.borrowTickGap, BorrowedK2TickGap))
@@ -410,6 +449,12 @@ func (a *SaturationAnalyzer) borrowedK2WithKv(ownKey, modelID string, own int64,
 	args := boundArgs(ownParams)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.boundsHeld {
+		// The stored lower bounds are not in yet (HoldLowerBounds): read as
+		// an unarmed bound, at full strength, but record nothing a restore
+		// would then lose to.
+		serving = false
+	}
 	lb := a.lowerBounds[ownKey]
 	runOn := func() {
 		lb.donor, lb.own, lb.donorK2 = best.variant, best.own, best.k2
@@ -424,7 +469,7 @@ func (a *SaturationAnalyzer) borrowedK2WithKv(ownKey, modelID string, own int64,
 			a.lowerBounds[ownKey] = lb
 		}
 		lb.armed, lb.since, lb.tick, lb.seen = true, now, now, now
-		lb.offered = 0
+		lb.offered, lb.rearmPending = 0, false
 		runOn()
 		return at(0), true
 	}
@@ -435,11 +480,13 @@ func (a *SaturationAnalyzer) borrowedK2WithKv(ownKey, modelID string, own int64,
 		return arm()
 	}
 	lb.seen = now
-	if lb.argsChanged(args) {
-		// The arguments changed while the bound ran, or since it was spent:
-		// new evidence, and a fresh bound -- not what is left of one armed
-		// on another engine hours ago. A replica that may not arm reads it
-		// as the fresh bound it is about to be.
+	if lb.rearmPending || lb.newArgs(args, best.own) {
+		// A newer previous figure, or arguments that changed while the bound
+		// ran on a sibling's figure or since it was spent: new evidence, and
+		// a fresh bound -- not what is left of one armed on another engine
+		// hours ago. A replica that may not arm reads it as the fresh bound
+		// it is about to be. The variant's own figure, unchanged, runs on
+		// across a change of arguments (newArgs).
 		if serving {
 			return arm()
 		}
@@ -483,7 +530,7 @@ func (a *SaturationAnalyzer) borrowedK2WithKv(ownKey, modelID string, own int64,
 		lb.clearPrior()
 		return k2Borrow{}, false
 	}
-	if lb.rearms(best.k2, args) {
+	if lb.rearms(best.k2, args, best.own) {
 		if serving {
 			return arm()
 		}

@@ -148,12 +148,15 @@ func (a *SaturationAnalyzer) k2WindowUnderLocked(key, args string) {
 
 // notePreviousFigureLocked makes window ra, written under tag, the key's
 // previous figure in place of any older one, and restarts a running bound's
-// clock: the arguments changed. Callers hold a.mu.
+// clock: the arguments changed. The restart is completed by the bound's next
+// serving cycle, which arms it afresh (rearmPending), so the time to then --
+// the rollout -- is not read as a gap. Callers hold a.mu.
 func (a *SaturationAnalyzer) notePreviousFigureLocked(key string, ra *capacity.RollingAverage) {
 	now := a.now()
 	lb := a.lowerBounds[key]
 	if lb != nil && lb.armed {
 		lb.since, lb.tick, lb.seen = now, now, now
+		lb.rearmPending = true
 	}
 	if ra.Len() == 0 {
 		return

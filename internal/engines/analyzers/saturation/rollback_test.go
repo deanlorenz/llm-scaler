@@ -10,7 +10,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
-// Specs for the review of the learned-state redesign: each pins one finding.
+// Rollbacks, rollouts and what a variant keeps across them.
 
 func rrWindow(v float64) *capacity.RollingAverage {
 	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)

@@ -1,0 +1,63 @@
+package saturation
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+)
+
+// The ITL window and baseline follow the engine arguments, as the k2 and
+// throughput windows do.
+
+// A change of arguments drops the ITL window and baseline learned under the
+// old ones: the line is a property of the engine, and the old engine's priced
+// the new one's service rate.
+func TestAChangeOfArgumentsDropsTheITLBaseline(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	const key = "test-ns|test-model|decode-a|H100|1"
+	a.itlUnderArgs(key, "args-a")
+	a.itlTracker.SetBaseline(key, 0.011)
+	a.itlUnderArgs(key, "args-a")
+	if _, ok := a.itlBaselines()[key]; !ok {
+		t.Fatal("precondition: the same arguments keep the baseline")
+	}
+	a.itlUnderArgs(key, "args-b")
+	if b, ok := a.itlBaselines()[key]; ok {
+		t.Errorf("the baseline learned under the old arguments survived the change: %v", b)
+	}
+}
+
+// Mid-rollout the ITL window takes no readings: one may be an old pod's.
+func TestTheITLWindowTakesNoReadingsMidRollout(t *testing.T) {
+	window := func(rolling bool) int {
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "decode-a", capacity.Record{
+			EngineParams: mtParams(256, "vllm:v1"), RollingOut: rolling,
+		})
+		a := NewSaturationAnalyzer(store)
+		rows := make([]domain.ReplicaMetrics, 0, 10)
+		for i := range 10 {
+			k := 0.20 + 0.04*float64(i)
+			rm := makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "decode-a", int64(k*16000), 16000, 0, 100, 50)
+			rm.KvUsageInstant = k
+			rm.AvgITL = 0.01 + 0.02*k
+			rows = append(rows, rm)
+		}
+		in := makeAnalyzerInput(rows, []domain.VariantReplicaState{{
+			VariantName: "decode-a", AcceleratorName: "H100", CurrentReplicas: 10, GPUsPerReplica: 1, Role: domain.RoleDecode,
+		}})
+		if _, err := a.Analyze(context.Background(), in); err != nil {
+			t.Fatalf("Analyze: %v", err)
+		}
+		return a.itlWindowLen(a.itlWindowKey("test-ns", "test-model", "decode-a", "H100", 1))
+	}
+	if n := window(false); n == 0 {
+		t.Fatal("precondition: outside a rollout the window takes the readings")
+	}
+	if n := window(true); n != 0 {
+		t.Errorf("mid-rollout the ITL window took %d readings", n)
+	}
+}

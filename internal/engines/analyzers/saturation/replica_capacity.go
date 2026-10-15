@@ -565,10 +565,12 @@ type k2Decision struct {
 // window, not the throughput (written only for P1), not the lower bound --
 // so the next cycle prices from the chain again unless it is saturated too.
 //
-// A Pod of the variant's own that is not Ready is priced at the chain. Its
-// reading is not what it is holding now but what it held when it stopped
-// being routed to, or a hang with its gauges frozen, and a frozen reading
-// would price it low for as long as the hang lasts: every cycle re-reads it.
+// A Pod of the variant's own that is not Ready is priced at the chain, mid-rollout
+// or not. Its reading is not what it is holding now but what it held when it
+// stopped being routed to -- an old pod draining, a new one failing its
+// readiness probe -- or a hang with its gauges frozen, and a frozen reading
+// would price it low for as long as the hang lasts: every cycle re-reads it,
+// and a rollout stalled on that pod lasts as long.
 func (a *SaturationAnalyzer) unadmittedPrice(
 	chain int64, chainSrc capacity.K2Source,
 	historyKey, modelID, namespace, variantName string,
@@ -581,7 +583,7 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	if (!adm.bridge && !adm.rollout) || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+	if !(adm.bridge || (adm.rollout && adm.admitted())) || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
 	}
 	why := "a warm-pool bridge"

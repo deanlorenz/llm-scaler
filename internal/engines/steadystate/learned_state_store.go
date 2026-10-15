@@ -61,6 +61,12 @@ const (
 	// document gets what the others leave, up to learnedStateMaxBytes.
 	learnedStateMaxBytes = 700 << 10
 	learnedStateMaxData  = 900 << 10
+	// learnedStateBoundHold is how long, from the first restore attempt, the
+	// lower bounds are held while the snapshot cannot be read
+	// (SaturationAnalyzer.HoldLowerBounds): long enough for a transient
+	// failure to pass, short enough that a store that stays unreadable --
+	// a missing Role -- does not keep every lower bound at full strength.
+	learnedStateBoundHold = 10 * time.Minute
 )
 
 // learnedStateKey is the ConfigMap data key this version's document lives
@@ -94,6 +100,9 @@ type learnedStateStoreState struct {
 	// finding it gone afterwards is a flush rather than a first start.
 	seen    bool
 	lastTry time.Time
+	// firstTry is the first restore attempt, which the lower bounds' hold
+	// runs from (learnedStateBoundHold).
+	firstTry time.Time
 	// lastWrite is the last write attempt, which paces the reads;
 	// lastWriteDone the last write that landed, which paces the refresh.
 	lastWrite     time.Time
@@ -109,6 +118,7 @@ type learnedStater interface {
 	RestoreLearnedState(saturation.LearnedState) saturation.RestoreReport
 	ForgetLearnedState()
 	TakeRestoreOutcomes() map[string]int
+	HoldLowerBounds(held bool)
 }
 
 // Pinned at compile time: the assertion below fails silently at run time.
@@ -166,17 +176,26 @@ func (e *Engine) readLearnedState(ctx context.Context) (*corev1.ConfigMap, error
 
 // restoreLearnedState runs at the start of a cycle until a read has
 // succeeded. A read that fails -- Forbidden included -- restores nothing and
-// is retried; it is never taken as an empty store.
+// is retried; it is never taken as an empty store. Until a read succeeds, for
+// at most learnedStateBoundHold, the analyzer's lower bounds are held: a
+// cycle in between would arm one the restore then kept over the stored one.
 func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	if e.Config == nil || !e.Config.LearnedStateSnapshotEnabled() {
 		return
 	}
 	st := &e.learnedState
-	if st.restored || (!st.lastTry.IsZero() && now.Sub(st.lastTry) < learnedStateInterval) {
+	if st.restored {
 		return
 	}
 	analyzer, ok := e.saturationV2Analyzer.(learnedStater)
 	if !ok {
+		return
+	}
+	if st.firstTry.IsZero() {
+		st.firstTry = now
+	}
+	analyzer.HoldLowerBounds(now.Sub(st.firstTry) < learnedStateBoundHold)
+	if !st.lastTry.IsZero() && now.Sub(st.lastTry) < learnedStateInterval {
 		return
 	}
 	st.lastTry = now
@@ -189,6 +208,9 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	}
 	e.reportLearnedStateErr(logger, nil, "")
 	st.restored = true
+	// Released before this cycle's analysis, which runs after the restore
+	// below.
+	analyzer.HoldLowerBounds(false)
 	if cm == nil {
 		logger.Info("Learned state: no snapshot to restore", "configMap", learnedStateConfigMap)
 		return
@@ -407,22 +429,42 @@ func encodeLearnedState(s saturation.LearnedState, now time.Time, budget int) (s
 	if len(raw) <= budget {
 		return string(raw), 0, nil
 	}
-	entries := learnedStateEntries(doc.State)
-	dropped := 0
-	for len(raw) > budget && dropped < len(entries) {
-		n := max(len(entries)/10, 1)
-		for _, e := range entries[dropped:min(dropped+n, len(entries))] {
+	// The fewest entries, least recently used first, whose leaving out makes
+	// it fit: a binary search over how many, each try on a fresh copy, since
+	// a dropped entry cannot be put back. Dropped in chunks of a tenth, a
+	// document one byte over its bound lost a tenth of what it had learned.
+	orig := doc.State
+	try := func(n int) ([]byte, error) {
+		doc.State = cloneLearnedState(orig)
+		for _, e := range learnedStateEntries(doc.State)[:n] {
 			e.drop()
 		}
-		dropped = min(dropped+n, len(entries))
-		if raw, err = json.Marshal(doc); err != nil {
-			return "", 0, err
-		}
+		return json.Marshal(doc)
+	}
+	total := len(learnedStateEntries(orig))
+	if raw, err = try(total); err != nil {
+		return "", 0, err
 	}
 	if len(raw) > budget {
-		return "", dropped, fmt.Errorf("the learned-state snapshot is %d bytes with every entry left out, over its %d-byte bound", len(raw), budget)
+		return "", total, fmt.Errorf("the learned-state snapshot is %d bytes with every entry left out, over its %d-byte bound", len(raw), budget)
 	}
-	return string(raw), dropped, nil
+	lo, hi := 0, total // lo does not fit, hi does
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		r, err := try(mid)
+		if err != nil {
+			return "", 0, err
+		}
+		if len(r) <= budget {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	if raw, err = try(hi); err != nil {
+		return "", 0, err
+	}
+	return string(raw), hi, nil
 }
 
 // cloneLearnedState copies every map of the state, so leaving entries out of
@@ -449,7 +491,13 @@ func cloneLearnedState(s saturation.LearnedState) saturation.LearnedState {
 // learnedStateEntry is one entry of the state, with the clock that says how
 // recently it was used and how to leave it out.
 type learnedStateEntry struct {
-	at   time.Time
+	// spare is an entry that goes before every other whatever its clock: a
+	// spent lower bound holding no figure (learnedStateEntries).
+	spare bool
+	at    time.Time
+	// key breaks a tie between two clocks, so the order -- and the entries a
+	// trim leaves out -- is the same on every call.
+	key  string
 	drop func()
 }
 
@@ -460,36 +508,36 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		len(s.K2Stash)+len(s.ThroughputStash))
 	// A window goes with the arguments it was written under.
 	for k, w := range s.K2 {
-		out = append(out, learnedStateEntry{w.LastUsed, func() {
+		out = append(out, learnedStateEntry{at: w.LastUsed, key: "k2|" + k, drop: func() {
 			delete(s.K2, k)
 			delete(s.K2Args, k)
 		}})
 	}
 	for k, w := range s.Throughput {
-		out = append(out, learnedStateEntry{w.LastUsed, func() {
+		out = append(out, learnedStateEntry{at: w.LastUsed, key: "throughput|" + k, drop: func() {
 			delete(s.Throughput, k)
 			delete(s.ThroughputArgs, k)
 		}})
 	}
 	// A window put aside goes on its own clock, like the windows.
 	for k, w := range s.K2Stash {
-		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.K2Stash, k) }})
+		out = append(out, learnedStateEntry{at: w.LastUsed, key: "k2stash|" + k, drop: func() { delete(s.K2Stash, k) }})
 	}
 	for k, w := range s.ThroughputStash {
-		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.ThroughputStash, k) }})
+		out = append(out, learnedStateEntry{at: w.LastUsed, key: "throughputstash|" + k, drop: func() { delete(s.ThroughputStash, k) }})
 	}
 	for k, seen := range s.VariantSeenAt {
-		out = append(out, learnedStateEntry{seen, func() {
+		out = append(out, learnedStateEntry{at: seen, key: "seen|" + k, drop: func() {
 			delete(s.VariantSeenAt, k)
 			delete(s.ITLBaseline, k)
 			delete(s.StartSeconds, k)
 		}})
 	}
 	for k, l := range s.ITLLines {
-		out = append(out, learnedStateEntry{l.LearnedAt, func() { delete(s.ITLLines, k) }})
+		out = append(out, learnedStateEntry{at: l.LearnedAt, key: "itl|" + k, drop: func() { delete(s.ITLLines, k) }})
 	}
 	for k, m := range s.Accelerators {
-		out = append(out, learnedStateEntry{m.LastUsed, func() { delete(s.Accelerators, k) }})
+		out = append(out, learnedStateEntry{at: m.LastUsed, key: "accel|" + k, drop: func() { delete(s.Accelerators, k) }})
 	}
 	// A lower bound is one entry, ordered by when its variant was last seen,
 	// not by its start: a running bound, or one holding a previous figure, is
@@ -505,12 +553,26 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	// whole hold and relaxation before its last tick (the analyzer keeps
 	// it so, to judge new evidence against); one never armed holding no
 	// figure is as dispensable.
+	//
+	// Among themselves the spent bounds go oldest last serving cycle first,
+	// and a bound still running or holding a figure is ordered by its own
+	// last use -- its last serving cycle, or the figure's last use -- not by
+	// Seen: a bound under a key the variant no longer serves (a retuned
+	// queue threshold, another GPU count) is refreshed every cycle by its
+	// variant's liveness, and ordered by Seen it outlived the windows of
+	// buckets in use. A spent bound on a bucket still served is ticked every
+	// serving cycle, so it goes last of the spent ones.
 	for k, lb := range s.LowerBounds {
-		at := lb.Seen
-		if lb.Prior <= 0 && (!lb.Armed || spentBound(lb)) {
-			at = time.Time{}
+		e := learnedStateEntry{at: lb.Seen, key: "bound|" + k}
+		switch {
+		case lb.Prior <= 0 && (!lb.Armed || spentBound(lb)):
+			e.spare, e.at = true, lb.Tick
+		case lb.Armed && !lb.Tick.IsZero():
+			e.at = lb.Tick
+		case !lb.Armed && !lb.PriorUsed.IsZero():
+			e.at = lb.PriorUsed
 		}
-		out = append(out, learnedStateEntry{at, func() {
+		out = append(out, learnedStateEntry{spare: e.spare, at: e.at, key: e.key, drop: func() {
 			delete(s.LowerBounds, k)
 			delete(s.K2BorrowedSince, k)
 			delete(s.PriorK2, k)
@@ -520,10 +582,10 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		if _, bound := s.LowerBounds[k]; bound {
 			continue
 		}
-		out = append(out, learnedStateEntry{since, func() { delete(s.K2BorrowedSince, k) }})
+		out = append(out, learnedStateEntry{at: since, key: "clock|" + k, drop: func() { delete(s.K2BorrowedSince, k) }})
 	}
 	for k, m := range s.Forgotten {
-		out = append(out, learnedStateEntry{m.Seen, func() { delete(s.Forgotten, k) }})
+		out = append(out, learnedStateEntry{at: m.Seen, key: "forgotten|" + k, drop: func() { delete(s.Forgotten, k) }})
 	}
 	// A PR #151 document's previous figures, where no bound holds the key;
 	// one a bound holds goes with it.
@@ -531,9 +593,17 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		if _, bound := s.LowerBounds[k]; bound {
 			continue
 		}
-		out = append(out, learnedStateEntry{p.InstalledAt, func() { delete(s.PriorK2, k) }})
+		out = append(out, learnedStateEntry{at: p.InstalledAt, key: "priork2|" + k, drop: func() { delete(s.PriorK2, k) }})
 	}
-	slices.SortStableFunc(out, func(a, b learnedStateEntry) int { return cmp.Compare(a.at.UnixNano(), b.at.UnixNano()) })
+	slices.SortFunc(out, func(a, b learnedStateEntry) int {
+		if a.spare != b.spare {
+			if a.spare {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Or(cmp.Compare(a.at.UnixNano(), b.at.UnixNano()), cmp.Compare(a.key, b.key))
+	})
 	return out
 }
 

@@ -59,9 +59,9 @@ func TestABorrowsTickAndAForgetMarksSeenDoNotChangeTheDigest(t *testing.T) {
 }
 
 // A spent bound's start is the oldest time in the document, so ordered by its
-// start it was the first entry the size bound dropped. It is ordered by when
-// its variant was last seen, and goes whole, with the rollback copy of its
-// start.
+// start it was the first entry the size bound dropped. It goes before every
+// other entry, ordered among the spent ones by its last serving cycle, and
+// goes whole, with the rollback copy of its start.
 func TestTheSizeBoundOrdersABorrowClockByItsVariantAndDropsItWhole(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	const key = "ns|v|m|H100|1|both|b0|q5"
@@ -78,7 +78,8 @@ func TestTheSizeBoundOrdersABorrowClockByItsVariantAndDropsItWhole(t *testing.T)
 	// A spent bound goes before everything else: it only keeps a borrow from
 	// re-arming without new evidence. Ordered by when its variant was last
 	// seen -- every cycle -- it outlived everything else in the document.
-	assert.True(t, entries[0].at.IsZero(), "the spent bound is the first to go")
+	assert.True(t, entries[0].spare, "the spent bound is the first to go")
+	assert.Equal(t, now, entries[0].at, "ordered among the spent ones by its last serving cycle")
 	assert.Equal(t, now.Add(-2*time.Hour), entries[1].at, "the forget mark is an entry, by when it was last seen")
 	assert.Equal(t, now.Add(-time.Hour), entries[2].at)
 

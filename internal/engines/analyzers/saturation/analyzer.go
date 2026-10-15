@@ -90,6 +90,8 @@ type SaturationAnalyzer struct {
 	// clock counts as serving time (WithOptimizationInterval); never below
 	// BorrowedK2TickGap.
 	borrowTickGap time.Duration
+	// boundsHeld holds every lower bound as it stands (HoldLowerBounds).
+	boundsHeld bool
 	// forgotten is, per namespace/variant, the last forget token acted on
 	// (ForgetVariant), so an annotation left in place is not acted on again.
 	// Swept with the variant.
@@ -146,6 +148,12 @@ type SaturationAnalyzer struct {
 	// that has once been measured never falls back to a constant guessed for
 	// another card.
 	itlTracker *itl.Tracker
+	// itlArgs is the engine arguments each key's ITL window and baseline were
+	// learned under (windowArgs), so a change of arguments drops them
+	// (itlUnderArgs): an ITL line is a property of the engine, and one from
+	// the arguments a variant left priced the new engine's service rate with
+	// the old engine's latency.
+	itlArgs map[string]string
 	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
 	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
@@ -318,6 +326,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlTracker:             itl.NewTracker(),
+		itlArgs:                make(map[string]string),
 		itlLines:               make(map[string]learnedLine),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -434,9 +443,13 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 	}
 	// A lower bound is swept on the same liveness, and keyed the k2 way
 	// (namespace|variant|model|...), so it is matched on its own prefixes.
+	k2Prefixes := make([]string, 0, len(variantNames))
+	for _, v := range variantNames {
+		k2Prefixes = append(k2Prefixes, namespace+"|"+v+"|"+modelID+"|")
+	}
 	for key, lb := range a.lowerBounds {
-		for _, v := range variantNames {
-			if strings.HasPrefix(key, namespace+"|"+v+"|"+modelID+"|") {
+		for _, p := range k2Prefixes {
+			if strings.HasPrefix(key, p) {
 				lb.seen = now
 				break
 			}

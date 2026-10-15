@@ -239,6 +239,25 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 	return derivedMu{rate: rate, seqs: seqs, tokenSec: tokenSec, ok: true}
 }
 
+// itlUnderArgs drops key's ITL window and baseline when they were learned
+// under engine arguments other than args, the ones its variant runs now, and
+// records args for them. A key seen for the first time adopts args, as an
+// untagged k2 window does (window_args.go). Unlike a k2 window nothing is put
+// aside for a rollback: a line refits within its window, where a k2 waits for
+// a saturation.
+func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
+	if args == "" {
+		return
+	}
+	a.mu.Lock()
+	tag, ok := a.itlArgs[key]
+	a.itlArgs[key] = args
+	a.mu.Unlock()
+	if ok && tag != args {
+		a.itlTracker.Sweep(a.now(), func(k string) bool { return k == key })
+	}
+}
+
 // noteITL adds this cycle's (k, ITL) readings for one variant to its rolling
 // window and returns the model fitted over what the window holds.
 //

@@ -34,6 +34,8 @@ type stateSpy struct {
 	forgot   int
 	// outcomes is what TakeRestoreOutcomes reports next.
 	outcomes map[string]int
+	// held is every HoldLowerBounds call, in order.
+	held []bool
 }
 
 func (s *stateSpy) ExportLearnedState() saturation.LearnedState { return s.state }
@@ -41,7 +43,8 @@ func (s *stateSpy) RestoreLearnedState(st saturation.LearnedState) saturation.Re
 	s.restored = append(s.restored, st)
 	return saturation.RestoreReport{}
 }
-func (s *stateSpy) ForgetLearnedState() { s.forgot++ }
+func (s *stateSpy) ForgetLearnedState()       { s.forgot++ }
+func (s *stateSpy) HoldLowerBounds(held bool) { s.held = append(s.held, held) }
 func (s *stateSpy) TakeRestoreOutcomes() map[string]int {
 	out := s.outcomes
 	s.outcomes = nil
