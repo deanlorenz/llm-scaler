@@ -492,6 +492,10 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 	for prev := range e.lastAnalyzerSeries[modelKey].target {
 		e.metricsEmitter.RecordAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant, 0)
 	}
+	// Nothing was priced, so nothing was borrowed: a model parked at zero, or
+	// whose scrape is lost, must not keep reporting the borrow its last
+	// priced cycle made. The next priced cycle publishes afresh.
+	e.metricsEmitter.DeleteLearnedStateBorrowsForModel(namespace, modelID)
 }
 
 // evictStaleAnalyzerSeries deletes the analyzer series this model published on

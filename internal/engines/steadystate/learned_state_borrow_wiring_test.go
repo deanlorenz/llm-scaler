@@ -79,6 +79,37 @@ func TestEvictStaleAnalyzerSeries_DeletesTheBorrowOfADepartedVariant(t *testing.
 		"a departed variant's borrow must go with its analyzer series")
 }
 
+// A cycle with no replica rows prices nothing and so borrows nothing: the
+// docs say the series is absent then, and a parked model must not keep the
+// borrow of its last priced cycle published for as long as it is parked.
+func TestZeroObservedReplicas_DeletesTheModelsBorrows(t *testing.T) {
+	e, registry := engineConfigEngine(t)
+	k2 := map[string][]domain.LearnedStateBorrow{
+		"canary": {{Quantity: domain.BorrowedK2, Donor: "main", Relaxed: 0.1}},
+	}
+	for _, m := range []string{"m1", "m2"} {
+		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{
+			withBorrows(namedResult("saturation", nil, 5, "main", "canary"), k2),
+		})
+	}
+
+	e.zeroObservedReplicas("ns", "m1")
+	assert.ElementsMatch(t, []string{"m2"},
+		seriesLabels(t, registry, constants.WVALearnedStateBorrowed, constants.LabelModelName),
+		"a model with no replica rows kept its borrow published")
+	assert.ElementsMatch(t, []string{"m2"},
+		seriesLabels(t, registry, constants.WVALearnedStateBorrowRelaxed, constants.LabelModelName),
+		"a model with no replica rows kept its relaxation published")
+
+	// The first priced cycle after the gap publishes the borrow again.
+	e.recordAnalyzerMetrics("ns", "m1", []allocation.NamedAnalyzerResult{
+		withBorrows(namedResult("saturation", nil, 5, "main", "canary"), k2),
+	})
+	assert.ElementsMatch(t, []string{"m1", "m2"},
+		seriesLabels(t, registry, constants.WVALearnedStateBorrowed, constants.LabelModelName),
+		"a borrow made after the gap was not published")
+}
+
 func TestPruneAndEvictAll_DeleteTheBorrowsOfADepartedModel(t *testing.T) {
 	e, registry := engineConfigEngine(t)
 	k2 := map[string][]domain.LearnedStateBorrow{
