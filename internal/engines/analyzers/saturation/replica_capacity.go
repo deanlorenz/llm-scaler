@@ -95,14 +95,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// lowers the window, and a low k2 never corrects itself: it orders
 	// replicas, so nothing saturates to write a higher one, and every read
 	// keeps the window alive (Priority 2's Touch). Unadmitted rows still read
-	// the window; they only do not write it.
-	var unadmitted string
-	switch {
-	case rm.FromWarmPool:
-		unadmitted = "a warm-pool bridge runs the pool's engine configuration, not this variant's"
-	case !rm.Ready:
-		unadmitted = "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"
-	}
+	// the window; they only do not write it. admissionOf is the one place the
+	// rule is spelled: the k2 write, the throughput write below, the borrow
+	// clock and the capacity-store update all read adm.
+	adm := admissionOf(rm)
 	k2, k2Priority, k2Recordable := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -114,7 +110,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.TotalKvCapacityTokens,
 		role,
 		downstreamSaturated,
-		unadmitted,
+		adm,
 		logger,
 	)
 	// The same saturated moment that yields a k2 observation yields the
@@ -175,7 +171,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
-	if k2Priority == capacity.K2SrcObserved && rm.Ready && !rm.FromWarmPool {
+	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
@@ -260,10 +256,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// would price that variant -- once parked, and as a compatible sibling's
 	// clamp -- on an engine it does not run.
 	//
-	// A not-Ready Pod files its cache, which is the variant's own, but at
-	// the capacity the chain gave: a reading it may not record
-	// (K2SrcUnadmitted) prices this cycle and goes no further.
-	if !rm.FromWarmPool {
+	// A not-Ready Pod files its cache, which is the variant's own engine's
+	// -- so the gate here is adm.bridge, not adm.admitted() -- but at the
+	// capacity the chain gave, never at a reading it may not record.
+	if !adm.bridge {
 		var existingParams *capacity.EngineParams
 		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
 			existingParams = existing.EngineParams
@@ -422,10 +418,10 @@ const derivedBucket = "derived"
 // it, and the k2 the chain gave -- the figure the capacity store may keep. The
 // first and last differ only for an unadmitted row (unadmittedPrice).
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
-// and variantName are for the log lines only. A non-empty unadmitted says why
-// this replica's reading may not be recorded (computeReplicaCapacity): a
-// saturated reading is then logged as P1-obs-unadmitted and the chain falls
-// through, as for a prefill reading under a saturated decode.
+// and variantName are for the log lines only. adm is the row's admission
+// (admissionOf): a row that is not admitted has its saturated reading logged
+// as P1-obs-unadmitted, and the chain falls through, as for a prefill reading
+// under a saturated decode.
 func (a *SaturationAnalyzer) computeK2(
 	historyKey string,
 	modelID, namespace, variantName string,
@@ -437,29 +433,33 @@ func (a *SaturationAnalyzer) computeK2(
 	kvCeiling int64,
 	role string,
 	downstreamSaturated bool,
-	unadmitted string,
+	adm admission,
 	logger logr.Logger,
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	chain, chainSrc := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
 		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
-		unadmitted, logger)
+		adm, logger)
 	return a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
-		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, unadmitted, logger)
+		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
 }
 
 // unadmittedPrice returns the k2 a row is priced on this cycle, its source,
 // and the k2 the chain gave, which is what the capacity store may keep.
 //
-// The two differ only for an unadmitted row (a warm-pool bridge, or a Pod
-// that is not Ready) that is saturated. Its reading may not be written -- it
-// describes the pool's engine, or a frozen Pod -- but it is what that row is
-// holding NOW, and for a variant a bridge alone is carrying it is the only
-// reading there is: falling through to derived, or to k1 for prefill, priced
-// the bridge higher in the very cycle that showed it full, so fewer of the
-// variant's own replicas were ordered while the bridge was its only supply
-// and was saturated. So the row is priced at its reading for this cycle, and
-// only where that is LOWER than the chain -- a reading may only make one
-// cycle more conservative, never a record.
+// The two differ only for a warm-pool bridge that is saturated. Its reading
+// may not be written -- it describes the pool's engine -- but it is what the
+// bridge is holding NOW, and for a variant a bridge alone is carrying it is
+// the only reading there is: falling through to derived, or to k1 for
+// prefill, priced the bridge higher in the very cycle that showed it full, so
+// fewer of the variant's own replicas were ordered while the bridge was its
+// only supply and was saturated. So the bridge is priced at its reading for
+// this cycle, and only where that is LOWER than the chain -- a reading may
+// only make one cycle more conservative, never a record.
+//
+// A Pod of the variant's own that is not Ready is priced at the chain. Its
+// reading is not what it is holding now but what it held when it stopped
+// being routed to, or a hang with its gauges frozen, and a frozen reading
+// would price it low for as long as the hang lasts: every cycle re-reads it.
 func (a *SaturationAnalyzer) unadmittedPrice(
 	chain int64, chainSrc capacity.K2Source,
 	historyKey, modelID, namespace, variantName string,
@@ -467,12 +467,12 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 	queueThreshold float64,
 	kvCeiling int64,
 	downstreamSaturated bool,
-	unadmitted string,
+	adm admission,
 	logger logr.Logger,
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	if unadmitted == "" || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+	if !adm.bridge || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
 	}
 	logger.V(logging.DEFAULT).Info("k2-decision",
@@ -485,9 +485,9 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 
 // k2Chain is the priority chain itself: P1 (a saturated reading, recorded),
 // P2 (the variant's window), P3 (derived) and P4 (k1), with the lower-only
-// borrow from a compatible sibling after P3 and P4. An unadmitted row
-// (unadmitted != "") never writes the window and never starts the variant's
-// borrow clock: a bridge serving a variant whose own Pods are pending would
+// borrow from a compatible sibling after P3 and P4. A row that is not
+// admitted never writes the window and never starts the variant's borrow
+// clock: a bridge serving a variant whose own Pods are pending would
 // otherwise spend the borrow's hold before the variant ran a replica of its
 // own.
 func (a *SaturationAnalyzer) k2Chain(
@@ -501,10 +501,10 @@ func (a *SaturationAnalyzer) k2Chain(
 	kvCeiling int64,
 	role string,
 	downstreamSaturated bool,
-	unadmitted string,
+	adm admission,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
-	armBorrowClock := unadmitted == ""
+	armBorrowClock := adm.admitted()
 	// Priority 1: Observed (queue saturated)
 	//
 	// A reading above the KV cache's PHYSICAL ceiling is a scrape artifact
@@ -603,12 +603,12 @@ func (a *SaturationAnalyzer) k2Chain(
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "queue saturated while the decode role is; a prefill completes only when decode admits it, so this is decode's saturation seen from prefill; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
-	case saturatedReading && unadmitted != "":
+	case saturatedReading && !adm.admitted():
 		logger.V(logging.DEFAULT).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
-			"reason", unadmitted+"; not recorded (it may still price this cycle, lower-only)",
+			"reason", adm.why+"; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading:
 		k2Observed := tokensInUse

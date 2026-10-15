@@ -58,7 +58,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				params,
 				k1,
 				k1, // kvCeiling
-				domain.RoleDecode, false, "", logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			return k2, src
 		}
 		withHistory := func(k2 float64) (*SaturationAnalyzer, *capacity.RollingAverage) {
@@ -171,7 +171,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				600, 1000, 10,
 				nil,
 				1000000, 1000000,
-				domain.RoleDecode, false, "", logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			Expect(src).To(Equal(capacity.K2SrcObserved))
 
 			// Re-read from the MAP: a reset stores a new window, so the handle

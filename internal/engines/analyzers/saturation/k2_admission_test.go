@@ -61,30 +61,29 @@ func k2Windows(a *SaturationAnalyzer) int {
 // same row Ready and own, which records.
 func TestK2Admission_RecordsOnlyReadyOwnReplicas(t *testing.T) {
 	cases := []struct {
-		name     string
-		mutate   func(*domain.ReplicaMetrics)
-		recorded bool
+		name   string
+		mutate func(*domain.ReplicaMetrics)
+		want   []string
 	}{
-		{"a Ready replica of the variant's own", func(*domain.ReplicaMetrics) {}, true},
-		{"a warm-pool bridge lent to the variant", func(rm *domain.ReplicaMetrics) { rm.FromWarmPool = true }, false},
-		{"a replica that is not Ready", func(rm *domain.ReplicaMetrics) { rm.Ready = false }, false},
+		{"a Ready replica of the variant's own", func(*domain.ReplicaMetrics) {}, []string{"P1-obs"}},
+		// Declined, falls through to k1 (no window, no engine parameters), and
+		// -- a bridge only -- priced at the 600 000 it holds for this cycle.
+		{"a warm-pool bridge lent to the variant", func(rm *domain.ReplicaMetrics) { rm.FromWarmPool = true },
+			[]string{k2ReasonObsUnadmitted, "P4-k1", k2ReasonObsUnadmitted}},
+		// Declined, and priced at what the chain gives: a Pod that is not
+		// Ready may be holding a frozen reading.
+		{"a replica that is not Ready", func(rm *domain.ReplicaMetrics) { rm.Ready = false },
+			[]string{k2ReasonObsUnadmitted, "P4-k1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			analyzer := NewSaturationAnalyzer(capacity.NewStore())
 			seen := k2AdmissionCycle(t, analyzer, 1_162_240, tc.mutate)
-			require.NotEmpty(t, seen)
-			if tc.recorded {
-				assert.Equal(t, "P1-obs", seen[0])
+			assert.Equal(t, tc.want, seen)
+			if tc.want[0] == "P1-obs" {
 				assert.Equal(t, 1, k2Windows(analyzer), "the reading opens the variant's k2 window")
 				return
 			}
-			assert.Equal(t, k2ReasonObsUnadmitted, seen[0],
-				"the saturated reading is named as declined, then the chain falls through")
-			require.Len(t, seen, 3, "the decline, the tier it fell through to, and the reading pricing the cycle")
-			assert.Equal(t, "P4-k1", seen[1], "no window, no engine parameters: the chain gives k1")
-			assert.Equal(t, k2ReasonObsUnadmitted, seen[2],
-				"600 000 resident is under k1, so the row is priced at it for this cycle")
 			assert.Zero(t, k2Windows(analyzer), "nothing is written to the variant's k2 window")
 		})
 	}
@@ -92,17 +91,17 @@ func TestK2Admission_RecordsOnlyReadyOwnReplicas(t *testing.T) {
 
 // An unadmitted row still READS the variant's window: it is only the write
 // that is refused. A not-Ready replica next to a measured history prices from
-// it rather than from k1.
+// it rather than from k1 -- and not from its own frozen, lower reading.
 func TestK2Admission_UnadmittedRowReadsTheWindow(t *testing.T) {
 	analyzer := NewSaturationAnalyzer(capacity.NewStore())
 	require.Equal(t, []string{"P1-obs"}, k2AdmissionCycle(t, analyzer, 1_162_240, func(*domain.ReplicaMetrics) {}))
-	seen := k2AdmissionCycle(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) {
+	seen, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) {
 		rm.Ready = false
 		rm.TokensInUse = 300_000 // a frozen, lower reading that would pull the window down
 		rm.KvCacheUsage = float64(rm.TokensInUse) / float64(rm.TotalKvCapacityTokens)
 	})
-	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P2-hist", k2ReasonObsUnadmitted}, seen,
-		"the window is read; the frozen reading is lower, so it prices this cycle only")
+	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P2-hist"}, seen, "the window is read")
+	assert.InDelta(t, 600_000, price, 0.5, "priced at the window, not at the frozen 300 000")
 	analyzer.mu.Lock()
 	defer analyzer.mu.Unlock()
 	for _, ra := range analyzer.computeCapacityHistory {
@@ -163,14 +162,14 @@ func TestK2Admission_ABridgeAloneIsPricedAtWhatItHolds(t *testing.T) {
 	}
 }
 
-// Lower-only: an unadmitted reading ABOVE what the chain gives does not price
-// the row up. The window measured 600 000; a not-Ready Pod holding 800 000
-// stays at the window's figure.
+// Lower-only: a bridge's reading ABOVE what the chain gives does not price
+// the row up. The window measured 600 000; a bridge holding 800 000 stays at
+// the window's figure.
 func TestK2Admission_AnUnadmittedReadingNeverPricesAboveTheChain(t *testing.T) {
 	analyzer := NewSaturationAnalyzer(capacity.NewStore())
 	require.Equal(t, []string{"P1-obs"}, k2AdmissionCycle(t, analyzer, 1_162_240, func(*domain.ReplicaMetrics) {}))
 	seen, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) {
-		rm.Ready = false
+		rm.FromWarmPool = true
 		rm.TokensInUse = 800_000
 		rm.KvCacheUsage = float64(rm.TokensInUse) / float64(rm.TotalKvCapacityTokens)
 	})
@@ -178,19 +177,21 @@ func TestK2Admission_AnUnadmittedReadingNeverPricesAboveTheChain(t *testing.T) {
 	assert.InDelta(t, 600_000, price, 0.5)
 }
 
-// A not-Ready Pod files its cache, which is the variant's own, but at the
-// capacity the chain gave: the reading that priced its cycle is not recorded
-// in the store either.
-func TestK2Admission_ANotReadyPodFilesTheChainsFigure(t *testing.T) {
+// A not-Ready Pod is priced at the chain and files its cache, which is the
+// variant's own, at the chain's figure. Its saturated reading prices nothing:
+// it may be a hang with its gauges frozen, and every cycle would re-read it.
+func TestK2Admission_ANotReadyPodIsPricedAndFiledAtTheChain(t *testing.T) {
 	store := capacity.NewStore()
 	analyzer := NewSaturationAnalyzer(store)
-	_, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) { rm.Ready = false })
-	assert.InDelta(t, 600_000, price, 0.5, "the cycle is priced at the reading")
+	k1 := memoryBound(1_162_240, 0.8)
+	for range 3 { // a hang: the same frozen reading, cycle after cycle
+		_, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) { rm.Ready = false })
+		assert.InDelta(t, float64(k1), price, 0.5, "priced at the chain (k1 here), not at the frozen 600 000")
+	}
 	rec := store.Get("test-ns", "test-model", admissionVariant)
 	require.NotNil(t, rec)
 	assert.Equal(t, capacity.LearnedFromLive, rec.LearnedFrom)
-	assert.EqualValues(t, memoryBound(1_162_240, 0.8), rec.EffectiveCapacity,
-		"the record holds the chain's figure (k1 here), not the unrecorded reading")
+	assert.EqualValues(t, k1, rec.EffectiveCapacity, "the record holds the chain's figure, not the reading")
 }
 
 // A bridge reads a sibling's lower k2 like any row, but does not start the

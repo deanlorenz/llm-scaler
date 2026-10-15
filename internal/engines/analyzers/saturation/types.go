@@ -5,6 +5,38 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
+// admission is whether one row's saturated reading may be recorded as the
+// variant's own -- its k2, its saturated throughput, a start of its borrow
+// clock -- and if not, why. Computed once per row (admissionOf) so the four
+// places that gate on it cannot drift apart.
+type admission struct {
+	// why is empty for an admitted row and names the reason otherwise; it is
+	// what the P1-obs-unadmitted log line says.
+	why string
+	// bridge is a warm-pool bridge lent to the variant. Its cache is the pool
+	// engine's, so it files no capacity record, and only its saturated
+	// reading may price its own cycle (lower-only) without being recorded.
+	bridge bool
+}
+
+// admitted reports a row whose reading may be recorded.
+func (ad admission) admitted() bool { return ad.why == "" }
+
+// admissionOf is the admission rule: a row's reading is the variant's own
+// only from a Ready Pod of the variant's own -- the rows its saturated
+// throughput is taken from, too. A warm-pool bridge runs the pool's engine
+// configuration; a Pod that is not Ready gets no traffic, so its queue and
+// resident KV are left over or frozen.
+func admissionOf(rm domain.ReplicaMetrics) admission {
+	switch {
+	case rm.FromWarmPool:
+		return admission{why: "a warm-pool bridge runs the pool's engine configuration, not this variant's", bridge: true}
+	case !rm.Ready:
+		return admission{why: "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"}
+	}
+	return admission{}
+}
+
 // k2ReasonObsImplausible labels the diagnostic emitted when an observation is
 // discarded for exceeding the KV cache's physical ceiling. It is deliberately
 // not a capacity.K2Source: no capacity comes from it -- the analyzer falls

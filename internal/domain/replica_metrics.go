@@ -84,12 +84,15 @@ type ReplicaMetrics struct {
 	//     prefill (roleSaturated) skip a Pod that is not Ready: nothing is
 	//     routed to it, so its queue is left over or frozen;
 	//   - a saturated reading from it is not recorded, neither as the variant's
-	//     k2 (P1-obs-unadmitted) nor as its saturated throughput.
+	//     k2 (P1-obs-unadmitted) nor as its saturated throughput, and does not
+	//     price its cycle either (only a warm-pool bridge's reading does).
 	// It does not remove the Pod from capacity or demand: a Pod that is
 	// starting still holds its GPU, its KV cache is real, and the analyzer
 	// counts both, and files its cache in the capacity store.
 	//
 	// The collector fails open: a Pod whose listing cannot be read is Ready.
+	// Each such listing is counted, wva_metrics_collection_errors_total with
+	// query_type=pod_list.
 	Ready bool
 
 	// StartSeconds is how long this replica took to become Ready: the Pod's

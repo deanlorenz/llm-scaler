@@ -54,7 +54,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				nil,   // engineParams: nil so Priority 3 has nothing but the k1 fallback
 				90000, // k1
 				90000, // kvCeiling
-				domain.RoleDecode, false, "", logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			return k2, src
 		}
 
@@ -135,7 +135,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				params,
 				919859, // k1: large, so it clamps neither figure
 				919859,
-				domain.RoleDecode, false, "", logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 
 			Expect(src).To(Equal(capacity.K2SrcHistorical))
 			Expect(k2).To(BeNumerically("==", 95000),
@@ -148,7 +148,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			fresh := NewSaturationAnalyzer(capacity.NewStore())
 			derived, derivedSrc, _ := fresh.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10, params, 919859, 919859,
-				domain.RoleDecode, false, "", logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			Expect(derivedSrc).To(Equal(capacity.K2SrcDerived))
 			Expect(derived).To(BeNumerically("<", k2),
 				"derived below measured is what makes the general claim false")
