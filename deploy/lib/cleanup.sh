@@ -77,14 +77,6 @@ wva_undeploy_watch_namespace_rbac() {
 undeploy_wva_controller() {
     log_info "Uninstalling Workload-Variant-Autoscaler..."
     wva_undeploy_watch_namespace_rbac
-    # The pod-write grant deploy/warmpool.sh, utilization-share activate and
-    # an upgrade made in workload namespaces. Not rendered, so the delete
-    # below never names it. See lib/pod_writer.sh.
-    if [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
-    else
-        wva_remove_pod_writers "$WVA_NS"
-    fi
 
     local kustomize_overlay
     kustomize_overlay="$(wva_overlay_dir)"
@@ -159,6 +151,21 @@ EOF
         fi
     fi
     rm -rf "$tmp_overlay"
+
+    # The pod-write grant deploy/warmpool.sh, utilization-share activate and
+    # an upgrade made in workload namespaces. Not rendered, so the delete
+    # above never names it. See lib/pod_writer.sh. Removed after that delete,
+    # and only once the controller's Deployment is gone: a delete that failed
+    # leaves a running controller, whose warm pools and optimizer still need it.
+    if kc_capture get deployment wva-controller-manager -n "$WVA_NS" -o name; then
+        log_warning "The controller Deployment is still in $WVA_NS, so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once the Deployment is gone."
+    elif ! kc_not_found "$KC_ERR"; then
+        log_warning "Could not tell whether the controller Deployment in $WVA_NS is gone ($KC_ERR), so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once it is."
+    elif [ "$(wva_install_scope)" = "namespace" ]; then
+        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
+    else
+        wva_remove_pod_writers "$WVA_NS"
+    fi
 
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a

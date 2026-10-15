@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=44
+EXPECT_CASES=45
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -500,6 +500,18 @@ want: $want"
         ok "POD WRITES: undeploy_wva_controller removes the grants"
     else
         fail "POD WRITES: cleanup.sh never calls wva_remove_pod_writers"
+    fi
+    # After the delete, and gated on the Deployment being gone: removed first, a
+    # delete that then failed left a running controller without patch on pods.
+    cl="$(tr -d '\r' < "$ROOT/deploy/lib/cleanup.sh")"
+    remove_at="$(printf '%s\n' "$cl" | grep -nE '^[[:space:]]+wva_remove_pod_writers ' | head -1 | cut -d: -f1)"
+    delete_at="$(printf '%s\n' "$cl" | grep -nE 'kubectl delete -f - --ignore-not-found' | head -1 | cut -d: -f1)"
+    gate_at="$(printf '%s\n' "$cl" | grep -nE 'get deployment wva-controller-manager -n "\$WVA_NS"' | head -1 | cut -d: -f1)"
+    if [ -n "$remove_at" ] && [ -n "$delete_at" ] && [ -n "$gate_at" ] \
+        && [ "$delete_at" -lt "$gate_at" ] && [ "$gate_at" -lt "$remove_at" ]; then
+        ok "POD WRITES: uninstall removes the grants after the delete, once the Deployment is gone"
+    else
+        fail "POD WRITES: wva_remove_pod_writers must follow the delete and a Deployment-gone check (delete ${delete_at:-none}, check ${gate_at:-none}, remove ${remove_at:-none})"
     fi
 fi
 
