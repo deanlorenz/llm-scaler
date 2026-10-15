@@ -607,7 +607,7 @@ func main() {
 				// The walk stops when the physical limiter goes, and nothing
 				// else would clear a denial it reported: without the limiter
 				// the undercount bounds nothing.
-				metrics.SetPodAccessDenied(false)
+				usageDiscovery.ResetPodAccessDenied()
 			}
 			return allocation.NodeUsageWanted(cfg, watchNS != "")
 		},

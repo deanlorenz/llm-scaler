@@ -383,6 +383,17 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 	return list.Items, nil
 }
 
+// ResetPodAccessDenied clears a reported pod-list denial: wva_pod_access_denied
+// reads 0, and the next Forbidden list is logged again as if it were the first.
+//
+// Call it when the walk stops because no physical limiter reads it. Nothing
+// else would clear the gauge then, and without clearing the remembered level,
+// a physical limiter turned off and on again would not log the denial again.
+func (d *K8sWithGpuOperator) ResetPodAccessDenied() {
+	metrics.SetPodAccessDenied(false)
+	d.podsDenied.Store(podsDeniedNone)
+}
+
 // reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
 // while a physical limiter is in force, and as information otherwise.
 func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {

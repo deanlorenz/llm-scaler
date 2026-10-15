@@ -3,9 +3,11 @@ package gpunodes
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
@@ -208,6 +211,59 @@ func TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure(t *testing.T) {
 	}
 	if got := podAccessDenied(t, registry); got != 1 {
 		t.Errorf("%s = %v once a physical limiter is in force, want 1", constants.WVAPodAccessDenied, got)
+	}
+}
+
+// TestResetPodAccessDeniedLogsTheNextDenialAgain: turning the physical limiter
+// off stops the walk and clears the gauge. Turning it on again must report a
+// still-Forbidden list as a failure again, gauge and error log both. The level
+// last logged used to survive the reset, so the error was not logged again.
+func TestResetPodAccessDeniedLogsTheNextDenialAgain(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	if err := metrics.InitMetrics(registry); err != nil {
+		t.Fatal(err)
+	}
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	node := gpuNode()
+	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
+	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node, gpuPod("mine-0", "mine", 2)).Build()
+	reader := fake.NewClientBuilder().WithScheme(s).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", nil)
+		}}).Build()
+	errorLogs := 0
+	ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
+		if strings.Contains(args, "the physical limiter can admit scale-ups") {
+			errorLogs++
+		}
+	}, funcr.Options{}))
+
+	d := NewK8sWithGpuOperator(cached).WithPodReader(reader)
+	for range 3 {
+		if _, _, err := d.DiscoverUsageByNamespace(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if errorLogs != 1 {
+		t.Fatalf("fixture: a denial that persists is logged once, got %d", errorLogs)
+	}
+
+	d.ResetPodAccessDenied()
+	if got := podAccessDenied(t, registry); got != 0 {
+		t.Errorf("%s = %v after the reset, want 0", constants.WVAPodAccessDenied, got)
+	}
+
+	if _, _, err := d.DiscoverUsageByNamespace(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if errorLogs != 2 {
+		t.Errorf("error logs after the reset and another denied list = %d, want 2", errorLogs)
+	}
+	if got := podAccessDenied(t, registry); got != 1 {
+		t.Errorf("%s = %v after another denied list, want 1", constants.WVAPodAccessDenied, got)
 	}
 }
 
