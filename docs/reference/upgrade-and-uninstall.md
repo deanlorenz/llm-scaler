@@ -157,6 +157,25 @@ they enable. Do this, in order:
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
 
+#### Other changes that need an action
+
+- **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
+  now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
+  `wva-controller-manager-token` is deleted. Only the admin phase does both.
+  `make deploy-wva INSTALL_PHASE=wva` alone keeps scraping with the old token.
+  ```bash
+  NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift   # (cluster admin)
+  ```
+- **The install stops when KEDA is absent**, before it creates anything. It
+  prints the command that installs KEDA
+  (`KEDA_HELM_INSTALL=true NAMESPACE=<namespace> make setup-prereqs`). The
+  controller-only phase (`INSTALL_PHASE=wva`) never installs KEDA, so there it
+  always stops.
+- **kube-prometheus-stack is pinned** (`KUBE_PROMETHEUS_STACK_CHART_VERSION`,
+  default `92.7.0`). A newer release already installed is kept, with a
+  warning. Set the variable to install that exact version, including an older
+  one.
+
 #### Prometheus TLS verification is on by default
 
 Earlier releases skipped TLS verification for every Prometheus. This release

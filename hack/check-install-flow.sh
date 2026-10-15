@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=48
+EXPECT_CASES=51
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -132,7 +132,36 @@ else
     else
         fail "KEDA_HELM_INSTALL=true must accept an absent KEDA (rc=$rc state=$state)" "$out"
     fi
+    # The controller-only phase never runs deploy_keda, so KEDA_HELM_INSTALL=true
+    # there installs nothing. Accepting an absent KEDA on it went on to report
+    # "KEDA: installed by this run" about a KEDA nobody installed.
+    INSTALL_PHASE=wva; CRD_MODE=absent; keda_case
+    if [ "$rc" -ne 0 ] && [ "$state" != absent-installing ] && printf '%s' "$out" | grep -q 'never installs KEDA'; then
+        ok "KEDA absent with INSTALL_PHASE=wva refuses even with KEDA_HELM_INSTALL=true"
+    else
+        fail "INSTALL_PHASE=wva must refuse an absent KEDA: that phase never installs it (rc=$rc state=$state)" "$out"
+    fi
+    unset INSTALL_PHASE
     KEDA_HELM_INSTALL=false
+
+    # The advice is the command to run, in this install's shape.
+    CRD_MODE=absent; keda_case
+    if printf '%s' "$out" | grep -q 'KEDA_HELM_INSTALL=true NAMESPACE=wva-system make setup-prereqs'; then
+        ok "KEDA absent prints the setup-prereqs command that installs it"
+    else
+        fail "KEDA absent must print the make setup-prereqs command with KEDA_HELM_INSTALL=true" "$out"
+    fi
+
+    # SKIP_CHECKS=true skips the preflight that sets WVA_KEDA_STATE; deploy_keda
+    # confirmed the CRD and the summary still said "not verified by this run".
+    CRD_MODE=new
+    : > "$KUBECTL_LOG"
+    out="$( (WVA_KEDA_STATE=''; deploy_keda; echo "STATE=${WVA_KEDA_STATE:-}") 2>&1 )"
+    if [ "$(printf '%s\n' "$out" | sed -n 's/^STATE=//p')" = present ]; then
+        ok "deploy_keda records a KEDA it confirmed, for the summary (SKIP_CHECKS=true)"
+    else
+        fail "deploy_keda must set WVA_KEDA_STATE=present when it finds the CRD" "$out"
+    fi
 
     # Older than 2.17 is supported: the plan writes ScaledObjects with no
     # fallback (so_keda_fallback_probe). The preflight must say so and go on,

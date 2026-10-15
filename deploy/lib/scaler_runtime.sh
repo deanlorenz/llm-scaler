@@ -17,8 +17,12 @@ KEDA_FALLBACK_MIN_VERSION="${KEDA_FALLBACK_MIN_VERSION:-2.17}"
 
 # wva_keda_installs_itself reports whether THIS run installs KEDA (so its absence
 # now is expected, not a fault): kind-emulator always goes the Helm path, and
-# Kubernetes does when KEDA_HELM_INSTALL=true.
+# Kubernetes does when KEDA_HELM_INSTALL=true. Never the controller-only phase
+# (INSTALL_PHASE=wva): KEDA is installed by the prerequisites phase, which that
+# phase does not run, so KEDA_HELM_INSTALL=true there installed nothing while
+# the summary said "installed by this run".
 wva_keda_installs_itself() {
+    [ "${INSTALL_PHASE:-all}" != "wva" ] || return 1
     [ "${ENVIRONMENT:-kubernetes}" = "kind-emulator" ] && return 0
     [ "${ENVIRONMENT:-kubernetes}" = "kubernetes" ] && [ "${KEDA_HELM_INSTALL:-false}" = "true" ]
 }
@@ -30,10 +34,16 @@ wva_keda_absent_advice() {
         printf '%s\n' "On OpenShift this installer does not install KEDA: it uses the platform's." \
             "Install the Custom Metrics Autoscaler operator (OperatorHub) and create its" \
             "KedaController (namespace openshift-keda), then re-run this command."
-    else
-        printf '%s\n' "Install KEDA on the cluster, or let this installer do it:" \
-            "    KEDA_HELM_INSTALL=true   (installs chart kedacore/keda ${KEDA_CHART_VERSION:-<pinned>} into ${KEDA_NAMESPACE:-keda-system})"
+        return 0
     fi
+    if [ "${INSTALL_PHASE:-all}" = "wva" ]; then
+        printf '%s\n' "This is the controller-only phase (INSTALL_PHASE=wva), which never installs KEDA." \
+            "Install KEDA on the cluster, or have a cluster admin let this installer do it:"
+    else
+        printf '%s\n' "Install KEDA on the cluster, or let this installer do it (cluster admin):"
+    fi
+    printf '%s\n' "    $(wva_make_cmd setup-prereqs KEDA_HELM_INSTALL=true)" \
+        "  It installs chart kedacore/keda ${KEDA_CHART_VERSION:-<pinned>} into ${KEDA_NAMESPACE:-keda-system}. Then re-run this command."
 }
 
 # wva_keda_old_warning warns that this KEDA predates fallback.behavior, in the
@@ -160,6 +170,7 @@ deploy_keda() {
     if [ "$ENVIRONMENT" = "openshift" ]; then
         log_info "OpenShift: assuming platform-managed KEDA — skipping Helm install"
         if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+            WVA_KEDA_STATE=present
             log_success "KEDA ScaledObject CRD is available on the cluster"
         else
             log_error "OpenShift: scaledobjects.keda.sh CRD not found (SCALER_BACKEND=keda).
@@ -184,6 +195,9 @@ $(wva_keda_absent_advice)"
         local keda_probe keda_rc=0
         keda_probe=$(kubectl get crd scaledobjects.keda.sh 2>&1) || keda_rc=$?
         if [ $keda_rc -eq 0 ]; then
+            # Measured here, so the summary says so even when SKIP_CHECKS=true
+            # skipped the preflight that would otherwise have set it.
+            WVA_KEDA_STATE=present
             log_success "KEDA ScaledObject CRD is available on the cluster"
         elif printf '%s' "$keda_probe" | grep -qi 'forbidden'; then
             log_warning "Cannot check for the KEDA CRD (reading cluster-scoped CRDs is not permitted for you), so this install assumes KEDA is present."
@@ -206,6 +220,7 @@ $(wva_keda_absent_advice)"
         # reconciles anything.
         if wva_any_pod_ready -A "$KEDA_OPERATOR_LABEL_SELECTOR"; then
             if kubectl get apiservice "$EXTERNAL_METRICS_APISERVICE_NAME" >/dev/null 2>&1; then
+                WVA_KEDA_STATE=present
                 log_success "KEDA CRD, operator, and metrics APIService detected — skipping helm install"
                 return
             fi
@@ -216,6 +231,7 @@ $(wva_keda_absent_advice)"
         if kubectl get clusterrole keda-operator >/dev/null 2>&1; then
             keda_cr_managed_by=$(kubectl get clusterrole keda-operator -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
             if [ "$keda_cr_managed_by" != "Helm" ]; then
+                WVA_KEDA_STATE=present
                 log_info "KEDA CRD present and ClusterRole keda-operator is not Helm-managed — skipping Helm install (pre-installed KEDA)"
                 return
             fi
