@@ -135,7 +135,7 @@ var _ = Describe("noteTransient", func() {
 
 	It("forgets a model not seen for the window timeout", func() {
 		a.noteTransient("ns/m", steady, window, grace, clock)
-		a.sweep(clock.Add(windowTimeout + time.Minute))
+		Expect(a.EvictStale(clock.Add(windowTimeout + time.Minute)).Transients).To(Equal(1))
 		Expect(a.transients).NotTo(HaveKey("ns/m"))
 	})
 })

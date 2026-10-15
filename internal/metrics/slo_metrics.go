@@ -259,6 +259,23 @@ func SweepSLO(now time.Time) {
 	}
 }
 
+// DeleteSLOModel deletes every SLO series of one model at once. The engine
+// calls it when the model departs, as it deletes the model's other analyzer
+// series; SweepSLO's timeout is then only the backstop for a model that stays
+// but stops publishing.
+func DeleteSLOModel(namespace, modelName string) {
+	if sloTarget == nil {
+		return
+	}
+	sloPublishedMu.Lock()
+	defer sloPublishedMu.Unlock()
+	key := namespace + "/" + modelName
+	if m := sloPublished[key]; m != nil {
+		deleteGone(m.series, nil)
+		delete(sloPublished, key)
+	}
+}
+
 // deleteGone deletes every series in prev that current does not hold.
 func deleteGone(prev, current map[*prometheus.GaugeVec]map[string]prometheus.Labels) {
 	for g, series := range prev {

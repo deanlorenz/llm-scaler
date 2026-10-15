@@ -136,6 +136,12 @@ type Engine struct {
 	// Typed as domain.Analyzer to allow injection in tests.
 	saturationV2Analyzer domain.Analyzer
 
+	// sloAnalyzer is the built-in slo analyzer, also registered in analyzers
+	// under domain.SLOAnalyzerName: held here so the per-cycle sweeps reach its
+	// learned state whether or not any model runs it. Nil in tests that build
+	// an Engine by hand.
+	sloAnalyzer sloStateKeeper
+
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *capacity.Store
 
@@ -318,6 +324,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// collector does not read the store itself.
 	replicaCollector := collector.NewReplicaMetricsCollector(promSource, client, apiReader, recorder, podLocator)
 	replicaCollector.SetBridgeResolver(decision.DefaultBridges)
+	sloAnalyzer := slo.New(replicaCollector, capacityStore)
 
 	engine = Engine{
 		client:                  client,
@@ -331,6 +338,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		policies:                scalingpolicy.NewChangeReporter(),
 		metricsRegistry:         metricsRegistry,
 		saturationV2Analyzer:    satV2,
+		sloAnalyzer:             sloAnalyzer,
 		capacityStore:           capacityStore,
 		lastGoodAnalysis:        make(map[string]map[string]time.Time),
 		lastAnalyzerSeries:      make(map[string]analyzerSeries),
@@ -344,7 +352,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			// elsewhere, and enabling it needs no restart. Its result is
 			// published and, like every non-saturation result, not yet consumed
 			// (docs/proposals/slo-tiers.md, phase 0).
-			{name: domain.SLOAnalyzerName, analyzer: slo.New(replicaCollector, capacityStore)},
+			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
 	}

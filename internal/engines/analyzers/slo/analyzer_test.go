@@ -112,7 +112,7 @@ var _ = Describe("Analyzer", func() {
 		cfg := policy(44*time.Millisecond, 0)
 		warm(cfg)
 		vc, reading := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
-			readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
+			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 				ReplicaMetrics: cycleRows("agg", 4)}),
 			0.010, 0.85, clock)
 		Expect(reading.Source).To(Equal(constants.SLOSourceInfeasible))

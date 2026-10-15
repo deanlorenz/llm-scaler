@@ -10,6 +10,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	promclient "github.com/prometheus/client_golang/prometheus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
@@ -22,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scalingpolicy"
+	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
 func sloWiringEngine(t *testing.T) *Engine {
@@ -127,4 +129,117 @@ func TestResolveModelPolicyReportsAHalfConfiguredSLO(t *testing.T) {
 		}
 	}
 	t.Fatalf("no half-configured report among %d log lines: %v", len(lines), lines)
+}
+
+// sloKeeperSpy records how the engine's sweeps reached the slo analyzer.
+type sloKeeperSpy struct {
+	evictions int
+	present   map[string][]string
+}
+
+func (s *sloKeeperSpy) NoteVariantsPresent(namespace, modelID string, names []string) {
+	if s.present == nil {
+		s.present = map[string][]string{}
+	}
+	s.present[namespace+"/"+modelID] = append(s.present[namespace+"/"+modelID], names...)
+}
+
+func (s *sloKeeperSpy) EvictStale(time.Time) slo.Evicted {
+	s.evictions++
+	return slo.Evicted{}
+}
+
+// TestNewEngineHoldsTheSLOAnalyzerItRegisters pins that the analyzer the sweeps
+// reach is the one that runs: two instances would leave the running one's state
+// unswept.
+func TestNewEngineHoldsTheSLOAnalyzerItRegisters(t *testing.T) {
+	e := sloWiringEngine(t)
+	for _, entry := range e.analyzers {
+		if entry.name == domain.SLOAnalyzerName {
+			if entry.analyzer != e.sloAnalyzer.(domain.Analyzer) {
+				t.Fatal("the engine sweeps a different slo analyzer than the one it registered")
+			}
+			return
+		}
+	}
+	t.Fatal("NewEngine registered no slo analyzer")
+}
+
+// TestEvictStaleLearnedStateSweepsTheSLOAnalyzer pins that the slo analyzer's
+// state is aged by the engine's once-per-cycle sweep. It used to sweep inside
+// Analyze, which never runs again once the last model stops listing it.
+func TestEvictStaleLearnedStateSweepsTheSLOAnalyzer(t *testing.T) {
+	spy := &sloKeeperSpy{}
+	e := &Engine{saturationV2Analyzer: plainAnalyzer{}, sloAnalyzer: spy}
+	e.evictStaleLearnedState(context.Background())
+	if spy.evictions != 1 {
+		t.Fatalf("a sweep reached the slo analyzer %d times, want 1", spy.evictions)
+	}
+}
+
+// TestNotePresentVariantsStampsTheSLOAnalyzer pins that a variant parked at
+// zero, which no analyzer runs for, keeps its slo line as it keeps its
+// saturation state.
+func TestNotePresentVariantsStampsTheSLOAnalyzer(t *testing.T) {
+	e := sloWiringEngine(t)
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	e.notePresentVariants(context.Background(), map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
+		"chat/m": {{
+			ObjectMeta: metav1.ObjectMeta{Name: "chat-a", Namespace: "chat"},
+			Spec:       llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{ModelID: "m"},
+		}},
+	})
+	if got := spy.present["chat/m"]; len(got) != 1 || got[0] != "chat-a" {
+		t.Fatalf("the slo analyzer was told %v present for chat/m, want [chat-a]", got)
+	}
+}
+
+// TestPruneAnalyzerSeriesDeletesADepartedModelsSLOSeries pins that a model
+// whose VariantAutoscalings are gone loses its SLO series with its other
+// analyzer series, not ten minutes later.
+func TestPruneAnalyzerSeriesDeletesADepartedModelsSLOSeries(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	metrics.PublishSLO(metrics.SLOModelSnapshot{Namespace: "ns", ModelName: "gone",
+		Objectives: []metrics.SLOObjectiveReading{{Objective: constants.SLOObjectiveTTFT, Statistic: "p90",
+			TargetSeconds: 3, Observed: 1, Attainment: 0.95, Requests: 300}},
+	}, time.Now())
+	metrics.PublishSLO(metrics.SLOModelSnapshot{Namespace: "ns", ModelName: "kept",
+		Objectives: []metrics.SLOObjectiveReading{{Objective: constants.SLOObjectiveTTFT, Statistic: "p90",
+			TargetSeconds: 3, Observed: 1, Attainment: 0.95, Requests: 300}},
+	}, time.Now())
+	targets := func() map[string]bool {
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, mf := range mfs {
+			if mf.GetName() != constants.WVASLOTargetSeconds {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == constants.LabelModelName {
+						out[l.GetValue()] = true
+					}
+				}
+			}
+		}
+		return out
+	}
+	if got := targets(); !got["gone"] || !got["kept"] {
+		t.Fatalf("setup: published %v", got)
+	}
+	e := &Engine{metricsEmitter: metrics.NewMetricsEmitter(), lastAnalyzerSeries: map[string]analyzerSeries{
+		"ns/gone": {namespace: "ns", modelID: "gone"},
+		"ns/kept": {namespace: "ns", modelID: "kept"},
+	}}
+	e.pruneAnalyzerSeries(map[string]bool{"ns/kept": true})
+	if got := targets(); got["gone"] || !got["kept"] {
+		t.Fatalf("after the departed model's prune the SLO series are %v, want only kept", got)
+	}
 }

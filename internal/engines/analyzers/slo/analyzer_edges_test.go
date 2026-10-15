@@ -52,28 +52,59 @@ var _ = Describe("Analyzer state and inputs", func() {
 	}
 	noop := func(*domain.ReplicaMetrics) {}
 
-	It("drops a variant's window once it has not been seen for the timeout", func() {
+	It("forgets a variant's line once it has not been seen for the timeout", func() {
 		a := newAt(nil)
 		warmWith(a, noop)
 		key := windowKey("ns", "m", agg)
-		Expect(a.windows).To(HaveKey(key))
-		Expect(a.baseline).To(HaveKey(key))
+		Expect(a.lines.WindowLens()).To(HaveKey(key))
+		Expect(a.lines.Baselines()).To(HaveKey(key))
 
-		clock = clock.Add(windowTimeout + time.Minute)
-		other := domain.VariantReplicaState{VariantName: "other", Role: domain.RoleBoth, CurrentReplicas: 1}
-		_, err := a.Analyze(ctx, domain.AnalyzerInput{ModelID: "m2", Namespace: "ns",
-			Config: policy(44*time.Millisecond, 0), VariantStates: []domain.VariantReplicaState{other}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(a.windows).NotTo(HaveKey(key))
-		Expect(a.baseline).NotTo(HaveKey(key))
+		// Evicted by the engine's per-cycle sweep, not by another model's
+		// Analyze: once no model lists the analyzer, nothing would call that.
+		ev := a.EvictStale(clock.Add(windowTimeout + time.Minute))
+		Expect(ev.Lines).To(Equal(1))
+		Expect(ev.Baselines).To(Equal(1))
+		Expect(a.lines.WindowLens()).NotTo(HaveKey(key))
+		Expect(a.lines.Baselines()).NotTo(HaveKey(key))
 		Expect(a.seen).NotTo(HaveKey(key))
 	})
 
-	It("keeps a window seen within the timeout", func() {
+	It("keeps a line seen within the timeout", func() {
 		a := newAt(nil)
 		warmWith(a, noop)
-		a.sweep(clock.Add(windowTimeout - time.Minute))
-		Expect(a.windows).To(HaveKey(windowKey("ns", "m", agg)))
+		Expect(a.EvictStale(clock.Add(windowTimeout - time.Minute)).Any()).To(BeFalse())
+		Expect(a.lines.WindowLens()).To(HaveKey(windowKey("ns", "m", agg)))
+	})
+
+	It("keeps a parked variant's line while it is reported present", func() {
+		a := newAt(nil)
+		warmWith(a, noop)
+		key := windowKey("ns", "m", agg)
+		clock = clock.Add(windowTimeout - time.Minute)
+		a.NoteVariantsPresent("ns", "m", []string{"agg"})
+		Expect(a.EvictStale(clock.Add(2 * time.Minute)).Lines).To(BeZero(),
+			"parked, so not analyzed, but present")
+		Expect(a.lines.Baselines()).To(HaveKey(key))
+		stamped := clock
+		clock = clock.Add(windowTimeout)
+		a.NoteVariantsPresent("ns", "m", []string{"ag"})
+		Expect(a.EvictStale(stamped.Add(windowTimeout + 2*time.Minute)).Lines).To(Equal(1),
+			`"ag" must not keep "agg" alive`)
+	})
+
+	It("keys the line on the last resolved accelerator while the pods disagree", func() {
+		a := newAt(nil)
+		warmWith(a, noop)
+		resolved := windowKey("ns", "m", agg)
+		unresolved := agg
+		unresolved.AcceleratorName = constants.UnresolvedAcceleratorType
+		Expect(a.variantKey("ns", "m", unresolved)).To(Equal(resolved))
+		moved := agg
+		moved.AcceleratorName = "H200"
+		Expect(a.variantKey("ns", "m", moved)).NotTo(Equal(resolved), "a resolved change is new hardware")
+		fresh := New(nil, nil)
+		Expect(fresh.variantKey("ns", "m", unresolved)).To(Equal(windowKey("ns", "m", unresolved)),
+			"never resolved: the reading itself")
 	})
 
 	Context("engine params from the capacity store", func() {
@@ -121,7 +152,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 		zeroCap := row("agg", "agg-a", 0.5)
 		zeroCap.TotalKvCapacityTokens = 0
 		_, reading := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}, agg,
-			readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
+			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 				ReplicaMetrics: []domain.ReplicaMetrics{zeroCap}}),
 			0.044, 0.85, clock)
 		Expect(reading.Source).To(Equal(constants.SLOSourceInputInvalid))
@@ -142,7 +173,8 @@ var _ = Describe("Analyzer state and inputs", func() {
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourceOwn))
-		Expect(a.baseline[key]).To(BeNumerically("~", 0.030, 1e-9))
+		b, _ := a.lines.Baseline(key)
+		Expect(b).To(BeNumerically("~", 0.030, 1e-9))
 
 		// Twenty readings at nearly one fill push the spread-out ones out of
 		// the window, so only a pinned fit is possible.

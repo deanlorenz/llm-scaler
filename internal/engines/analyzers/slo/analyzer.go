@@ -15,6 +15,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,22 +53,31 @@ type Analyzer struct {
 	store  *capacity.Store
 	now    func() time.Time
 
+	// lines fits each generating variant's ITL(k), with the same itl.Tracker
+	// and so the same rules as the saturation analyzer. Its own instance:
+	// saturation fits only the decode role, and an aggregated replica (role
+	// "both"), the common deployment, would never get a line there.
+	lines *itl.Tracker
+
 	mu sync.Mutex
-	// windows holds each generating variant's (k, ITL) readings. The analyzer
-	// fits its own lines rather than reading the saturation analyzer's, because
-	// saturation fits only the decode role: an aggregated replica (role "both"),
-	// the common deployment, never gets a line there.
-	windows map[string]*itl.Window
-	// baseline is the intercept B of each window's last full fit: what a
-	// pinned fit holds B to once the fleet stops spanning k.
-	baseline map[string]float64
-	seen     map[string]time.Time
+	// seen is when each variant key was last analyzed or reported present:
+	// its line and its prefill ceiling are evicted on it (EvictStale).
+	seen map[string]time.Time
+	// accelerators is the last resolved accelerator per namespace/variant,
+	// so a cycle on which the pods disagree about it keys the line where it
+	// was (stableAccelerator).
+	accelerators map[string]acceleratorMemo
 	// transients is each model's recent fleet history, keyed namespace/model,
 	// for the transient exclusion (transient.go).
 	transients map[string]*transientMemo
 	// ceilings is each prefill-role variant's saturated prefill token rates
-	// and last ceiling, keyed like windows (ttft.go).
+	// and last ceiling, keyed like the lines (ttft.go).
 	ceilings map[string]*ceilingState
+}
+
+type acceleratorMemo struct {
+	name     string
+	lastUsed time.Time
 }
 
 // New returns an SLO analyzer. router may be nil, in which case the SLO is
@@ -75,15 +85,14 @@ type Analyzer struct {
 // applies and capacity comes from live readings only.
 func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 	return &Analyzer{
-		router:   router,
-		store:    store,
-		now:      time.Now,
-		windows:  make(map[string]*itl.Window),
-		baseline: make(map[string]float64),
-		seen:     make(map[string]time.Time),
-
-		transients: make(map[string]*transientMemo),
-		ceilings:   make(map[string]*ceilingState),
+		router:       router,
+		store:        store,
+		now:          time.Now,
+		lines:        itl.NewTracker(),
+		seen:         make(map[string]time.Time),
+		accelerators: make(map[string]acceleratorMemo),
+		transients:   make(map[string]*transientMemo),
+		ceilings:     make(map[string]*ceilingState),
 	}
 }
 
@@ -129,15 +138,15 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		tpotTarget = cfg.SLO.TPOT.Target.Seconds()
 	}
 	for _, vs := range fleet.variants {
-		vc, reading := a.priceVariant(input, vs, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
+		key := a.variantKey(input.Namespace, input.ModelID, vs)
+		vc, reading := a.priceVariant(input, vs, key, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
 		// Only a reading priceVariant made was priced for TPOT; one made below
 		// carries TTFT inputs alone and has no output length to lack.
 		pricedForTPOT := reading != nil
 		// The TTFT curve's inputs, for every variant that prefills: observed
 		// and published, nothing priced from them yet (ttft.go).
 		if cfg.SLO != nil && cfg.SLO.TTFT != nil && vs.Role != domain.RoleDecode {
-			in := a.observeTTFTInputs(windowKey(input.Namespace, input.ModelID, vs), vs.VariantName,
-				vs.Role, input.ReplicaMetrics, now)
+			in := a.observeTTFTInputs(key, vs.VariantName, vs.Role, input.ReplicaMetrics, now)
 			if reading == nil {
 				reading = newVariantReading(vs.VariantName, "")
 			}
@@ -167,7 +176,6 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"prefillUtilization", reading.PrefillUtilization, "prefillCeiling", reading.PrefillCeiling)
 		}
 	}
-	a.sweep(now)
 
 	snap.Objectives = a.judge(ctx, input, cfg.SLO)
 	// A window that covered a wake or a starting replica is not judged: the
@@ -200,7 +208,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 // priceVariant fits the variant's line and prices one replica of it at the
 // TPOT target. The reading is nil for a variant the TPOT objective does not
 // describe: a prefill role, or a policy with no TPOT target.
-func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantReplicaState,
+func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantReplicaState, key string,
 	fleet fleetReading, tpotTarget, scaleUp float64, now time.Time) (domain.VariantCapacity, *metrics.SLOVariantReading) {
 	vc := domain.VariantCapacity{
 		VariantName:      vs.VariantName,
@@ -218,7 +226,6 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if !isGenerating(vs.Role) {
 		return vc, nil
 	}
-	key := windowKey(input.Namespace, input.ModelID, vs)
 	line, source := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, now)
 	if !(tpotTarget > 0) {
 		return vc, nil
@@ -274,54 +281,24 @@ func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 	}
 }
 
-// fitLine adds this cycle's (k, ITL) readings for one variant to its window and
-// fits ITL(k) = A*k + B over it, with the same admission rules and the same two
-// tiers as the saturation analyzer's decode fit: a full least-squares fit when
-// the window spans enough of k, otherwise B pinned to the last full fit's
-// intercept (or the default floor) and only A fitted.
+// fitLine fits one variant's ITL(k) = A*k + B with the shared itl.Tracker --
+// the saturation analyzer's rules, by construction -- and names where the line
+// came from: a full fit, B pinned to this key's own last full fit, or B pinned
+// to the default floor.
 func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, now time.Time) (itl.Model, string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.seen[key] = now
-	w, ok := a.windows[key]
-	if !ok {
-		w = itl.NewWindow(itl.DefaultWindowMaxSize, itl.DefaultObservationMaxAge, itl.DefaultMinSamples,
-			itl.DefaultMinKSpread, itl.DefaultMinObservableK, itl.DefaultMaxObservableK)
-		a.windows[key] = w
-	}
-	for _, rm := range rows {
-		// A Pod not yet Ready, or one lent by the warm pool, is not a reading of
-		// what one of this variant's replicas does.
-		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
-			continue
-		}
-		if !(rm.AvgITL > 0) || !finite(rm.AvgITL) || !(rm.KvUsageInstant > 0) || rm.KvUsageInstant > itl.DefaultMaxObservableK {
-			continue
-		}
-		w.Add(rm.KvUsageInstant, rm.AvgITL, now)
-	}
-	w.Prune(now)
-	obs := w.Observations()
-	if w.Ready() {
-		if m, ok := itl.Fit(obs); ok {
-			if m.B > 0 {
-				a.baseline[key] = m.B
-			}
-			return m, constants.SLOSourceOwn
-		}
-	}
-	if len(obs) < itl.DefaultMinSamples {
-		return itl.Model{}, constants.SLOSourceNoLine
-	}
-	source := constants.SLOSourcePinned
-	b, learned := a.baseline[key]
-	if !learned || !(b > 0) {
+	a.mu.Unlock()
+	r := a.lines.Observe(key, variant, rows, now)
+	switch {
+	case r.Tier == itl.TierOLS:
+		return r.Model, constants.SLOSourceOwn
+	case r.Tier == itl.TierPinnedB && r.BaselineLearned:
+		return r.Model, constants.SLOSourcePinned
+	case r.Tier == itl.TierPinnedB:
 		// Not a measurement of this hardware: a constant for another card.
 		// Labelled apart, so the line it pins is not read as one.
-		b, source = itl.DefaultBaselineSec, constants.SLOSourcePinnedDefault
-	}
-	if m, ok := itl.FitPinnedB(obs, b); ok {
-		return m, source
+		return r.Model, constants.SLOSourcePinnedDefault
 	}
 	return itl.Model{}, constants.SLOSourceNoLine
 }
@@ -402,23 +379,102 @@ func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.En
 	return nil
 }
 
-// sweep drops the windows of variants not seen for windowTimeout.
-func (a *Analyzer) sweep(now time.Time) {
+// EvictStale forgets the learned state of variants and models not analyzed or
+// reported present for windowTimeout. The engine calls it once per cycle with
+// the saturation analyzer's sweep, so it runs whether or not any model lists
+// this analyzer this cycle, and each key is visited once per cycle rather than
+// once per analyzed model.
+func (a *Analyzer) EvictStale(now time.Time) Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for key, at := range a.seen {
-		if now.Sub(at) > windowTimeout {
-			delete(a.seen, key)
-			delete(a.windows, key)
-			delete(a.baseline, key)
+	stale := func(key string) bool {
+		at, ok := a.seen[key]
+		return !ok || now.Sub(at) > windowTimeout
+	}
+	var ev Evicted
+	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
+	for key := range a.ceilings {
+		if stale(key) {
 			delete(a.ceilings, key)
+			ev.Ceilings++
+		}
+	}
+	for key := range a.seen {
+		if stale(key) {
+			delete(a.seen, key)
 		}
 	}
 	for key, m := range a.transients {
 		if now.Sub(m.seenAt) > windowTimeout {
 			delete(a.transients, key)
+			ev.Transients++
 		}
 	}
+	for key, m := range a.accelerators {
+		if now.Sub(m.lastUsed) > windowTimeout {
+			delete(a.accelerators, key)
+			ev.Accelerators++
+		}
+	}
+	return ev
+}
+
+// Evicted counts what one EvictStale forgot, per map.
+type Evicted struct {
+	Lines, Baselines, Ceilings, Transients, Accelerators int
+}
+
+// Any reports whether anything was evicted.
+func (e Evicted) Any() bool {
+	return e.Lines+e.Baselines+e.Ceilings+e.Transients+e.Accelerators > 0
+}
+
+// NoteVariantsPresent stamps the learned state of a model's variants that
+// were discovered this cycle, analyzed or not: a variant parked at zero is
+// not analyzed, and must not lose its line for it.
+func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+	now := a.now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, name := range variantNames {
+		prefix := namespace + "|" + modelID + "|" + name + "|"
+		for key := range a.seen {
+			if strings.HasPrefix(key, prefix) {
+				a.seen[key] = now
+			}
+		}
+	}
+	if m, ok := a.transients[namespace+"/"+modelID]; ok {
+		m.seenAt = now
+	}
+}
+
+// variantKey is windowKey with the stable accelerator in it.
+func (a *Analyzer) variantKey(namespace, modelID string, vs domain.VariantReplicaState) string {
+	vs.AcceleratorName = a.stableAccelerator(namespace, vs.VariantName, vs.AcceleratorName)
+	return windowKey(namespace, modelID, vs)
+}
+
+// stableAccelerator is the accelerator to key a variant's line under: the
+// reading when it resolves, else the last one that did. The pods of one
+// variant disagreeing about it for a cycle is not new hardware, and keying on
+// the raw reading opened a fresh, empty window every time they did. The same
+// rule as the saturation analyzer's, kept per analyzer like the lines.
+func (a *Analyzer) stableAccelerator(namespace, variant, accelerator string) string {
+	key := namespace + "/" + variant
+	now := a.now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if constants.IsAcceleratorResolved(accelerator) {
+		a.accelerators[key] = acceleratorMemo{name: accelerator, lastUsed: now}
+		return accelerator
+	}
+	if last, ok := a.accelerators[key]; ok {
+		last.lastUsed = now
+		a.accelerators[key] = last
+		return last.name
+	}
+	return accelerator
 }
 
 // windowKey names one variant's line. The accelerator and GPU count are part

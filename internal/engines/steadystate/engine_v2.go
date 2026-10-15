@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
@@ -360,6 +361,16 @@ type presenceNoter interface {
 	NoteVariantsPresent(namespace, modelID string, variantNames []string)
 }
 
+// sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
+// its learned state is stamped by notePresentVariants and aged by
+// evictStaleLearnedState, like the saturation analyzer's.
+type sloStateKeeper interface {
+	presenceNoter
+	EvictStale(now time.Time) slo.Evicted
+}
+
+var _ sloStateKeeper = (*slo.Analyzer)(nil)
+
 // Pinned at compile time: the assertion in notePresentVariants fails silently
 // at run time, so a rename of the method would otherwise let a parked fleet's
 // learned state age out again with every test green.
@@ -384,8 +395,14 @@ func (e *Engine) notePresentVariants(
 	ctx context.Context,
 	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 ) {
-	noter, ok := e.saturationV2Analyzer.(presenceNoter)
-	if !ok {
+	var noters []presenceNoter
+	if noter, ok := e.saturationV2Analyzer.(presenceNoter); ok {
+		noters = append(noters, noter)
+	}
+	if e.sloAnalyzer != nil {
+		noters = append(noters, e.sloAnalyzer)
+	}
+	if len(noters) == 0 {
 		return
 	}
 	note := func(groups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling) {
@@ -397,7 +414,9 @@ func (e *Engine) notePresentVariants(
 			for i := range modelVAs {
 				names = append(names, modelVAs[i].Name)
 			}
-			noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
+			for _, noter := range noters {
+				noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
+			}
 		}
 	}
 	note(modelGroups)
@@ -485,6 +504,13 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)
+	}
+	if e.sloAnalyzer != nil {
+		if ev := e.sloAnalyzer.EvictStale(time.Now()); ev.Any() {
+			logger.Info("evicted stale slo analyzer state",
+				"lines", ev.Lines, "baselines", ev.Baselines, "ceilings", ev.Ceilings,
+				"transients", ev.Transients, "accelerators", ev.Accelerators)
+		}
 	}
 }
 
@@ -593,6 +619,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+			metrics.DeleteSLOModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -609,6 +636,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+		metrics.DeleteSLOModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

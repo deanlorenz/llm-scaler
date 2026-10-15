@@ -184,7 +184,7 @@ var _ = Describe("observeTTFTInputs", func() {
 	It("forgets a variant's ceiling when the variant is swept", func() {
 		cycles(1, 10000)
 		Expect(a.ceilings).To(HaveKey("k"))
-		a.sweep(clock.Add(windowTimeout + time.Minute))
+		Expect(a.EvictStale(clock.Add(windowTimeout + time.Minute)).Ceilings).To(Equal(1))
 		Expect(a.ceilings).NotTo(HaveKey("k"))
 	})
 })
