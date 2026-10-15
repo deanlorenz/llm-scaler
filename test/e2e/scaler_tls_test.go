@@ -1,0 +1,127 @@
+package e2e
+
+import (
+	"strings"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+)
+
+// scalerTLSOn records whether the controller serves the external scaler over
+// the installer's mutual TLS (configureScalerTLS).
+var scalerTLSOn bool
+
+// configureScalerTLS reads the controller Deployment and, when it serves the
+// installer's mutual TLS, points every fixture at the TLS scaler address with
+// KEDA's ClusterTriggerAuthentication, as the installer's ScaledObjects are.
+func configureScalerTLS() {
+	dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "reading the controller Deployment to learn its scaler TLS mode")
+	provider := dep.Spec.Template.Annotations["wva.llmd.ai/scaler-tls"]
+	certFlag := false
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if c.Name != "manager" {
+			continue
+		}
+		for _, a := range c.Args {
+			if strings.HasPrefix(a, "--external-scaler-cert-path") {
+				certFlag = true
+			}
+		}
+	}
+	scalerTLSOn = provider != "" && certFlag
+	if !scalerTLSOn {
+		GinkgoWriter.Printf("External scaler: plaintext\n")
+		return
+	}
+	tlsAddr := "wva-external-scaler." + cfg.WVANamespace + ".svc:9090"
+	auth := "wva-external-scaler-" + cfg.WVANamespace
+	fixtures.SetExternalScalerTLS(externalScalerAddress(), tlsAddr, auth)
+	GinkgoWriter.Printf("External scaler: mutual TLS (%s); fixtures use %s with ClusterTriggerAuthentication %s\n",
+		provider, tlsAddr, auth)
+}
+
+// The installer turns mutual TLS on by default, and every other spec reaches
+// the scaler through it. This one checks the other half: a ScaledObject without
+// KEDA's client certificate is refused. Both ScaledObjects target identical
+// Deployments, so the only difference between the one that wires and the one
+// that does not is the trigger's TLS settings.
+var _ = Describe("External scaler mutual TLS", Label("smoke", "full"), Ordered, func() {
+	const (
+		tlsTarget   = "scaler-tls-ok"
+		plainTarget = "scaler-tls-plain"
+	)
+
+	BeforeAll(func() {
+		if !scalerTLSOn {
+			Skip("The controller serves the external scaler in plaintext (WVA_SCALER_TLS=false, or the install could not turn TLS on), so there is no TLS to refuse a client.")
+		}
+		for _, name := range []string{tlsTarget, plainTarget} {
+			Expect(ensurePauseDeployment(cfg.LLMDNamespace, name)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.AppsV1().Deployments(cfg.LLMDNamespace).Delete(ctx, name, metav1.DeleteOptions{})
+			})
+		}
+	})
+
+	It("wires a ScaledObject that presents KEDA's client certificate, and refuses one that does not", func() {
+		By("Creating a ScaledObject on the TLS address with KEDA's authenticationRef")
+		Expect(fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, tlsTarget, tlsTarget, tlsTarget, 1, 2, cfg.MonitoringNS,
+			fixtures.WithWVATriggerMetadata(cfg.ModelID, "10.0"),
+			fixtures.WithExternalScalerTrigger(externalScalerAddress()))).To(Succeed())
+		DeferCleanup(func() { _ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, tlsTarget) })
+
+		By("Creating a ScaledObject on the plaintext address with no authenticationRef")
+		Expect(fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, plainTarget, plainTarget, plainTarget, 1, 2, cfg.MonitoringNS,
+			fixtures.WithWVATriggerMetadata(cfg.ModelID, "10.0"),
+			fixtures.WithExternalScalerTrigger(externalScalerAddress()),
+			fixtures.WithPlaintextScalerTrigger())).To(Succeed())
+		DeferCleanup(func() { _ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, plainTarget) })
+
+		By("The TLS ScaledObject gets WVA's external metric on its HPA")
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, tlsTarget, tlsTarget)
+
+		By("The plaintext ScaledObject never does: the scaler refuses the handshake")
+		Consistently(func(g Gomega) {
+			latched, carried, why := hpaOnCPUDefault(cfg.LLMDNamespace, plainTarget)
+			GinkgoWriter.Printf("plaintext ScaledObject's HPA: on CPU default=%v, metrics=%v %s\n", latched, carried, why)
+			for _, m := range carried {
+				g.Expect(m).NotTo(Equal("External"),
+					"KEDA got a metric spec over plaintext from a scaler that should require mutual TLS")
+			}
+		}, 90*time.Second, 10*time.Second).Should(Succeed())
+	})
+})
+
+// ensurePauseDeployment creates a one-replica Deployment that only needs to
+// exist as a scale target.
+func ensurePauseDeployment(namespace, name string) error {
+	labels := map[string]string{"app": name, "test-resource": "true"}
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  "pause",
+					Image: "registry.k8s.io/pause:3.10",
+				}}},
+			},
+		},
+	}
+	_, err := k8sClient.AppsV1().Deployments(namespace).Create(ctx, dep, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}

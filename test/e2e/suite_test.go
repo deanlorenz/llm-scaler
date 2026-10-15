@@ -141,6 +141,9 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.Background()) //nolint:fatcontext // shared across BeforeSuite/AfterSuite
 
+	By("Reading how the controller serves the external scaler")
+	configureScalerTLS()
+
 	By("Verifying WVA controller is running")
 	Eventually(func(g Gomega) {
 		pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{

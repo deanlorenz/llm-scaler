@@ -118,6 +118,60 @@ var externalScalerAddr string
 // fail loudly; it would sit at its replica count until the spec timed out.
 func SetExternalScalerAddress(addr string) { externalScalerAddr = addr }
 
+// externalScalerTLS is how fixtures reach a scaler served over the installer's
+// mutual TLS (SetExternalScalerTLS); zero when it serves plaintext.
+var externalScalerTLS struct{ plainAddr, tlsAddr, authName string }
+
+// SetExternalScalerTLS makes every fixture trigger on plainAddr use tlsAddr and
+// the ClusterTriggerAuthentication authName instead, as the installer's own
+// ScaledObjects do. KEDA keeps one connection per scalerAddress, so the TLS
+// address is a different string for the same Service.
+func SetExternalScalerTLS(plainAddr, tlsAddr, authName string) {
+	externalScalerTLS.plainAddr = plainAddr
+	externalScalerTLS.tlsAddr = tlsAddr
+	externalScalerTLS.authName = authName
+}
+
+// applyExternalScalerTLS moves the triggers naming the plaintext scaler address
+// to the TLS one, with KEDA's authenticationRef. A trigger that already carries
+// an authenticationRef is left as it is.
+func applyExternalScalerTLS(so *kedav1alpha1.ScaledObject) {
+	if _, plain := so.Annotations[plaintextScalerKey]; plain {
+		delete(so.Annotations, plaintextScalerKey)
+		return
+	}
+	if externalScalerTLS.authName == "" {
+		return
+	}
+	for i := range so.Spec.Triggers {
+		t := &so.Spec.Triggers[i]
+		if t.Metadata[registry.ScalerAddressKey] != externalScalerTLS.plainAddr || t.AuthenticationRef != nil {
+			continue
+		}
+		t.Metadata[registry.ScalerAddressKey] = externalScalerTLS.tlsAddr
+		t.AuthenticationRef = &kedav1alpha1.AuthenticationRef{
+			Name: externalScalerTLS.authName,
+			Kind: "ClusterTriggerAuthentication",
+		}
+	}
+}
+
+// WithPlaintextScalerTrigger keeps the trigger on the plaintext scaler address
+// with no authenticationRef, even when the suite reaches the scaler over TLS:
+// for a spec that checks the scaler refuses a client without KEDA's certificate.
+func WithPlaintextScalerTrigger() ScaledObjectOption {
+	return func(so *kedav1alpha1.ScaledObject) {
+		if so.Annotations == nil {
+			so.Annotations = make(map[string]string)
+		}
+		so.Annotations[plaintextScalerKey] = "true"
+	}
+}
+
+// plaintextScalerKey marks, while a fixture is built, a ScaledObject that must
+// stay on the plaintext scaler address. Removed before the object is applied.
+const plaintextScalerKey = "e2e.llm-d.ai/plaintext-scaler"
+
 // Private carrier keys for the deferred trigger metadata. They never reach the
 // cluster: applyWVATriggerMetadata removes them.
 const (
@@ -456,6 +510,7 @@ func buildScaledObject(namespace, name, scaleTargetName, variantName string, min
 	}
 	// After the options, so it lands on whatever triggers they left behind.
 	applyWVATriggerMetadata(so)
+	applyExternalScalerTLS(so)
 	return so
 }
 
