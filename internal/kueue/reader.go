@@ -56,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // Options configures a Reader.
@@ -79,6 +80,12 @@ type Options struct {
 	// ControllerNamespace is where the Kueue controller's Deployment is read
 	// for its version; empty means DefaultControllerNamespace.
 	ControllerNamespace string
+
+	// AssumeTestedVersion counts borrowing under a controller whose image
+	// names no version, as if it were tested (kueue.assumeTestedVersion). It
+	// applies only to a version that cannot be read from a Deployment that
+	// can: a Deployment that cannot be read is kueue-controller-down.
+	AssumeTestedVersion bool
 
 	// Workloads, when set, is where Workloads are read; nil reads through
 	// WorkloadsVia at the time of the read. Not part of the options' identity.
@@ -112,14 +119,11 @@ type Reader struct {
 	// warnedPending is set once a failed Workload read for the lender signal
 	// has been logged.
 	warnedPending bool
-	// version is the Kueue controller's version as last read, at versionAt;
-	// versionForbidden is set when that read was Forbidden.
+	// version is the Kueue controller's version and liveness as last read, at
+	// versionAt; versionForbidden is set when that read was Forbidden.
 	version          ControllerVersion
 	versionAt        time.Time
 	versionForbidden bool
-	// controllerSeen is set once a read found the controller's Deployment, so
-	// a later NotFound reads as a controller gone, not as one never there.
-	controllerSeen bool
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -293,7 +297,10 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		nsQueues[ns] = append(nsQueues[ns], cqName)
 	}
 	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
-	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable || cohortsStale
+	// A transient failure is the stale freeze, not an unknown hierarchy: the
+	// withheld reason would otherwise win over it (Precedence) and drop every
+	// counted namespace to nominal over a blip.
+	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable
 	controllerDown := false
 	var lowest map[string]int32
 	if slices.ContainsFunc(slices.Collect(maps.Values(topo.Queues)), func(q QueueState) bool { return q.Cohort != "" }) {
@@ -302,8 +309,15 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// or lend: a cluster without cohorts costs neither read.
 		version := r.controllerVersion(ctx)
 		topo.VersionUntested = version.Known && !version.Tested
+		// A Deployment read whose image names no version is unknown, and
+		// withheld unless the operator vouches for it. One that could not be
+		// read is not unknown but down (version.Down), which the override
+		// does not lift.
+		topo.VersionUnknown = !version.Down && !version.Known && !r.opts.AssumeTestedVersion
 		controllerDown = version.Down
-		pending := r.readPending(ctx, localQueues)
+		metrics.PublishKueueVersionKnown(version.Known)
+		pending, unreadable := r.readPending(ctx, localQueues)
+		topo.LendersUnreadable = unreadable
 		lowest = pending.lowestByNamespace
 		for name, q := range topo.Queues {
 			q.PendingWorkloads = pending.byQueue[name]
@@ -330,6 +344,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		r.warnedLabels = false
 	}
 	r.warnNoStatus(ctx, topo)
+	metrics.PublishKueueBorrowDrift(BorrowDrift(topo))
 	borrowing := ComputeBorrowing(topo, cohortsStale)
 	guaranteed, within, err := r.borrowCaps(queues, flavorType, borrowing, nsQueues, byNamespace)
 	if err != nil {
@@ -456,6 +471,8 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			Reason:         string(p.Reason),
 			WaitingLenders: slices.Clone(p.WaitingLenders),
 			Lenders:        externalLenders(p.Lenders),
+			PendingGPUs:    p.PendingGPUs,
+			CoFree:         maps.Clone(p.CoFree),
 		})
 	}
 	return out
@@ -493,6 +510,7 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					LentOut:        f.LentOut,
 					SourceBorrowed: f.KueueBorrowed,
 					Reason:         string(reason),
+					PinRequired:    f.PinRequired,
 				})
 			}
 		}
@@ -574,6 +592,15 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 		q.Inactive = true
 	}
 	q.AdmissionChecks = hasAdmissionChecks(cq)
+	if policy, _, _ := unstructured.NestedString(cq.Object, "spec", "preemption", CQFieldBorrowWithinCohort, "policy"); policy != "" && policy != BorrowWithinCohortNever {
+		q.BorrowWithinCohort = true
+	}
+	if when, _, _ := unstructured.NestedString(cq.Object, "spec", CQFieldFlavorFungibility, "whenCanBorrow"); when == FungibilityBorrow || when == FungibilityMayStopSearch {
+		// Set explicitly: Kueue may then borrow on the first flavor that fits
+		// instead of trying the next one, so a variant must pin its flavor.
+		q.PinRequired = true
+	}
+	gpuFlavors := map[string]map[string]bool{} // GPU resource -> flavors offering it
 	groups, _, _ := unstructured.NestedSlice(cq.Object, "spec", "resourceGroups")
 	for _, g := range groups {
 		group, _ := g.(map[string]interface{})
@@ -585,12 +612,33 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 				q.Inactive = true
 			}
 			resources, _, _ := unstructured.NestedSlice(flavor, "resources")
+			gpuFlavor := slices.ContainsFunc(resources, func(res interface{}) bool {
+				rq, _ := res.(map[string]interface{})
+				resName, _, _ := unstructured.NestedString(rq, "name")
+				return r.gpuNames[resName]
+			})
 			for _, res := range resources {
 				rq, _ := res.(map[string]interface{})
 				resName, _, _ := unstructured.NestedString(rq, "name")
 				if !r.gpuNames[resName] {
+					if gpuFlavor {
+						// A co-resource of the GPU flavor's resource group:
+						// Kueue admits only when it fits as well (B1).
+						c, err := coQuota(rq)
+						if err != nil {
+							q.Malformed = true
+						}
+						if q.CoResources == nil {
+							q.CoResources = map[ResourceKey]CoQuota{}
+						}
+						q.CoResources[ResourceKey{Flavor: name, Resource: resName}] = c
+					}
 					continue
 				}
+				if gpuFlavors[resName] == nil {
+					gpuFlavors[resName] = map[string]bool{}
+				}
+				gpuFlavors[resName][name] = true
 				var qr QueueResource
 				var errs [3]error
 				qr.Nominal, errs[0] = quantityField(rq, "nominalQuota")
@@ -601,6 +649,13 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 				}
 				q.Resources[ResourceKey{Flavor: name, Resource: resName}] = qr
 			}
+		}
+	}
+	for _, fs := range gpuFlavors {
+		if len(fs) > 1 {
+			// Several flavors of one GPU resource: which one Kueue assigns a
+			// replica depends on what fits first, unless the variant pins one.
+			q.PinRequired = true
 		}
 	}
 
@@ -625,6 +680,15 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 			rq, _ := res.(map[string]interface{})
 			resName, _, _ := unstructured.NestedString(rq, "name")
 			key := ResourceKey{Flavor: name, Resource: resName}
+			if c, co := q.CoResources[key]; co {
+				total, err := optionalMilli(rq, "total")
+				if err != nil {
+					q.Malformed = true
+				}
+				c.Reserved = total
+				q.CoResources[key] = c
+				continue
+			}
 			qr, declared := q.Resources[key]
 			if !declared {
 				continue
@@ -672,6 +736,48 @@ func optionalQuantity(m map[string]interface{}, field string) (*int, error) {
 		return nil, err
 	}
 	return &n, nil
+}
+
+// coQuota reads a co-resource's nominalQuota and lendingLimit, in milli-units.
+// A field that does not parse is an error; the figures read stand.
+func coQuota(rq map[string]interface{}) (CoQuota, error) {
+	var c CoQuota
+	nominal, errN := optionalMilli(rq, "nominalQuota")
+	c.Nominal = nominal
+	var errL error
+	if raw, ok := rq["lendingLimit"]; ok && raw != nil {
+		var l int64
+		l, errL = optionalMilli(rq, "lendingLimit")
+		c.LendingLimit = &l
+	}
+	return c, errors.Join(errN, errL)
+}
+
+// optionalMilli parses a resource.Quantity field in milli-units; 0 when absent.
+func optionalMilli(m map[string]interface{}, field string) (int64, error) {
+	raw, ok := m[field]
+	if !ok || raw == nil {
+		return 0, nil
+	}
+	var q resource.Quantity
+	switch v := raw.(type) {
+	case string:
+		parsed, err := resource.ParseQuantity(v)
+		if err != nil {
+			return 0, fmt.Errorf("%s %q: %w", field, v, err)
+		}
+		q = parsed
+	case int64:
+		q = *resource.NewQuantity(v, resource.DecimalSI)
+	case float64:
+		q = *resource.NewMilliQuantity(int64(v*1000), resource.DecimalSI)
+	default:
+		return 0, fmt.Errorf("%s has unexpected type %T", field, raw)
+	}
+	if q.Sign() < 0 {
+		return 0, errors.New(field + " is negative")
+	}
+	return q.MilliValue(), nil
 }
 
 // intField reads an integer status field, which decodes from JSON as int64 and

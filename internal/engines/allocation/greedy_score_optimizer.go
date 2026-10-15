@@ -67,6 +67,11 @@ type GreedyByScoreOptimizer struct {
 	// BorrowGovernor.BorrowBlocked). Its guaranteed growth is unaffected.
 	BorrowBlocked func(namespace, modelID, variant string) bool
 
+	// BorrowBlockedIn, when set, reports whether a model may not draw on one
+	// cohort's shared pools this cycle: its cooldown there, backed off after
+	// repeated preemptions or placement timeouts (BorrowGovernor.BorrowBlockedIn).
+	BorrowBlockedIn func(namespace, modelID, cohort string) bool
+
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
 }
@@ -202,6 +207,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	bs := newBorrowState(constraints, o.Nodes)
 	if bs != nil {
 		bs.blocked = o.BorrowBlocked
+		bs.blockedIn = o.BorrowBlockedIn
 	}
 	if !o.quiet {
 		o.draws = nil

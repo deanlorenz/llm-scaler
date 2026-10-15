@@ -101,6 +101,7 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 	}
 	if entry.Kueue != nil {
 		opts.ControllerNamespace = entry.Kueue.ControllerNamespace
+		opts.AssumeTestedVersion = entry.Kueue.AssumeTestedVersion
 	}
 	key, _ := json.Marshal(opts)
 	kueueReaders.Lock()

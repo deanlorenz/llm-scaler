@@ -17,6 +17,14 @@ kind: Component
 # and the reader reports "not served" rather than an empty quota if enabled
 # there. A cluster-scoped install does not need it: its manager ClusterRole
 # already carries these rules.
+#
+# Counting Kueue borrowing also reads the kueue-controller-manager Deployment
+# (the version) and its leader-election Lease (liveness) in the Kueue
+# namespace, get by name only. That grant is a Role in the Kueue namespace, so
+# it cannot live here: an overlay moves every namespaced object into the
+# install namespace. The prereqs phase and `make enable-physical-limiter`
+# create it (deploy/lib/physical_limiter.sh, pl_grant_kueue_controller_read);
+# without it borrowing freezes as kueue-controller-down.
 resources:
 - kueue-reader-clusterrole.yaml
 - kueue-reader-clusterrolebinding.yaml

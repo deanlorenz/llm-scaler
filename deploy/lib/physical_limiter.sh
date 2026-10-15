@@ -521,6 +521,60 @@ subjects:
 EOF
 }
 
+# pl_grant_kueue_controller_read grants ServiceAccount $2 in $1, through a Role
+# in the Kueue namespace (KUEUE_NAMESPACE, default kueue-system), get on the
+# kueue-controller-manager Deployment and on the controller's leader-election
+# Lease, both by name: borrowing reads the version from the one and liveness
+# from the other. Without it a namespace-scoped controller reads both as
+# Forbidden, which freezes borrowing (kueue-controller-down). A cluster-scoped
+# install has both from its manager ClusterRole.
+#
+# A Role, not part of components/kueue-reader: a kustomize overlay moves every
+# namespaced object into the install namespace, and this one must live in the
+# Kueue namespace. Skipped, with a note, when that namespace does not exist.
+pl_grant_kueue_controller_read() {
+    local ns="$1" sa="$2" kns="${KUEUE_NAMESPACE:-kueue-system}" suffix
+    suffix="$(wva_ns_suffix "$ns")"
+    if ! kubectl get namespace "$kns" >/dev/null 2>&1; then
+        log_info "  No namespace $kns (KUEUE_NAMESPACE): not granting the Kueue controller read. Kueue borrowing, if counted, freezes as kueue-controller-down until it is granted."
+        return 0
+    fi
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wva-kueue-controller-reader-${suffix}
+  namespace: ${kns}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["kueue-controller-manager"]
+  verbs: ["get"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["c1f6bfd2.kueue.x-k8s.io"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wva-kueue-controller-reader-${suffix}
+  namespace: ${kns}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wva-kueue-controller-reader-${suffix}
+subjects:
+- kind: ServiceAccount
+  name: ${sa}
+  namespace: ${ns}
+EOF
+}
+
 # pl_can_watch_namespaces echoes yes | no | unknown: whether ServiceAccount $2
 # in $1 may WATCH every Namespace. Watch, not get: the kueue-reader role grants
 # get only, so a yes comes from somewhere else -- the manager ClusterRole of a
@@ -1105,6 +1159,8 @@ enable_physical_limiter() {
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
             pl_grant_kueue_read "$ns" "$sa" "$managed" \
                 || log_error "could not grant $ns/$sa the Kueue read (ClusterRole/ClusterRoleBinding wva-kueue-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
+            pl_grant_kueue_controller_read "$ns" "$sa" \
+                || log_error "could not grant $ns/$sa the Kueue controller read (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$ns") in ${KUEUE_NAMESPACE:-kueue-system}). Nothing was published; the grants made before this one stay in place."
         fi
         if [ "$src" != own ]; then
             pl_grant_namespace_read "$ns" "$sa" "$cm_ns" \

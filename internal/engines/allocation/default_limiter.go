@@ -106,6 +106,9 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		TotalAvail:      l.inventory.TotalAvailable(),
 		NamespaceScoped: namespaceScopedOf(l.inventory),
 	}
+	if r, ok := l.inventory.(KueueReadReporter); ok {
+		rc.KueueNeverRead = r.KueueNeverRead()
+	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
 	// active namespaces, expose them via NamespacePools and derive the cluster
@@ -149,6 +152,9 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 // own pools, their caps and the shared pools.
 func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespaces []string) {
 	rc.BorrowWithheld = bi.BorrowWithheld(activeNamespaces)
+	if p, ok := bi.(interface{ BorrowNamespacesSet() bool }); ok {
+		rc.BorrowNamespacesSet = p.BorrowNamespacesSet()
+	}
 	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
 	if len(byNS) == 0 {
 		return

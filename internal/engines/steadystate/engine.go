@@ -1317,7 +1317,7 @@ func (e *Engine) selectV2Optimizer(
 	// Published as wva_constraint_provider_skipped and logged when the set
 	// changes, so a bound that stopped applying is visible without a log line
 	// every cycle.
-	e.providerSkips.report(ctx, skipped)
+	e.providerSkips.report(ctx, append(skipped, allocation.NeverReadSkips(constraints)...))
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints
@@ -1582,10 +1582,11 @@ func (e *Engine) optimizeV2(
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
 		g.BorrowBlocked = e.borrowBlocked()
+		g.BorrowBlockedIn = e.borrowBlockedIn()
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
 	e.recordBorrowDraws(optimizer)
-	logScalingDecisions(ctx, requests, allDecisions)
+	logScalingDecisions(ctx, requests, allDecisions, e.borrowedByModel(optimizer, constraints))
 
 	logger.Info("V2 optimizer produced decisions",
 		"optimizer", optimizer.Name(),
@@ -1608,6 +1609,10 @@ func (e *Engine) optimizeV2(
 	// replica asks back, last, so nothing above raises it again
 	// (borrowing_release.go). A no-op without borrowing.
 	e.releaseBorrowed(ctx, requests, allDecisions, variantScaleTargets, borrowNow)
+	// What on-call sees: the budgets the cycle used, the borrowing reasons,
+	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
+	// so a cleared condition clears its series.
+	e.publishBorrowSignals(constraints, requests, allDecisions, borrowNow)
 
 	// The holes this cycle ordered replicas into stay held, from both
 	// engines, until the replicas' pods hold their nodes. After the release:

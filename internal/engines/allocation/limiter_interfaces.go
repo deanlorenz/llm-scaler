@@ -134,6 +134,21 @@ type ResourceConstraints struct {
 	// Set even when no namespace counts borrowing; read only to report
 	// (LimiterBudgets), never to decide.
 	BorrowWithheld map[string]string
+	// BorrowNamespacesSet is set on a provider whose quota entry names
+	// kueue.borrowNamespaces (a pilot), so two entries over one cohort that
+	// disagree can be warned about (BorrowNamespacesSplit).
+	BorrowNamespacesSet bool
+	// KueueNeverRead is set on a quota entry that reads Kueue, leaves some
+	// type unlimited in its static caps, and has never read Kueue
+	// successfully: nothing bounds that type. Read only to report
+	// (wva_kueue_never_read).
+	KueueNeverRead bool
+}
+
+// KueueReadReporter is an inventory that reports a Kueue source never read
+// (QuotaInventory).
+type KueueReadReporter interface {
+	KueueNeverRead() bool
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

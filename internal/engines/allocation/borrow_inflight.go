@@ -128,8 +128,15 @@ func compareInFlightKeys(a, b inFlightKey) int {
 // ("" when the pod names none) -- from the chunks of the namespace's cohorts
 // that serve the accelerator, first chunk first. Every figure clamps at 0.
 // Constraints without borrowing are returned as they are.
+//
+// Gated demand is read twice: from the governed namespaces' gated pods
+// (gated), and from the pending Workloads of every namespace in the cohort's
+// ClusterQueues (SharedPoolChunk.PendingGPUs, B8), which a gated pod's own
+// Workload is among. Per chunk the larger of the two comes off, so a governed
+// pod is not counted twice, and a peer's ask -- another controller's, or a
+// batch job's -- is not borrowed from under it.
 func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw, gated map[string]map[string]int) []*ResourceConstraints {
-	if !HasBorrowing(constraints) || (len(inFlight) == 0 && len(gated) == 0) {
+	if !HasBorrowing(constraints) || (len(inFlight) == 0 && len(gated) == 0 && !anyPending(constraints)) {
 		return constraints
 	}
 	out := make([]*ResourceConstraints, 0, len(constraints))
@@ -148,8 +155,16 @@ func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw,
 				}
 			}
 		}
-		for ns, byAcc := range gated {
-			for acc, n := range byAcc {
+		// What the governed gated pods take of each chunk, first chunk first.
+		fromPods := make([]int, len(cc.SharedPools))
+		left := make([]int, len(cc.SharedPools))
+		for i := range cc.SharedPools {
+			left[i] = cc.SharedPools[i].Free
+		}
+		for _, ns := range slices.Sorted(maps.Keys(gated)) {
+			byAcc := gated[ns]
+			for _, acc := range slices.Sorted(maps.Keys(byAcc)) {
+				n := byAcc[acc]
 				for i := range cc.SharedPools {
 					p := &cc.SharedPools[i]
 					if n <= 0 {
@@ -158,15 +173,36 @@ func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw,
 					if !slices.Contains(c.NamespaceCohorts[ns], p.Cohort) || (acc != "" && !p.serves(acc)) {
 						continue
 					}
-					take := min(p.Free, n)
-					p.Free -= take
+					take := min(left[i], n)
+					left[i] -= take
+					fromPods[i] += take
 					n -= take
 				}
 			}
 		}
+		for i := range cc.SharedPools {
+			p := &cc.SharedPools[i]
+			p.Free = max(0, p.Free-max(fromPods[i], p.PendingGPUs))
+		}
 		out = append(out, &cc)
 	}
 	return out
+}
+
+// anyPending reports whether some borrowing constraint's chunk carries pending
+// demand.
+func anyPending(constraints []*ResourceConstraints) bool {
+	for _, c := range constraints {
+		if c == nil || c.NamespaceBorrow == nil {
+			continue
+		}
+		for _, p := range c.SharedPools {
+			if p.PendingGPUs > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BlockCohorts returns copies of constraints whose shared pools in the given

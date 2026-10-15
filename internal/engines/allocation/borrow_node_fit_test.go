@@ -109,7 +109,7 @@ func BenchmarkBorrowPlacementCycle(b *testing.B) {
 			r := replicaFit{acc: "H100", pods: []int{8}, tolerations: benchTolerations, templates: benchTemplates}
 			saved := bs.save(p.guaranteed)
 			for range 4 {
-				if !p.placeReplica("v", r, 8, 1) {
+				if placed, _ := p.placeReplica("v", r, 8, nil, 1); !placed {
 					b.Fatal("a replica did not place")
 				}
 			}

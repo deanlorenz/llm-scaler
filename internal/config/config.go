@@ -853,6 +853,17 @@ func (c *Config) HasClusterQuota() bool {
 	})
 }
 
+// KueueCountsBorrowable reports whether some quota entry counts Kueue
+// borrowing. Thread-safe.
+func (c *Config) KueueCountsBorrowable() bool {
+	for _, e := range c.EffectiveQuotaEntries() {
+		if e.KueueCountsBorrowable() {
+			return true
+		}
+	}
+	return false
+}
+
 // KueueBorrowTimings returns the borrowing timings of the first quota entry that
 // counts Kueue borrowing, or the defaults when none does.
 // Thread-safe.

@@ -523,6 +523,11 @@ func (e *Engine) processInactiveModel(
 	}
 
 	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
+	if len(selected) == 0 && outcome == OutcomeNoCapacity && place.nominalLentOut {
+		// The budget it missed is within nominal, short of nominal because a
+		// peer holds what the queue lent and need not give it back (B10).
+		outcome = OutcomeNominalLentOut
+	}
 	constraints := place.constraints
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
@@ -548,7 +553,7 @@ func (e *Engine) processInactiveModel(
 				"modelID", group.modelID,
 				"reason", string(outcome),
 			}
-			if outcome == OutcomeNoCapacity {
+			if outcome == OutcomeNoCapacity || outcome == OutcomeNominalLentOut {
 				// The one reason that cannot be diagnosed from the verdict alone: it
 				// says a set did not fit, not what it was measured against nor what
 				// it asked for. Both halves are needed — a budget of zero and a

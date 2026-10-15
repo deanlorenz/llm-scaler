@@ -235,6 +235,10 @@ type placement struct {
 	// nodes is the tick's per-node picture when the physical limiter bounds
 	// this wake (fresh constraints only; see decideWake), nil otherwise.
 	nodes *allocation.NodeView
+	// nominalLentOut is set when the namespace's queue lent nominal it cannot
+	// reclaim: its within-nominal figure, which the wake is checked against,
+	// is below its nominal.
+	nominalLentOut bool
 }
 
 // placementFor computes the placement basis for namespace; see gpuConstraints.
@@ -286,6 +290,12 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// model woken onto borrowed GPUs can be preempted before it serves (B7).
 	// Within nominal, not guaranteed -- an idle queue on Kueue's default
 	// (Never) has a guaranteed figure of 0, and must still wake.
+	//
+	// Within nominal is min(nominal, guaranteed + the cohort's free pool): a
+	// queue that cannot reclaim the nominal it lent does not count it, so the
+	// wake does not create a pod Kueue would hold at its gate. A refusal then
+	// says why (OutcomeNominalLentOut).
+	p.nominalLentOut = allocation.NominalLentOut(constraints, namespace) > 0
 	constraints = allocation.WithinNominal(constraints)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints

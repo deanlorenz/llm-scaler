@@ -134,6 +134,7 @@ func Discover(
 			Tolerations:     scaletarget.PodTolerations(scaleTarget),
 			TopologyKey:     scaletarget.ExclusiveTopology(scaleTarget),
 			Placements:      podPlacements(scaleTarget),
+			ReplicaRequests: replicaRequests(scaleTarget),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 

@@ -102,6 +102,21 @@ const (
 	// RFFieldTopologyName is ResourceFlavorSpec.TopologyName: set, the flavor
 	// uses Topology-Aware Scheduling (apis/kueue/v1beta1/resourceflavor_types.go).
 	RFFieldTopologyName = "topologyName"
+	// CQFieldBorrowWithinCohort is ClusterQueuePreemption.BorrowWithinCohort,
+	// whose policy field is read (apis/kueue/v1beta1/clusterqueue_types.go,
+	// BorrowWithinCohort.Policy).
+	CQFieldBorrowWithinCohort = "borrowWithinCohort"
+	// BorrowWithinCohortNever is the policy that preempts nothing to borrow
+	// (BorrowWithinCohortPolicyNever); absent means it too.
+	BorrowWithinCohortNever = "Never"
+	// CQFieldFlavorFungibility is ClusterQueueSpec.FlavorFungibility, whose
+	// whenCanBorrow is read (apis/kueue/v1beta1/clusterqueue_types.go).
+	CQFieldFlavorFungibility = "flavorFungibility"
+	// FungibilityBorrow and FungibilityMayStopSearch are the whenCanBorrow
+	// values that let Kueue borrow on the first flavor that fits instead of
+	// trying the next (Borrow; MayStopSearch replaces it in newer releases).
+	FungibilityBorrow        = "Borrow"
+	FungibilityMayStopSearch = "MayStopSearch"
 )
 
 // The Kueue controller, whose image tag names the running version
@@ -110,6 +125,10 @@ const (
 const (
 	ControllerDeployment       = "kueue-controller-manager"
 	DefaultControllerNamespace = "kueue-system"
+	// ControllerLease is the leader-election Lease the controller renews, in
+	// the same namespace (config/components/manager/controller_manager_config.yaml,
+	// leaderElection.resourceName). Its renewTime says whether a leader runs.
+	ControllerLease = "c1f6bfd2.kueue.x-k8s.io"
 )
 
 // integratedOwners are the owner kinds Kueue's integrations set on the

@@ -128,3 +128,14 @@ func TestABlockedBorrowerIsNotMarkedLimited(t *testing.T) {
 		t.Fatalf("control: target %d, want 1", d.TargetReplicas)
 	}
 }
+
+// The same for a model backed off in every cohort it could draw on (B12).
+func TestABackedOffBorrowerIsNotMarkedLimited(t *testing.T) {
+	nodes := map[string]decision.NodeGPU{"n1": h100Node(0, map[string]string{"pool": "a"})}
+	o := NewGreedyByScoreOptimizer()
+	o.BorrowBlockedIn = func(_, _, _ string) bool { return true }
+	d := decideBorrowing(o, nodes, borrowOnFlavorA(16))
+	if d.TargetReplicas != 0 || d.WasLimited {
+		t.Fatalf("backed off in its only cohort: target %d limited %v by %q, want 0 and not limited", d.TargetReplicas, d.WasLimited, d.LimitedBy)
+	}
+}

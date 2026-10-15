@@ -12,6 +12,7 @@ package steadystate
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
@@ -64,6 +66,9 @@ type borrowingState struct {
 	// preemption past its bound, zero once a cycle counting borrowing acted on
 	// it.
 	preemptDroppedAt time.Time
+	// preemptCounted is the preemptions already counted in
+	// wva_kueue_preempted_pods_total, by preemptionKey, kept for the cooldown.
+	preemptCounted map[string]time.Time
 	// preemptErrLogged and eventsErrLogged are the namespaces whose
 	// preemption or cluster-autoscaler Event read failed and was logged, until
 	// a read succeeds.
@@ -72,6 +77,24 @@ type borrowingState struct {
 	// cycle is this cycle's input to the governor, kept for the releases
 	// after the optimizer; zero when the cycle borrows nothing.
 	cycle allocation.BorrowCycle
+	// gated is this cycle's GPUs of managed pods at Kueue's admission gate,
+	// per namespace and accelerator (gatedGPUs), for what on-call sees.
+	gated map[string]map[string]int
+	// reclaimedUntil is, per "namespace/model", until when the
+	// lender-reclaimed reason holds: a recent Kueue preemption plus the
+	// cooldown.
+	reclaimedUntil map[string]time.Time
+	// budgets is the limiterBudgets value last handed to the status
+	// publisher, whose asOf stamps the next one keeps.
+	budgets controllerstatus.LimiterBudgets
+	// cohortsByNS is this cycle's cohorts per borrowing namespace, so a
+	// preemption backs its model off in those cohorts (B12); nil outside a
+	// cycle that counts borrowing, when a preemption cools the model down in
+	// every cohort.
+	cohortsByNS map[string][]string
+	// splitWarned is the borrow-namespaces-split warning last logged, so it
+	// is logged once per change (B13).
+	splitWarned string
 }
 
 // prepareBorrowing readies one cycle's borrowing: it drops the in-flight draws
@@ -83,7 +106,7 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
-	st.cycle = allocation.BorrowCycle{}
+	st.cycle, st.gated, st.cohortsByNS = allocation.BorrowCycle{}, nil, nil
 	if st.inFlight == nil {
 		st.inFlight = allocation.NewBorrowInFlight()
 	}
@@ -96,8 +119,12 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	e.notePhysicalSkipped(ctx, physical && !slices.ContainsFunc(constraints, func(c *allocation.ResourceConstraints) bool {
 		return c != nil && c.ProviderName == allocation.PhysicalLimiterName
 	}))
-	gated := e.gatedGPUs(ctx, constraints)
-	constraints = allocation.DeductUnreserved(constraints, st.inFlight.Entries(), gated)
+	st.gated = e.gatedGPUs(ctx, constraints)
+	constraints = allocation.DeductUnreserved(constraints, st.inFlight.Entries(), st.gated)
+	// What only the variants' pod templates show: a flavor not pinned where
+	// Kueue could pick another, a co-resource request not stated (B1).
+	constraints = allocation.WithholdByVariants(constraints, requests)
+	e.warnBorrowNamespacesSplit(ctx, constraints)
 	return e.governBorrowing(ctx, constraints, requests, scaleTargets, now)
 }
 
@@ -118,6 +145,26 @@ func (e *Engine) notePhysicalSkipped(ctx context.Context, skipped bool) {
 		}
 	}
 	st.physicalSkipped = skipped
+}
+
+// warnBorrowNamespacesSplit logs, when it changes, that two quota entries
+// count borrowing over one cohort and only one of them names borrowNamespaces
+// (B13): the pilot list of one does not hold back the other, so the pilot is
+// not one. A warning only; nothing is rejected or withheld.
+func (e *Engine) warnBorrowNamespacesSplit(ctx context.Context, constraints []*allocation.ResourceConstraints) {
+	split := allocation.BorrowNamespacesSplit(constraints)
+	key := fmt.Sprint(split)
+	if key == e.borrowing.splitWarned {
+		return
+	}
+	e.borrowing.splitWarned = key
+	if len(split) == 0 {
+		return
+	}
+	for _, s := range split {
+		ctrl.LoggerFrom(ctx).Info("Warning: two quota entries count Kueue borrowing in one cohort and only one sets kueue.borrowNamespaces; the other borrows for all its namespaces (borrow-namespaces-split)",
+			"reason", allocation.BorrowNamespacesSplitReason, "cohort", s.Cohort, "withList", s.WithList, "withoutList", s.WithoutList)
+	}
 }
 
 // recordBorrowDraws keeps what the optimizer borrowed this cycle as in flight.

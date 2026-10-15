@@ -60,6 +60,9 @@ type borrowState struct {
 	draws   []BorrowDraw
 	// blocked reports a variant that may not borrow this pass; nil blocks none.
 	blocked func(namespace, modelID, variant string) bool
+	// blockedIn reports a model that may not draw on one cohort's pools this
+	// pass (its backed-off cooldown there); nil blocks none.
+	blockedIn func(namespace, modelID, cohort string) bool
 }
 
 // newBorrowState builds the pass's borrowing state, or nil when no constraint
@@ -146,6 +149,7 @@ func (bs *borrowState) debitPool(ns, acc string, n int) {
 type borrowSave struct {
 	borrow     map[string]map[string]nsBorrowLeft
 	free       []int
+	coFree     []map[string]int64
 	nodes      viewDebits
 	draws      int
 	guaranteed map[string]int
@@ -161,6 +165,7 @@ func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
 	}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
+		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
 	}
 	return s
 }
@@ -175,6 +180,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	}
 	for i, c := range bs.chunks {
 		c.Free = s.free[i]
+		c.CoFree = s.coFree[i]
 	}
 	bs.nodes.restoreDebits(s.nodes)
 	bs.draws = bs.draws[:s.draws]
@@ -263,17 +269,38 @@ func (p *modelPlacer) markCut() {
 
 // tryUnit places every replica of the unit, one at a time, and reports
 // whether all placed.
+//
+// A unit of several roles -- a P/D pair -- borrows only whole (B4, B9): either
+// no replica of it draws on the shared pools, or every one does. A pair with
+// its prefill on guaranteed capacity and its decode borrowed would, once
+// Kueue reclaims the decode, leave a prefill serving nothing; with minReplicas
+// 1 the placement timeout could not release the prefill either, and with
+// minReplicas 0 releasing it would give back guaranteed capacity. Such a unit
+// does not place; placeUnit then tries a smaller one.
 func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantByRole map[string]string,
 	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
+	var borrowed, guaranteed int
 	for _, role := range picked {
 		v := variantByRole[role]
 		r := p.replica(variants, stateMap, v)
 		g := gpusPerReplicaFromState(stateMap, v)
+		requests := stateMap[v].ReplicaRequests
 		for i := 0; i < kByRole[role]; i++ {
-			if !p.placeReplica(v, r, g, p.targets[v]+kByRole[role]) {
+			placed, drew := p.placeReplica(v, r, g, requests, p.targets[v]+kByRole[role])
+			if !placed {
 				return false
 			}
+			if drew {
+				borrowed++
+			} else {
+				guaranteed++
+			}
 		}
+	}
+	if len(picked) > 1 && borrowed > 0 && guaranteed > 0 {
+		// A P/D unit straddling guaranteed and borrowed capacity: the
+		// guaranteed figure ran out for part of it.
+		return p.refuse(variantByRole[picked[len(picked)-1]], false)
 	}
 	return true
 }
@@ -305,8 +332,13 @@ func (p *modelPlacer) refuse(variant string, byNodes bool) bool {
 // guaranteed budget the borrowed part must fit the namespace's cap, one chunk
 // of its cohorts, and -- with a node view -- a node of that chunk's flavor,
 // whole replica at once. Every node must also satisfy the replica's pod
-// templates, its tolerations and topology key.
-func (p *modelPlacer) placeReplica(variant string, r replicaFit, g, target int) bool {
+// templates, its tolerations and topology key, and a borrowed replica must
+// fit the chunk's free pool of every co-resource its flavor's resource group
+// covers (requests, per replica in milli-units), which it is debited. It
+// reports whether the replica placed, and whether it drew on a shared pool. A
+// replica refused for want of a node, when a chunk's pools held it, is
+// recorded as node fit's (refuse).
+func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests map[string]int64, target int) (placed, drew bool) {
 	bs := p.bs
 	acc := r.acc
 	left := -1 // unbounded: an open namespace, or an unlimited allowance
@@ -324,7 +356,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g, target int) 
 	if left < 0 || left >= g {
 		reclaim := borrow != nil && borrow.lentOut > 0
 		if !bs.nodes.place(r) && !reclaim {
-			return p.refuse(variant, true)
+			return p.refuse(variant, true), false
 		}
 		if left >= 0 {
 			p.guaranteed[key] = left - g
@@ -334,35 +366,43 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g, target int) 
 			borrow.lentOut -= n
 			bs.debitPool(p.namespace, acc, n)
 		}
-		return true
+		return true, false
 	}
 	if borrow == nil {
-		return p.refuse(variant, false)
+		return p.refuse(variant, false), false
 	}
 	if bs.blocked != nil && bs.blocked(p.namespace, p.modelID, variant) {
 		// A borrowing rule holds it back (a placement hold, a cooldown, the
 		// physical limiter skipped), not scarcity: its own reason says so,
 		// and the decision is not marked limited.
-		return p.refuse("", false)
+		return p.refuse("", false), false
 	}
 	need := g - left
 	if borrow.cap >= 0 && borrow.cap < need {
-		return p.refuse(variant, false)
+		return p.refuse(variant, false), false
 	}
-	byNodes := false
-	for _, c := range bs.cohortChunks(p.namespace, acc) {
-		if c.Free < need {
-			continue
+	byNodes, open := false, false
+	chunks := bs.cohortChunks(p.namespace, acc)
+	for _, c := range chunks {
+		if bs.blockedIn != nil && bs.blockedIn(p.namespace, p.modelID, c.Cohort) {
+			continue // backed off in this cohort (B12)
+		}
+		open = true
+		if c.Free < need || !coFits(c.CoFree, requests) {
+			continue // the GPUs, or a co-resource of the flavor's group (B1), would hold it back
 		}
 		// place commits only when every pod fits, so one call both probes
 		// and debits.
 		flavor := r
 		flavor.flavor = &c.FlavorPlacement
 		if !bs.nodes.place(flavor) {
-			byNodes = true // the pool held it; no node of the flavor did
+			byNodes = true // the pools held it; no node of the flavor did
 			continue
 		}
 		c.Free -= need
+		for res := range c.CoFree {
+			c.CoFree[res] -= requests[res]
+		}
 		if borrow.cap >= 0 {
 			borrow.cap -= need
 		}
@@ -372,9 +412,27 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g, target int) 
 			Cohort: c.Cohort, Flavor: c.Flavor, Resource: c.Resource,
 			GPUs: need, Replicas: 1, Target: target, Placement: &c.FlavorPlacement,
 		})
-		return true
+		return true, true
 	}
-	return p.refuse(variant, byNodes)
+	if len(chunks) > 0 && !open {
+		// Backed off in every cohort it could draw on: a rule, not
+		// scarcity, as for a blocked variant above.
+		return p.refuse("", false), false
+	}
+	return p.refuse(variant, byNodes), false
+}
+
+// coFits reports whether one replica's requests fit a chunk's free pool of
+// every co-resource it holds. A co-resource the replica does not request is
+// taken as 0 here: a variant whose request of one is unknown is withheld
+// before the pass (WithholdByVariants).
+func coFits(coFree map[string]int64, requests map[string]int64) bool {
+	for res, free := range coFree {
+		if requests[res] > free {
+			return false
+		}
+	}
+	return true
 }
 
 // drawsByVariant folds the pass's draws into one per variant and chunk.

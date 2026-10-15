@@ -55,8 +55,10 @@ const (
 	// (kueue_constants.go) are not known to hold. The nominal quotas still
 	// apply.
 	ReasonKueueVersionUntested Reason = "kueue-version-untested"
-	// ReasonKueueControllerDown: the Kueue controller's Deployment reports no
-	// ready replica, or is gone, while Kueue's API still answers
+	// ReasonKueueControllerDown: no Kueue leader is known to run -- its leader
+	// Lease is not renewed within twice its duration, or without a Lease its
+	// Deployment has no ready replica, or neither can be found or read
+	// (Forbidden included) -- while Kueue's API still answers
 	// (ControllerVersion.Down). Nothing admits or preempts, and queue status
 	// stops moving, so no new borrowing is counted; what is borrowed is frozen,
 	// not shrunk. Decided on the engine side from
@@ -143,8 +145,38 @@ type QueueState struct {
 	// AdmissionChecks is true when the queue names admission checks, in
 	// spec.admissionChecks or spec.admissionChecksStrategy.
 	AdmissionChecks bool
+	// BorrowWithinCohort is true when spec.preemption.borrowWithinCohort sets
+	// a policy other than Never: Kueue may preempt in the cohort to borrow.
+	BorrowWithinCohort bool
+	// PinRequired is true when a variant must pin a flavor's nodeLabels to be
+	// counted (ReasonFlavorUnpinned): the queue offers more than one flavor for
+	// one of its GPU resources, or its flavorFungibility.whenCanBorrow is
+	// Borrow or MayStopSearch.
+	PinRequired bool
 	// Resources are the GPU resources the queue declares, per flavor.
 	Resources map[ResourceKey]QueueResource
+	// CoResources are the other resources (CPU, memory, ...) the resource
+	// group of a GPU flavor covers, per flavor, in milli-units: Kueue admits a
+	// Workload only when every covered resource fits.
+	CoResources map[ResourceKey]CoQuota
+}
+
+// CoQuota is one ClusterQueue's quota and reservation of a non-GPU resource a
+// GPU flavor's resource group covers, in milli-units (resource.Quantity's
+// MilliValue), so CPU and memory share one scale.
+type CoQuota struct {
+	Nominal      int64
+	LendingLimit *int64
+	Reserved     int64
+}
+
+// lent is the co-resource's L and G, as QueueResource.lent.
+func (c CoQuota) lent() (lent, kept int64) {
+	lent = c.Nominal
+	if c.LendingLimit != nil {
+		lent = min(max(*c.LendingLimit, 0), c.Nominal)
+	}
+	return lent, c.Nominal - lent
 }
 
 // CanReclaim reports whether the queue may preempt borrowers to get its
@@ -211,6 +243,12 @@ type Topology struct {
 	// VersionUntested is set when the Kueue controller runs a version outside
 	// TestedKueueVersions. An unknown version does not set it.
 	VersionUntested bool
+	// VersionUnknown is set when the controller's Deployment was read and its
+	// image names no version, and kueue.assumeTestedVersion is not set.
+	VersionUnknown bool
+	// LendersUnreadable is set when the Workloads were not read cluster-wide,
+	// or the read failed: no lender's wait can be seen.
+	LendersUnreadable bool
 }
 
 // QueueFigures is what one ClusterQueue could reach for one flavor and GPU
@@ -242,6 +280,8 @@ type QueueFigures struct {
 	// GuaranteedReason is ReasonNominalLentOut when Guaranteed is below
 	// Nominal, empty otherwise.
 	GuaranteedReason Reason
+	// PinRequired is the queue's QueueState.PinRequired.
+	PinRequired bool
 }
 
 // SharedPool is one cohort's free capacity of one flavor and GPU resource,
@@ -262,6 +302,18 @@ type SharedPool struct {
 	// for it and what it lends unused: what deciding whether its capacity may
 	// be borrowed needs.
 	Lenders []LenderState
+	// PendingGPUs is what the pending Workloads of every member queue -- every
+	// namespace of the cohort's ClusterQueues, not only the governed ones --
+	// request of this key, on the flavors their node selection allows (B6):
+	// demand Kueue may admit onto the free pool before anything new borrowed
+	// here is (B8). Taken out of the pool by the engine
+	// (allocation.DeductUnreserved).
+	PendingGPUs int
+	// CoFree is, per other resource the flavor's resource group covers (CPU,
+	// memory, ...), the cohort's free pool of it in milli-units, by the same
+	// formula as Free; 0 when Reason is set. A borrowed replica must fit every
+	// one of them as well as the GPUs (B3, co-resources).
+	CoFree map[string]int64
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -305,6 +357,13 @@ type Borrowing struct {
 // the borrowers give capacity back for nothing.
 func LenderWaiting(q QueueState, key ResourceKey) bool {
 	return lenderPending(q, key) > 0
+}
+
+// LenderWaitingOn is LenderWaiting for a flavor whose nodeLabels are given: a
+// pending Workload whose node selection rules the flavor out does not wait
+// for it (B6). Unknown labels, or rules that do not say, count it.
+func LenderWaitingOn(q QueueState, key ResourceKey, nodeLabels map[string]string) bool {
+	return lenderPendingOn(q, key, nodeLabels) > 0
 }
 
 // lent returns L = min(lendingLimit, nominal), nominal when unset, and the kept
@@ -355,15 +414,14 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 
 	out := Borrowing{Queues: make(map[string][]QueueFigures, len(t.Queues))}
 	for name, q := range t.Queues {
-		reason := ReasonNoCohort
-		switch {
-		case stale:
-			reason = ReasonStale
-		case q.Inactive:
-			reason = ReasonInactive
-		case q.Cohort != "":
-			reason = cohortReason[q.Cohort]
+		own := cohortReason[q.Cohort]
+		if q.Cohort == "" {
+			own = Precedence(globalReason(t, stale), ReasonNoCohort)
 		}
+		if q.Inactive {
+			own = Precedence(own, ReasonInactive)
+		}
+		reason := own
 		figs := make([]QueueFigures, 0, len(q.Resources))
 		for key, r := range q.Resources {
 			f := QueueFigures{
@@ -374,6 +432,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				BorrowCap:     config.QuotaUnlimited,
 				KueueBorrowed: r.Borrowed,
 				Reason:        reason,
+				PinRequired:   q.PinRequired,
 			}
 			if r.BorrowingLimit != nil {
 				f.BorrowCap = max(*r.BorrowingLimit, 0)
@@ -406,6 +465,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 			p := SharedPool{Cohort: cohort, ResourceKey: key, FlavorPlacement: t.Flavors[key.Flavor], Reason: cohortReason[cohort]}
 			if p.Reason == "" {
 				p.Free = cohortFree(qs, key)
+				p.CoFree = cohortCoFree(qs, key.Flavor)
 			}
 			for _, q := range qs {
 				r, declares := q.Resources[key]
@@ -413,8 +473,12 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 					continue
 				}
 				// An inactive queue still lends (cohortFree counts it), but
-				// never waits.
-				waiting := !q.Inactive && LenderWaiting(q, key)
+				// never waits. A pending Workload counts only on the flavors
+				// its node selection allows (B6).
+				waiting := !q.Inactive && LenderWaitingOn(q, key, t.Flavors[key.Flavor].NodeLabels)
+				if !q.Inactive {
+					p.PendingGPUs = addCapped(p.PendingGPUs, pendingOn(q, key, t.Flavors[key.Flavor].NodeLabels))
+				}
 				if waiting {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
@@ -433,61 +497,103 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 	return out
 }
 
-// withheldReason is why borrowing cannot be counted anywhere in a cohort, or
-// empty. The checks run in order, so the reason shown is the first that holds.
-func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reason {
+// globalReason is what withholds borrowing in every cohort of a read: the
+// Workloads unreadable, the controller's version unknown or untested, a stale
+// read. Precedence decides between them.
+func globalReason(t Topology, stale bool) Reason {
+	var rs []Reason
 	if stale {
-		return ReasonStale
+		rs = append(rs, ReasonStale)
+	}
+	if t.LendersUnreadable {
+		rs = append(rs, ReasonLendersUnreadable)
+	}
+	if t.VersionUnknown {
+		rs = append(rs, ReasonKueueVersionUnknown)
 	}
 	if t.VersionUntested {
-		return ReasonKueueVersionUntested
+		rs = append(rs, ReasonKueueVersionUntested)
 	}
-	for _, q := range qs {
-		// Inactive members too: their usage counts in the free pool.
-		if !q.HasStatus {
-			return ReasonNoStatus
-		}
-	}
+	return Precedence(rs...)
+}
+
+// withheldReason is why borrowing cannot be counted anywhere in a cohort, or
+// empty. Every condition that holds is collected, and the one shown is the
+// first in the B1 table order (Precedence).
+func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reason {
+	rs := []Reason{globalReason(t, stale)}
+	add := func(r Reason) { rs = append(rs, r) }
 	if t.CohortsUnreadable {
-		return ReasonHierarchyUnknown
+		add(ReasonHierarchyUnknown)
 	}
 	if c, ok := t.Cohorts[cohort]; ok && (c.Parent != "" || c.HasResourceGroups) {
-		return ReasonHierarchicalCohort
+		add(ReasonHierarchicalCohort)
 	}
 	for _, c := range t.Cohorts {
 		if c.Parent == cohort {
 			// A root that looks flat while a child lends into it.
-			return ReasonHierarchicalCohort
+			add(ReasonHierarchicalCohort)
 		}
 	}
 	for _, q := range qs {
+		// Inactive members too: their usage counts in the free pool.
+		if !q.HasStatus {
+			add(ReasonNoStatus)
+		}
 		if q.EffectiveQuotas {
-			return ReasonEffectiveQuotas
+			add(ReasonEffectiveQuotas)
 		}
-	}
-	for _, q := range qs {
 		if q.FairSharing {
-			return ReasonFairSharing
+			add(ReasonFairSharing)
 		}
-	}
-	for _, q := range qs {
 		for key := range q.Resources {
 			if t.Flavors[key.Flavor].TopologyName != "" {
-				return ReasonTopologyAware
+				add(ReasonTopologyAware)
 			}
 		}
-	}
-	for _, q := range qs {
 		if q.AdmissionChecks {
-			return ReasonAdmissionChecks
+			add(ReasonAdmissionChecks)
 		}
-	}
-	for _, q := range qs {
 		if q.Malformed {
-			return ReasonMalformed
+			add(ReasonMalformed)
+		}
+		if q.BorrowWithinCohort {
+			add(ReasonBorrowWithinCohort)
 		}
 	}
-	return ""
+	return Precedence(rs...)
+}
+
+// cohortCoFree is, per co-resource the members cover beside flavor's GPUs,
+// max(0, Σ L_m − Σ max(0, U_m − G_m)) in milli-units, over every member that
+// declares it: the same free pool as cohortFree, per co-resource. Nil when no
+// member covers one.
+func cohortCoFree(qs []QueueState, flavor string) map[string]int64 {
+	type sums struct{ lent, used int64 }
+	by := map[string]*sums{}
+	for _, q := range qs {
+		for key, c := range q.CoResources {
+			if key.Flavor != flavor {
+				continue
+			}
+			s := by[key.Resource]
+			if s == nil {
+				s = &sums{}
+				by[key.Resource] = s
+			}
+			l, g := c.lent()
+			s.lent += l
+			s.used += max(0, c.Reserved-g)
+		}
+	}
+	if len(by) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(by))
+	for res, s := range by {
+		out[res] = max(0, s.lent-s.used)
+	}
+	return out
 }
 
 // cohortFree is max(0, Σ L_m − Σ max(0, U_m − G_m)) over every member that

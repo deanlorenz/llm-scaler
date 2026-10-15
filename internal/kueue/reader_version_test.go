@@ -2,6 +2,7 @@ package kueue
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,10 +29,26 @@ func kueueController(ns, image string) *unstructured.Unstructured {
 	return d
 }
 
-// versionClient serves the Kueue kinds and Deployments.
+// leaseNow is the clock the Lease specs read at.
+var leaseNow = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+// leaderLease is the Kueue controller's leader-election Lease, renewed at
+// renewed, with a duration of seconds.
+func leaderLease(renewed time.Time, seconds int64) *unstructured.Unstructured {
+	l := &unstructured.Unstructured{}
+	l.SetGroupVersionKind(schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"})
+	l.SetNamespace("kueue-system")
+	l.SetName(ControllerLease)
+	Expect(unstructured.SetNestedField(l.Object, renewed.Format(time.RFC3339Nano), "spec", "renewTime")).To(Succeed())
+	Expect(unstructured.SetNestedField(l.Object, seconds, "spec", "leaseDurationSeconds")).To(Succeed())
+	return l
+}
+
+// versionClient serves the Kueue kinds, Deployments and Leases.
 func versionClient(funcs *interceptor.Funcs, objs ...client.Object) client.Client {
 	m := cohortMapper("v1beta2").(*meta.DefaultRESTMapper)
 	m.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"}, meta.RESTScopeNamespace)
 	b := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(m).WithObjects(objs...)
 	if funcs != nil {
 		b = b.WithInterceptorFuncs(*funcs)
@@ -80,18 +97,29 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 		Expect(reasonsOf(versionClient(nil, objs...), Options{})).To(Equal(counted), "not found in kueue-system: unknown")
 	})
 
-	It("treats an unreadable or untagged controller as unknown, which does not withhold", func() {
+	// B4: a Deployment read whose image names no version withholds
+	// (kueue-version-unknown) unless kueue.assumeTestedVersion vouches for it.
+	// A Deployment that cannot be read is not "unknown" but down, which the
+	// override does not lift.
+	It("withholds an untagged controller as kueue-version-unknown unless assumeTestedVersion; an unreadable one is down", func() {
+		unknown := []string{"kueue-version-unknown", "kueue-version-unknown", "kueue-version-unknown"}
 		digestOnly := append(docsExample(v, "cohortName"), kueueController("kueue-system", "registry.k8s.io/kueue/kueue@sha256:0123"))
-		Expect(reasonsOf(versionClient(nil, digestOnly...), Options{})).To(Equal(counted))
+		Expect(reasonsOf(versionClient(nil, digestOnly...), Options{})).To(Equal(unknown))
+		Expect(reasonsOf(versionClient(nil, digestOnly...), Options{AssumeTestedVersion: true})).To(Equal(counted),
+			"the override applies to a version that cannot be read")
 
 		denied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-			if o.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+			if k := o.GetObjectKind().GroupVersionKind().Kind; k == "Deployment" || k == "Lease" {
 				return forbidden("deployments")
 			}
 			return c.Get(ctx, key, o, opts...)
 		}}
 		objs := append(docsExample(v, "cohortName"), kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.21.0"))
-		Expect(reasonsOf(versionClient(denied, objs...), Options{})).To(Equal(counted))
+		c := versionClient(denied, objs...)
+		Expect(reasonsOf(c, Options{AssumeTestedVersion: true})).To(Equal(counted), "Forbidden is not unknown: the rows carry no version reason")
+		snap, err := NewReader(c, Options{AssumeTestedVersion: true}).Quotas(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snap.KueueControllerDown).To(BeTrue(), "Forbidden is down, and the override does not lift it")
 	})
 
 	It("reports the controller down when it has no ready replica, or is gone after it was seen; the rows are unchanged", func() {
@@ -119,23 +147,45 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 		Expect(down(r)).To(BeTrue(), "gone while the Kueue CRDs are served")
 	})
 
-	It("does not report the controller down when it cannot read it, or never found it", func() {
+	// B4 (proposal rev 8, B1): a Deployment or Lease never found, or Forbidden
+	// -- a namespace-scoped install without the Role in the Kueue namespace --
+	// is kueue-controller-down, never "unknown and up".
+	It("reports the controller down when it cannot read it, or never found it", func() {
 		down := func(c client.Client) bool {
 			snap, err := NewReader(c, Options{}).Quotas(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			return snap.KueueControllerDown
 		}
 		denied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-			if o.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+			if k := o.GetObjectKind().GroupVersionKind().Kind; k == "Deployment" || k == "Lease" {
 				return forbidden("deployments")
 			}
 			return c.Get(ctx, key, o, opts...)
 		}}
-		stopped := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
-		Expect(unstructured.SetNestedField(stopped.Object, int64(0), "status", "readyReplicas")).To(Succeed())
-		Expect(down(versionClient(denied, append(docsExample(v, "cohortName"), stopped)...))).To(BeFalse(), "Forbidden is unknown")
-		Expect(down(versionClient(nil, docsExample(v, "cohortName")...))).To(BeFalse(),
-			"never found (Kueue in another namespace without controllerNamespace) is unknown")
+		ready := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+		Expect(down(versionClient(denied, append(docsExample(v, "cohortName"), ready)...))).To(BeTrue(), "Forbidden is not absent")
+		Expect(down(versionClient(nil, docsExample(v, "cohortName")...))).To(BeTrue(),
+			"never found (Kueue in another namespace without controllerNamespace)")
+		Expect(down(versionClient(nil, append(docsExample(v, "cohortName"), ready)...))).To(BeFalse(),
+			"control: a ready Deployment without a Lease is up")
+	})
+
+	// B4: liveness comes from the leader Lease's renewTime against twice its
+	// leaseDurationSeconds; readyReplicas is only the fallback without one.
+	It("judges liveness by the leader Lease first", func() {
+		down := func(objs ...client.Object) bool {
+			snap, err := NewReader(versionClient(nil, append(docsExample(v, "cohortName"), objs...)...),
+				Options{now: func() time.Time { return leaseNow }}).Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.KueueControllerDown
+		}
+		ready := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+		Expect(down(ready, leaderLease(leaseNow.Add(-20*time.Second), 15))).To(BeFalse(), "renewed 20s ago, duration 15s: within 2x")
+		Expect(down(ready, leaderLease(leaseNow.Add(-31*time.Second), 15))).To(BeTrue(),
+			"a stuck leader: ready replicas, but the Lease not renewed for over 2x its duration")
+		notReady := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+		Expect(unstructured.SetNestedField(notReady.Object, int64(0), "status", "readyReplicas")).To(Succeed())
+		Expect(down(notReady, leaderLease(leaseNow.Add(-time.Second), 15))).To(BeFalse(), "the Lease wins over readyReplicas")
 	})
 })
 

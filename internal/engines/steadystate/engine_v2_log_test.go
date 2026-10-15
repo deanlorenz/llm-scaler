@@ -210,7 +210,7 @@ func TestLogScalingDecisions_EmitsPerModel(t *testing.T) {
 		{ModelID: "model-b", Namespace: "ns", VariantName: "v1", CurrentReplicas: 2, TargetReplicas: 1, Action: domain.ActionScaleDown},
 	}
 
-	logScalingDecisions(ctx, requests, decisions)
+	logScalingDecisions(ctx, requests, decisions, nil)
 
 	require.Equal(t, 2, logs.Len(), "expected one log line per model")
 	msgs := map[string]bool{}
@@ -221,6 +221,32 @@ func TestLogScalingDecisions_EmitsPerModel(t *testing.T) {
 	}
 	assert.True(t, msgs["model-a"], "expected log for model-a")
 	assert.True(t, msgs["model-b"], "expected log for model-b")
+}
+
+// O2: while borrowing is counted, every model's scaling-decision line says how
+// many GPUs it draws from the cohorts' shared pools, 0 included; without it,
+// the field is absent.
+func TestLogScalingDecisions_Borrowed(t *testing.T) {
+	ctx, logs := zapObserverCtx(t)
+	requests := []allocation.ModelScalingRequest{{ModelID: "a", Namespace: "ns"}, {ModelID: "b", Namespace: "ns"}}
+	decisions := []domain.VariantDecision{
+		{ModelID: "a", Namespace: "ns", VariantName: "a1", CurrentReplicas: 1, TargetReplicas: 2, Action: domain.ActionScaleUp},
+		{ModelID: "b", Namespace: "ns", VariantName: "b1", CurrentReplicas: 1, TargetReplicas: 1, Action: domain.ActionNoChange},
+	}
+	logScalingDecisions(ctx, requests, decisions, map[string]int{"ns/a": 8})
+	require.Equal(t, 2, logs.Len())
+	got := map[string]any{}
+	for _, e := range logs.All() {
+		got[e.ContextMap()["modelID"].(string)] = e.ContextMap()["borrowed"]
+	}
+	assert.EqualValues(t, 8, got["a"])
+	assert.EqualValues(t, 0, got["b"])
+
+	ctx, logs = zapObserverCtx(t)
+	logScalingDecisions(ctx, requests, decisions, nil)
+	for _, e := range logs.All() {
+		assert.NotContains(t, e.ContextMap(), "borrowed", "no borrowing counted: no field")
+	}
 }
 
 // atMax is what separates "WVA chose this size" from "WVA was not allowed to go
@@ -245,7 +271,7 @@ func TestLogScalingDecisions_AtMaxReplicas(t *testing.T) {
 		{ModelID: "model-a", Namespace: "ns", VariantName: "unbounded", CurrentReplicas: 9, TargetReplicas: 99, Action: domain.ActionScaleUp},
 	}
 
-	logScalingDecisions(ctx, requests, decisions)
+	logScalingDecisions(ctx, requests, decisions, nil)
 
 	require.Equal(t, 1, logs.Len())
 
@@ -282,7 +308,7 @@ func TestLogScalingDecisions_NoDecisionsSkipsModel(t *testing.T) {
 		{ModelID: "model-a", Namespace: "ns", VariantName: "v1", Action: domain.ActionNoChange},
 	}
 
-	logScalingDecisions(ctx, requests, decisions)
+	logScalingDecisions(ctx, requests, decisions, nil)
 
 	require.Equal(t, 1, logs.Len(), "model with no decisions should emit no log line")
 	assert.Equal(t, "model-a", logs.All()[0].ContextMap()["modelID"])

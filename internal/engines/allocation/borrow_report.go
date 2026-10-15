@@ -16,41 +16,37 @@ import (
 )
 
 // Reasons a counted namespace's borrowable figure is 0 this cycle, beside the
-// kueue.Reason values a withheld namespace carries.
+// kueue.Reason values a withheld namespace carries. They are the kueue
+// package's, where their order (kueue.Precedence) lives.
 const (
 	// BorrowReasonLenderWaiting: a lender of the namespace's cohort waits for
-	// capacity it lent, so the cohort is closed to new borrowing for the
-	// cooldown.
-	BorrowReasonLenderWaiting = "lender-waiting"
+	// capacity it lent, so the cohort is closed to new borrowing.
+	BorrowReasonLenderWaiting = string(kueue.ReasonLenderWaiting)
 	// BorrowReasonPoolEmpty: the cohort's shared pools serving the type hold
 	// no free GPUs (after what is in flight and gated is taken out).
-	BorrowReasonPoolEmpty = "cohort-pool-empty"
+	BorrowReasonPoolEmpty = string(kueue.ReasonCohortPoolEmpty)
 	// BorrowReasonNoBorrowCap: the namespace may not go past its guaranteed
 	// figure: its queues' borrowingLimit, the static entry or its
 	// ResourceQuota stops it there.
-	BorrowReasonNoBorrowCap = "no-borrow-cap"
+	BorrowReasonNoBorrowCap = string(kueue.ReasonNoBorrowCap)
 	// BorrowReasonPreemptionsUnreadable: Kueue's preemptions in the namespace
 	// could not be read this cycle, so none of its models grows on borrowed
 	// capacity (a preemption may have gone unseen).
-	BorrowReasonPreemptionsUnreadable = "preemptions-unreadable"
+	BorrowReasonPreemptionsUnreadable = string(kueue.ReasonPreemptionsUnreadable)
 )
 
 // MarkPreemptionsUnreadable reports, on every budget of a namespace whose
-// Kueue preemptions could not be read this cycle, a borrowable figure of 0
-// with reason preemptions-unreadable: the governor blocks every borrowed
-// growth there (BorrowGovernor.BorrowBlocked). A budget that already reads 0
-// for a reason that holds whatever preemptions say -- borrowing withheld, or
-// no borrow cap -- keeps that reason.
+// Kueue preemptions could not be read this cycle, a borrowable figure of 0:
+// the governor blocks every borrowed growth there (BorrowGovernor.BorrowBlocked).
+// The reason shown is preemptions-unreadable unless a reason earlier in the
+// B1 table order holds (kueue.Precedence).
 func MarkPreemptionsUnreadable(budgets []LimiterBudget, unknown map[string]bool) {
 	for i := range budgets {
 		b := &budgets[i]
-		if !unknown[b.Namespace] {
+		if !unknown[b.Namespace] || b.Guaranteed < 0 {
 			continue
 		}
-		switch b.Reason {
-		case "", BorrowReasonPoolEmpty, BorrowReasonLenderWaiting:
-			b.Borrowable, b.Reason = 0, BorrowReasonPreemptionsUnreadable
-		}
+		b.Borrowable, b.Reason = 0, kueue.PrecedenceOf(b.Reason, BorrowReasonPreemptionsUnreadable)
 	}
 }
 
@@ -91,6 +87,16 @@ func LimiterBudgets(constraints []*ResourceConstraints, blocked map[string]bool)
 				switch nb, counted := c.NamespaceBorrow[ns][t]; {
 				case counted && p.Limit >= 0:
 					b.Borrowable, b.Reason = borrowableNow(c, ns, t, nb, blocked)
+					if w := c.BorrowWithheld[ns]; w != "" {
+						// Counted only to keep what it holds, or frozen: no
+						// new borrowing, and one reason, the first in the
+						// table. A freeze shows its own cause, not the stale
+						// pools it leaves behind.
+						if b.Reason == string(kueue.ReasonStale) && w == string(kueue.ReasonKueueControllerDown) {
+							b.Reason = w
+						}
+						b.Borrowable, b.Reason = 0, kueue.PrecedenceOf(w, b.Reason)
+					}
 				case c.BorrowWithheld[ns] != "":
 					b.Reason = c.BorrowWithheld[ns]
 				}
@@ -106,16 +112,14 @@ func LimiterBudgets(constraints []*ResourceConstraints, blocked map[string]bool)
 }
 
 // borrowableNow is min(cap, free GPUs of ns's cohorts' chunks serving acc), and
-// why it is 0 when it is.
+// why it is 0 when it is: of every reason that holds, the first in the B1
+// table order (kueue.Precedence).
 func borrowableNow(c *ResourceConstraints, ns, acc string, nb NamespaceBorrow, blocked map[string]bool) (int, string) {
 	if nb.Frozen {
 		if nb.Withheld != "" {
 			return 0, nb.Withheld
 		}
 		return 0, string(kueue.ReasonStale)
-	}
-	if nb.Cap == 0 {
-		return 0, BorrowReasonNoBorrowCap
 	}
 	free, stale, closed := 0, false, false
 	for _, ch := range c.SharedPools {
@@ -129,16 +133,22 @@ func borrowableNow(c *ResourceConstraints, ns, acc string, nb NamespaceBorrow, b
 	if nb.Cap != config.QuotaUnlimited {
 		free = min(free, nb.Cap)
 	}
-	switch {
-	case free > 0:
+	if free > 0 {
 		return free, ""
-	case stale:
-		return 0, string(kueue.ReasonStale)
-	case closed:
-		return 0, BorrowReasonLenderWaiting
-	default:
-		return 0, BorrowReasonPoolEmpty
 	}
+	var reasons []kueue.Reason
+	if stale {
+		reasons = append(reasons, kueue.ReasonStale)
+	}
+	if closed {
+		reasons = append(reasons, kueue.ReasonLenderWaiting)
+	}
+	if nb.Cap == 0 {
+		reasons = append(reasons, kueue.ReasonNoBorrowCap)
+	} else if !closed && !stale {
+		reasons = append(reasons, kueue.ReasonCohortPoolEmpty)
+	}
+	return 0, string(kueue.Precedence(reasons...))
 }
 
 // VariantBorrowStatus is what the governor holds against one variant now.
@@ -180,6 +190,44 @@ func (g *BorrowGovernor) WaitingLenders(now time.Time) []LenderWait {
 		}
 	}
 	slices.SortFunc(out, func(a, b LenderWait) int { return compareLenderKeys(a.LenderKey, b.LenderKey) })
+	return out
+}
+
+// PoolBorrowed is the GPUs this controller's namespaces hold past their
+// guaranteed figures in one cohort and flavor.
+type PoolBorrowed struct {
+	Cohort, Flavor string
+	GPUs           int
+}
+
+// BorrowedByPool is, per cohort and flavor, the GPUs the namespaces of
+// constraints hold past their guaranteed figures (gated pods, which hold no
+// reservation, not counted), sorted. Kueue does not say which flavor a
+// borrowed GPU sits on: a namespace's figure for a type goes to the first of
+// its cohorts' chunks that serves the type, in chunk order.
+func BorrowedByPool(constraints []*ResourceConstraints, gated map[string]map[string]int) []PoolBorrowed {
+	chunks, cohorts := mergeSharedPools(constraints)
+	by := map[[2]string]int{}
+	for ns, perType := range namespaceBorrowed(constraints, gated) {
+		for t, n := range perType {
+			if n <= 0 {
+				continue
+			}
+			for _, ch := range chunks {
+				if slices.Contains(cohorts[ns], ch.Cohort) && ch.serves(t) {
+					by[[2]string{ch.Cohort, ch.Flavor}] += n
+					break
+				}
+			}
+		}
+	}
+	out := make([]PoolBorrowed, 0, len(by))
+	for k, n := range by {
+		out = append(out, PoolBorrowed{Cohort: k[0], Flavor: k[1], GPUs: n})
+	}
+	slices.SortFunc(out, func(a, b PoolBorrowed) int {
+		return cmp.Or(strings.Compare(a.Cohort, b.Cohort), strings.Compare(a.Flavor, b.Flavor))
+	})
 	return out
 }
 

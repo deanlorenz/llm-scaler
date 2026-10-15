@@ -116,7 +116,10 @@ var _ = Describe("BorrowGovernor", func() {
 	}
 
 	Describe("the debounced lender rule", func() {
-		It("does not count one read, nor two inside the debounce, and counts two fresh reads 60s apart", func() {
+		// B2: the first sighting of a waiting lender stops new borrowing in
+		// its cohort; the debounce applies only to the alert (WaitingLenders)
+		// and the cohort cooldown.
+		It("blocks new borrowing at the first sighting, and counts the wait only after two fresh reads 60s apart", func() {
 			g := NewBorrowGovernor(settings)
 			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
 			w := govWorld{lenders: []kueue.LenderState{never(8)}, used: 32}
@@ -124,12 +127,24 @@ var _ = Describe("BorrowGovernor", func() {
 				w.readAt = t0.Add(d)
 				run(g, w, t0.Add(d), reqs)
 				Expect(g.WaitingLenders(t0.Add(d))).To(BeEmpty(), d.String())
-				Expect(g.BlockedCohorts(t0.Add(d))).To(BeEmpty(), d.String())
+				Expect(g.BlockedCohorts(t0.Add(d))).To(HaveKey("c"), "raw signal, "+d.String())
 			}
 			w.readAt = t0.Add(61 * time.Second)
 			run(g, w, t0.Add(61*time.Second), reqs)
 			Expect(g.WaitingLenders(t0.Add(61 * time.Second))).To(HaveLen(1))
 			Expect(g.BlockedCohorts(t0.Add(61 * time.Second))).To(HaveKey("c"))
+
+			// The lender stops waiting: the raw block lifts at once, the
+			// cooldown its debounced wait started stays.
+			w.lenders = []kueue.LenderState{{Queue: "lender", LentOut: 8, Reclaim: kueue.ReclaimNever}}
+			w.readAt = t0.Add(90 * time.Second)
+			run(g, w, t0.Add(90*time.Second), reqs)
+			Expect(g.BlockedCohorts(t0.Add(90*time.Second))).To(HaveKey("c"), "the cohort cooldown after the wait is kept")
+			Expect(g.BlockedCohorts(t0.Add(61*time.Second + settings.Cooldown))).To(BeEmpty())
+
+			fresh := NewBorrowGovernor(settings)
+			run(fresh, govWorld{lenders: []kueue.LenderState{{Queue: "lender", LentOut: 8}}, used: 32, readAt: t0}, t0, reqs)
+			Expect(fresh.BlockedCohorts(t0)).To(BeEmpty(), "control: no lender waits, nothing blocked")
 		})
 
 		It("hands nothing back to a waiting lender that cannot reclaim, and closes the cohort to new borrowing", func() {
@@ -214,7 +229,7 @@ var _ = Describe("BorrowGovernor", func() {
 			rel := g.Releases(c, ds)
 			Expect(rel).To(HaveLen(2))
 			Expect(targets(ds)).To(Equal(map[string]int{"p": 0, "d": 0}))
-			Expect(g.BorrowBlocked("b", "pd", "p", t0.Add(7*time.Minute))).To(BeTrue())
+			Expect(g.BorrowBlockedIn("b", "pd", "c", t0.Add(7*time.Minute))).To(BeTrue(), "the model cools down in its cohort")
 		})
 
 		It("waits while the cluster autoscaler is scaling up, at most three times the timeout", func() {

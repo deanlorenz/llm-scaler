@@ -275,6 +275,9 @@ type VariantReplicaState struct {
 	// Placements is each pod template's node placement; see
 	// VariantMetadata.Placements.
 	Placements []PodPlacement
+	// ReplicaRequests is what one replica requests of each resource; see
+	// VariantMetadata.ReplicaRequests.
+	ReplicaRequests map[string]int64
 	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedAt: see
 	// VariantMetadata.UnplacedReplicas.
 	UnplacedReplicas int

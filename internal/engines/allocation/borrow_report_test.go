@@ -106,6 +106,9 @@ var _ = Describe("what on-call sees of borrowing", func() {
 		})
 	})
 
+	// The reason shown is the first that holds in the B1 table order
+	// (kueue.Precedence): cohort-pool-empty and no-borrow-cap precede
+	// preemptions-unreadable.
 	It("marks the budgets of a namespace whose preemptions could not be read, keeping a reason that holds anyway", func() {
 		budgets := []LimiterBudget{
 			{Namespace: "a", Borrowable: 8},
@@ -117,7 +120,7 @@ var _ = Describe("what on-call sees of borrowing", func() {
 		MarkPreemptionsUnreadable(budgets, map[string]bool{"a": true})
 		Expect(budgets).To(Equal([]LimiterBudget{
 			{Namespace: "a", Reason: BorrowReasonPreemptionsUnreadable},
-			{Namespace: "a", Accelerator: "A100", Reason: BorrowReasonPreemptionsUnreadable},
+			{Namespace: "a", Accelerator: "A100", Reason: BorrowReasonPoolEmpty},
 			{Namespace: "a", Accelerator: "L4", Reason: BorrowReasonNoBorrowCap},
 			{Namespace: "a", Accelerator: "T4", Reason: string(kueue.ReasonNotKueueManaged)},
 			{Namespace: "b", Borrowable: 4},

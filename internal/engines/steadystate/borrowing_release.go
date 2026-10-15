@@ -26,6 +26,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
@@ -86,6 +87,34 @@ func (e *Engine) borrowBlocked() func(namespace, modelID, variant string) bool {
 	}
 }
 
+// borrowBlockedIn is the greedy optimizer's per-(model, cohort) block for this
+// cycle -- the backed-off cooldown after preemptions or placement timeouts
+// (B12) -- nil when the cycle borrows nothing.
+func (e *Engine) borrowBlockedIn() func(namespace, modelID, cohort string) bool {
+	g, now := e.borrowing.governor, e.borrowing.cycle.Now
+	if g == nil || now.IsZero() {
+		return nil
+	}
+	return func(namespace, modelID, cohort string) bool {
+		return g.BorrowBlockedIn(namespace, modelID, cohort, now)
+	}
+}
+
+// borrowedByModel is, per "namespace/model", the GPUs the last pass drew from
+// the cohorts' shared pools; nil when the cycle counts no borrowing.
+func (e *Engine) borrowedByModel(optimizer allocation.ScalingOptimizer, constraints []*allocation.ResourceConstraints) map[string]int {
+	if !allocation.HasBorrowing(constraints) {
+		return nil
+	}
+	out := map[string]int{}
+	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
+		for _, d := range g.BorrowDraws() {
+			out[d.Namespace+"/"+d.ModelID] += d.GPUs
+		}
+	}
+	return out
+}
+
 // releaseBorrowed runs the governor's half after every stage that sets a
 // target: releases lower the decisions and stay in force until they land. Each
 // is logged, counted and recorded as an Event; the ledger is persisted when it
@@ -113,7 +142,9 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 				"the smallest unit that keeps the model serviceable is larger than what it borrows",
 				"namespace", r.Namespace, "modelID", r.ModelID, "cause", string(r.Cause), "guaranteedGPUs", r.GuaranteedGPUs)
 		}
+		metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
 		acc := scaleTargets[r.Namespace+"/"+r.Variant]
+		e.borrowReleasedEvent(r, acc)
 		if acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
 			e.checkLWSScaleDown(ctx, r, acc)
 		}
@@ -231,12 +262,20 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 	logger := ctrl.LoggerFrom(ctx)
 	cooldown := e.borrowSettings().Cooldown
 	namespaces := map[string]bool{}
+	st.cohortsByNS = map[string][]string{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		for ns := range c.NamespaceBorrow {
 			namespaces[ns] = true
+		}
+		for ns, cs := range c.NamespaceCohorts {
+			for _, co := range cs {
+				if !slices.Contains(st.cohortsByNS[ns], co) {
+					st.cohortsByNS[ns] = append(st.cohortsByNS[ns], co)
+				}
+			}
 		}
 	}
 	var unknown map[string]bool
@@ -446,7 +485,8 @@ func (e *Engine) markPreemption(ctx context.Context, ns, model string, uids []ty
 	if now.Sub(at) > e.borrowSettings().Cooldown {
 		return // found again after a restart: its cooldown is over
 	}
-	st.governor.MarkPreempted(model, at)
+	st.governor.MarkPreemptedIn(model, st.cohortsByNS[ns], at)
+	e.recordReclaim(model, w, now, key)
 	ctrl.LoggerFrom(ctx).Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
 		"modelID", model, "uid", string(uids[0]), "preemption", key, "preemptedAt", at)
 }

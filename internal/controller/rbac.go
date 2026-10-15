@@ -93,6 +93,13 @@ package controller
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get
 //
+// Whether a Kueue leader runs is read from its leader-election Lease
+// (kueue.ControllerLease) in the Kueue namespace: get only. A namespace-scoped
+// install gets it, with the kueue-controller-manager Deployment, from a Role in
+// the Kueue namespace the prereqs phase creates; without either, borrowing
+// freezes (kueue-controller-down).
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get
+//
 // The placement timeout of a borrowed replica waits while the cluster
 // autoscaler reports TriggeredScaleUp on its pod (B5): Events are read, get and
 // list only, never watched.

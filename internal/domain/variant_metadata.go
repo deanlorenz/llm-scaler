@@ -86,6 +86,14 @@ type VariantMetadata struct {
 	// replica only if it satisfies every entry. Nil when no template
 	// constrains its nodes.
 	Placements []PodPlacement
+	// ReplicaRequests is what one replica's pods request in all of each
+	// resource, in milli-units (resource.Quantity's MilliValue): a container
+	// that sets only a limit requests the limit, an init container counts only
+	// when larger. A resource no container of the template names is absent:
+	// its request is not known (a LimitRange may set it), so Kueue borrowing
+	// is not counted for a co-resource it is (co-resource-bound). Nil when the
+	// template could not be read.
+	ReplicaRequests map[string]int64
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -131,6 +139,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		Tolerations:      m.Tolerations,
 		TopologyKey:      m.TopologyKey,
 		Placements:       m.Placements,
+		ReplicaRequests:  m.ReplicaRequests,
 		UnplacedReplicas: m.UnplacedReplicas,
 		UnplacedSince:    m.UnplacedSince,
 		UnplacedPods:     m.UnplacedPods,

@@ -86,6 +86,9 @@ type BorrowLedger struct {
 	ModelCooldown  map[string]time.Time `json:"modelCooldown,omitempty"`
 	TimeoutHeld    map[string]int       `json:"timeoutHeld,omitempty"`
 	IdleSince      *time.Time           `json:"idleSince,omitempty"`
+	// Backoff is the per (model, cohort) cooldowns, keyed
+	// "namespace/model@cohort" (B12).
+	Backoff map[string]BackoffEntry `json:"backoff,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -142,7 +145,15 @@ type BorrowGovernor struct {
 	// GPUs past its guaranteed figure, as Observe saw it: the earliest a pod
 	// of it can have been unplaced as a borrowed one (observePast).
 	pastSince map[string]time.Time
-	started   bool
+	// rawWaiting is the cohorts where, in the last fresh read, some lender
+	// waits: new borrowing stops there at the first sighting (B2, B6). The
+	// debounce (waiting) applies only to the alert and the cohort cooldown.
+	rawWaiting map[string]bool
+	// backoff is, per "namespace/model@cohort", the model's cooldown in that
+	// cohort after a preemption or a placement-timeout release, and how many
+	// times it doubled (B12).
+	backoff map[string]BackoffEntry
+	started bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
@@ -155,6 +166,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		cohortCooldown: map[string]time.Time{}, modelCooldown: map[string]time.Time{},
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
 		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{},
+		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{},
 	}
 }
 
@@ -196,6 +208,13 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) int {
 		}
 		if _, held := g.timeoutHeld[k]; !held && to >= 0 && strings.Contains(k, "/") {
 			g.timeoutHeld[k] = stickyRelease{to: to}
+		}
+	}
+	for _, k := range boundedKeys(l.Backoff, &dropped) {
+		e := l.Backoff[k]
+		if _, held := g.backoff[k]; !held && strings.Contains(k, "@") && !e.Until.IsZero() &&
+			e.Level >= 0 && e.Level <= maxBackoffLevel {
+			g.backoff[k] = e
 		}
 	}
 	if l.IdleSince != nil && g.idleSince.IsZero() && !g.started {
@@ -246,6 +265,16 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 		at := g.idleSince.UTC()
 		out.IdleSince = &at
 	}
+	if len(g.backoff) > 0 {
+		out.Backoff = make(map[string]BackoffEntry, len(g.backoff))
+		for k, e := range g.backoff {
+			until := e.Until.Truncate(time.Minute)
+			if until.Before(e.Until) {
+				until = until.Add(time.Minute)
+			}
+			out.Backoff[k] = BackoffEntry{Until: until.UTC(), Level: e.Level, LastAt: e.LastAt.Truncate(time.Second).UTC()}
+		}
+	}
 	return out
 }
 
@@ -290,18 +319,130 @@ func UnmarshalBorrowLedger(s string) (BorrowLedger, error) {
 // MarkPreempted starts the model's cooldown from at, when Kueue preempted one
 // of its borrowed pods: a preemption found again after a restart cools down
 // only for what is left of its cooldown, and never shortens a later one.
-// modelKey is "namespace/model".
+// modelKey is "namespace/model". It holds in every cohort; MarkPreemptedIn
+// backs off per cohort.
 func (g *BorrowGovernor) MarkPreempted(modelKey string, at time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.markModelCooldown(modelKey, at)
+}
+
+func (g *BorrowGovernor) markModelCooldown(modelKey string, at time.Time) {
 	if until := at.Add(g.settings.Cooldown); until.After(g.modelCooldown[modelKey]) {
 		g.modelCooldown[modelKey] = until
 	}
 }
 
+// MarkPreemptedIn is MarkPreempted for a model whose namespace borrows in
+// cohorts: the cooldown backs off per (model, cohort) (B12). Without a cohort
+// it is MarkPreempted.
+func (g *BorrowGovernor) MarkPreemptedIn(modelKey string, cohorts []string, at time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.markBackoff(modelKey, cohorts, at)
+}
+
+// BackoffEntry is one (model, cohort)'s borrowing cooldown: until when, how
+// many times it doubled, and the event that last started it.
+type BackoffEntry struct {
+	Until  time.Time `json:"until"`
+	Level  int       `json:"level,omitempty"`
+	LastAt time.Time `json:"lastAt"`
+}
+
+// Backoff bounds (B12): the cooldown doubles on a repeat up to four times its
+// setting, never past maxBackoff -- unless the setting itself is longer.
+const (
+	maxBackoffLevel = 2
+	maxBackoff      = 40 * time.Minute
+	// sameEvent is how close two marks must be to be one event: the pods of
+	// one preempted group arrive one by one, and must not double it per pod.
+	sameEvent = time.Minute
+)
+
+// backoffFor is the cooldown at a backoff level.
+func (g *BorrowGovernor) backoffFor(level int) time.Duration {
+	return min(g.settings.Cooldown<<level, max(maxBackoff, g.settings.Cooldown))
+}
+
+// markBackoff starts the cooldown of modelKey in each cohort from at: a repeat
+// -- an event during the cooldown, or within one cooldown after it ended --
+// doubles it, up to maxBackoffLevel; one clean cooldown resets it (pruneClocks
+// forgets the entry). An event at the same time as the last (sameEvent), or
+// older, starts nothing new, and nothing shortens a cooldown in force.
+func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.Time) {
+	if len(cohorts) == 0 {
+		g.markModelCooldown(modelKey, at)
+		return
+	}
+	for _, c := range cohorts {
+		k := modelKey + "@" + c
+		e, ok := g.backoff[k]
+		if ok && at.Sub(e.LastAt) < sameEvent {
+			continue
+		}
+		level := 0
+		if ok && at.Before(e.Until.Add(g.settings.Cooldown)) {
+			level = min(e.Level+1, maxBackoffLevel)
+		}
+		until := at.Add(g.backoffFor(level))
+		if ok && e.Until.After(until) {
+			until = e.Until
+		}
+		g.backoff[k] = BackoffEntry{Until: until, Level: level, LastAt: at}
+	}
+}
+
+// BorrowBlockedIn reports whether the model may not draw on cohort's pools
+// now: its cooldown there, after a preemption or a placement-timeout release,
+// has not ended.
+func (g *BorrowGovernor) BorrowBlockedIn(namespace, modelID, cohort string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e, ok := g.backoff[namespace+"/"+modelID+"@"+cohort]
+	return ok && now.Before(e.Until)
+}
+
+// CoolingDown reports whether the model borrows nothing new now in some
+// cohort, or in all of them: a preemption or a placement-timeout release
+// started its cooldown, which has not ended.
+func (g *BorrowGovernor) CoolingDown(namespace, modelID string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	key := namespace + "/" + modelID
+	if until, ok := g.modelCooldown[key]; ok && now.Before(until) {
+		return true
+	}
+	for k, e := range g.backoff {
+		if strings.HasPrefix(k, key+"@") && now.Before(e.Until) {
+			return true
+		}
+	}
+	return false
+}
+
+// namespaceCohorts is the cohorts constraints map ns to, sorted, once each.
+func namespaceCohorts(constraints []*ResourceConstraints, ns string) []string {
+	var out []string
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for _, co := range c.NamespaceCohorts[ns] {
+			if !slices.Contains(out, co) {
+				out = append(out, co)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // BlockedCohorts is the cohorts where nothing new may be borrowed now: a
-// lender waited within the cooldown. Kueue is reclaiming for it what it lent,
-// and new borrowing would only be preempted in turn.
+// lender waits in the last fresh read -- the raw signal, at its first
+// sighting, not debounced (B2) -- or a lender's debounced wait put the cohort
+// in its cooldown. Kueue is reclaiming for it what it lent, and new borrowing
+// would only be preempted in turn.
 func (g *BorrowGovernor) BlockedCohorts(now time.Time) map[string]bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -310,6 +451,9 @@ func (g *BorrowGovernor) BlockedCohorts(now time.Time) map[string]bool {
 		if now.Before(until) {
 			out[c] = true
 		}
+	}
+	for c := range g.rawWaiting {
+		out[c] = true
 	}
 	return out
 }
@@ -359,14 +503,21 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 	// stale one.
 	listed := map[string]bool{}
 	anyStale := false
+	raw := map[string]bool{}
 	for _, ch := range chunks {
 		listed[ch.key()] = !ch.Stale
 		anyStale = anyStale || ch.Stale
+		if ch.Stale && g.rawWaiting[ch.Cohort] {
+			raw[ch.Cohort] = true // frozen: the last fresh sighting stands
+		}
 		for _, l := range ch.Lenders {
 			key := LenderKey{Cohort: ch.Cohort, Lender: l.Queue, Flavor: ch.Flavor, Resource: ch.Resource}
 			seen[key] = true
 			if ch.Stale {
 				continue // frozen: nothing about this lender changes
+			}
+			if l.Waiting {
+				raw[ch.Cohort] = true
 			}
 			g.observeLender(key, l.Waiting, ch.ReadAt, c.Now)
 			if g.waiting(key, c.Now) {
@@ -374,6 +525,7 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 			}
 		}
 	}
+	g.rawWaiting = raw
 	// known is a pool read fresh this cycle, or one no longer listed in a cycle
 	// that read nothing stale (its cohort or flavor went).
 	known := func(fk string) bool {
@@ -421,6 +573,15 @@ func (g *BorrowGovernor) observePast(c BorrowCycle) {
 // pruneClocks drops expired cooldowns and clamps one further away than the
 // cooldown (a restored, or changed, setting).
 func (g *BorrowGovernor) pruneClocks(now time.Time) {
+	for k, e := range g.backoff {
+		switch {
+		case !now.Before(e.Until.Add(g.settings.Cooldown)):
+			delete(g.backoff, k) // a clean cooldown since it ended: reset
+		case e.Until.Sub(now) > g.backoffFor(maxBackoffLevel):
+			e.Until = now.Add(g.backoffFor(maxBackoffLevel))
+			g.backoff[k] = e
+		}
+	}
 	for _, m := range []map[string]time.Time{g.cohortCooldown, g.modelCooldown} {
 		for k, until := range m {
 			switch {
@@ -508,6 +669,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 	}
 	if now.Sub(g.idleSince) > g.settings.Cooldown+g.settings.ReleaseActuation {
 		clear(g.watches)
+		clear(g.rawWaiting)
 		clear(g.timeoutHeld)
 		clear(g.pastSince)
 		g.started = false
@@ -600,7 +762,7 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 				below = 0
 			}
 			heldPast[req.Namespace][typeKey] -= gpus
-			g.modelCooldown[req.Namespace+"/"+req.ModelID] = c.Now.Add(g.settings.Cooldown)
+			g.markBackoff(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now)
 			break // one release per model per cycle: the counts above are now stale
 		}
 	}

@@ -361,8 +361,20 @@ warn_unadvertised_accelerators() {
 # the install after it had already re-applied the shipped ConfigMap, leaving the
 # policy with no limiters at all. Paired with limiter_entry_yaml here so the
 # offline check exercises the same transform the install runs.
+#
+# A re-run KEEPS kueue.borrowNamespaces, and kueue.countBorrowable when
+# WVA_QUOTA_KUEUE_BORROW is not given, from the quota entry it replaces: the
+# pilot list is written by hand into the live policy, and no install variable
+# carries it, so rebuilding the entry used to drop it -- and with it the pilot,
+# turning borrowing on for every namespace. The entry kept from is the old
+# quota entry of the same name that has a kueue block, else the only old one
+# that has. The old list is the policy own .limiters, or LIMITERS_KEEP_FROM
+# when set: the installer passes the list it read BEFORE its apply reset the
+# policy (WVA_LIVE_LIMITERS), since by the time it composes the live policy
+# carries none.
 policy_with_limiters() {
-    local out program
+    local out program keep_count=true
+    [ -n "${WVA_QUOTA_KUEUE_BORROW:-}" ] && keep_count=false
     if [ "${3:-}" = "compose" ]; then
         # Drop the current entries of each kind the new list declares, then
         # append the new list.
@@ -375,7 +387,21 @@ policy_with_limiters() {
     else
         program='.limiters = (strenv(LIMITERS_YAML) | from_yaml)'
     fi
-    out="$(printf '%s\n' "$1" | LIMITERS_YAML="$2" yq "$program")" || {
+    # The Kueue pilot settings of the entry being replaced (see above).
+    program='(.limiters // []) as $live
+        | ((strenv(KEEP_FROM) | select(. != "") | from_yaml) // $live) as $old
+        | ($old | map(select(.type == "quota" and .kueue != null))) as $oldq
+        | '"$program"'
+        | .limiters |= ((. // []) | map(
+            . as $e
+            | ((($oldq | map(select(.name == $e.name))) + ($oldq | map(select(($oldq | length) == 1)))) | .[0]) as $o
+            | [(select(.type == "quota" and .kueue != null and .kueue.borrowNamespaces == null
+                    and ($o | .kueue.borrowNamespaces) != null)
+                | .kueue.borrowNamespaces = ($o | .kueue.borrowNamespaces)), .] | .[0]
+            | [(select(.type == "quota" and .kueue != null and .kueue.countBorrowable == null
+                    and strenv(KEEP_COUNT) == "true" and ($o | .kueue.countBorrowable) != null)
+                | .kueue.countBorrowable = ($o | .kueue.countBorrowable)), .] | .[0]))'
+    out="$(printf '%s\n' "$1" | LIMITERS_YAML="$2" KEEP_FROM="${LIMITERS_KEEP_FROM:-}" KEEP_COUNT="$keep_count" yq "$program")" || {
         log_error "could not merge the limiter entry into the policy. The entry was:
 $2"
     }

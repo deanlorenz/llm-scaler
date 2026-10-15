@@ -62,6 +62,12 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+- apiGroups:
   - inference.networking.k8s.io
   - inference.networking.x-k8s.io
   resources:

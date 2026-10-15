@@ -19,6 +19,11 @@
 #   resourceflavors,      `kueue.enabled`; components/kueue-reader grants them,
 #   cohorts               applied by the prereqs phase like node-reader. The
 #                         namespaced half, localqueues and workloads, is below.
+#   leases, and the       in the KUEUE namespace, read by name for Kueue
+#   kueue-controller-     borrowing (liveness and version): a Role there that
+#   manager Deployment    the prereqs phase creates
+#                         (pl_grant_kueue_controller_read). Denied, borrowing
+#                         freezes as kueue-controller-down.
 #
 # Everything else — pods, services, configmaps, deployments, replicasets,
 # statefulsets, deployments/scale, jobs, resourcequotas, inferencepools,

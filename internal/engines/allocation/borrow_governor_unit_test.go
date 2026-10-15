@@ -385,13 +385,14 @@ var _ = Describe("BorrowGovernor release units", func() {
 			l, err := UnmarshalBorrowLedger(raw)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(l.ModelCooldown).To(HaveKey("b/m"))
-			Expect(l.ModelCooldown).To(HaveKey("b/x"))
+			Expect(l.Backoff).To(HaveKey("b/x@c"), "a placement-timeout release backs the model off in its cohort")
 			Expect(l.TimeoutHeld).To(HaveKeyWithValue("b/x-v", 1))
 
 			restarted := NewBorrowGovernor(settings)
 			restarted.Restore(l)
 			now := t0.Add(7 * time.Minute)
 			Expect(restarted.BorrowBlocked("b", "m", "m-v", now)).To(BeTrue(), "the preemption cooldown survives the restart")
+			Expect(restarted.BorrowBlockedIn("b", "x", "c", now)).To(BeTrue(), "the backoff survives the restart")
 			held := []ModelScalingRequest{govModel("x", 2, 8)}
 			ds := decisionsOf(held)
 			restarted.HoldReleases(now, held, ds)

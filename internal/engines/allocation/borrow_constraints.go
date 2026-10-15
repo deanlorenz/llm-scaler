@@ -47,6 +47,14 @@ type NamespaceBorrow struct {
 	// nothing new, and its cohort's lenders are still read, so their wait still
 	// stops new borrowing. Empty otherwise.
 	Withheld string
+	// PinRequired is set when a variant of the type must pin one of PinLabels
+	// -- the nodeLabels of the flavors its queues offer the type on -- to be
+	// counted (kueue.ReasonFlavorUnpinned): a queue offers more than one
+	// flavor for the GPU, or sets flavorFungibility.whenCanBorrow Borrow or
+	// MayStopSearch. A flavor without nodeLabels cannot be pinned and is not
+	// listed.
+	PinRequired bool
+	PinLabels   []map[string]string
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A
@@ -67,6 +75,14 @@ type SharedPoolChunk struct {
 	// Stale marks a chunk frozen over a stale read: Free is 0, and nothing
 	// about its lenders may change what has been decided.
 	Stale bool
+	// PendingGPUs is what every member queue's pending Workloads ask of this
+	// chunk, whichever namespace or controller they belong to (B8): taken out
+	// of Free before the optimizer runs (DeductUnreserved).
+	PendingGPUs int
+	// CoFree is, per other resource the flavor's resource group covers, the
+	// cohort's free pool of it in milli-units: a borrowed replica must fit it
+	// too, and is debited its per-replica request (B1).
+	CoFree map[string]int64
 }
 
 // key identifies a chunk across providers that read the same cohort.
@@ -88,6 +104,22 @@ func HasBorrowing(constraints []*ResourceConstraints) bool {
 	return slices.ContainsFunc(constraints, func(c *ResourceConstraints) bool {
 		return c != nil && c.NamespaceBorrow != nil
 	})
+}
+
+// NominalLentOut is the nominal of ns's queues that a peer holds and they
+// cannot reclaim (NamespaceBorrow.NominalLentOut), summed over constraints and
+// types.
+func NominalLentOut(constraints []*ResourceConstraints, ns string) int {
+	n := 0
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for _, b := range c.NamespaceBorrow[ns] {
+			n += b.NominalLentOut
+		}
+	}
+	return n
 }
 
 // WithinNominal returns copies of constraints for the consumers that must never
@@ -214,6 +246,7 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 			}
 			chunk := p
 			chunk.Lenders = slices.Clone(p.Lenders)
+			chunk.CoFree = maps.Clone(p.CoFree)
 			byKey[p.key()] = &chunk
 		}
 		for ns, cs := range c.NamespaceCohorts {
@@ -235,6 +268,15 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 // (mergeSharedPools).
 func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	prev.Free = min(prev.Free, p.Free)
+	prev.PendingGPUs = max(prev.PendingGPUs, p.PendingGPUs)
+	for res, n := range p.CoFree {
+		if have, ok := prev.CoFree[res]; !ok || n < have {
+			if prev.CoFree == nil {
+				prev.CoFree = map[string]int64{}
+			}
+			prev.CoFree[res] = n
+		}
+	}
 	prev.Stale = prev.Stale || p.Stale
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt

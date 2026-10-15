@@ -56,6 +56,11 @@ CLUSTER_SCOPED = {
     # components/kueue-reader. Denied, borrowing reads hierarchy-unknown and is
     # not counted; the nominal Kueue bound is unaffected.
     ("kueue.x-k8s.io", "cohorts"),
+    # The Kueue controller's leader-election Lease: namespaced, but in the
+    # Kueue namespace, which the tenant Role cannot reach. The prereqs phase
+    # grants it by name with a Role there (pl_grant_kueue_controller_read).
+    # Denied, borrowing freezes as kueue-controller-down.
+    ("coordination.k8s.io", "leases"),
 }
 
 

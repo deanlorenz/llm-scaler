@@ -2719,6 +2719,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# the optimizer block and strand the marks, and parses perfectly.
 	@bash -n deploy/utilization-share.sh
 	@bash hack/check-utilization-share-script.sh
+	@echo "Checking a rebuilt Kueue quota entry keeps its borrowing settings..."
+	@# Executes policy_with_limiters. A re-run that drops a hand-written
+	@# borrowNamespaces turns a pilot into borrowing everywhere, and the
+	@# document it writes is perfectly valid.
+	@bash hack/check-kueue-borrow-keep.sh
 	@echo "Checking workload readiness detection..."
 	@# Executes the real functions against fixture pod specs. `bash -n` above
 	@# cannot see any of what this covers: choosing the wrong container, counting

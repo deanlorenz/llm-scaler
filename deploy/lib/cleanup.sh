@@ -167,6 +167,16 @@ EOF
         wva_remove_pod_writers "$WVA_NS"
     fi
 
+    # The Kueue controller read lives in the Kueue namespace, outside the
+    # overlay (pl_grant_kueue_controller_read), so the filtered delete above
+    # never names it.
+    local kueue_rb kueue_err
+    kueue_rb="wva-kueue-controller-reader-$(wva_ns_suffix "$WVA_NS")"
+    kueue_err="$(kubectl delete role,rolebinding "$kueue_rb" -n "${KUEUE_NAMESPACE:-kueue-system}" --ignore-not-found 2>&1 >/dev/null)" && kueue_err=""
+    if [ -n "$kueue_err" ]; then
+        log_warning "Could not remove Role/RoleBinding $kueue_rb in ${KUEUE_NAMESPACE:-kueue-system}: $kueue_err"
+    fi
+
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a
     # reinstall would restore peaks recorded before the uninstall. Deleted

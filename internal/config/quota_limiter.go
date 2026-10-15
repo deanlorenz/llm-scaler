@@ -161,6 +161,13 @@ type KueueQuotaSource struct {
 	// (kueue-controller-manager), whose image tag tells the Kueue version
 	// borrowing is checked against. Empty means kueue-system.
 	ControllerNamespace string `yaml:"controllerNamespace,omitempty" json:"controllerNamespace,omitempty"`
+
+	// AssumeTestedVersion counts borrowing under a Kueue controller whose image
+	// names no version (a digest-only reference), as if it were a tested one.
+	// Default false: such a version withholds borrowing
+	// (kueue-version-unknown). It applies only to a version that cannot be
+	// read from a readable Deployment, and never lifts kueue-controller-down.
+	AssumeTestedVersion bool `yaml:"assumeTestedVersion,omitempty" json:"assumeTestedVersion,omitempty"`
 }
 
 // KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
@@ -169,8 +176,30 @@ func (q QuotaLimiterConfig) KueueBorrowSelected(ns string) bool {
 	return q.Kueue == nil || len(q.Kueue.BorrowNamespaces) == 0 || slices.Contains(q.Kueue.BorrowNamespaces, ns)
 }
 
+// HasUnlimitedCap reports whether the entry's static caps, in its scope, leave
+// some accelerator type unlimited (QuotaUnlimited, -1): only an external
+// source then bounds that type.
+func (q QuotaLimiterConfig) HasUnlimitedCap() bool {
+	if q.Scope == QuotaScopeCluster {
+		for _, v := range q.ClusterQuotas {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+		return false
+	}
+	for _, perType := range q.NamespaceQuotas {
+		for _, v := range perType {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Defaults of the borrowing timings (the Kueue borrowing proposal, PR #161,
-// B5 and B6). The placement timeout and the cooldown are first guesses, to be
+// B5). The placement timeout and the cooldown are first guesses, to be
 // replaced by figures the live-Kueue e2e measures.
 const (
 	DefaultPlacementTimeout = 5 * time.Minute
@@ -374,8 +403,9 @@ type ExternalQuotas struct {
 	// borrowing row then carries the stale reason, and a quota entry that counts
 	// borrowing treats the snapshot as stale -- it freezes, never shrinks.
 	BorrowStale bool
-	// KueueControllerDown is set when the Kueue controller's Deployment reports
-	// no ready replica, or is gone, while Kueue's API still answers: the
+	// KueueControllerDown is set when no Kueue leader is known to run (its
+	// leader Lease not renewed, or without one no ready replica, or neither
+	// readable: Forbidden or never found), while Kueue's API still answers: the
 	// figures are readable but stop moving. A quota entry that counts
 	// borrowing freezes, as on a stale snapshot, and reports every governed
 	// namespace withheld with reason kueue-controller-down.
@@ -407,6 +437,13 @@ type ExternalSharedPool struct {
 	// Lenders is every active member declaring this key, for the release of
 	// borrowed capacity to a lender that waits (B6).
 	Lenders []ExternalLender `json:"lenders,omitempty"`
+	// PendingGPUs is what the pending Workloads of every member queue request
+	// of this flavor and resource: demand Kueue may admit onto the free pool
+	// first, whichever namespace or controller it belongs to.
+	PendingGPUs int `json:"pendingGPUs,omitempty"`
+	// CoFree is the cohort's free pool of every other resource the flavor's
+	// resource group covers (CPU, memory, ...), in milli-units.
+	CoFree map[string]int64 `json:"coFree,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.
@@ -451,6 +488,10 @@ type ExternalBorrow struct {
 	// logged as a cross-check.
 	SourceBorrowed int    `json:"kueueBorrowed"`
 	Reason         string `json:"reason,omitempty"`
+	// PinRequired is set when a variant must pin a flavor's nodeLabels for its
+	// borrowing to be counted: the queue offers more than one flavor for the
+	// GPU, or sets flavorFungibility.whenCanBorrow Borrow or MayStopSearch.
+	PinRequired bool `json:"pinRequired,omitempty"`
 }
 
 // Counted reports whether the row's borrowing is counted: no reason, or only

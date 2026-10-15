@@ -24,10 +24,13 @@ import (
 
 const h100Product = "NVIDIA-H100-80GB-HBM3"
 
-// cohortMapper is kueueMapper that also serves the Cohort kind.
+// cohortMapper is kueueMapper that also serves the Cohort and Workload kinds:
+// a cluster with cohorts is read for its Workloads, and one that does not
+// serve them reads as lenders-unreadable.
 func cohortMapper(version string) meta.RESTMapper {
 	m := kueueMapper(version).(*meta.DefaultRESTMapper)
 	m.Add(schema.GroupVersionKind{Group: Group, Version: version, Kind: KindCohort}, meta.RESTScopeRoot)
+	m.Add(schema.GroupVersionKind{Group: Group, Version: version, Kind: KindWorkload}, meta.RESTScopeNamespace)
 	return m
 }
 
@@ -161,8 +164,42 @@ var _ = Describe("Reader borrowing figures", func() {
 
 	It("reads hierarchy-unknown, never flat, when the Cohort kind is not served", func() {
 		const v = "v1beta2"
-		snap := readBorrow(newFakeClient(v, docsExample(v, "cohortName")...))
+		m := kueueMapper(v).(*meta.DefaultRESTMapper)
+		m.Add(schema.GroupVersionKind{Group: Group, Version: v, Kind: KindWorkload}, meta.RESTScopeNamespace)
+		c := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(m).
+			WithObjects(docsExample(v, "cohortName")...).Build()
+		snap := readBorrow(c)
 		Expect(snap.Borrow["team-a"][0].Reason).To(Equal(string(ReasonHierarchyUnknown)))
+	})
+
+	// B3: a cluster whose Workloads cannot be read cluster-wide -- not
+	// served, Forbidden, or a namespace-scoped install -- cannot see a lender
+	// wait, so borrowing is withheld; it wins over the cohort's reasons below
+	// it in the table.
+	It("withholds as lenders-unreadable when the Workloads are not read cluster-wide", func() {
+		const v = "v1beta2"
+		reason := func(c client.Client, opts Options) string {
+			snap, err := NewReader(c, opts).Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.Borrow["team-a"][0].Reason
+		}
+		Expect(reason(newFakeClient(v, docsExample(v, "cohortName")...), Options{})).To(Equal(string(ReasonLendersUnreadable)),
+			"not served (NoMatch), and the Cohort kind neither: the first in table order")
+		denied := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(cohortMapper(v)).
+			WithObjects(docsExample(v, "cohortName")...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindWorkload+"List" {
+						return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "workloads"}, "", errors.New("no RBAC"))
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			}).Build()
+		Expect(reason(denied, Options{})).To(Equal(string(ReasonLendersUnreadable)), "Forbidden is not absent")
+		Expect(reason(newCohortClient(v, docsExample(v, "cohortName")...), Options{Namespace: "team-a"})).
+			To(Equal(string(ReasonLendersUnreadable)), "a namespace-scoped controller sees its own namespace only")
+		Expect(reason(newCohortClient(v, docsExample(v, "cohortName")...), Options{})).
+			To(Equal(string(ReasonNominalLentOut)), "control: read cluster-wide, counted")
 	})
 
 	It("reads hierarchy-unknown on a Forbidden Cohort list, and the read still succeeds", func() {
