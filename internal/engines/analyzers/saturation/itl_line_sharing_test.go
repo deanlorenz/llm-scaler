@@ -186,14 +186,14 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		Expect(a.noteITL(keyB, tenOn("decode-b", 0.22), "decode-b",
 			a.now(), logr.Discard()).IsZero()).To(BeFalse())
 
-		Expect(a.itlWindows).To(HaveLen(2), "one window per variant, not one shared")
-		Expect(a.itlWindows[keyA].Len()).To(Equal(10),
+		Expect(a.itlWindowLens()).To(HaveLen(2), "one window per variant, not one shared")
+		Expect(a.itlWindowLens()[keyA]).To(Equal(10),
 			"A's window holds A's ten readings and only those")
-		Expect(a.itlWindows[keyB].Len()).To(Equal(10))
+		Expect(a.itlWindowLens()[keyB]).To(Equal(10))
 
-		Expect(a.itlBaseline).To(HaveLen(2))
-		Expect(a.itlBaseline).To(HaveKey(keyA))
-		Expect(a.itlBaseline).To(HaveKey(keyB))
+		Expect(a.itlBaselines()).To(HaveLen(2))
+		Expect(a.itlBaselines()).To(HaveKey(keyA))
+		Expect(a.itlBaselines()).To(HaveKey(keyB))
 	})
 
 	It("records the measuring variant as the owner, not the borrower", func() {
