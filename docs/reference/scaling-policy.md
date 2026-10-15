@@ -85,12 +85,19 @@ only the decode of a P/D model with `pd-gpu`, and the untagged prefill parks,
 scales and wakes under `pd-gpu` too, not under `default`. `default` applies only
 when no variant of the model names a tier.
 
-**A bad value is skipped, not fatal.** This covers two fields:
+**A bad value is skipped, not fatal.** This covers these fields:
 
 - `scaleToZero.retentionPeriod` that is not a duration (for example
   `5 minutes`) or is shorter than 30s (for example `0s` or `10s`). A retention
   that short would park a model between two requests and wake it on the next.
 - `shapeChangeHoldSeconds` below zero.
+- A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
+  `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
+  `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`. An infinite `priority` or `score` does not put a model
+  first: under a GPU limiter it put the model last. For strict precedence, a
+  finite `priority` such as 5 is enough.
+- An analyzer `score` below zero.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in
