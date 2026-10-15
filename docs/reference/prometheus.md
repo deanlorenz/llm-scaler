@@ -403,9 +403,9 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Type**: Counter
 - **Description**: Total number of metrics collection errors
 - **Labels**:
-  - `query_type`: Type of metrics query that failed
-  - `reason`: Reason for the error
-- **Use Case**: Track metrics collection failures and identify problematic queries
+  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query
+  - `reason`: Reason for the error. For `pod_list`: `forbidden`, `unavailable` or `other`
+- **Use Case**: Track metrics collection failures and identify problematic queries. A failed `pod_list` makes the controller treat every Pod in that namespace as Ready and present for the cycle, so a not-Ready Pod's saturated reading can become its variant's k2; a steady rate of `pod_list` errors (`reason="forbidden"` after an RBAC change) is worth an alert
 - **Example**:
   ```json
   {

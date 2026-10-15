@@ -469,7 +469,7 @@ var _ = Describe("roleSaturated", func() {
 	roles := map[string]string{"d": domain.RoleDecode, "p": domain.RolePrefill, "": ""}
 	const cache = int64(1_162_240) // k1 at 0.8 = 929 792
 	row := func(variant string, queue int, tokens int64) []domain.ReplicaMetrics {
-		return []domain.ReplicaMetrics{{VariantName: variant, QueueLength: queue, TokensInUse: tokens, TotalKvCapacityTokens: cache}}
+		return []domain.ReplicaMetrics{{VariantName: variant, Ready: true, QueueLength: queue, TokensInUse: tokens, TotalKvCapacityTokens: cache}}
 	}
 	It("is full AND queued: the P1-obs admission test with the KV at its bound", func() {
 		Expect(roleSaturated(row("d", 5, 929_792), roles, domain.RoleDecode, 5, 0.8)).To(BeTrue(), "at the threshold, at k1")
@@ -481,13 +481,17 @@ var _ = Describe("roleSaturated", func() {
 			"resident tokens above the physical ceiling are the scrape artifact P1 discards as invalid")
 		Expect(roleSaturated(row("d", 50, 1_100_000), roles, domain.RoleDecode, 5, 0.8)).To(BeTrue(),
 			"between k1 and the ceiling is the most informative reading there is")
-		Expect(roleSaturated([]domain.ReplicaMetrics{{VariantName: "d", QueueLength: 50, TokensInUse: 1_000_000}},
+		Expect(roleSaturated([]domain.ReplicaMetrics{{VariantName: "d", Ready: true, QueueLength: 50, TokensInUse: 1_000_000}},
 			roles, domain.RoleDecode, 5, 0.8)).To(BeFalse(), "no cache size: cannot be judged, does not count")
 		Expect(roleSaturated(row("p", 50, 1_100_000), roles, domain.RoleDecode, 5, 0.8)).To(BeFalse(), "another role's saturation is not this one's")
 		Expect(roleSaturated(row("", 50, 1_100_000), roles, domain.RoleBoth, 5, 0.8)).To(BeTrue(), "an empty role is 'both'")
 		bridge := row("d", 50, 1_100_000)
 		bridge[0].FromWarmPool = true
 		Expect(roleSaturated(bridge, roles, domain.RoleDecode, 5, 0.8)).To(BeTrue(), "a full, queued bridge lent to decode is decode saturated")
+		unready := row("d", 50, 1_100_000)
+		unready[0].Ready = false
+		Expect(roleSaturated(unready, roles, domain.RoleDecode, 5, 0.8)).To(BeFalse(),
+			"a full, queued decode that is not Ready is routed nothing: its queue and KV are left over or frozen")
 		Expect(roleSaturated(nil, roles, domain.RoleDecode, 5, 0.8)).To(BeFalse())
 	})
 })

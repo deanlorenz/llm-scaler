@@ -928,6 +928,11 @@ const (
 	QueryTypeRequestCount = "request_count"
 	QueryTypeCacheConfig  = "cache_config"
 	QueryTypeArrivalRate  = "arrival_rate"
+	// QueryTypePodList is the collector's per-namespace Pod listing, which
+	// supplies readiness and deletion state. Not a Prometheus query: a failure
+	// is a Kubernetes API error (reason forbidden, unavailable or other), and
+	// the collector then treats every Pod as Ready and present for the cycle.
+	QueryTypePodList = "pod_list"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute
