@@ -66,7 +66,8 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 				}
 				continue
 			}
-			if !anyPoolFits(perType, need) && !(uncapped && len(perType) == 0) {
+			// An uncapped namespace with no type named anywhere has no bound.
+			if !anyPoolFits(perType, need) && (!uncapped || len(perType) > 0) {
 				return false
 			}
 			continue
