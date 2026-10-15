@@ -201,7 +201,7 @@ ships. With `mode: enforce`, the `analyzers:` list picks the mode:
 | `analyzers:` (with `mode: enforce`) | Mode | What decides |
 | --- | --- | --- |
 | `saturation` + `slo` | guard | per SO, the larger of the two replica counts |
-| `saturation {enabled: false}` + `slo` | sizer | the SLO; saturation where the SLO has no signal for that SO |
+| `saturation {enabled: false}` + `slo` | sizer | the SLO; a role the SLO cannot size holds where it is |
 
 Without `mode: enforce`, any list that includes `slo` is observe.
 
@@ -263,9 +263,9 @@ saturation's, not shared. `O` scales both `D` and `P`, so it largely cancels in
 1. **The branch landed**, with the three fixes the engine-structure review
    found (the #82 quota-charge regression; the saturation fallback skipping
    the per-SO `Reason` filter; that guard tested on the real
-   `buildComposite`). **`HeldRoleDemand` cannot be copied verbatim**: the
-   composite must record the winning contributor per SO, and carry the hold
-   only when saturation won every SO of that role.
+   `buildComposite`). `HeldRoleDemand` is handled per role (built, #167): kept
+   in saturation's frame, raised to the most demanding other analyzer's need,
+   and dropped where another analyzer's frame decides the role.
 2. **Saturation disabled only by an explicit `enabled: false`** (above).
 3. **`shadow: true`** (above), also left out of `maxScore`, or a shadowed
    `score` still moves cross-model priority.

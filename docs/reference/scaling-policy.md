@@ -1362,7 +1362,11 @@ One thing about turning it on **can** change scaling: a tier that lists
    `Scaling policy not found` for a tier name with no entry, and the model
    then runs on `default`. Saturation's `parameters:` and `score`,
    `queueLengthThreshold`, the scale-to-zero settings and the hold are not in
-   that line: compare those in the ConfigMap.
+   that line: compare those in the ConfigMap. Nor is the `analyzers:` list:
+   confirm the tier still lists `saturation`. A list of `slo` without
+   `saturation` holds the model where it is; check that
+   `wva_model_scaling_blocked{model_name="<model>", reason="no-composite-signal"}`
+   is absent and the log has no `no listed analyzer can size this model` line.
 
 **See the result**
 
@@ -1594,7 +1598,7 @@ registration order and invokes its `Analyze` method.
 >   `no-composite-signal` ([Prometheus](prometheus.md#wva_model_scaling_blocked));
 >   when it is one role, only the log says so (`composite holds a role`).
 > - **A listed analyzer misses a cycle.** For up to three cycles after its
->   last good reading (90s at the default 30s interval), the roles it covers
+>   last good reading (45s at the default 15s `GLOBAL_OPT_INTERVAL`), the roles it covers
 >   do not scale down, so one missed scrape from the analyzer asking for
 >   most replicas does not shrink the fleet. Scale-up still follows the
 >   others. Saturation's own grace works as it always has.

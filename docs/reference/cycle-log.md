@@ -1,8 +1,10 @@
 # llm-scaling-manager Cycle Log
 
-Each reconcile cycle, the saturation engine writes two INFO lines per model,
-and a third, `throughput-demand-floor`, on a cycle where the throughput floor
-changes a role's demand. They show what the analyzer and optimizer computed,
+Each reconcile cycle, the saturation engine writes these INFO lines per model:
+one `analyzer-result` for each analyzer that ran, one for the composite the
+optimizer acted on, and one `scaling-decision`; a `throughput-demand-floor`
+line on a cycle where the throughput floor changes a role's demand; and a
+`composite holds a role` line for each held role. They show what the analyzer and optimizer computed,
 with no debug logging needed.
 
 The log uses zap's development **console** format, not JSON: timestamp, level,
@@ -75,8 +77,8 @@ thing here.
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
   "analyzer": "CompositeSignal", "live": true, "supply": 2362173, "demand": 2688000, "util": 1.14,
   "rc": 800180, "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
-  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"C0-agree"},
-               {"name":"v2","prc":403391,"role":"both","reason":"C1-single"}]}
+  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"C0-agree","observed":1},
+               {"name":"v2","prc":403391,"role":"both","reason":"C1-single","observed":3}]}
 ```
 
 `demand` is in **saturation's units** always, so the numbers here are directly

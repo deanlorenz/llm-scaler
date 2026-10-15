@@ -346,14 +346,16 @@ it, the PRC of each variant another analyzer decided, and the holds:
   policy lists it (`ScalingPolicy.SaturationListed`: listed and enabled, or no
   `analyzers` section at all), and `slo` never is: it only observes. `Reason`
   records the path: `C0-agree` (several), `C1-single`, `C4-no-signal` (none).
-- **Pricing** (`priceRole`, per role). The role is priced in one frame,
-  saturation's or the other analyzers' (`Decision.Others`), whichever needs
-  more replicas for the fleet the role runs: the lower coverage, the sum over
-  its variants of replicas / N (1 per variant when it runs none), saturation's
-  on a tie. A variant the others do not size is read at saturation's ratio to
-  the variant they do. Mixing the two per variant asked for more than either
-  analyzer when saturation decided one accelerator and another analyzer the
-  other.
+- **Pricing** (`priceRole`, per role). The role is priced in one analyzer's
+  frame (`roleFrames`: saturation's, and one per other analyzer from
+  `Decision.Needs`), whichever needs more replicas for the fleet the role runs:
+  the lowest coverage, the sum over its variants of replicas / N (1 per variant
+  when it runs none), saturation's on a tie. A variant an analyzer does not
+  size is read at saturation's ratio to the variants it does. Mixing frames per
+  variant asked for more than any analyzer, and taking the largest need among
+  the others per variant let one analyzer's zero need veto another's. A
+  VERBOSE `composite-pricing` line names the frame and every frame's coverage
+  and demand.
   - *Saturation's frame:* its demand and PRCs stand. `HeldRoleDemand` is
     raised to the others' need in saturation's units,
     `D_sat x coverage_sat / coverage_others`, and dropped when that reaches
@@ -368,7 +370,13 @@ it, the PRC of each variant another analyzer decided, and the holds:
     (or is the role's demand, aggregated), the role's variants share it in
     saturation's proportions (evenly when it attributed none), their
     utilization follows, and `HeldRoleDemand` is dropped.
-  - With one variant per role either frame gives saturation's PRC. A need
+  - *Scale-down* is bounded by every frame (`boundSpare`): shedding X of the
+    chosen frame's capacity sheds at most `X x r` of frame f's, `r` the largest
+    `PRC_f / PRC_chosen` over the running variants, so the role's spare (the
+    model's on an aggregated model) is capped at `spare_f / r` for each f.
+    *Scale-up* follows the chosen frame alone: a variant it grows may leave
+    another frame short for one cycle, until the new replicas are read.
+  - With one variant per role every frame gives saturation's PRC. A need
     whose demand at saturation's PRC overflows is no reading. A need on a
     variant saturation has no PRC for is carried only in the others' frame;
     in saturation's it is logged as dropped.
@@ -384,8 +392,10 @@ it, the PRC of each variant another analyzer decided, and the holds:
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
   raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale
   pass (`rescaleModelDecisions`) also reads them: a role held both ways freezes
-  the model there, as in the share optimizer, and no role is reclaimed or
-  filled in a direction it is held against.
+  the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
+  such a model exactly its current GPUs in the water-fill, so the rest of the
+  budget goes to the others; no role is reclaimed or filled in a direction it
+  is held against.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply is still

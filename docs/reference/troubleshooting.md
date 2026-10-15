@@ -77,8 +77,9 @@ a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 [metrics](#metrics-stale-or-missing).
 
 **`no-composite-signal`**: no analyzer the policy lists could size any variant
-this cycle. With `saturation` listed, the model is still sized on saturation's
-measured capacity; without it, the model holds where it is, up and down. The
+this cycle. With `saturation` listed, the model is sized on saturation's own
+result, as before the composite existed; without it, the model holds where it
+is, up and down. The
 dashboard's *Models blocked from scaling* panel counts it.
 
 1. Check each listed analyzer reports the model:
