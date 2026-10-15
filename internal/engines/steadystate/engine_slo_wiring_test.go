@@ -3,6 +3,7 @@ package steadystate
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -219,26 +220,64 @@ func TestSLONamespacesReachTheCollectorEachCycle(t *testing.T) {
 	}
 }
 
-// TestRunningTheSLOAnalyzerNotesItsNamespace pins the producer side of that
-// gate: a model whose policy lists slo marks its namespace, and one whose
-// policy does not marks nothing.
-func TestRunningTheSLOAnalyzerNotesItsNamespace(t *testing.T) {
+// countingRouter is a router latency source that counts what it was asked.
+type countingRouter struct{ calls int }
+
+func (r *countingRouter) CollectRouterLatency(context.Context, string, string) *domain.RouterLatency {
+	r.calls++
+	return &domain.RouterLatency{WindowSeconds: 300,
+		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 3, Rate: 1}, {UpperBound: math.Inf(1), Rate: 1}}}
+}
+
+// TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt pins the zero-impact
+// promise at the engine, with the real analyzer: a model whose policy does not
+// list slo makes no router query, publishes no wva_slo_* series and marks no
+// namespace for the inputs only the analyzer reads; a model that lists it
+// does all three. (The collector half -- no prefill or queue-time query in an
+// unmarked namespace -- is pinned in the collector package.)
+func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	sloSeries := func() int {
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, mf := range mfs {
+			if strings.HasPrefix(mf.GetName(), "wva_slo_") {
+				n += len(mf.GetMetric())
+			}
+		}
+		return n
+	}
+	router := &countingRouter{}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	sloSpy := &fakeAnalyzerWithResult{analyzerName: domain.SLOAnalyzerName, result: &domain.AnalyzerResult{}}
 	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: sloSpy}}}
-	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
+	targets := &config.SLOPolicy{TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 3 * time.Second}}}
+	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, SLO: targets}
 	withSLO := plain
 	withSLO.Analyzers = []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}
+	states := []domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 1}}
 
-	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "batch", nil, plain, nil, nil, nil, nil, nil, 0); err != nil {
+	// Targets set, analyzer not listed: the half-configured case, which must
+	// still cost nothing.
+	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "batch", nil, plain, states, nil, nil, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "chat", nil, withSLO, nil, nil, nil, nil, nil, 0); err != nil {
+	if router.calls != 0 || sloSeries() != 0 || len(e.sloNamespaces) != 0 {
+		t.Fatalf("unlisted: %d router queries, %d slo series, slo namespaces %v; want none",
+			router.calls, sloSeries(), e.sloNamespaces)
+	}
+	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "chat", nil, withSLO, states, nil, nil, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if !e.sloNamespaces["chat"] || e.sloNamespaces["batch"] {
-		t.Fatalf("slo namespaces this cycle are %v, want only chat", e.sloNamespaces)
+	if router.calls != 1 || sloSeries() == 0 || !e.sloNamespaces["chat"] || e.sloNamespaces["batch"] {
+		t.Fatalf("listed: %d router queries, %d slo series, slo namespaces %v; want 1, some, only chat",
+			router.calls, sloSeries(), e.sloNamespaces)
 	}
 }
 
