@@ -50,9 +50,8 @@ type NamespaceBorrow struct {
 	// PinRequired is set when a variant of the type must pin one of PinLabels
 	// -- the nodeLabels of the flavors its queues offer the type on -- to be
 	// counted (kueue.ReasonFlavorUnpinned): a queue offers more than one
-	// flavor for the GPU, or sets flavorFungibility.whenCanBorrow Borrow or
-	// MayStopSearch. A flavor without nodeLabels cannot be pinned and is not
-	// listed.
+	// flavor for the GPU. A flavor without nodeLabels cannot be pinned and is
+	// not listed.
 	PinRequired bool
 	PinLabels   []map[string]string
 	// CoHeadroom is, per co-resource, how far the namespace's queues may still

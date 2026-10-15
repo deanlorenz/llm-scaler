@@ -601,11 +601,12 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 	if policy, _, _ := unstructured.NestedString(cq.Object, "spec", "preemption", CQFieldBorrowWithinCohort, "policy"); policy != "" && policy != BorrowWithinCohortNever {
 		q.BorrowWithinCohort = true
 	}
-	if when, _, _ := unstructured.NestedString(cq.Object, "spec", CQFieldFlavorFungibility, "whenCanBorrow"); when == FungibilityBorrow || when == FungibilityMayStopSearch {
-		// Set explicitly: Kueue may then borrow on the first flavor that fits
-		// instead of trying the next one, so a variant must pin its flavor.
-		q.PinRequired = true
-	}
+	// flavorFungibility.whenCanBorrow is not read (K3). Kueue v0.20's CRD
+	// defaults it to MayStopSearch on every ClusterQueue (kubebuilder default
+	// in apis/kueue/v1beta1 and v1beta2 clusterqueue_types.go), so it cannot
+	// tell a queue that chose it from one that did not; and it decides only
+	// between flavors, so with one flavor for the GPU there is nothing to
+	// pin. Several flavors require a pin, below, whatever it says.
 	gpuFlavors := map[string]map[string]bool{} // GPU resource -> flavors offering it
 	groups, _, _ := unstructured.NestedSlice(cq.Object, "spec", "resourceGroups")
 	for _, g := range groups {

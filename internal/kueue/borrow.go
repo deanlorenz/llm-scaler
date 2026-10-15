@@ -155,8 +155,8 @@ type QueueState struct {
 	BorrowWithinCohort bool
 	// PinRequired is true when a variant must pin a flavor's nodeLabels to be
 	// counted (ReasonFlavorUnpinned): the queue offers more than one flavor for
-	// one of its GPU resources, or its flavorFungibility.whenCanBorrow is
-	// Borrow or MayStopSearch.
+	// one of its GPU resources. flavorFungibility.whenCanBorrow is not read:
+	// the CRD defaults it, and with one flavor it chooses nothing (K3).
 	PinRequired bool
 	// Resources are the GPU resources the queue declares, per flavor.
 	Resources map[ResourceKey]QueueResource

@@ -495,7 +495,7 @@ type ExternalBorrow struct {
 	Reason         string `json:"reason,omitempty"`
 	// PinRequired is set when a variant must pin a flavor's nodeLabels for its
 	// borrowing to be counted: the queue offers more than one flavor for the
-	// GPU, or sets flavorFungibility.whenCanBorrow Borrow or MayStopSearch.
+	// GPU.
 	PinRequired bool `json:"pinRequired,omitempty"`
 	// CoHeadroom is, per co-resource, how far the queue's usage of it may
 	// still grow: nominal plus borrowingLimit less usage, in milli-units;

@@ -24,11 +24,10 @@ const (
 	// model.
 	ReasonBorrowWithinCohort Reason = "borrow-within-cohort"
 	// ReasonFlavorUnpinned: the namespace's queue offers more than one flavor
-	// for the GPU, or lets Kueue borrow on the first flavor that fits
-	// (flavorFungibility.whenCanBorrow Borrow or MayStopSearch), and a variant's
-	// pod template does not pin a flavor's nodeLabels: Kueue may then put its
-	// replica on a flavor other than the one it was counted on. Decided on the
-	// engine side, from the variants' pod templates.
+	// for the GPU and a variant's pod template does not pin a flavor's
+	// nodeLabels: Kueue may then put its replica on a flavor other than the
+	// one it was counted on. Decided on the engine side, from the variants'
+	// pod templates.
 	ReasonFlavorUnpinned Reason = "flavor-unpinned"
 	// ReasonCoResourceBound: the GPU flavor's resource group covers another
 	// resource (CPU, memory, ...) and a variant's per-replica request of it is

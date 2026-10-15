@@ -98,17 +98,23 @@ func figures2(t *testing.T, b Borrowing, name string) QueueFigures {
 	return b.Queues[name][0]
 }
 
-// B5: a variant must pin its flavor when the queue offers several for the GPU,
-// or sets whenCanBorrow Borrow/MayStopSearch explicitly.
+// B5: a variant must pin its flavor when the queue offers several for the GPU.
+// K3: whenCanBorrow does not decide it. Kueue v0.20's CRD defaults it to
+// MayStopSearch on every ClusterQueue, so reading it withheld every
+// single-flavor queue whose flavor has no nodeLabels to pin, and with one
+// flavor there is no other one to choose anyway.
 func TestPinRequiredIsRead(t *testing.T) {
 	r := &Reader{gpuNames: map[string]bool{"nvidia.com/gpu": true}}
 	flavors := map[string]string{"h100": "", "h100-b": ""}
 	if q := r.queueState(clusterQueueObj(nil), flavors); q.PinRequired {
 		t.Error("control: one flavor, no fungibility set: no pin required")
 	}
-	cq := clusterQueueObj(map[string]interface{}{"flavorFungibility": map[string]interface{}{"whenCanBorrow": "Borrow"}})
-	if q := r.queueState(cq, flavors); !q.PinRequired {
-		t.Error("whenCanBorrow Borrow: pin required")
+	for _, when := range []string{"MayStopSearch", "Borrow", "TryNextFlavor"} {
+		cq := clusterQueueObj(map[string]interface{}{"flavorFungibility": map[string]interface{}{
+			"whenCanBorrow": when, "whenCanPreempt": "TryNextFlavor"}})
+		if q := r.queueState(cq, flavors); q.PinRequired {
+			t.Errorf("one flavor, whenCanBorrow %s (MayStopSearch is the CRD default): no pin required", when)
+		}
 	}
 	two := clusterQueueObj(nil)
 	groups, _, _ := unstructured.NestedSlice(two.Object, "spec", "resourceGroups")
