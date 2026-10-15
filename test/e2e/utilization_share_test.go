@@ -312,10 +312,12 @@ func unreadyPods(ns string) string {
 
 // controllerLogsSince returns the controller pods' logs since t, all pods
 // together: only the leader logs the optimizer, and which pod leads is not
-// this spec's business.
+// this spec's business. No controller Pod fails the spec: an empty log would
+// otherwise read as "the controller said nothing".
 func controllerLogsSince(t time.Time) string {
 	pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 	Expect(err).NotTo(HaveOccurred())
+	Expect(pods).NotTo(BeEmpty(), "no Pod of Deployment %s in %s", utils.ControllerDeploymentName, cfg.WVANamespace)
 	since := metav1.NewTime(t)
 	var b strings.Builder
 	for _, p := range pods {

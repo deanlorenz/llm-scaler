@@ -80,9 +80,18 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 		modelNode   string
 	)
 
-	controllerLog := func() string {
+	// readControllerLog reads the controller's log and reports a failed read,
+	// which a check for an ABSENT line must not mistake for an empty log.
+	readControllerLog := func() (string, error) {
 		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
 			controller.Name, "", sinceRestart)
+		return logs, err
+	}
+
+	// controllerLog is readControllerLog for a check that waits for a line to
+	// APPEAR: a failed read is one more poll that has not seen it yet.
+	controllerLog := func() string {
+		logs, err := readControllerLog()
 		if err != nil {
 			return ""
 		}
@@ -99,10 +108,10 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 		return last
 	}
 
-	// linesContaining returns every controller log line holding all of subs.
-	linesContaining := func(subs ...string) []string {
+	// linesIn returns every line of logs holding all of subs.
+	linesIn := func(logs string, subs ...string) []string {
 		var out []string
-		for _, line := range strings.Split(controllerLog(), "\n") {
+		for _, line := range strings.Split(logs, "\n") {
 			all := true
 			for _, s := range subs {
 				if !strings.Contains(line, s) {
@@ -115,6 +124,11 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 			}
 		}
 		return out
+	}
+
+	// linesContaining returns every controller log line holding all of subs.
+	linesContaining := func(subs ...string) []string {
+		return linesIn(controllerLog(), subs...)
 	}
 
 	BeforeAll(func() {
@@ -368,7 +382,12 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 		By("Producing NO phantom variant named after the scale target")
 		// The visible shape of the bug: the analyzer grew a second variant, made
 		// entirely of the bridge, that nothing else in WVA had ever heard of.
-		Expect(linesContaining("replica-capacity-decision", `"variant": "`+scaleTarget+`"`)).To(BeEmpty(),
+		// Read strictly: an unreadable log has no phantom row in it either, and
+		// would pass this check while proving nothing.
+		logs, err := readControllerLog()
+		Expect(err).NotTo(HaveOccurred(),
+			"could not read the controller log, so the absence of a phantom variant proves nothing")
+		Expect(linesIn(logs, "replica-capacity-decision", `"variant": "`+scaleTarget+`"`)).To(BeEmpty(),
 			"the analyzer keyed a row by the scale target, which is a variant nothing is scaling")
 
 		By("Attributing it under the VARIANT's name wherever the collector says so")
