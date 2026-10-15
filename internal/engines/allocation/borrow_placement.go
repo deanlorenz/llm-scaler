@@ -48,6 +48,11 @@ type BorrowDraw struct {
 	Reclaim bool
 	// Accelerator is the type a Reclaim entry was placed for.
 	Accelerator string
+	// Wake marks an entry a scale-from-zero wake recorded (WakeDraws): its
+	// variant may not be among the steady-state engine's yet, and the target
+	// it decides is not the wake's, so only its replicas existing, or
+	// InFlightTTL, ends it.
+	Wake bool
 }
 
 // nsBorrowLeft is what one namespace may still borrow of one accelerator type

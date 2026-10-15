@@ -24,8 +24,11 @@ import (
 // Across ticks, the in-flight ledger (allocation.DefaultInFlight) carries a
 // wake that was fitted to nodes: its node hole stays held, from both engines,
 // until its pods hold a node (scheduled, or nominated for one after a
-// preemption) or allocation.InFlightTTL passes. A wake's pool demand is not
-// carried across ticks: a quota counts it once the steady-state engine next
+// preemption) or allocation.InFlightTTL passes. What a wake takes of a Kueue
+// cohort's free pool, and what Kueue reclaims for it from borrowers, is held
+// in the shared borrow record (allocation.DefaultBorrowInFlight, N3) until
+// its pods exist, for both engines. Its other pool demand is not carried
+// across ticks: a quota counts it once the steady-state engine next
 // publishes what WVA's variants hold, and the physical pool once its pods
 // land. Under a physical limiter the held hole refuses the next wake anyway;
 // under a quota alone that window is the limit of the check.
@@ -83,7 +86,11 @@ func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]alloca
 // decideWake judges a model's wake and, when it selects a set, records what
 // the set takes, as one step: see the comment at the top of this file.
 func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage) (placement, []Candidate, SelectionOutcome) {
-	place := e.placementFor(ctx, group.namespace)
+	own := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		own[c.VariantName] = true
+	}
+	place := e.placementForModel(ctx, group.namespace, own)
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
 	if place.snapshotTakenAt.IsZero() && place.constraints != nil {
@@ -114,6 +121,19 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf 
 		key := namespace + "/" + c.VariantName
 		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)
 	}
+}
+
+// wakeReplicas is one replica of each selected candidate whose accelerator is
+// resolved, in order, as allocation.WakeDraws reads them.
+func wakeReplicas(selected []Candidate) []allocation.WakeReplica {
+	out := make([]allocation.WakeReplica, 0, len(selected))
+	for _, c := range selected {
+		if !constants.IsAcceleratorResolved(c.Accelerator) {
+			continue
+		}
+		out = append(out, allocation.WakeReplica{Variant: c.VariantName, Accelerator: c.Accelerator, GPUs: c.GPUsPerReplica})
+	}
+	return out
 }
 
 // debitTick records a wake's demand against this tick's later wakes. Caller

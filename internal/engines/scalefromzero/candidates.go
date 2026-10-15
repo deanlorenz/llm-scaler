@@ -248,10 +248,22 @@ type placement struct {
 	// queueFlavor is SelectionInput.QueueFlavor, read from the constraints
 	// before the wake's within-nominal view drops their borrowing figures.
 	queueFlavor func(accelerator string) *kueue.FlavorPlacement
+	// raw is this tick's constraints before the wake's within-nominal view
+	// drops their borrowing figures: what the wake records of the pools it
+	// takes is read from them (allocation.WakeDraws). Nil off this tick's
+	// constraints.
+	raw []*allocation.ResourceConstraints
 }
 
 // placementFor computes the placement basis for namespace; see gpuConstraints.
 func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
+	return e.placementForModel(ctx, namespace, nil)
+}
+
+// placementForModel is placementFor for a wake of the variants in own: what
+// the shared record holds for them -- their own wake, recorded on an earlier
+// tick while their pods do not exist yet -- does not count against them.
+func (e *Engine) placementForModel(ctx context.Context, namespace string, own map[string]bool) placement {
 	providers := allocation.ConstraintProvidersFrom(e.currentGPULimiter())
 	if len(providers) == 0 {
 		e.reportUnchecked(ctx, namespace, "no constraint provider is configured")
@@ -319,7 +331,8 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// only once the cohort's free pool no longer covers the growth (N1), less
 	// what earlier cycles and wakes already grew into that way.
 	record := allocation.DefaultBorrowInFlight
-	unreserved := record.Unreserved(now)
+	unreserved := record.Unreserved(now).WithoutVariants(namespace, own)
+	p.raw = constraints
 	p.reclaimable = allocation.ReclaimableNominal(allocation.DeductReclaimed(constraints, unreserved.InFlight), namespace)
 	// Kueue admits the wake's pods on the queue's flavor, within nominal too:
 	// the node fit lands them only where it does (W5), as the steady placer

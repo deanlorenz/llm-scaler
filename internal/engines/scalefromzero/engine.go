@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -754,6 +755,7 @@ func observeCompletedWakes(
 // provider unavailable, no young snapshot -- it is counted and logged, one per
 // wake, so an uncapped wake is never silent.
 func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placement, selected []Candidate) {
+	prior := maps.Clone(e.tickWakes[group.namespace])
 	if !place.snapshotTakenAt.IsZero() {
 		e.debitSnapshot(group.namespace, place.snapshotTakenAt, demandOf(selected))
 	} else if place.constraints != nil {
@@ -775,6 +777,14 @@ func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placeme
 		e.admitInFlight(group.namespace, selected, place.queueFlavor)
 	}
 	e.debitReclaimed(group.namespace, took)
+	// What the wake takes of its cohort's free pool, and what Kueue reclaims
+	// for it from borrowers, is in no Kueue read until its pods are admitted:
+	// the shared record holds it, so the steady-state engine does not borrow
+	// the same GPUs meanwhile, nor a later wake reclaim them again (N3).
+	if placed && place.snapshotTakenAt.IsZero() && place.raw != nil {
+		allocation.DefaultBorrowInFlight.RecordWake(allocation.WakeDraws(place.raw, group.namespace, group.modelID,
+			wakeReplicas(selected), prior, place.reclaimable), time.Now())
+	}
 	if place.unchecked {
 		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
 		log.FromContext(ctx).Info("Scale-from-zero: woke WITHOUT a GPU capacity check; every declared limiter is unavailable and no recent snapshot exists",

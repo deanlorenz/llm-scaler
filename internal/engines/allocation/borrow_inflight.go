@@ -166,7 +166,17 @@ func (b *BorrowInFlight) ObserveAt(observed map[string]VariantObservation, now t
 	})
 	for k, d := range b.entries {
 		o, ok := observed[k.namespace+"/"+k.variant]
-		if !ok || (o.Desired > 0 && o.Desired < d.Target) || now.Sub(d.OrderedAt) > InFlightTTL {
+		if now.Sub(d.OrderedAt) > InFlightTTL {
+			delete(b.entries, k)
+			continue
+		}
+		if d.Wake {
+			// A wake's variant may not be observed yet, and its desired
+			// count is the wake's own: only its pods existing end it.
+			if !ok {
+				continue
+			}
+		} else if !ok || (o.Desired > 0 && o.Desired < d.Target) {
 			delete(b.entries, k)
 			continue
 		}
@@ -206,8 +216,8 @@ func (b *BorrowInFlight) Trim(targets map[string]int) {
 	defer b.mu.Unlock()
 	for k, d := range b.entries {
 		t, ok := targets[k.namespace+"/"+k.variant]
-		if !ok {
-			continue
+		if !ok || d.Wake {
+			continue // a wake's target is its own, not this engine's
 		}
 		if d, keep := trimDraw(d, t); keep {
 			b.entries[k] = d
