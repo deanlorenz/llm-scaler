@@ -72,6 +72,11 @@ type NamespaceBorrow struct {
 	// GPU Workloads, nil when none was read: the priority of a model whose
 	// pod template names no priority class (SharedPoolChunk.drawable).
 	HighestPriority *int32
+	// Flavors are the flavors the namespace's own queues offer the type on
+	// (their ExternalBorrow rows), sorted: the ones Kueue admits its replicas
+	// on within nominal, out of every flavor its cohorts' chunks serve
+	// (queueFlavor, N2).
+	Flavors []string
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A

@@ -835,6 +835,7 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 	if !unlimited {
 		b.Cap = max(0, reach-guaranteed)
 	}
+	b.Flavors = rowFlavors(matched)
 	counted := slices.DeleteFunc(slices.Clone(matched), func(r config.ExternalBorrow) bool { return !r.Counted() })
 	b.CoHeadroom = sumCo(counted, func(r config.ExternalBorrow) map[string]int64 { return r.CoHeadroom }, true)
 	b.CoKept = sumCo(counted, func(r config.ExternalBorrow) map[string]int64 { return r.CoKept }, false)

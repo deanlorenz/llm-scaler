@@ -78,6 +78,10 @@ type nsBorrowLeft struct {
 // borrowing"; the others are reached only through a non-nil state.
 type borrowState struct {
 	borrow map[string]map[string]*nsBorrowLeft
+	// ownFlavors is, per namespace and type, the flavors its own queues offer
+	// the type on (NamespaceBorrow and NominalFigures.Flavors): what
+	// queueFlavor picks among its cohorts' chunks.
+	ownFlavors map[string]map[string][]string
 	// lent is, for a namespace read and not counted, the nominal of its
 	// reclaiming queues a peer holds still to grow into (its lentOut; cap
 	// unused): such growth, like a counted namespace's, needs no node hole.
@@ -115,6 +119,7 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 	}
 	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{}, nodes: nodes}
 	bs.chunks, bs.cohorts = mergeSharedPools(constraints)
+	bs.ownFlavors = ownFlavorsOf(constraints)
 	for _, c := range constraints {
 		if c == nil {
 			continue
@@ -274,21 +279,31 @@ type flavorUse struct {
 }
 
 // queueFlavor is the flavor Kueue admits ns's replicas of acc on within its
-// guaranteed figure (W5): the one flavor its cohorts' chunks serve acc on --
-// every chunk naming the same node labels and tolerations. Nil when the
-// namespace is not known to be Kueue-managed (neither counted nor carrying
-// its queues' nominal figures), or its queues offer acc on more than one
-// placement: Kueue then picks, and the replica is fitted by its templates
-// alone.
+// guaranteed figure (W5): the one flavor its OWN queues offer acc on (N2) --
+// every chunk of its cohorts serving acc on one of those flavors naming the
+// same node labels and tolerations. A cohort's chunks are its members'
+// flavors together: per-team pools, a's flavor pinned to pool=a and b's to
+// pool=b, would otherwise disagree and leave a's replica fitted to b's nodes.
+// Without its own flavors known (none read), every chunk of its cohorts
+// serving acc. Nil when the namespace is not known to be Kueue-managed
+// (neither counted nor carrying its queues' nominal figures), or its queues
+// offer acc on more than one placement: Kueue then picks, and the replica is
+// fitted by its templates alone.
 func (bs *borrowState) queueFlavor(ns, acc string) *kueue.FlavorPlacement {
 	_, counted := bs.borrow[ns]
 	_, read := bs.lent[ns]
 	if !counted && !read {
 		return nil
 	}
+	var own []string
+	if k, ok := accelerator.FindKey(bs.ownFlavors[ns], acc); ok {
+		own = bs.ownFlavors[ns][k]
+	}
 	var got *kueue.FlavorPlacement
 	for _, c := range bs.cohortChunks(ns, acc) {
 		switch {
+		case len(own) > 0 && !slices.Contains(own, c.Flavor):
+			continue // a peer's flavor, not one ns's queues offer
 		case got == nil:
 			got = &c.FlavorPlacement
 		case !maps.Equal(got.NodeLabels, c.NodeLabels) || !slices.Equal(got.Tolerations, c.Tolerations):
@@ -315,9 +330,45 @@ func QueueFlavorOf(constraints []*ResourceConstraints, ns string) func(acc strin
 	if !read {
 		return nil
 	}
-	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{ns: nil}}
+	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{ns: nil}, ownFlavors: ownFlavorsOf(constraints)}
 	bs.chunks, bs.cohorts = mergeSharedPools(constraints)
 	return func(acc string) *kueue.FlavorPlacement { return bs.queueFlavor(ns, acc) }
+}
+
+// ownFlavorsOf is, per namespace and type, the flavors its own queues offer
+// the type on, from every constraint's NamespaceBorrow and NamespaceNominal,
+// together.
+func ownFlavorsOf(constraints []*ResourceConstraints) map[string]map[string][]string {
+	out := map[string]map[string][]string{}
+	add := func(ns, t string, flavors []string) {
+		if len(flavors) == 0 {
+			return
+		}
+		if out[ns] == nil {
+			out[ns] = map[string][]string{}
+		}
+		for _, f := range flavors {
+			if !slices.Contains(out[ns][t], f) {
+				out[ns][t] = append(out[ns][t], f)
+			}
+		}
+	}
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for ns, perType := range c.NamespaceBorrow {
+			for t, b := range perType {
+				add(ns, t, b.Flavors)
+			}
+		}
+		for ns, perType := range c.NamespaceNominal {
+			for t, f := range perType {
+				add(ns, t, f.Flavors)
+			}
+		}
+	}
+	return out
 }
 
 // PlacedFlavors is, per "namespace/variant", the Kueue flavor the last pass

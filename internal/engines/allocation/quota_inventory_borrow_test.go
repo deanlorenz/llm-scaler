@@ -94,7 +94,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 0}))
 		Expect(c.NamespacePools["team-a"]["H100"].Limit).To(Equal(0))
 		Expect(c.NamespaceBorrow).To(Equal(map[string]map[string]NamespaceBorrow{
-			"team-a": {"H100": {Cap: 16, WithinNominal: 8, NominalLentOut: 8}},
+			"team-a": {"H100": {Cap: 16, WithinNominal: 8, NominalLentOut: 8, Flavors: []string{"h100"}}},
 		}))
 		Expect(c.SharedPools).To(HaveLen(1))
 		Expect(c.SharedPools[0].Free).To(Equal(16))

@@ -39,6 +39,9 @@ type NominalFigures struct {
 	// NominalLentOut is the nominal it cannot reach: lent by a queue that cannot
 	// reclaim (B10).
 	NominalLentOut int
+	// Flavors are the flavors its own queues offer the type on, sorted
+	// (NamespaceBorrow.Flavors).
+	Flavors []string
 }
 
 // uncountedNominal is, per namespace the read granted borrowing rows for and
@@ -71,6 +74,7 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 					f.PreemptAfter += r.PreemptAfter
 				}
 			}
+			f.Flavors = rowFlavors(rowsOfType(rows, accType))
 			f.NominalLentOut = max(0, nominal-f.WithinNominal)
 			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
 				continue // nominal, whatever the pool holds: nothing to carry
@@ -97,6 +101,18 @@ func rowsOfType(rows []config.ExternalBorrow, accType string) []config.ExternalB
 		matched = slices.DeleteFunc(slices.Clone(rows), func(r config.ExternalBorrow) bool { return r.Accelerator != "" })
 	}
 	return matched
+}
+
+// rowFlavors is the flavors rows name, sorted, each once; nil when none.
+func rowFlavors(rows []config.ExternalBorrow) []string {
+	var out []string
+	for _, r := range rows {
+		if r.Flavor != "" && !slices.Contains(out, r.Flavor) {
+			out = append(out, r.Flavor)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // NamespaceNominal returns, for the active namespaces whose borrowing this
