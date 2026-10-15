@@ -135,6 +135,19 @@ wva_resolve_install_phase() {
         return 0
     fi
 
+    # KEDA_HELM_INSTALL=true asks THIS run to install KEDA, and only the
+    # prereqs half does that. Resolved to `wva`, an admin re-run whose RBAC was
+    # already in place skipped deploy_keda and then failed the KEDA check it
+    # had asked to satisfy. Kept unless the KEDA CRD is confirmed present; an
+    # unreadable one is not taken for absent or present -- `all` is the phase
+    # that can act either way, and its KEDA check says which it is.
+    if [ "${SCALER_BACKEND:-keda}" = "keda" ] && [ "${KEDA_HELM_INSTALL:-false}" = "true" ] \
+        && [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] \
+        && ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        log_info "Running both phases: KEDA_HELM_INSTALL=true and KEDA is not confirmed installed, and only the cluster-admin phase installs it."
+        return 0
+    fi
+
     [ -z "$(wva_missing_prereqs)" ] || return 0
     INSTALL_PHASE=wva
     export INSTALL_PHASE
@@ -529,6 +542,15 @@ main() {
         all)     do_prereqs=true; do_wva=true ;;
         *)       log_error "INSTALL_PHASE must be prereqs, wva or all (got '$phase')" ;;
     esac
+
+    # The controller's live Prometheus TLS settings, read and judged before
+    # EITHER phase writes anything. Inside deploy_wva_controller the refusal
+    # came after the prereqs phase had already applied namespaces, RBAC and
+    # Prometheus, and still said "Nothing was changed".
+    if [ "$do_wva" = true ] && [ "$DEPLOY_WVA" = "true" ]; then
+        wva_read_live_prometheus_tls "$WVA_NS"
+        wva_refuse_unknown_prometheus_tls
+    fi
 
     if [ "$do_prereqs" = true ]; then
         wva_run_prereqs_phase "$phase"

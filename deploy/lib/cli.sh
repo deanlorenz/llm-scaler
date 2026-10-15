@@ -86,10 +86,12 @@ Environment Variables:
                                A newer release already installed is kept unless you set this.
   PROMETHEUS_URL               Where WVA reads metrics from. Required when Prometheus is not deployed here.
   PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
-                               false; true for the Prometheus this install deploys. See TLS
-                               configuration in docs/reference/prometheus.md.
+                               Skip verifying the Prometheus certificate. Default false; true for the
+                               Prometheus this install deploys. See TLS configuration in
+                               docs/reference/prometheus.md.
   PROMETHEUS_CA_CERT_PATH      CA file the controller verifies Prometheus with. Mount it yourself.
-                               Unset, a re-run keeps the one the controller runs with.
+                               Unset, a re-run keeps the one the controller runs with, for the
+                               same PROMETHEUS_URL.
   DEPLOY_OPERATIONAL_DASHBOARD Publish the WVA Grafana dashboard (default: true). Works against an
                                existing Grafana — it is a sidecar-labelled ConfigMap.
   DASHBOARD_NS                 Namespace to publish the dashboard into (default: MONITORING_NAMESPACE)
@@ -224,7 +226,7 @@ parse_args() {
         ;;
       -u|--undeploy)          UNDEPLOY=true; shift ;;
       -e|--environment)
-        ENVIRONMENT="$2" ; shift 2
+        ENVIRONMENT="$2" ; ENVIRONMENT_EXPLICIT="$2" ; shift 2
         if ! containsElement "$ENVIRONMENT" "${COMPATIBLE_ENV_LIST[@]}"; then
           log_error "Invalid environment: $ENVIRONMENT. Valid options are: ${COMPATIBLE_ENV_LIST[*]}"
         fi

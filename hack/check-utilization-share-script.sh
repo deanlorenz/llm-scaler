@@ -77,6 +77,12 @@ expect "kind: gpu-inventory" inventory "$(printf '%s\n' "$INV_POLICY" | us_limit
 expect "kind: the inventory alias" inventory "$(printf 'limiters:\n  - name: p\n    type: inventory\n' | us_limiter_kind)"
 expect "kind: quota and inventory is quota" quota "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_limiter_kind)"
 expect "kind: no limiters" none "$(printf 'scaleUpThreshold: 0.85\n' | us_limiter_kind)"
+# The controller rejects a policy naming a type it does not know and runs with
+# no limiter, whatever else the list holds. Was: inventory, from the known half.
+expect "kind: an unknown type beside gpu-inventory is none" none \
+    "$(printf '%s\n  - name: x\n    type: gpu-inventry\n' "$INV_POLICY" | us_limiter_kind)"
+expect "kind: an unknown type beside a quota is none" none \
+    "$(printf '%s\n  - name: x\n    type: bogus\n' "$QUOTA_POLICY" | us_limiter_kind)"
 expect "quota keys" "NVIDIA-H200" "$(printf '%s\n' "$QUOTA_POLICY" | us_quota_keys)"
 expect "state: no block" "off plain" "$(printf '%s\n' "$QUOTA_POLICY" | us_block_state)"
 expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | us_block_state)"
@@ -582,7 +588,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=94
+CASES_EXPECTED=96
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

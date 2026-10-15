@@ -445,6 +445,7 @@ kill %1
 | `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
+| `CrashLoopBackOff`, `x509: certificate signed by unknown authority` | verification is on by default now, and a private CA signed the Prometheus certificate | mount the CA, then re-run the install with `PROMETHEUS_CA_CERT_PATH=<file>` and every other variable you installed with. The re-run restarts the controller ([TLS configuration](prometheus.md#tls-configuration)) |
 
 ## Cluster policy is not applied (policy namespace unverified)
 

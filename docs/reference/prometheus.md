@@ -61,7 +61,7 @@ spec:
 |----------|----------|-------------|---------|
 | `PROMETHEUS_BASE_URL` | Yes | Prometheus server URL (HTTPS only in production) | - |
 | `PROMETHEUS_ALLOW_HTTP` | No | Allow a plain `http://` `PROMETHEUS_BASE_URL` (dev/test only; cannot be combined with TLS settings or bearer token auth) | `false` |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification. The binary and the shipped config (`config/base/manager/manager-configmap.yaml`) default to `false`. The installer sets `"true"` only for the kube-prometheus-stack it deploys itself on Kubernetes, which has no CA to give the controller. Any other HTTPS Prometheus stays verified. In production set `"false"` and point `PROMETHEUS_CA_CERT_PATH` at the CA that signed Prometheus's certificate | `false`; `"true"` for the Prometheus the installer deploys on Kubernetes |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification. The binary and the shipped config (`config/base/manager/manager-configmap.yaml`) default to `false`. The installer sets `"true"` only for the kube-prometheus-stack it deploys itself on Kubernetes, which has no CA to give the controller, or, on an upgrade, a Prometheus the controller already ran unverified with no CA. Any other HTTPS Prometheus stays verified. In production set `"false"` and point `PROMETHEUS_CA_CERT_PATH` at the CA that signed Prometheus's certificate | `false`; `"true"` for the Prometheus the installer deploys on Kubernetes, or kept on an upgrade |
 | `PROMETHEUS_CA_CERT_PATH` | No | Path to CA certificate for TLS verification | - |
 | `PROMETHEUS_CLIENT_CERT_PATH` | No | Path to client certificate for mutual TLS | - |
 | `PROMETHEUS_CLIENT_KEY_PATH` | No | Path to client private key for mutual TLS | - |
@@ -176,6 +176,14 @@ That stack serves a self-signed certificate that nothing mounts into the
 controller, so verifying would fail with `x509: certificate signed by unknown
 authority`. Another Prometheus or a Thanos in the same namespace is verified.
 
+Use the default URL for that stack. If you pass
+`PROMETHEUS_URL=https://prometheus-operated.<MONITORING_NAMESPACE>...` on a new
+install, it is verified, and the stack's certificate does not name that host,
+so the controller cannot connect.
+
+On an upgrade, a Prometheus the controller already ran unverified with no CA
+stays unverified (see the [upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
+
 Any other HTTPS Prometheus stays verified, because the controller sends it a
 token. If its certificate comes from a private CA, the controller cannot connect
 until you do one of these:
@@ -193,8 +201,10 @@ kubectl logs -n "$WVA_NS" deploy/wva-controller-manager | grep -m1 x509
 No output means there is nothing to do.
 
 Re-runs keep `PROMETHEUS_CA_CERT_PATH` and the verification setting the
-controller runs with, so a re-run does not undo either
-([upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
+controller runs with, for the same `PROMETHEUS_URL`, so a re-run does not undo
+either ([upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
+When a re-run changes a Prometheus setting, the installer restarts the
+controller, which reads them only when it starts.
 
 The installer warns about both cases during the install, and repeats it on the
 `TLS:` line of the summary at the end: an HTTPS connection it does not verify,
@@ -222,7 +232,8 @@ kubectl patch deployment wva-controller-manager -n "$WVA_NS" --type=json -p='[
 ```
 
 Then re-run the install with the path. It writes
-`PROMETHEUS_CA_CERT_PATH` and turns verification on:
+`PROMETHEUS_CA_CERT_PATH`, turns verification on and restarts the controller.
+Add every other variable you installed with:
 
 ```bash
 PROMETHEUS_CA_CERT_PATH=/etc/prometheus-certs/ca.crt NAMESPACE=<namespace> make deploy-wva
@@ -236,7 +247,8 @@ and `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"` in `wva-manager-config`
 - **GitOps:** put the same volume and mount in a kustomize patch, as
   `config/components/openshift/deployment-patch.yaml` does for its serving cert.
 - **Installer re-runs** keep both keys, because the controller runs with them.
-  They do not manage the volume and mount: keep those in your own overlay.
+  A volume and mount you added with `kubectl patch` survive re-runs. With
+  GitOps, keep them in your overlay.
 
 **The other direction, the controller's `/metrics`:** the shipped ServiceMonitor
 scrapes it with `insecureSkipVerify: true`, because the controller generates a

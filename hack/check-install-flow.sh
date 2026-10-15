@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=58
+EXPECT_CASES=63
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -217,6 +217,28 @@ else
         fail "SCALER_BACKEND=none must skip the probe (rc=$rc state=$state)" "$out"
     fi
     SCALER_BACKEND=keda
+fi
+
+# An admin re-run asking for KEDA (KEDA_HELM_INSTALL=true) keeps both phases
+# while KEDA is not there: only the prereqs half installs it. Resolved to `wva`
+# because the RBAC prereqs existed, it skipped deploy_keda and then failed the
+# KEDA check it had asked to satisfy.
+# resolved_phase <CRD_MODE> <KEDA_HELM_INSTALL> prints the phase chosen.
+resolved_phase() {
+    (
+        CRD_MODE="$1" KEDA_HELM_INSTALL="$2" SCALER_BACKEND=keda ENVIRONMENT=kubernetes
+        INSTALL_PHASE_EXPLICIT='' INSTALL_PHASE=all WVA_SCOPE=namespace
+        wva_missing_prereqs() { :; }
+        log_info() { :; }
+        wva_resolve_install_phase
+        printf '%s' "$INSTALL_PHASE"
+    )
+}
+if [ "$(resolved_phase absent true)" = all ] && [ "$(resolved_phase forbidden true)" = all ] \
+    && [ "$(resolved_phase new true)" = wva ] && [ "$(resolved_phase absent false)" = wva ]; then
+    ok "PHASE: KEDA_HELM_INSTALL=true keeps both phases until KEDA is confirmed installed"
+else
+    fail "PHASE: KEDA_HELM_INSTALL=true with KEDA absent or unreadable must stay all; present, or not asked for, resolves to wva (absent/true $(resolved_phase absent true), forbidden/true $(resolved_phase forbidden true), new/true $(resolved_phase new true), absent/false $(resolved_phase absent false))"
 fi
 
 # The ORDER of the cluster-admin phase: the scaler backend before the controller.
@@ -466,6 +488,16 @@ ns-u 10.0.0.9:9090 - llama"
     else
         fail "POD WRITES: a wva-pod-writer Role without patch on pods must read as unknown"
     fi
+    # A rule limited by resourceNames grants patch on those pods only. Was read
+    # as the whole grant, so the grant was never made again.
+    if [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 PW_ROLE_RULES='[""] ["pods"] ["patch"] ["one-pod"]' \
+            wva_pod_writes_allowed ns-a wva-system) )" = unknown ] \
+        && [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 PW_ROLE_RULES='[""] ["pods"] ["patch"] []' \
+            wva_pod_writes_allowed ns-a wva-system) )" = yes ]; then
+        ok "POD WRITES: a rule restricted by resourceNames is not the whole grant"
+    else
+        fail "POD WRITES: a patch rule with resourceNames must read as unknown (an empty list still counts)"
+    fi
 
     # Before the apply that removes the old grant, and only where the
     # installer applies cluster RBAC.
@@ -510,7 +542,7 @@ body_of() { # body_of <file> <function>: the function's lines, numbered from its
 line_of() { printf '%s\n' "$1" | awk -v p="$2" 'index($0, p) {print $1; exit}'; }
 dwc="$(body_of "$ROOT/deploy/lib/infra_wva.sh" deploy_wva_controller)"
 read_at="$(line_of "$dwc" 'wva_read_live_prometheus_tls "$WVA_NS"')"
-guard_at="$(line_of "$dwc" 'if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then')"
+guard_at="$(line_of "$dwc" 'if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ] && [ -z "${WVA_LIVE_PROM_TLS:-}" ]; then')"
 refuse_at="$(line_of "$dwc" 'wva_refuse_unknown_prometheus_tls')"
 render_at="$(line_of "$dwc" 'wva_render_manager_config_patch "$tmp_overlay"')"
 apply_at="$(line_of "$dwc" 'kubectl apply -k "$tmp_overlay"')"
@@ -519,9 +551,34 @@ token_at="$(line_of "$dwc" 'all|prereqs) wva_delete_legacy_controller_token "$WV
 if [ -n "$read_at" ] && [ -n "$guard_at" ] && [ "$((guard_at + 1))" = "$read_at" ] \
     && [ -n "$refuse_at" ] && [ -n "$render_at" ] && [ -n "$apply_at" ] \
     && [ "$read_at" -lt "$refuse_at" ] && [ "$refuse_at" -lt "$render_at" ] && [ "$render_at" -lt "$apply_at" ]; then
-    ok "WIRING: the live TLS settings are read (not in the prereqs phase), checked and rendered before the apply"
+    ok "WIRING: the live TLS settings are read (not in the prereqs phase, not twice), checked and rendered before the apply"
 else
-    fail "WIRING: deploy_wva_controller must read the live TLS settings under the != prereqs guard, then refuse-if-unknown, then render, all before the apply (guard ${guard_at:-none}, read ${read_at:-none}, refuse ${refuse_at:-none}, render ${render_at:-none}, apply ${apply_at:-none})"
+    fail "WIRING: deploy_wva_controller must read the live TLS settings under the != prereqs, not-yet-read guard, then refuse-if-unknown, then render, all before the apply (guard ${guard_at:-none}, read ${read_at:-none}, refuse ${refuse_at:-none}, render ${render_at:-none}, apply ${apply_at:-none})"
+fi
+# The refusal says "Nothing was changed", so main reads and judges the live
+# settings before EITHER phase runs. Inside deploy_wva_controller it came after
+# INSTALL_PHASE=all had already applied the prereqs phase.
+mn="$(body_of "$ROOT/deploy/lib/install_core.sh" main)"
+m_read_at="$(line_of "$mn" 'wva_read_live_prometheus_tls "$WVA_NS"')"
+m_refuse_at="$(line_of "$mn" 'wva_refuse_unknown_prometheus_tls')"
+m_prereqs_at="$(line_of "$mn" 'wva_run_prereqs_phase "$phase"')"
+m_wva_at="$(line_of "$mn" 'WVA_APPLY_SCOPE=controller deploy_wva_controller')"
+if [ -n "$m_read_at" ] && [ -n "$m_refuse_at" ] && [ -n "$m_prereqs_at" ] && [ -n "$m_wva_at" ] \
+    && [ "$m_read_at" -lt "$m_refuse_at" ] && [ "$m_refuse_at" -lt "$m_prereqs_at" ] && [ "$m_refuse_at" -lt "$m_wva_at" ]; then
+    ok "WIRING: main reads and judges the live TLS settings before either phase writes anything"
+else
+    fail "WIRING: main must read the live TLS settings and refuse-if-unknown before the prereqs and controller phases (read ${m_read_at:-none}, refuse ${m_refuse_at:-none}, prereqs ${m_prereqs_at:-none}, controller ${m_wva_at:-none})"
+fi
+# The controller reads its config once, at startup: a changed Prometheus
+# setting needs a restart, after every patch to that config.
+restart_at="$(line_of "$dwc" 'wva_restart_on_prometheus_change "$(kubectl get configmap wva-manager-config')"
+limiter_at="$(line_of "$dwc" 'case "${WVA_LIMITER:-}" in')"
+wait_at="$(line_of "$dwc" '# Wait for WVA to be ready.')"
+if [ -n "$restart_at" ] && [ -n "$write_at" ] && [ -n "$limiter_at" ] && [ -n "$wait_at" ] \
+    && [ "$restart_at" -gt "$write_at" ] && [ "$restart_at" -gt "$limiter_at" ] && [ "$restart_at" -lt "$wait_at" ]; then
+    ok "WIRING: the controller is restarted on a Prometheus change after the last config patch, before the wait"
+else
+    fail "WIRING: wva_restart_on_prometheus_change must follow the Prometheus write and the limiter patch, before the readiness wait (restart ${restart_at:-none}, write ${write_at:-none}, limiter ${limiter_at:-none}, wait ${wait_at:-none})"
 fi
 if [ -n "$write_at" ] && [ -n "$apply_at" ] && [ "$write_at" -gt "$apply_at" ]; then
     ok "WIRING: the Prometheus settings are written into the live config after the apply"
@@ -688,7 +745,14 @@ kps_run() {
         openssl() { return 0; }
         helm() {
             printf 'helm %s\n' "$*" >> "$KUBECTL_LOG"
-            case "$1" in list) printf '%s\n' "$KPS_LIST" ;; esac
+            case "$1" in
+                list)
+                    if [ "$KPS_LIST" = FAIL ]; then
+                        echo 'Error: Kubernetes cluster unreachable: Get "https://api:6443/version": dial tcp: i/o timeout' >&2
+                        return 1
+                    fi
+                    printf '%s\n' "$KPS_LIST" ;;
+            esac
             return 0
         }
         install_operational_dashboard() { :; }
@@ -734,6 +798,16 @@ if [ "$(kps_version_used)" = "$kps_default" ] && ! grep -q 'newer than this inst
     ok "an older installed kube-prometheus-stack is upgraded to the pin, quietly"
 else
     fail "an older installed release must be upgraded to the pin $kps_default" "$(kps_version_used); $(cat "$WORK/kps.out")"
+fi
+# A list that failed is not "no release". Read as one, a transient error or a
+# Forbidden list installed the pin over a newer shared release.
+KPS_LIST=FAIL
+KUBE_PROMETHEUS_STACK_CHART_VERSION="$kps_default" KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT='' kps_run
+if ! grep -q '^helm upgrade --install kube-prometheus-stack' "$KUBECTL_LOG" \
+    && grep -q 'cluster unreachable' "$WORK/kps.out" && grep -q 'Could not list the Helm releases' "$WORK/kps.out"; then
+    ok "a failed helm list refuses, with helm's error, rather than installing the pin"
+else
+    fail "a failed helm list must refuse with its error, not install $kps_default" "$(cat "$WORK/kps.out")"
 fi
 KPS_LIST='[]'
 

@@ -890,7 +890,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 | --- | --- |
 | `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
-| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
+| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again, each with `NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>` |
 | `limiters:` | kept when `WVA_LIMITER` is not passed, hand-written entries included; `WVA_LIMITER=none` removes it |
 
 This touches only the controller's own ConfigMap. A policy published in

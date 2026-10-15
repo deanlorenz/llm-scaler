@@ -114,7 +114,11 @@ bash deploy/lib/pod_writer.sh <pool namespace> <controller namespace> | kubectl 
 ```
 
 A namespace-scoped controller then needs a restart; a cluster-scoped one
-retries on its own.
+retries on its own:
+
+```bash
+kubectl rollout restart deployment/wva-controller-manager -n <controller namespace>
+```
 
 **A model never gets a warm copy in a multi-pool namespace.** The log says
 `variant will get no warm copy`, with the reason: it named no pool, or one that

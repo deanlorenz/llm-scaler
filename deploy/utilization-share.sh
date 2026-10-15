@@ -71,10 +71,18 @@ us_doc_count() {
 
 # us_limiter_kind -- quota, inventory or none: the budget the optimizer would
 # share. A list holding both is a quota: the controller then builds only the
-# quota limiter.
+# quota limiter. A list holding a type the controller does not know is none:
+# its validation rejects the whole policy and it runs with no limiter
+# (internal/config/saturation_scaling.go), so there is no budget to share.
 us_limiter_kind() {
-    local types
+    local types t
     types="$(yq -r '[.limiters[]?.type] | join(" ")')" || return 1
+    for t in $types; do
+        case "$t" in
+            quota|gpu-inventory|inventory) ;;
+            *) echo none; return 0 ;;
+        esac
+    done
     case " $types " in
         *" quota "*) echo quota ;;
         *" gpu-inventory "*|*" inventory "*) echo inventory ;;

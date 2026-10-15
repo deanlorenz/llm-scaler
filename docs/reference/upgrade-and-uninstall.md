@@ -17,7 +17,7 @@ production on it.
 
 Pin a release tag or a digest, and deploy with the manifests from the **same**
 release. An image older than the manifests crash-loops on flags it does not
-know.
+know. Before the first release, pin a digest.
 
 ```bash
 git checkout v0.9.0
@@ -165,6 +165,10 @@ they enable. Do this, in order:
   `make deploy-wva INSTALL_PHASE=wva` alone keeps scraping with the old token.
   ```bash
   NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift   # (cluster admin)
+  # out-of-reach shape: the controller runs in wva-<namespace>
+  NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>
+  # cluster scope
+  make setup-prereqs ENVIRONMENT=openshift SCOPE=cluster WVA_NS=<controller namespace>
   ```
 - **The install stops when KEDA is absent**, before it creates anything. It
   prints the command that installs KEDA
@@ -184,9 +188,13 @@ installer deploys itself, which has no CA to verify with.
 
 A re-run keeps what the controller runs with now:
 
-- **A CA path.** `PROMETHEUS_CA_CERT_PATH` is kept, and verification stays on.
-  Keep the CA volume and mount in your own overlay; the installer does not
-  manage them.
+- **A CA path, same Prometheus.** `PROMETHEUS_CA_CERT_PATH` is kept, and so is
+  the verification setting it had. If verification was off, it stays off, and
+  the installer warns that the CA path is unused. A volume and mount you added
+  with `kubectl patch` survive re-runs. With GitOps, keep them in your overlay.
+- **A CA path, different `PROMETHEUS_URL`.** The CA path is dropped, because
+  the new Prometheus may use another CA. The installer warns, and prints the
+  re-run that keeps it.
 - **Verification off, no CA, same Prometheus.** It stays off, and the
   installer warns
   `TLS verification for <url> stays OFF, as it was before this upgrade`.
@@ -205,9 +213,17 @@ To turn verification on, do one of these:
 - Re-run with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false`, if a public CA signed
   the certificate.
 
+When a Prometheus setting changes, the installer restarts the controller. The
+controller reads these settings only when it starts.
+
 If the installer cannot read the controller's current config, it stops before
 changing anything, and asks you to re-run with
-`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` or `=false`.
+`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` or `=false`. It does not stop when
+you pass `PROMETHEUS_CA_CERT_PATH`, or for the Prometheus it deploys itself.
+
+The re-run commands the installer prints carry `PROMETHEUS_URL`, `IMG`,
+`DEPLOY_PROMETHEUS=false` and `ENVIRONMENT` when you set them. Add every other
+variable you installed with.
 
 #### Patch on pods moves to Role `wva-pod-writer`
 
@@ -225,7 +241,11 @@ removes the old grant. It does so in each namespace that holds:
 - any model that calls this controller, when the utilization-share optimizer
   is active (not shadow). The re-run also removes the `optimizer:` block
   ([Re-running the installer resets the default entry](scaling-policy.md#re-running-the-installer-resets-the-default-entry)),
-  so run `make utilization-share-shadow`, then `make utilization-share-activate` again.
+  so run these again, in order:
+  ```bash
+  make utilization-share-shadow NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>
+  make utilization-share-activate NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>
+  ```
 
 It prints each namespace it granted in. Then read its warnings:
 
@@ -376,7 +396,7 @@ List the pod-write bindings, and the controller namespace each one is for:
 
 ```bash
 kubectl get rolebinding -A -l app.kubernetes.io/name=workload-variant-autoscaler \
-  -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ROLE:.roleRef.name,CONTROLLER:.subjects[0].namespace \
+  -o 'custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ROLE:.roleRef.name,CONTROLLER:.subjects[0].namespace' \
   | grep -E '^NAMESPACE|wva-pod-writer'
 ```
 

@@ -133,12 +133,14 @@ wva_pod_writes_allowed() {
 }
 
 # wva_pod_writer_role_grants_patch reports whether role/wva-pod-writer in $1
-# has a rule granting patch on pods (wildcards count).
+# has a rule granting patch on pods (wildcards count). A rule limited by
+# resourceNames grants patch on those pods only, so it does not count: the
+# controller patches pods it has never seen by name.
 wva_pod_writer_role_grants_patch() {
     local rules
     rules="$(kubectl get role "$WVA_POD_WRITER_ROLE" -n "$1" \
-        -o jsonpath='{range .rules[*]}{.apiGroups}{" "}{.resources}{" "}{.verbs}{"\n"}{end}' 2>/dev/null)" || return 1
-    printf '%s\n' "$rules" | grep -qE '^\[[^]]*(""|"\*")[^]]*\] \[[^]]*("pods"|"\*")[^]]*\] \[[^]]*("patch"|"\*")[^]]*\]'
+        -o jsonpath='{range .rules[*]}{.apiGroups}{" "}{.resources}{" "}{.verbs}{" "}{.resourceNames}{"\n"}{end}' 2>/dev/null)" || return 1
+    printf '%s\n' "$rules" | grep -qE '^\[[^]]*(""|"\*")[^]]*\] \[[^]]*("pods"|"\*")[^]]*\] \[[^]]*("patch"|"\*")[^]]*\] ?(\[\])?$'
 }
 
 # wva_ensure_pod_writes makes sure the controller in $2 may patch pods in $1:

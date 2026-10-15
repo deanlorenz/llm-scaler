@@ -188,7 +188,7 @@ binding and the `metrics-reader` repoint are added as above.
 
 | Command | Grants | To whom |
 | --- | --- | --- |
-| `deploy/warmpool.sh create`, `make utilization-share-activate`, and `make deploy-wva` for a cluster-scoped install in the `all` or `prereqs` phase only (where a warm pool or utilization-share marks of this controller are, and every namespace of its models when the optimizer is active) | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only. Skipped where the controller can already patch pods | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role. `make undeploy-wva` removes them |
+| `deploy/warmpool.sh create`, `make utilization-share-activate`, and `make deploy-wva` for a cluster-scoped install in the `all` or `prereqs` phase only (where a warm pool or utilization-share marks of this controller are, and every namespace of its models when the optimizer is active) | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only. `deploy/warmpool.sh create` and `make utilization-share-activate` skip it where the controller can already patch pods | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role. `make undeploy-wva` removes them |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
 | `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on Namespaces, by name: the namespace a namespace-scoped controller (tenant-owned or out of reach) manages, the same grant `make setup-prereqs` renders. Every Namespace only for a cluster-scoped controller whose ServiceAccount already reads every Namespace (an installer-made one does, through its manager ClusterRole) or whose namespace `WVA_LIMITER_TARGETS` names; a controller that looks cluster-scoped without that read is warned about, with the `make setup-prereqs` run for that install | the same |
 | `make enable-physical-limiter`, and `make setup-prereqs` when the policy namespace already exists | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus RoleBinding `wva-policy-reader-<suffix>` | each controller that reads policy from that namespace. `make setup-prereqs` grants it only to a controller that manages its own namespace. `make undeploy-wva` leaves both ([cleanup](upgrade-and-uninstall.md#policy-namespace-and-limiter-leftovers-cluster-admin)) |
@@ -330,9 +330,10 @@ requests; it is part of the data plane, not the controller.
 
 The controller sends its own ServiceAccount token to Prometheus on every query.
 The shipped config verifies the Prometheus certificate. The installer turns
-verification off for one Prometheus only: the kube-prometheus-stack it deploys
-on Kubernetes, which has no CA to give the controller. There the token goes to
-whatever answers at that address. Set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to
+verification off only for the kube-prometheus-stack it deploys on Kubernetes,
+which has no CA to give the controller, or, on an upgrade, a Prometheus the
+controller already ran unverified with no CA. There the token goes to whatever
+answers at that address. Set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to
 `false` and give a CA with `PROMETHEUS_CA_CERT_PATH`. See
 [TLS configuration](prometheus.md#tls-configuration).
 

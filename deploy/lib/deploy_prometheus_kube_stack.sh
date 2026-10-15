@@ -9,11 +9,24 @@
 
 # kps_installed_chart_version echoes the chart version of the
 # kube-prometheus-stack release in MONITORING_NAMESPACE, or nothing when there
-# is none or it cannot be read.
+# is none. It FAILS, with helm's error on stderr, when the releases cannot be
+# listed: a list that failed is not "no release". Read as one, a transient
+# error or a Forbidden list installed the pin over a newer release that other
+# installs share.
 kps_installed_chart_version() {
-    local chart
-    chart="$(helm list -n "$MONITORING_NAMESPACE" -o json 2>/dev/null \
-        | jq -r '.[]? | select(.name == "kube-prometheus-stack") | .chart // ""' 2>/dev/null | head -1)" || chart=""
+    local out err rc=0 chart
+    err="$(mktemp)"
+    out="$(helm list -n "$MONITORING_NAMESPACE" -o json 2>"$err")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'helm list -n %s failed (exit %s): %s\n' "$MONITORING_NAMESPACE" "$rc" "$(head -3 "$err")" >&2
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+    if ! chart="$(printf '%s' "$out" | jq -r '[.[]? | select(.name == "kube-prometheus-stack") | .chart // ""] | .[0] // ""')"; then
+        printf 'helm list -n %s answered something that is not JSON\n' "$MONITORING_NAMESPACE" >&2
+        return 1
+    fi
     case "$chart" in
         kube-prometheus-stack-*) printf '%s\n' "${chart#kube-prometheus-stack-}" ;;
     esac
@@ -32,7 +45,7 @@ kps_chart_version_to_install() {
         printf '%s\n' "$pin"
         return 0
     fi
-    installed="$(kps_installed_chart_version)"
+    installed="$(kps_installed_chart_version)" || return 1
     if [ -n "$installed" ] && [ "$installed" != "$pin" ] \
         && [ "$(printf '%s\n%s\n' "$installed" "$pin" | sort -V | tail -1)" = "$installed" ]; then
         log_warning "kube-prometheus-stack $installed is installed in $MONITORING_NAMESPACE, newer than this install's pin ($pin). Keeping $installed rather than downgrading a release other installs share. To install $pin anyway, set KUBE_PROMETHEUS_STACK_CHART_VERSION=$pin."
@@ -97,7 +110,8 @@ deploy_prometheus_kube_stack() {
         log_error "KUBE_PROMETHEUS_STACK_CHART_VERSION is empty: refusing an unpinned kube-prometheus-stack, which upgrades the release every WVA on this cluster shares to whatever the repository serves today."
     fi
     local kps_version
-    kps_version="$(kps_chart_version_to_install)"
+    kps_version="$(kps_chart_version_to_install)" \
+        || log_error "Could not list the Helm releases in $MONITORING_NAMESPACE (see the error above), so this install cannot tell whether a newer kube-prometheus-stack is already there, and installing $KUBE_PROMETHEUS_STACK_CHART_VERSION could downgrade a release every WVA on the cluster shares. Fix the error and re-run, or set KUBE_PROMETHEUS_STACK_CHART_VERSION=<version> to choose the version yourself."
     helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
         --version "$kps_version" \
         -n "$MONITORING_NAMESPACE" \
