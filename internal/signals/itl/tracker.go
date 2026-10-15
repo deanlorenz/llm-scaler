@@ -209,6 +209,17 @@ func (t *Tracker) SetBaseline(key string, b float64) {
 	t.baselines[key] = b
 }
 
+// WindowLen is how many readings the window filed under key holds, 0 when there
+// is none.
+func (t *Tracker) WindowLen(key string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if w, ok := t.windows[key]; ok {
+		return w.Len()
+	}
+	return 0
+}
+
 // WindowLens returns, for every key holding a window, how many readings it
 // holds.
 func (t *Tracker) WindowLens() map[string]int {
