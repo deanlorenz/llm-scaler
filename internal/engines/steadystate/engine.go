@@ -1492,10 +1492,12 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 		if data == nil {
 			logger.V(logging.DEBUG).Info("Skipping model: no metrics available", "modelID", modelID)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 
@@ -1507,26 +1509,11 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, data.scaleTargets)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 
-		// Reported unconditionally, every cycle the composite is actually built,
-		// mirroring applyScaleToZeroEnforcement's own convention: this call is
-		// what CLEARS the reason once a usable signal returns, so a path that
-		// skips it on the healthy branch would pin a stale "blocked" answer.
-		// spec composite-analyzer §5.1.3/D2 — a composite with no usable signal
-		// (decision path C4-no-signal, once §5.1.2's per-SO field lands) means no
-		// analyzer, saturation included, was informative this cycle: the model
-		// was not usefully measured, so nothing downstream should be treated as
-		// evidence. Surfaced on the same wva_model_scaling_blocked dashboard the
-		// scale-to-zero policy/wake reasons already use, rather than only in a
-		// log line.
-		var signalReasons []string
-		if !allocation.CompositeHasSignal(req.CompositeSignal) {
-			signalReasons = []string{constants.ScalingBlockedNoCompositeSignal}
-		}
-		metrics.SetModelScalingBlockedReasons(namespace, modelID,
-			constants.ScalingBlockedReasonsSignal, signalReasons)
+		reportSignalReason(namespace, modelID, req)
 
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
@@ -2602,4 +2589,17 @@ func publishServing(namespace string, metrics []domain.ReplicaMetrics) {
 	for variant, pods := range byVariant {
 		decision.PublishServing(namespace, variant, len(pods), now)
 	}
+}
+
+// reportSignalReason sets the no-composite-signal reason when req's composite
+// defines no replica need for any variant, and clears it otherwise. A nil req
+// (this cycle built no composite for the model) clears it, so the reason never
+// outlives the cycle that found it. With no signal the optimizer sizes on
+// saturation's own capacity.
+func reportSignalReason(namespace, modelID string, req *allocation.ModelScalingRequest) {
+	var reasons []string
+	if req != nil && !allocation.CompositeHasSignal(req.CompositeSignal) {
+		reasons = []string{constants.ScalingBlockedNoCompositeSignal}
+	}
+	metrics.SetModelScalingBlockedReasons(namespace, modelID, constants.ScalingBlockedReasonsSignal, reasons)
 }

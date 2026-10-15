@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"math"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 )
@@ -52,4 +54,92 @@ func TotalReplicas(result *domain.AnalyzerResult, vc domain.VariantCapacity) (n 
 		return 0, false
 	}
 	return demand / vc.PerReplicaCapacity, true
+}
+
+// Decision is how the composite reached one variant's replica need.
+type Decision struct {
+	// N is the replica need, in saturation's demand units; defined only when
+	// OK.
+	N  float64
+	OK bool
+	// Path names the rule that produced N.
+	Path DecisionPath
+	// Contributors names every analyzer whose need was considered.
+	Contributors []string
+	// FromSaturation is whether saturation's own need is N, so saturation's
+	// own per-replica capacity already prices it exactly.
+	FromSaturation bool
+}
+
+// ResolveSO decides one variant's replica need from entries, the analyzers
+// eligible to contribute, falling back to sat when none does. Each eligible
+// analyzer with a finite, non-negative TotalReplicas for the variant
+// contributes, and N is the largest. A non-finite need is no reading: one
+// analyzer's +Inf demand would otherwise price every replica at zero.
+func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant string) Decision {
+	var d Decision
+	for _, e := range entries {
+		if !Eligible(e) {
+			continue
+		}
+		evc, present := FindVariantCapacity(e.Result, variant)
+		if !present || evc.Reason == ReasonNoData || evc.Reason == ReasonError {
+			continue
+		}
+		n, ok := finiteNeed(e.Result, evc)
+		if !ok {
+			continue
+		}
+		d.Contributors = append(d.Contributors, e.Name)
+		switch {
+		case !d.OK || n > d.N:
+			d.N, d.OK = n, true
+			d.FromSaturation = sat != nil && e.Name == sat.Name
+		case n == d.N && sat != nil && e.Name == sat.Name:
+			d.FromSaturation = true
+		}
+	}
+	switch len(d.Contributors) {
+	case 0:
+		d.Path = DecisionNoSignal
+		if sat == nil || !Eligible(*sat) {
+			return d
+		}
+		satVC, present := FindVariantCapacity(sat.Result, variant)
+		if !present {
+			return d
+		}
+		if n, ok := finiteNeed(sat.Result, satVC); ok {
+			return Decision{N: n, OK: true, Path: DecisionSatFallback, Contributors: []string{sat.Name}, FromSaturation: true}
+		}
+		return d
+	case 1:
+		d.Path = DecisionSingle
+	default:
+		d.Path = DecisionAgree
+	}
+	return d
+}
+
+// finiteNeed is TotalReplicas when it is finite and not negative.
+func finiteNeed(result *domain.AnalyzerResult, vc domain.VariantCapacity) (float64, bool) {
+	n, ok := TotalReplicas(result, vc)
+	if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// FindVariantCapacity returns variant's VariantCapacity from result, and
+// whether it is present.
+func FindVariantCapacity(result *domain.AnalyzerResult, variant string) (domain.VariantCapacity, bool) {
+	if result == nil {
+		return domain.VariantCapacity{}, false
+	}
+	for _, vc := range result.VariantCapacities {
+		if vc.VariantName == variant {
+			return vc, true
+		}
+	}
+	return domain.VariantCapacity{}, false
 }

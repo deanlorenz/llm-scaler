@@ -221,7 +221,6 @@ var _ = Describe("buildComposite — no-signal end to end (test 8d)", func() {
 
 		Expect(req.CompositeSignal.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionNoSignal)))
 		Expect(allocation.CompositeHasSignal(req.CompositeSignal)).To(BeFalse())
-		Expect(allocation.SOHasSignal(req.CompositeSignal, "v1")).To(BeFalse())
 	})
 })
 

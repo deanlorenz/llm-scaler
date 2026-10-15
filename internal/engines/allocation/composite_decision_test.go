@@ -31,8 +31,7 @@ func makeAnalyzer(name string, demand, prc float64) NamedAnalyzerResult {
 	}
 }
 
-// testDecision mirrors ResolveSO's old return shape, so the ported test
-// bodies below stay close to their pre-rewrite originals.
+// testDecision is ResolveSO's result in the field names the specs below use.
 type testDecision struct {
 	n            float64
 	ok           bool
@@ -40,82 +39,11 @@ type testDecision struct {
 	contributors []string
 }
 
-// resolveSOForTest runs composite.go step 5's inline contributor-collection
-// and decision switch in isolation from buildComposite, for testing that
-// logic without standing up a full Engine/collectV2ModelRequest. This is the
-// "small test-only helper" composite-signal-redesign.md's coder task calls
-// for now that ResolveSO/SODecision are deleted and their logic lives inline
-// in steadystate.buildComposite (not exported, not callable directly from
-// this package's tests).
-//
-// entries plays eligibleAnalyzers's role (may or may not include sat, mirrors
-// ResolveSO's old "entries" parameter where sat's own presence/eligibility in
-// the list was what determined whether it could be an ordinary contributor);
-// sat is buildComposite's separate, always-present identity/fallback source
-// (found from namedResults regardless of eligibility, exactly as
-// findSaturation does). variant is the SO being resolved.
+// resolveSOForTest calls ResolveSO, the function buildComposite decides each
+// variant with.
 func resolveSOForTest(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant string) testDecision {
-	type contribution struct {
-		name string
-		n    float64
-	}
-	var contributors []contribution
-	for _, e := range entries {
-		if !Eligible(e) {
-			continue
-		}
-		evc, present := findVariantCapacityForTest(e.Result, variant)
-		if !present || evc.Reason == ReasonNoData || evc.Reason == ReasonError {
-			continue
-		}
-		n, ok := TotalReplicas(e.Result, evc)
-		if !ok {
-			continue
-		}
-		contributors = append(contributors, contribution{name: e.Name, n: n})
-	}
-
-	switch {
-	case len(contributors) == 0:
-		// A sat with no real result (nil, erroring, no-data, or stale) must
-		// never produce a fallback value -- mirrors composite.go step 5's
-		// Eligible(sat) guard, added after the first version of this switch
-		// let a stale sat leak a fallback value (caught by make test).
-		if sat == nil || sat.Result == nil || !Eligible(*sat) {
-			return testDecision{path: DecisionNoSignal}
-		}
-		satVC, present := findVariantCapacityForTest(sat.Result, variant)
-		if satN, ok := TotalReplicas(sat.Result, satVC); present && ok {
-			return testDecision{n: satN, ok: true, path: DecisionSatFallback, contributors: []string{sat.Name}}
-		}
-		return testDecision{path: DecisionNoSignal}
-	case len(contributors) == 1:
-		return testDecision{n: contributors[0].n, ok: true, path: DecisionSingle, contributors: []string{contributors[0].name}}
-	default:
-		var names []string
-		var best float64
-		for _, c := range contributors {
-			names = append(names, c.name)
-			if c.n > best {
-				best = c.n
-			}
-		}
-		return testDecision{n: best, ok: true, path: DecisionAgree, contributors: names}
-	}
-}
-
-// findVariantCapacityForTest mirrors composite.go's private findVariantCapacity,
-// duplicated here since that helper lives in the steadystate package.
-func findVariantCapacityForTest(result *domain.AnalyzerResult, variant string) (domain.VariantCapacity, bool) {
-	if result == nil {
-		return domain.VariantCapacity{}, false
-	}
-	for _, vc := range result.VariantCapacities {
-		if vc.VariantName == variant {
-			return vc, true
-		}
-	}
-	return domain.VariantCapacity{}, false
+	d := ResolveSO(entries, sat, variant)
+	return testDecision{n: d.N, ok: d.OK, path: d.Path, contributors: d.Contributors}
 }
 
 var _ = Describe("TotalReplicas", func() {
@@ -125,7 +53,7 @@ var _ = Describe("TotalReplicas", func() {
 			TotalDemand:       1000,
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 200}},
 		}
-		vc, _ := findVariantCapacityForTest(result, "v")
+		vc, _ := FindVariantCapacity(result, "v")
 		n, ok := TotalReplicas(result, vc)
 		Expect(ok).To(BeTrue())
 		Expect(n).To(Equal(5.0))
@@ -139,12 +67,12 @@ var _ = Describe("TotalReplicas", func() {
 				{VariantName: "d1", Role: "decode", PerReplicaCapacity: 300},
 			},
 		}
-		pVC, _ := findVariantCapacityForTest(result, "p1")
+		pVC, _ := FindVariantCapacity(result, "p1")
 		n, ok := TotalReplicas(result, pVC)
 		Expect(ok).To(BeTrue())
 		Expect(n).To(Equal(4.0))
 
-		dVC, _ := findVariantCapacityForTest(result, "d1")
+		dVC, _ := FindVariantCapacity(result, "d1")
 		n, ok = TotalReplicas(result, dVC)
 		Expect(ok).To(BeTrue())
 		Expect(n).To(Equal(3.0))
@@ -156,7 +84,7 @@ var _ = Describe("TotalReplicas", func() {
 			TotalDemand:       0,
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 200}},
 		}
-		vc, _ := findVariantCapacityForTest(result, "v")
+		vc, _ := FindVariantCapacity(result, "v")
 		n, ok := TotalReplicas(result, vc)
 		Expect(ok).To(BeTrue())
 		Expect(n).To(BeZero())
@@ -467,7 +395,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		// other's own contribution (12) is identical in both cases; only the
 		// winner of the max (and therefore the aggregate) may change based
 		// on sat's PRC, but other's computed N_i is untouched by it.
-		otherVC, _ := findVariantCapacityForTest(other.Result, "v")
+		otherVC, _ := FindVariantCapacity(other.Result, "v")
 		otherN, ok := TotalReplicas(other.Result, otherVC)
 		Expect(ok).To(BeTrue())
 		Expect(otherN).To(Equal(12.0))

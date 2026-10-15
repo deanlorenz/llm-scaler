@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -119,22 +120,42 @@ func (e *Engine) runV2AnalysisOnly(
 // TODO: make configurable if needed.
 const analyzerLivenessStaleCycles = 3
 
-// runAnalyzersAndScore runs the V2 saturation analyzer plus every other
-// registered, enabled analyzer, builds a NamedAnalyzerResult for each, runs
-// liveness tracking and metrics for all, then returns the full slice.
-// collectV2ModelRequest builds the composite from this slice (spec
-// composite-analyzer §6.1/§6.2 O2) as the single CompositeSignal handed to
-// the optimizer — it is not saturation, even on the sat-only path. The
-// composite is built at that O2 site, not here: this function's return type
-// and behavior are otherwise unchanged from before the composite-analyzer
-// mission.
+// runAnalyzersAndScore runs every analyzer (runAnalyzers) and records their
+// wva_analyzer_* series. collectV2ModelRequest does not use it: it records
+// once, with the composite it builds included, so a cycle's two calls cannot
+// evict each other's series.
+func (e *Engine) runAnalyzersAndScore(
+	ctx context.Context,
+	modelID, namespace string,
+	replicaMetrics []domain.ReplicaMetrics,
+	config config.ScalingPolicy,
+	variantStates []domain.VariantReplicaState,
+	variantMetadata []domain.VariantMetadata,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	schedulerQueue *domain.SchedulerQueueMetrics,
+	arrivalRate float64,
+) ([]allocation.NamedAnalyzerResult, error) {
+	namedResults, err := e.runAnalyzers(ctx, modelID, namespace, replicaMetrics, config,
+		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
+	if err != nil {
+		return nil, err
+	}
+	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
+	return namedResults, nil
+}
+
+// runAnalyzers runs the V2 saturation analyzer plus every other registered,
+// enabled analyzer, builds a NamedAnalyzerResult for each, runs liveness
+// tracking and logs each, and returns the full slice. It records no metrics:
+// the caller does, once.
 //
 // Saturation always runs; every other registered analyzer runs only if
 // config.AnalyzerEnabled. The capacity-build step (buildNamedResult) runs
 // once per analyzer. Saturation is the keeper of per-variant metadata
 // (Cost, AcceleratorName, Role) until a future pre-analysis-extraction PR
 // separates that concern.
-func (e *Engine) runAnalyzersAndScore(
+func (e *Engine) runAnalyzers(
 	ctx context.Context,
 	modelID, namespace string,
 	replicaMetrics []domain.ReplicaMetrics,
@@ -210,7 +231,6 @@ func (e *Engine) runAnalyzersAndScore(
 	}
 
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
-	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
 
 	for _, nr := range namedResults {
 		logAnalyzerResult(ctx, modelID, namespace, nr)
@@ -1128,20 +1148,19 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 	}
 }
 
-// computeCurrentGPUUsage sums the GPUs WVA's own variants hold, per accelerator
-// type, across this cycle's population. This is the ManagedUsage view: the only
-// consumption an operator-declared quota may be charged for.
 // measuredThisCycle reports whether the request carries a result this cycle,
 // so its replica counts are charged to a quota. A result with no usable signal
 // still counts: its replicas hold their GPUs whatever the analyzers made of
 // them, and charging them nothing published headroom the warm pool then grew
 // into (TestASteadyFleetStillPublishesHeadroom). A request with no result at
-// all was not measured, and is not charged. Deliberately not
-// allocation.CompositeHasSignal, which gates decisions, not accounting.
+// all was not measured, and is not charged.
 func measuredThisCycle(req allocation.ModelScalingRequest) bool {
 	return req.CompositeSignal.Result != nil
 }
 
+// computeCurrentGPUUsage sums the GPUs WVA's own variants hold, per accelerator
+// type, across this cycle's population. This is the ManagedUsage view: the only
+// consumption an operator-declared quota may be charged for.
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
@@ -1225,7 +1244,7 @@ func (e *Engine) collectV2ModelRequest(
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
 ) (*allocation.ModelScalingRequest, error) {
-	namedResults, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
+	namedResults, err := e.runAnalyzers(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
 		return nil, fmt.Errorf("collecting V2 model request for %s/%s: %w", namespace, modelID, err)
@@ -1240,60 +1259,23 @@ func (e *Engine) collectV2ModelRequest(
 		}
 	}
 
-	// The optimizer's input is the composite (spec composite-analyzer §6.1,
-	// §6.2 O2) — never literally saturation, even on the sat-only path.
-	// buildComposite reduces the full namedResults slice (every enabled
-	// analyzer's demand, not just saturation's) into the single
-	// NamedAnalyzerResult the optimizer consumes; the per-analyzer slice
-	// itself is untouched and still serves liveness/metrics/logging inside
-	// runAnalyzersAndScore. Built here, at the O2 site, not inside
-	// runAnalyzersAndScore — that function's return type and behavior stay
-	// exactly what they were before this mission.
-	//
-	// The composite uses the policy's own default thresholds, not
-	// saturation's (possibly per-analyzer-overridden) ones — naming
-	// domain.SaturationAnalyzerName here would be exactly the
-	// "sat-specific code outside of compose" pattern this call stack must
-	// not have anywhere.
-	//
-	// Saturation's contributor eligibility is resolved exactly once, here,
-	// before compose (spec §2.1): sat's name is never tested inside
-	// buildComposite's per-SO contributor loop, which cannot tell sat apart
-	// from any other analyzer. Sat keeps its unconditional identity role
-	// (D_sat, ReplicaCount and friends come from namedResults regardless),
-	// but it only *contributes* to CompositeTotalReplicas when it is enabled.
+	// The optimizer's input is the composite of every analyzer that ran,
+	// never saturation's own entry, even when it runs alone (buildComposite).
+	// Saturation contributes only when the policy lists it; it is the
+	// composite's identity and unit either way. The thresholds are
+	// saturation's own, a per-analyzer override included: the composite's
+	// demand is saturation's, and the warm pool's pressure reads the same pair.
 	eligibleAnalyzers := namedResults
 	if !config.AnalyzerEnabled(domain.SaturationAnalyzerName) {
 		eligibleAnalyzers = excludeByName(namedResults, domain.SaturationAnalyzerName)
 	}
-	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, config.ScaleUpThreshold, config.ScaleDownBoundary)
+	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
 
-	// Observability parity (spec §6/A22/A23): the composite is a second,
-	// explicit call into the SAME functions every analyzer's own result
-	// already went through inside runAnalyzersAndScore — not a parallel
-	// logging/metrics path, and not folded into that function's own pass
-	// (composing there would have coupled the composite's construction to
-	// the per-analyzer slice's own liveness/metrics/logging step, which
-	// this mission's user-facing review found to be the wrong trade: it
-	// hid the composite's build inside runAnalyzersAndScore, where a
-	// reader tracing "where does the optimizer's signal come from" would
-	// no longer find it at the O2 compose site).
-	//
-	// recordAnalyzerMetrics is safe to call a second time for one more
-	// entry: its own eviction step (evictStaleAnalyzerSeries) compares the
-	// current call's published series against whatever this model's LAST
-	// call left behind and only deletes what didn't reappear, then
-	// overwrites the stored set with the current call's — so calling it
-	// again here, after runAnalyzersAndScore's own call already ran for the
-	// per-analyzer slice this same cycle, does not delete those series (the
-	// per-analyzer series recorded moments earlier this same cycle are
-	// still "current" as far as THIS call is concerned; only a series that
-	// stops appearing across cycles is ever evicted). It does re-emit the
-	// per-analyzer series a second time (harmless — a Gauge.Set to the same
-	// value is idempotent) so the composite's series can be added in the
-	// same accounting pass, keeping "this call's current set" the
-	// authoritative one stored for next cycle's eviction.
-	e.recordAnalyzerMetrics(namespace, modelID, append(namedResults, composite))
+	// One record per cycle, the composite included: two calls each evicted
+	// what the other had published, and each variant's engine configuration
+	// with it.
+	e.recordAnalyzerMetrics(namespace, modelID, append(slices.Clone(namedResults), composite))
 	logAnalyzerResult(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
@@ -1309,29 +1291,11 @@ func (e *Engine) collectV2ModelRequest(
 	}, nil
 }
 
-// excludeByName returns a copy of results with the entry named name omitted,
-// or results itself when no entry carries that name. Used once per cycle to
-// resolve buildComposite's eligibleAnalyzers, so saturation's enabled/disabled
-// state is decided in exactly one place instead of being re-tested per SO.
+// excludeByName returns a copy of results without the entries named name.
 func excludeByName(results []allocation.NamedAnalyzerResult, name string) []allocation.NamedAnalyzerResult {
-	found := false
-	for _, nr := range results {
-		if nr.Name == name {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return results
-	}
-	out := make([]allocation.NamedAnalyzerResult, 0, len(results))
-	for _, nr := range results {
-		if nr.Name == name {
-			continue
-		}
-		out = append(out, nr)
-	}
-	return out
+	return slices.DeleteFunc(slices.Clone(results), func(nr allocation.NamedAnalyzerResult) bool {
+		return nr.Name == name
+	})
 }
 
 // metadataByVariant indexes discovery metadata by variant name for the capacity
