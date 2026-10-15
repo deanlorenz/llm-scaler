@@ -1177,9 +1177,9 @@ ships, because enforcing will need an explicit `slo.mode: enforce`. Use it to
 see whether a tier meets an SLO before anything sizes a fleet from one.
 Experimental: its figures have not been checked against a live router yet.
 
-One thing about turning it on **can** change scaling: a tier's own entry takes
-built-in defaults for every field it leaves unset, and those override
-`default`'s (step 3 below).
+One thing about turning it on **can** change scaling: a tier that lists
+`analyzers:` takes the built-in band and loses saturation's inherited entry,
+unless it writes them out (step 3 below).
 
 **Before you start**
 
@@ -1235,28 +1235,25 @@ built-in defaults for every field it leaves unset, and those override
 
 3. **Write the tier with every field it relies on.** Read the ConfigMap first:
    `kubectl get configmap wva-scaling-policy-config -n <controller-ns> -o yaml`
-   (or the namespace-local map, if the model's namespace has one). A tier's
-   entry does not inherit what it leaves unset: `kvCacheThreshold`,
-   `queueLengthThreshold` and `priority` take built-in defaults, and an entry
-   with an `analyzers:` list takes the built-in band too -- 0.85 and 0.70 for
-   `scaleUpThreshold` and `scaleDownBoundary`
-   ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)). The
-   list also replaces saturation's inherited `parameters:` and `score`. So
-   write every one of them out, keeping the tier's own values where it sets
-   them. Take `scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold` and
-   `priority` from the line saved in step 1: those are the values the model
-   runs at now, wherever they came from. Take `queueLengthThreshold`, and
-   saturation's `score` and `parameters:`, from the ConfigMap: the tier's entry
-   where it sets them, `default` where it does not. Replace each `<...>` below;
-   do not paste the example values:
+   (or the namespace-local map, if the model's namespace has one). A tier
+   inherits what it leaves unset from `default`, with two exceptions, both
+   because it lists `analyzers:`:
+   - it takes the built-in band, 0.85 and 0.70 for `scaleUpThreshold` and
+     `scaleDownBoundary`, instead of the one it would inherit
+     ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149));
+   - the list replaces the inherited one, and with it saturation's
+     `parameters:` and `score`.
+
+   So write those out, keeping the tier's own values where it sets them. Take
+   the band from the line saved in step 1: it is what the model runs at now,
+   wherever it came from. Take saturation's `score` and `parameters:` from the
+   ConfigMap: the tier's entry where it sets them, `default` where it does not.
+   Replace each `<...>` below; do not paste the example values:
 
    ```yaml
    slo-watch: |
-     scaleUpThreshold: <current>       # every field copied from the model's tier now
+     scaleUpThreshold: <current>       # the band the model runs at now
      scaleDownBoundary: <current>
-     kvCacheThreshold: <current>
-     queueLengthThreshold: <current>
-     priority: <current>
      analyzers:
        - name: saturation              # keep it, with the current score and parameters
          score: <current>
