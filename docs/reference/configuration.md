@@ -485,15 +485,16 @@ KEDA proves who it is to the scaler. Only KEDA can call it.
 This authenticates KEDA, not whoever wrote a ScaledObject. Anyone who may
 create a ScaledObject can point it at the scaler with this install's
 `authenticationRef`, and KEDA then calls the scaler for them. Who may create
-ScaledObjects is still your RBAC.
+ScaledObjects is still your RBAC
+([security model](security-model.md#scaler-mutual-tls)).
 
 **What you do:** nothing, on a new install. The installer turns TLS on when it
 can, and says why when it cannot.
 
 **When it stays on plaintext** (the installer prints which one, and the fix):
 
-- KEDA is not installed, or the installer cannot tell where it runs. Fix: set
-  `KEDA_NAMESPACE`.
+- KEDA is not installed, or the installer cannot tell where it runs or where
+  it keeps its Secrets. Fix: set `KEDA_NAMESPACE`.
 - The cluster admin has not written KEDA's side yet (a tenant's
   `make deploy-wva` cannot). Fix: the admin runs `make setup-prereqs`.
 - You may not create what it needs (below).
@@ -559,16 +560,23 @@ plaintext.
   cert-manager, re-run `make deploy-wva`. The controller reloads it without a
   restart.
 - KEDA's client certificate lasts as long as the CA (10 years). KEDA reads it
-  once per connection and never again, so it is not renewed sooner.
+  when it first connects and keeps it until KEDA's operator restarts, so it is
+  not renewed sooner.
 - **When the CA changes, restart KEDA's operator.** That happens when the CA
   nears its end, after an uninstall and reinstall, or when you switch
   certificate provider. KEDA keeps the old CA and certificate until it
-  restarts, and every handshake fails. `make setup-prereqs` prints the command
-  when it sees the change:
+  restarts, and every handshake fails. The installer prints the command:
+  - `make setup-prereqs`, when the CA or KEDA's certificate changed;
+  - `make setup-prereqs`, when it writes KEDA's side for the first time while
+    KEDA runs (it cannot tell a reinstall from a first install);
+  - `make undeploy-wva` (the admin's), when it removed KEDA's side.
 
   ```bash
-  kubectl rollout restart deployment -n <KEDA namespace> -l app=keda-operator
+  kubectl rollout restart deployment/keda-operator -n <KEDA namespace>
   ```
+
+  On OpenShift's Custom Metrics Autoscaler, the KEDA namespace is usually
+  `openshift-keda`.
 
 - **OpenShift** rotates its service CA by itself. When it does, a cluster admin
   re-runs `make setup-prereqs`, then restarts KEDA's operator.
@@ -578,11 +586,12 @@ plaintext.
 
 - the mode (plaintext, TLS, mutual TLS);
 - the certificates' expiry;
-- whether KEDA's side is in place;
-- every ScaledObject that would not reach the scaler.
+- whether KEDA's side is in place, and whether KEDA trusts the current CA;
+- every ScaledObject that would not reach the scaler, in either mode.
 
 **Undo.** `make undeploy-wva` removes what carries the `wva.llmd.ai/scaler-tls`
-label. The admin's uninstall also removes KEDA's side. The installer refuses
+label. The admin's uninstall also removes KEDA's side, again only what carries
+the label, and prints the KEDA restart command. The installer refuses
 to overwrite a Secret, Issuer, Certificate or ClusterTriggerAuthentication
 without that label, or one it cannot read.
 
@@ -601,6 +610,8 @@ what it replaced, `WVA_SCALER_TLS=false` removes them.
   certificate it signed is accepted.
 - `--external-scaler-client-san` (comma-separated): accepts only clients whose
   certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
+  The installer sets one name, `wva-keda-client`, or `WVA_SCALER_CLIENT_SAN`
+  when given; that must be one lowercase DNS name, or the install refuses.
 
 In KEDA v2.18 the external scaler dials TLS when the authentication sets
 `caCert`, when it sets **both** `tlsClientCert` and `tlsClientKey` (one alone

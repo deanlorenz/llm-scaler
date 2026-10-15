@@ -487,7 +487,8 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 | --- | --- | --- |
 | `scalerAddress` names a namespace where no scaler runs | the ScaledObject points at another or a removed install | `make scaledobjects-repoint` |
 | `make verify-deployment` names the ScaledObject as not reaching the scaler over TLS | the scaler serves mutual TLS, and the trigger uses the plaintext address or lacks KEDA's `authenticationRef` | `make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true`, or edit the trigger ([what it needs](configuration.md#external-scaler-mutual-tls)) |
-| Every ScaledObject not-Ready after the scaler's CA changed (reinstall, provider switch, OpenShift service CA rotation) | KEDA keeps the TLS of a connection until it restarts | (cluster admin) `make setup-prereqs`, then `kubectl rollout restart deployment -n <KEDA namespace> -l app=keda-operator` |
+| Every ScaledObject not-Ready after the scaler's CA changed (reinstall, provider switch, OpenShift service CA rotation) | KEDA keeps the TLS of a connection until it restarts | (cluster admin) `make setup-prereqs`, then `kubectl rollout restart deployment/keda-operator -n <KEDA namespace>` |
+| The install or `make verify-deployment` says `Cannot tell which CA KEDA trusts` | KEDA's side was written by an older installer, which did not record the CA | (cluster admin) `make setup-prereqs` |
 | `make verify-deployment` says KEDA's side is not usable | the cluster admin has not run `make setup-prereqs` since TLS was turned on, or KEDA's copy of the client certificate expired | (cluster admin) `make setup-prereqs` with the install's variables |
 | the trigger has no `modelID` | the controller cannot tell which model to answer for | set `modelID` to what the container serves; `make verify-scaledobjects` |
 | `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |

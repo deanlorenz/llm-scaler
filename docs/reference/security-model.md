@@ -326,9 +326,24 @@ holds on any network. It is on by default, once KEDA's side is in place
   writes both; no model namespace gets a copy.
 - It protects the port only where the tenant cannot edit the controller's
   Deployment (the controller in an admin-owned namespace): whoever owns the
-  Deployment owns its flags. The client key is as sensitive as the port: anyone
-  who can read Secret `wva-external-scaler-client-tls` in the controller's
-  namespace, or its copy in KEDA's, can call the scaler as KEDA.
+  Deployment owns its flags.
+- It authenticates KEDA, not whoever wrote a ScaledObject. Anyone who may
+  create a ScaledObject can give it this install's `authenticationRef`, and
+  KEDA then calls the scaler for them
+  ([what a ScaledObject needs](configuration.md#external-scaler-mutual-tls)).
+  Who may create ScaledObjects is still your RBAC.
+
+These Secrets are as sensitive as the port. Anyone who can read one can call
+the scaler as KEDA:
+
+- `wva-external-scaler-client-tls` in the controller's namespace, and its copy
+  `wva-external-scaler-<controller namespace>` in KEDA's: KEDA's client key.
+- `wva-external-scaler-ca` in the controller's namespace: the CA's private key,
+  from cert-manager or the installer alike. With it, anyone can sign a client
+  certificate of their own.
+
+A tenant who can read Secrets in the controller's namespace holds the client
+key and the CA key.
 
 ## Data handled
 
