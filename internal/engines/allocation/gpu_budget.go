@@ -44,6 +44,12 @@ import (
 // there, charged) against; an allowlist of several types denies it. The
 // alternative, charging the largest remaining type, would guess a type the
 // scheduler is free to contradict.
+//
+// The demand is fitted per budget key AND per key that covers several of its
+// types (accelerator.Covers), as the greedy optimizer fits a P/D pair
+// (fitPairToBudget): a decode on NVIDIA-H100-80GB-HBM3 and a prefill on
+// NVIDIA-H100-PCIE-80GB both draw on an H100 family key, so 8 + 8 does not fit
+// a family residual of 12 although each product alone does.
 func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand map[string]int) bool {
 	if len(constraints) == 0 {
 		return true
@@ -56,6 +62,8 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 		return true // no cluster bound, and no allowance for this namespace
 	}
 
+	// spent is the demand by the budget key it is drawn from.
+	spent := make(map[string]int, len(demand))
 	for rawType, need := range demand {
 		if need <= 0 {
 			continue
@@ -80,18 +88,26 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 		if !known {
 			return false
 		}
-		budget := budgets[key]
+		spent[key] += need
+	}
 
-		// A negative budget survives tighterBudget only when every contributing
-		// budget was unlimited.
+	// Every key bounds the sum of what is drawn on the keys it covers: itself,
+	// its case spellings and, for a family key, its products. A negative budget
+	// survives tighterBudget only when every contributing budget was unlimited.
+	for key, budget := range budgets {
 		if isUnboundedBudget(budget) {
 			continue
 		}
-		if need > budget {
+		sum := 0
+		for drawn, need := range spent {
+			if accelerator.Covers(key, drawn) {
+				sum += need
+			}
+		}
+		if sum > budget {
 			return false
 		}
 	}
-
 	return true
 }
 
