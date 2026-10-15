@@ -268,8 +268,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := controller.ResolvePolicyNamespace(signalCtx, policyProbe, cfg); err != nil {
-		setupLog.Error(err, "unable to resolve where cluster policy comes from")
-		os.Exit(1)
+		os.Exit(startupExitCode(signalCtx, setupLog, err, "unable to resolve where cluster policy comes from"))
 	}
 
 	// Conditionally add LeaderWorkerSet scheme if CRD exists
@@ -533,8 +532,7 @@ func main() {
 
 	ctx := ctrl.LoggerInto(signalCtx, setupLog)
 	if err = configMapReconciler.BootstrapInitialConfigMaps(ctx); err != nil {
-		setupLog.Error(err, "unable to bootstrap initial ConfigMaps")
-		os.Exit(1)
+		os.Exit(startupExitCode(ctx, setupLog, err, "unable to bootstrap initial ConfigMaps"))
 	}
 	setupLog.Info("Initial ConfigMap bootstrap completed")
 
@@ -588,8 +586,8 @@ func main() {
 
 	// Validate that the API is working by testing a simple query with retry logic
 	if err := prometheusutil.ValidatePrometheusAPI(ctx, promAPI); err != nil {
-		setupLog.Error(err, "CRITICAL: Failed to connect to Prometheus - WVA requires Prometheus connectivity for autoscaling decisions")
-		os.Exit(1)
+		os.Exit(startupExitCode(ctx, setupLog, err,
+			"CRITICAL: Failed to connect to Prometheus - WVA requires Prometheus connectivity for autoscaling decisions"))
 	}
 	setupLog.Info("Prometheus client and API wrapper initialized and validated successfully")
 
