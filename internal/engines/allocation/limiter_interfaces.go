@@ -89,9 +89,13 @@ type ResourceConstraints struct {
 	// a namespace it excludes is bound by it not at all. It is set even when
 	// no active namespace is capped and NamespacePools is empty.
 	NamespaceScoped bool
-	TotalLimit      int
-	TotalUsed       int
-	TotalAvail      int
+	// ExcludedNamespaces holds the active namespaces a namespace-scoped
+	// provider lists in `exclude`. It does not cap them. Nil for a provider
+	// that excludes none, and for every cluster-scoped provider.
+	ExcludedNamespaces map[string]bool
+	TotalLimit         int
+	TotalUsed          int
+	TotalAvail         int
 	// PoolsVersion is the version of the warm-pool figure
 	// (decision.WarmPoolGPUsVersion) that the usage these constraints were
 	// computed against included. Set by the engine that built the usage views,
@@ -204,6 +208,11 @@ type NamespaceAwareInventory interface {
 	// no active namespace is capped (DefaultLimiter reads the difference as
 	// ResourceConstraints.NamespaceScoped).
 	NamespaceResourcePools(activeNamespaces []string) map[string]map[string]ResourcePool
+
+	// ExcludedNamespaces returns the active namespaces this inventory does
+	// not cap because its configuration excludes them, or nil when there are
+	// none. NamespaceResourcePools omits exactly these.
+	ExcludedNamespaces(activeNamespaces []string) map[string]bool
 }
 
 // ConstraintProvidersFrom unwraps a configured limiter into the providers that

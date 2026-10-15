@@ -471,5 +471,23 @@ func (q *QuotaInventory) NamespaceResourcePools(activeNamespaces []string) map[s
 	return out
 }
 
+// ExcludedNamespaces implements NamespaceAwareInventory: the active namespaces
+// the namespace-scoped configuration lists in `exclude`. Nil for the cluster
+// scope, and when no active namespace is excluded.
+func (q *QuotaInventory) ExcludedNamespaces(activeNamespaces []string) map[string]bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	var out map[string]bool
+	for _, ns := range activeNamespaces {
+		if q.cfg.IsExcluded(ns) {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[ns] = true
+		}
+	}
+	return out
+}
+
 // copyNestedIntMap returns a deep copy of a two-level nested int map.
 // maps.Clone is shallow, so the inner maps are cloned explicitly.

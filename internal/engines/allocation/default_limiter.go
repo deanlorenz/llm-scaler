@@ -115,6 +115,7 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		// A namespace-scoped inventory answers with a map, empty when none of
 		// the active namespaces is capped; a cluster-scoped one with nil.
 		rc.NamespaceScoped = nsPools != nil
+		rc.ExcludedNamespaces = nai.ExcludedNamespaces(activeNamespaces)
 		if len(nsPools) > 0 {
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
