@@ -31,9 +31,9 @@ const (
 // namespace-local → global, then the tier the default entry's defaultPolicy
 // names, then any per-model override — which is matched on the modelID/namespace
 // in its BODY, not its key — so precedence is settled before this is called.
-// Scale-to-zero is read from the default entry, the tier its defaultPolicy names,
-// or a per-model override — not from a tier a variant names: the callers resolve
-// with ResolveScalingPolicy, which passes no tier. A
+// The steady-state engine resolves the entry once per tier the model's variants
+// name and folds the results (scaleToZeroPolicy): the model parks only if every
+// tier allows it, and waits for the longest retention among them. A
 // separate wva-model-scale-to-zero-config ConfigMap used to carry the same
 // setting, which meant three places to look and a precedence rule to remember.
 //

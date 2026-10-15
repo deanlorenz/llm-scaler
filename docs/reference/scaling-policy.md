@@ -74,6 +74,16 @@ scaleToZero:
 | `enabled` | inherit | the `WVA_SCALE_TO_ZERO` deployment flag |
 | `retentionPeriod` | inherit | 10m (`DefaultScaleToZeroRetentionPeriod`) |
 
+You can set it in `default`, in a named tier, or in a per-model entry. When a
+model's variants name different tiers, the model parks only if every one of
+those tiers allows it. It then waits for the longest `retentionPeriod` among
+them.
+
+A `retentionPeriod` that is not a positive duration (for example `5 minutes` or
+`0s`) is ignored. The controller logs a warning once when it loads the
+ConfigMap, and the field acts as if it were not set. The rest of the entry
+still applies.
+
 #### How long until a model actually reaches zero
 
 **`retentionPeriod` and KEDA's `cooldownPeriod` add up.** They run one after
@@ -888,7 +898,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 
 | you set, in `default` | after a re-run |
 | --- | --- |
-| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
+| `scaleToZero` | repeat it, or set it on a named tier or a per-model entry (an entry whose body names the model); both are kept |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
 | `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
 | `limiters:` | kept when `WVA_LIMITER` is not passed, hand-written entries included; `WVA_LIMITER=none` removes it |
@@ -918,7 +928,7 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
-| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. | `0` (5 minutes) |
+| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is ignored with a warning at load. | `0` (5 minutes) |
 | `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off; it cannot turn back on a hold the `default` entry turned off. | `false` |
 
 ### Expected output length
@@ -1619,9 +1629,11 @@ triggers:
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
 
-Parking is the exception: `scaleToZero` is resolved without the variant's tier
-(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
-the tier `default.defaultPolicy` names, and the per-model override decide it.
+Parking is stricter, because it takes the whole model to zero. Each variant's
+tier has a say: a model parks only if every tier its variants name allows
+`scaleToZero`, and it waits for the longest `retentionPeriod` among them. When
+all variants name the same tier, this is just that tier's setting
+(`scaleToZeroPolicy` in the steady-state engine).
 
 Two failure modes resolve deterministically, and both are reported:
 
