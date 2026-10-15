@@ -18,10 +18,15 @@
   make model-cache NAMESPACE=<namespace> WVA_MODEL_PVC_SIZE=<size> WVA_MODEL_PVC_CLASS=<rwx-class>
   ```
 
-- [ ] RBAC that lets the scaling manager `patch` Pods. The shipped ClusterRole
-  has it. If yours was scoped by hand, the scaling manager refuses to start the
-  pool and says so: it will not hold accelerators to warm models it could never
-  lend.
+- [ ] The right to create Roles and RoleBindings in the pool's namespace.
+  The scaling manager must `patch` pool Pods to lend them, and its ClusterRole
+  only reads Pods. `deploy/warmpool.sh create` grants the patch in this
+  namespace alone (Role `wva-pod-writer`), before it creates the pool. A
+  namespace-scoped scaling manager already has it, and nothing is granted. If
+  you may not create Roles, `create` stops before creating anything and prints
+  the command to ask an admin to run. Without the grant, the scaling manager
+  refuses to start the pool: it will not hold accelerators to warm models it
+  could never lend.
 - [ ] **Two container images, from two owners** (below), pullable from the pool
   nodes.
 
