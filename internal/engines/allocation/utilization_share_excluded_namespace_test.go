@@ -28,7 +28,7 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 				byType[acc] += n
 			}
 		}
-		var out []*ResourceConstraints
+		out := make([]*ResourceConstraints, 0, len(entries))
 		for _, q := range entries {
 			rc, err := NewDefaultLimiter(q.Name, NewQuotaInventory(q)).ComputeConstraints(context.Background(), byType, byNS)
 			Expect(err).NotTo(HaveOccurred())
