@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -236,6 +237,37 @@ func TestServiceRateSignal_ParkedVariantPublishesNoLine(t *testing.T) {
 	assert.False(t, sig.ITLWindowed, "a parked variant's sample count was published")
 	assert.Empty(t, sig.RateSource, "no replica, no rate")
 	assert.True(t, srSignal(t, res, serving).HasLine, "the serving sibling keeps its line")
+}
+
+// A line that passes itl.ValidModel at k_sat but is negative at the pricing k
+// derives no rate (deriveMu refuses it), and is not published as one: its
+// value at the pricing k would read as a negative inter-token latency. The
+// sample count still is. The usable line beside it guards against a test
+// that passes because nothing publishes.
+func TestAttachServiceRates_LineUnusableAtPricingK(t *testing.T) {
+	unusable := itl.Model{A: 0.05, B: -0.04}
+	require.True(t, itl.ValidModel(unusable.A, unusable.B), "the fixture must pass the fit's own check")
+	c := &cycle{
+		cfg:            &config.ScalingPolicy{KvCacheThreshold: 0.8, ScaleUpThreshold: 0.85},
+		rolesByVariant: map[string]string{"bad": domain.RoleDecode, "good": domain.RoleDecode},
+		itlModels:      map[string]itl.Model{"bad": unusable, "good": tracedModel},
+		itlSamples:     map[string]int{"bad": 12, "good": 12},
+	}
+	require.Less(t, unusable.ITLAt(pricingK(c.cfg)), 0.0, "the fixture must be unusable at the pricing k")
+	variants := []domain.VariantCapacity{
+		{VariantName: "bad", ObservedReplicas: 2},
+		{VariantName: "good", ObservedReplicas: 2},
+	}
+
+	c.attachServiceRates(variants, nil)
+
+	bad := *variants[0].ServiceRate
+	assert.False(t, bad.HasLine, "a line negative at the pricing k was published")
+	assert.True(t, bad.ITLWindowed)
+	assert.Equal(t, 12, bad.LineSamples)
+	good := *variants[1].ServiceRate
+	assert.True(t, good.HasLine)
+	assert.Greater(t, good.ITLAtPricingK, 0.0)
 }
 
 // The rate's source, per case, and what is left out of the median.

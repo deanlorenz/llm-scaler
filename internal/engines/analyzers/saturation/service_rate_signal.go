@@ -6,6 +6,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
 // The service-rate signal: one struct per variant per cycle, built from the
@@ -54,7 +55,7 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 			sig.ITLWindowed = true
 			sig.LineSamples = n
 		}
-		if line, ok := c.itlModels[name]; ok && serving && !line.IsZero() {
+		if line, ok := c.itlModels[name]; ok && serving && lineUsableAt(line, kPrice) {
 			sig.HasLine = true
 			sig.LineSlope = line.A
 			sig.LineIntercept = line.B
@@ -63,6 +64,15 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 		sig.Rate, sig.RateSource = variantServiceRate(name, caps)
 		variants[i].ServiceRate = sig
 	}
+}
+
+// lineUsableAt reports whether a line can derive a service rate at k: the
+// condition deriveMu applies. A fit that passes itl.ValidModel, which checks
+// the line at k_sat (0.85), can still be zero or negative at the pricing k
+// (0.68 with the shipped defaults), and deriveMu refuses it; publishing it
+// would show a negative inter-token latency as the one a rate is priced at.
+func lineUsableAt(line itl.Model, k float64) bool {
+	return !line.IsZero() && line.ITLAt(k) > 0
 }
 
 // variantServiceRate returns the median saturated completion rate over a

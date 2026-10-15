@@ -1272,7 +1272,7 @@ per pod.
 
 ### `wva_itl_seconds_at_pricing_k`
 - **Type**: Gauge
-- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency the derived service rate is priced at. Absent while the variant has no line.
+- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency the derived service rate is priced at. Absent while the variant has no line. A line that is zero or negative at the pricing k cannot derive a rate, and none of the three line series is published for it; `wva_itl_line_samples` still is.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Compare against the ITL the engines report under load. A priced ITL well below the observed one means the derived rate over-states what a replica completes.
 
