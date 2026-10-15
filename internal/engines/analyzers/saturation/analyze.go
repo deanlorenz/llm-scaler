@@ -518,19 +518,34 @@ func (c *cycle) settleShape(caps []capacity.ReplicaCapacity) {
 	c.shapeChanged = !measured
 }
 
+// variantsPricedFromBorrowedLine is the set of variants at least one of whose
+// own replicas was priced from a sibling's ITL line this cycle. A bridge does
+// not count: it reads nothing of the variant's learned state.
+func variantsPricedFromBorrowedLine(caps []capacity.ReplicaCapacity) map[string]bool {
+	out := make(map[string]bool)
+	for _, rc := range ownRowsOf(caps) {
+		if rc.SaturatedThroughputLineBorrowed {
+			out[rc.VariantName] = true
+		}
+	}
+	return out
+}
+
 // priceDemand aggregates the per-replica records to variant and role totals,
 // and adds what the router is holding and no pod has started.
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
 		!c.cfg.EnableLearnedStateReuse, c.logger)
+	pricedFromLine := variantsPricedFromBorrowedLine(caps)
 	for i := range variantCapacities {
 		vc := &variantCapacities[i]
 		from := c.itlBorrowedFrom[vc.VariantName]
-		// Only a variant with replicas of its own reporting is priced from the
-		// line: fitLines resolves one for every known variant, a variant at
-		// zero or carried by bridges alone included, but only own rows read it.
-		if from == "" || vc.ObservedReplicas == 0 {
+		// Only a variant one of whose own replicas was PRICED from the line
+		// borrowed it: fitLines resolves a line for every known variant -- one
+		// at zero, carried by bridges alone, or priced from its own measured
+		// window included -- and holding a line is not using it.
+		if from == "" || !pricedFromLine[vc.VariantName] {
 			continue
 		}
 		// from is the lender's itlWindowKey, namespace|model|variant|...: the
