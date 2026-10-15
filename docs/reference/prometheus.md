@@ -170,27 +170,36 @@ Only those sources write or repoint the binding:
 
 **What ships:** the manager ConfigMap verifies (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"`).
 On Kubernetes the installer turns verification off for one Prometheus only: the
-kube-prometheus-stack it deploys itself (`DEPLOY_PROMETHEUS=true`, in
-`MONITORING_NAMESPACE`). That stack serves a self-signed certificate that nothing
-mounts into the controller, so verifying would fail with `x509: certificate
-signed by unknown authority`. Pass `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false`
-once the CA is mounted.
+kube-prometheus-stack it deploys itself (`DEPLOY_PROMETHEUS=true`, and a
+`PROMETHEUS_URL` naming `kube-prometheus-stack-prometheus.<MONITORING_NAMESPACE>.svc`).
+That stack serves a self-signed certificate that nothing mounts into the
+controller, so verifying would fail with `x509: certificate signed by unknown
+authority`. Another Prometheus or a Thanos in the same namespace is verified.
 
 Any other HTTPS Prometheus stays verified, because the controller sends it a
 token. If its certificate comes from a private CA, the controller cannot connect
 until you do one of these:
 
-- mount the CA and set `PROMETHEUS_CA_CERT_PATH` (steps below), or
+- mount the CA and re-run with `PROMETHEUS_CA_CERT_PATH=<file>` (steps below), or
 - re-run the install with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true`, on a
   development cluster only.
 
-An upgrade of a controller that already skips verification, with no CA set,
-keeps skipping it and says so
+To check whether this is your problem:
+
+```bash
+kubectl logs -n "$WVA_NS" deploy/wva-controller-manager | grep -m1 x509
+```
+
+No output means there is nothing to do.
+
+Re-runs keep `PROMETHEUS_CA_CERT_PATH` and the verification setting the
+controller runs with, so a re-run does not undo either
 ([upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
 
-The installer warns about both cases at the end of the install: an HTTPS
-connection it does not verify, and one it verifies with no CA set. The OpenShift
-overlays verify against the service CA.
+The installer warns about both cases during the install, and repeats it on the
+`TLS:` line of the summary at the end: an HTTPS connection it does not verify,
+and one it verifies with no CA set. The OpenShift overlays verify against the
+service CA.
 
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)
@@ -212,15 +221,22 @@ kubectl patch deployment wva-controller-manager -n "$WVA_NS" --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"prometheus-ca","mountPath":"/etc/prometheus-certs","readOnly":true}}]'
 ```
 
-Then, in the manager ConfigMap (`wva-manager-config`, key `config.yaml`), set
-`PROMETHEUS_CA_CERT_PATH: "/etc/prometheus-certs/ca.crt"` and
-`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"`, and restart the controller
+Then re-run the install with the path. It writes
+`PROMETHEUS_CA_CERT_PATH` and turns verification on:
+
+```bash
+PROMETHEUS_CA_CERT_PATH=/etc/prometheus-certs/ca.crt NAMESPACE=<namespace> make deploy-wva
+```
+
+Without the installer, set `PROMETHEUS_CA_CERT_PATH: "/etc/prometheus-certs/ca.crt"`
+and `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"` in `wva-manager-config`
+(key `config.yaml`), and restart the controller
 (`kubectl rollout restart deployment/wva-controller-manager -n "$WVA_NS"`).
 
 - **GitOps:** put the same volume and mount in a kustomize patch, as
   `config/components/openshift/deployment-patch.yaml` does for its serving cert.
-- **Installer re-runs** re-apply the manager ConfigMap from the overlay and reset
-  both keys. Set them again afterwards, or keep them in your own overlay.
+- **Installer re-runs** keep both keys, because the controller runs with them.
+  They do not manage the volume and mount: keep those in your own overlay.
 
 **The other direction, the controller's `/metrics`:** the shipped ServiceMonitor
 scrapes it with `insecureSkipVerify: true`, because the controller generates a

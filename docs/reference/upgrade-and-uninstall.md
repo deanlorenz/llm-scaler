@@ -163,23 +163,32 @@ Earlier releases skipped TLS verification for every Prometheus. This release
 verifies the certificate of any `https://` Prometheus, except the one the
 installer deploys itself, which has no CA to verify with.
 
-An upgrade does not turn verification on by itself. If the controller runs with
-`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` and no `PROMETHEUS_CA_CERT_PATH`, the
-upgrade keeps it off and warns:
-`TLS verification for <url> stays OFF, as it was before this upgrade`.
-Turning it on with no CA would stop the controller connecting to Prometheus.
+A re-run keeps what the controller runs with now:
+
+- **A CA path.** `PROMETHEUS_CA_CERT_PATH` is kept, and verification stays on.
+  Keep the CA volume and mount in your own overlay; the installer does not
+  manage them.
+- **Verification off, no CA, same Prometheus.** It stays off, and the
+  installer warns
+  `TLS verification for <url> stays OFF, as it was before this upgrade`.
+  Turning it on with no CA would stop the controller connecting.
+- **Verification off, but a different `PROMETHEUS_URL`.** The new Prometheus
+  is verified, and the installer says so. Pass
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` to keep it off.
+
+An explicit `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` or `PROMETHEUS_CA_CERT_PATH`
+always wins.
 
 To turn verification on, do one of these:
 
-- Mount the CA that signed the Prometheus certificate, and set
-  `PROMETHEUS_CA_CERT_PATH` ([TLS configuration](prometheus.md#tls-configuration)).
+- Mount the CA that signed the Prometheus certificate, and re-run with
+  `PROMETHEUS_CA_CERT_PATH=<file>` ([TLS configuration](prometheus.md#tls-configuration)).
 - Re-run with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false`, if a public CA signed
   the certificate.
 
-If the installer cannot read the controller's current config, it uses the new
-default (verify) and warns `Could not read the controller config`. If the
-controller then logs `CRITICAL: Failed to connect to Prometheus`, re-run with
-`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true`, or mount the CA.
+If the installer cannot read the controller's current config, it stops before
+changing anything, and asks you to re-run with
+`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` or `=false`.
 
 #### Patch on pods moves to Role `wva-pod-writer`
 
