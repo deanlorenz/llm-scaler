@@ -157,7 +157,8 @@ func UnsharedExcludedNamespace(acc string) string {
 // ShareGroupOptions controls which groups BuildShareGroups returns.
 type ShareGroupOptions struct {
 	// ClusterIsQuota reports whether a cluster-scoped quota bounds the cluster
-	// group. A namespace-scoped quota is not one: it bounds only the
+	// group: a cluster-scope quota entry is declared, alone or beside a
+	// physical limiter. A namespace-scoped quota is not one: it bounds only the
 	// namespaces it caps. When ClusterIsQuota is false the cluster-scope budget
 	// is the physical inventory, and the cluster group is built only with
 	// PhysicalGroups.

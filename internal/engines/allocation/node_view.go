@@ -165,10 +165,6 @@ func NodeViewFor(constraints []*ResourceConstraints, store *decision.NodeGPUStor
 	return view, ""
 }
 
-// PhysicalLimiterName is the name the physical limiter is built under: the
-// provider label of its constraints.
-const PhysicalLimiterName = "gpu-limiter"
-
 // PhysicalBounds reports whether the physical limiter's constraints are among
 // constraints.
 func PhysicalBounds(constraints []*ResourceConstraints) bool {
