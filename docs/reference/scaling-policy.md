@@ -80,9 +80,9 @@ those tiers allows it. It then waits for the longest `retentionPeriod` among
 them.
 
 A `retentionPeriod` that is not a positive duration (for example `5 minutes` or
-`0s`) is ignored. The controller logs a warning once when it loads the
-ConfigMap, and the field acts as if it were not set. The rest of the entry
-still applies.
+`0s`) is ignored, and the field acts as if it were not set. The rest of the
+entry still applies. The controller logs a warning each time it reads the
+ConfigMap, not just the first time.
 
 #### How long until a model actually reaches zero
 
@@ -928,7 +928,7 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
-| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is ignored with a warning at load. | `0` (5 minutes) |
+| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is ignored, with a warning each time the ConfigMap is read. | `0` (5 minutes) |
 | `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off; it cannot turn back on a hold the `default` entry turned off. | `false` |
 
 ### Expected output length

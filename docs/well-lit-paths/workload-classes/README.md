@@ -13,8 +13,6 @@ overnight batch job.
 - One model really needs its own numbers. Use a per-model override, which wins
   over any tier. Reach for it deliberately, not as the way to configure
   everything.
-- You want a tier to control scale-to-zero. Parking never reads the tier a
-  variant names ([details](#choosing-a-tier)).
 
 ## Start here
 
@@ -142,10 +140,10 @@ Utilization is measured against `kvCacheThreshold`-scaled capacity, so the
 real scale-out point is `kvCacheThreshold × scaleUpThreshold` of physical KV:
 0.80 × 0.85 = 0.68 with the defaults, 0.48 for the `interactive` example.
 
-The `scaleToZero` of a tier a variant names is not read. Parking reads only
-the `default` entry, the tier `default.defaultPolicy` names, or a per-model
-entry, never the variant's `scalingPolicy` (`ResolveScalingPolicy` in
-`internal/config/scaling_policy.go`). Put it on a per-model entry instead
+A tier can also carry `scaleToZero`, so a class decides whether its models may
+park. A model parks only if every tier its variants name allows it. It then
+waits for the longest `retentionPeriod` among those tiers. A per-model entry
+still overrides the tier
 ([scale to zero](../scale-to-zero/#start-here)).
 
 ### How a variant's policy is resolved

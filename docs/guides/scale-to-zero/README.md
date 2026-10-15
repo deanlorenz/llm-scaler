@@ -59,7 +59,9 @@ kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
 <!-- guide:deploy.policy end -->
 
 - The model's own entry is a per-model entry whose body names its `model_id` and
-  `namespace`. A variant's `scalingPolicy` tier is **not** read for parking.
+  `namespace`.
+- A named tier can carry `scaleToZero` too. If a model's variants name
+  different tiers, the model parks only if every one of them allows it.
 - Re-running `make deploy-wva` resets the `default` entry, which drops
   `scaleToZero`. Put it on a per-model entry to keep it, or repeat the edit.
 - Out-of-reach controller: it reads its own ConfigMap only at start, so restart
@@ -251,11 +253,12 @@ request still waiting in the EPP queue.
 
 ## Details
 
-- **Where the setting is read.** The `default` entry (and the tier
-  `default.defaultPolicy` names, if set), overridden by a per-model entry. A
-  variant's `scalingPolicy` tier is not read (`ResolveScalingPolicy` in
-  `internal/config/scaling_policy.go`). Parking is a model property: a model is at
-  zero only when nothing serves it.
+- **Where the setting is read.** The `default` entry, then the tier each
+  variant names in `scalingPolicy` (or the tier `default.defaultPolicy` names),
+  then a per-model entry, which wins. Parking is a model property: a model is at
+  zero only when nothing serves it. So when its variants name different tiers,
+  it parks only if every tier allows it, and waits for the longest
+  `retentionPeriod` among them.
 - **Why an out-of-reach controller needs a restart.** It reads its own
   ConfigMap only at start. A namespace-local map in the model's namespace is read
   live ([why](../../reference/scaling-policy.md#limiters-cluster-default-only-live)).
