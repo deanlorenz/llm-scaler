@@ -169,6 +169,33 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 	}, true
 }
 
+// k2WriteAge is how long ago the window a k2 figure came from was last
+// written: the variant's own window for P1-obs and P2-hist, the donor's for
+// P2-borrow. It reads WriteAge and never touches: asking how old a figure is
+// must not make it look used. ok is false for P3 and P4, which read no window,
+// and for a window that is gone.
+func (a *SaturationAnalyzer) k2WriteAge(historyKey string, src capacity.K2Source, donor string) (time.Duration, bool) {
+	key := historyKey
+	switch src {
+	case capacity.K2SrcObserved, capacity.K2SrcHistorical:
+	case capacity.K2SrcBorrowed:
+		namespace, _, rest, ok := splitVariantKey(historyKey)
+		if !ok || donor == "" {
+			return 0, false
+		}
+		key = namespace + "|" + donor + "|" + rest
+	default:
+		return 0, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ra, ok := a.computeCapacityHistory[key]
+	if !ok || ra.Len() == 0 {
+		return 0, false
+	}
+	return ra.WriteAge(), true
+}
+
 // logBorrowedK2 is the k2-decision line for a borrowed figure. It names the
 // donor and what the variant would have used instead, because the borrow is
 // standing state, not a one-cycle event: a fleet holding more replicas than its

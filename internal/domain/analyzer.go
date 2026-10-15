@@ -299,6 +299,20 @@ type VariantCapacity struct {
 	// it borrowed nothing.
 	Borrowed []LearnedStateBorrow
 
+	// K2Source is the k2 source (P1-obs, P2-hist, P2-borrow, P3-k2, P4-k1) of
+	// the replica the variant's per-replica capacity was taken from -- the
+	// replica Reason names. K2Age is how long ago the window that figure came
+	// from was last WRITTEN, when HasK2Age: the variant's own window for
+	// P1-obs and P2-hist, the donor's for P2-borrow; P3-k2 and P4-k1 come
+	// from no window. A read does not make a figure younger. K2Source is
+	// empty when no replica reported this cycle, or the analyzer learns no
+	// k2. Diagnostics only -- published as wva_learned_state_k2_source and
+	// wva_learned_state_k2_age_seconds -- so that a fleet held up by a
+	// figure measured a week ago is visible without reading the cycle log.
+	K2Source string
+	K2Age    time.Duration
+	HasK2Age bool
+
 	// WarmPoolReplicas is how many BRIDGES are serving this variant: warm pool
 	// Pods lent to it while it is short, counted in the same scale-target units
 	// as ReplicaCount but deliberately NOT part of it.

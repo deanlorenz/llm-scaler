@@ -347,6 +347,24 @@ across a restart, are otherwise visible only in the logs.
 - **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, then rising linearly toward 1 over the next 6 hours. When the relaxation completes the variant is on its own figure again: the borrow ends, and this series and the `k2` series of `wva_learned_state_borrowed` disappear, so the gauge never reads 1. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
 - **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`. Present only while `wva_learned_state_borrowed{quantity="k2"}` is.
 
+### `wva_learned_state_k2_source`
+- **Type**: Gauge
+- **Description**: 1 for the source of the k2 a variant is priced on, named as the [cycle log](cycle-log.md) names it: `P1-obs` (measured this cycle), `P2-hist` (the variant's own earlier measurement), `P2-borrow` (a sibling's measurement), `P3-k2` (derived from the engine flags) or `P4-k1` (the KV cache alone). Taken from the replica the variant's capacity comes from -- the one `analyzer-result`'s `reason` names. One series per variant. Absent when no replica of the variant reported this cycle.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`, `role`, `source`.
+- **Use Case**: Answers "is this variant priced on a measurement, and whose?" `P3-k2` and `P4-k1` mean nothing has been measured for the output length being served.
+
+### `wva_learned_state_k2_age_seconds`
+- **Type**: Gauge
+- **Description**: Seconds since the k2 a variant is priced on was last measured: the variant's own window for `P1-obs` and `P2-hist`, the donor's for `P2-borrow`. It is the age of the measurement, not of its last use: a figure in use every cycle is read every cycle and still ages. Absent for `P3-k2` and `P4-k1`, which come from no measurement.
+- **Labels**: as `wva_learned_state_k2_source`.
+- **Use Case**: A k2 is only ever measured while a replica is saturated, and a low k2 orders enough replicas that none saturates again -- so a too-low figure can price a fleet for weeks without anything correcting it. An old `P2-hist` at a large fleet is that case:
+  ```promql
+  wva_learned_state_k2_age_seconds{source="P2-hist"} > 86400
+    and on (exported_namespace, model_name, variant_name)
+  max by (exported_namespace, model_name, variant_name) (wva_analyzer_observed_replicas) > 4
+  ```
+  An old figure is not wrong by itself: a fleet sized correctly does not saturate either. The alert says where to look; a measurement is renewed only by a burst that saturates a replica.
+
 ### `wva_learned_state_restores_total`
 - **Type**: Counter
 - **Description**: Variants whose learned state was restored from the snapshot after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.

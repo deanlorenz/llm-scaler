@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -94,6 +95,8 @@ var (
 	engineConfig             *prometheus.GaugeVec
 	learnedStateBorrowed     *prometheus.GaugeVec
 	learnedStateRelaxed      *prometheus.GaugeVec
+	learnedStateK2Source     *prometheus.GaugeVec
+	learnedStateK2Age        *prometheus.GaugeVec
 	learnedStateRestores     *prometheus.CounterVec
 	learnedStateErrors       *prometheus.CounterVec
 	analyzerObservedReplicas *prometheus.GaugeVec
@@ -166,6 +169,10 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedBorrowLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
 		constants.LabelQuantity, constants.LabelDonor, constants.LabelDonorNamespace}
 	learnedRelaxedLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
+	// learnedK2Labels: one series per variant; role and source are
+	// determined by the variant this cycle, so they add no cardinality.
+	learnedK2Labels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
+		constants.LabelRole, constants.LabelSource}
 	// engineConfigLabels: the key learned state is filed under -- model,
 	// accelerator, GPUs per replica, fingerprint -- followed by the engine
 	// flags the fingerprint hashes.
@@ -199,6 +206,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		engineConfigLabels = append(engineConfigLabels, constants.LabelControllerInstance)
 		learnedBorrowLabels = append(learnedBorrowLabels, constants.LabelControllerInstance)
 		learnedRelaxedLabels = append(learnedRelaxedLabels, constants.LabelControllerInstance)
+		learnedK2Labels = append(learnedK2Labels, constants.LabelControllerInstance)
 		unmeasuredQueueLabels = append(unmeasuredQueueLabels, constants.LabelControllerInstance)
 		variantAtMaxLabels = append(variantAtMaxLabels, constants.LabelControllerInstance)
 		modelScalingBlockedLabels = append(modelScalingBlockedLabels, constants.LabelControllerInstance)
@@ -302,6 +310,20 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising toward 1 over the next 6 hours. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
 		},
 		learnedRelaxedLabels,
+	)
+	learnedStateK2Source = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVALearnedStateK2Source,
+			Help: "1 for the source of the k2 a variant is priced on, as the cycle log names it: P1-obs (measured this cycle), P2-hist (the variant's own earlier measurement), P2-borrow (a sibling's), P3-k2 (derived from engine flags) or P4-k1 (the KV cache alone). Taken from the replica the variant's capacity comes from. Absent when no replica of the variant reported this cycle.",
+		},
+		learnedK2Labels,
+	)
+	learnedStateK2Age = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVALearnedStateK2AgeSeconds,
+			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow; absent for P3-k2 and P4-k1, which come from no measurement.",
+		},
+		learnedK2Labels,
 	)
 	learnedStateRestores = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -813,7 +835,8 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(engineConfig); err != nil {
 		return fmt.Errorf("failed to register %s: %w", constants.WVAEngineConfig, err)
 	}
-	for _, c := range []prometheus.Collector{learnedStateBorrowed, learnedStateRelaxed, learnedStateRestores, learnedStateErrors} {
+	for _, c := range []prometheus.Collector{learnedStateBorrowed, learnedStateRelaxed, learnedStateK2Source, learnedStateK2Age,
+		learnedStateRestores, learnedStateErrors} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register a learned-state metric: %w", err)
 		}
@@ -1780,38 +1803,105 @@ var (
 	learnedBorrowsPublished = map[string][]domain.LearnedStateBorrow{}
 )
 
-// DeleteLearnedStateBorrows removes one variant's borrow series, whatever it
-// borrowed and from whom. modelID is part of the match: a variant name is
-// unique within a model, not within a namespace (see DeleteEngineConfig).
-func (m *MetricsEmitter) DeleteLearnedStateBorrows(namespace, modelID, variantName string) {
-	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
+// RecordLearnedStateK2Source publishes the source of the k2 a variant is
+// priced on and, when hasAge, how long ago that figure was last measured; an
+// empty source publishes nothing. Whatever it published for the variant
+// before under another role or source is removed after the new series is
+// set, so a variant priced every cycle is never absent from a concurrent
+// scrape.
+func (m *MetricsEmitter) RecordLearnedStateK2Source(namespace, modelID, variantName, role, source string, age time.Duration, hasAge bool) {
+	if learnedStateK2Source == nil || learnedStateK2Age == nil {
 		return
 	}
+	labels := func(role, source string) prometheus.Labels {
+		l := prometheus.Labels{
+			constants.LabelNamespace:   namespace,
+			constants.LabelModelName:   modelID,
+			constants.LabelVariantName: variantName,
+			constants.LabelRole:        role,
+			constants.LabelSource:      source,
+		}
+		if controllerInstance != "" {
+			l[constants.LabelControllerInstance] = controllerInstance
+		}
+		return l
+	}
+	now := learnedK2Series{role: role, source: source, hasAge: hasAge && source != ""}
+	if source != "" {
+		learnedStateK2Source.With(labels(role, source)).Set(1)
+		if now.hasAge {
+			learnedStateK2Age.With(labels(role, source)).Set(age.Seconds())
+		}
+	}
+	key := namespace + "|" + modelID + "|" + variantName
+	learnedBorrowsMu.Lock()
+	prev, had := learnedK2Published[key]
+	if source != "" {
+		learnedK2Published[key] = now
+	} else {
+		delete(learnedK2Published, key)
+	}
+	learnedBorrowsMu.Unlock()
+	if !had {
+		return
+	}
+	if source == "" || prev.role != role || prev.source != source {
+		learnedStateK2Source.Delete(labels(prev.role, prev.source))
+		learnedStateK2Age.Delete(labels(prev.role, prev.source))
+	} else if prev.hasAge && !now.hasAge {
+		learnedStateK2Age.Delete(labels(prev.role, prev.source))
+	}
+}
+
+// learnedK2Series is the k2-source series RecordLearnedStateK2Source last
+// published for a variant; learnedK2Published holds one per
+// namespace|model|variant, guarded by learnedBorrowsMu.
+type learnedK2Series struct {
+	role, source string
+	hasAge       bool
+}
+
+var learnedK2Published = map[string]learnedK2Series{}
+
+// DeleteLearnedStateBorrows removes one variant's borrow and k2-source series,
+// whatever it borrowed and from whom. modelID is part of the match: a variant
+// name is unique within a model, not within a namespace (see
+// DeleteEngineConfig).
+func (m *MetricsEmitter) DeleteLearnedStateBorrows(namespace, modelID, variantName string) {
 	match := prometheus.Labels{
 		constants.LabelNamespace:   namespace,
 		constants.LabelModelName:   modelID,
 		constants.LabelVariantName: variantName,
 	}
-	learnedStateBorrowed.DeletePartialMatch(match)
-	learnedStateRelaxed.DeletePartialMatch(match)
+	for _, g := range []*prometheus.GaugeVec{learnedStateBorrowed, learnedStateRelaxed, learnedStateK2Source, learnedStateK2Age} {
+		if g != nil {
+			g.DeletePartialMatch(match)
+		}
+	}
 	learnedBorrowsMu.Lock()
 	delete(learnedBorrowsPublished, namespace+"|"+modelID+"|"+variantName)
+	delete(learnedK2Published, namespace+"|"+modelID+"|"+variantName)
 	learnedBorrowsMu.Unlock()
 }
 
-// DeleteLearnedStateBorrowsForModel removes every borrow series of a model, for
-// a model that stops being reconciled.
+// DeleteLearnedStateBorrowsForModel removes every borrow and k2-source series
+// of a model: one that stops being reconciled, or has no replica reporting.
 func (m *MetricsEmitter) DeleteLearnedStateBorrowsForModel(namespace, modelID string) {
-	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
-		return
-	}
 	match := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelID}
-	learnedStateBorrowed.DeletePartialMatch(match)
-	learnedStateRelaxed.DeletePartialMatch(match)
+	for _, g := range []*prometheus.GaugeVec{learnedStateBorrowed, learnedStateRelaxed, learnedStateK2Source, learnedStateK2Age} {
+		if g != nil {
+			g.DeletePartialMatch(match)
+		}
+	}
 	learnedBorrowsMu.Lock()
 	for k := range learnedBorrowsPublished {
 		if strings.HasPrefix(k, namespace+"|"+modelID+"|") {
 			delete(learnedBorrowsPublished, k)
+		}
+	}
+	for k := range learnedK2Published {
+		if strings.HasPrefix(k, namespace+"|"+modelID+"|") {
+			delete(learnedK2Published, k)
 		}
 	}
 	learnedBorrowsMu.Unlock()

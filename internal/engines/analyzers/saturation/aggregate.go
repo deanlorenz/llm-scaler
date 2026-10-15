@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"sort"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -220,6 +221,16 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 
 		totalCapacity := float64(replicaCount) * perReplicaCapacity
 
+		// The replica Reason names, so the source and age published for the
+		// variant describe the figure its price carries.
+		var k2Source string
+		var k2Age time.Duration
+		var hasK2Age bool
+		if row := medianK2Row(pricedRows); row != nil {
+			k2Source = row.K2Priority.String()
+			k2Age, hasK2Age = row.K2WriteAge, row.K2WriteAgeKnown
+		}
+
 		var utilization float64
 		if totalCapacity > 0 {
 			utilization = totalDemand / totalCapacity
@@ -247,6 +258,9 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			Utilization:                utilization,
 			Reason:                     capacityLabel,
 			Borrowed:                   k2BorrowOf(namespace, pricedRows),
+			K2Source:                   k2Source,
+			K2Age:                      k2Age,
+			HasK2Age:                   hasK2Age,
 		})
 		if warmPoolReplicas > 0 {
 			logger.Info("warm-pool-bridge-supply",

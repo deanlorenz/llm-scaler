@@ -97,6 +97,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		downstreamSaturated,
 		logger,
 	)
+	k2Age, k2AgeKnown := a.k2WriteAge(historyKey, k2Priority, k2Borrowed.donor)
 	// The same saturated moment that yields a k2 observation yields the
 	// replica's saturated THROUGHPUT: with the queue over the threshold the
 	// engine is completing requests as fast as it can, so its completion rate
@@ -262,6 +263,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		K2Priority:                  k2Priority,
 		K2BorrowedFrom:              k2Borrowed.donor,
 		K2BorrowRelaxed:             k2Borrowed.relaxed,
+		K2WriteAge:                  k2Age,
+		K2WriteAgeKnown:             k2AgeKnown,
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
@@ -828,17 +831,26 @@ func memoryBound(totalKvCapacityTokens int64, kvCacheThreshold float64) int64 {
 // never produce a value that matches no element.
 // Returns "" when replicas is empty.
 func k2SourceLabel(replicas []capacity.ReplicaCapacity) string {
-	if len(replicas) == 0 {
+	row := medianK2Row(replicas)
+	if row == nil {
 		return ""
+	}
+	if label := row.K2Priority.String(); label != "" {
+		return label
+	}
+	return domain.ReasonError
+}
+
+// medianK2Row is the replica k2SourceLabel names: the lower median by
+// EffectiveCapacity, from a sorted copy. Nil when replicas is empty.
+func medianK2Row(replicas []capacity.ReplicaCapacity) *capacity.ReplicaCapacity {
+	if len(replicas) == 0 {
+		return nil
 	}
 	sorted := make([]capacity.ReplicaCapacity, len(replicas))
 	copy(sorted, replicas)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].EffectiveCapacity < sorted[j].EffectiveCapacity
 	})
-	medIdx := (len(sorted) - 1) / 2
-	if label := sorted[medIdx].K2Priority.String(); label != "" {
-		return label
-	}
-	return domain.ReasonError
+	return &sorted[(len(sorted)-1)/2]
 }

@@ -252,6 +252,10 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 		target:    make(map[analyzerTargetSeries]struct{}),
 	}
 	borrows := map[string][]domain.LearnedStateBorrow{}
+	// k2s holds, per variant, the entry that carries a k2 source, if any
+	// analyzer reported one; otherwise any entry, so the variant is still
+	// written and a source it no longer has is removed.
+	k2s := map[string]domain.VariantCapacity{}
 
 	for _, nr := range results {
 		if nr.Result == nil {
@@ -271,6 +275,9 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
 			borrows[vc.VariantName] = append(borrows[vc.VariantName], vc.Borrowed...)
+			if _, seen := k2s[vc.VariantName]; !seen || vc.K2Source != "" {
+				k2s[vc.VariantName] = vc
+			}
 		}
 	}
 	// Per variant, not per analyzer: gathered across every analyzer that
@@ -282,6 +289,9 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	// wva_engine_config is; only the saturation analyzer borrows today.)
 	for variant, b := range borrows {
 		e.metricsEmitter.RecordLearnedStateBorrows(namespace, modelID, variant, b)
+	}
+	for variant, vc := range k2s {
+		e.metricsEmitter.RecordLearnedStateK2Source(namespace, modelID, variant, vc.Role, vc.K2Source, vc.K2Age, vc.HasK2Age)
 	}
 
 	// Evict after emitting, never before, so a series that survives the cycle is
@@ -492,9 +502,10 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 	for prev := range e.lastAnalyzerSeries[modelKey].target {
 		e.metricsEmitter.RecordAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant, 0)
 	}
-	// Nothing was priced, so nothing was borrowed: a model parked at zero, or
-	// whose scrape is lost, must not keep reporting the borrow its last
-	// priced cycle made. The next priced cycle publishes afresh.
+	// Nothing was priced, so nothing was borrowed and no k2 is in use: a
+	// model parked at zero, or whose scrape is lost, must not keep reporting
+	// the borrow or the k2 source its last priced cycle had. The next priced
+	// cycle publishes afresh.
 	e.metricsEmitter.DeleteLearnedStateBorrowsForModel(namespace, modelID)
 }
 
