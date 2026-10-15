@@ -1178,8 +1178,8 @@ see whether a tier meets an SLO before anything sizes a fleet from one.
 Experimental: its figures have not been checked against a live router yet.
 
 One thing about turning it on **can** change scaling: a tier that lists
-`analyzers:` takes the built-in band and loses saturation's inherited entry,
-unless it writes them out (step 3 below).
+`analyzers:` replaces the list it would inherit, and with it saturation's
+`score` and `parameters:`, unless it writes them out (step 3 below).
 
 **Before you start**
 
@@ -1225,38 +1225,33 @@ unless it writes them out (step 3 below).
    restart:
    - a new tier, named by each of the model's ScaledObjects (step 4);
    - the tier the model is on: add to it, and keep its own values;
-   - the `defaultPolicy:` tier, or `default` when there is none, which turns it
-     on for every model that uses it.
+   - the `defaultPolicy:` tier, or `default` when there is none. This turns it
+     on for every model that uses it, except a model whose tier or per-model
+     override lists its own `analyzers:`, which replaces this list.
 
    If an entry in the map names this model in its body (a per-model override),
    it is applied after the tier and wins over it, `analyzers:` and `slo`
    included. Put the `slo` block and the `analyzers:` list there instead, or
    take them out of it.
 
-3. **Write the tier with every field it relies on.** Read the ConfigMap first:
+3. **Write the tier, copying saturation's entry.** Read the ConfigMap first:
    `kubectl get configmap wva-scaling-policy-config -n <controller-ns> -o yaml`
    (or the namespace-local map, if the model's namespace has one). A tier
-   inherits what it leaves unset from `default`, with two exceptions, both
-   because it lists `analyzers:`:
-   - it takes the built-in band, 0.85 and 0.70 for `scaleUpThreshold` and
-     `scaleDownBoundary`, instead of the one it would inherit
-     ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149));
-   - the list replaces the inherited one, and with it saturation's
-     `parameters:` and `score`.
-
-   So write those out, keeping the tier's own values where it sets them. Take
-   the band from the line saved in step 1: it is what the model runs at now,
-   wherever it came from. Take saturation's `score` and `parameters:` from the
-   ConfigMap: the tier's entry where it sets them, `default` where it does not.
-   Replace each `<...>` below; do not paste the example values:
+   inherits every field it leaves unset from `default`, the band included,
+   with one exception: its `analyzers:` list replaces the inherited one whole,
+   and with it saturation's `score` and `parameters:`. So copy saturation's
+   entry: the tier's own where it lists one, `default`'s where it does not.
+   Leave the band and the thresholds out: written here, they would stop
+   following `default`. On the tier the model is already on, keep its own
+   values as they are. Replace each `<...>` below; do not paste the example
+   values:
 
    ```yaml
    slo-watch: |
-     scaleUpThreshold: <current>       # the band the model runs at now
-     scaleDownBoundary: <current>
      analyzers:
-       - name: saturation              # keep it, with the current score and parameters
+       - name: saturation              # copied, with its current score and parameters
          score: <current>
+         parameters: <current>         # omit if the entry you copy has none
        - name: slo
      slo:
        tpot: {target: 100ms}                  # a mean
