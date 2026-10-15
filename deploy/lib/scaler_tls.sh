@@ -265,11 +265,33 @@ wva_scaler_write_secret() {
         || { wva_scaler_drop_tmp; log_error "Could not write Secret $name in $WVA_NS."; }
 }
 
+# wva_scaler_tmp_begin makes the private directory in WVA_SCALER_TMPD that holds
+# private keys while certificates are minted or copied, and arms INT and TERM
+# traps that remove it, so a Ctrl-C does not leave a key on disk.
+#
+# INT and TERM only, never EXIT: deploy_wva_controller owns the EXIT trap (its
+# throw-away overlay), and replacing it would leak that directory instead. The
+# handlers exit, which still runs that EXIT trap. The INT and TERM traps in
+# force before are saved and put back by wva_scaler_drop_tmp.
+wva_scaler_tmp_begin() {
+    WVA_SCALER_TMPD="$(mktemp -d)" || log_error "Could not create a temporary directory for the scaler certificates."
+    chmod 700 "$WVA_SCALER_TMPD"
+    WVA_SCALER_SAVED_TRAPS="$(trap -p INT TERM)"
+    trap 'wva_scaler_drop_tmp; exit 130' INT
+    trap 'wva_scaler_drop_tmp; exit 143' TERM
+}
+
 # wva_scaler_drop_tmp removes the directory in WVA_SCALER_TMPD, which holds
-# private keys while certificates are minted, before a refusal exits.
+# private keys while certificates are minted, before a refusal exits, and puts
+# back the INT and TERM traps wva_scaler_tmp_begin replaced.
 wva_scaler_drop_tmp() {
     [ -z "${WVA_SCALER_TMPD:-}" ] || rm -rf "$WVA_SCALER_TMPD"
     WVA_SCALER_TMPD=""
+    if [ -n "${WVA_SCALER_SAVED_TRAPS+set}" ]; then
+        trap - INT TERM
+        eval "$WVA_SCALER_SAVED_TRAPS"
+        unset WVA_SCALER_SAVED_TRAPS
+    fi
 }
 
 # wva_scaler_sha256 echoes the SHA-256 of file $1.
@@ -302,9 +324,8 @@ wva_scaler_check_openshift_serving() {
 wva_scaler_tls_provision_openssl() {
     local d ca_new=false issued="" kept="" serving=true dns san
     [ "${ENVIRONMENT:-}" = openshift ] && serving=false
-    d="$(mktemp -d)"
-    chmod 700 "$d"
-    WVA_SCALER_TMPD="$d"
+    wva_scaler_tmp_begin
+    d="$WVA_SCALER_TMPD"
 
     # Every refusal first, so none leaves a private key behind in $d.
     wva_scaler_require_writable secret "$WVA_SCALER_CA_SECRET"
@@ -330,7 +351,7 @@ wva_scaler_tls_provision_openssl() {
 
     if [ ! -s "$d/ca.crt" ] || [ ! -s "$d/ca.key" ] \
         || ! openssl x509 -in "$d/ca.crt" -noout -checkend $((WVA_SCALER_RENEW_DAYS * 86400)) >/dev/null 2>&1; then
-        wva_scaler_new_ca "$d" || { rm -rf "$d"; log_error "openssl could not mint the scaler CA."; }
+        wva_scaler_new_ca "$d" || { wva_scaler_drop_tmp; log_error "openssl could not mint the scaler CA."; }
         wva_scaler_write_secret "$WVA_SCALER_CA_SECRET" ca "$d/ca.crt" "$d/ca.key" "$d/ca.crt"
         ca_new=true
         issued="$issued CA"
@@ -343,7 +364,7 @@ wva_scaler_tls_provision_openssl() {
         if [ "$ca_new" = true ] || ! wva_scaler_cert_ok "$d/serving.old" "$d/ca.crt" "$dns"; then
             # shellcheck disable=SC2086 # two names, split on purpose
             wva_scaler_new_leaf "$d" serving "wva-external-scaler.${WVA_NS}.svc" serverAuth $dns \
-                || { rm -rf "$d"; log_error "openssl could not mint the scaler serving certificate."; }
+                || { wva_scaler_drop_tmp; log_error "openssl could not mint the scaler serving certificate."; }
             wva_scaler_write_secret "$WVA_SCALER_TLS_SECRET" serving "$d/serving.crt" "$d/serving.key" "$d/ca.crt"
             issued="$issued serving"
         else
@@ -355,7 +376,7 @@ wva_scaler_tls_provision_openssl() {
     if [ "$ca_new" = true ] || ! wva_scaler_cert_ok "$d/client.old" "$d/ca.crt" "$san" \
         || ! cmp -s "$d/client-ca.old" "$d/ca.crt"; then
         WVA_SCALER_LEAF_DAYS="$WVA_SCALER_CLIENT_DAYS" wva_scaler_new_leaf "$d" client "$san" clientAuth "$san" \
-            || { rm -rf "$d"; log_error "openssl could not mint the KEDA client certificate."; }
+            || { wva_scaler_drop_tmp; log_error "openssl could not mint the KEDA client certificate."; }
         wva_scaler_write_secret "$WVA_SCALER_CLIENT_SECRET" client "$d/client.crt" "$d/client.key" "$d/ca.crt"
         issued="$issued client"
     else
@@ -364,7 +385,7 @@ wva_scaler_tls_provision_openssl() {
 
     WVA_SCALER_CLIENT_CA_HASH="$(wva_scaler_sha256 "$d/ca.crt")"
     wva_scaler_drop_tmp
-    [ -z "$issued" ] || log_info "  issued:${issued} (openssl; leaves valid ${WVA_SCALER_LEAF_DAYS} days, re-issued by a re-install within ${WVA_SCALER_RENEW_DAYS} days of expiry)"
+    [ -z "$issued" ] || log_info "  issued:${issued} (openssl; the serving certificate is valid ${WVA_SCALER_LEAF_DAYS} days, KEDA's client certificate ${WVA_SCALER_CLIENT_DAYS} days, the CA ${WVA_SCALER_CA_DAYS} days; a re-install re-issues one within ${WVA_SCALER_RENEW_DAYS} days of its expiry)"
     [ -z "$kept" ] || log_info "  kept, still valid:${kept}"
     if [ "$serving" = false ]; then
         log_info "  serving certificate: issued by the OpenShift service CA into Secret $WVA_SCALER_TLS_SECRET"
@@ -731,12 +752,11 @@ wva_scaler_keda_auth_apply() {
         return 0
     fi
 
-    d="$(mktemp -d)"
-    chmod 700 "$d"
-    WVA_SCALER_TMPD="$d"
+    wva_scaler_tmp_begin
+    d="$WVA_SCALER_TMPD"
     wva_scaler_object_state secret "$WVA_SCALER_CLIENT_SECRET"
     if [ "$WVA_OBJ_STATE" != ours ]; then
-        rm -rf "$d"
+        wva_scaler_drop_tmp
         wva_scaler_keda_not_ready "KEDA's client certificate (Secret $WVA_SCALER_CLIENT_SECRET in $WVA_NS) is $WVA_OBJ_STATE${WVA_OBJ_ERR:+: $WVA_OBJ_ERR}"
         return 0
     fi
@@ -750,7 +770,7 @@ wva_scaler_keda_auth_apply() {
         ca_src="the OpenShift service CA"
     fi
     if [ ! -s "$d/tls.crt" ] || [ ! -s "$d/tls.key" ] || [ ! -s "$d/ca.crt" ]; then
-        rm -rf "$d"
+        wva_scaler_drop_tmp
         wva_scaler_keda_not_ready "KEDA's client certificate, key or ${ca_src} could not be read in $WVA_NS"
         return 0
     fi
@@ -768,13 +788,13 @@ wva_scaler_keda_auth_apply() {
     fi
     case "$obj_state" in
         absent|ours) ;;
-        unreadable) rm -rf "$d"; log_error "Cannot read Secret $name in $WVA_SCALER_KEDA_OBJ_NS ($WVA_OBJ_ERR). Grant get on secrets there, or set WVA_SCALER_TLS=false." ;;
-        *) rm -rf "$d"; log_error "Secret $name in $WVA_SCALER_KEDA_OBJ_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false." ;;
+        unreadable) wva_scaler_drop_tmp; log_error "Cannot read Secret $name in $WVA_SCALER_KEDA_OBJ_NS ($WVA_OBJ_ERR). Grant get on secrets there, or set WVA_SCALER_TLS=false." ;;
+        *) wva_scaler_drop_tmp; log_error "Secret $name in $WVA_SCALER_KEDA_OBJ_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false." ;;
     esac
     out="$(kubectl get clustertriggerauthentications.keda.sh "$name" -o json 2>&1)" || rc=$?
     if [ "$rc" = 0 ]; then
         printf '%s' "$out" | jq -e --arg k "$WVA_SCALER_TLS_LABEL" '.metadata.labels[$k] // empty' >/dev/null 2>&1 \
-            || { rm -rf "$d"; log_error "ClusterTriggerAuthentication $name was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false."; }
+            || { wva_scaler_drop_tmp; log_error "ClusterTriggerAuthentication $name was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false."; }
     elif ! wva_scaler_not_found "$out"; then
         wva_scaler_drop_tmp
         log_error "Cannot read ClusterTriggerAuthentication $name ($(printf '%s\n' "$out" | head -1)). Grant get on clustertriggerauthentications.keda.sh, or set WVA_SCALER_TLS=false."
@@ -788,7 +808,7 @@ wva_scaler_keda_auth_apply() {
                      annotations: {"wva.llmd.ai/copied-from": ($src + "/wva-external-scaler-client-tls")}},
           data: {"tls.crt": ($crt | @base64), "tls.key": ($key | @base64), "ca.crt": ($ca | @base64)}}' \
         | kubectl apply --server-side --force-conflicts --field-manager=llm-scaling-manager -f - >/dev/null \
-        || { rm -rf "$d"; log_error "Could not write Secret $name in $WVA_SCALER_KEDA_OBJ_NS."; }
+        || { wva_scaler_drop_tmp; log_error "Could not write Secret $name in $WVA_SCALER_KEDA_OBJ_NS."; }
     jq -n --arg n "$name" --arg l "$WVA_SCALER_TLS_LABEL" --arg s "$name" \
         '{apiVersion: "keda.sh/v1alpha1", kind: "ClusterTriggerAuthentication",
           metadata: {name: $n, labels: {"app.kubernetes.io/managed-by": "llm-scaling-manager", ($l): "keda-client"}},
@@ -797,7 +817,7 @@ wva_scaler_keda_auth_apply() {
             {parameter: "tlsClientCert", name: $s, key: "tls.crt"},
             {parameter: "tlsClientKey", name: $s, key: "tls.key"}]}}' \
         | kubectl apply --server-side --force-conflicts --field-manager=llm-scaling-manager -f - >/dev/null \
-        || { rm -rf "$d"; log_error "Could not write ClusterTriggerAuthentication $name."; }
+        || { wva_scaler_drop_tmp; log_error "Could not write ClusterTriggerAuthentication $name."; }
 
     sha="$(wva_scaler_sha256 "$d/tls.crt")"
     not_after="$(openssl x509 -in "$d/tls.crt" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')"
@@ -810,7 +830,7 @@ wva_scaler_keda_auth_apply() {
           metadata: {name: $m, namespace: $ns, labels: {"app.kubernetes.io/managed-by": "llm-scaling-manager", ($l): "keda-client"}},
           data: {clusterTriggerAuthentication: $cta, secretNamespace: $on, clientCertSha256: $sha, clientCert: $crt, caSha256: $cas}}' \
         | kubectl apply --server-side --force-conflicts --field-manager=llm-scaling-manager -f - >/dev/null \
-        || { rm -rf "$d"; log_error "Could not write ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS."; }
+        || { wva_scaler_drop_tmp; log_error "Could not write ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS."; }
     wva_scaler_drop_tmp
     WVA_SCALER_KEDA_READY=true
     log_success "KEDA's side of the scaler TLS: ClusterTriggerAuthentication $name, reading Secret $name in $WVA_SCALER_KEDA_OBJ_NS (client certificate expires $not_after; KEDA trusts ${ca_src})"

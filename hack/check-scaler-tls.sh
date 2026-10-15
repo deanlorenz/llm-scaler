@@ -886,6 +886,34 @@ for bad in 'a,DNS:evil' 'Upper' '-lead' '"two words"' '"ok${NL}evil"'; do
     ok '[ "$RC" = 1 ] && grep -q "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name" "$WORK/refusal"' "client SAN $bad accepted (exit $RC)"
 done
 
+# ---------------------------------------------------------------- Ctrl-C while minting
+# arm_outer_exit stands in for deploy_wva_controller's own EXIT trap;
+# arm_outer_int for an INT trap the caller had before.
+arm_outer_exit() { trap 'echo outer >"$WORK/outer-exit"' EXIT; }
+arm_outer_int() { trap 'echo mine' INT; }
+print_int_trap() { trap -p INT; }
+
+echo "== Ctrl-C while the CA is minted leaves no key on disk, and the caller's EXIT trap still runs"
+reset_store
+rm -rf "$WORK/tmpd" "$WORK/outer-exit"
+mkdir -p "$WORK/tmpd"
+# openssl, as a function, interrupts the shell running the install when it is
+# asked to mint the CA: the Ctrl-C lands mid-mint, with the key directory full.
+run 'arm_outer_exit ; wva_scaler_tls_provision_openssl' "TMPDIR=$WORK/tmpd" \
+    'openssl() { case "$*" in "req -x509"*) kill -INT "$BASHPID" ;; esac; command openssl "$@"; }'
+ok '[ "$RC" = 130 ] && [ -z "$(ls -A "$WORK/tmpd")" ]' "interrupted mint: exit $RC, left behind: $(cd "$WORK/tmpd" && find . -type f | tr '\n' ' ')"
+ok '[ -s "$WORK/outer-exit" ]' "interrupted mint: the caller's EXIT trap did not run (clobbered)"
+
+echo "== minting puts the caller's INT trap back"
+reset_store
+run 'arm_outer_int ; wva_scaler_tls_provision_openssl; print_int_trap'
+ok '[ "$RC" = 0 ] && grep -q "echo mine" "$WORK/stdout"' "after minting the INT trap is '$(cat "$WORK/stdout")', want the caller's: $(cat "$WORK/refusal")"
+
+echo "== the issued line gives each certificate's own lifetime"
+reset_store
+run wva_scaler_tls_provision_openssl
+ok 'grep -q "serving certificate is valid 365 days, KEDA.s client certificate 3650 days" "$WORK/info"' "issued line: $(grep issued "$WORK/info")"
+
 echo ""
 if [ "$FAIL" -gt 0 ]; then
     echo "external-scaler TLS: $FAIL failed, $PASS passed"
