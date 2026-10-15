@@ -40,4 +40,12 @@ var _ = Describe("Config.HasClusterQuota", func() {
 		Expect(with().HasClusterQuota()).To(BeFalse())
 		Expect(with(QuotaLimiterConfig{Type: "gpu-inventory"}).HasClusterQuota()).To(BeFalse())
 	})
+
+	// Validation rejects a scope on gpu-inventory; the check must not rely on
+	// that. Only a quota entry is a quota, whatever scope it carries.
+	It("is false for a cluster scope on an entry that is not a quota", func() {
+		inventory := QuotaLimiterConfig{Type: "gpu-inventory", Name: "i", Scope: QuotaScopeCluster}
+		Expect(with(inventory).HasClusterQuota()).To(BeFalse())
+		Expect(with(inventory, namespaceQuota).HasClusterQuota()).To(BeFalse())
+	})
 })

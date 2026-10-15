@@ -776,11 +776,9 @@ func (c *Config) EffectiveQuotaEntries() []QuotaLimiterConfig {
 func (c *Config) HasClusterQuota() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	limiters := c.effectiveLimitersLocked()
-	if limiterModeOf(limiters) != LimiterTypeQuota {
-		return false
-	}
-	return slices.ContainsFunc(limiters, func(l QuotaLimiterConfig) bool {
+	// A cluster-scoped quota entry makes the mode quota, so the entry alone
+	// decides; the physical inventory (gpu-inventory) has no scope.
+	return slices.ContainsFunc(c.effectiveLimitersLocked(), func(l QuotaLimiterConfig) bool {
 		return l.Type == string(LimiterTypeQuota) && l.Scope == QuotaScopeCluster
 	})
 }
