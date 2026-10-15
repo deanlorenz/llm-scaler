@@ -146,7 +146,7 @@ check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in
 check(script.index("if [ -d /seed ]") < script.index('touch "/engine-cache/$MARKER"'), "the seed is copied before the prepared marker is written")
 check('[ "$seeded_from" != "$want" ]' in script and 'echo "$want" > "/engine-cache/$SEED_MARKER"' in script and 'want="$SEED_ID@$stamp"' in script, "the seed marker records the seed and its publish stamp, and a different seed or a new stamp is merged in")
 i_ok = script.index('if [ "$complete" = 1 ]; then\n'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('cp -a --no-preserve=ownership "$e" "$t"')
-check(i_loop < i_ok < i_mark and '|| { complete=0; rm -f "$t"; }' in script and 'else complete=0; rm -rf "$t"; fi' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
+check(i_loop < i_ok < i_mark and '|| { complete=0; rm -f "$t"; continue; }' in script and 'else complete=0; rm -rf "$t"; added=' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
 check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
 env = {e["name"]: e.get("value") for e in seed["containers"][0]["env"]}
