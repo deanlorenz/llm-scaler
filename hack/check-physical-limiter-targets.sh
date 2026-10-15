@@ -112,6 +112,9 @@ case "$1" in
     # The Namespace rule of every ClusterRole: its resourceNames, or * for none.
     printf '%s\n' "$doc" | yq -N e 'select(.kind == "ClusterRole") | .metadata.name + " " + ([.rules[] | select(.resources[] == "namespaces") | ((.resourceNames // ["*"]) | join(","))] | join(";"))' - \
       | sed 's/^/NSRULE /' >> "$KGRANTS"
+    # The revoke label of every namespaced Role and RoleBinding, or - for none.
+    printf '%s\n' "$doc" | yq -N e 'select(.kind == "Role" or .kind == "RoleBinding") | .kind + " " + .metadata.name + " " + .metadata.namespace + " " + (.metadata.labels["llm-d.ai/wva-kueue-controller-reader"] // "-")' - \
+      | sed 's/^/RBLABEL /' >> "$KGRANTS"
     exit 0 ;;
   get)
     case "$2" in
@@ -587,6 +590,17 @@ elif wva_policy_patch | grep -q 'countBorrowable'; then
 else
     ok "an unset WVA_QUOTA_KUEUE_BORROW leaves countBorrowable out of the cluster policy"
 fi
+# S3: the Role and RoleBinding in the Kueue namespace carry the install suffix
+# as a label, so the uninstall finds them wherever KUEUE_NAMESPACE put them.
+case_begin
+want_label="$(wva_ns_suffix tenant-a)"
+if ! grep -q "^RBLABEL Role wva-kueue-controller-reader-$want_label kueue-system $want_label\$" "$GRANTS"; then
+    fail "the Kueue-namespace Role of tenant-a carries no install-suffix label: $(grep RBLABEL "$GRANTS" | head -6)"
+elif ! grep -q "^RBLABEL RoleBinding wva-kueue-controller-reader-$want_label kueue-system $want_label\$" "$GRANTS"; then
+    fail "the Kueue-namespace RoleBinding of tenant-a carries no install-suffix label: $(grep RBLABEL "$GRANTS" | head -6)"
+else
+    ok "the Kueue controller read is labelled with the install suffix"
+fi
 # WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE: there is no Kueue block to put
 # it on, so the published policy carries neither, and the command says so.
 case_begin
@@ -666,6 +680,13 @@ elif grep -q 'bounded by nothing' "$WORK/out"; then
 else
     ok "disable says the quota still bounds, not that nothing does"
 fi
+# The quota stays, so the Kueue controller read it may need stays too.
+case_begin
+if grep -q 'CALL\[delete role,rolebinding' "$CALLS"; then
+    fail "disabling the physical limiter revoked the Kueue controller read the quota may still need: $(grep 'CALL\[delete' "$CALLS" | head -2)"
+else
+    ok "disabling only the physical limiter keeps the Kueue controller read"
+fi
 
 # The documented undo of a QUOTA run without WVA_LIMITER_TYPE=quota: the policy
 # holds only a quota, so there is no physical limiter to remove. It used to
@@ -698,6 +719,17 @@ elif ! grep -q 'Removed the quota limiter from wva-policy/wva-scaling-policy-con
     fail "disable WVA_LIMITER_TYPE=quota did not report the removal: $(tail -6 "$WORK/out")"
 else
     ok "disable WVA_LIMITER_TYPE=quota removes a quota-only policy's entry"
+fi
+# S4: the quota gone, the Kueue controller read it needed goes too, by label --
+# for tenant-g, the controller that reads wva-policy, and not for tenant-a,
+# whose own policy this did not touch.
+case_begin
+if ! grep -qF "CALL[delete role,rolebinding -A -l llm-d.ai/wva-kueue-controller-reader=$(wva_ns_suffix tenant-g) --ignore-not-found]" "$CALLS"; then
+    fail "disable WVA_LIMITER_TYPE=quota left the Kueue controller read of tenant-g: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+elif grep -qF "reader=$(wva_ns_suffix tenant-a)" "$CALLS"; then
+    fail "disable WVA_LIMITER_TYPE=quota revoked tenant-a, whose policy it did not clear: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+else
+    ok "disable WVA_LIMITER_TYPE=quota revokes the Kueue controller read by its label, only where the quota went"
 fi
 
 # WVA_LIMITER_TYPE=all removes every limiter whatever its kind: the uninstall
@@ -881,7 +913,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=50
+CASES_EXPECTED=53
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

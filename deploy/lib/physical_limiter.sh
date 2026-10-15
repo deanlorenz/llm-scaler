@@ -540,6 +540,12 @@ EOF
 # A Role, not part of components/kueue-reader: a kustomize overlay moves every
 # namespaced object into the install namespace, and this one must live in the
 # Kueue namespace. Skipped, with a note, when that namespace does not exist.
+#
+# Both carry WVA_KUEUE_CONTROLLER_READER_LABEL=<suffix of $1>, so the uninstall
+# and disable-limiter find them by label wherever KUEUE_NAMESPACE put them
+# (pl_revoke_kueue_controller_read): the namespace is not recorded anywhere
+# else, and a revoke that guessed kueue-system left a grant made elsewhere.
+WVA_KUEUE_CONTROLLER_READER_LABEL="llm-d.ai/wva-kueue-controller-reader"
 pl_grant_kueue_controller_read() {
     local ns="$1" sa="$2" kns="${KUEUE_NAMESPACE:-kueue-system}" suffix
     suffix="$(wva_ns_suffix "$ns")"
@@ -555,6 +561,7 @@ metadata:
   namespace: ${kns}
   labels:
     app.kubernetes.io/name: workload-variant-autoscaler
+    ${WVA_KUEUE_CONTROLLER_READER_LABEL}: "${suffix}"
 rules:
 - apiGroups: ["apps"]
   resources: ["deployments"]
@@ -572,6 +579,7 @@ metadata:
   namespace: ${kns}
   labels:
     app.kubernetes.io/name: workload-variant-autoscaler
+    ${WVA_KUEUE_CONTROLLER_READER_LABEL}: "${suffix}"
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -581,6 +589,28 @@ subjects:
   name: ${sa}
   namespace: ${ns}
 EOF
+}
+
+# pl_revoke_kueue_controller_read removes the Role and RoleBinding that
+# pl_grant_kueue_controller_read made for the controller installed in $1: by
+# label in every namespace, then by name in KUEUE_NAMESPACE (default
+# kueue-system) for a grant made before the label existed. A label delete that
+# is refused cluster-wide is reported, not passed over. Prints what failed and
+# returns 1 when anything did.
+pl_revoke_kueue_controller_read() {
+    local ns="$1" suffix name kns="${KUEUE_NAMESPACE:-kueue-system}" out err=""
+    suffix="$(wva_ns_suffix "$ns")"
+    name="wva-kueue-controller-reader-${suffix}"
+    if ! out="$(kubectl delete role,rolebinding -A -l "${WVA_KUEUE_CONTROLLER_READER_LABEL}=${suffix}" \
+        --ignore-not-found 2>&1 >/dev/null)"; then
+        err="by label ${WVA_KUEUE_CONTROLLER_READER_LABEL}=${suffix} in every namespace: ${out}"
+    fi
+    if ! out="$(kubectl delete role,rolebinding "$name" -n "$kns" --ignore-not-found 2>&1 >/dev/null)"; then
+        err="${err:+$err; }by name in ${kns}: ${out}"
+    fi
+    [ -z "$err" ] && return 0
+    printf '%s' "$err"
+    return 1
 }
 
 # pl_can_watch_namespaces echoes yes | no | unknown: whether ServiceAccount $2
@@ -1272,7 +1302,7 @@ disable_physical_limiter() {
     esac
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
-    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart="" set_rc other_left=""
+    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart="" set_rc other_left="" reads_from=""
 
     # The SAME per-controller resolution enable uses. Looking only at the
     # well-known namespace left the limiter in force everywhere it had actually
@@ -1300,6 +1330,7 @@ disable_physical_limiter() {
         # One that does not watch its policy namespace sees the removal only
         # when it restarts (pl_policy_is_live).
         pl_policy_is_live "$managed" "$cm_ns" || to_restart="$to_restart $ns/$deploy/$cm_ns"
+        reads_from="$reads_from $ns/$cm_ns"
     done 3<<< "$PL_GRANT"
     # The well-known namespace too, even with no controller reading it today: a
     # WVA installed tomorrow would read whatever was left there.
@@ -1360,7 +1391,22 @@ disable_physical_limiter() {
         cleared_ns="$cleared_ns$cm_ns "
     done
 
-    local entry r_ns r_deploy r_cm not_restarted=""
+    # The Kueue controller read (pl_grant_kueue_controller_read) goes with
+    # the quota: a controller whose policy no longer declares one reads no
+    # Kueue, and the grant in the Kueue namespace is the one this command
+    # made that nothing else revokes. The cluster-wide reads stay (below).
+    local entry r_ns r_deploy r_cm not_restarted="" revoke_err
+    if [ "$limiter" = "quota" ] || [ "$limiter" = "all" ]; then
+        for entry in $reads_from; do
+            r_ns="${entry%%/*}"; r_cm="${entry#*/}"
+            case "$cleared_ns" in *" $r_cm "*) ;; *) continue ;; esac
+            if revoke_err="$(pl_revoke_kueue_controller_read "$r_ns")"; then
+                log_info "  Revoked the Kueue controller read of $r_ns (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$r_ns"))"
+            else
+                log_warning "  Could not revoke the Kueue controller read of $r_ns: $revoke_err"
+            fi
+        done
+    fi
     for entry in $to_restart; do
         r_ns="${entry%%/*}"; r_cm="${entry##*/}"; r_deploy="${entry#*/}"; r_deploy="${r_deploy%/*}"
         case "$cleared_ns" in *" $r_cm "*) ;; *) continue ;; esac
@@ -1426,5 +1472,5 @@ disable_physical_limiter() {
         log_warning "Scaling is now bounded by nothing WVA knows about for the controllers that read the policies above: the optimizer allocates without a GPU budget, and a scale-from-zero wake is published without a capacity check."
     fi
     [ "$left" -eq 0 ] || log_warning "$left skipped controller(s) above still declare a limiter in their own policy."
-    log_info "The RBAC is left in place — it grants reads only, and removing it would break the next enable."
+    log_info "The cluster-wide RBAC is left in place — it grants reads only, and removing it would break the next enable. The Role in the Kueue namespace goes with the quota; enable grants it again."
 }

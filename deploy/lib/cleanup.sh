@@ -169,12 +169,12 @@ EOF
 
     # The Kueue controller read lives in the Kueue namespace, outside the
     # overlay (pl_grant_kueue_controller_read), so the filtered delete above
-    # never names it.
-    local kueue_rb kueue_err
-    kueue_rb="wva-kueue-controller-reader-$(wva_ns_suffix "$WVA_NS")"
-    kueue_err="$(kubectl delete role,rolebinding "$kueue_rb" -n "${KUEUE_NAMESPACE:-kueue-system}" --ignore-not-found 2>&1 >/dev/null)" && kueue_err=""
-    if [ -n "$kueue_err" ]; then
-        log_warning "Could not remove Role/RoleBinding $kueue_rb in ${KUEUE_NAMESPACE:-kueue-system}: $kueue_err"
+    # never names it. Found by its label, wherever KUEUE_NAMESPACE put it at
+    # install time.
+    local kueue_err
+    if ! kueue_err="$(pl_revoke_kueue_controller_read "$WVA_NS")"; then
+        log_warning "Could not remove the Kueue controller read (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$WVA_NS")): $kueue_err"
+        log_warning "  A cluster admin removes it with: kubectl delete role,rolebinding -A -l ${WVA_KUEUE_CONTROLLER_READER_LABEL}=$(wva_ns_suffix "$WVA_NS")"
     fi
 
     # The utilization-share need history is written by the controller, not
