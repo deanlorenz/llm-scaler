@@ -99,7 +99,9 @@ check("trap 'exit 0' TERM" in script and "sleep 3600" in script, "then the pod s
 check(c["command"] == ["/bin/sh", "-c"], "sh -c with the script as args")
 probe = c["readinessProbe"]["exec"]["command"]
 check(probe == ["/bin/sh", "-c", "test -f /engine-cache/.prepared && test -w /engine-cache/vllm"], "Ready is the marker AND the directory writable by this UID: %s" % probe)
-check("$HOSTNAME" in script, "the command is rendered as written, not evaluated on the operator's machine")
+check("$NODE_NAME" in script, "the command is rendered as written, not evaluated on the operator's machine")
+check(env.get("NODE_NAME", {}).get("valueFrom") == {"fieldRef": {"fieldPath": "spec.nodeName"}} and "$HOSTNAME" not in script,
+      "the preparer's log names the node (NODE_NAME from spec.nodeName), not the pod (HOSTNAME): %s" % env.get("NODE_NAME"))
 res = c.get("resources", {})
 for section in ("requests", "limits"):
     for k in res.get(section, {}):
@@ -140,14 +142,14 @@ check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": T
 m2 = {m["name"]: m for m in seed2["containers"][0]["volumeMounts"]}
 check("subPath" not in m2.get("seed", {}), "no subPath when none was given: %s" % m2.get("seed"))
 script = seed["containers"][0]["args"][0]
-check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ ! -e "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$2/"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
+check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ -e "$t" ] || [ -L "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$t"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
 check(script.index("if [ -d /seed ]") < script.index('touch "/engine-cache/$MARKER"'), "the seed is copied before the prepared marker is written")
 check('[ "$seeded_from" != "$want" ]' in script and 'echo "$want" > "/engine-cache/$SEED_MARKER"' in script and 'want="$SEED_ID@$stamp"' in script, "the seed marker records the seed and its publish stamp, and a different seed or a new stamp is merged in")
-i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
-check(i_loop < i_ok < i_mark and 'else complete=0; rm -rf "$t"' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
+i_ok = script.index('if [ "$complete" = 1 ]; then\n'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('cp -a --no-preserve=ownership "$e" "$t"')
+check(i_loop < i_ok < i_mark and '|| { complete=0; rm -f "$t"; continue; }' in script and 'else complete=0; rm -rf "$t"; added=' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
 check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
-env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
+env = {e["name"]: e.get("value") for e in seed["containers"][0]["env"]}
 check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache" and env.get("SEED_SUBPATH") == "engine-cache", "the seed marker's name, the seed's identity and its subPath come from the environment: %s" % env)
 check("$(" not in script and "$$" not in script, "still no $( or $$ in the command")
 plain_ps = plain["spec"]["template"]["spec"]
@@ -170,18 +172,20 @@ SH=sh; command -v dash >/dev/null 2>&1 && SH=dash
 SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run1.out" 2>&1
 [ "$(cat "$M/cache/vllm/torch_compile_cache/keyA/f")" = old ] && [ "$(cat "$M/cache/vllm/torch_compile_cache/keyB/f")" = b ] && [ "$(cat "$M/cache/triton/x/f")" = t ] && [ "$(cat "$M/cache/.seeded")" = shared:x ] \
     && ok "merge ($SH): the node's key kept, the seed's other key added beside it, triton added, the marker records the seed" || fail "merge run 1: $(cat "$M/run1.out"; ls -R "$M/cache" | head -20)"
-grep -q "2 entries added" "$M/run1.out" && ok "merge: two entries added on the first run" || fail "merge run 1 message: $(cat "$M/run1.out")"
+grep -q "2 file(s) copied" "$M/run1.out" && ok "merge: two files copied on the first run, and the message says files" || fail "merge run 1 message: $(cat "$M/run1.out")"
 SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run2.out" 2>&1
 grep -q "seeded on" "$M/run2.out" && fail "merge: the same seed was copied again" || ok "merge: the same seed is not copied again"
+SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared NODE_NAME=node-a HOSTNAME=engine-cache-x7k2p "$SH" "$M/p.sh" > "$M/run2n.out" 2>&1
+grep -q "prepared on node-a:" "$M/run2n.out" && ! grep -q engine-cache-x7k2p "$M/run2n.out" && ok "preparer: its log names the node, not the pod" || fail "preparer log names: $(cat "$M/run2n.out")"
 mkdir -p "$M/seed/vllm/torch_compile_cache/keyC"; echo c > "$M/seed/vllm/torch_compile_cache/keyC/f"
 SEED_MARKER=.seeded SEED_ID=shared:y MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run3.out" 2>&1
-[ "$(cat "$M/cache/vllm/torch_compile_cache/keyC/f")" = c ] && [ "$(cat "$M/cache/.seeded")" = shared:y ] && grep -q "1 entries added" "$M/run3.out" && ok "merge: a changed seed adds its new key and rewrites the marker" || fail "merge run 3: $(cat "$M/run3.out")"
+[ "$(cat "$M/cache/vllm/torch_compile_cache/keyC/f")" = c ] && [ "$(cat "$M/cache/.seeded")" = shared:y ] && grep -q "1 file(s) copied" "$M/run3.out" && ok "merge: a changed seed adds its new key and rewrites the marker" || fail "merge run 3: $(cat "$M/run3.out")"
 # a copy that cannot complete: an unreadable seed entry (the preparer's own
 # chmod 1777 would undo a read-only target directory)
 mkdir -p "$M/seed/triton/y"; echo y > "$M/seed/triton/y/f"; chmod 000 "$M/seed/triton/y"
 SEED_MARKER=.seeded SEED_ID=shared:z MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run4.out" 2>&1; chmod 755 "$M/seed/triton/y"
 if [ "$(id -u)" = 0 ]; then ok "merge: (the failed-copy case needs a non-root check runner)"; else
-grep -q "did not complete" "$M/run4.out" && [ "$(cat "$M/cache/.seeded")" = shared:y ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves the marker at the previous seed and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded")"; fi
+grep -q "did not complete" "$M/run4.out" && [ ! -e "$M/cache/.seeded" ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves no seed marker (not the previous seed's) and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded" 2>&1)"; fi
 # a seed claim whose subPath does not exist yet -- a fresh stand-up's
 # workload claim: nothing to seed, said so, and Ready; the seed is merged
 # once it appears
@@ -202,7 +206,7 @@ sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d'
 grep -q 'cp -a' "$P/pub.sh" || fail "publish: no publish_script extracted"
 SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$P/pub.sh" > "$P/pub.out" 2>&1; rc=$?
 [ "$rc" = 0 ] && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyN/f")" = n ] && [ "$(cat "$P/seed/engine-cache/triton/t/f")" = t ] \
-    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 entries" "$P/pub.out" \
+    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 file(s) copied" "$P/pub.out" \
     && ok "publish: a node's caches are merged into the seed, the seed's own entries kept" || fail "publish run: rc=$rc $(cat "$P/pub.out")"
 # the node seeded before the publish ($F, marker workload-pvc:engine-cache) merges again once the seed is stamped
 echo 20261013120000 > "$F/seed/engine-cache/.published"
@@ -212,6 +216,143 @@ SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache 
     && ok "seed: a stamped seed is merged again by a node already seeded, and the marker records the stamp" || fail "stamped seed: $(cat "$F/run3.out"; cat "$F/cache/.seeded")"
 SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run4.out" 2>&1
 grep -q "seeded on" "$F/run4.out" && fail "stamped seed: merged again with no new stamp" || ok "seed: the same stamp is not merged twice"
+# a newer stamp whose merge fails, on a node that merged the stamp before: the
+# node must not stay Ready on the old marker. The rendered probe is run against
+# the node directory. A fake cp fails on one entry, so this holds under root too.
+mkdir -p "$T/failcp"
+REAL_CP="$(command -v cp)"
+cat > "$T/failcp/cp" <<EOF
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *keyFAIL*) echo "cp: fake failure on \$a" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/failcp/cp"
+probe_f="$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.containers[0].readinessProbe.exec.command[2]' "$T/render-seed.yaml" | sed "s|/engine-cache|$F/cache|g")"
+if [ -z "$probe_f" ] || ! sh -c "$probe_f"; then fail "probe: the rendered probe refuses a node that merged the current stamp: '$probe_f' marker $(cat "$F/cache/.seeded")"; else
+    echo 20261014120000 > "$F/seed/engine-cache/.published"
+    mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL"; echo x > "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL/f"
+    PATH="$T/failcp:$PATH" SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run5.out" 2>&1
+    if grep -q "did not complete" "$F/run5.out" && ! sh -c "$probe_f" 2>/dev/null && [ ! -e "$F/cache/vllm/torch_compile_cache/keyFAIL" ]; then
+        ok "seed: a newer stamp that fails to merge leaves the node not Ready, not Ready on the stamp before"
+    else
+        fail "seed: a failed merge of a newer stamp left the node Ready (marker: $(cat "$F/cache/.seeded" 2>&1)): $(cat "$F/run5.out")"
+    fi
+    SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run6.out" 2>&1
+    [ "$(cat "$F/cache/.seeded" 2>/dev/null)" = "workload-pvc:engine-cache@20261014120000" ] && sh -c "$probe_f" \
+        && ok "seed: the failed stamp is merged at the next start, and the node is Ready again" || fail "seed retry after a failed stamp: $(cat "$F/run6.out")"
+fi
+# the preparer and the publisher merge with the same code
+m_prep="$(sed -n '/^preparer_script() {/,/^SCRIPT$/p' deploy/enginecache.sh | sed -n '/^cpa=0$/,/^merge_report() {/p')"
+m_pub="$(sed -n '/^publish_script() {/,/^SCRIPT$/p' deploy/enginecache.sh | sed -n '/^cpa=0$/,/^merge_report() {/p')"
+[ -n "$m_prep" ] && [ "$m_prep" = "$m_pub" ] && ok "merge: the preparer and the publisher run the same merge" || fail "merge: the preparer's and the publisher's merge differ, or neither was found"
+# a busybox cp, which refuses --no-preserve: seeding and publish still
+# complete, with a plain cp. The fake logs every call, so the run shows it
+# was the cp in use.
+mkdir -p "$T/bbcp"
+cat > "$T/bbcp/cp" <<EOF
+#!/bin/sh
+echo "\$*" >> "$T/bbcp.log"
+for a in "\$@"; do case "\$a" in --no-preserve*) echo "cp: unrecognized option '\$a'" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/bbcp/cp"; : > "$T/bbcp.log"
+B="$T/bb"; mkdir -p "$B/seed/vllm/torch_compile_cache/keyB/rank_0_0" "$B/cache"
+echo b > "$B/seed/vllm/torch_compile_cache/keyB/rank_0_0/f"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$B/seed|g; s|/engine-cache|$B/cache|g; s|^trap .*||" > "$B/p.sh"
+PATH="$T/bbcp:$PATH" SEED_MARKER=.seeded SEED_ID=shared:bb MARKER=.prepared HOSTNAME=n1 "$SH" "$B/p.sh" > "$B/run.out" 2>&1
+grep -q -- '--no-preserve' "$T/bbcp.log" && [ "$(cat "$B/cache/vllm/torch_compile_cache/keyB/rank_0_0/f" 2>/dev/null)" = b ] && [ "$(cat "$B/cache/.seeded" 2>/dev/null)" = shared:bb ] \
+    && ok "merge: with a busybox cp (no --no-preserve) the seed is merged and the node marked seeded" || fail "merge with busybox cp: $(cat "$B/run.out"; cat "$T/bbcp.log")"
+BP="$T/bbpub"; mkdir -p "$BP/node/vllm/torch_compile_cache/keyN/rank_0_0" "$BP/seed"
+echo n > "$BP/node/vllm/torch_compile_cache/keyN/rank_0_0/f"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$BP/seed|g; s|/engine-cache|$BP/node|g" > "$BP/pub.sh"
+PATH="$T/bbcp:$PATH" SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$BP/pub.sh" > "$BP/pub.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$BP/seed/engine-cache/vllm/torch_compile_cache/keyN/rank_0_0/f" 2>/dev/null)" = n ] \
+    && ok "publish: with a busybox cp the node's caches reach the seed" || fail "publish with busybox cp: rc=$rc $(cat "$BP/pub.out")"
+# symlinks are never copied, at any depth, by either merge; a file only its
+# owner can read is copied readable by every user, and both are reported
+L="$T/links"; LK="$L/seed/vllm/torch_compile_cache/keyL"
+mkdir -p "$LK/rank_0_0" "$L/cache" "$L/elsewhere"
+echo l > "$LK/rank_0_0/f"; echo s > "$L/elsewhere/s"; echo p > "$LK/rank_0_0/private"; chmod 600 "$LK/rank_0_0/private"
+ln -s "$L/elsewhere/s" "$LK/rank_0_0/link"; ln -s "$L/elsewhere" "$LK/linkdir"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$L/seed|g; s|/engine-cache|$L/cache|g; s|^trap .*||" > "$L/p.sh"
+SEED_MARKER=.seeded SEED_ID=shared:l MARKER=.prepared HOSTNAME=n1 "$SH" "$L/p.sh" > "$L/run.out" 2>&1
+LC="$L/cache/vllm/torch_compile_cache/keyL"
+if [ "$(cat "$LC/rank_0_0/f" 2>/dev/null)" = l ] && [ ! -e "$LC/rank_0_0/link" ] && [ ! -L "$LC/rank_0_0/link" ] && [ ! -e "$LC/linkdir" ] && [ ! -L "$LC/linkdir" ] \
+    && grep -q '2 symlink(s) skipped' "$L/run.out" && grep -q "skipped $LK/linkdir: a symlink" "$L/run.out" && [ "$(cat "$L/cache/.seeded" 2>/dev/null)" = shared:l ]; then
+    ok "merge: symlinks in the seed, to a file or a directory, are skipped and named; the rest is merged and the node seeded"
+else
+    fail "merge copied a symlink, or did not say so: $(ls -lR "$LC" 2>&1 | head -12; cat "$L/run.out")"
+fi
+ls -ld "$LC/rank_0_0/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 file(s) not readable by every user were copied readable by every user' "$L/run.out" \
+    && ok "merge: a file only its owner could read is copied readable by every user, and counted" || fail "merge: private file: $(ls -ld "$LC/rank_0_0/private" 2>&1); $(cat "$L/run.out")"
+# a name with two leading dots is copied like any other; a 640 file counts as
+# not readable by every user, a 644 file does not
+DD="$T/dotdot"; DK="$DD/seed/vllm/torch_compile_cache"
+mkdir -p "$DK/keyD" "$DK/keyG" "$DD/cache"
+echo o > "$DK/keyD/..odd"; echo f > "$DK/keyD/f"; echo g > "$DK/keyG/g640"; chmod 640 "$DK/keyG/g640"; echo h > "$DK/keyG/g644"; chmod 644 "$DK/keyG/g644"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$DD/seed|g; s|/engine-cache|$DD/cache|g; s|^trap .*||" > "$DD/p.sh"
+SEED_MARKER=.seeded SEED_ID=shared:dd MARKER=.prepared HOSTNAME=n1 "$SH" "$DD/p.sh" > "$DD/run.out" 2>&1
+[ "$(cat "$DD/cache/vllm/torch_compile_cache/keyD/..odd" 2>/dev/null)" = o ] && grep -q "4 file(s) copied" "$DD/run.out" \
+    && ok "merge: a file named ..odd is copied and counted" || fail "merge: ..odd: $(ls -la "$DD/cache/vllm/torch_compile_cache/keyD" 2>&1 | tr '\n' ';') $(cat "$DD/run.out")"
+grep -q "1 file(s) not readable by every user were copied readable by every user, for example $DK/keyG/g640" "$DD/run.out" \
+    && ok "merge: a 640 file is counted as not readable by every user, a 644 file is not" || fail "merge: 640 count: $(cat "$DD/run.out")"
+# a file whose copy fails is not counted as copied readable: not in a
+# directory the node already had, nor under a new directory that is then
+# removed. A fake cp fails on zFAIL, so this holds under root too.
+mkdir -p "$T/failz"
+cat > "$T/failz/cp" <<EOF
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *zFAIL*) echo "cp: fake failure on \$a" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/failz/cp"
+FZ="$T/failcount"; FK="$FZ/seed/vllm/torch_compile_cache"
+mkdir -p "$FK/keyE" "$FK/keyR" "$FZ/cache/vllm/torch_compile_cache/keyE"
+echo e > "$FK/keyE/zFAIL"; chmod 600 "$FK/keyE/zFAIL"; echo a > "$FK/keyR/a"; chmod 600 "$FK/keyR/a"; echo z > "$FK/keyR/zFAIL"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$FZ/seed|g; s|/engine-cache|$FZ/cache|g; s|^trap .*||" > "$FZ/p.sh"
+PATH="$T/failz:$PATH" SEED_MARKER=.seeded SEED_ID=shared:fz MARKER=.prepared HOSTNAME=n1 "$SH" "$FZ/p.sh" > "$FZ/run.out" 2>&1
+grep -q "did not complete" "$FZ/run.out" && [ ! -e "$FZ/cache/vllm/torch_compile_cache/keyR" ] && ! grep -q "copied readable by every user" "$FZ/run.out" \
+    && ok "merge: a file whose copy failed, or was removed with its new directory, is not counted as copied readable" || fail "merge: failed copies counted: $(cat "$FZ/run.out")"
+LP="$T/linkpub"; mkdir -p "$LP/node/vllm/torch_compile_cache/keyM" "$LP/seed"
+echo m > "$LP/node/vllm/torch_compile_cache/keyM/f"; echo q > "$LP/node/vllm/torch_compile_cache/keyM/private"; chmod 600 "$LP/node/vllm/torch_compile_cache/keyM/private"
+ln -s /etc/hostname "$LP/node/vllm/torch_compile_cache/keyM/link"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$LP/seed|g; s|/engine-cache|$LP/node|g" > "$LP/pub.sh"
+SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$LP/pub.sh" > "$LP/pub.out" 2>&1; rc=$?
+LS="$LP/seed/engine-cache/vllm/torch_compile_cache/keyM"
+[ "$rc" = 0 ] && [ "$(cat "$LS/f" 2>/dev/null)" = m ] && [ ! -L "$LS/link" ] && [ ! -e "$LS/link" ] && ls -ld "$LS/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 symlink(s) skipped' "$LP/pub.out" \
+    && ok "publish: a node's symlink never reaches the seed, and a private file reaches it readable" || fail "publish with a symlink and a private file: rc=$rc $(ls -l "$LS" 2>&1); $(cat "$LP/pub.out")"
+# a key only its owner can read -- 700 directories and a 600 file, as vLLM
+# writes its AOT files -- is copied readable and searchable by every user, by
+# both merges and with either cp: the copier is root and a non-root engine
+# must read the copy. Run under umask 077, so a mode the copy merely inherits
+# from mkdir or cp is private and only the merge's own chmod makes it public.
+modes_case() { # $1: merge or publish; $2: gnu or busybox
+    local W="$T/modes-$1-$2" k="vllm/torch_compile_cache/torch_aot_compile/keyR" src dst pth="$PATH" rc d bad=""
+    if [ "$1" = merge ]; then src="$W/seed"; dst="$W/cache"; else src="$W/node"; dst="$W/seed/engine-cache"; fi
+    [ "$2" = gnu ] || pth="$T/bbcp:$PATH"
+    mkdir -p "$src/$k/rank_0_0" "$W/cache" "$W/seed"
+    echo m > "$src/$k/rank_0_0/model"; chmod 600 "$src/$k/rank_0_0/model"
+    chmod 700 "$src/vllm/torch_compile_cache" "$src/vllm/torch_compile_cache/torch_aot_compile" "$src/$k" "$src/$k/rank_0_0"
+    if [ "$1" = merge ]; then
+        sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$W/seed|g; s|/engine-cache|$W/cache|g; s|^trap .*||" > "$W/run.sh"
+        (umask 077; PATH="$pth" SEED_MARKER=.seeded SEED_ID=shared:m MARKER=.prepared NODE_NAME=n1 "$SH" "$W/run.sh") > "$W/run.out" 2>&1; rc=$?
+    else
+        sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$W/seed|g; s|/engine-cache|$W/node|g" > "$W/run.sh"
+        (umask 077; PATH="$pth" SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$W/run.sh") > "$W/run.out" 2>&1; rc=$?
+    fi
+    [ "$(cat "$dst/$k/rank_0_0/model" 2>/dev/null)" = m ] || bad="$bad no copy;"
+    ls -ld "$dst/$k/rank_0_0/model" 2>/dev/null | grep -q '^-......r' || bad="$bad model not o+r;"
+    for d in vllm/torch_compile_cache vllm/torch_compile_cache/torch_aot_compile "$k" "$k/rank_0_0"; do
+        ls -ld "$dst/$d" 2>/dev/null | grep -q '^d......r.x' || bad="$bad $d not o+rx;"
+    done
+    # publish also creates the seed subPath and its engine directory
+    if [ "$1" = publish ]; then
+        for d in . vllm; do ls -ld "$dst/$d" 2>/dev/null | grep -q '^d......r.x' || bad="$bad seed $d not o+rx;"; done
+    fi
+    [ "$rc" = 0 ] && [ -z "$bad" ] && ok "$1 ($2 cp): a 600 file under 700 directories is copied o+r, its directories o+rx" \
+        || fail "$1 ($2 cp) modes: rc=$rc$bad $(ls -lR "$dst/vllm" 2>&1 | head -12 | tr '\n' ';') $(cat "$W/run.out")"
+}
+modes_case merge gnu; modes_case merge busybox; modes_case publish gnu; modes_case publish busybox
 # the readiness probe accepts every marker form the preparer writes
 for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
     echo "$m" > "$T/marker"
@@ -221,7 +362,7 @@ echo "other-claim:x" > "$T/marker"
 grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" && fail "probe accepts another seed's marker" || ok "probe: accepts the seed's three marker forms, refuses another seed's"
 # publish waits on the usable nodes (status), never `rollout status`, which
 # also waits for a cordoned node's pod that never comes up
-pub_body="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+pub_body="$(sed -n '/^cmd_publish() {/,/^}/p; /^reseed_wait() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
 if [ -z "$pub_body" ]; then fail "publish: no cmd_publish found"
 elif printf '%s' "$pub_body" | grep -q 'rollout status'; then fail "publish: waits with rollout status, which counts cordoned nodes"
 elif printf '%s' "$pub_body" | grep -q 'enginecache.sh" status'; then ok "publish: waits for the usable nodes to re-seed, not for every DaemonSet pod"
@@ -257,6 +398,24 @@ stale_preparers '"$(echo "$c" | cut -d: -f2)")"
     printf '%s' "$pub_body" | grep -q 'deprecated\\.daemonset\\.template\\.generation' \
         && ok "publish: compares against the DaemonSet's template generation, which the pod label follows" \
         || fail "publish: compares against .metadata.generation, which also moves on edits outside the template"
+fi
+# a node that never merges the new stamp: the wait times out and publish fails,
+# never reporting success. status is a stand-in that exits as told.
+rw_body="$(sed -n '/^reseed_wait() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$rw_body" ]; then fail "publish: no reseed_wait, so nothing stops a success report after the re-seed wait times out"; else
+    mkdir -p "$T/rw"; printf '#!/bin/sh\nexit "$STATUS_RC"\n' > "$T/rw/enginecache.sh"
+    for c in 1:1 0:0; do
+        out="$(STATUS_RC="${c%%:*}" bash -c 'stale_preparers() { echo 0; }; sleep() { SECONDS=$((SECONDS + $1)); }; HERE="'"$T/rw"'"; NAMESPACE=ns; '"$rw_body"'
+SECONDS=0; reseed_wait 13 600; echo "rc=$?"')"
+        [ "$out" = "rc=${c#*:}" ] && ok "reseed_wait: status exiting ${c%%:*} gives $out" || fail "reseed_wait: status exiting ${c%%:*} gave '$out', want rc=${c#*:}"
+    done
+    pub_only="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+    if printf '%s\n' "$pub_only" | grep -A1 'reseed_wait "$gen"' | grep -q '|| log_error' \
+        && [ "$(printf '%s\n' "$pub_only" | grep -n 'reseed_wait "$gen"' | cut -d: -f1)" -lt "$(printf '%s\n' "$pub_only" | grep -n 'log_success' | cut -d: -f1)" ]; then
+        ok "publish: a re-seed wait that times out is an error, and success is reported only after it passes"
+    else
+        fail "publish: reports success whether or not every usable node merged the new stamp"
+    fi
 fi
 ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else
@@ -499,7 +658,11 @@ case "\$1 \$2" in
         *) echo "stub kubectl: the claim read names no claim:\$ARGV" >&2; exit 2 ;;
       esac
       case "\$ARGV" in
-        *"jsonpath={.status.phase}"*) printf '%s' "\${STUB_PVC_PHASE-Bound}" ;;
+        *"jsonpath={.status.phase}"*)
+            if [ -n "\${STUB_BIND_AFTER:-}" ]; then
+                n=\$(( \$(cat "$T/bind.n" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$T/bind.n"
+                if [ "\$n" -ge "\$STUB_BIND_AFTER" ]; then printf Bound; else printf Pending; fi
+            else printf '%s' "\${STUB_PVC_PHASE-Bound}"; fi ;;
         *"jsonpath={.metadata.name}/{.spec.storageClassName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf 'engine-cache/%s' "\${STUB_PVC_CLASS-}" ;;
         *"jsonpath={.spec.volumeName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_VOLUME-$PVNAME}" ;;
         *"jsonpath={.spec.storageClassName}"*) printf '%s' "\${STUB_PVC_CLASS-}" ;;
@@ -522,6 +685,13 @@ case "\$1 \$2" in
   "get pv")      refuse -n
                  case "\$ARGV" in
                    *"jsonpath={.spec.hostPath.path}"*) case "\$ARGV" in *" $PVNAME "*) printf '%s' "\${STUB_PV_PATH-/mnt/local/weights/check-ns/engine-cache}" ;; *) echo "stub kubectl: pv read for a volume that is not the claim's:\$ARGV" >&2; exit 2 ;; esac ;;
+                   *" -o name "*)
+                       case "\$ARGV" in *" $PVNAME "*) ;; *) echo "stub kubectl: pv read for a volume that is not the claim's:\$ARGV" >&2; exit 2 ;; esac
+                       case "\${STUB_PV_STATE:-exists}" in
+                         exists) printf 'persistentvolume/%s\n' "$PVNAME" ;;
+                         absent) case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "Error from server (NotFound): persistentvolumes $PVNAME not found" >&2; exit 1 ;; esac ;;
+                         forbidden) echo "Error from server (Forbidden): persistentvolumes $PVNAME is forbidden: stub" >&2; exit 1 ;;
+                       esac ;;
                    *) want -l "$LBL"; want -o json; cat "$T/pvs.json" ;;
                  esac ;;
   "delete pv")   refuse -n; echo deleted ;;
@@ -578,7 +748,27 @@ if STUB_DS_SELECTOR='a=b"c' PATH="$STUB_PATH" bash deploy/enginecache.sh status 
     grep -q 'this script did not write' "$T/edited.out" && ok "status: a DaemonSet nodeSelector this script did not write is refused before kubectl" || fail "status on an edited DaemonSet: $(tail -1 "$T/edited.out")"; fi
 if STUB_NODES_ERROR='Error from server (Forbidden): nodes is forbidden: User cannot list' PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/forb.out" 2>&1; then fail "status must fail when nodes cannot be listed"; else
     grep -q 'cluster-reader' "$T/forb.out" && ok "status: a Forbidden node list names the permission (cluster-reader)" || fail "status Forbidden: $(tail -1 "$T/forb.out")"; fi
-if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pending.out" 2>&1; then fail "status must fail while the claim is not Bound"; else grep -q 'the claim is not bound: its volume is cluster-scoped and was not created' "$T/pending.out" && ok "status: an unbound claim is reported with why, and fails" || fail "status: unbound claim: $(head -2 "$T/pending.out" | tr '\n' ';')"; fi
+if STUB_PV_STATE=absent STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pending.out" 2>&1; then fail "status must fail while the claim is not Bound"; else grep -q "the claim is not bound: its volume ${PVNAME} is cluster-scoped and was not created" "$T/pending.out" && ok "status: an unbound claim whose volume is not there is blamed on leave to create it, and fails" || fail "status: unbound claim: $(head -2 "$T/pending.out" | tr '\n' ';')"; fi
+# a claim whose volume exists is a binding delay, not missing rights; a
+# volume that cannot be read is unknown, never absent
+if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pendpv.out" 2>&1; then fail "status must fail while the claim is not Bound, even with its volume there"; else
+    grep -q "the claim is not bound yet: its volume ${PVNAME} exists" "$T/pendpv.out" && ! grep -q 'leave to create' "$T/pendpv.out" \
+        && ok "status: an unbound claim whose volume exists is a binding delay, with no blame on permissions" || fail "status: unbound claim, volume there: $(sed -n 2p "$T/pendpv.out")"; fi
+if STUB_PV_STATE=forbidden STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pendforb.out" 2>&1; then fail "status must fail while the claim is not Bound, volume unreadable"; else
+    grep -q "its volume ${PVNAME} could not be read (Error from server (Forbidden)" "$T/pendforb.out" && ! grep -q 'was not created' "$T/pendforb.out" \
+        && ok "status: an unbound claim whose volume read is Forbidden says so, never that the volume is absent" || fail "status: unbound claim, volume Forbidden: $(sed -n 2p "$T/pendforb.out")"; fi
+# apply waits briefly for the claim to bind before its report (sleep is a
+# stand-in that returns at once, so the wait costs nothing here)
+mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
+rm -f "$T/bind.n"
+STUB_BIND_AFTER=3 STUB_PVC_CLASS=node-local-engine-cache PATH="$T/fastsleep:$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/latebind.out" 2>&1 || true
+grep -q 'claim engine-cache: Bound' "$T/latebind.out" && ! grep -q 'not bound' "$T/latebind.out" \
+    && ok "apply: a claim that binds a few seconds after the apply is reported Bound, not as a fault" || fail "apply, claim binding late: reads=$(cat "$T/bind.n" 2>/dev/null); $(grep -E 'claim engine-cache|not bound' "$T/latebind.out" | tr '\n' ';')"
+rm -f "$T/bind.n"
+STUB_BIND_AFTER=99 STUB_PVC_CLASS=node-local-engine-cache PATH="$T/fastsleep:$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/slowbind.out" 2>&1 || true
+[ "$(cat "$T/bind.n" 2>/dev/null || echo 0)" -ge 10 ] && grep -q "the claim is not bound yet: its volume ${PVNAME} exists" "$T/slowbind.out" && ! grep -q 'leave to create' "$T/slowbind.out" \
+    && ok "apply: a claim still Pending after the wait, its volume there, is reported as not bound yet" || fail "apply, claim still Pending: reads=$(cat "$T/bind.n" 2>/dev/null); $(grep -E 'not bound' "$T/slowbind.out" | tr '\n' ';')"
+rm -f "$T/bind.n"
 # apply: refuses before anything lands without PV rights; refuses a foreign claim; the OpenShift notice
 : > "$T/calls"
 if STUB_NO_PV=1 STUB_PVC_PHASE="" PATH="$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/nopv.out" 2>&1; then fail "apply must refuse without leave to create PersistentVolumes"; else
@@ -937,6 +1127,23 @@ chmod 755 "$T/ecv/ec-c"
 [ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc5.out" \
     && ecv_row "$T/ecv-anc5.out" n-c UNREADABLE "$AOTK@rank_0_0" \
     && ok "verify: a 700 volume mount above the cache root another UID cannot search is unreadable, naming it" || fail "verify mount root 700: rc=$rc $(grep n-c "$T/ecv-anc5.out")"
+# the directories above a key are only passed through: search is enough, so
+# a 711 volume mount another UID cannot list is no reason to call it unreadable
+ecv_reset; chmod 711 "$T/ecv/ec-c" "$T/ecv/ec-c/vllm"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc711.out" --keys "$K1")"
+chmod 755 "$T/ecv/ec-c" "$T/ecv/ec-c/vllm"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-anc711.out" n-c present "$K1" && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-anc711.out" \
+    && ok "verify: a 711 volume mount and cache root above a readable key are present for another UID" || fail "verify mount root 711, other uid: rc=$rc $(grep -E 'n-c|VERIFIED' "$T/ecv-anc711.out" | tr '\n' ';')"
+if [ "$ME" = 0 ]; then
+    # a root 711 mount root above keys owned by 1000, judged for their owner
+    ecv_reset; ecv_aot; for p in ec-a ec-b ec-c; do chown -R 1000:1000 "$T/ecv/$p/vllm/$AOTK"; done; chmod 711 "$T/ecv/ec-a"
+    rc="$(ecv "$T/ecv-anc711r.out" --keys "$AOTK@rank_0_0")"
+    chmod 755 "$T/ecv/ec-a"
+    [ "$rc" = 0 ] && ecv_row "$T/ecv-anc711r.out" n-a present "$AOTK@rank_0_0" \
+        && grep -q '^  VERIFIED for uid 1000: every key is on every usable node, readable by uid 1000' "$T/ecv-anc711r.out" \
+        && ok "verify: a root 711 volume mount above a 1000:1000 key is present, VERIFIED for uid 1000" \
+        || fail "verify root 711 mount root, owner 1000: rc=$rc $(grep -E 'n-a|VERIFIED' "$T/ecv-anc711r.out" | tr '\n' ';')"
+fi
 if [ "$ME" = 0 ]; then
     # a root 700 mount root above keys owned by 1000, judged for their owner
     ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a"

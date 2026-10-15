@@ -145,8 +145,9 @@
 # engine's UID: the owner of the key directory (the engine that wrote it), or
 # ENGINE_CACHE_UID=<uid> in the environment when the engines run as another
 # UID than the one that owns the key (a seeded node: the preparer copied it
-# as root). A file that UID cannot read (or a directory it cannot read and
-# search, under the key or on the way to it from the volume mount) is
+# as root). A file that UID cannot read (or a directory under the key it
+# cannot read and search, or one on the way to it from the volume mount it
+# cannot search) is
 # reported unreadable, naming the UID. vLLM's AOT files are 600, which is
 # fine for the engine that owns them. A seeded or published key is owned by
 # root, so without ENGINE_CACHE_UID it is judged for root. Without it every
@@ -275,21 +276,54 @@ for d in vllm flashinfer triton; do
   mkdir -p "/engine-cache/$d" || exit 1
   chmod 1777 "/engine-cache/$d" 2>/dev/null || true
 done
-# merge SRC DST: an entry the node has is kept, one it lacks is copied, a
-# directory both have is descended -- so a second engine config's key lands
-# beside the node's own. A copy that fails is removed and the seed marked
-# incomplete.
+# cp -a without ownership is GNU only; busybox cp refuses the option. Try it
+# once; without it a plain cp copies the content and mode, not the times.
+cpa=0
+: > /tmp/.ec-cp-check 2>/dev/null && cp -a --no-preserve=ownership /tmp/.ec-cp-check /tmp/.ec-cp-check.2 2>/dev/null && cpa=1
+rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
+# merge SRC DST: an entry DST has is kept, one it lacks is copied, a directory
+# both have is descended -- so a second engine config's key lands beside the
+# node's own. It walks every directory and copies one file at a time:
+#  * a symlink is skipped and logged: vLLM writes none, and a link is not
+#    the cache (it would point at whatever the target is on each node);
+#  * a file not every user can read is copied readable by every user, and
+#    counted once its copy succeeds: the engine may run as another UID;
+#  * a new directory is removed whole when any copy under it fails, so no
+#    half-copied key is left behind, and the merge is marked incomplete;
+#    what was counted under it is uncounted;
+#    a directory that cannot be listed is a failed copy, not an empty one.
+# The copier owns every copy, whatever owned the original. The globs match
+# every name: plain, one leading dot, and two leading dots (..x).
 merge() {
-  local e n t
-  for e in "$1"/* "$1"/.[!.]*; do
-    [ -e "$e" ] || continue
+  local e n t was wa wp wpe pub
+  # a directory that cannot be listed would glob to nothing and read as empty
+  ls -a "$1" >/dev/null || { complete=0; return; }
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
-    if [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
-      merge "$e" "$t"
-    elif [ ! -e "$t" ]; then
-      if cp -a --no-preserve=ownership "$e" "$2/"; then added="$added."; else complete=0; rm -rf "$t"; fi
+    if [ -L "$e" ]; then
+      links="$links."; echo "engine cache: skipped $e: a symlink, not cache content"
+    elif [ -e "$t" ] || [ -L "$t" ]; then
+      if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
+    elif [ -d "$e" ]; then
+      was="$complete"; wa="$added"; wp="$private"; wpe="$private_eg"; complete=1
+      mkdir "$t" && chmod a+rx "$t" || complete=0
+      [ "$complete" = 0 ] || merge "$e" "$t"
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; added="$wa"; private="$wp"; private_eg="$wpe"; fi
+    elif [ -f "$e" ]; then
+      pub=0; ls -ld "$e" | grep -q '^-......r' && pub=1
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" || { complete=0; rm -f "$t"; continue; }
+      added="$added."
+      [ "$pub" = 1 ] || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
+    else
+      echo "engine cache: skipped $e: not a file or a directory"
     fi
   done
+}
+# merge_report prints what the merge skipped or changed.
+merge_report() {
+  [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) not readable by every user were copied readable by every user, for example $private_eg"
 }
 seeded_from=""
 [ ! -f "/engine-cache/$SEED_MARKER" ] || read -r seeded_from < "/engine-cache/$SEED_MARKER" || seeded_from=""
@@ -310,22 +344,26 @@ if [ -d /seed ] && [ ! -d "$seed_dir" ]; then
   if [ "$seeded_from" != "none:$SEED_ID" ] && [ "$seeded_from" != "$SEED_ID" ]; then
     echo "none:$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
   fi
-  echo "engine cache: no seed on $HOSTNAME: $SEED_ID has no $seed_dir yet; nothing to seed"
+  echo "engine cache: no seed on $NODE_NAME: $SEED_ID has no $seed_dir yet; nothing to seed"
 elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
-  complete=1; added=""
+  # Drop the old marker first. If this merge fails, the node must be not
+  # Ready -- not Ready on the stamp it merged before.
+  rm -f "/engine-cache/$SEED_MARKER" || exit 1
+  complete=1; added=""; links=""; private=""; private_eg=""
   for d in vllm flashinfer triton; do
     [ -d "$seed_dir/$d" ] || continue
     merge "$seed_dir/$d" "/engine-cache/$d"
   done
+  merge_report
   if [ "$complete" = 1 ]; then
     echo "$want" > "/engine-cache/$SEED_MARKER" || exit 1
-    echo "engine cache: seeded on $HOSTNAME from $want: ${#added} entries added, what the node already had kept"
+    echo "engine cache: seeded on $NODE_NAME from $want: ${#added} file(s) copied; what the node already had is kept"
   else
-    echo "engine cache: seeding on $HOSTNAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
+    echo "engine cache: seeding on $NODE_NAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
   fi
 fi
 touch "/engine-cache/$MARKER" || exit 1
-echo "engine cache: prepared on $HOSTNAME: /engine-cache/{vllm,flashinfer,triton}"
+echo "engine cache: prepared on $NODE_NAME: /engine-cache/{vllm,flashinfer,triton}"
 trap 'exit 0' TERM; while :; do sleep 3600 & wait; done
 SCRIPT
 }
@@ -337,7 +375,10 @@ seed_volume_yaml() {
     printf '        - name: seed\n          persistentVolumeClaim:\n            claimName: %s\n            readOnly: true\n' "$SEED_CLAIM"
 }
 # seed_probe prints the readiness probe's extra clause with a seed: the node
-# carries the marker of THIS seed. The probe is a single-quoted YAML scalar,
+# carries the marker of THIS seed. Any stamp matches, which is safe only
+# because the preparer drops the marker before it merges a new stamp: the
+# marker a pod finds is the stamp that pod merged, never an older one left
+# behind by a merge that failed. The probe is a single-quoted YAML scalar,
 # so the double quotes in it need no escaping.
 seed_probe() {
     [ -n "$SEED_CLAIM" ] || return 0
@@ -505,6 +546,11 @@ $(preparer_script | sed 's/^/              /')
               value: "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}"
             - name: SEED_SUBPATH
               value: "${SEED_SUBPATH}"
+            # The node, for the log: HOSTNAME is the pod's name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             # Engine images bake in NVIDIA_VISIBLE_DEVICES=all, and the NVIDIA
             # runtime honours it from a container that requested no GPU.
             - name: NVIDIA_VISIBLE_DEVICES
@@ -586,6 +632,13 @@ cmd_apply() {
         log_warning "jq is not installed; skipping the per-node report (enginecache.sh status needs it)"
         return 0
     fi
+    # The claim binds to its static volume a few seconds after the apply;
+    # give it 20 s, so the report below does not read that delay as a fault.
+    local tries=0
+    while [ "$tries" -lt 10 ] && [ "$(kubectl get pvc -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.status.phase}' 2>/dev/null || true)" = Pending ]; do
+        tries=$((tries + 1))
+        sleep 2
+    done
     cmd_status report || true
 }
 
@@ -644,6 +697,28 @@ ec_nodes() {
     fi
 }
 
+# claim_unbound_reason says why the claim is not Bound. A claim on a static
+# volume binds a few seconds after the volume exists, so a volume that exists
+# is a delay, not a fault. Only a volume that is not there is blamed on leave
+# to create it, and a volume that cannot be read is said to be unknown.
+claim_unbound_reason() {
+    local vol found err_file
+    vol="$(kubectl get pvc -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)"
+    if [ -z "$vol" ]; then
+        echo "  the claim is not bound and names no volume -- re-run apply"
+        return
+    fi
+    err_file="$(mktemp)"
+    if ! found="$(kubectl get pv "$vol" -o name --ignore-not-found 2>"$err_file")"; then
+        echo "  the claim is not bound, and its volume ${vol} could not be read ($(tr '\n' ' ' < "$err_file")) -- whether it exists is not known; reading PersistentVolumes needs cluster-scoped read"
+    elif [ -n "$found" ]; then
+        echo "  the claim is not bound yet: its volume ${vol} exists, and a claim on it binds within seconds -- run status again"
+    else
+        echo "  the claim is not bound: its volume ${vol} is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
+    fi
+    rm -f "$err_file"
+}
+
 # cmd_status prints, per node, whether the node is prepared. Ready is the
 # marker present and the directory writable by the preparer's UID; a pod
 # that keeps failing shows its reason, and no pod at all is a node the
@@ -666,7 +741,7 @@ cmd_status() {
     echo "${path}  (claim ${CLAIM}: ${bound:-missing}; seed: ${seed:-none}; nodes: $(accelerator_selector_text "$selector"))"
     if [ "$bound" != Bound ]; then
         rc=1
-        [ -z "$bound" ] || echo "  the claim is not bound: its volume is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
+        [ -z "$bound" ] || claim_unbound_reason
     fi
     printf '  %-28s %-12s %s\n' NODE CACHE PREPARER
     accelerator_print_excluded "$excluded"
@@ -759,27 +834,67 @@ cmd_delete() {
 publish_script() {
     cat <<'SCRIPT'
 dst="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
-mkdir -p "$dst" || exit 1
+# umask 022: every directory mkdir -p creates is readable and searchable by
+# every user, as the merge makes its own; one that exists is left as it is
+(umask 022; mkdir -p "$dst") || exit 1
+# cp -a without ownership is GNU only; busybox cp refuses the option. Try it
+# once; without it a plain cp copies the content and mode, not the times.
+cpa=0
+: > /tmp/.ec-cp-check 2>/dev/null && cp -a --no-preserve=ownership /tmp/.ec-cp-check /tmp/.ec-cp-check.2 2>/dev/null && cpa=1
+rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
+# merge SRC DST: an entry DST has is kept, one it lacks is copied, a directory
+# both have is descended -- so a second engine config's key lands beside the
+# node's own. It walks every directory and copies one file at a time:
+#  * a symlink is skipped and logged: vLLM writes none, and a link is not
+#    the cache (it would point at whatever the target is on each node);
+#  * a file not every user can read is copied readable by every user, and
+#    counted once its copy succeeds: the engine may run as another UID;
+#  * a new directory is removed whole when any copy under it fails, so no
+#    half-copied key is left behind, and the merge is marked incomplete;
+#    what was counted under it is uncounted;
+#    a directory that cannot be listed is a failed copy, not an empty one.
+# The copier owns every copy, whatever owned the original. The globs match
+# every name: plain, one leading dot, and two leading dots (..x).
 merge() {
-  local e n t
-  for e in "$1"/* "$1"/.[!.]*; do
-    [ -e "$e" ] || continue
+  local e n t was wa wp wpe pub
+  # a directory that cannot be listed would glob to nothing and read as empty
+  ls -a "$1" >/dev/null || { complete=0; return; }
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
-    if [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
-      merge "$e" "$t"
-    elif [ ! -e "$t" ]; then
-      if cp -a --no-preserve=ownership "$e" "$2/"; then added="$added."; else complete=0; rm -rf "$t"; fi
+    if [ -L "$e" ]; then
+      links="$links."; echo "engine cache: skipped $e: a symlink, not cache content"
+    elif [ -e "$t" ] || [ -L "$t" ]; then
+      if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
+    elif [ -d "$e" ]; then
+      was="$complete"; wa="$added"; wp="$private"; wpe="$private_eg"; complete=1
+      mkdir "$t" && chmod a+rx "$t" || complete=0
+      [ "$complete" = 0 ] || merge "$e" "$t"
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; added="$wa"; private="$wp"; private_eg="$wpe"; fi
+    elif [ -f "$e" ]; then
+      pub=0; ls -ld "$e" | grep -q '^-......r' && pub=1
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" || { complete=0; rm -f "$t"; continue; }
+      added="$added."
+      [ "$pub" = 1 ] || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
+    else
+      echo "engine cache: skipped $e: not a file or a directory"
     fi
   done
 }
-complete=1; added=""
+# merge_report prints what the merge skipped or changed.
+merge_report() {
+  [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) not readable by every user were copied readable by every user, for example $private_eg"
+}
+complete=1; added=""; links=""; private=""; private_eg=""
 for d in vllm flashinfer triton; do
   [ -d "/engine-cache/$d" ] || continue
-  mkdir -p "$dst/$d" || exit 1
+  (umask 022; mkdir -p "$dst/$d") || exit 1
   merge "/engine-cache/$d" "$dst/$d"
 done
+merge_report
 [ "$complete" = 1 ] || { echo "engine cache: publishing from $NODE_NAME did not complete (a copy failed and was removed)"; exit 1; }
-echo "engine cache: published from $NODE_NAME: ${#added} entries added to the seed"
+echo "engine cache: published from $NODE_NAME: ${#added} file(s) copied into the seed; what the seed already had is kept"
 SCRIPT
 }
 
@@ -926,18 +1041,26 @@ EOF
         || { kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null 2>&1; log_error "publish: the seed was filled but not stamped; rerun publish"; }
     kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
     kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
-    # Wait on the usable nodes, as status counts them: `rollout status` also
-    # waits for a cordoned node's pod, which never comes up. status alone
-    # passes on the preparers from before the restart (still Ready), so the
-    # wait also needs every live preparer to be of the restarted template.
-    local deadline=$((SECONDS + 600)) gen
+    local gen
     gen="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.deprecated\.daemonset\.template\.generation}')"
     sleep 5
+    reseed_wait "$gen" 600 \
+        || log_error "publish: the seed is stamped ${stamp}, but not every usable node merged it within 600 s. A node whose merge failed is not prepared: enginecache.sh status -n ${NAMESPACE} says which, and that node's preparer log says why"
+    log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every usable node merged it"
+}
+
+# reseed_wait GEN TIMEOUT_S waits for the preparers to merge a new stamp: 0
+# once every live preparer is of template GEN and status passes, 1 when
+# TIMEOUT_S passes first. It waits on the usable nodes, as status counts them:
+# `rollout status` also waits for a cordoned node's pod, which never comes up.
+# status alone passes on the preparers from before the restart (still Ready),
+# so the wait also needs every live preparer to be of the restarted template.
+reseed_wait() {
+    local gen="$1" deadline=$((SECONDS + $2))
     until [ -n "$gen" ] && [ "$(stale_preparers "$gen")" = 0 ] && bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
-        [ "$SECONDS" -lt "$deadline" ] || { log_warning "publish: not every usable node re-seeded within 600 s; enginecache.sh status says which"; break; }
+        [ "$SECONDS" -lt "$deadline" ] || return 1
         sleep 10
     done
-    log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
 }
 
 # KEY_RE matches a compile cache path in an engine's log, up to its rank
@@ -1071,7 +1194,7 @@ root="$1"; shift
 walk() {
   local e
   if [ ! -r "$1" ] || [ ! -x "$1" ]; then bad="$1"; return; fi
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     if [ -L "$e" ]; then link="$e"; return 0; fi
     [ -e "$e" ] || continue
     if [ -d "$e" ]; then
@@ -1092,14 +1215,25 @@ linked() {
     if [ -L "$p" ]; then echo "$p"; return; fi
   done
 }
-# private ROOT KEY prints "ok UID" when UID can read every file under the
-# key directory ROOT/KEY and read and search every directory from the parent
-# of ROOT (the volume mount) down to it and under it, else "no UID PATH" for
-# the first one it cannot -- UID
+# above DIR UID GID prints DIR when it is a directory UID cannot search: the
+# directories above a key are only passed through, so x is all they need (a
+# 711 volume mount is fine). GID empty: only u and o count.
+above() {
+  if [ -n "$3" ]; then
+    find "$1" -prune -type d \( \( -user "$2" ! -perm -100 \) -o \( ! -user "$2" -group "$3" ! -perm -010 \) -o \( ! -user "$2" ! -group "$3" ! -perm -001 \) \) 2> /dev/null
+  else
+    find "$1" -prune -type d \( \( -user "$2" ! -perm -100 \) -o \( ! -user "$2" ! -perm -001 \) \) 2> /dev/null
+  fi
+}
+# private ROOT KEY prints "ok UID" when UID can search every directory from
+# the parent of ROOT (the volume mount) down to the key directory ROOT/KEY,
+# and read every file and read and search every directory from the key
+# directory down, else "no UID PATH" for the first one it cannot -- UID
 # being $euid when set, else the owner of the key directory, the engine
 # that wrote the key (root, for a seeded or published copy). A path owned by
 # UID needs u+r; one in the key directory's group, g+r (the engine is taken
-# to be in that group); any other, o+r (directories: r and x likewise). With
+# to be in that group); any other, o+r (directories: r and x likewise; above
+# the key directory, x alone). With
 # $euid the UID's groups are not known, so only u and o count. "? WHY" when
 # the modes or the owner cannot be read -- including a find that rejects any
 # part of the expression, probed whole before it is trusted: an expression
@@ -1126,15 +1260,16 @@ private() {
     echo "? no-find-modes$miss"; return
   fi
   # the directories on the way: the volume mount (the cache root's parent),
-  # the cache root, then each component of KEY
+  # the cache root, then each component of KEY above the key directory:
+  # search only
   a="${root%/*}"
   if [ -n "$a" ]; then
-    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    f="$(above "$a" "$u" "$g")"
     [ -z "$f" ] || { echo "no $u $f"; return; }
   fi
   a="$root"
   while :; do
-    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    f="$(above "$a" "$u" "$g")"
     [ -z "$f" ] || { echo "no $u $f"; return; }
     [ -n "$rest" ] || break
     c="${rest%%/*}"
@@ -1147,7 +1282,7 @@ private() {
 }
 hasfile() {
   local e
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -L "$e" ] && continue
     [ -f "$e" ] && return 0
     [ -d "$e" ] && hasfile "$e" && return 0
@@ -1328,8 +1463,10 @@ cmd_verify() {
     # user may have changed. Name the UIDs assumed, every time.
     local ulist="" nuid=0 uwho=""
     if [ -z "$ENGINE_UID" ] && [ "$assumed" -gt 0 ]; then
-        ulist="$(tr ' ' '\n' <<< "$uids" | grep . | sort -n -u | paste -sd, -)"
-        nuid="$(tr ',' '\n' <<< "$ulist" | grep -c .)"
+        # grep finding nothing must not abort under pipefail: an empty list
+        # is reported as such, not as a dead script
+        ulist="$(tr ' ' '\n' <<< "$uids" | { grep . || true; } | sort -n -u | paste -sd, -)"
+        nuid="$(tr ',' '\n' <<< "$ulist" | { grep -c . || true; })"
         ulist="${ulist//,/, }"
         if [ "$nuid" -gt 1 ]; then uwho="uids ${ulist}"; else uwho="uid ${ulist}"; fi
         echo "  WARNING: ${assumed} of ${total} node/key checks were judged for the owner of the key directory (${uwho}), taken as the engines' UID."
