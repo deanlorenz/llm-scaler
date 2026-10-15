@@ -30,8 +30,20 @@ func DeleteService(ctx context.Context, k8sClient *kubernetes.Clientset, namespa
 	return nil
 }
 
+// ServiceOption adjusts a Service EnsureService builds.
+type ServiceOption func(*corev1.Service)
+
+// WithServiceSelector adds key=value to the Service's pod selector. On a
+// LeaderWorkerSet, selecting worker index 0 routes traffic to the group
+// leaders only: a worker pod that serves requests as well holds a queue no
+// leader's metrics show, and WVA reads a replica from its leader.
+func WithServiceSelector(key, value string) ServiceOption {
+	return func(s *corev1.Service) { s.Spec.Selector[key] = value }
+}
+
 // EnsureService creates or replaces the Service (idempotent for test setup).
-func EnsureService(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, baseName, appLabel string, port int) error {
+func EnsureService(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, baseName, appLabel string, port int,
+	opts ...ServiceOption) error {
 	serviceName := baseName + serviceNameSuffix
 	_, err := k8sClient.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
 	if err != nil {
@@ -48,6 +60,9 @@ func EnsureService(ctx context.Context, k8sClient *kubernetes.Clientset, namespa
 		}
 	}
 	service := buildService(namespace, baseName, appLabel, port)
+	for _, o := range opts {
+		o(service)
+	}
 	_, err = k8sClient.CoreV1().Services(namespace).Create(ctx, service, metav1.CreateOptions{})
 	if err != nil && errors.IsAlreadyExists(err) {
 		_ = k8sClient.CoreV1().Services(namespace).Delete(ctx, serviceName, metav1.DeleteOptions{})
