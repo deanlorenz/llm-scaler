@@ -203,6 +203,21 @@ case "$args" in
   *" rollout "*)
     [ -e "$S/restart.noreload" ] || echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
     exit 0 ;;
+  # May the controller already patch pods in a namespace? cani.<ns> holds yes,
+  # no or denied (impersonation not allowed); no file is no.
+  *" auth can-i "*)
+    case "$(cat "$S/cani.$ns" 2>/dev/null || echo no)" in
+      yes) echo yes; exit 0 ;;
+      no)  echo no; exit 1 ;;
+      *)   echo 'Error from server (Forbidden): User "u" cannot impersonate resource "serviceaccounts"' >&2; exit 1 ;;
+    esac ;;
+  *" get rolebinding "*)
+    echo 'Error from server (NotFound): rolebindings.rbac.authorization.k8s.io "x" not found' >&2; exit 1 ;;
+  # The ScaledObjects calling a controller, as the go-template renders them:
+  # namespace, scalerAddress, warmPoolName (- for none).
+  *" get scaledobject "*)
+    [ -e "$S/sos.forbidden" ] && { echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects" at the cluster scope' >&2; exit 1; }
+    cat "$S/sos" 2>/dev/null; exit 0 ;;
   *" apply -f - "*)
     [ -e "$S/apply.forbidden" ] && { echo 'Error from server (Forbidden): roles.rbac.authorization.k8s.io is forbidden' >&2; exit 1; }
     cat >> "$S/applied"; exit 0 ;;
@@ -271,6 +286,28 @@ vcase "activate: an already-active block still grants (a second namespace on one
 fresh "$TUNED_POLICY"; touch "$STATE/apply.forbidden"; run activate
 vcase "activate: a refused grant stops before going active" \
     eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "role/wva-pod-writer"'
+fresh "$TUNED_POLICY"; echo yes > "$STATE/cani.team-a"; run activate
+vcase "activate: no grant where the controller can already patch pods" \
+    eval '[ $RC -eq 0 ] && ! grep -q "^kind: Role$" "$STATE/applied" 2>/dev/null && says "can already patch pods in team-a"'
+
+# The budget spans namespaces; activate grants only in its own. Each other
+# namespace whose models call this controller and where it may not patch is
+# named, with the command -- and nothing is granted there.
+fresh "$TUNED_POLICY"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-d wva-external-scaler.team-a.svc.cluster.local:9090 pool' \
+    'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
+echo yes > "$STATE/cani.team-c"
+run activate
+vcase "activate: warns about each other namespace of the budget without a grant, and grants only its own" \
+    eval '[ $RC -eq 0 ] && says "may not patch pods in team-b" && says "activate -n team-b --controller-namespace team-a" && ! says "pods in team-c" && ! says "pods in team-d" && ! says "pods in team-e" && ! grep -q "namespace: team-b" "$STATE/applied"'
+fresh "$TUNED_POLICY"; touch "$STATE/sos.forbidden"; run activate
+vcase "activate: an unreadable ScaledObject list is warned as unknown, not taken for none" \
+    eval '[ $RC -eq 0 ] && says "other namespaces sharing this budget are unknown"'
+
 fresh "$TUNED_POLICY"; run activate
 vcase "activate: from shadow sets shadow false, keeps tuning" \
     eval '[ $RC -eq 0 ] && [ "$(pol .optimizer.utilizationShare.shadow)" = false ] && [ "$(pol .optimizer.utilizationShare.maxHeadroomReplicas)" = 2 ]'
@@ -431,7 +468,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=70
+CASES_EXPECTED=73
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

@@ -535,6 +535,28 @@ verb_shadow() {
     info "shadow computes and reports and moves nothing. Read 'status' over a few bursts before 'activate'."
 }
 
+# warn_ungranted_namespaces -- the optimizer moves pods in every namespace whose
+# models share the budget, and activate grants only in NS. So it names each
+# other namespace it can see -- one holding a ScaledObject that calls this
+# controller -- where the controller may not patch pods, with the command that
+# grants it there. It grants nothing there itself. A list it cannot read is
+# said, not taken for none.
+warn_ungranted_namespaces() {
+    local list ns
+    if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
+        warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
+        return 0
+    fi
+    for ns in $list; do
+        [ "$ns" != "$NS" ] || continue
+        case "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" in
+            yes) ;;
+            no) warn "the controller may not patch pods in $ns, where it also scales models: the optimizer cannot move their pods. Run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
+            *) warn "could not tell whether the controller may patch pods in $ns, where it also scales models. If they share this budget, run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
+        esac
+    done
+}
+
 verb_activate() {
     local state
     read_policy
@@ -550,8 +572,13 @@ verb_activate() {
     # namespace alone (lib/pod_writer.sh), before the mode that needs it --
     # and also when the block is already active, which is how a second
     # namespace sharing one budget gets its grant.
-    wva_grant_pod_writes "$NS" "$CONTROLLER_NS" || die "could not grant the controller patch on pods in $NS (role/wva-pod-writer); this needs create on roles and rolebindings there"
-    ok "the controller in $CONTROLLER_NS may patch pods in $NS (role/wva-pod-writer)"
+    wva_ensure_pod_writes "$NS" "$CONTROLLER_NS" \
+        || die "could not grant the controller patch on pods in $NS (role/wva-pod-writer): ${WVA_POD_WRITER_ERR}. This needs create on roles and rolebindings there; or an admin runs: $(wva_pod_writer_admin_hint "$NS" "$CONTROLLER_NS")"
+    case "$WVA_POD_WRITER_RESULT" in
+        already) ok "the controller in $CONTROLLER_NS can already patch pods in $NS" ;;
+        *) ok "the controller in $CONTROLLER_NS may patch pods in $NS (role/wva-pod-writer)" ;;
+    esac
+    warn_ungranted_namespaces
     if [ "${state% *}" = active ]; then
         ok "already active"
         return 0

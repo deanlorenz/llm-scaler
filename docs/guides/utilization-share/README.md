@@ -57,7 +57,9 @@ Activate also lets the controller patch pods in `NAMESPACE` (Role
 `wva-pod-writer`): the optimizer changes pods' deletion cost, and the
 controller's ClusterRole only reads pods. You need the right to create Roles in
 that namespace. If models in several namespaces share one budget, run activate
-once for each of them.
+once for each of them. Activate grants only in `NAMESPACE`. It warns about each
+other namespace whose models this controller scales and where the grant is
+missing, and prints the command to run there.
 
 On a cluster-wide quota, `clusterNamespaces` lets you act on a few namespaces
 first. Weights, floors and every other key are in the [scaling policy
