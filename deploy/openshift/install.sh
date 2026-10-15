@@ -25,8 +25,6 @@ DEPLOY_PROMETHEUS=false  # OpenShift uses built-in monitoring stack
 # OpenShift-specific prerequisites
 REQUIRED_TOOLS=("oc")
 
-# TLS verification enabled by default on OpenShift
-SKIP_TLS_VERIFY=false
 
 #### REQUIRED FUNCTION used by deploy/install.sh ####
 check_specific_prerequisites() {

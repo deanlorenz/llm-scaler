@@ -18,28 +18,25 @@ operating point, and scales before demand exceeds that supply.
 > **Status:** Implementation complete and wired into the engine's multi-analyzer pipeline.
 > Enable via the `analyzers:` field in `wva-scaling-policy-config` — see [Configuration](#configuration).
 >
-> **Enablement:** The ThroughputAnalyzer is **opt-in**. At startup, the controller checks whether
-> any saturation config entry lists `throughput` with `enabled != false`. If none does, the
-> analyzer is not registered and never participates in scaling. The default config ships with
+> **Enablement:** the ThroughputAnalyzer is **opt-in**. At startup the controller checks
+> whether any saturation config entry lists `throughput` with `enabled != false`. If none does,
+> the analyzer is not registered and never takes part in scaling. The default config ships with
 > saturation only, so throughput is off by default.
 >
-> **Runtime toggling requires a restart.** Registration is frozen after `StartOptimizeLoop`;
-> editing the configmap to add `throughput` takes effect only after a controller restart.
-> This restart requirement is about registration, not participation: the per-cycle
-> `ScalingPolicy.AnalyzerEnabled` gate (see the [multi-analyzer pipeline guide](multi-analyzer-pipeline.md))
-> governs whether an already-registered analyzer participates in a given cycle, and is
-> independent of this startup-time registration gate.
+> **Runtime toggling requires a restart.** Registration is frozen after `StartOptimizeLoop`, so
+> adding `throughput` to the ConfigMap takes effect only after a controller restart. This is
+> about registration, not participation: the per-cycle `ScalingPolicy.AnalyzerEnabled` gate
+> (see the [multi-analyzer pipeline guide](multi-analyzer-pipeline.md)) decides whether an
+> already-registered analyzer takes part in a given cycle, independently of the startup gate.
 >
-> **Editing the ConfigMap without restarting is surfaced, not silent.** When the
-> `ConfigMapReconciler` processes an edit to the **global** `wva-scaling-policy-config`
-> ConfigMap and the live throughput-analyzer enablement now differs from the registration
-> decision frozen at startup, it emits a Kubernetes Warning event on the ConfigMap (reason
-> `ThroughputAnalyzerRestartRequired`, visible via `kubectl describe configmap
-> wva-scaling-policy-config -n <system-namespace>`) and logs a message telling the operator
-> to restart `wva-controller-manager` to apply the change. This fires in both directions —
-> enabling or disabling `throughput` at runtime. **Namespace-local saturation ConfigMaps are not
-> covered**: startup registration reads only the global config, so a namespace-local edit can
-> never diverge from it and this check does not run for that path.
+> **An edit without a restart is reported, not silent.** When the `ConfigMapReconciler`
+> processes an edit to the **global** `wva-scaling-policy-config` and the live
+> throughput-analyzer enablement now differs from the startup decision, it emits a Warning event
+> on the ConfigMap (reason `ThroughputAnalyzerRestartRequired`, visible via `kubectl describe
+> configmap wva-scaling-policy-config -n <system-namespace>`) and logs a message to restart
+> `wva-controller-manager`. It fires both ways, enabling or disabling `throughput`.
+> **Namespace-local saturation ConfigMaps are not covered**: startup registration reads only the
+> global config, so a namespace-local edit can never diverge from it.
 
 ## Table of Contents
 
@@ -224,14 +221,14 @@ was removed because the EPP reports the port it routes to while every engine ser
 the port it is scraped on, so the two could not be joined.
 
 **Note on metric freshness:** the collector derives each replica's
-`ReplicaMetricsMetadata.Age`/`FreshnessStatus` from the same scrape timestamps used for the
-aggregate `wva_metrics_freshness_status` gauge — the least-fresh status across a pod's *present*
-metrics, and the age of the oldest one. Metrics that are absent by design (e.g. the EPP arrival
-rate when no EPP is deployed, or the prefix-cache metrics when prefix caching is off) leave a zero
-timestamp and are skipped rather than reported as `missing`, so a healthy replica is not
-mislabelled and a genuinely stale metric is not masked. `CheckModelMetrics` (`sanity.go`) flags a
-replica as `SanityIssueStaleMetrics` when `FreshnessStatus == "stale"`. This is currently detection
-only: the stale-metrics sanity issue is reported but not currently used to gate a scaling decision.
+`ReplicaMetricsMetadata.Age`/`FreshnessStatus` from the same scrape timestamps as the
+aggregate `wva_metrics_freshness_status` gauge: the least-fresh status across a pod's *present*
+metrics, and the age of the oldest one. Metrics absent by design (the EPP arrival rate with no
+EPP deployed, or prefix-cache metrics with prefix caching off) leave a zero timestamp and are
+skipped, not reported as `missing`. So a healthy replica is not mislabelled and a genuinely stale
+metric is not masked. `CheckModelMetrics` (`sanity.go`) flags a replica as
+`SanityIssueStaleMetrics` when `FreshnessStatus == "stale"`. This is detection only: the issue is
+reported but does not gate a scaling decision.
 
 ---
 

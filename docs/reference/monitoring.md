@@ -1,168 +1,146 @@
 # Watching what the scaling manager decides
 
-The dashboard, the metrics that answer specific questions, and how to read the
-logs. If the scaling manager is installed but you cannot tell what it is doing, this is the page.
+Use this page when the scaling manager is installed but you cannot tell what it
+is doing. It covers the dashboard, the metrics that answer specific questions,
+and the logs.
 
 > Part of the [the scaling manager deployment guide](../../deploy/). For whether the install
 > worked at all, see [After the install](operations.md).
 
 ## Watching what the scaling manager decides
 
-The scaling manager writes no custom resource. Its decisions are visible in three places, and you
-want them in this order: the **dashboard** for whether things are healthy, the
-**metrics** for a specific question, the **logs** only for why a single decision
-came out the way it did.
+The scaling manager writes no custom resource. Look in this order:
+
+1. the **dashboard**, for whether things are healthy;
+2. the **metrics**, for a specific question;
+3. the **logs**, only for why one decision came out as it did.
 
 ### The operational dashboard
 
-The install publishes a Grafana dashboard, *llm-scaling-manager Operational Dashboard*, covering
-the whole pipeline: GPU discovery, metric collection health and freshness,
-saturation, capacity, scaling decisions and limiter impact.
+The install publishes a Grafana dashboard, *WVA Operational Dashboard*. It
+covers GPU discovery, metric collection health, saturation, capacity, scaling
+decisions and limiter impact.
 
 ```bash
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-grafana 3000:80
 # then http://localhost:3000  (default admin password: prom-operator)
 ```
 
-It ships as a labelled ConfigMap, so **an existing Grafana picks it up** — you do
-not need to have let this install deploy Prometheus — *provided you publish into a
-namespace that Grafana's sidecar actually watches*:
+It ships as a labelled ConfigMap, so **an existing Grafana picks it up**, as long
+as you publish it into a namespace that Grafana's sidecar watches:
 
 ```bash
 # publish into whichever namespace your Grafana's sidecar watches
 DASHBOARD_NS=my-monitoring ./deploy/install.sh   # DEPLOY_PROMETHEUS=false is fine
 ```
 
-A sidecar watches only the namespaces it is configured for — `ALL` for a Grafana
-this installer deployed, often just its own for one you already had — so a wrong
-`DASHBOARD_NS` can produce a ConfigMap nobody reads. The install checks and warns;
-see [If you cannot write to the monitoring namespace](#if-you-cannot-write-to-the-monitoring-namespace).
+A Grafana this installer deployed watches `ALL` namespaces; one you already had
+often watches only its own. A wrong `DASHBOARD_NS` gives a ConfigMap nobody
+reads. The install checks and warns; see [If you cannot write to the monitoring
+namespace](#if-you-cannot-write-to-the-monitoring-namespace). Skip the dashboard
+with `DEPLOY_OPERATIONAL_DASHBOARD=false`.
 
-Skip it entirely with `DEPLOY_OPERATIONAL_DASHBOARD=false`.
-
-Read the panels top-down. The upper row answers "is the scaling manager seeing the cluster at all";
-until those are healthy, the scaling panels below them are meaningless.
+Read the panels top-down. The top row shows whether the scaling manager sees the
+cluster at all; until it is healthy, the scaling panels below mean nothing.
 
 #### Who owns the dashboard
 
-The dashboard is published as a ConfigMap into a **monitoring** namespace, which
-is normally not the namespace the scaling manager runs in — so publishing the shared one is a
-**cluster-admin** action even though it happens during the tenant install step.
+The shared dashboard goes into a **monitoring** namespace, normally not the
+scaling manager's. Publishing it is therefore a **cluster-admin** action, even
+though it runs during the tenant install step.
 
 | | can do |
 | --- | --- |
 | Cluster admin | publish and update the shared dashboard in the monitoring namespace; decide the datasource, and therefore who sees what |
 | Namespace admin | use the shared dashboard through their `?var-namespace=` link; or import the JSON into Grafana by hand; or publish into a namespace **their Grafana already watches** — see the caveat below |
 
-A namespace admin running `make deploy-wva` without rights to the monitoring
-namespace gets a message saying so — the install continues, and only the
-dashboard step is skipped. Nothing about the scaling manager's scaling depends on it.
+Without rights to the monitoring namespace, `make deploy-wva` says so, skips the
+dashboard step and carries on. Scaling does not depend on the dashboard.
 
 #### If you cannot write to the monitoring namespace
 
-`DASHBOARD_NS=<your-namespace>` publishes a private copy into your own namespace,
-which needs no cluster rights at all. **Whether it renders depends on the Grafana**,
-so the installer checks and tells you:
+`DASHBOARD_NS=<your-namespace>` publishes a private copy into your own
+namespace, with no cluster rights. **Whether it renders depends on the
+Grafana**, and the installer checks:
 
-- **A Grafana this installer deployed watches every namespace.** The bundled chart
-  (grafana 12.10.4 via kube-prometheus-stack) sets the dashboard sidecar's
-  `searchNamespace` to `ALL`, verified on a live install. So `DASHBOARD_NS` simply
-  works, and the install says so.
-- **A Grafana you already had may watch only its own namespace.** That is the
-  sidecar's other common configuration, and there is no error when it applies: the
-  ConfigMap is created, is correctly labelled, and is silently never read. The
-  install detects this and warns rather than reporting success.
+- **A Grafana this installer deployed watches every namespace.** The bundled
+  chart (grafana 12.10.4 via kube-prometheus-stack) sets the sidecar's
+  `searchNamespace` to `ALL`, so `DASHBOARD_NS` works.
+- **A Grafana you already had may watch only its own namespace.** Then the
+  ConfigMap is created and labelled but never read, with no error. The install
+  detects this and warns.
 
 Ways out, cheapest first:
 
 1. **Import the JSON by hand.** `deploy/grafana/operational-dashboard.json` is an
    ordinary Grafana dashboard. Anyone with Grafana editor rights can import it
-   through the UI — *Dashboards → New → Import* — with **no Kubernetes permission
-   at all**. This is the fastest self-service route and the right answer for most
-   namespace admins.
-2. **Use the shared dashboard, scoped to you.** If an admin has already published
-   it, you need nothing: open the link the install prints,
-   `…/d/wva-operational/wva-operational-dashboard?var-namespace=<your-namespace>`.
-3. **Ask for the sidecar to watch all namespaces** — only needed for a
-   pre-existing Grafana that does not already. One change,
-   `grafana.sidecar.dashboards.searchNamespace=ALL` or an explicit list, after which
-   `DASHBOARD_NS=<your-namespace>` works for every tenant, self-service.
-4. **Run your own Grafana in your namespace**, then publish to it with
-   `DASHBOARD_NS=<your-namespace>`. Fully self-service and needs no admin, at the
-   cost of operating another Grafana.
+   (*Dashboards → New → Import*), with **no Kubernetes permission**. This is the
+   right answer for most namespace admins.
+2. **Use the shared dashboard, scoped to you.** If an admin published it, open
+   the link the install prints:
+   `…/d/wva-op-dash-v2/wva-operational-dashboard?var-namespace=<your-namespace>`.
+3. **Ask for the sidecar to watch all namespaces.** One change,
+   `grafana.sidecar.dashboards.searchNamespace=ALL` or an explicit list. Then
+   `DASHBOARD_NS=<your-namespace>` works for every tenant.
+4. **Run your own Grafana in your namespace** and publish to it with
+   `DASHBOARD_NS=<your-namespace>`. No admin needed, but one more Grafana to run.
 
-On OpenShift, note that user-workload monitoring ships **no Grafana** — so options
-1 and 4 are the practical ones there unless your cluster runs its own.
+OpenShift user-workload monitoring ships **no Grafana**, so options 1 and 4 are
+the practical ones there unless your cluster runs its own.
 
 #### One dashboard, many installs
 
-The ConfigMap has a **fixed name in whatever namespace you publish it to**, so
-every install on a cluster writes the same object. That is deliberate — the
-dashboard is generic and driven by variables, and one copy per tenant would fill
-the picker with identical dashboards — but it has consequences worth knowing.
+The ConfigMap has a **fixed name**, so every install on a cluster writes the
+same object. This is deliberate: the dashboard is generic and variable-driven,
+and one copy per tenant would fill the picker with identical entries.
 
-**The first row is the admin's view.** *Installs present* counts llm-scaling-manager Deployments
-from kube-state-metrics; *Controllers reporting metrics* counts the ones whose
-metrics actually arrive. A gap between them is an install nobody is scraping,
-and it is the difference that matters: a controller that is not scraped looks
-exactly like a controller that is not scaling. *Scrape targets DOWN* names how
-many, and the **Controller** variable says which.
+**The first row is the admin's view.** *Installs present* counts
+llm-scaling-manager Deployments from kube-state-metrics; *Controllers reporting
+metrics* counts those whose metrics arrive. A gap is an install nobody scrapes,
+which looks exactly like a controller that is not scaling. *Scrape targets DOWN*
+says how many, and the **Controller** variable says which.
 
-**Your namespace's view is a link, not a default.** A Grafana variable's default
-lives inside the dashboard JSON, and this object is shared by every install on
-the cluster — so there is no per-tenant default to set: pinning it would mean
-everyone sees whichever tenant installed last. Each namespace gets its own entry
-point into the one dashboard instead, which the install prints:
+**Your namespace's view is a link, not a default.** The object is shared, so a
+pinned default would show whichever tenant installed last. The install prints
+your own entry point instead:
 
 ```text
-<your-grafana>/d/wva-operational/wva-operational-dashboard?var-namespace=<your-namespace>
+<your-grafana>/d/wva-op-dash-v2/wva-operational-dashboard?var-namespace=<your-namespace>
 ```
 
-Drop the query string for the cluster-wide view. If you would rather have your
-own dashboard object — pinned, private, nobody else writing it — publish a copy
-into your own namespace:
+Drop the query string for the cluster-wide view. For your own pinned, private
+copy, publish into your own namespace:
 
 ```bash
 DASHBOARD_NS=<your-namespace> make deploy-wva   # pinned to that namespace
 ```
 
-This renders whenever the Grafana's sidecar watches that namespace, which is the
-case for one this installer deployed (`searchNamespace: ALL`). The install verifies
-it and warns if not, in which case import the JSON by hand instead.
+It renders when the Grafana's sidecar watches that namespace (true for one this
+installer deployed). The install warns if not; then import the JSON by hand.
 
-Note the trade-off: the shared object is the default on purpose. One generic,
-variable-driven dashboard serves every install, whereas a copy per tenant fills the
-picker with near-identical entries.
+**Namespace label:** `wva_*` metrics carry `exported_namespace` (the
+*workload's* namespace) and `namespace` (the *controller's*). They are equal for
+a namespace-scoped install. For a cluster-scoped one, grouping by `namespace`
+collapses every workload onto the controller's namespace, so the dashboard
+defaults to `exported_namespace`. The benchmark dashboard defaults to
+`namespace`, because vLLM metrics carry only that.
 
-**Namespace label:** `wva_*` metrics carry both `namespace` and
-`exported_namespace`. `exported_namespace` is the *workload's* namespace and
-`namespace` is the *controller's* — the same for a namespace-scoped install,
-different for a cluster-scoped one, where grouping by `namespace` would collapse
-every workload onto the controller's namespace. The dashboard defaults to
-`exported_namespace` for that reason; the benchmark dashboard defaults to
-`namespace`, because vLLM metrics carry only that one.
-
-**Versions.** The ConfigMap records the scaling manager version that published it, and an
-older install will not overwrite a newer dashboard — it says so and leaves it.
-Panels for metrics a given version does not emit stay empty for that install:
-on a cluster running several versions, an empty panel may mean "older
-controller", not "nothing happening". Force a republish with:
+**Versions.** The ConfigMap records the version that published it, and an older
+install will not overwrite a newer dashboard; it says so. On a cluster running
+several versions, an empty panel may mean "older controller", not "nothing
+happening". Force a republish with:
 
 ```bash
 kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>
 ```
 
-**Who can see what is the datasource's decision, not the scaling manager's.** On OpenShift,
-`thanos-querier:9091` is cluster-monitoring-view — anything querying through it
-reads every namespace, whatever scope the scaling manager was installed with. For a tenant
-Grafana that must only see its own namespace, point the datasource at
-`thanos-querier:9092`, which enforces per-namespace RBAC.
-
-That is also what makes the shared dashboard safe rather than merely tidy: with
-a per-namespace datasource the **Namespace** variable only lists namespaces the
-viewer may read, so "All" already means "all of mine". Pinning a default never
-provided isolation — it only hid names from the dropdown while every query still
-ran with the datasource's own permissions.
+**The datasource decides who sees what**, not the scaling manager. On OpenShift,
+`thanos-querier:9091` is cluster-monitoring-view and reads every namespace. For a
+tenant Grafana that must see only its own namespace, use `thanos-querier:9092`,
+which enforces per-namespace RBAC. With that datasource the **Namespace**
+variable lists only namespaces the viewer may read, so "All" means "all of
+mine". A pinned default would never have isolated anything: queries run with
+the datasource's permissions.
 
 ### How the dashboard is organised
 
@@ -174,32 +152,28 @@ The panels sit in three rows, and the row says what a panel is scoped to:
 | **Selected namespace: `$namespace`** | the **Namespace** variable | What did the scaling manager do here? Replicas, capacity, saturation, scaling decisions, limiters, wake-from-zero. |
 | **Serving** (collapsed) | the **Namespace** variable | What the workload experienced: TTFT, inter-token latency, router and per-replica queues, KV utilization. Mostly from the EPP, so it reads the same for vLLM and SGLang. |
 
-The split exists because the two audiences differ. A panel in the fleet row does
-not change when you pick a namespace, and one in either lower row does — before
-the rows, that was invisible, and a "Models blocked from scaling" stat counting
-the whole cluster sat beside a chart of the same thing counting one namespace.
-`make dashboards-check` fails if a panel's query disagrees with the row it sits
-under.
+A fleet-row panel does not change when you pick a namespace; a panel in either
+lower row does. `make dashboards-check` fails if a panel's query disagrees with
+its row.
 
 ### When the dashboard shows nothing
 
-- **No Grafana at all** — `services "kube-prometheus-stack-grafana" not found`
-  means the install ran with `DEPLOY_OPERATIONAL_DASHBOARD=false`, or against a
-  cluster whose Grafana it did not deploy. Point the port-forward at your own.
-- **Panels render but say No Data** — hover the panel's `i` icon first; several
-  say which metric is missing and why. Then test the Prometheus datasource under
-  *Connections / Data sources*.
-- **The dashboard is not in the picker** — it lives in the `wva-operation-dashboard`
-  ConfigMap. If that object exists in a namespace your Grafana's sidecar does not
-  watch, nothing reads it: see [If you cannot write to the monitoring
+- **No Grafana at all** (`services "kube-prometheus-stack-grafana" not found`):
+  the install ran with `DEPLOY_OPERATIONAL_DASHBOARD=false`, or the cluster's
+  Grafana is not one it deployed. Point the port-forward at your own.
+- **Panels say No Data:** hover the panel's `i` icon first; several name the
+  missing metric. Then test the Prometheus datasource under *Connections / Data
+  sources*.
+- **The dashboard is not in the picker:** it lives in the
+  `wva-operation-dashboard` ConfigMap. In a namespace your Grafana's sidecar
+  does not watch, nothing reads it; see [If you cannot write to the monitoring
   namespace](#if-you-cannot-write-to-the-monitoring-namespace).
-- **Every variant shows the controller's namespace** — toggle the
-  `$namespace_label` variable at the top of the dashboard between
-  `exported_namespace` (the default, correct when Prometheus scrapes with
-  `honorLabels: false`) and `namespace`.
-- **You want an editable copy** — the shipped dashboard is read-only. Import
-  `deploy/grafana/operational-dashboard.json` under a name of your own, or
-  publish a private copy with `DASHBOARD_NS=<your-namespace>`.
+- **Every variant shows the controller's namespace:** switch the
+  `$namespace_label` variable between `exported_namespace` (the default, right
+  when Prometheus scrapes with `honorLabels: false`) and `namespace`.
+- **You want an editable copy:** the shipped dashboard is read-only. Import
+  `deploy/grafana/operational-dashboard.json` under your own name, or publish a
+  private copy with `DASHBOARD_NS=<your-namespace>`.
 
 ### The metrics that answer specific questions
 
@@ -222,8 +196,7 @@ many pods* are in that state — not a 0/1 flag. Compare the series:
 wva_metrics_freshness_status{status!="fresh"} > 0
 ```
 
-**Why is nothing scaling up?** — the silent-stall causes, each of which looks
-like "the scaling manager is fine" everywhere else:
+**Why is nothing scaling up?** These stalls look healthy everywhere else:
 
 | metric | meaning |
 | --- | --- |
@@ -233,30 +206,28 @@ like "the scaling manager is fine" everywhere else:
 | `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |
 | `wva_unattributed_gpus` | GPUs in use that could not be charged to a pool — usually a workload whose accelerator did not resolve |
 
-**Is the decision itself sane?** — `wva_desired_replicas` vs `wva_current_replicas`,
-with `wva_saturation_utilization` and `wva_analyzer_demand` / `wva_analyzer_target`
-showing what drove it. A desired that never becomes current is an actuation
-problem (KEDA, the HPA, or the workload), not a decision problem. A desired
-that looks too low is worth checking against `wva_analyzer_observed_replicas`:
-how many of the variant's replicas reported metrics in the analyzer's last
-cycle, not capped at the scale target. Compare it with the target's **ready**
-replicas, not with `wva_current_replicas`, which also counts pods still
-starting and legitimately absent during every scale-up. Below ready means a
-Pod's metrics were missing from the cycle (a scrape gap, and the low desired is
-correct for what was seen); above it means something the scale target does not
-own is serving the model.
+**Is the decision itself sane?** Compare `wva_desired_replicas` with
+`wva_current_replicas`; `wva_saturation_utilization`, `wva_analyzer_demand` and
+`wva_analyzer_target` show what drove it.
 
-**Tenant: query Prometheus.** The simplest way to read these for your own
-namespace is the cluster's Prometheus (or Thanos on OpenShift), filtered by
-`exported_namespace="<your-namespace>"`. On OpenShift, the tenant port of
-`thanos-querier` (9092) enforces per-namespace access.
+- A desired count that never becomes current is an actuation problem (KEDA, the
+  HPA or the workload), not a decision problem.
+- A desired count that looks too low: check `wva_analyzer_observed_replicas`,
+  the replicas that reported metrics in the last cycle (not capped at the scale
+  target). Compare it with the target's **ready** replicas, not
+  `wva_current_replicas`, which also counts pods still starting. Below ready
+  means a scrape gap, and the low number is right for what was seen. Above ready
+  means something the scale target does not own serves the model.
 
-**Tenant whose controller runs elsewhere.** In the out-of-reach shape the admin
-installs your controller in `wva-<your-namespace>`, which you cannot read. Its
-series carry `namespace="wva-<your-namespace>"` (the scrape target's namespace)
-with yours only in `exported_namespace`, and the OpenShift tenancy port filters
-on `namespace`, so through port 9092 you see none of them. What you can read
-yourself, in your own namespace:
+**Tenant: query Prometheus.** Use the cluster's Prometheus (or Thanos on
+OpenShift), filtered by `exported_namespace="<your-namespace>"`. On OpenShift,
+`thanos-querier` port 9092 enforces per-namespace access.
+
+**Tenant whose controller runs elsewhere.** In the out-of-reach shape your
+controller runs in `wva-<your-namespace>`, which you cannot read. Its series
+carry `namespace="wva-<your-namespace>"`, with yours only in
+`exported_namespace`. The OpenShift tenancy port filters on `namespace`, so
+through port 9092 you see none of them. What you can read in your own namespace:
 
 ```bash
 kubectl get events -n <your-namespace> --field-selector involvedObject.kind=ScaledObject
@@ -268,11 +239,11 @@ For anything more, ask the admin for read access to `wva-<your-namespace>`
 (pods and `pods/log`, for the controller log), or for a Prometheus or Grafana
 datasource that can query the controller's series by `exported_namespace`.
 
-**Straight off the controller.** The endpoint is HTTPS and authenticated: a
-plain `curl` gets `401 Unauthorized`. It needs a bearer token for an identity
-allowed `get` on the non-resource URL `/metrics`, which only a ClusterRole and
-ClusterRoleBinding can grant (cluster admin). The install's `epp-metrics`
-token is allowed it once the admin's setup step has created that binding:
+**Straight off the controller.** The endpoint is HTTPS and authenticated; a
+plain `curl` gets `401 Unauthorized`. It needs a bearer token allowed `get` on
+the non-resource URL `/metrics`, which only a ClusterRole and binding can grant
+(cluster admin). The install's `epp-metrics` token has it once the admin's setup
+step has created that binding:
 
 ```bash
 TOKEN=$(kubectl get secret wva-epp-metrics-token -n "$NS" -o jsonpath='{.data.token}' | base64 -d)
@@ -283,7 +254,7 @@ kill %1
 
 Without the token, or before the admin's binding exists, it answers `401` and the grep prints nothing.
 
-**What would the utilization-share optimizer do, and is it doing it?** — only
+**What would the utilization-share optimizer do, and is it doing it?** Only
 when an [`optimizer:` block](scaling-policy.md#optimizer-cluster-default-only-live)
 is set. Full list, with labels:
 [utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
@@ -300,80 +271,80 @@ is set. Full list, with labels:
 | `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing. Every outcome is published at `0` while a group acts, so `increase()` counts the first one too |
 | `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
 
-Alerts worth having once it is configured (adjust the `for:` to a few of your
-release times; `wva_utilization_share_effective_seconds{param="release-timeout"}`
-is one):
+Alerts worth having once it is configured. Set each `for:` to a few release
+times (`wva_utilization_share_effective_seconds{param="release-timeout"}` is one):
 
 ```promql
-# The optimizer block is broken: today's optimizer is running instead. This
-# includes a block whose limiters: list was removed (no budget to share).
+# The optimizer block is broken; today's optimizer runs instead.
 wva_utilization_share_mode{mode="invalid"} == 1
 
-# You configured it, but the controller reports it off: no optimizer: block
-# (it was edited out by mistake) or an empty type.
+# You configured it, but the controller reports it off.
 wva_utilization_share_mode{mode="off"} == 1
 
-# Transfers are not landing: donors that do not release, receivers that do not
-# fill, or donors losing a pod other than the marked one (wrong-pod is detected
-# only for transfers planned with node information). The threshold (3) is an
-# example; check the donors' scale-down windows and pods, and the blocked reasons.
-# Each outcome's series exists at 0 from the group's first acting cycle, so the
-# first transfer of an outcome is counted by increase(). After a restart the new
-# controller creates them at 0 and counts its first cycle's outcomes on the
-# next. A release that timed out while no controller ran is not counted: its
-# mark is removed, and the log line "removed a transfer mark older than the
-# release timeout" names the pod.
+# Transfers are not landing (the threshold 3 is an example).
 sum by (accelerator_type, scope) (
   increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
 ) > 3
 
-# Releases are running close to their bound: the p90 release time over the last
-# hour exceeds 80% of the release timeout in force.
+# The p90 release time over the last hour exceeds 80% of the release timeout.
 histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
   rate(wva_utilization_share_release_seconds_bucket[1h])))
 > on (accelerator_type, scope)
 0.8 * max by (accelerator_type, scope) (
   wva_utilization_share_effective_seconds{param="release-timeout"})
 
-# A model held back by a condition that holds until someone changes something
-# (alert with for: of a few release timeouts). marks-unreadable freezes every
-# model of the group until the controller can read its transfer marks again.
+# A model held back until someone changes something.
 wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
 
-# A role stuck short while the optimizer acts: holding less than three quarters
-# of its need (headroom below -0.25). Alert with for: of about one reversal
-# hold, wva_utilization_share_effective_seconds{param="reversal-hold"} (about
-# 12 minutes with a 300 s scale-down window): a transfer should have reached it
-# by then. Read the model's wva_model_scaling_blocked reason: reversal-hold
-# for the whole hold means no other role was lightly loaded enough to give at once, often a
-# model whose burst just ended. On a short quota (spare_gpus below 0) it fires
-# by design: rebalancing cannot cover every need.
+# A role stuck below three quarters of its need while the optimizer acts.
 wva_utilization_share_headroom < -0.25
   and on() (wva_utilization_share_mode{mode="active"} == 1)
 
-# Reasons that expire by themselves and come back: release-taken and
-# release-shape-mismatch last one release timeout after a fill timed out, and
-# donor-not-steerable lasts only its back-off (quiet-period lasts one fill
-# timeout after a restart and is expected; do not alert on it). A long for: may
-# never fire on them; alert on how long in a window they were present instead.
-# The series exists only while its reason does, so count it at a fixed 1m
-# step (a subquery), which does not depend on the scrape interval: more than
-# 60 minutes in 6h.
+# Self-expiring reasons present more than 60 minutes in 6h.
 sum by (exported_namespace, model_name, reason) (
   count_over_time(wva_model_scaling_blocked{reason=~"release-taken|release-shape-mismatch|donor-not-steerable"}[6h:1m])
 ) > 60
 ```
 
-Do not alert on `wva_utilization_share_in_flight{state="releasing"} > 0` with a
-long `for:`: one release cannot outlive its release timeout (it is aborted
-then), and a busy group keeps the series above zero with transfers that each
-land on time.
+Notes on these alerts:
+
+- **`mode="invalid"`** includes a block whose `limiters:` list was removed (no
+  budget to share). **`mode="off"`** means no `optimizer:` block (edited out by
+  mistake) or an empty type.
+- **Transfers not landing:** donors that do not release, receivers that do not
+  fill, or donors losing a pod other than the marked one (`wrong-pod` is detected
+  only for transfers planned with node information). Check the donors'
+  scale-down windows and pods, and the blocked reasons. Each outcome's series
+  exists at 0 from the group's first acting cycle, so `increase()` counts the
+  first transfer of an outcome. After a restart the new controller creates them
+  at 0 and counts its first cycle's outcomes on the next. A release that timed
+  out while no controller ran is not counted; its mark is removed, and the log
+  line "removed a transfer mark older than the release timeout" names the pod.
+- **Held back:** alert with a `for:` of a few release timeouts.
+  `marks-unreadable` freezes every model of the group until the controller can
+  read its transfer marks again.
+- **Stuck short:** alert with a `for:` of about one reversal hold,
+  `wva_utilization_share_effective_seconds{param="reversal-hold"}` (about 12
+  minutes with a 300 s scale-down window); a transfer should have reached it by
+  then. If the model's `wva_model_scaling_blocked` reason is `reversal-hold` for
+  the whole hold, no other role was lightly loaded enough to give at once, often
+  a model whose burst just ended. On a short quota (`spare_gpus` below 0) it
+  fires by design.
+- **Self-expiring reasons:** `release-taken` and `release-shape-mismatch` last
+  one release timeout after a fill timed out; `donor-not-steerable` lasts only
+  its back-off. A long `for:` may never fire on them, so the query counts
+  presence at a fixed 1m step (a subquery), independent of the scrape interval.
+  `quiet-period` lasts one fill timeout after a restart and is expected; do not
+  alert on it.
+- **Do not alert on `wva_utilization_share_in_flight{state="releasing"} > 0`**
+  with a long `for:`. A release is aborted at its timeout, and a busy group keeps
+  the series above zero with transfers that each land on time.
 
 #### Events on the models' scale targets
 
-While it acts, the optimizer records each transfer as Kubernetes Events on the
-Deployment or LeaderWorkerSet it moves, so a model's owner can read why it shrank
-or grew without the controller's log:
+While it acts, the optimizer records each transfer as Events on the Deployment
+or LeaderWorkerSet it moves. A model's owner can read why it shrank or grew
+without the controller's log:
 
 ```bash
 kubectl describe deployment <name> -n <namespace>     # or: leaderworkerset <name>
@@ -392,21 +363,19 @@ kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
 | `UtilizationShareFillTimedOut` | Warning | receiver | its new replica did not take the released GPUs within the fill timeout; it keeps its target |
 | `UtilizationShareDonorNotSteerable` | Warning | donor | it was asked to give, but the pod that would go could not be chosen; the Event carries the cause (a pod not Ready or not yet scheduled, a rollout, a sibling's deletion cost leaving no room, the patch failing) and the time before which it is not asked again. Not recorded for a donor that has simply given every pod it has to transfers still in flight |
 
-Events expire: the API server keeps them for an hour by default (its
-`--event-ttl`), so they explain what happened recently, not a model's history.
-For history, use the counters above and the controller log.
+Events expire after an hour by default (the API server's `--event-ttl`). For
+history, use the counters above and the controller log.
 
 An Event names the other model only when it is in the same namespace; otherwise
-it says "a model in another namespace of its quota group", so one tenant's Events
-never name another tenant's models. A P/D model is named with its role, for
-example `model llama (decode)`; an aggregated model by its name alone.
+it says "a model in another namespace of its quota group", so tenants never see
+each other's model names. A P/D model is named with its role, for example
+`model llama (decode)`.
 
 ### Events
 
-The controller records Kubernetes Events for a model on its **ScaledObject**
-(the scaling manager has no object of its own), utilization-share transfers on
-the **scale target** (Deployment or LeaderWorkerSet), and one config warning on
-the **ConfigMap**. Read them per namespace:
+The controller records Events in three places: per model on its
+**ScaledObject**, utilization-share transfers on the **scale target**
+(Deployment or LeaderWorkerSet), and one config warning on the **ConfigMap**:
 
 ```bash
 kubectl get events -n <model-namespace> --field-selector involvedObject.kind=ScaledObject
@@ -439,7 +408,7 @@ which can join a `ScaledUp`. The API server keeps Events for about an hour
 
 ### The logs
 
-Useful when a metric tells you *which* model is wrong and you want to know *why*.
+Use the logs when a metric tells you *which* model is wrong and you want *why*.
 
 | grep for | tells you | level |
 | --- | --- | --- |
@@ -464,20 +433,18 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 
-The controller runs at `-v=2` by default, so `Collected replica metrics` prints
-nothing and grepping for it proves nothing either way. Use
-`wva_metrics_pods_discovered` and `wva_metrics_freshness_status` for that question
-instead — they are always on. If you do want the line, raise verbosity on the
-container and put it back afterwards:
+The controller runs at `-v=2` by default, so `-v=4` lines such as `Collected
+replica metrics` do not print. For "are metrics arriving", use
+`wva_metrics_pods_discovered` and `wva_metrics_freshness_status`, which are
+always on. To see the line anyway, raise verbosity:
 
 ```bash
 kubectl patch deployment -n "$NS" wva-controller-manager --type=json \
   -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--v=4"}]'
 ```
 
-Put it back when done. The patch above made a new rollout, so undoing it
-returns the template from before it (and drops any other change made to the
-Deployment after the patch):
+Put it back when done. Undoing the rollout restores the template from before
+the patch (and drops any later change to the Deployment):
 
 ```bash
 kubectl rollout undo deployment/wva-controller-manager -n "$NS"
@@ -489,6 +456,5 @@ kubectl get deployment wva-controller-manager -n "$NS" \
 kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler -f
 ```
 
-The scaling manager writes no custom resource, so its decisions are visible only in these logs, in
-the metrics it publishes ([Prometheus metrics](prometheus.md)),
-and in the HPA state KEDA derives from them.
+With no custom resource, decisions are visible only in these logs, in the
+[metrics](prometheus.md), and in the HPA state KEDA derives from them.

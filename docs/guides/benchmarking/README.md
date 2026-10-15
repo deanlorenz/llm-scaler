@@ -2,59 +2,38 @@
 
 ## Overview
 
-Stands up an llm-d stack with the scaling manager on a GPU cluster, drives load through it with
-[llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark), and reports latency,
-replica counts and cost per run.
+This stands up an llm-d stack with the scaling manager on a GPU cluster, drives
+load through it with [llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark),
+and reports latency, replica counts and cost per run. Use it to compare scaling
+behaviour across configurations: thresholds, limiters, one variant against two.
 
-Use it to compare scaling behaviour across configurations — thresholds, limiters,
-one variant against two. It needs real GPUs; for correctness work without them,
-see [Test the scaling manager against a full llm-d stack](../testing-with-llm-d/).
+No GPUs? See [Test the scaling manager against a full llm-d
+stack](../testing-with-llm-d/). Already installed and just want to see it scale?
+`make benchmark-smoke NAMESPACE=<ns>` sends five minutes of load and snapshots
+the dashboard, with no standup.
 
 ## Prerequisites
 
-A GPU cluster, the namespace and image to measure, and the benchmark CLI:
+- [ ] A GPU cluster.
+- [ ] A **ReadWriteMany** StorageClass for the model cache
+  ([why](#the-model-cache-must-be-readwritemany)).
+- [ ] An `IMG` built from this branch. Released images reject a flag these
+  manifests pass ([why](#img-decides-what-is-measured)).
+- [ ] Running Fast Model Actuation in the namespace? Read
+  [FMA namespaces](#fma-namespaces) first.
 
-<!-- guide:env.static.target start -->
+<!-- guide:prerequisites start -->
 ```bash
+# The namespace to benchmark in, and the controller image to measure.
 export BENCHMARK_NAMESPACE=<namespace>
 export IMG=<your build>
-```
-<!-- guide:env.static.target end -->
 
-<!-- guide:prerequisites.cli start -->
-```bash
+# Install the llm-d-benchmark CLI.
 make benchmark-install
 ```
-<!-- guide:prerequisites.cli end -->
-
-### If the namespace runs Fast Model Actuation
-
-Benchmarking an FMA namespace works, and standup warns you about the one trap
-that matters: this stack renders a PodMonitor named `vllm-<model>`, the same name
-the FMA guide uses, so a scenario without `fma.enabled` **overwrites the
-FMA-aware one and the launchers stop being scraped, silently**. Most of the
-traffic then goes unmeasured — which is how a variant once sat flat at one
-replica through a 155-deep queue.
-
-Two things follow for the numbers you get:
-
-- `BENCHMARK_KEDA_MAX_REPLICAS` is a starting value, not the ceiling. Discovery
-  caps an FMA variant at the **launcher pods present**, because only one instance
-  per launcher is reachable today. Raising the variable past that buys nothing —
-  the extra requester pods sit `Pending` and, counting toward anticipated supply,
-  suppress the scale-up they were meant to provide.
-- The launcher pool does not grow with the benchmark. It is a declared count per
-  matching node, so load does not expand it.
-
-Both are explained in [the FMA post-mortem](../../proposals/fma-post-mortem.md).
+<!-- guide:prerequisites end -->
 
 ## Installation Instructions
-
-Already have the scaling manager installed and just want to see it scale? `make benchmark-smoke
-NAMESPACE=<ns>` drives symmetric 1024/1024 load at 15 req/s for five minutes
-and snapshots the
-dashboard, with no standup and no scenario. Everything below is for runs whose
-numbers you intend to compare.
 
 ### 1. Stand up the stack
 
@@ -64,64 +43,28 @@ make benchmark-standup BENCHMARK_NAMESPACE=${BENCHMARK_NAMESPACE} IMG=${IMG}
 ```
 <!-- guide:deploy.standup end -->
 
-Stands up the model servers via llm-d-benchmark, then installs the scaling manager from this
-repo and registers the workloads.
-
-**The model cache has to be ReadWriteMany.** The two the scaling manager scenarios in this repo
-ask for it explicitly; `guides/epp-keda-saturation` — which
-`BENCHMARK_DIRECT_KEDA=true` selects — comes from llm-d-benchmark and does not,
-so on that path check the `Model cache:` line the standup prints. It matters more here than anywhere else: an RWO cache stands the
-stack up perfectly — one replica, one node, everything green — and then the
-first scale-up leaves the new pod Pending on a volume it cannot attach, so the
-run measures an autoscaler that appears not to work. A cluster's *default*
-StorageClass is often RWO block storage (kind's `standard` is), so this is the
-common case, not the exotic one. The standup prints what the cluster actually
-bound and warns if it is not shareable:
+It deploys the model servers through llm-d-benchmark, installs the scaling
+manager from this repo, and registers the workloads. Check the `Model cache:`
+line it prints:
 
 ```text
 Model cache:
   <claim>  <size>  [ReadWriteMany]  Bound  class=<your-rwx-class>
 ```
 
-Re-running in the **same namespace** reuses that claim and its contents, which
-is the fast path: the weights are fetched once and every later run and replica
-reads them locally. A fresh namespace means a fresh claim and a full download —
-tens of GB for a 32B — so keep the namespace when you intend to compare runs.
+Keep the namespace between runs you want to compare: a re-run there reuses the
+cached weights, and a fresh namespace downloads them again.
 
-**The standup also patches those model servers to drain on scale-down, which
-restarts them, and waits for the rollout.** A replica removed mid-stream takes its open
-responses with it, and each scale-down produces a burst of client-side stream
-failures beginning when the replica goes and ending roughly a generation later.
-Those failures land in the same TTFT percentiles and error counts the run exists
-to measure, so a comparison between two scaling policies would partly be
-measuring which one removed more pods.
-Patching is safe here because the standup deployed these workloads itself; it is
-pinned to `BENCHMARK_NAMESPACE` and reaches nothing else on the cluster.
-`BENCHMARK_DRAIN_ROLLOUT_TIMEOUT` (default 900s) bounds the wait.
-`make benchmark-add-variant` does the same for the variant it adds.
+The standup also:
 
-**It also moves the timeline you are measuring, so say so in the writeup.** The
-hook is a `sleep 45` under a 120s grace period, which means a replica now lingers
-for the drain window after KEDA decides to remove it. Scale-down latency and the
-replica-count timeline both shift by roughly that much, so a run taken before
-this change and one taken after are not directly comparable — compare runs on
-the same side of it.
-
-One cosmetic consequence: `benchmark-deploy-wva` writes the ScaledObject plan
-*before* the patch is applied, so the plan you see reports
-`vllm declares no preStop hook` for workloads that have one thirty seconds
-later.
-
-prometheus-adapter is deliberately not installed: it and KEDA both claim the `external.metrics.k8s.io` APIService, of
-which a cluster has one.
-
-To keep llm-d-benchmark from installing it anyway, the standup creates the
-`prometheus-adapter-resource-reader` ClusterRole that its "is prometheus-adapter
-already here?" probe looks for. That object is cluster-scoped and unsuffixed, so
-on a shared cluster it may already belong to a **real** prometheus-adapter
-release: when it does, and that release lives in another namespace, the standup
-leaves it alone and says so rather than rewriting its Helm ownership — which
-would break that release's next `helm upgrade`.
+- **adds a drain hook** to the model servers (a `sleep 45` preStop under a 120 s
+  grace period) and waits for the restart. This shifts scale-down timing by about
+  the drain window, so only compare runs taken on the same side of this change.
+  `BENCHMARK_DRAIN_ROLLOUT_TIMEOUT` (default 900 s) bounds the wait.
+- **holds the engine image on every accelerator node** before deploying.
+  Check with `make prepull-status NAMESPACE=$BENCHMARK_NAMESPACE`.
+- **refuses to overwrite** an EPP or controller already in the namespace
+  ([standing up beside something](#standing-up-beside-something-that-already-exists)).
 
 ## Verification
 
@@ -139,71 +82,58 @@ make benchmark-report
 ```
 <!-- guide:verify.report end -->
 
-Restart the controller between runs — `make benchmark-restart-controller` —
-or learned per-replica capacity from the previous run carries into the next.
-The fleet-shape memo lives in the controller pod, so a run that ends on one
-request shape leaves the next run opening on what looks like a shape change,
-and its first minutes are measured through a hold. Changing the image digest
-restarts the controller as a side effect, which is why this only bites when two
-runs share a build.
+`make benchmark-report` renders a markdown table from the newest results. A run
+worth keeping has, per scenario:
 
-### Check the router spreads load before trusting a latency number
+- a non-zero request count and **0** errors;
+- a replica timeline that moves. A variant flat at one replica through a deep
+  queue means the scaling manager never saw the load.
+
+If queue depth and replicas disagree, see [After the
+install](../../reference/operations.md) before re-running.
+
+**Restart the controller between runs** with `make benchmark-restart-controller`.
+Otherwise learned capacity and the request-shape memo carry into the next run,
+and its first minutes look like a shape change. A new image digest restarts it
+anyway.
+
+### Check the router spreads load
 
 A fleet can scale correctly and still serve almost everything from one replica.
-The scorer that places a request on the least busy endpoint
-(`active-request-scorer`, or `queue-scorer` on a non-disaggregated profile) is
-weighted **below** `prefix-cache-scorer` in the EPP configs shipped here —
-`deploy/lib/epp-optimized-baseline.values.yaml` gives prefix-cache 3 against 2
-for both — and on a workload with no shared prefix the prefix scorer contributes
-no signal while still outranking the ones that do.
-
-Measured on this benchmark: nine decode replicas Ready, **one** serving, 766
-requests queued in the router, and the engine-side latency metric reporting
-0.04 s because the waiting happened where it cannot see. Raising the spreading
-scorer above the prefix scorer took it to nine of nine serving, engine queues to
-zero, and the phase-2 fleet from a median of nine replicas to three for the same
-load.
-
-Two checks, both cheap, both before the run matters:
+Check before you trust a latency number:
 
 ```bash
-# 1. Is the prefix scorer earning its weight? 0.000 means it is not.
-#    Both should be > 0 on a workload with shared prefixes.
+# Prefix-cache hit ratio. 0.000 means the prefix scorer is not earning its weight.
 curl -sG "$PROM/api/v1/query" --data-urlencode \
   'query=sum(rate(llm_d_epp_prefix_indexer_hit_ratio_sum[5m]))/sum(rate(llm_d_epp_prefix_indexer_hit_ratio_count[5m]))'
 
-# 2. Under load, how many replicas are actually serving?
-#    serving/ready well below 1 means the router is concentrating.
+# Running requests per replica. Many idle Ready replicas means the router is concentrating.
 curl -sG "$PROM/api/v1/query" --data-urlencode 'query=vllm:num_requests_running'
 ```
 
-If the hit ratio is zero and `serving/ready` is low, reweight the profile before
-reading any latency figure from the run — and prefer the harness's own
-`analysis/summary.txt`, whose TTFT is measured at the client and therefore
-includes the router wait that `vllm:time_to_first_token_seconds` omits. See
-"Judge the ramp on the client's TTFT" in
-[analyzer-evidence](../../developer-guide/analyzer-evidence.md).
+If the hit ratio is zero and few replicas serve, weight the spreading scorer
+above the prefix scorer before reading latency ([why](#router-weights)). Prefer
+the harness's `analysis/summary.txt`: its TTFT is measured at the client and
+includes the router wait that `vllm:time_to_first_token_seconds` misses.
 
-`make benchmark-report` renders a markdown table from the newest results in the
-workspace. A run worth keeping has, per scenario: a non-zero request count, an
-error count of **0**, and a replica timeline that moves — a variant flat at one
-replica through a deep queue means the scaling manager never saw the load, not that it decided
-not to scale. Check the queue-depth column against the replica column before
-trusting any latency number; if the two disagree, see
-[After the install](../../reference/operations.md) before re-running.
+### Snapshot the run
 
-## Next
+Prometheus ages the data out, so capture it while it is there:
 
-- [Two models, anti-phase bursts, warm pool on and off](two-model-warm-pool.md) —
-  the shared-pool comparison: one pool, two models whose bursts do not coincide,
-  measured with the pool and without it
-- [Two models, anti-phase bursts, under one quota](two-model-utilization-share.md) —
-  the same load under one quota smaller than both models' peak, with today's
-  optimizer, the utilization-share optimizer in shadow, and the same acting.
-  Run once on aggregated models: [what it measured](../../well-lit-paths/utilization-share/measured.md)
-- [FMA post-mortem](../../proposals/fma-post-mortem.md) — if the namespace runs FMA
-- [After the install](../../reference/operations.md) — what the metrics mean
-- [Configuration](../../reference/configuration.md) — every installer variable
+```bash
+# Run every benchmark-dashboard query over the window into panels.json
+hack/benchmark/snapshot.py \
+  --namespace ${BENCHMARK_NAMESPACE} \
+  --prometheus-url https://thanos-querier-openshift-monitoring.apps.<cluster>/ \
+  --token "$(oc whoami -t)" --insecure \
+  --since 30m --out <run-dir>/snapshot
+
+# Render one PNG per panel, offline, through the real dashboard (needs docker)
+hack/benchmark/snapshot-images/render.sh <run-dir>/snapshot
+```
+
+See [Snapshot details](#snapshot-details) for the operational dashboard and the
+namespace variable.
 
 ## Cleanup
 
@@ -213,16 +143,16 @@ make benchmark-teardown BENCHMARK_NAMESPACE=${BENCHMARK_NAMESPACE}
 ```
 <!-- guide:cleanup.teardown end -->
 
-Removes the scaling manager first, then the llm-d releases: a namespace-scoped install still
-creates cluster-scoped RBAC, which deleting the namespace would leave behind.
+It removes the scaling manager first, then the llm-d releases, so the
+cluster-scoped RBAC goes too.
 
 ## Configuration
 
-Optional, except `BENCHMARK_NAMESPACE`.
+Only `BENCHMARK_NAMESPACE` is required.
 
 | Parameter | Default | Example |
 | --- | --- | --- |
-| `BENCHMARK_NAMESPACE` | — (required) | `my-bench` |
+| `BENCHMARK_NAMESPACE` | none (required) | `my-bench` |
 | `IMG` | a build of this branch | `ghcr.io/you/wva:dev` |
 | `BENCHMARK_SPEC` | `guides/workload-autoscaling` | `guides/epp-keda-saturation` |
 | `BENCHMARK_HARNESS` | `guidellm` | `inference-perf` |
@@ -242,345 +172,252 @@ Optional, except `BENCHMARK_NAMESPACE`.
 | `PREPULL_NODE_SELECTOR` | *(empty: every node with a known GPU product label)* | `example.com/accelerator=h200` |
 | `PREPULL_TOLERATIONS` | *(empty: `nvidia.com/gpu` only)* | `dedicated,example.com/pool` |
 | `BENCHMARK_MODEL_HOSTPATH` | *(empty: the shared volume)* | `/mnt/local/wva-weights` |
+| `BENCHMARK_ENGINE_CACHE_HOSTPATH` | `BENCHMARK_MODEL_HOSTPATH` | `/mnt/local/wva-weights` |
+| `BENCHMARK_ENGINE_CACHE_SEED` | `auto` | `none` |
 
-**The harness image must match `BENCHMARK_REPO_REF`.** The harness pod always
-runs the checkout's scripts — they are copied in from a ConfigMap built from the
-tree — while the image comes from llm-d-benchmark's `defaults.yaml`, which pins
-`v0.7.0` regardless of ref. Mixing them fails at the first treatment, e.g.
-v0.7.8's scripts call `guidellm run` and the v0.7.0 image's guidellm only has
-`benchmark`: `Error: No such command 'run'`. `BENCHMARK_IMAGE_TAG` follows the
-ref for you; set it only to pin something else.
+Notes on the defaults:
+
+- **`BENCHMARK_IMAGE_TAG` follows `BENCHMARK_REPO_REF`.** The harness pod runs
+  the checkout's scripts, so the image must match the ref. Mixing them fails at
+  the first treatment, for example `Error: No such command 'run'`.
+- **`BENCHMARK_HARNESS_RUN_AS_USER=0`**, because the harness writes to
+  `/usr/local/bin` at startup. On OpenShift any other UID dies with
+  `cp: cannot create regular file ...: Permission denied`, and `anyuid` alone may
+  lose to a higher-priority SCC.
+- **The scale-up stabilization window (`0`) is the knob that matters.** HPA
+  takes its most conservative recommendation across the window; the periods are
+  only rate limits. Scale-down waits 300 s, because removing a replica too early
+  costs a cold start, and keeping one too long only costs money.
+- **The default model is small on purpose.** A 0.6B model exercises the same
+  scaling path as a 32B one, on one GPU per replica. Its latency says nothing
+  about a 32B model. Pass `MODEL_ID=Qwen/Qwen3-32B`, or `BENCHMARK_MODEL_ID=`
+  (empty) to use the scenario's own model.
+
+## Next
+
+- [Two models, anti-phase bursts, warm pool on and off](two-model-warm-pool.md)
+- [Two models, anti-phase bursts, under one quota](two-model-utilization-share.md):
+  today's optimizer, the utilization-share optimizer in shadow, and acting
+  ([what it measured](../../well-lit-paths/utilization-share/measured.md))
+- [FMA post-mortem](../../proposals/fma-post-mortem.md)
+- [After the install](../../reference/operations.md): what the metrics mean
+- [Configuration](../../reference/configuration.md): every installer variable
+
+## Details
+
+### The model cache must be ReadWriteMany
+
+The two scaling-manager scenarios in this repo ask for RWX. The
+`guides/epp-keda-saturation` scenario (`BENCHMARK_DIRECT_KEDA=true`) comes from
+llm-d-benchmark and does not, so check the `Model cache:` line there. An RWO
+cache stands up fine with one replica, then the first scale-up sits Pending on a
+volume it cannot attach. Many clusters' default StorageClass is RWO (kind's
+`standard` is). The standup warns when the bound claim is not shareable.
+
+### `IMG` decides what is measured
+
+Nothing in the results says which binary produced them. Released images reject
+`--external-scaler-bind-address`, which these manifests pass, so a run against
+one measures a CrashLoopBackOff. Set `IMG` to your own build whenever you change
+controller code.
+
+### Why the drain hook
+
+A replica removed mid-stream cuts its open responses. Each scale-down then adds
+client-side stream failures to the TTFT percentiles and error counts the run
+measures, so comparing two policies would partly measure which one removed more
+pods. The patch is safe here because the standup deployed these workloads; it is
+pinned to `BENCHMARK_NAMESPACE`. `make benchmark-add-variant` patches the
+variant it adds too. The ScaledObject plan is written before the patch, so it
+reports `vllm declares no preStop hook` for workloads that get one seconds later.
+
+### Router weights
+
+The scorer that sends a request to the least busy endpoint (`active-request-scorer`,
+or `queue-scorer` on a non-disaggregated profile) is weighted **below**
+`prefix-cache-scorer` in the EPP configs shipped here:
+`deploy/lib/epp-optimized-baseline.values.yaml` gives 3 against 2. With no shared
+prefixes, the prefix scorer adds no signal but still outranks the others.
+Measured on this benchmark: nine decode replicas Ready, **one** serving, 766
+requests queued in the router, and engine latency reading 0.04 s. Weighting the
+spreading scorer higher gave nine of nine serving and cut the phase-2 fleet from
+a median of nine replicas to three. See "Judge the ramp on the client's TTFT" in
+[analyzer-evidence](../../developer-guide/analyzer-evidence.md).
+
+### FMA namespaces
+
+This stack renders a PodMonitor named `vllm-<model>`, the same name the FMA guide
+uses. A scenario without `fma.enabled` **overwrites the FMA one, and the
+launchers silently stop being scraped**. Standup warns about it. Also:
+
+- `BENCHMARK_KEDA_MAX_REPLICAS` is a starting value, not the ceiling. An FMA
+  variant is capped at the launcher pods present. Raising it only adds Pending
+  requester pods, which suppress the scale-up they were meant to give.
+- The launcher pool does not grow with load. It is a fixed count per node.
+
+The placement check at the top of standup is described in [the FMA
+post-mortem](../../proposals/fma-post-mortem.md).
 
 ### Standing up beside something that already exists
 
-A standup renders a whole stack and applies it unconditionally. On a shared
-cluster that is a way to break someone else's running workload without either of
-you seeing an error: the pods keep running and answering while the scrape config,
-pool membership or image change underneath them. Three refusals now guard that,
-each because it happened.
+A standup applies a whole stack unconditionally. On a shared cluster that can
+break someone else's workload with no error. Three refusals guard it:
 
-- **An EPP already serving in the namespace.** The guide renders its own EPP
-  Deployment, Service, InferencePool and a PodMonitor named `vllm-<model>`, and
-  replaces whatever is there. Standup stops, lists the deployments it found, and
-  offers three ways on: use a clean namespace, benchmark what is already there
-  with `make benchmark-run` alone, or re-render deliberately with
-  `BENCHMARK_ALLOW_EPP_REUSE=true`.
-- **A controller already running.** The guard used to exclude our own
-  deployment name, so a standup silently re-applied over a running controller and
-  moved it to `$(IMG)` — including one somebody else was mid-experiment on.
-  Standup now prints the running image against the incoming one and points at
-  `BENCHMARK_WVA_DEPLOY=false`, which reuses the controller that is already
-  installed instead of redeploying it.
-- **The `prometheus-adapter-resource-reader` ClusterRole.** Cluster-scoped, so
-  taking it over affects every tenant: rewriting its Helm ownership metadata
-  makes the real release's next `helm upgrade` fail. Standup previously declined
-  only when it carried a release-namespace annotation; it now declines whenever
-  the object exists at all, and says so. The probe it exists to satisfy passes on
-  the existing object anyway.
+- **An EPP already serving in the namespace.** Standup stops and offers: a
+  clean namespace, `make benchmark-run` alone against what is there, or
+  `BENCHMARK_ALLOW_EPP_REUSE=true` to re-render deliberately.
+- **A controller already running.** Standup prints the running image against
+  the new one. `BENCHMARK_WVA_DEPLOY=false` reuses the installed controller.
+- **The `prometheus-adapter-resource-reader` ClusterRole.** The standup creates
+  it so llm-d-benchmark does not install prometheus-adapter, which would fight
+  KEDA for the `external.metrics.k8s.io` APIService. If the object already
+  exists, the standup leaves it alone and says so; rewriting its Helm ownership
+  would break the real release's next `helm upgrade`.
 
-The FMA placement check that runs at the top of standup is described in
-[the FMA post-mortem](../../proposals/fma-post-mortem.md) — placement, not GPU
-alignment, is what decides warm or cold.
+### Replica start time in the harness
 
-**`BENCHMARK_HARNESS_RUN_AS_USER` is 0 because the harness writes to
-`/usr/local/bin` at startup.** llm-d-benchmark stopped forcing that UID in
-v0.7.8, so on OpenShift the pod gets a namespace UID and dies with
-`cp: cannot create regular file ...: Permission denied`. Granting `anyuid` to
-its ServiceAccount may not be enough — a cluster SCC with a higher priority can
-still win and impose `MustRunAsRange`; asking for UID 0 is what makes that SCC
-unable to admit the pod.
+Every ramp is sized by how long a new replica takes to become Ready
+([why](../../reference/workload-preparation.md#the-rest-of-the-start-path)).
+llm-d-benchmark adds steps of its own, and a benchmark that keeps them measures
+the harness, not the autoscaler. The scenarios under
+`hack/benchmark/scenarios/guides/` fix three (package installs, the startup
+probe, engine caches); copy those blocks into a scenario of your own.
+`patch_harness.sh` fixes a fourth (the `libcuda` walk) for every scenario. Two
+more belong to the cluster: the image and, for large models, the weights.
 
-**Scaling knobs: the stabilization window is the one that matters.** HPA takes
-its most conservative recommendation across that window, so `scaleUp`
-stabilization is what delays a scale-up — the `periodSeconds` values are rate
-limits, and nothing reacts faster than the HPA control loop's sync period (15s
-by default). Scale-up therefore acts on the current recommendation (`0`), while
-scale-down waits 300s: removing a replica too eagerly costs a cold start on the
-next request, and keeping one too long only costs money.
+**The image on every node.** A replica on a node without the engine image pulls
+10-20 GB first. The standup holds the image the harness pins on every
+accelerator node before deploying (one sleeping DaemonSet per image, no
+accelerator requested). `BENCHMARK_PREPULL=false` skips it,
+`BENCHMARK_PREPULL_IMAGES` overrides it, and `PREPULL_TOLERATIONS` adds taints.
+`PREPULL_NODE_SELECTOR` picks the nodes: one or more `key=value` pairs,
+comma-separated, all of which a node must carry. It replaces the default (nodes
+with a known GPU product label), so include the product label to stay on GPU
+nodes. The scenarios pull the engine
+`IfNotPresent`. See [Holding the image on the
+nodes](../../reference/workload-preparation.md#holding-the-image-on-the-nodes).
 
-**The default model is small on purpose.** These runs measure the scaling manager's scaling
-behaviour, and a 0.6B model exercises the same path a 32B one does — discovery,
-the ScaledObject plan, the scale decision, the report — while pulling far less
-and holding one GPU per replica instead of several. Pass
-`MODEL_ID=Qwen/Qwen3-32B` when you want the scenario's own model, or
-`BENCHMARK_MODEL_ID=` (empty) to defer to whatever the scenario names.
-
-Latency and throughput numbers are model-specific, so a 0.6B run tells you
-nothing about a 32B model's TTFT. It tells you whether the scaling manager scaled correctly,
-which is what this suite is for.
-
-**`IMG` decides what is measured**, and nothing in the results afterwards says
-which binary produced them. The default is a build of this branch rather than a
-release: released images reject `--external-scaler-bind-address`, which these
-manifests pass, so a run against one measures a CrashLoopBackOff. Set `IMG` to
-your own build whenever you have changed controller code.
-
-## Replica start time in the harness
-
-Every ramp a benchmark records is sized by how long a new replica takes to
-become Ready ([why](../../reference/workload-preparation.md#the-rest-of-the-start-path)).
-llm-d-benchmark adds steps of its own to that path, and a benchmark that keeps
-them measures the harness, not the autoscaler. The scenarios under
-`hack/benchmark/scenarios/guides/` handle three of them (package installs,
-the startup probe, engine caches); a scenario of your own should copy the
-same three blocks. A fourth (the `libcuda` walk) is a harness default that
-`patch_harness.sh` changes, so every scenario gets it. Two more are the
-cluster's, not the harness's -- the image and, for large models, the
-weights on the node -- and the image comes first:
-
-**The image is on every accelerator node before the harness deploys it.** A
-replica scheduled to a node without the engine image pulls 10-20 GB before
-its container starts -- a minute or more on top of the start path above, and
-the one term of it that differs from node to node. `make benchmark-standup` holds the image
-the harness pins (`docker.io/vllm/vllm-openai:v0.26.0` in v0.7.8's
-`defaults.yaml`, read from the clone) on every accelerator node before it
-deploys anything -- `BENCHMARK_PREPULL=false` skips it,
-`BENCHMARK_PREPULL_IMAGES=<image>[,<image>]` overrides it,
-`PREPULL_NODE_SELECTOR` picks the nodes (one or more `key=value` pairs,
-comma-separated, all of which a node must carry; an explicit selector
-replaces the default, nodes carrying a known GPU product label, so include
-the product label among the pairs to stay on GPU nodes) and `PREPULL_TOLERATIONS` adds taints. The holders
-keep pulling while the standup goes on, so before the run:
+**The weights on every node's disk.** `BENCHMARK_MODEL_HOSTPATH=<dir>` turns on
+the harness's node-local mode: `model-pvc` binds to a hostPath volume, a
+DaemonSet downloads the model to every accelerator node (the placement
+`make prepull` uses; `PREPULL_NODE_SELECTOR` replaces it, `PREPULL_TOLERATIONS`
+included), and the engines deploy
+once every node holds it. For a 0.6B model this changes nothing measurable; it
+is for models where reading over the shared volume dominates start time.
 
 ```bash
-make prepull-status NAMESPACE=$BENCHMARK_NAMESPACE      # every accelerator node: present
+# One downloader per accelerator node, Ready when its download finished
+kubectl get pods -n $BENCHMARK_NAMESPACE -l component=model-download -o wide
 ```
 
-The mechanism (one DaemonSet per image, the image itself asleep, no
-accelerator requested) is
-[Holding the image on the nodes](../../reference/workload-preparation.md#holding-the-image-on-the-nodes);
-it applies to any workload the scaling manager scales, not only a benchmark. The scenarios
-pull the engine `IfNotPresent` for the same reason -- a pinned tag pulled
-`Always` still asks the registry at every start.
+What to know about node-local weights:
 
-**The weights can be on every accelerator node's disk before the run.**
-`BENCHMARK_MODEL_HOSTPATH=<directory on the node>` makes the standup turn on
-the harness's own node-local mode in the scenario copy: `model-pvc` binds
-to a static hostPath volume there, a DaemonSet downloads the model onto
-every accelerator node (the placement `make prepull` uses; `PREPULL_NODE_SELECTOR`
-replaces it), and the engines deploy only once every node holds it --
-`patch_harness.sh` fix 11 gives that DaemonSet a readiness probe on the
-completion marker, since the harness's wait reads `numberReady` and a
-container with no probe is Ready the moment it starts, and skips its SELinux
-relabel only on a node without SELinux (where `chcon` fails, and under the
-downloader's `set -e` that ended the script before the marker -- every
-downloader crash-looped, re-downloading on each restart); any other `chcon`
-error still fails the download. The download Job is
-skipped. The benchmark uses the harness's downloader, not `make weights`,
-because the harness owns `model-pvc`'s name and the engine's `pvc://` uri,
-keeps an existing claim, and only its own mode skips the download Job and
-holds the engine deploy until every node is Ready; `make weights` beside it
-would leave the harness's Job writing a single node's copy. Three things to know: the harness waits for EVERY node the
-DaemonSet counts, and a DaemonSet counts a cordoned node and a node under
-`DiskPressure` too (its controller tolerates both taints) -- a node that
-kept evicting the downloader held the standup until `daemonSetTimeout`
-(3600 s) and then failed it. The standup now keeps the downloader off every
-node an engine cannot use (cordoned, or carrying a `NoSchedule` or
-`NoExecute` taint the run does not tolerate) with a `kubernetes.io/hostname
-NotIn` affinity on the scenario copy, and names those nodes; nothing is done
-to the nodes themselves, which on a shared cluster are not yours to taint; the standup refuses a namespace whose
-`model-pvc` already sits on another storage class -- the harness keeps an
-existing claim, and a run that looks like it measured a local read while
-reading the shared volume is the wrong measurement -- so use a fresh
-namespace or delete the claim; and the harness's downloader is not
-`make weights`'s: it mounts the hostPath directly with `seLinuxOptions.type:
-spc_t` (Pod Security `privileged`; on OpenShift only the `privileged` SCC
-admits a pod-supplied SELinux type -- the `hostmount-anyuid` binding the
-harness makes for itself admits nothing it needs, and the harness grants
-`privileged` to its own `inference-perf-runner` ServiceAccount in its
-admin-prerequisites step, which is why the standup is cluster-admin-only on
-OpenShift), it runs with the harness ServiceAccount's token automounted, it
-`pip install`s an unpinned `huggingface_hub` from PyPI at every start, and
-`hf auth login` writes the token into the container's `/tmp`. Fix 11
-labels at level `s0`, since the `spc_t` downloader writes at whatever level
-the runtime gave it and the engines read at the project's. On RHCOS the
-directory is under `/var` (`BENCHMARK_MODEL_HOSTPATH=/var/mnt/wva-bench`,
-with a disk mounted there). None of this has been run on OpenShift yet. `make weights`
-(the general form,
-[Weights on the node's disk](../../reference/workload-preparation.md#weights-on-the-nodes-disk))
-mounts the claim, carries no token, runs the engine image's own library,
-and needs only `baseline`. It reuses a copy already in the same node
-directory when the copy carries its completion marker,
-`<dir>/models/<id>/.download-complete`: an earlier `make weights` with the
-same `WEIGHTS_PATH` writes it, and so does the harness's downloader, at the
-same place. The downloader then fetches nothing on that node. A copy
-without the marker -- one interrupted, or put there by hand -- is passed to
-huggingface_hub's `snapshot_download` again, and the library decides which
-of its files to fetch. Fix 12 gives the harness's volume a name that
-carries the namespace and a `claimRef` into it -- unpatched, the volume is
-named `model-pvc-hostpath-pv` cluster-wide with no `claimRef`, so any
-namespace's claim asking for the class takes it and a second benchmark
-namespace stays Pending forever -- and scopes the teardown's `kubectl
-delete pv -l usage=model-cache`, which unpatched removes every such volume
-in the cluster whenever any benchmark namespace is torn down. The placement
-is `make prepull`'s, `PREPULL_TOLERATIONS` included. Per node:
+- The harness waits for every node the DaemonSet counts, including cordoned
+  nodes and nodes under `DiskPressure`. The standup keeps the downloader off
+  nodes an engine cannot use (cordoned, or with an untolerated `NoSchedule` /
+  `NoExecute` taint) with a `NotIn` hostname affinity, and names them. It never
+  changes the nodes.
+- The standup refuses a namespace whose `model-pvc` already uses another
+  storage class. Use a fresh namespace or delete the claim.
+- The downloader is the harness's, not `make weights`
+  ([Weights on the node's disk](../../reference/workload-preparation.md#weights-on-the-nodes-disk)),
+  because the harness owns `model-pvc`'s name and the engine's `pvc://` URI. It
+  is much more privileged: it mounts the hostPath with `seLinuxOptions.type:
+  spc_t` (Pod Security `privileged`; on OpenShift only the `privileged` SCC,
+  which is why the standup is cluster-admin-only there), automounts its
+  ServiceAccount token, `pip install`s an unpinned `huggingface_hub` at every
+  start, and writes the HF token to `/tmp`. On RHCOS use a directory under
+  `/var`. Not yet run on OpenShift.
+- A copy with the completion marker `<dir>/models/<id>/.download-complete`
+  (written by both `make weights` and this downloader) is reused. A copy without
+  it goes back through `snapshot_download`.
+- `patch_harness.sh` fixes the harness here: fix 11 adds a readiness probe on
+  the completion marker, skips the SELinux relabel only where SELinux is absent,
+  and labels at level `s0`. Fix 12 names the volume per namespace with a
+  `claimRef`, and scopes the teardown's `kubectl delete pv -l usage=model-cache`.
+  Unpatched, a second benchmark namespace stays Pending forever, and any
+  teardown deletes every such volume in the cluster.
 
-```bash
-kubectl get pods -n $BENCHMARK_NAMESPACE -l component=model-download -o wide   # one per accelerator node, Ready when the download finished
-```
+**Package installs at engine start.** The `preprocess` init container writes
+`/shared-config/llmdbench_env.sh`, which every engine sources before
+`vllm serve`. It runs `apt-get install` for `iproute2` (needed only for the
+`ip route` / `ip rule` lines on a multi-NIC RDMA node) and `infiniband-diags`
+(never used when serving). Mirror speed then varies start time day to day. The
+scenarios wrap the init container's command to strip `infiniband-diags` always,
+and `iproute2` unless routing lines are present.
 
-For the 0.6B model the runs above use, this changes nothing measurable: the
-read is a second. It is for the model sizes where the read through the
-shared volume is the start path.
+**The startup probe.** The harness default is `30 / 30 / 60`
+(`initialDelaySeconds / periodSeconds / failureThreshold`). Fix 10 makes it
+`1 / 5 / 360`: the same 30-minute budget, polled faster (1, not 0, because the
+API server drops a zero). Scenarios with their own `probes:` block use the same
+numbers.
 
-**Package installs at engine start.** The `preprocess` init container
-(`set_llmdbench_environment.py`, from the harness image) writes
-`/shared-config/llmdbench_env.sh`, which every engine container sources before
-`vllm serve`, and it opens with two `apt-get update && apt install` runs:
-`iproute2`, for the `ip route`/`ip rule` lines the script emits on a multi-NIC
-RDMA node, and `infiniband-diags`, which nothing on the serving path calls. On
-a single-NIC node the script has no `ip` commands and both installs are dead
-weight -- and mirror speed is why the same standup starts replicas in
-different times on different days. The scenarios wrap the init container's
-command so it post-processes the script it just wrote: the `infiniband-diags`
-block always goes, the `iproute2` block goes unless an `ip route`/`ip rule`
-line is present. The generator itself runs from the image, so this cannot be
-patched in the clone; it is the scenario's `initContainers[preprocess].command`.
+**The `libcuda` walk.** The harness preamble ran two `find / -name libcuda.so.1`
+walks across every mount, 0.6-1.0 s each on fast local disks, and a network walk
+on a large shared cache. Fix 14 asks the loader cache (`ldconfig -p`, 2 ms) and
+falls back to `/usr` and `/opt` only. A scenario that writes its own preamble
+keeps what it wrote.
 
-**The startup probe.** The harness default is `initialDelaySeconds 30 /
-periodSeconds 30 / failureThreshold 60`. `patch_harness.sh` fix 10 changes the
-default to `1 / 5 / 360` (the same 30-minute budget; 1 rather than 0 because
-the API server drops a zero and the harness's config validator then fails the
-standup on `None`), and the scenarios that spell out their own `probes:` block
-carry the same numbers.
+**Engine caches.** The model PVC is mounted read-only, so the scenarios put the
+compile caches on the harness's `workload-pvc` at `/engine-cache` and point
+`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR` and `TRITON_CACHE_DIR` there. A
+guard unsets any that is not writable, so the engine compiles instead of failing.
+That fallback was the start-time variance: nine starts on three nodes split into
+51-56 s and 75-81 s, and the slow nodes had `workload-pvc` mounted read-only
+(compile 14.4 s against 2.9 s cached). If you edit that command: Kubernetes
+rewrites `$$` and expands `$(NAME)` in `command`/`args`, and the generated
+script has no trailing newline.
 
-**The `libcuda` walk.** The harness's `accelerator.runtimePreamble` -- the
-first thing every engine command runs on an NVIDIA node -- is two
-`find / -name libcuda.so.1` walks, one per variable it exports, and each
-crosses every mount in the pod: the image's 14 GB of site-packages, the model
-volume and the engine-cache volume. Measured inside the engine image on this
-cluster's NVMe nodes with two near-empty volumes mounted, 0.6-1.0 s per walk;
-on a shared model cache holding many models it would be a directory walk over
-the network, twice (not measured here). `patch_harness.sh` fix 14 makes the
-preamble ask the loader
-cache instead (`ldconfig -p`, 2 ms -- it is where the NVIDIA runtime
-registers the driver's `libcuda`), and fall back to a walk of `/usr` and
-`/opt` on the root filesystem only, for an image whose only copy is a
-forward-compat one. A scenario that writes its own preamble instead of
-`${accelerator.runtimePreamble}` keeps whatever it wrote.
+`BENCHMARK_ENGINE_CACHE_HOSTPATH=<dir>` puts the caches on the node's disk
+instead: `deploy/enginecache.sh apply` creates a hostPath volume at
+`<dir>/engine-cache`, a claim named `engine-cache` and a preparing DaemonSet
+([Engine caches on the node's disk](../../reference/workload-preparation.md#engine-caches-on-the-nodes-disk)),
+and `hack/benchmark/engine_cache_claim.sh` points the scenario at that claim. The
+standup fails if the claim is not Bound. The first start per node compiles; the
+rest hit. To avoid a cold node at scale-up (measured: a replica Ready 96 s after
+it was wanted), `BENCHMARK_ENGINE_CACHE_SEED=auto` copies the old
+`workload-pvc` cache to each node when that claim exists; `none` seeds nothing;
+`<claim>[:<subPath>]` seeds from that claim. `make engine-cache-status
+NAMESPACE=$BENCHMARK_NAMESPACE` lists the nodes.
 
-**Engine caches.** The chart mounts the model PVC read-only at `/model-cache`,
-and a second mount of the same claim inherits that (the CSI driver publishes a
-claim once per pod), so the scenarios mount the harness's own `workload-pvc`
--- RWX, read-write, created at standup for the results -- at `/engine-cache`
-(an `additionalVolumes` entry of type `persistentVolumeClaim` with a
-`subPath`), and point `VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR` and
-`TRITON_CACHE_DIR` at it through `extraEnvVars`. The preprocess command also
-appends a guard to the generated script: each of those directories is tested
-for writability where the engine runs, and one that is not writable is unset
-so the engine falls back to its default and pays a compile rather than
-failing -- vLLM dies on `os.makedirs` otherwise, and a CSI publish that is
-retried after a failure has come back read-only on one node of a cluster
-while read-write everywhere else. (Two things to know if you edit that
-command: Kubernetes rewrites `$$` to `$` and expands `$(NAME)` in a
-container's `command`/`args`, so neither may appear in it; and the generator
-leaves its script without a trailing newline.)
-
-That fallback is silent and it is the start-time variance: nine bare starts
-of the decode pod spec, three per node on three nodes, were repeatable
-within 2.5 s on a node and split by node into 51-56 s and 75-81 s, and
-the slow nodes were the ones where `workload-pvc` had come up read-only --
-every start there compiled from nothing (14.4 s against 2.9 s from the
-cache, and 8 s more before the engine). `BENCHMARK_ENGINE_CACHE_HOSTPATH=<dir>`
-(defaulting to `BENCHMARK_MODEL_HOSTPATH`, so one directory turns both on)
-makes the standup put the caches on the node's disk instead: it runs
-`deploy/enginecache.sh apply` with the harness's engine image -- one
-`hostPath` volume at `<dir>/engine-cache`, a claim named `engine-cache`, a
-DaemonSet that prepares the directory on every accelerator node
-([Engine caches on the node's disk](../../reference/workload-preparation.md#engine-caches-on-the-nodes-disk))
--- and `hack/benchmark/engine_cache_claim.sh` repoints every `engine-cache`
-volume in the scenario copy at that claim, without the `subPath`. The env
-vars and the guard stay as they are. The edit refuses a namespace without a
-Bound `engine-cache` claim and fails the standup: engines whose cache
-volume never mounts sit in `ContainerCreating` for good. A hostPath is a
-bind mount with no storage driver in its path, so no driver publishes it
-read-only (the filesystem under it can still go read-only, which is what the
-preparer's readiness and the guard are for); the first start on a node
-compiles once and every start after it on that node hits. `make
-engine-cache-status NAMESPACE=$BENCHMARK_NAMESPACE` lists the nodes. The
-cache is one per node, so until every node has started an engine once a
-scale-up can land on a cold one (measured: a second replica Ready 96 s
-after it was wanted, on a node no engine had used since the switch); the
-standup therefore seeds it -- `BENCHMARK_ENGINE_CACHE_SEED` is `auto`,
-which copies the harness's own `workload-pvc` `engine-cache` directory (the
-caches' shared home before) onto each node when that claim already exists,
-a re-standup in a namespace with history; `none` seeds nothing; a
-`<claim>[:<subPath>]` seeds from that. On a fresh namespace the claim does
-not exist yet at that point and the first start per node compiles, as it
-always did.
-
-After a standup, check what was rendered rather than trusting the scenario:
+After a standup, check what was rendered:
 
 ```bash
 D=$(kubectl get pods -n $BENCHMARK_NAMESPACE -l llm-d.ai/role=decode -o jsonpath='{.items[0].metadata.name}')
-# probe timing and cache paths on the engine container
+# Probe timing and cache paths on the engine container
 kubectl get pod -n $BENCHMARK_NAMESPACE $D -o jsonpath='{range .spec.containers[?(@.name=="vllm")]}startup {.startupProbe.periodSeconds}s x{.startupProbe.failureThreshold}{"\n"}{range .env[*]}{.name}={.value}{"\n"}{end}{end}' | grep -E 'startup|CACHE|FLASHINFER|TRITON'
-# 0 on a single-NIC node; 1 (iproute2) where the script carries routing lines
+# apt-get runs left: 0 on a single-NIC node, 1 where routing lines exist
 kubectl exec -n $BENCHMARK_NAMESPACE $D -c vllm -- grep -c apt-get /shared-config/llmdbench_env.sh
-# the second replica should report a compile-cache hit, not a compile; a
-# "not writable" line here means the guard fell back to the engine default;
-# with BENCHMARK_ENGINE_CACHE_HOSTPATH the directory is /engine-cache/... on the node's disk
+# Cache hits; "not writable" means the guard fell back to the engine default
 kubectl logs -n $BENCHMARK_NAMESPACE $D -c vllm | grep -E 'torch.compile took|Using cache directory|not writable'
-# 0: the preamble asks the loader cache (fix 14); a count here is the walk of /
+# 0 expected: the preamble no longer walks /
 kubectl get pod -n $BENCHMARK_NAMESPACE $D -o jsonpath='{.spec.containers[?(@.name=="vllm")].args}' | grep -c 'find / -name libcuda'
-# with BENCHMARK_ENGINE_CACHE_HOSTPATH: the engine-cache volume names the node-local claim, no subPath
+# With BENCHMARK_ENGINE_CACHE_HOSTPATH: the claim name, and no subPath
 kubectl get pod -n $BENCHMARK_NAMESPACE $D -o jsonpath='{range .spec.volumes[?(@.name=="engine-cache")]}{.persistentVolumeClaim.claimName}{"\n"}{end}{range .spec.containers[?(@.name=="vllm")].volumeMounts[?(@.name=="engine-cache")]}{.mountPath} subPath={.subPath}{"\n"}{end}'
-# the image was on the node: container started within seconds of scheduling
+# Scheduled time against container start: seconds apart means the image was on the node
 kubectl get pod -n $BENCHMARK_NAMESPACE $D -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].lastTransitionTime}{" scheduled, container up "}{.status.containerStatuses[?(@.name=="vllm")].state.running.startedAt}{"\n"}'
 ```
 
-## Snapshotting a run
+### Snapshot details
 
-A run's charts live in Prometheus, which ages them out. Capture them while they
-are still there:
+`snapshot.py` is stdlib-only, so it runs in the benchmark venv. `render.sh`
+starts Grafana and its image renderer in docker with this repo's dashboard, and
+writes one PNG per panel plus the whole dashboard to
+`<run-dir>/snapshot/<dashboard-slug>/`. The data is a file, so a run can be
+re-rendered months later with no cluster.
 
-```bash
-hack/benchmark/snapshot.py \
-  --namespace ${BENCHMARK_NAMESPACE} \
-  --prometheus-url https://thanos-querier-openshift-monitoring.apps.<cluster>/ \
-  --token "$(oc whoami -t)" --insecure \
-  --since 30m --out <run-dir>/snapshot
-```
-
-That writes `panels.json`: every query in `deploy/grafana/benchmark-dashboard.json`,
-run over the window, with its results. It is stdlib-only, so it works in a shell
-whose python has no pip — including the one the benchmark venv provides.
-
-Then render the images, offline, through the real dashboard:
+To capture the operational dashboard instead (useful for checking a layout
+change, since a cluster Grafana without the renderer plugin cannot):
 
 ```bash
-hack/benchmark/snapshot-images/render.sh <run-dir>/snapshot
-```
-
-Grafana and its image renderer come up in docker, provisioned with this repo's
-own dashboard, and read the snapshot through a shim that speaks the Prometheus
-API. The output is one PNG per panel plus the whole dashboard, written to
-`<run-dir>/snapshot/<dashboard-slug>/` — a directory per dashboard, because both
-dashboards have a panel called "Deployment Replicas" and a flat layout would have
-the second render quietly overwrite the first. Because the data is a file, a run
-can be re-rendered months later with no cluster at all, and the images cannot
-drift from the dashboard — they *are* the dashboard.
-
-Both steps take a dashboard, so the operational one can be captured and rendered
-the same way — useful for checking a layout change, since a cluster Grafana
-without the image-renderer plugin answers `/render` with "No image renderer
-available/installed":
-
-```bash
+# Capture and render the operational dashboard
 hack/benchmark/snapshot.py --dashboard deploy/grafana/operational-dashboard.json ...
 DASHBOARD=$PWD/deploy/grafana/operational-dashboard.json \
   hack/benchmark/snapshot-images/render.sh <run-dir>/snapshot
 ```
 
-The dashboard takes a **Namespace** variable, populated from `wva_current_replicas`
-so the list follows whichever label the **Namespace label** variable selects. That
-variable is for the `wva_*` panels only: those series carry the workload namespace
-as `exported_namespace` and the controller's as `namespace`, while engine and EPP
-series carry a plain `namespace` and nothing else, so those panels always match on
-it. Pick your namespace at the top of the dashboard when viewing it live;
-`--namespace` does it for a capture, and the render passes it through.
-
-`make dashboards-check` enforces that split, along with the panel layout — Grafana
-repacks overlapping panels on load, so a broken layout still displays and only the
-JSON shows it.
-
+The dashboard's **Namespace** variable is filled from `wva_current_replicas`.
+The **Namespace label** variable applies to the `wva_*` panels only: those
+series carry the workload namespace as `exported_namespace`, while engine and
+EPP series carry plain `namespace`. `--namespace` selects it for a capture.
+`make dashboards-check` enforces that split and the panel layout.

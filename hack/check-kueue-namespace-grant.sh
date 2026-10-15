@@ -36,7 +36,7 @@ for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permi
     }
 done
 
-EXPECT_CASES=18
+EXPECT_CASES=25
 RAN=0
 FAILED=0
 
@@ -56,6 +56,63 @@ POLICY_WITH_KUEUE='limiters:
   kueue:
     enabled: true'
 
+# stub_kubectl answers from the STUB_* variables below. Errors go to stderr,
+# where the API server puts them, and STUB_WARN=1 adds a warning there on every
+# call while still SUCCEEDING -- what a deprecated API or a webhook does. A
+# warning is never data: no verdict may change with it.
+stub_kubectl() {
+    echo "$*" >> "$WORK/kubectl.log"
+    [ -z "${STUB_WARN:-}" ] || echo 'Warning: the kubectl client is older than the server' >&2
+    case "$*" in
+        "auth can-i create "*)
+            # check_permissions: the caller's own create rights.
+            case " ${STUB_DENY_CREATE:-} " in
+                *" $4 "*) echo no; return 1 ;;
+            esac
+            echo yes; return 0
+            ;;
+        "auth can-i "*)
+            case "${STUB_CANI:-no}" in
+                yes) echo yes; return 0 ;;
+                no) echo no; return 1 ;;
+                *) echo 'Error from server (Forbidden): users "x" is forbidden: cannot impersonate' >&2; return 1 ;;
+            esac
+            ;;
+        "api-resources "*)
+            printf '%s\n' \
+                'configmaps cm v1 true ConfigMap' \
+                'services svc v1 true Service' \
+                'serviceaccounts sa v1 true ServiceAccount' \
+                'secrets  v1 true Secret' \
+                'deployments deploy apps/v1 true Deployment' \
+                'networkpolicies netpol networking.k8s.io/v1 true NetworkPolicy' \
+                'roles  rbac.authorization.k8s.io/v1 true Role' \
+                'rolebindings  rbac.authorization.k8s.io/v1 true RoleBinding' \
+                'clusterroles  rbac.authorization.k8s.io/v1 false ClusterRole' \
+                'clusterrolebindings  rbac.authorization.k8s.io/v1 false ClusterRoleBinding'
+            ;;
+        "get namespace "*)
+            case "${STUB_LABEL:-}" in
+                FORBIDDEN) echo 'Error from server (Forbidden): namespaces is forbidden' >&2; return 1 ;;
+                *) printf '%s' "${STUB_LABEL:-}" ;;
+            esac
+            ;;
+        "get configmap wva-scaling-policy-config -n "*)
+            local cns="${5:-}" body=""
+            case " ${STUB_CM_FORBIDDEN:-} " in
+                *" $cns "*) echo 'Error from server (Forbidden): configmaps is forbidden' >&2; return 1 ;;
+            esac
+            case "$cns" in
+                wva-policy) body="${STUB_POLICY:-}" ;;
+                "${STUB_LABEL:-none}") body="${STUB_LABELLED_POLICY:-}" ;;
+                "$WVA_NS") body="${STUB_OWN:-}" ;;
+            esac
+            [ -n "$body" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; return 1; }
+            printf '%s\n' "$body" ;;
+        *) return 0 ;;
+    esac
+}
+
 # run_check [VAR=value...] runs wva_check_kueue_namespace_read and echoes
 # REFUSED, WARNED or OK, then the can-i question asked ("-" for none).
 #   STUB_CANI      yes | no | unknown (impersonation denied)
@@ -72,37 +129,7 @@ run_check() {
         log_success() { :; }
         log_warning() { echo "WARNED" >> "$WORK/out"; }
         log_error() { echo "REFUSED" >> "$WORK/out"; printf '%s\n' "$1" > "$WORK/refusal"; exit 1; }
-        kubectl() {
-            echo "$*" >> "$WORK/kubectl.log"
-            case "$*" in
-                "auth can-i "*)
-                    case "${STUB_CANI:-no}" in
-                        yes) echo yes; return 0 ;;
-                        no) echo no; return 1 ;;
-                        *) echo 'Error from server (Forbidden): users "x" is forbidden: cannot impersonate'; return 1 ;;
-                    esac
-                    ;;
-                "get namespace "*)
-                    case "${STUB_LABEL:-}" in
-                        FORBIDDEN) echo 'Error from server (Forbidden): namespaces is forbidden'; return 1 ;;
-                        *) printf '%s' "${STUB_LABEL:-}" ;;
-                    esac
-                    ;;
-                "get configmap wva-scaling-policy-config -n "*)
-                    local cns="${5:-}" body=""
-                    case " ${STUB_CM_FORBIDDEN:-} " in
-                        *" $cns "*) echo 'Error from server (Forbidden): configmaps is forbidden'; return 1 ;;
-                    esac
-                    case "$cns" in
-                        wva-policy) body="${STUB_POLICY:-}" ;;
-                        "${STUB_LABEL:-none}") body="${STUB_LABELLED_POLICY:-}" ;;
-                        "$WVA_NS") body="${STUB_OWN:-}" ;;
-                    esac
-                    [ -n "$body" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found'; return 1; }
-                    printf '%s\n' "$body" ;;
-                *) return 0 ;;
-            esac
-        }
+        kubectl() { stub_kubectl "$@"; }
         WVA_NS=wva-ctl WVA_WATCH_NS='' WVA_SCOPE=namespace INSTALL_PHASE=wva
         WVA_LIMITER=quota WVA_QUOTA_KUEUE=true STUB_CANI=no STUB_POLICY=''
         local kv
@@ -158,6 +185,88 @@ check 'an unreadable policy is unknown: warned, not silently no source' \
 check 'unknown source, read already granted -> quiet' \
     'OK get namespaces/wva-ctl' \
     "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy STUB_CANI=yes)"
+
+# A warning kubectl prints on stderr while succeeding is not data. Merged into
+# the answer with 2>&1, it became the label ("Warning: ..."), and a `yes` that
+# starts with "Warning" was no longer a yes.
+check 'stderr warning: the label still names the policy namespace' \
+    'REFUSED get namespaces/wva-ctl' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_WARN=1 STUB_LABEL=platform-policy "STUB_LABELLED_POLICY='$POLICY_WITH_KUEUE'")"
+check 'stderr warning: a granted read is still granted' \
+    'OK get namespaces/wva-ctl' "$(run_check STUB_WARN=1 STUB_CANI=yes)"
+check 'stderr warning: a NotFound policy is still no source' \
+    'OK -' "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_WARN=1)"
+
+# --- check_permissions in the controller-only phase asks only for what that
+# phase applies.
+#
+# NetworkPolicy/wva-external-scaler is the admin's by NAME (WVA_PREREQ_NAMED)
+# and the render's only NetworkPolicy. Filtering by kind name left
+# NetworkPolicy in the tenant's list, so INSTALL_PHASE=wva and --check
+# demanded `create networkpolicies` of a tenant for an object that phase never
+# applies. The render is stubbed to the shapes that matter: a tenant ConfigMap
+# beside the admin's named one, the admin's NetworkPolicy, and admin kinds.
+RENDER_FIXTURE='apiVersion: v1
+kind: ConfigMap
+metadata: {name: wva-manager-config}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: wva-metrics-server-ca}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: wva-controller-manager}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: wva-external-scaler}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: wva-manager-role}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: wva-leader-election-role}'
+# run_perm <INSTALL_PHASE> [VAR=value...]: echoes the create rights asked for
+# (sorted), then REFUSED if check_permissions refused on a create right.
+run_perm() {
+    local phase="$1"
+    shift
+    : > "$WORK/kubectl.log"
+    : > "$WORK/refusal"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { :; }
+        log_error() { printf '%s\n' "$1" > "$WORK/refusal"; exit 1; }
+        kubectl() { stub_kubectl "$@"; }
+        wva_render_manifests() { printf '%s\n' "$RENDER_FIXTURE"; }
+        WVA_NS=wva-ctl WVA_WATCH_NS='' WVA_SCOPE=namespace INSTALL_PHASE="$phase"
+        WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CANI=yes STUB_DENY_CREATE=networkpolicies
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        check_permissions
+    ) >/dev/null 2>&1
+    printf '%s' "$(grep '^auth can-i create ' "$WORK/kubectl.log" | awk '{print $4}' | sort -u | tr '\n' ' ')"
+    grep -q 'You cannot create everything' "$WORK/refusal" && printf 'REFUSED'
+}
+check 'INSTALL_PHASE=wva: no create networkpolicies asked, not refused' \
+    'configmaps deployments ' "$(run_perm wva)"
+check 'INSTALL_PHASE=all still asks it, and a denial refuses (the stub can tell)' \
+    'clusterroles configmaps deployments networkpolicies roles REFUSED' "$(run_perm all)"
+# A render that comes back empty falls back to a fixed kind list. That list
+# carried the admin kinds (Role, RoleBinding, Secret, ServiceAccount,
+# ServiceMonitor) into the controller-only phase, and a tenant denied them was
+# refused. ServiceMonitor is not served by the stub, so it is never asked.
+ADMIN_KINDS_DENIED='roles rolebindings secrets serviceaccounts'
+check 'unrendered fallback, INSTALL_PHASE=wva: only the tenant kinds asked, not refused' \
+    'configmaps deployments services ' \
+    "$(run_perm wva RENDER_FIXTURE= "STUB_DENY_CREATE='$ADMIN_KINDS_DENIED'")"
+check 'unrendered fallback, INSTALL_PHASE=all: the admin kinds still asked, a denial refuses' \
+    'configmaps deployments rolebindings roles secrets serviceaccounts services REFUSED' \
+    "$(run_perm all RENDER_FIXTURE= "STUB_DENY_CREATE='$ADMIN_KINDS_DENIED'")"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.

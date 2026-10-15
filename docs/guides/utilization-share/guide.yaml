@@ -1,71 +1,41 @@
 name: utilization-share
 
 prerequisites:
+  vars:
+    note: The models' namespace. Also export CONTROLLER_NAMESPACE if the controller runs elsewhere.
+    run: |
+      export NAMESPACE=<namespace>
+  check:
+    note: Check there is a limiter and every variant's accelerator resolves. Fails with the reason if not.
+    run: |
+      make utilization-share-check
+
+trial:
   setup:
-    note: |
-      Only if you do not run two models under one quota yet. This builds a trial
-      setup: two 8B models, 1 GPU per replica, under one namespace quota of 4.
-      Use the accelerator name your nodes carry (H200, NVIDIA-H200, ...); the
-      check below reads the exact name the controller uses.
+    note: Build a trial setup, two 8B models under one namespace quota of 4 GPUs.
     run: |
       export BENCHMARK_NAMESPACE=<namespace>
       WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-preflight
       WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
       make benchmark-two-model-verify
-  vars:
-    note: |
-      The models' namespace. On a namespace-scoped install the controller is
-      there too; otherwise also export CONTROLLER_NAMESPACE. The policy's
-      namespace (its own, or a policy namespace such as wva-policy) is read
-      from the controller's wva-controller-status ConfigMap (policyNamespace),
-      else from its log, else worked out from the namespace's labels and
-      wva-policy. POLICY_NAMESPACE names it when none of those can; one that
-      disagrees with what the controller reports is refused.
-    run: |
-      export NAMESPACE=<namespace>
-  check:
-    note: |
-      Is there a budget to share, and does every variant's accelerator
-      resolve. It names the limiter in the policy and the one the controller
-      runs, and fails on no limiter, an unresolved accelerator, or anything it
-      could not read. It warns when a quota has no key for an accelerator the
-      controller logs: that key must be the logged name exactly.
-    run: |
-      make utilization-share-check
 
 deploy:
   shadow:
-    note: |
-      Writes the optimizer block with shadow: true, keeping everything else in
-      the policy, then waits for the controller to read it and checks it was
-      not refused. It refuses a policy with no limiter or with another
-      optimizer block.
+    note: Turn the optimizer on in shadow mode. It reports what it would move, and moves nothing.
     run: |
       make utilization-share-shadow
   active:
-    note: |
-      Only after reading what shadow would do. For two to three minutes after
-      this, nothing in the group scales and its models show quiet-period; the
-      same happens after every controller restart.
+    note: Let it act. Only after reading what shadow would do.
     run: |
       make utilization-share-activate
 
 verify:
   status:
-    note: |
-      The mode, the last decisions in the log (what shadow would move;
-      transfers once active), the transfer events, any UtilizationShare
-      warning, and the pods marked for a transfer.
+    note: Show the mode, recent decisions, transfer events, warnings and marked pods.
     run: |
       make utilization-share-status
   endpoint:
-    note: |
-      Whoever can read Secrets and port-forward in the CONTROLLER's namespace:
-      the tenant in the default shape, the admin when the controller runs out
-      of the tenant's reach. The endpoint checks the caller against a
-      cluster-wide /metrics grant, which the EPP metrics token carries once the
-      admin's prereqs step has run. A 401 or 403 here means use Prometheus
-      instead.
+    note: Read the optimizer metrics from the controller. Needs Secrets read in the controller's namespace.
     run: |
       CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE:-$NAMESPACE}
       TOKEN=$(kubectl get secret wva-epp-metrics-token -n $CONTROLLER_NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
@@ -77,10 +47,6 @@ verify:
 
 cleanup:
   disable:
-    note: |
-      Back to shadow first, so the controller removes the transfer marks it
-      wrote; it waits for them to clear, then removes the block. Today's
-      optimizer runs again and the limiter is untouched. If the marks do not
-      clear, or the pods cannot be read, it stops with the block in shadow.
+    note: Turn the optimizer off. Returns to today's optimizer; the limiter is untouched.
     run: |
       make utilization-share-off

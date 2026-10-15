@@ -31,7 +31,7 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh infra_wva.sh install_core.sh; do
+for lib in common.sh infra_wva.sh install_core.sh limiter_policy.sh physical_limiter.sh; do
     tr -d '\r' < "deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
@@ -41,8 +41,13 @@ source "$WORK/common.sh"
 source "$WORK/infra_wva.sh"
 # shellcheck source=/dev/null
 source "$WORK/install_core.sh"
+# shellcheck source=/dev/null
+source "$WORK/limiter_policy.sh"
+# shellcheck source=/dev/null
+source "$WORK/physical_limiter.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
+          wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read \
           wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
@@ -50,7 +55,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=33
+EXPECT_CASES=38
 RAN=0
 FAILED=0
 
@@ -201,6 +206,29 @@ check '--check: neither is also reported missing' '0' \
 check '--check: a required object is still MISSING, not optional' '1' \
     "$(printf '%s\n' "$mp" | grep -cx "ClusterRoleBinding/wva-metrics-auth-rolebinding-$(wva_ns_suffix wns)")"
 
+# The kinds INSTALL_PHASE=wva is checked for are the kinds of what it APPLIES.
+# NetworkPolicy/wva-external-scaler is admin-owned by name, and dropping only
+# the admin KINDS left NetworkPolicy in the list: a tenant was asked for
+# `create networkpolicies`, for an object that phase never applies.
+controller_kinds() {
+    (
+        WVA_PROJECT="$ROOT" WVA_NS=wns ENVIRONMENT=kubernetes WVA_SCOPE=namespace WVA_WATCH_NS=''
+        PROMETHEUS_SA='' DEPLOY_PROMETHEUS=false
+        kubectl() {
+            case "$1" in
+                kustomize) command "${KBUILD[@]}" "$2" ;;
+                *) return 0 ;;
+            esac
+        }
+        wva_rendered_kinds controller
+    )
+}
+ck="$(controller_kinds | tr '\n' ' ')"
+check 'INSTALL_PHASE=wva kinds: no NetworkPolicy, nothing admin-owned' '0' \
+    "$(printf '%s\n' $ck | grep -cx 'NetworkPolicy\|ClusterRole\|ClusterRoleBinding\|Role\|RoleBinding\|ServiceMonitor\|ServiceAccount\|Secret\|Namespace')"
+check 'INSTALL_PHASE=wva kinds: still what it applies (Deployment, ConfigMap, Service)' '3' \
+    "$(printf '%s\n' $ck | grep -cx 'Deployment\|ConfigMap\|Service')"
+
 # ----------------------------------------------------------------------------
 # The namespace-scoped Kueue reader gets ONE Namespace: the managed one
 # ----------------------------------------------------------------------------
@@ -223,6 +251,85 @@ for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
     check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
         "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
 done
+
+# ----------------------------------------------------------------------------
+# Install, enable-physical-limiter, install: one Kueue Namespace rule throughout
+# ----------------------------------------------------------------------------
+# Both write ClusterRole wva-kueue-reader-role-<suffix>. The installer granted
+# the managed namespace and enable the controller's own, so for a controller in
+# wva-foo managing foo every enable took `get namespaces/foo` away and every
+# setup-prereqs gave it back. Run in sequence against one live role: the
+# installer's apply is its render, enable's is what pl_grant_kueue_read sends.
+LIVE_ROLE="$WORK/live-kueue-role.yaml"
+seq_kubectl() {
+    case "$1 ${2:-}" in
+        "get clusterrole")
+            [ -s "$LIVE_ROLE" ] && { cat "$LIVE_ROLE"; return 0; }
+            echo "Error from server (NotFound): clusterroles.rbac.authorization.k8s.io \"$3\" not found" >&2
+            return 1 ;;
+        "apply -f") yq 'select(.kind == "ClusterRole")' - > "$LIVE_ROLE" ;;
+        "auth can-i") echo no; return 1 ;;
+        kustomize*) command kubectl "$@" ;;
+        *) return 0 ;;
+    esac
+}
+live_names() { yq -r '.rules[] | select(.resources[] == "namespaces") | (.resourceNames // ["*"]) | join(",")' "$LIVE_ROLE"; }
+# seq_install <ns> <managed>: the prereqs phase rendering and applying the role.
+seq_install() {
+    local dir
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/namespace-scoped/kubernetes" "$dir/base"
+    printf 'namespace: %s\nresources:\n- ./base\n' "$1" > "$dir/kustomization.yaml"
+    (
+        kubectl() { seq_kubectl "$@"; }
+        log_error() { echo "REFUSED $1" >&2; exit 1; }
+        WVA_APPLY_SCOPE=prereqs
+        wva_append_crb_name_patches "$dir/kustomization.yaml" "$1"
+        wva_append_install_kueue_reader_scope_patch "$dir/kustomization.yaml" "$1" "$2"
+    ) || return 1
+    "${KBUILD[@]}" "$dir" \
+        | yq "select(.kind == \"ClusterRole\" and .metadata.name == \"wva-kueue-reader-role-$(wva_ns_suffix "$1")\")" > "$LIVE_ROLE"
+}
+# seq_enable <ns> <managed>: make enable-physical-limiter for that controller.
+seq_enable() {
+    (
+        kubectl() { seq_kubectl "$@"; }
+        log_warning() { :; }
+        unset WVA_LIMITER_TARGETS
+        pl_grant_kueue_read "$1" wva-controller-manager "$2"
+    )
+}
+# seq_run <ns> <managed>: the rule after install, after enable, after install.
+seq_run() {
+    local a b c
+    seq_install "$1" "$2" && a="$(live_names)"
+    seq_enable "$1" "$2" && b="$(live_names)"
+    seq_install "$1" "$2" && c="$(live_names)"
+    printf '%s %s %s' "${a:-none}" "${b:-none}" "${c:-none}"
+}
+: > "$LIVE_ROLE"
+check 'install/enable/install, out of reach (wva-foo manages foo): foo every time' \
+    'foo foo foo' "$(seq_run wva-foo foo)"
+: > "$LIVE_ROLE"
+check 'install/enable/install, tenant-owned (team manages team): team every time' \
+    'team team team' "$(seq_run team team)"
+# A name an admin added by hand survives both commands.
+cat > "$LIVE_ROLE" <<'CREOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: placeholder
+rules:
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["clusterqueues", "resourceflavors"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames: ["admin-added"]
+  verbs: ["get"]
+CREOF
+check 'install/enable/install over an admin-added name: kept by both' \
+    'foo,admin-added foo,admin-added foo,admin-added' "$(seq_run wva-foo foo)"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped policy-namespace reader gets only the Namespaces it reads

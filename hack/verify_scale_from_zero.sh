@@ -27,13 +27,22 @@
 # minReplicas is asserted before anything else runs, and the script says plainly
 # when the precondition is unmet instead of blaming the autoscaler.
 #
-# Usage: verify_scale_from_zero.sh <namespace> <deployment> <modelID>
-# Env:   SFZ_MAX_REPLICAS (default 3), SFZ_LOAD (default 40), SFZ_WAKE_TIMEOUT (default 120)
+# Usage: verify_scale_from_zero.sh <namespace> <deployment> <modelID> [<scaler-namespace>]
+# Env:   SFZ_MAX_REPLICAS (default 3), SFZ_LOAD (default 40), SFZ_WAKE_TIMEOUT (default 120),
+#        SFZ_WVA_NAMESPACE (same as the 4th argument)
+#
+# <scaler-namespace> is where the WVA controller and its wva-external-scaler
+# Service run. It is the model namespace only when the controller was installed
+# beside its workloads; installed out of reach, in a namespace of its own, the
+# model namespace has no scaler, and a ScaledObject naming it gets nothing from
+# KEDA but a CPU fallback. Left unset, it is read from a WVA ScaledObject already
+# in <namespace>, else taken to be <namespace>.
 set -u
 
-NS="${1:?usage: verify_scale_from_zero.sh <namespace> <deployment> <modelID>}"
+NS="${1:?usage: verify_scale_from_zero.sh <namespace> <deployment> <modelID> [<scaler-namespace>]}"
 DEPLOY="${2:?deployment required}"
 MODEL="${3:?modelID required}"
+CTL_NS="${4:-${SFZ_WVA_NAMESPACE:-}}"
 MAXR="${SFZ_MAX_REPLICAS:-3}"
 LOAD="${SFZ_LOAD:-40}"
 WAKE_TIMEOUT="${SFZ_WAKE_TIMEOUT:-120}"
@@ -43,6 +52,24 @@ fail() { echo; echo "FAIL: $*" >&2; exit 1; }
 skip() { echo; echo "SKIP: $*"; exit 0; }
 
 kubectl get deploy "$DEPLOY" -n "$NS" >/dev/null 2>&1 || fail "no deployment $DEPLOY in $NS"
+
+if [ -z "$CTL_NS" ]; then
+    addr=$(kubectl get scaledobject -n "$NS" \
+        -o jsonpath='{range .items[*]}{range .spec.triggers[*]}{.metadata.scalerAddress}{"\n"}{end}{end}' 2>/dev/null \
+        | grep '^wva-external-scaler\.' | head -1)
+    CTL_NS=$(printf '%s' "$addr" | cut -d: -f1 | cut -d. -f2)
+    [ -n "$CTL_NS" ] || CTL_NS="$NS"
+fi
+# Forbidden is not absent: a tenant may not read the controller's namespace.
+if ! svc_err=$(kubectl get svc wva-external-scaler -n "$CTL_NS" -o name 2>&1 >/dev/null); then
+    case "$svc_err" in
+        *NotFound*|*"not found"*)
+            fail "no wva-external-scaler Service in $CTL_NS, so the ScaledObject this writes would name a scaler nothing answers. Pass the controller's namespace as the 4th argument (or SFZ_WVA_NAMESPACE)." ;;
+        *)
+            echo "  cannot verify the scaler in $CTL_NS ($(printf '%s' "$svc_err" | head -1)); using it as given" ;;
+    esac
+fi
+echo "  scaler: wva-external-scaler.${CTL_NS}"
 
 # A model is at zero only when EVERY variant serving it is. Park one and leave a
 # sibling running and the InferencePool still has endpoints, so EPP routes rather
@@ -176,7 +203,7 @@ spec:
     - type: external-push
       name: wva-external-scaler
       metadata:
-        scalerAddress: "wva-external-scaler.${NS}.svc.cluster.local:9090"
+        scalerAddress: "wva-external-scaler.${CTL_NS}.svc.cluster.local:9090"
         modelID: "${MODEL}"
 YAML
 # NOT an HPA check. KEDA's HPA always carries minReplicas: 1 -- KEDA does 0<->1
@@ -194,7 +221,7 @@ for _ in $(seq 1 18); do
 done
 r=$(kubectl get deploy "$DEPLOY" -n "$NS" -o jsonpath='{.status.replicas}' 2>/dev/null || echo 0)
 if [ "${r:-0}" != "0" ]; then
-    tgt=$(kubectl logs deploy/wva-controller-manager -n "$NS" --tail=300 2>/dev/null \
+    tgt=$(kubectl logs deploy/wva-controller-manager -n "$CTL_NS" --tail=300 2>/dev/null \
           | grep -oE "\"name\":\"${SO%-sfz-verify}-wva\",\"curr\":[0-9]+,\"tgt\":[0-9]+[^,]*" | tail -1)
     skip "the scaler took it to $r before any load arrived: WVA still decides this model needs replicas${tgt:+ ($tgt)}, so it is not idle and there is nothing to wake.
       Run this against a model that has been quiet long enough for WVA to decide 0 -- a model serving recently keeps a floor from historical capacity."
@@ -220,7 +247,7 @@ for i in $(seq 1 $((WAKE_TIMEOUT / 10))); do
     [ "${rep:-0}" -gt 0 ] 2>/dev/null && { woke=1; break; }
 done
 
-act=$(kubectl logs deploy/wva-controller-manager -n "$NS" --since-time="$SINCE" 2>/dev/null \
+act=$(kubectl logs deploy/wva-controller-manager -n "$CTL_NS" --since-time="$SINCE" 2>/dev/null \
       | grep -c "Published scale-from-zero activation")
 
 echo

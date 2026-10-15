@@ -3,7 +3,10 @@ package alerts
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +141,95 @@ func TestWVAMetricNamesComesFromTheConstants(t *testing.T) {
 	// Reason slugs and label names live in the same file and are not metrics.
 	assert.False(t, known["variant-floor"])
 	assert.False(t, known["namespace"])
+}
+
+// runbookPrefix is where every runbook_url points: the docs on main.
+const runbookPrefix = "https://github.com/ev-shindin/llm-scaling-manager/blob/main/"
+
+// Every alert names a runbook, and the runbook resolves: the URL is under the
+// repository's main branch, the file exists in this tree, and the anchor is a
+// heading in it. An anchor left behind by a renamed heading sends the operator
+// paged at night to the top of a long page, which is where nobody finds the fix.
+func TestAlertsHaveResolvableRunbooks(t *testing.T) {
+	rule := loadRule(t)
+	var checked int
+	for _, group := range rule.Spec.Groups {
+		for _, r := range group.Rules {
+			if r.Alert == "" {
+				continue
+			}
+			url := r.Annotations["runbook_url"]
+			if !assert.NotEmpty(t, url, "alert %q has no runbook_url", r.Alert) {
+				continue
+			}
+			rest, ok := strings.CutPrefix(url, runbookPrefix)
+			if !assert.True(t, ok, "alert %q: runbook_url %q is not under %s", r.Alert, url, runbookPrefix) {
+				continue
+			}
+			file, anchor, _ := strings.Cut(rest, "#")
+			if !assert.NotEmpty(t, anchor, "alert %q: runbook_url %q names no anchor", r.Alert, url) {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(RepoRoot(), filepath.FromSlash(file)))
+			if !assert.NoError(t, err, "alert %q: runbook file %s", r.Alert, file) {
+				continue
+			}
+			assert.Contains(t, headingAnchors(string(raw)), anchor,
+				"alert %q: %s has no heading with anchor #%s", r.Alert, file, anchor)
+			checked++
+		}
+	}
+	assert.NotZero(t, checked, "no runbook was checked -- the test would pass vacuously")
+}
+
+// headingAnchors returns the anchors GitHub generates for the Markdown headings
+// in md: lowercased, punctuation other than '-' and '_' dropped, spaces turned
+// into hyphens, and a repeated heading suffixed -1, -2 and so on. Headings
+// inside fenced code blocks are not headings.
+func headingAnchors(md string) map[string]bool {
+	anchors := make(map[string]bool)
+	seen := make(map[string]int)
+	inFence := false
+	for _, line := range strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || !strings.HasPrefix(line, "#") {
+			continue
+		}
+		text := strings.TrimSpace(strings.TrimLeft(line, "#"))
+		var b strings.Builder
+		for _, r := range strings.ToLower(text) {
+			switch {
+			case r == ' ':
+				b.WriteRune('-')
+			case r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r):
+				b.WriteRune(r)
+			}
+		}
+		slug := b.String()
+		if n := seen[slug]; n > 0 {
+			anchors[slug+"-"+strconv.Itoa(n)] = true
+		} else {
+			anchors[slug] = true
+		}
+		seen[slug]++
+	}
+	return anchors
+}
+
+func TestHeadingAnchorsMatchGitHub(t *testing.T) {
+	got := headingAnchors("# Title\n## The controller is not Ready or crash-looping\n" +
+		"```\n# not a heading\n```\n### GPUs held, or quota spent\n## Title\n")
+	for _, want := range []string{
+		"title",
+		"the-controller-is-not-ready-or-crash-looping",
+		"gpus-held-or-quota-spent",
+		"title-1",
+	} {
+		assert.True(t, got[want], "missing anchor %q in %v", want, got)
+	}
+	assert.False(t, got["not-a-heading"], "a line inside a code fence is not a heading")
 }

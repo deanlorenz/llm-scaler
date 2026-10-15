@@ -1016,11 +1016,99 @@ else
     ok "the emitted name '$emitted_name' is not singled out by validateLimiters()"
 fi
 
+# ---------------------------------------------------------------------------
+# A re-install that does not name WVA_LIMITER keeps the limiter in force
+# ---------------------------------------------------------------------------
+# The overlay apply resets data.default to the shipped one, limiters: and all,
+# so `make deploy-wva` re-run without WVA_LIMITER silently unbounded a controller
+# that an admin had bounded. wva_live_limiters reads what is in force BEFORE the
+# apply; wva_keep_live_limiters writes it back AFTER. Executed against a stubbed
+# kubectl: what is asserted is what it read, and the patch it would have sent.
+LIVE_POLICY='scaleUpThreshold: 0.85
+limiters:
+- name: quota
+  type: quota
+  quotas:
+    H200: 8
+  kueue:
+    enabled: true'
+SHIPPED_POLICY='scaleUpThreshold: 0.85
+scaleDownBoundary: 0.7'
+
+# lim_stub serves wva-scaling-policy-config from LIM_DEFAULT ("" = no ConfigMap,
+# FORBIDDEN = denied) and records a patch in $WORK/lim-patch.
+lim_stub() {
+    case "$*" in
+        "get configmap wva-scaling-policy-config -n "*" -o json")
+            case "${LIM_DEFAULT-}" in
+                FORBIDDEN) echo 'Error from server (Forbidden): configmaps "wva-scaling-policy-config" is forbidden' >&2; return 1 ;;
+                '') echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; return 1 ;;
+            esac
+            jq -n --arg d "$LIM_DEFAULT" '{data:{default:$d}}' ;;
+        "get configmap wva-scaling-policy-config -n "*" -o jsonpath="*)
+            printf '%s' "$LIM_DEFAULT" ;;
+        "patch configmap wva-scaling-policy-config "*)
+            local a next=0
+            for a in "$@"; do
+                [ "$next" = 1 ] && { printf '%s' "$a" > "$WORK/lim-patch"; next=0; }
+                [ "$a" = "-p" ] && next=1
+            done ;;
+        *) return 0 ;;
+    esac
+}
+
+live_limiters() {   # live_limiters <default entry> -- echoes "rc|limiters json"
+    local rc=0
+    LIM_DEFAULT="$1"
+    kubectl() { lim_stub "$@"; }
+    wva_live_limiters wva-system 2>/dev/null || rc=$?
+    unset -f kubectl
+    printf '%s|%s' "$rc" "${WVA_LIVE_LIMITERS:-}"
+}
+
+case_begin
+got="$(live_limiters "$LIVE_POLICY")"
+if [ "${got%%|*}" = 0 ] \
+   && [ "$(printf '%s' "${got#*|}" | jq -r '.[0].type + "|" + (.[0].kueue.enabled | tostring) + "|" + (.[0].quotas.H200 | tostring)' 2>/dev/null)" = 'quota|true|8' ]; then
+    ok "wva_live_limiters reads the live limiters: block, quota and Kueue settings included"
+else
+    fail "wva_live_limiters did not read the declared limiter back: [$got]"
+fi
+
+case_begin
+got="$(live_limiters '')"
+[ "$got" = '0|' ] && ok "no ConfigMap yet (a first install) is no limiter, not an error" \
+    || fail "an absent ConfigMap read as [$got], not [0|]"
+
+case_begin
+got="$(live_limiters "$SHIPPED_POLICY
+limiters: []")"
+[ "$got" = '0|' ] && ok "limiters: [] declares none, and nothing is kept" \
+    || fail "limiters: [] read as [$got], not [0|]"
+
+case_begin
+got="$(live_limiters FORBIDDEN)"
+[ "${got%%|*}" = 2 ] && ok "a Forbidden read is 'could not look' (2), never 'no limiter'" \
+    || fail "a Forbidden ConfigMap read returned [$got] -- folded into no limiter, an upgrade would unbound in silence"
+
+case_begin
+rm -f "$WORK/lim-patch"
+(
+    LIM_DEFAULT="$SHIPPED_POLICY"
+    kubectl() { lim_stub "$@"; }
+    log_warning() { :; }
+    wva_keep_live_limiters wva-system "$(printf '%s\n' "$LIVE_POLICY" | yq -o=json -I=0 '.limiters')"
+) >/dev/null 2>&1
+written="$(jq -r '.data.default' "$WORK/lim-patch" 2>/dev/null | yq -o=json -I=0 '[.limiters[0].type, .limiters[0].kueue.enabled, .scaleDownBoundary]' 2>/dev/null)"
+[ "$written" = '["quota",true,0.7]' ] \
+    && ok "wva_keep_live_limiters writes the kept limiter back into the freshly applied default, keeping the rest" \
+    || fail "the kept limiter was not written back over the reset default: [$written]"
+
 # How many cases ran. Without it, deleting a refuse_quota line removes a case
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=54
+CASES_EXPECTED=59
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

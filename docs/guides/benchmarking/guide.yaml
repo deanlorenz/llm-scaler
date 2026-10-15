@@ -1,14 +1,13 @@
 name: benchmarking
 
-env:
-  static:
-    target:
-      run: |
-        export BENCHMARK_NAMESPACE=<namespace>
-        export IMG=<your build>
-
 prerequisites:
+  target:
+    note: The namespace to benchmark in, and the controller image to measure.
+    run: |
+      export BENCHMARK_NAMESPACE=<namespace>
+      export IMG=<your build>
   cli:
+    note: Install the llm-d-benchmark CLI.
     run: make benchmark-install
 
 deploy:

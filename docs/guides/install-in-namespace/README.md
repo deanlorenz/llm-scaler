@@ -2,84 +2,46 @@
 
 ## Overview
 
-This guide installs the scaling manager (llm-scaling-manager) into one namespace, where it
-sizes the llm-d model servers running there and nothing else. The scaling manager decides how
-many replicas each variant needs from saturation and cost, and hands the decision
-to KEDA, which owns the HPA and does the scaling.
+This guide installs the scaling manager (llm-scaling-manager) into one namespace.
+It sizes the llm-d model servers in that namespace and nothing else. It decides
+how many replicas each variant needs and hands that number to KEDA, which does
+the scaling.
 
-It is the common path, and it works the same whether llm-d is already serving or
-you have just deployed it. A cluster admin runs one command first, once — see
-[Cluster-admin setup](../admin-cluster-setup/) — after which the
-namespace's owner installs and upgrades the controller themselves.
+A cluster admin runs one command once ([Cluster-admin setup](../admin-cluster-setup/)).
+After that, the namespace owner installs and upgrades the controller.
 
 ## Prerequisites
 
-- **llm-d model servers in the namespace, deployed first.** The scaling manager scales what is
-  already serving; it does not deploy models, and the install refuses a namespace
-  with none rather than leave a healthy controller with nothing to scale. No
-  model yet? [Install a small llm-d model](../install-small-model/) puts one on a
-  single GPU.
-- KEDA. The install never installs it on its own. On OpenShift, install the
-  Custom Metrics Autoscaler operator first. On Kubernetes the install assumes
-  the cluster already runs KEDA; if it has none, `KEDA_HELM_INSTALL=true make
-  setup-prereqs` installs it with Helm.
-- a Prometheus scraping those model servers and their EPP
-- **the EPP's `flowControl` feature gate.** `check-prereqs` and `deploy-wva`
-  refuse without it: it publishes the router queue the scaling manager reads as
-  demand, and it is the only signal at zero replicas. EPPs from llm-d guides have
-  it off; add `featureGates: [flowControl]` to the `EndpointPickerConfig` and
-  restart the EPP.
-- **a model cache on those model servers.** Autoscaling means new replicas,
-  and a replica that has to fetch its weights first turns every scale-up into
-  a download from Hugging Face. llm-d mounts one by default, so this is
-  normally already true — `make scaledobjects-plan` says so per workload if it
-  is not. See [Weights and the model
-  cache](../../reference/workload-preparation.md#weights-and-the-model-cache), which
-  also covers what it does not buy: the cache removes the download, not the
-  load.
-- **a drain hook on those model servers.** Autoscaling also means replicas being
-  *removed*, and a replica removed mid-stream takes its open responses with it:
-  the client sees a truncated body, after the request was already paid for in GPU
-  time. This one is normally **not** already true: llm-d does not set a preStop
-  hook.
+- [ ] **llm-d model servers in the namespace.** The install refuses an empty
+  namespace. No model yet? [Install a small llm-d model](../install-small-model/).
+- [ ] **KEDA.** On OpenShift, install the Custom Metrics Autoscaler operator. On
+  Kubernetes, `KEDA_HELM_INSTALL=true make setup-prereqs` installs it if missing.
+- [ ] **A Prometheus** that scrapes the model servers and their EPP.
+- [ ] **The EPP's `flowControl` feature gate.** Add `featureGates: [flowControl]`
+  to the `EndpointPickerConfig` and restart the EPP. The install refuses without it.
+- [ ] **A cluster admin has run step 1**, or you are a cluster admin.
 
-`make workload-patch` reports both and writes the fix for whichever is missing.
-It writes a file rather than changing your workloads, because the pod spec
-belongs to your modelservice chart; see [Writing the
-patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch).
-
-Every check that can refuse below is listed, with the fix, in [First-line
-troubleshooting](../../reference/operations.md#first-line-troubleshooting).
-`SKIP_CHECKS=true` turns the refusals into warnings and installs anyway; see
-[`SKIP_CHECKS`](../../reference/configuration.md#deployment-flags) for what it
-does not skip.
-
-<!-- guide:env.static.namespace start -->
+<!-- guide:prerequisites start -->
 ```bash
+# The namespace your model servers run in.
 export NAMESPACE=<your-namespace>
-```
-<!-- guide:env.static.namespace end -->
 
-Required: the install refuses without it rather than guess which namespace it
-manages. (`WVA_NS` is a different setting: where the *controller* runs. It
-differs from `NAMESPACE` only in the cluster-wide shape.)
-
-<!-- guide:prerequisites.check start -->
-```bash
+# Read-only. Reports the namespace, its model servers and the Prometheus it found.
 make check-prereqs
 ```
-<!-- guide:prerequisites.check end -->
+<!-- guide:prerequisites end -->
 
-Read-only. It reports the namespace it resolved, whether that namespace holds
-model servers, and the Prometheus it found. If it says the namespace is empty or
-missing, stop and fix `NAMESPACE`: a controller pointed at the wrong namespace
-installs cleanly, reports healthy, and scales nothing.
+If `check-prereqs` says the namespace is empty or missing, fix `NAMESPACE`
+before going on. Each refusal and its fix is in [First-line
+troubleshooting](../../reference/operations.md#first-line-troubleshooting).
+Step 3 checks two more things the model servers need: a model cache and a drain
+hook.
 
 ## Installation Instructions
 
 ### 1. Cluster admin: prepare the namespace
 
-**This step needs cluster-admin rights** — everything after it does not.
+**Needs cluster-admin rights.** Nothing after this step does.
 
 <!-- guide:deploy.prereqs start -->
 ```bash
@@ -87,24 +49,22 @@ make setup-prereqs
 ```
 <!-- guide:deploy.prereqs end -->
 
-Once per namespace, not once per upgrade. It creates the cluster-scoped RBAC, the
-ServiceAccounts, Roles and ServiceMonitor: the objects a namespace admin is not
-allowed to create — and the controller's namespace when `WVA_NS` names one apart
-from yours. Your namespace must already exist. See
-[Cluster-admin setup](../admin-cluster-setup/) for what each one is and why it
-needs an admin.
+Run it once per namespace, and again when a release adds a prerequisite
+([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+Your namespace must already exist. Two optional settings:
 
-On Kubernetes with no KEDA, the step stops and tells you to re-run it as
-`KEDA_HELM_INSTALL=true make setup-prereqs`; on OpenShift, install the Custom
-Metrics Autoscaler operator and re-run.
+- `KEDA_NAMESPACE=<ns>` when the command says it cannot find KEDA. Without it no
+  NetworkPolicy is written and the scaler port `:9090` is open to every Pod.
+- `PROMETHEUS_SA=<namespace>/<serviceaccount>` to let your Prometheus scrape the
+  controller's `/metrics`.
 
-Already done for your namespace? Go to step 2: it checks, and names anything
-still missing.
+If KEDA is missing it stops and tells you what to do. What it creates, and why
+each object needs an admin, is in [Cluster-admin setup](../admin-cluster-setup/).
 
-On a **shared cluster** your admin should instead run the controller
+On a **shared cluster** your admin should run the controller
 [out of your reach](../admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach),
-in a namespace they own: the GPU bound then holds against the namespace's owner.
-In that shape the admin does steps 1 and 2, and you start at step 3.
+in a namespace they own (for example `wva-${NAMESPACE}`). Then the admin does
+steps 1 and 2, and you start at step 3.
 
 ### 2. Install the controller
 
@@ -114,70 +74,74 @@ make deploy-wva
 ```
 <!-- guide:deploy.controller end -->
 
-It works out which half is left to do, and says which it chose. Run by a
-namespace owner, or once step 1 has run, it installs the controller only. Run by
-a cluster admin before step 1, it does both. If step 1 has not happened and you
-cannot do it yourself, it stops and names what is missing for an admin.
+It works out what is left to do and says what it chose. Run by you after step 1,
+it installs the controller. Run by a cluster admin before step 1, it does both
+steps. If step 1 is missing and you cannot do it, it stops and names what an
+admin must create.
 
 ### What you own, and what your admin owns
 
-| | owned by | what that means |
+| What | Owner | Notes |
 | --- | --- | --- |
-| the controller Deployment, its Services, `wva-manager-config` | you | you install and upgrade them with namespace rights |
-| `wva-scaling-policy-config` in your namespace | you | in a namespace-scoped install this is the controller's **global** map, not a namespace-local override: its `default` entry is the default for everything the controller manages. Thresholds, tiers and per-model entries are yours. So are the limiters — unless a cluster policy namespace governs this controller; see below |
-| ServiceAccounts, Roles, RoleBindings, the ServiceMonitor, the token Secrets | your admin | created by step 1, in your namespace; RBAC forbids you granting what you do not hold |
-| the hashed ClusterRoles and ClusterRoleBindings | your admin | cluster-scoped |
-| the cluster policy namespace (`wva-policy`) | your admin | where a GPU budget lives when the admin publishes one |
+| The controller Deployment, its Services, `wva-manager-config` | you | install and upgrade with namespace rights |
+| `wva-scaling-policy-config` in your namespace | you | the controller's **global** map: its `default` entry applies to every model. You set thresholds, tiers, per-model entries, and the limiters unless a [cluster policy](#is-a-cluster-policy-in-force) governs the controller |
+| ServiceAccounts, Roles, RoleBindings, the ServiceMonitor, token Secrets | your admin | created by step 1 in your namespace |
+| Hashed ClusterRoles and ClusterRoleBindings | your admin | cluster-scoped |
+| The cluster policy namespace (`wva-policy`) | your admin | holds a GPU budget when the admin publishes one |
+| **Out-of-reach shape:** everything above except your policy map | your admin | the controller runs in `wva-${NAMESPACE}`. There is no `wva-scaling-policy-config` in your namespace until you create one. If you do, it [replaces the admin's map whole](../../reference/scaling-policy.md#namespace-local-scaling-policy-map) for your models, so its `default` must carry every threshold. It cannot set `limiters:` or `optimizer:` |
 
-Whether a cluster policy governs your controller is in its startup log. This
-guide installs the controller in `${NAMESPACE}`; if your admin instead runs it
-[out of your reach](../admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach),
-it runs in **their** namespace (for example `wva-${NAMESPACE}`), so pass that to
-`-n` — and you can read its log only if they grant you `pods/log` there:
+#### Is a cluster policy in force?
+
+The controller publishes the answer in its `wva-controller-status` ConfigMap.
+Use `-n` for the namespace the **controller** runs in: `${NAMESPACE}` here, or
+`wva-${NAMESPACE}` in the out-of-reach shape.
 
 ```bash
-# -n: the namespace the CONTROLLER runs in, not necessarily ${NAMESPACE}
-kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager \
-  | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
+# Print the policy namespace and the limiter in force
+kubectl get cm wva-controller-status -n ${NAMESPACE} \
+  -o jsonpath='{.data.policyNamespace} {.data.limiter}{"\n"}'
 ```
 
-No `Cluster policy comes from` line (the own-ConfigMap branch logs only at V(1),
-hidden at the default verbosity) means your ConfigMap's `limiters:` are in
-force; `Could not read the managed Namespace` says why a policy namespace was
-not seen. On Kubernetes that means the controller lacks `get` on Namespaces,
-which `make setup-prereqs` grants: an install set up before that grant existed
-cannot see a published `wva-policy` until a cluster admin re-runs
-`NAMESPACE=${NAMESPACE} make setup-prereqs` and the controller restarts. Until
-then it also logs `Cannot tell whether a cluster admin published policy` and
-sets `wva_policy_namespace_unverified` to 1. The full list of permissions and
-their reasons is in the [security model](../../reference/security-model.md).
+- `policyNamespace` is the controller's own namespace: your ConfigMap's
+  `limiters:` are in force.
+- Any other value (such as `wva-policy`): the limiters come from there and yours
+  are ignored. `limiter` names the one in force.
+- **Forbidden** (normal in the out-of-reach shape): you cannot read the
+  controller's namespace. Ask your admin, or read the Events on your
+  ScaledObjects. A limiter holding a scale-up shows as `ResourceConstrained`:
+
+  ```bash
+  # Scaling Events the controller recorded on your ScaledObjects
+  kubectl get events -n ${NAMESPACE} --field-selector involvedObject.kind=ScaledObject
+  ```
+
+- **NotFound**: the controller is older than this ConfigMap. See
+  [Details](#reading-the-policy-from-the-controller-log).
 
 ### 3. Make the workloads safe to scale
 
-The two prerequisites above are stated at the top of this guide and are easy to
-skip, so this is the step that checks them. It reports and changes nothing.
-
 <!-- guide:deploy.readiness start -->
 ```bash
-# What the model servers need before anything scales them. Reports first;
-# changes nothing until you ask.
+# Report what the model servers still need. Changes nothing.
 make workload-patch NAMESPACE=${NAMESPACE}
 ```
 <!-- guide:deploy.readiness end -->
 
-A model server with no preStop hook loses in-flight responses on every
-scale-down, and one that downloads its weights outside every volume it mounts
-re-fetches them on every scale-up. Both are pod-spec settings owned by the chart
-that deployed the model server, so this writes a patch rather than applying one.
-See [Writing the
-patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch) for
-what to do with it, including `make model-cache` when the weights half is what is
-missing.
+It checks two things:
+
+- **A drain hook (preStop).** Without one, every scale-down cuts the responses a
+  replica is still writing. llm-d does not set one.
+- **A model cache.** Without one, every scale-up downloads the weights again.
+  llm-d mounts one by default.
+
+Both live in the pod spec, which your modelservice chart owns, so it writes a
+patch file rather than changing your workloads. See [Writing the
+patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch),
+including `make model-cache` when the cache is missing.
 
 ### 4. Register the workloads
 
-Nothing scales until a ScaledObject exists: the scaling manager is only ever
-asked about workloads KEDA calls it about.
+Nothing scales until a ScaledObject exists.
 
 <!-- guide:deploy.register start -->
 ```bash
@@ -187,44 +151,41 @@ make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:deploy.register end -->
 
-`scaledobjects-plan` finds the model servers and writes one entry each, applying
-nothing:
+In the out-of-reach shape, `scaledobjects-apply` finds the admin's controller
+from the RoleBinding step 1 wrote in your namespace. If it says it cannot, name
+it: add `WVA_NS=wva-${NAMESPACE} WVA_WATCH_NS=${NAMESPACE}` to both commands.
+
+`scaledobjects-plan` writes one entry per model server and applies nothing.
+Lines starting with `#` are information only and are never read back:
 
 ```yaml
 plan:
 
-  - apply: "yes"                        # yes | no | adopt
+  - apply: "yes"  # yes | no
     namespace: llm-d-sim
     kind: Deployment
     name: dev-model-decode
-    modelID: "meta/llama"               # required — what the container serves
+    modelID: "meta/llama"
     minReplicas: 1
     maxReplicas: 10
     variantCost: "10.0"
-    inferencePool: "optimized-baseline" # informational
+    # scalingPolicy: "standard"
+    # inferencePool: optimized-baseline
 ```
 
-Edit it; `scaledobjects-apply` does exactly what you left in it. Every field is
-explained in the comments the file is written with, so there is nothing to look
-up. `apply: adopt` is for a workload something else already scales: it repoints
-that object at the scaling manager instead of adding a second, because two ScaledObjects on one
-target is two HPAs writing the same replica count. A workload whose model could
-not be read is written as `no` with the reason, and never created without one.
+Edit it, then `scaledobjects-apply` does exactly what the file says. The
+comments at the top of the file explain every field.
 
-> **Running Fast Model Actuation?** The plan can carry a second entry for the
-> same model — the FMA half — switched off by default, and an entry can arrive as
-> `apply: no` until the launcher pods are scraped. See
-> [the FMA post-mortem](../../proposals/fma-post-mortem.md).
+- `apply: adopt` appears only when something already scales the workload. It
+  points that ScaledObject at the scaling manager instead of adding a second one.
+- A workload whose model could not be read is written as `apply: "no"` with a
+  `# note:` saying why.
+- Below the entries, a `warmPools:` section suggests [warm pools](../warm-pool/)
+  for workloads that share an accelerator. All are written `apply: "no"`, because
+  a pool holds its GPUs for as long as it exists.
 
-#### The same file also suggests warm pools
-
-Below the `plan:` entries, `wva-plan.yaml` carries a `warmPools:` section. It
-groups the workloads that share an accelerator and a device count, because they
-could share a [warm pool](../warm-pool/): engines kept loaded on a GPU, so a
-scale-up serves in seconds instead of waiting for a cold model load. A pool holds
-its GPUs for as long as it exists, so every suggestion is written `apply: "no"`.
-Read [Bridge a scale-up with a warm pool](../warm-pool/) before turning one on;
-its `models` and `modelSize` fields are placeholders you must size.
+> **Running Fast Model Actuation?** See [the FMA
+> post-mortem](../../proposals/fma-post-mortem.md) for the extra plan entry.
 
 ## Verification
 
@@ -236,8 +197,6 @@ kubectl get scaledobject,hpa -n ${NAMESPACE}
 ```
 <!-- guide:verify.objects end -->
 
-A working registration looks like this:
-
 ```text
 NAME                                        SCALETARGETKIND      SCALETARGETNAME    MIN  MAX  READY  ACTIVE  TRIGGERS
 scaledobject.keda.sh/dev-model-decode-wva   apps/v1.Deployment   dev-model-decode   1    10   True   True    external-push
@@ -246,50 +205,49 @@ NAME                                                  REFERENCE                 
 horizontalpodautoscaler.autoscaling/keda-hpa-dev-...  Deployment/dev-model-decode   1/1 (avg)   1        10       1
 ```
 
-Three things to read, in this order:
+- **`READY True`**: KEDA reached the scaling manager.
+- **`TARGETS` shows a number**: decisions are flowing. `1/1 (avg)` means one
+  replica is the right size.
+- **`ACTIVE True`**: there is traffic. `Unknown` with no traffic is normal.
 
-- **`READY True`** — KEDA reached the scaling manager and got a metric spec back. The HPA is
-  KEDA's; it creates one per ScaledObject.
-- **`TARGETS` showing a number** — the decision is flowing. `1/1 (avg)` is the scaling manager
-  saying one replica is the right size.
-- **`ACTIVE True`** — there is traffic. `Unknown` on a workload nobody is
-  calling is normal, and not a fault.
-
-`TARGETS` reading **`cpu: <unknown>/80%`** means the opposite of it looks: KEDA
-could not fetch the metric spec from the scaling manager and fell back to a CPU metric, so the
-workload is not being scaled by the scaling manager at all. `READY False` accompanies it. The
-usual cause is a trigger naming a scaler it cannot reach, which is what a
-ScaledObject written for a different install does — the shipped samples name the
-default namespace, and a namespace-scoped install is not there. Repair it with:
+**`TARGETS` reads `cpu: <unknown>/80%`** (with `READY False`): KEDA cannot reach
+the scaling manager, so nothing scales this workload. Usually the ScaledObject
+names a scaler that is not there, such as a shipped sample naming the default
+namespace. Point it at the running install:
 
 ```bash
+# Point ScaledObjects at the running install's scaler
 make scaledobjects-repoint
 ```
 
-It takes no arguments — it finds the install that is running and points the
-object at it. It rewrites `scalerAddress` only, leaves your `modelID`,
-`variantCost` and bounds untouched, and is idempotent. See
-[First-line troubleshooting](../../reference/operations.md#first-line-troubleshooting)
-for the other causes.
+It changes `scalerAddress` only. In the out-of-reach shape, run
+`make scaledobjects-repoint WVA_NS=wva-${NAMESPACE}`. If your token cannot read
+that namespace, it warns and repoints as given. A ScaledObject that names a
+namespace it cannot check is left alone; ask your admin to run the repoint, or
+re-apply that plan entry with `WVA_NS=wva-${NAMESPACE}`. Other causes: [First-line
+troubleshooting](../../reference/operations.md#first-line-troubleshooting).
 
 ### 2. Read the decisions
 
-**Give it an optimize cycle first.** The scaling manager decides on a timer, so a ScaledObject
-created seconds ago has not been through one yet and this returns nothing —
-which reads like a broken install and is not. Measured on a fresh namespace: 0
-decision lines immediately after `scaledobjects-apply`, 53 a few minutes later,
-with no change in between. If it is still empty after a few minutes, that is
-worth investigating; straight away, it is not.
+**Wait a few minutes first.** The scaling manager decides on a timer, so a new
+ScaledObject has no decisions yet. An empty result straight after
+`scaledobjects-apply` is normal.
 
 <!-- guide:verify.decisions start -->
 ```bash
-kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep scaling-decision
+# Needs read access to the controller's logs.
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager --tail=-1 | grep scaling-decision
 ```
 <!-- guide:verify.decisions end -->
 
 ```text
 scaling-decision {"modelID":"meta/llama","decisions":[{"name":"llama-decode-wva","curr":1,"tgt":3,"action":"scale-up"}]}
 ```
+
+The log is the admin's in the out-of-reach shape. Without log access, watch the
+`TARGETS` column of `kubectl get hpa -n ${NAMESPACE}` change, and read
+`ScaledUp` / `ScaledDown` Events with the `kubectl get events` command
+[above](#is-a-cluster-policy-in-force).
 
 ### 3. (Optional) See it in a dashboard
 
@@ -299,27 +257,13 @@ make dashboard
 ```
 <!-- guide:visualize.dashboard end -->
 
-**OpenShift only.** It reads Thanos through the platform's tenancy port and
-publishes itself through a Route, neither of which exists on vanilla Kubernetes;
-it checks, and says so rather than building a Grafana that cannot work. On plain
-Kubernetes, import `deploy/grafana/operational-dashboard.json` into your own
-Grafana and point it at the Prometheus `make check-prereqs` reports.
+**OpenShift only**, and it needs grafana-operator's CRDs (a cluster-admin
+install). It creates a Grafana private to this namespace with the operational
+dashboard, and prints the URL and admin password on every run. On Kubernetes,
+import `deploy/grafana/operational-dashboard.json` into your own Grafana. See
+[Details](#the-dashboard) for what it creates.
 
-Stands up a Grafana private to this namespace — not the shared cluster
-instance, whose dashboards are read-only — with the scaling manager's operational dashboard
-already imported, reading Thanos through a namespaced role rather than any
-cluster-scoped grant. Requires grafana-operator's CRDs; that is a cluster-admin
-install, so this only creates namespaced objects and says plainly if they are
-missing. It also refuses a namespace with no model servers in it: the namespace
-is what the datasource enforces and what the dashboard pins its variable to, so
-the wrong one yields a dashboard that is empty rather than broken. Prints the
-dashboard URL and the admin password on every run, so it is safe to re-run for
-either. Its datasource ServiceAccount, `wva-grafana-datasource`, gets a
-**non-expiring** token Secret, `view` on the namespace and `create` on
-`metrics.k8s.io` pods; whoever reads Secrets in the namespace holds it — see the
-[security model](../../reference/security-model.md#grants-made-after-install).
-
-### 4. (Optional) Drive some load and look at it
+### 4. (Optional) Drive some load
 
 <!-- guide:visualize.smoke start -->
 ```bash
@@ -327,15 +271,10 @@ make benchmark-smoke NAMESPACE=${NAMESPACE}
 ```
 <!-- guide:visualize.smoke end -->
 
-Symmetric 1024-in/1024-out at 15 req/s for five minutes, then a snapshot of the
-dashboard over
-exactly that window, and a line telling you where it is. It answers one question
-— is the scaling manager actually scaling this? — and it needs a GPU cluster, because
-that is what serving a model needs.
-
-It is not a measurement of the model: five minutes of Poisson arrivals is not a
-latency study, and a small model's TTFT says nothing about a large one's. For
-numbers worth comparing, see [Benchmark the scaling manager](../benchmarking/).
+Five minutes of 1024-in/1024-out requests at 15 req/s, then a dashboard
+snapshot of that window. It answers one question: does the scaling manager scale
+this workload? It needs a GPU cluster and is not a benchmark; for that, see
+[Benchmark the scaling manager](../benchmarking/).
 
 ## Cleanup
 
@@ -345,27 +284,16 @@ make undeploy-wva
 ```
 <!-- guide:cleanup.uninstall end -->
 
-This removes the ScaledObjects it created, and KEDA restores each workload to the
-replica count it had before the scaling manager sized it. Objects you adopted are left alone and
-listed by name — they were not this installer's to delete — so repoint or remove
-them yourself: their trigger now calls a scaler that is gone, KEDA keeps the HPA,
-and a workload parked at zero can never be woken.
+It removes the ScaledObjects it created, and KEDA returns each workload to its
+earlier replica count. ScaledObjects you **adopted** are left and listed by name.
+Repoint or remove them yourself: their trigger now calls a scaler that is gone,
+and a workload parked at zero can never wake. `UNDEPLOY_SCALEDOBJECTS=false`
+keeps every ScaledObject, for reinstalling in place.
 
-`UNDEPLOY_SCALEDOBJECTS=false` keeps everything, for reinstalling in place.
-
-### The model servers are still running
-
-`make undeploy-wva` removes the **autoscaler only**. Every model server, EPP and
-InferencePool in the namespace keeps serving, which is usually what you want:
-the scaling manager did not create them, and something else may depend on them.
-
-For the same reason, a drain hook applied with `WVA_WORKLOAD_PATCH_APPLY=true`
-stays: those fields belong to the model server, and the next `helm upgrade` of
-its chart reverts them. A model cache created by `make model-cache` is also left
-alone, because it holds data.
-
-If you stood the model up with
-[Install a small llm-d model](../install-small-model/), that is what removes it:
+The model servers, EPP and InferencePools keep running. A drain hook you applied
+and a model cache from `make model-cache` also stay. If you deployed the model
+with [Install a small llm-d model](../install-small-model/), remove it **after**
+`make undeploy-wva`:
 
 <!-- guide:cleanup.model start -->
 ```bash
@@ -373,45 +301,112 @@ make benchmark-teardown BENCHMARK_NAMESPACE=${NAMESPACE}
 ```
 <!-- guide:cleanup.model end -->
 
-Run it **after** `make undeploy-wva`, not instead of it. It tears down the llm-d
-releases and the namespace, and a controller left behind would keep calling a
-scaler for workloads that no longer exist.
-
 ### What an uninstall run by you leaves behind
 
-A namespace-scoped install has cluster-scoped RBAC that you cannot delete. Run
-by you, `make undeploy-wva` removes everything you may delete, then prints the
-`Forbidden` objects it could not and asks for a cluster admin. Deleting the
-namespace strands them too. Send your admin this, which removes this install's
-hashed ClusterRoles and ClusterRoleBindings and nothing else:
+You cannot delete cluster-scoped RBAC. `make undeploy-wva` removes everything
+you may delete, then lists the `Forbidden` objects for a cluster admin. Deleting
+the namespace leaves them too. Send your admin this:
 
 ```bash
-# Run by a cluster admin. The suffix is the first 8 hex digits of the SHA-256
-# of the controller's namespace (shasum -a 256 on macOS).
-SUFFIX=$(printf '%s' "<the namespace>" | sha256sum | cut -c1-8)
+# Run by a cluster admin: list, then remove, this install's hashed cluster RBAC
+SUFFIX=$(printf '%s' "<the namespace>" | sha256sum | cut -c1-8)   # shasum -a 256 on macOS
 kubectl get clusterrole,clusterrolebinding -o name | grep -- "-${SUFFIX}$"
-NAMESPACE=<the namespace> make undeploy-wva     # removes them; or delete the listed objects by hand
+NAMESPACE=<the namespace> make undeploy-wva
 ```
 
 ## Configuration
 
-`NAMESPACE` is required; everything else is detected, so set one only to
-override what the preflight reported.
+`NAMESPACE` is required. Everything else is detected; set a value only to
+override what `check-prereqs` reported.
 
 | Parameter | Default | Example |
 | --- | --- | --- |
-| `NAMESPACE` | none — **required**, never discovered | `llm-d-optimized-baseline` |
-| `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
+| `NAMESPACE` | none, **required** | `llm-d-optimized-baseline` |
+| `WVA_NS` | `NAMESPACE`. Where the **controller** runs. It differs from `NAMESPACE` in the cluster-wide and out-of-reach shapes | `wva-llm-d-optimized-baseline` |
+| `WVA_WATCH_NS` | `WVA_NS`. The namespace a controller in `WVA_NS` manages (out-of-reach shape) | `llm-d-optimized-baseline` |
+| `IMG` | the image built from main, a **floating** tag ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 | `PROMETHEUS_URL` | detected; Thanos on OpenShift | `https://prom.monitoring.svc:9090` |
-| `KEDA_HELM_INSTALL` | `false` on Kubernetes — assumes cluster KEDA | `true`, to install one with Helm |
+| `KEDA_HELM_INSTALL` | `false` on Kubernetes | `true` |
+| `KEDA_NAMESPACE` | detected (admin step) | `keda` |
+| `PROMETHEUS_SA` | none (admin step) | `monitoring/prometheus-k8s` |
+| `SKIP_CHECKS` | `false`. `true` turns refusals into warnings ([what it does not skip](../../reference/configuration.md#deployment-flags)) | `true` |
 
 Full list: [Configuration reference](../../reference/configuration.md).
+
+## Details
+
+### Why the prerequisites matter
+
+- **No model servers:** the install refuses rather than leave a healthy
+  controller with nothing to scale. A controller pointed at the wrong namespace
+  installs cleanly, reports healthy and scales nothing.
+- **`flowControl`:** it publishes the router queue the scaling manager reads as
+  demand. It is the only signal at zero replicas. EPPs from the llm-d guides have
+  it off.
+- **Model cache:** the cache removes the download, not the load. See [Weights and
+  the model cache](../../reference/workload-preparation.md#weights-and-the-model-cache).
+  `scaledobjects-plan` also flags a workload without one.
+
+### Step 1 settings
+
+- `KEDA_NAMESPACE`: found from the KEDA-served external-metrics APIService; else,
+  with `KEDA_HELM_INSTALL=true` and that APIService NotFound, the namespace the
+  install puts KEDA in; else an existing scaler NetworkPolicy. With none of
+  these, no NetworkPolicy is written.
+- `PROMETHEUS_SA`: the `metrics-reader` binding goes only to a Prometheus you
+  name. A re-run without it keeps the binding an earlier run made.
+- Step 1 also creates the controller's namespace when `WVA_NS` names one apart
+  from yours.
+
+### Reading the policy from the controller log
+
+When `wva-controller-status` is NotFound, read the startup log. It needs
+`pods/log` in the controller's namespace, so in the out-of-reach shape it is
+your admin's check.
+
+```bash
+# Startup lines that say where cluster policy comes from
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager --tail=-1 \
+  | grep -E 'Cluster policy comes from|Could not read the managed Namespace|Cannot tell whether'
+```
+
+- `Cluster policy comes from this controller's own namespace`: your limiters are
+  in force. (It logs at V(1), which the default `-v=2` shows.)
+- `Cluster policy comes from the namespace this one is labelled with` or `...from
+  the well-known namespace`: the admin's limiters are in force.
+- `Could not read the managed Namespace` or `Cannot tell whether a cluster admin
+  published policy`: the controller lacks `get` on Namespaces, so it cannot see a
+  published `wva-policy`. It also sets `wva_policy_namespace_unverified` to 1.
+  A cluster admin re-runs `NAMESPACE=${NAMESPACE} make setup-prereqs`, then the
+  controller restarts.
+
+Every permission and its reason is in the [security
+model](../../reference/security-model.md).
+
+### Adopt and repoint
+
+- `apply: adopt` exists because two ScaledObjects on one target are two HPAs
+  writing the same replica count.
+- `scaledobjects-repoint` finds the running install itself. It leaves `modelID`,
+  `variantCost` and the bounds alone, and is safe to re-run. It never repoints
+  a ScaledObject that names another live install.
+
+### The dashboard
+
+`make dashboard` reads Thanos through the platform's tenancy port and publishes
+through a Route; neither exists on plain Kubernetes, so it checks and says so.
+It reads Thanos through a namespaced role, with no cluster-scoped grant. It
+refuses a namespace with no model servers, because the dashboard pins its
+namespace variable to it. Its datasource ServiceAccount,
+`wva-grafana-datasource`, gets a **non-expiring** token Secret, `view` on the
+namespace and `create` on `metrics.k8s.io` pods. Anyone who can read Secrets in
+the namespace holds that token; see the [security
+model](../../reference/security-model.md#grants-made-after-install).
 
 ## Next
 
 - [After the install](../../reference/operations.md)
-- [Bound every install by real GPUs](../admin-gpu-bounding/) — otherwise
-  scaling is bounded only by each workload's `maxReplicaCount`
-- [Bridge a scale-up with a warm pool](../warm-pool/) — hold models loaded and
-  asleep so a scale-up serves while its replica is still loading
+- [Bound every install by real GPUs](../admin-gpu-bounding/). Without it, only
+  each workload's `maxReplicaCount` bounds scaling.
+- [Bridge a scale-up with a warm pool](../warm-pool/)
 - [Scaling policy](../../reference/scaling-policy.md)
