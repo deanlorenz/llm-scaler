@@ -241,12 +241,45 @@ var _ = Describe("Store", func() {
 				got := store.Get("ns-1", "model-a", "variant-h100")
 				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive), "an H100 measurement kept pricing an H200 engine")
 				Expect(got.TotalKvCapacityTokens).To(BeZero())
+				Expect(got.PriorLiveCapacity).To(BeZero(), "an H100 measurement capped an H200 engine's estimate")
 
 				load("--max-num-seqs=256")
 				goLive()
 				loadOn("H100", 2)
-				Expect(store.Get("ns-1", "model-a", "variant-h100").LearnedFrom).NotTo(Equal(LearnedFromLive),
+				got = store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive),
 					"a one-GPU measurement kept pricing a two-GPU engine")
+				Expect(got.PriorLiveCapacity).To(BeZero(), "a one-GPU measurement capped a two-GPU engine's estimate")
+			})
+
+			It("drops the ceiling when a parked variant moves to other hardware later", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=64")
+				Expect(store.Get("ns-1", "model-a", "variant-h100").PriorLiveCapacity).To(Equal(int64(12800)))
+
+				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H200", 1,
+					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=64")))
+				Expect(store.Get("ns-1", "model-a", "variant-h100").PriorLiveCapacity).To(BeZero(),
+					"the ceiling outlived the hardware it was measured on")
+			})
+
+			It("ages the ceiling out on the measurement's clock, not the record's", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=64")
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.PriorLiveAt).NotTo(BeZero())
+
+				// Rewritten every cycle, the record's own LearnedAt is always
+				// fresh; the measurement is not.
+				aged := *got
+				aged.PriorLiveAt = time.Now().Add(-EvictionTimeout - time.Hour)
+				store.records[storeKey("ns-1", "model-a", "variant-h100")] = &aged
+				load("--max-num-seqs=64")
+				got = store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.PriorLiveCapacity).To(BeZero(), "a measurement older than the eviction horizon still capped the estimate")
+				Expect(got.PriorLiveAt).To(BeZero())
 			})
 
 			It("does not take an unresolved accelerator for a move", func() {

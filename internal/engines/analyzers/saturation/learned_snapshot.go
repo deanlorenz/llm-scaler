@@ -35,6 +35,14 @@ import (
 // variant's state is neither recorded nor installed (engineFingerprint makes
 // the same call for sharing).
 //
+// The tag is the configuration the variant runs at export, not the one each
+// figure was learned under. The capacity record follows a rollout, so k2 and
+// throughput entries learned before it go out under the new fingerprint. That
+// is deliberate: those keys carry no fingerprint, so the running process goes
+// on using the same mixed history after the rollout, and a restore gives what
+// not restarting would have given. A rollout made while the controller was
+// down is the case the check exists for.
+//
 // Pending entries are exported until they are installed or rejected. The first
 // write after a restart happens a minute in, and a variant that has not been
 // analysed by then -- a model parked at zero, one whose policy has not loaded

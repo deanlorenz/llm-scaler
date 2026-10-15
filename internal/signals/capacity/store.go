@@ -52,8 +52,16 @@ type Record struct {
 	// LoadFromScaleTarget replaces a live record after a rollout. It is only
 	// ever a CEILING on the estimate a parked variant is priced from
 	// (estimateStoredCapacity), never a floor and never k1. The next live
-	// write builds a fresh record and so drops it.
+	// write builds a fresh record and so drops it. A move to other hardware
+	// drops it too: it was measured on hardware the variant no longer runs on.
 	PriorLiveCapacity int64
+	// PriorLiveAt is when PriorLiveCapacity was measured: the replaced live
+	// record's LearnedAt, kept as the ceiling is carried from cycle to cycle.
+	// LoadFromScaleTarget rewrites the record every cycle, so its own
+	// LearnedAt never ages; this clock does, and the ceiling is dropped once
+	// it is older than EvictionTimeout, as the live record itself would have
+	// been.
+	PriorLiveAt time.Time
 	// EngineParams are the parsed deployment params for k2 derivation.
 	EngineParams *EngineParams
 	// LearnedFrom is LearnedFromLive for a record written from live metrics,
@@ -94,7 +102,9 @@ func storeKey(namespace, modelID, variantName string) string {
 // Update stores or overwrites a capacity record for a specific variant and
 // stamps LearnedAt. Live data is always authoritative and should always be
 // written via Update, with LearnedFrom set to LearnedFromLive by the caller:
-// that is what stops LoadFromScaleTarget overwriting it.
+// that is what stops LoadFromScaleTarget overwriting it while the variant runs
+// the arguments and hardware it was measured on (LoadFromScaleTarget replaces
+// it when either changes).
 func (s *Store) Update(namespace, modelID, variantName string, record Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,8 +144,11 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 //   - estimateStoredCapacity's live branch, on the zero-replica path, which
 //     returns rec.EffectiveCapacity directly. That figure was min(k1, k2) when
 //     it was written, on the hardware it was written on -- not against
-//     anything current -- and LoadFromScaleTarget refuses to overwrite a live
-//     record, so a redeploy onto a smaller cache does not correct it.
+//     anything current. LoadFromScaleTarget replaces a live record when the
+//     engine arguments or the hardware change, keeping the old figure only as
+//     a ceiling (PriorLiveCapacity); a redeploy that changes neither -- the
+//     same flags on a card with less free memory -- is not seen, and does not
+//     correct it.
 //
 // The real reason is what the alternative is. A nil record on the zero-replica
 // path falls to lookupCompatibleCapacity and then to perReplicaCapacity = 0,
@@ -160,8 +173,10 @@ func (s *Store) IsStale(namespace, modelID, variantName string) bool {
 
 // LoadFromScaleTarget parses the engine args from a scale target (dispatching by
 // detected engine via ParseEngineArgs) and stores an estimated capacity record for
-// the variant. It does NOT overwrite an existing "live" record — scale
-// target-derived data is a fallback only.
+// the variant. Scale-target-derived data is a fallback only: an existing
+// "live" record is kept while the variant runs the arguments and hardware it
+// was measured on (an image-only change re-tags its parameters), and replaced
+// when either changes.
 func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, scaleTarget scaletarget.ScaleTargetAccessor) {
 	if scaleTarget == nil {
 		return
@@ -205,6 +220,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	// from the live record it replaced is carried again from its own record
 	// on the next cycle; otherwise the bound held for one cycle only.
 	var carriedKv, priorLive int64
+	var priorLiveAt time.Time
 	existing, ok := s.records[key]
 	sameHW := ok && sameHardware(existing, accelerator, gpuCount)
 	if ok && existing.LearnedFrom == LearnedFromLive {
@@ -223,10 +239,16 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		// What the variant was last measured at stays a ceiling on what it
 		// is priced at until it is measured again. The derived estimate it
 		// falls back to otherwise has no bound at all when the cache's
-		// geometry changed and no sibling runs the new flags yet.
-		priorLive = existing.EffectiveCapacity
-	} else if ok {
-		priorLive = existing.PriorLiveCapacity
+		// geometry changed and no sibling runs the new flags yet. Not across
+		// a hardware move: a figure measured on other hardware bounds nothing.
+		if sameHW {
+			priorLive, priorLiveAt = existing.EffectiveCapacity, existing.LearnedAt
+		}
+	} else if ok && sameHW && time.Since(existing.PriorLiveAt) <= EvictionTimeout {
+		priorLive, priorLiveAt = existing.PriorLiveCapacity, existing.PriorLiveAt
+	}
+	if priorLive == 0 {
+		priorLiveAt = time.Time{}
 	}
 	// What the KV cache holds is a property of the memory, not of the
 	// scheduler flags. While nothing that shapes it changed, the measured
@@ -240,6 +262,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		GpuCount:          gpuCount,
 		EngineParams:      &params,
 		PriorLiveCapacity: priorLive,
+		PriorLiveAt:       priorLiveAt,
 		LearnedFrom:       "deployment", // same for deployment and LWS
 		LearnedAt:         time.Now(),
 	}

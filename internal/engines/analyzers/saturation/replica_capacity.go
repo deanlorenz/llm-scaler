@@ -711,7 +711,10 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 // it tries to compute a better estimate using the k2 derivation formula with
 // model-level workload averages, bounded by:
 //  1. A compatible variant's live EffectiveCapacity (already min(k1,k2))
-//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override)
+//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override,
+//     or the measured total carried across a flag change)
+//  3. Own PriorLiveCapacity: what the variant was last measured at before a
+//     rollout changed its arguments (boundedBy=prior-live)
 //
 // Falls back to stored EffectiveCapacity (EffectiveMaxBatchedTokens) when no
 // workload data is available.
