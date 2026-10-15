@@ -1018,7 +1018,7 @@ ok 'grep -q "Cannot tell which CA KEDA trusts" "$WORK/warnings"' "verify, marker
 echo "== warmpool.sh reads the controller once: one warning when it cannot"
 # A kubectl that is Forbidden everything, so the controller's mode is unknown.
 mkdir -p "$WORK/kbin"
-printf '#!/bin/sh\necho "Error from server (Forbidden): deployments.apps is forbidden in the namespace notfound-prod" >&2\nexit 1\n' >"$WORK/kbin/kubectl"
+printf '#!/bin/sh\necho "Error from server (Forbidden): deployments.apps is forbidden in the namespace tenant" >&2\nexit 1\n' >"$WORK/kbin/kubectl"
 chmod +x "$WORK/kbin/kubectl"
 PATH="$WORK/kbin:$PATH" bash "$ROOT/deploy/warmpool.sh" create -n tenant --name pool \
     --proxy-image example.invalid/proxy:v1 --wva-namespace wva-system \
@@ -1070,14 +1070,16 @@ arm_outer_exit() { trap 'echo outer >"$WORK/outer-exit"' EXIT; }
 arm_outer_int() { trap 'echo mine' INT; }
 print_int_trap() { trap -p INT; }
 
-echo "== Ctrl-C while the CA is minted leaves no key on disk, and the caller's EXIT trap still runs"
+echo "== Ctrl-C while a leaf is signed leaves no key on disk, and the caller's EXIT trap still runs"
 reset_store
-rm -rf "$WORK/tmpd" "$WORK/outer-exit"
+rm -rf "$WORK/tmpd" "$WORK/outer-exit" "$WORK/tmpd-during"
 mkdir -p "$WORK/tmpd"
 # openssl, as a function, interrupts the shell running the install when it is
-# asked to mint the CA: the Ctrl-C lands mid-mint, with the key directory full.
-run 'arm_outer_exit ; wva_scaler_tls_provision_openssl' "TMPDIR=$WORK/tmpd" \
-    'openssl() { case "$*" in "req -x509"*) kill -INT "$BASHPID" ;; esac; command openssl "$@"; }'
+# asked to sign the first leaf: the CA key and the leaf key are on disk by then,
+# and the function records what the temp directory held at that moment.
+run 'arm_outer_exit ; wva_scaler_tls_provision_openssl' "export TMPDIR=$WORK/tmpd" \
+    'openssl() { case "$*" in "x509 -req"*) find "$TMPDIR" -name "*.key" >"$WORK/tmpd-during"; kill -INT "$BASHPID" ;; esac; command openssl "$@"; }'
+ok '[ -s "$WORK/tmpd-during" ]' "interrupted mint: no key was on disk under TMPDIR when the signal came, so this case proves nothing"
 ok '[ "$RC" = 130 ] && [ -z "$(ls -A "$WORK/tmpd")" ]' "interrupted mint: exit $RC, left behind: $(cd "$WORK/tmpd" && find . -type f | tr '\n' ' ')"
 ok '[ -s "$WORK/outer-exit" ]' "interrupted mint: the caller's EXIT trap did not run (clobbered)"
 
