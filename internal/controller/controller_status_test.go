@@ -209,5 +209,27 @@ optimizer:
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "none"))
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyUtilizationShare, constants.UtilizationShareModeOff))
 		})
+
+		// The bootstrap read of the policy namespace records the policy's
+		// version, never policyIgnored: that key belongs to the controller's
+		// own ConfigMap, and writing it from here would wipe what that one
+		// reported.
+		DescribeTable("the bootstrap read of the policy namespace leaves policyIgnored alone",
+			func(withPolicy bool) {
+				objs := []client.Object{policyConfigMap(systemNS, "", "scaleToZero:\n  retentionPeriod: 5 minutes\n")}
+				if withPolicy {
+					objs = append(objs, policyConfigMap(policyNS, "", quotaShadowPolicy))
+				}
+				r := newReconciler(objs...)
+				reconcile(r, systemNS)
+				ownIgnored := status.Data()[controllerstatus.KeyPolicyIgnored]
+				Expect(ownIgnored).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+
+				Expect(r.bootstrapClusterPolicy(ctx)).To(Succeed())
+				Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ownIgnored))
+			},
+			Entry("a policy ConfigMap is present", true),
+			Entry("no policy ConfigMap exists", false),
+		)
 	})
 })

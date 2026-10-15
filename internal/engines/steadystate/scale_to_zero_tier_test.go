@@ -106,17 +106,60 @@ func TestScaleToZeroHonoursTheVariantsPolicyTier(t *testing.T) {
 
 // Retention is the longest any selected tier asks for, so a model is never
 // parked sooner than one of its variants' tiers allows.
+//
+// The longest is placed first, last and in the middle of the sorted tiers, so
+// a fold that keeps the first or the last tier's value fails one of the cases.
 func TestScaleToZeroPolicyTakesTheLongestRetention(t *testing.T) {
 	on := true
-	policies := map[string]config.ScalingPolicy{
-		"default": {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
-		"batch":   {ScaleToZero: &config.ScaleToZeroEnvelope{RetentionPeriod: "7m"}},
+	retention := func(r string) config.ScalingPolicy {
+		return config.ScalingPolicy{ScaleToZero: &config.ScaleToZeroEnvelope{RetentionPeriod: r}}
 	}
-	got := scaleToZeroPolicy(config.NewTestConfig(), policies, "m", "ns", []string{"", "batch"})
-	if r := config.ResolveScaleToZeroRetention(&got); r != 7*time.Minute {
-		t.Fatalf("retention = %v, want 7m", r)
+	cases := []struct {
+		name     string
+		policies map[string]config.ScalingPolicy
+		tiers    []string
+		want     time.Duration
+	}{
+		{
+			name: "longest in the last tier",
+			policies: map[string]config.ScalingPolicy{
+				"default": {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"batch":   retention("7m"),
+			},
+			tiers: []string{"", "batch"},
+			want:  7 * time.Minute,
+		},
+		{
+			name: "longest in the first tier",
+			policies: map[string]config.ScalingPolicy{
+				"default": {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"alpha":   retention("9m"),
+				"zeta":    retention("3m"),
+			},
+			tiers: []string{"alpha", "zeta"},
+			want:  9 * time.Minute,
+		},
+		{
+			name: "longest in the middle tier",
+			policies: map[string]config.ScalingPolicy{
+				"default": {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"alpha":   retention("2m"),
+				"beta":    retention("8m"),
+				"gamma":   retention("4m"),
+			},
+			tiers: []string{"alpha", "beta", "gamma"},
+			want:  8 * time.Minute,
+		},
 	}
-	if !config.ResolveScaleToZeroEnabled(nil, &got) {
-		t.Fatal("both tiers inherit enabled from the default; the fold must keep it enabled")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scaleToZeroPolicy(config.NewTestConfig(), tc.policies, "m", "ns", tc.tiers)
+			if r := config.ResolveScaleToZeroRetention(&got); r != tc.want {
+				t.Fatalf("retention = %v, want %v", r, tc.want)
+			}
+			if !config.ResolveScaleToZeroEnabled(nil, &got) {
+				t.Fatal("every tier inherits enabled from the default; the fold must keep it enabled")
+			}
+		})
 	}
 }
