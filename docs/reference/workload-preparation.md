@@ -532,14 +532,24 @@ Pass the keys exactly as `engine-cache-keys` prints them, for example
 `torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
 the rank directories the engine wrote. Each one must be on the node.
 
+Multi-node engines (a LeaderWorkerSet, or data parallel across nodes) need
+one more step. Name the leader and every worker pod. Their ranks merge into
+one key, for example 16 ranks for two nodes of eight. `engine-cache-verify`
+then needs all 16 ranks on every node. Each node compiled only its own ranks,
+so this passes only after `make engine-cache-publish`. If you name only the
+leader pod, the check covers only the leader's ranks.
+
 `engine-cache-verify` prints one line per node and key:
 
 - `present`: the key is there, with every listed rank, and every file under it
   can be read.
 - `ABSENT`: the key, or one of its ranks, is not on the node. The line names a
-  missing rank. That node recompiles torch.compile on its next start.
-- `UNREADABLE`: a file under the key cannot be read, or other users cannot
-  read it. The engine may run as a different user than the check.
+  missing rank. It means: if that rank starts on this node, it recompiles
+  torch.compile. On a multi-node engine, a node often lacks ranks that never
+  run there; publish to fill them in.
+- `UNREADABLE`: a file under the key cannot be read, other users cannot read
+  it, or it is a symbolic link. The engine may run as a different user than
+  the check.
 - `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
   Forbidden, or timed out. This is never reported as absent.
 
@@ -572,9 +582,21 @@ The check runs in the preparer pod already on each node (`kubectl exec`, no
 GPU). That pod runs as root on Kubernetes, so it can read any file. To catch
 files the engine could not read, it also reports any file without read
 permission for other users, and any directory without read and search
-permission for them. Symbolic links are not followed or counted. The read
-stops after 300 seconds, and after 280 inside the pod when its image has
-`timeout`.
+permission for them. This mode check is conservative. It looks only at the
+bits for other users. An engine running as root, or as the owning user or
+group (for example a `1770` directory shared by one UID), can read files the
+check calls `UNREADABLE`.
+
+vLLM writes no symbolic links. A link under the key, or a linked directory on
+the way to it, is `UNREADABLE` and is never followed.
+
+`engine-cache-keys` takes no key from a log line saying an AOT save failed
+(`unable to save AOT compiled function to ...`), or that a load failed and
+the engine compiled again. It warns instead.
+
+The read stops after 300 seconds, and after 280 inside the pod when its
+image has `timeout`. The image needs `find` to read file modes; without it
+every key is `COULD NOT CHECK`.
 
 </details>
 

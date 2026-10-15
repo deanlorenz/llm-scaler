@@ -392,7 +392,8 @@ make engine-cache-verify NAMESPACE=$BENCHMARK_NAMESPACE ENGINE_CACHE_KEYS='<key>
 Prefill and decode compile under different keys, so name one pod of each role.
 Copy the keys as `engine-cache-keys` prints them, rank list included.
 Run `make engine-cache-publish` first if the nodes have not been seeded with
-what the first starts compiled. The check does not cover the FlashInfer and
+what the first starts compiled. For a multi-node engine, name the leader and
+every worker pod; the check then passes only after a publish. The check does not cover the FlashInfer and
 Triton caches. What each result means:
 [Check the cache without a second start](../../reference/workload-preparation.md#check-the-cache-without-a-second-start).
 
