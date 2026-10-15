@@ -74,7 +74,7 @@ render() {
 # CRLF, and bash then stops at the first function definition. A file that does
 # not exist yet (the code under test, on a tree without it) becomes an empty
 # one, so every case fails on its missing function instead of the run aborting.
-for f in constants common verify scaler_tls; do
+for f in constants common verify infra_wva scaler_tls; do
     if [ -f "$ROOT/deploy/lib/$f.sh" ]; then
         tr -d '\r' <"$ROOT/deploy/lib/$f.sh" >"$WORK/$f.sh"
     else
@@ -168,6 +168,11 @@ cm_issue() {
 #   STUB_CTA           FORBIDDEN makes the ClusterTriggerAuthentication unreadable
 #   STUB_CONFIGMAPS    FORBIDDEN makes ConfigMaps in the controller namespace unreadable
 #   STUB_FORBID_NS     the namespace a Forbidden message names
+#   STUB_APISERVICE    "<namespace> <service>" behind the external-metrics APIService (else NotFound)
+#   STUB_NP            the namespace an existing wva-external-scaler NetworkPolicy admits (else NotFound)
+#   STUB_KEDA_DEPLOYS  FORBIDDEN makes the Deployments in KEDA's namespace unreadable
+#   STUB_KEDA_OBJ_NS   KEDA_CLUSTER_OBJECT_NAMESPACE on KEDA's operator (else unset)
+# A file $STORE/deployment@<ns>__keda-operator.json is KEDA's operator in <ns>.
 stub_kubectl() {
     printf '%s\n' "$*" >>"$WORK/kubectl.log"
     local a="$*" tmp name
@@ -195,9 +200,42 @@ stub_kubectl() {
             set -- $a
             store_get clustertriggerauthentications.keda.sh "$3"
             ;;
-        "get secret "*" -n keda -o json")
+        "get secret "*" -n "*" -o json")
             set -- $a
-            store_get secret@keda "$3"
+            if [ "$5" != "$NS" ]; then
+                store_get "secret@$5" "$3"
+            else
+                [ "${STUB_SECRETS:-}" != FORBIDDEN ] || { forbidden; return 1; }
+                store_get secret "$3"
+            fi
+            ;;
+        "get apiservice v1beta1.external.metrics.k8s.io "*)
+            if [ -n "${STUB_APISERVICE:-}" ]; then printf '%s' "$STUB_APISERVICE"; else notfound; return 1; fi
+            ;;
+        "get networkpolicy wva-external-scaler -n $NS "*)
+            if [ -n "${STUB_NP:-}" ]; then printf '9090 |%s \n' "$STUB_NP"; else notfound; return 1; fi
+            ;;
+        "get deployments -n "*" -o json")
+            [ "${STUB_KEDA_DEPLOYS:-}" != FORBIDDEN ] || { forbidden; return 1; }
+            jq -n --arg o "${STUB_KEDA_OBJ_NS:-}" 'if $o == "" then {items: []} else {items: [{spec: {template: {spec: {containers: [
+                {name: "keda-operator", env: [{name: "KEDA_CLUSTER_OBJECT_NAMESPACE", value: $o}]}]}}}}]} end'
+            ;;
+        "get deployment keda-operator -n "*" -o name")
+            set -- $a
+            if [ -f "$STORE/deployment@${5}__keda-operator.json" ]; then echo deployment.apps/keda-operator; else notfound; return 1; fi
+            ;;
+        "delete clustertriggerauthentications.keda.sh "*)
+            set -- $a
+            rm -f "$STORE/clustertriggerauthentications.keda.sh__$3.json"
+            ;;
+        "delete configmap "*" -n $NS "*)
+            set -- $a
+            rm -f "$STORE/configmap__$3.json"
+            ;;
+        "delete secret "*" -n "*" --ignore-not-found")
+            set -- $a
+            if [ "$#" = 6 ] && [ "$4" = -n ] && [ "$5" != "$NS" ]; then rm -f "$STORE/secret@${5}__$3.json"; fi
+            if [ "$#" = 6 ] && [ "$4" = -n ] && [ "$5" = "$NS" ]; then rm -f "$STORE/secret__$3.json"; fi
             ;;
         "get scaledobject "*" -n "*" -o json")
             set -- $a
@@ -240,11 +278,6 @@ stub_kubectl() {
             cm_issue "$WORK/cm-applied.yaml"
             ;;
         "wait "*) [ "${STUB_WAIT:-ok}" = ok ] || return 1 ;;
-        "delete secret "*" -n $NS --ignore-not-found")
-            set -- $a
-            name="$3"
-            rm -f "$STORE/secret__$name.json"
-            ;;
         *) return 0 ;;
     esac
 }
@@ -274,6 +307,8 @@ run() {
         . "$WORK/common.sh"
         # shellcheck disable=SC1091
         . "$WORK/verify.sh"
+        # shellcheck disable=SC1091
+        . "$WORK/infra_wva.sh"
         # shellcheck disable=SC1091
         . "$WORK/scaler_tls.sh"
         log_info() { echo "$1" >>"$WORK/info"; }
@@ -802,12 +837,15 @@ ok '! grep -q "restart KEDA" "$WORK/warnings"' "unchanged re-run asks for a KEDA
 rm -f "$STORE/secret__$CA.json"
 put_deploy openssl
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
-ok '[ "$RC" = 0 ] && grep -q "restart KEDA.s operator now" "$WORK/warnings" && grep -q "rollout restart deployment -n keda" "$WORK/warnings"' "a new CA must ask for a KEDA restart: $(cat "$WORK/warnings")"
+ok '[ "$RC" = 0 ] && grep -q "restart KEDA.s operator now" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "a new CA must ask for a KEDA restart: $(cat "$WORK/warnings")"
 
 echo "== the key copy goes only where a tenant cannot choose"
+# The NetworkPolicy in WVA_NS names tenant-pick: that namespace's admin can
+# edit it, so it must not decide where the private key goes. infra_wva.sh is
+# sourced, so code that asks wva_resolve_scaler_keda_namespace would follow it.
 reset_store
 fresh_k
-run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false KEDA_NAMESPACE=tenant-pick
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false KEDA_NAMESPACE=keda-system STUB_NP=tenant-pick
 ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "where KEDA runs is not known" "$WORK/warnings" && ! grep -q "secret@" "$WORK/keda-writes"' "unknown KEDA namespace: on=$WVA_SCALER_TLS_ON, keda writes '$(tr '\n' ' ' <"$WORK/keda-writes")'"
 
 echo "== a tenant uninstall keeps the admin's marker"
@@ -845,11 +883,73 @@ run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent
 ok '[ "$RC" = 0 ] && grep -q "takes over" "$WORK/warnings" && grep -q -- "--external-scaler-cert-path=/mine" "$WORK/stderr"' "takeover: exit $RC, warnings '$(cat "$WORK/warnings")' stderr '$(cat "$WORK/stderr")'"
 
 echo "== undeploy: removes only what carries the installer label, and KEDA's side only from the admin phase"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
 run wva_scaler_tls_undeploy STUB_CM=present
 ok 'grep -q "^delete secret -n $NS -l wva.llmd.ai/scaler-tls" "$WORK/kubectl.log" && grep -q "^delete certificates.cert-manager.io,issuers.cert-manager.io -n $NS -l wva.llmd.ai/scaler-tls" "$WORK/kubectl.log"' "undeploy: $(tr '\n' ';' <"$WORK/kubectl.log")"
 ok 'grep -q "^delete clustertriggerauthentications.keda.sh $CTA" "$WORK/kubectl.log" && grep -q "^delete secret $CTA -n keda" "$WORK/kubectl.log"' "undeploy, admin: KEDA's side not removed: $(tr '\n' ';' <"$WORK/kubectl.log")"
 run wva_scaler_tls_undeploy STUB_CM=present WVA_APPLY_SCOPE=controller
 ok '! grep -q "clustertriggerauthentications\|-n keda" "$WORK/kubectl.log"' "undeploy, controller phase: touched KEDA's side: $(tr '\n' ';' <"$WORK/kubectl.log")"
+
+# ---------------------------------------------------------------- where KEDA is, and restarting it
+echo "== KEDA's Deployments unreadable: where its Secrets go is unknown, not KEDA's namespace"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false \
+    "STUB_APISERVICE='keda keda-operator-metrics-apiserver'" STUB_KEDA_DEPLOYS=FORBIDDEN
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "KEDA_CLUSTER_OBJECT_NAMESPACE" "$WORK/warnings" && ! grep -q "secret@" "$WORK/keda-writes"' "default, KEDA Deployments Forbidden: exit $RC, on=$WVA_SCALER_TLS_ON, keda writes '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/warnings")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false \
+    "STUB_APISERVICE='keda keda-operator-metrics-apiserver'" STUB_KEDA_DEPLOYS=FORBIDDEN
+ok '[ "$RC" = 1 ] && grep -q "KEDA_CLUSTER_OBJECT_NAMESPACE" "$WORK/refusal"' "explicit, KEDA Deployments Forbidden: exit $RC, $(cat "$WORK/refusal")"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA_DEPLOYS=FORBIDDEN
+ok '[ "$RC" = 0 ] && grep -q "secret@keda/$CTA" "$WORK/keda-writes"' "KEDA_NAMESPACE given, Deployments Forbidden: the caller's namespace should be used: $(cat "$WORK/warnings")"
+
+echo "== the restart command names where KEDA runs, not install.sh's keda-system default"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false KEDA_NAMESPACE=keda-system \
+    "STUB_APISERVICE='openshift-keda keda-metrics-apiserver'"
+rm -f "$STORE/secret__$CA.json"
+put_deploy openssl
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NAMESPACE_EXPLICIT=false KEDA_NAMESPACE=keda-system \
+    "STUB_APISERVICE='openshift-keda keda-metrics-apiserver'"
+ok '[ "$RC" = 0 ] && grep -q "kubectl rollout restart deployment/keda-operator -n openshift-keda" "$WORK/warnings"' "restart command on a CMA-style cluster: $(grep -i restart "$WORK/warnings")"
+
+echo "== a first write of KEDA's side while KEDA runs asks for a restart (uninstall, then reinstall)"
+reset_store
+fresh_k
+echo '{}' >"$STORE/deployment@keda__keda-operator.json"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "written for the first time while KEDA.s operator is running" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "reinstall: no restart notice: $(cat "$WORK/warnings")"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+ok '! grep -q "rollout restart" "$WORK/warnings"' "first write with no KEDA operator running asks for a restart: $(cat "$WORK/warnings")"
+
+echo "== an admin uninstall that removed KEDA's side says to restart KEDA"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+run wva_scaler_tls_undeploy STUB_CM=absent
+ok 'grep -q "Before installing this scaler here again, restart it:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "uninstall: no restart notice: $(cat "$WORK/warnings")"
+
+echo "== undeploy removes KEDA's copy where the marker says it went"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA_OBJ_NS=keda-objs
+ok '[ "$RC" = 0 ] && grep -q "secret@keda-objs/$CTA" "$WORK/keda-writes" && [ "$(jq -r .data.secretNamespace "$STORE/configmap__wva-scaler-keda-auth.json")" = keda-objs ]' "moved object namespace: copy not written to keda-objs: '$(tr '\n' ' ' <"$WORK/keda-writes")'"
+# KEDA's operator no longer says where (uninstalled first, or reconfigured).
+run wva_scaler_tls_undeploy STUB_CM=absent
+ok 'grep -q "^delete secret $CTA -n keda-objs" "$WORK/kubectl.log" && [ ! -f "$STORE/secret@keda-objs__$CTA.json" ]' "undeploy left KEDA's copy in keda-objs: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
+
+echo "== undeploy leaves a same-named ClusterTriggerAuthentication and copy it did not write"
+reset_store
+jq -n --arg n "$CTA" '{kind: "ClusterTriggerAuthentication", metadata: {name: $n}}' >"$STORE/clustertriggerauthentications.keda.sh__$CTA.json"
+jq -n --arg n "$CTA" '{kind: "Secret", metadata: {name: $n}, data: {}}' >"$STORE/secret@keda__$CTA.json"
+run wva_scaler_tls_undeploy STUB_CM=absent
+ok '[ -f "$STORE/clustertriggerauthentications.keda.sh__$CTA.json" ] && ! grep -q "^delete clustertriggerauthentications" "$WORK/kubectl.log"' "undeploy deleted a foreign ClusterTriggerAuthentication: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
+ok '[ -f "$STORE/secret@keda__$CTA.json" ] && grep -q "ClusterTriggerAuthentication $CTA was not created by this installer" "$WORK/warnings"' "undeploy deleted a foreign copy, or did not say it left the ClusterTriggerAuthentication: $(cat "$WORK/warnings")"
 
 # ---------------------------------------------------------------- Forbidden is never NotFound
 # probe_* print what a reader concluded, for the cases below.

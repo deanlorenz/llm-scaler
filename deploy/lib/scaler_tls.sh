@@ -41,7 +41,8 @@
 # does not.
 #
 # Requires vars: WVA_NS, ENVIRONMENT. Requires funcs: log_info, log_warning,
-# log_error; kubectl and jq on PATH (openssl for the no-cert-manager path).
+# log_error, and kc_capture (common.sh) for KEDA's side; kubectl and jq on PATH
+# (openssl for the no-cert-manager path).
 
 WVA_SCALER_TLS_SECRET=wva-external-scaler-tls
 WVA_SCALER_CLIENT_SECRET=wva-external-scaler-client-tls
@@ -682,15 +683,16 @@ wva_scaler_install_puts_keda() {
     esac
 }
 
-# wva_scaler_keda_object_ns sets WVA_SCALER_KEDA_OBJ_NS to the namespace KEDA
-# reads a ClusterTriggerAuthentication's Secrets from, or to empty when it is
-# not known. The private key is copied there, so only sources a tenant cannot
-# choose count: KEDA_NAMESPACE set by the caller, the namespace serving the
-# external-metrics APIService, or the namespace this install puts KEDA in.
-# Never the NetworkPolicy in WVA_NS, which that namespace's admin can edit.
-wva_scaler_keda_object_ns() {
-    local kns="" out rc=0 env
-    WVA_SCALER_KEDA_OBJ_NS=""
+# wva_scaler_keda_run_ns sets WVA_SCALER_KEDA_RUN_NS to the namespace KEDA's
+# operator runs in, or to empty when it is not known. Only sources a tenant
+# cannot choose count: KEDA_NAMESPACE set by the caller (install.sh defaults it
+# to keda-system, so only when KEDA_NAMESPACE_EXPLICIT=true), the namespace
+# serving the external-metrics APIService, or the namespace this install puts
+# KEDA in. Never the NetworkPolicy in WVA_NS, which that namespace's admin can
+# edit.
+wva_scaler_keda_run_ns() {
+    local kns=""
+    WVA_SCALER_KEDA_RUN_NS=""
     if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = true ]; then
         kns="${KEDA_NAMESPACE:-}"
     elif declare -F wva_keda_apiservice_ns >/dev/null && kns="$(wva_keda_apiservice_ns 2>/dev/null)"; then
@@ -700,14 +702,37 @@ wva_scaler_keda_object_ns() {
     else
         kns=""
     fi
-    [ -n "$kns" ] || return 0
-    # The operator may move its object namespace; a value from a fieldRef is
-    # its own namespace, which is kns.
-    out="$(kubectl get deployments -n "$kns" -o json 2>/dev/null)" || rc=$?
-    if [ "$rc" = 0 ]; then
-        env="$(printf '%s' "$out" | jq -r '[.items[]?.spec.template.spec.containers[]?.env[]?
-            | select(.name == "KEDA_CLUSTER_OBJECT_NAMESPACE") | .value // empty] | first // ""' 2>/dev/null)" || env=""
+    WVA_SCALER_KEDA_RUN_NS="$kns"
+}
+
+# wva_scaler_keda_object_ns sets WVA_SCALER_KEDA_OBJ_NS to the namespace KEDA
+# reads a ClusterTriggerAuthentication's Secrets from, or to empty when it is
+# not known (WVA_SCALER_KEDA_OBJ_WHY says why). The private key is copied there,
+# so it starts from wva_scaler_keda_run_ns. KEDA's operator may move it with
+# KEDA_CLUSTER_OBJECT_NAMESPACE; when the Deployments there cannot be read, that
+# is unknown, not unset, unless KEDA_NAMESPACE was given explicitly.
+wva_scaler_keda_object_ns() {
+    local kns rc=0 env=""
+    WVA_SCALER_KEDA_OBJ_NS=""
+    WVA_SCALER_KEDA_OBJ_WHY=""
+    wva_scaler_keda_run_ns
+    kns="$WVA_SCALER_KEDA_RUN_NS"
+    if [ -z "$kns" ]; then
+        WVA_SCALER_KEDA_OBJ_WHY="where KEDA runs is not known. Set KEDA_NAMESPACE=<the namespace KEDA runs in>"
+        return 0
     fi
+    kc_capture get deployments -n "$kns" -o json || rc=$?
+    if [ "$rc" != 0 ]; then
+        if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = true ]; then
+            WVA_SCALER_KEDA_OBJ_NS="$kns"
+            return 0
+        fi
+        WVA_SCALER_KEDA_OBJ_WHY="the Deployments in $kns, where KEDA runs, cannot be read ($(printf '%s\n' "$KC_ERR" | head -1)), so whether KEDA_CLUSTER_OBJECT_NAMESPACE moves its Secrets elsewhere is unknown. Grant list on deployments there, or set KEDA_NAMESPACE=$kns"
+        return 0
+    fi
+    # A value from a fieldRef is the operator's own namespace, which is kns.
+    env="$(printf '%s' "$KC_OUT" | jq -r '[.items[]?.spec.template.spec.containers[]?.env[]?
+        | select(.name == "KEDA_CLUSTER_OBJECT_NAMESPACE") | .value // empty] | first // ""' 2>/dev/null)" || env=""
     WVA_SCALER_KEDA_OBJ_NS="${env:-$kns}"
 }
 
@@ -743,7 +768,7 @@ wva_scaler_keda_auth_apply() {
     fi
     wva_scaler_keda_object_ns
     if [ -z "$WVA_SCALER_KEDA_OBJ_NS" ]; then
-        wva_scaler_keda_not_ready "where KEDA runs is not known. Set KEDA_NAMESPACE=<the namespace KEDA runs in>"
+        wva_scaler_keda_not_ready "$WVA_SCALER_KEDA_OBJ_WHY"
         return 0
     fi
     if ! kubectl auth can-i create clustertriggerauthentications.keda.sh >/dev/null 2>&1 \
@@ -835,14 +860,36 @@ wva_scaler_keda_auth_apply() {
     WVA_SCALER_KEDA_READY=true
     log_success "KEDA's side of the scaler TLS: ClusterTriggerAuthentication $name, reading Secret $name in $WVA_SCALER_KEDA_OBJ_NS (client certificate expires $not_after; KEDA trusts ${ca_src})"
     if [ "$changed" = true ]; then
-        log_warning "KEDA's client certificate or the CA it trusts changed. KEDA keeps the TLS of a connection it already has until it restarts, so restart KEDA's operator now:  kubectl rollout restart deployment -n $(wva_scaler_keda_operator_ns) -l app=keda-operator"
+        log_warning "KEDA's client certificate or the CA it trusts changed. KEDA keeps the TLS of a connection it already has until it restarts, so restart KEDA's operator now:  $(wva_scaler_keda_restart_cmd)"
+    elif [ "$obj_state" = absent ] && wva_scaler_keda_operator_may_run; then
+        # A first write while KEDA runs: after an uninstall and reinstall, KEDA
+        # still holds the connection it built with the old certificate.
+        log_warning "KEDA's side was written for the first time while KEDA's operator is running. If this scaler was installed here before (an uninstall and reinstall), KEDA still holds the old certificate and every handshake fails until it restarts. Then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
     fi
 }
 
 # wva_scaler_keda_operator_ns echoes the namespace KEDA's operator runs in,
-# for a message: the object namespace unless KEDA_NAMESPACE names another.
+# for a message: wva_scaler_keda_run_ns, else the namespace KEDA's Secrets are
+# in (from this run, or from the marker), else a placeholder.
 wva_scaler_keda_operator_ns() {
-    printf '%s\n' "${KEDA_NAMESPACE:-$WVA_SCALER_KEDA_OBJ_NS}"
+    [ -n "${WVA_SCALER_KEDA_RUN_NS:-}" ] || wva_scaler_keda_run_ns
+    printf '%s\n' "${WVA_SCALER_KEDA_RUN_NS:-${WVA_SCALER_KEDA_OBJ_NS:-${WVA_SCALER_KEDA_MARKER_NS:-<KEDA namespace>}}}"
+}
+
+# wva_scaler_keda_restart_cmd echoes the command that restarts KEDA's operator,
+# the Deployment KEDA's own manifests and Helm chart name keda-operator.
+wva_scaler_keda_restart_cmd() {
+    printf 'kubectl rollout restart deployment/keda-operator -n %s\n' "$(wva_scaler_keda_operator_ns)"
+}
+
+# wva_scaler_keda_operator_may_run succeeds unless KEDA's operator Deployment is
+# known to be absent: a Deployment that cannot be read may be running.
+wva_scaler_keda_operator_may_run() {
+    local ns rc=0
+    ns="$(wva_scaler_keda_operator_ns)"
+    kc_capture get deployment keda-operator -n "$ns" -o name || rc=$?
+    [ "$rc" = 0 ] && return 0
+    ! wva_scaler_not_found "$KC_ERR"
 }
 
 # wva_scaler_keda_not_ready reports that KEDA's side could not be written: a
@@ -862,6 +909,10 @@ wva_scaler_keda_not_ready() {
 # holds an older (still valid) client certificate than the one in WVA_NS, and
 # WVA_SCALER_KEDA_NOT_AFTER when the one KEDA holds expires, and
 # WVA_SCALER_KEDA_EXPIRING whether that is within WVA_SCALER_RENEW_DAYS.
+# WVA_SCALER_KEDA_CA_STALE is true when KEDA trusts another CA than the one
+# that signs the serving certificate now, and unknown when the marker does not
+# record it (an older installer wrote it). WVA_SCALER_KEDA_MARKER_NS is where
+# the marker says KEDA's copy went.
 wva_scaler_keda_marker_state() {
     local out rc=0 cta sha cur d
     WVA_SCALER_KEDA_READY=false
@@ -870,6 +921,7 @@ wva_scaler_keda_marker_state() {
     WVA_SCALER_KEDA_NOT_AFTER=""
     WVA_SCALER_KEDA_EXPIRING=false
     WVA_SCALER_KEDA_CA_STALE=false
+    WVA_SCALER_KEDA_MARKER_NS=""
     out="$(kubectl get configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
         if wva_scaler_not_found "$out"; then
@@ -881,6 +933,7 @@ wva_scaler_keda_marker_state() {
     fi
     cta="$(printf '%s' "$out" | jq -r '.data.clusterTriggerAuthentication // ""')"
     sha="$(printf '%s' "$out" | jq -r '.data.clientCertSha256 // ""')"
+    WVA_SCALER_KEDA_MARKER_NS="$(printf '%s' "$out" | jq -r '.data.secretNamespace // ""')"
     if [ "$cta" != "$(wva_scaler_keda_auth_name)" ]; then
         WVA_SCALER_KEDA_WHY="ConfigMap $WVA_SCALER_KEDA_MARKER names ClusterTriggerAuthentication '${cta}', not $(wva_scaler_keda_auth_name)"
         return 0
@@ -915,7 +968,12 @@ wva_scaler_keda_marker_state() {
     want=""
     [ -s "$d/ca" ] && want="$(wva_scaler_sha256 "$d/ca")"
     rm -rf "$d"
-    [ -z "$cas" ] || [ -z "$want" ] || [ "$cas" = "$want" ] || WVA_SCALER_KEDA_CA_STALE=true
+    # A marker from an installer that did not record the CA: cannot tell.
+    if [ -z "$cas" ]; then
+        WVA_SCALER_KEDA_CA_STALE=unknown
+    elif [ -n "$want" ] && [ "$cas" != "$want" ]; then
+        WVA_SCALER_KEDA_CA_STALE=true
+    fi
 }
 
 # wva_scaler_plaintext_scaledobjects echoes <namespace>/<name> of every
@@ -1287,13 +1345,54 @@ wva_scaler_tls_undeploy() {
     # KEDA's side, and the marker that records it, are the admin's: only an
     # uninstall that may write them removes them.
     [ "${WVA_APPLY_SCOPE:-all}" != controller ] || return 0
-    kubectl delete configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true
-    local name
+    local name marker_state copy_ns="" out rc=0 removed=false
     name="$(wva_scaler_keda_auth_name)"
-    kubectl delete clustertriggerauthentications.keda.sh "$name" --ignore-not-found >/dev/null 2>&1 || true
-    wva_scaler_keda_object_ns
-    if [ -n "$WVA_SCALER_KEDA_OBJ_NS" ]; then
-        kubectl delete secret "$name" -n "$WVA_SCALER_KEDA_OBJ_NS" --ignore-not-found >/dev/null 2>&1 \
-            || log_warning "Could not remove KEDA's copy of the scaler client certificate, Secret $name in $WVA_SCALER_KEDA_OBJ_NS."
+    # The marker records where the copy went. Read it before anything is
+    # deleted, and delete it last: it is how a re-run finds the copy.
+    wva_scaler_object_state configmap "$WVA_SCALER_KEDA_MARKER"
+    marker_state="$WVA_OBJ_STATE"
+    if [ "$marker_state" = ours ]; then
+        copy_ns="$(printf '%s' "$WVA_OBJ_JSON" | jq -r '.data.secretNamespace // ""' 2>/dev/null)" || copy_ns=""
+    fi
+
+    out="$(kubectl get clustertriggerauthentications.keda.sh "$name" -o json 2>&1)" || rc=$?
+    if [ "$rc" = 0 ]; then
+        if ! printf '%s' "$out" | jq -e --arg k "$WVA_SCALER_TLS_LABEL" '.metadata.labels[$k] // empty' >/dev/null 2>&1; then
+            log_warning "ClusterTriggerAuthentication $name was not created by this installer (no $WVA_SCALER_TLS_LABEL label); left in place."
+        elif kubectl delete clustertriggerauthentications.keda.sh "$name" --ignore-not-found >/dev/null 2>&1; then
+            removed=true
+        else
+            log_warning "Could not remove ClusterTriggerAuthentication $name."
+        fi
+    elif ! wva_scaler_not_found "$out"; then
+        log_warning "Could not read ClusterTriggerAuthentication $name ($(printf '%s\n' "$out" | head -1)); left in place."
+    fi
+
+    if [ -z "$copy_ns" ]; then
+        wva_scaler_keda_object_ns
+        copy_ns="$WVA_SCALER_KEDA_OBJ_NS"
+    fi
+    if [ -n "$copy_ns" ]; then
+        WVA_NS="$copy_ns" wva_scaler_object_state secret "$name"
+        case "$WVA_OBJ_STATE" in
+            ours)
+                if kubectl delete secret "$name" -n "$copy_ns" --ignore-not-found >/dev/null 2>&1; then
+                    removed=true
+                else
+                    log_warning "Could not remove KEDA's copy of the scaler client certificate, Secret $name in $copy_ns."
+                fi ;;
+            foreign) log_warning "Secret $name in $copy_ns was not created by this installer (no $WVA_SCALER_TLS_LABEL label); left in place." ;;
+            unreadable) log_warning "Could not read Secret $name in $copy_ns ($WVA_OBJ_ERR); KEDA's copy of the scaler client key may still be there." ;;
+        esac
+    elif [ "$marker_state" != absent ]; then
+        log_warning "Where KEDA's copy of the scaler client certificate went is not known (${WVA_SCALER_KEDA_OBJ_WHY:-the marker names no namespace}); Secret $name in KEDA's namespace may still be there."
+    fi
+
+    case "$marker_state" in
+        ours) kubectl delete configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true ;;
+        foreign) log_warning "ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); left in place." ;;
+    esac
+    if [ "$removed" = true ]; then
+        log_warning "KEDA's side of the scaler TLS is removed, but KEDA's operator keeps the connection it built with it until it restarts. Before installing this scaler here again, restart it:  $(wva_scaler_keda_restart_cmd)"
     fi
 }
