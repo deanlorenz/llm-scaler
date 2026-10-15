@@ -42,19 +42,21 @@ version, for readers outside the repository:
 ## The problem
 
 **The available signals do not mean anything stable.** The cost of a request
-depends on its shape, so two requests to one model can differ by a factor of a
-thousand in compute. A threshold tuned for one traffic pattern is wrong for the
+depends on its shape, so two requests to one model can differ by orders of
+magnitude in compute. A threshold tuned for one traffic pattern is wrong for the
 next, and nothing in the signal says so. We ran a trace at a constant 6 req/s
 where only the shape changed, from 6000 tokens in and 1000 out to 1000 in and
 4000 out. One decode replica sustains about 5.4 req/s at the first shape and 2.5
-at the second, so the fleet had to go from two replicas to three:
+at the second, so the fleet had to go from two replicas to three (Qwen3-0.6B,
+experimental P/D path, a tuned HPA with a 180 s scale-down window, build
+`f5f98761` of 2026-09-23). The last two rows are computed, not measured arms:
 
 | signal | what it showed | what it implies |
 | --- | --- | --- |
 | request rate | constant at 6 req/s | nothing to do |
 | gateway queue depth | flat, no queue ever formed | nothing to do |
 | a KV-occupancy trigger (as in llm-d's token-aware decode recipe) | 5–15 % in the steady phase | scale down to one |
-| running requests per replica (llm-d's default trigger) | a per-replica constant, valid for the one shape it was tuned on | re-tune when the shape changes |
+| running requests per replica (llm-d's default trigger) | a per-replica constant, valid for the one shape it was tuned on | likely over-ordering at these long requests (unmeasured); re-tune when the shape changes |
 
 **Reacting after saturation is too late.** A replica is ready when the model has
 loaded and the kernels have compiled: about 41 s for an 8B server, 192 s for
@@ -106,14 +108,14 @@ push path; quota-bounded scaling, against either a
 
 | Claim | Measured | Where |
 | --- | --- | --- |
-| A shape change is caught without a queue | Third replica ordered at +1344 s, about four minutes after the shape change, once that shape's throughput was measured, on a controller that had seen both shapes. No queue formed in the second phase; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
+| A shape change is caught without a queue | Third replica ordered at +1344 s, about four minutes after the shape change, once that shape's throughput was measured, on a controller that had seen both shapes. No queue formed in the second phase; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/measured.md) |
 | Missing it has a price | A cold controller sized the same window from occupancy: 4.2 s p95 in that five-minute window (204 ms over the whole run) | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision precedes the queue | Second replica ordered at +53 s, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode 1 → 2 → 3, prefill never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The warm pool covers the rise | p95 TTFT per rise falls from 5.2–8.8 s to 0.11–0.83 s | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | It beats the floor it replaces | 14 138 GPU-seconds against 16 080, 12 % less, within 50 ms of the floor's latency on three of four rises | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | And what it costs | 17 % more than holding nothing, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
-| A warm Pod switches models fast | About 437 ms (four switches of 435–440 ms) against roughly 41 s cold, on an H100 test cluster | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
+| A warm Pod switches models fast | About 437 ms (four switches of 435–440 ms) against roughly 41 s cold, on an H100 test cluster. That is the engine switch itself; in the warm-pool benchmark the lend waits for the scale-up decision and was first seen 33–143 s after each traffic rise | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
 | Cold start is mostly not the weights | 8B ~41 s; GLM 192 s of which 40 s is weights; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
 | The P/D result reproduces | The pair was run twice a day apart, within a tenth of every figure except the cold pass's first five minutes, where one window ranged from 0.25 s to 5.6 s | [P/D path](well-lit-paths/pd-disaggregation/) |
 

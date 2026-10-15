@@ -1,19 +1,18 @@
 # Router configuration
 
-What an operator sets on the llm-d inference router (the Endpoint Picker, EPP)
-so that the signals the scaling manager reads mean what it assumes they mean.
+What to set on the llm-d inference router (the Endpoint Picker, EPP) so the
+signals the scaling manager reads mean what it assumes.
 
-The scaling manager does not configure the router and does not route anything.
-It *reads* the router, and two of the router's settings decide what it sees:
+The scaling manager does not configure the router or route anything. It *reads*
+the router, and two router settings decide what it sees:
 
-- **flow control** bounds the gateway queue, and the scaling manager reads that
-  queue as demand;
-- **scheduling profiles** decide which replica each request goes to, and so
-  whether replicas the scaling manager orders are actually used.
+- **flow control** bounds the gateway queue, which the scaling manager reads as
+  demand;
+- **scheduling profiles** pick the replica for each request, and so decide
+  whether the replicas the scaling manager orders get used.
 
-Neither is wrong by default. Both have defaults that suit a short-prompt
-workload and behave differently under long prompts, and neither announces that
-it is the thing limiting you.
+Neither default is wrong. Both suit short prompts and behave differently under
+long ones, and neither tells you when it is what limits you.
 
 ## Flow control bounds the demand signal
 
@@ -24,22 +23,21 @@ both read
 llm_d_epp_flow_control_queue_size or inference_extension_flow_control_queue_size
 ```
 
-as the model's queued demand. Requests sitting in that queue have reached no
-engine yet; they are what `estimateSchedulerQueueDemand` charges to the roles,
-and on a disaggregated fleet they are most of what sizes prefill. **However the
-router is configured to bound that queue is the ceiling on the demand the
-scaling manager can see.**
+as the model's queued demand. Requests in that queue have reached no engine
+yet. `estimateSchedulerQueueDemand` charges them to the roles, and on a
+disaggregated fleet they are most of what sizes prefill. **The bound on that
+queue is the ceiling on the demand the scaling manager can see.**
 
-Ask the router what it resolved, rather than reading the ConfigMap — defaults
-are filled in at load and the ConfigMap does not show them:
+Ask the router what it resolved, not the ConfigMap: defaults are filled in at
+load and the ConfigMap does not show them:
 
 ```bash
+# Print the flow-control configuration the router resolved
 kubectl -n <ns> logs deploy/<model>-router-epp -c epp \
   | grep -o 'FlowControlConfig:{.*}' | head -1
 ```
 
-An unconfigured `llm-d-router-endpoint-picker:v0.9.0` answers with, in
-substance:
+An unconfigured `llm-d-router-endpoint-picker:v0.9.0` answers, in substance:
 
 ```
 Controller:{DefaultRequestTTL:0s ExpiryCleanupInterval:1s ...}
@@ -47,7 +45,7 @@ Registry:{MaxBytes:0 MaxRequests:0
           PriorityBands:[{Priority:0 Queue:ListQueue MaxBytes:1000000000 MaxRequests:0}]}
 ```
 
-Read that as three facts:
+That is three facts:
 
 | setting | value here | meaning |
 |---|---|---|
@@ -55,15 +53,14 @@ Read that as three facts:
 | `MaxRequests` (band) | `0` | no count bound applied on this version. |
 | `MaxBytes` (band) | `1000000000` | 1 GB — the only bound that actually applies. |
 
-**Check your own version rather than copying this table.** These are the values
-*this* router resolved with no `flowControl` block configured; defaults differ
-between router versions, and a newer one defaults `defaultRequestTTL` to 60s
-and gives each band a count bound. The command above prints what yours
-actually resolved, which is the only answer that is true for your deployment.
+**Check your own version; do not copy this table.** These are what *this*
+router resolved with no `flowControl` block. Defaults differ between versions: a
+newer one defaults `defaultRequestTTL` to 60s and gives each band a count bound.
+The command above prints what yours resolved.
 
-The practical consequence is that the queue is bounded by *bytes*, and prompt
-length decides how many requests that is. Measured on a 30,000-token prompt
-trace at 12 req/s against a fleet that could not keep up:
+So the queue is bounded by *bytes*, and prompt length decides how many requests
+that is. Measured on a 30,000-token prompt trace at 12 req/s, against a fleet
+that could not keep up:
 
 | | observed |
 |---|---|
@@ -72,28 +69,25 @@ trace at 12 req/s against a fleet that could not keep up:
 | mean time a request spent queued | **181 s** |
 | requests evicted, all as `client disconnected: request evicted from queue: request context cancelled` | 246 |
 
-At ~170 KB per queued request the byte cap is reached at roughly 6,000
-requests, so on this workload *bytes* bind first and request count never does.
-On a 500-token prompt the same cap is tens of thousands of requests, and the
-queue is effectively unbounded. The same configuration therefore behaves
-completely differently depending on prompt length, which is the part worth
-knowing before an incident rather than during one.
+At ~170 KB per queued request the byte cap is reached at about 6,000
+requests, so here *bytes* bind first and the count never does. With 500-token
+prompts the same cap is tens of thousands of requests, and the queue is in
+effect unbounded. The same configuration behaves very differently with prompt
+length.
 
 Two consequences for the scaling manager:
 
 1. **An unbounded queue is an unbounded demand signal.** The scaling manager
-   will keep ordering replicas for work that is queued, including work whose
-   client has already timed out. The 246 evictions above were all
-   `client disconnected` — not the router shedding by policy, because with
-   `DefaultRequestTTL: 0s` it never does.
-2. **A request queued for 181 seconds is not demand you can serve.** If your
-   service objective is a 30-second time-to-first-token, a request that has
-   been queued for three minutes is already a failure; scaling for it buys
-   nothing and costs GPUs.
+   keeps ordering replicas for queued work, including work whose client has
+   already timed out. The 246 evictions above were all `client disconnected`,
+   not the router shedding by policy: with `DefaultRequestTTL: 0s` it never does.
+2. **A request queued for 181 seconds is not demand you can serve.** With a
+   30-second time-to-first-token objective, a request queued for three minutes
+   has already failed. Scaling for it buys nothing and costs GPUs.
 
 ### A TTL has to cover two different kinds of waiting
 
-There are two reasons a request cannot dispatch, and they want opposite
+A request cannot dispatch for one of two reasons, and they need opposite
 budgets:
 
 | regime | meaning | what waiting buys | right budget |
@@ -101,27 +95,25 @@ budgets:
 | **saturated** | endpoints exist, all busy | a slot frees in seconds | short — keep TTFT inside the objective |
 | **empty pool** | no endpoints at all | a pod starts: image pull + weight load | long — minutes |
 
-**This matters more here than on most deployments, because the scaling manager
-scales to zero.** Every scale-from-zero is the empty-pool regime, and the wait
-is a pod start. Measured on this stack, pod startup is **60-64 seconds**. A TTL
-chosen for a time-to-first-token objective — 30 seconds, say — sheds every
-scale-from-zero request about half a minute before the pod it was waiting for
-becomes ready, and the autoscaler looks like it failed to scale when it was
-the router that gave up.
+**This matters more here than usual, because the scaling manager scales to
+zero.** Every scale-from-zero is the empty-pool case, and the wait is a pod
+start: **60-64 seconds** measured on this stack. A TTL set for a
+time-to-first-token objective (30 seconds, say) sheds every scale-from-zero
+request about half a minute before its pod is ready. The autoscaler then looks
+like it failed to scale, when the router gave up.
 
-v0.11.0 and newer split the two (`defaultRequestTTL` for the saturated regime,
-`noEndpointRequestTTL` for the empty pool, each charged from the later of
+v0.11.0 and newer split the two: `defaultRequestTTL` for the saturated case,
+`noEndpointRequestTTL` for the empty pool. Each is charged from the later of
 enqueue time and the last regime change, so a regime change restarts the
-budget). **v0.9.0 does not**: its resolved configuration carries
-`DefaultRequestTTL` and no empty-pool budget at all, so one number serves both
-regimes and the only safe choice is the longer one. That is why the scenarios
-in this repo pin v0.11.0.
+budget. **v0.9.0 does not**: it has `DefaultRequestTTL` and no empty-pool
+budget, so one number serves both and the only safe choice is the longer one.
+That is why this repo's scenarios pin v0.11.0.
 
 ### Which router version you need
 
-The two-budget split is the difference between a scale-to-zero deployment that
-works and one that sheds its own cold starts, so it decides the version. Taken
-from the shipped binaries rather than release notes:
+The two-budget split decides whether a scale-to-zero deployment works or
+sheds its own cold starts, so it decides the version. From the shipped binaries,
+not release notes:
 
 | flow-control feature | v0.9.0 | v0.11.0 |
 |---|---|---|
@@ -131,16 +123,15 @@ from the shipped binaries rather than release notes:
 | `sheddable-eviction-filter` | absent | present |
 | `slo-deadline`, `edf-ordering`, round-robin and program-aware fairness | present | present |
 
-**On v0.9.0 there is no value of `defaultRequestTTL` that serves a
-scale-to-zero deployment.** Short enough for a time-to-first-token objective
-kills cold starts; long enough for a cold start abandons the objective
-whenever the pool is merely busy. Upgrade, or accept one of those.
+**On v0.9.0 no `defaultRequestTTL` serves a scale-to-zero deployment.** Short
+enough for a time-to-first-token objective kills cold starts. Long enough for a
+cold start gives up the objective whenever the pool is just busy. Upgrade, or
+accept one of those.
 
 #### Migrating to v0.11.0: three changes
 
-A P/D config does not start on v0.11.0 unmodified. Each of these is a startup
-failure, found by deploying and reading the error, and none of them is in a
-release note:
+A P/D config does not start on v0.11.0 unchanged. Each of these is a startup
+failure, and none is in a release note:
 
 **1. `disagg-headers-handler` is gone.**
 
@@ -148,14 +139,12 @@ release note:
 configuration validation failed: plugin type 'disagg-headers-handler' is not registered
 ```
 
-Upstream `runner.go` registers only `disagg-profile-handler` — now
-`disagg.HandlerFactory`, via `RegisterWithPluginDependencies` — and the three
-PD deciders. The two v0.9.0 types `disagg.HeadersHandler` and
-`disagg.PdProfileHandler` collapsed into one `disagg.Handler` taking a
-`StageOrder`. So the handler is **absorbed, not renamed**: delete the line,
-do not look for a replacement. (`header-profile-handler` exists in v0.11.0 and
-is *not* it — that is an unrelated Alpha plugin that picks a profile from a
-header.)
+**Delete the line**; there is no replacement. Upstream `runner.go` registers
+only `disagg-profile-handler` (now `disagg.HandlerFactory`, via
+`RegisterWithPluginDependencies`) and the three PD deciders. The v0.9.0 types
+`disagg.HeadersHandler` and `disagg.PdProfileHandler` merged into one
+`disagg.Handler` taking a `StageOrder`. (`header-profile-handler` in v0.11.0 is
+*not* it: it is an unrelated Alpha plugin that picks a profile from a header.)
 
 **2. `deciderPluginName` was removed.**
 
@@ -164,10 +153,9 @@ failed to parse parameters of the disagg-profile-handler
   json: unknown field "deciderPluginName"
 ```
 
-Use `deciders.prefill`. v0.9.0 had been warning about this at every startup:
-*"Deprecated parameter 'deciderPluginName', use 'deciders.prefill' instead"* —
-worth grepping your current router's log for deprecation warnings before any
-upgrade, since they are the migration notes.
+Use `deciders.prefill`. v0.9.0 warned at every startup: *"Deprecated parameter
+'deciderPluginName', use 'deciders.prefill' instead"*. Before any upgrade, grep
+your router's log for deprecation warnings: they are the migration notes.
 
 ```yaml
 - type: disagg-profile-handler
@@ -176,15 +164,14 @@ upgrade, since they are the migration notes.
       prefill: always-disagg-pd-decider
 ```
 
-**3. The metrics data source has to be declared.** This one does not crash, and
-is the dangerous one.
+**3. Declare the metrics data source.** This one does not crash, which makes
+it the dangerous one.
 
-v0.9.0's framework injected a working `metrics-data-source`; v0.11.0's
-auto-created producer does not reach the engines. With no engine metrics every
-endpoint reads stale, and the utilization detector scores a stale endpoint as
-**fully saturated** — it fails closed. The router starts, reports healthy, and
-then a single request against an idle fleet takes 19-30 s or sheds at the TTL
-with a 429. Declare it explicitly:
+v0.9.0 injected a working `metrics-data-source`; v0.11.0's auto-created producer
+does not reach the engines. Without engine metrics every endpoint reads stale,
+and the utilization detector scores a stale endpoint as **fully saturated** (it
+fails closed). The router starts and reports healthy, then one request against
+an idle fleet takes 19-30 s or is shed at the TTL with a 429. Declare it:
 
 ```yaml
 - type: metrics-data-source
@@ -195,17 +182,17 @@ with a 429. Declare it explicitly:
 - type: core-metrics-extractor
 ```
 
-After those three, the `flowControl` block parses and resolves as written:
+After these three, the `flowControl` block resolves as written:
 `DefaultRequestTTL: 30s, NoEndpointRequestTTL: 3m0s, PriorityBands:
 [{Priority: 0, MaxBytes: 1073741824, MaxRequests: 2000}]`.
 
-**Verify the P/D split afterwards, not just that it starts.** A wrong answer in
-the disaggregation plugins does not crash — it quietly routes everything to one
-role, and a benchmark still produces plausible numbers. Drive a dozen
-completions and require *both* roles' `vllm:request_success_total` to move:
+**Then verify the P/D split, not just that it starts.** A mistake in the
+disaggregation plugins does not crash: it quietly routes everything to one role,
+and a benchmark still gives plausible numbers. Drive a dozen completions and
+check that *both* roles' `vllm:request_success_total` moved:
 
 ```bash
-# before and after driving traffic, per role
+# Read the success counter on one pod per role, before and after the traffic
 kubectl -n <ns> exec <pod> -c vllm -- \
   sh -c 'curl -s localhost:$VLLM_INFERENCE_PORT/metrics | grep ^vllm:request_success_total'
 ```
@@ -213,10 +200,9 @@ kubectl -n <ns> exec <pod> -c vllm -- \
 Measured here after the migration: completions in 27-120 ms (v0.9.0 was
 44-113 ms), and 12 requests incremented both roles by exactly 12.
 
-And **pin the router version** rather than inheriting it from a benchmark
-harness's anchor. An unpinned router changes how requests are spread and how
-the demand queue is bounded between one run and the next, with nothing in the
-output saying so.
+**Pin the router version**; do not inherit it from a benchmark harness. An
+unpinned router can change how requests spread and how the queue is bounded
+between runs, with nothing in the output saying so.
 
 ### What to set
 
@@ -234,40 +220,37 @@ flowControl:
       maxBytes: 1Gi
 ```
 
-On v0.9.0, with no split available, the only safe single value is one that
-clears pod start — `defaultRequestTTL: 180s` — and the TTFT objective goes
-unserved while the pool is busy.
+On v0.9.0, with no split, the only safe single value clears pod start
+(`defaultRequestTTL: 180s`), and the TTFT objective goes unserved while the pool
+is busy.
 
-Two things that are easy to get wrong:
+Two easy mistakes:
 
-**A TTL only acts if the caller waits at least as long.** Pair it with a
-gateway request timeout no shorter than the TTL. Otherwise the client
-disconnects first and the request is evicted as a cancelled context rather than
-shed by policy — which is exactly what the 246 evictions above were, every one
-of them the same message as above, ending `request context cancelled`. The
-router never got
-to apply a budget because it had none, and the caller supplied the only bound.
+**A TTL acts only if the caller waits at least as long.** Set a gateway request
+timeout no shorter than the TTL. Otherwise the client disconnects first, and the
+request is evicted as a cancelled context, not shed by policy. That is what all
+246 evictions above were (`request context cancelled`): the router had no
+budget, so the caller set the only bound.
 
 **Set the count bound explicitly.** With only a byte bound, the depth at which
-the router starts rejecting moves by an order of magnitude when prompt length
-does, and nothing in the configuration says so. Note that on some router
-versions a per-band `0` means "unset, take the default" rather than "no limit",
-so leaving it at `0` does not reliably mean unbounded — read the resolved
-configuration from the log rather than assuming either reading.
+the router starts rejecting moves tenfold with prompt length, and nothing says
+so. On some versions a per-band `0` means "unset, take the default", not "no
+limit", so `0` is not reliably unbounded. Read the resolved configuration from
+the log.
 
 ### The prerequisite that fails closed
 
-Dispatch depends on **fresh** model-server metrics. The default saturation
-detector scores an endpoint whose metrics are older than its staleness
-threshold as *fully saturated* — it fails closed, not open. If the router loses
-its scrape path to every endpoint (a NetworkPolicy, a port change, TLS, a
-starved refresh loop), saturation pins high, dispatch stalls, and queued
-requests leave at their TTL — or, with no TTL, never.
+Dispatch needs **fresh** model-server metrics. The default saturation
+detector scores an endpoint whose metrics are older than its staleness threshold
+as *fully saturated*: it fails closed, not open. If the router loses its scrape
+path to every endpoint (a NetworkPolicy, a port change, TLS, a starved refresh
+loop), saturation pins high, dispatch stalls, and queued requests leave at their
+TTL, or with no TTL, never.
 
-Keep the metrics refresh interval comfortably inside the staleness threshold.
-Watch `inference_extension_flow_control_pool_saturation` alongside queue size:
-on the run above it peaked at 28.8 while the queue was 4,772 deep, so
-saturation was being reported — the queue simply was not bounded to act on it.
+Keep the metrics refresh interval well inside the staleness threshold. Watch
+`inference_extension_flow_control_pool_saturation` next to queue size. On the run
+above it peaked at 28.8 with the queue 4,772 deep: saturation was reported, but
+the queue had no bound to act on it.
 
 ## Scheduling profiles decide whether ordered replicas get used
 
@@ -286,11 +269,10 @@ A P/D router carries one profile per role. The stock prefill profile is:
 ```
 
 Scores are normalised to `[0,1]` and weighted-summed, so **the largest weight
-wins ties it should not**. At `prefix-cache-scorer: 3` against
-`queue-scorer: 2`, a prefix hit contributes up to 3 while the entire spread
-between an idle replica and a saturated one contributes at most 2: a replica
-that has seen the prefix attracts the request regardless of what it is already
-holding.
+wins ties it should not**. With `prefix-cache-scorer: 3` against
+`queue-scorer: 2`, a prefix hit adds up to 3, while the whole gap between an
+idle and a saturated replica adds at most 2. A replica that has seen the prefix
+gets the request however busy it is.
 
 Measured on the same trace, prefill side, at 8-10 ready replicas:
 
@@ -299,17 +281,15 @@ Measured on the same trace, prefill side, at 8-10 ready replicas:
 - fewer than 40% of ready replicas had any queued request at all
 - work per replica spread from 34% of the total down to 3%
 
-The scaling manager ordered ten prefill replicas, roughly four times the
-capacity the offered load required, and the queue still ran past 1,300. **When
-a fleet is scaled out and latency does not improve, measure the spread before
-scaling further** — routing can bound latency in a way no replica count
-reaches.
+The scaling manager ordered ten prefill replicas, about four times what the
+load needed, and the queue still passed 1,300. **When a scaled-out fleet's
+latency does not improve, measure the spread before scaling further.** Routing
+can cap latency where no replica count helps.
 
 ### What to check first
 
-Whether the affinity you are paying for exists at all. If the engines run
-without prefix caching, the prefix scorer is steering toward KV that was never
-retained:
+Check that the affinity you pay for exists at all. Without prefix caching on
+the engines, the prefix scorer steers toward KV that was never kept:
 
 ```bash
 # on an engine pod: is prefix caching even on?
@@ -323,30 +303,27 @@ kubectl -n <ns> exec <engine-pod> -- \
 ```
 
 On a stack started with `--no-enable-prefix-caching`, those counters read `0.0`
-for the life of the run on every replica, and the highest-weighted signal on
-the prefill path is optimising for a cache that does not exist.
+on every replica for the whole run: the highest-weighted prefill signal is
+optimising for a cache that does not exist.
 
 ### What is NOT established
 
-Swapping the two weights (`queue-scorer: 3`, `prefix-cache-scorer: 2`) was
-measured on this workload and **did not improve prefill latency**: phase-2
-time-to-first-token went from 54 s to 80 s and the busiest replica's queue
-share went from 65% to 100%. That single run is not evidence the swap is
-harmful either — two runs with the weights *unchanged* scored 100% and 65% on
-the same measure, so the run-to-run spread is wider than the effect being
-looked for.
+Swapping the weights (`queue-scorer: 3`, `prefix-cache-scorer: 2`) on this
+workload **did not improve prefill latency**: phase-2 time-to-first-token went
+from 54 s to 80 s, and the busiest replica's queue share from 65% to 100%. One
+run does not show the swap is harmful either: two runs with the weights
+*unchanged* scored 100% and 65%, so run-to-run spread is wider than the effect.
 
-Treat the weights as something to measure on your own workload with repeated
-runs, not as a setting with a known-good value. The defensible statement today
-is narrower: *if* your prefill replicas are unevenly loaded, the scorer weights
-are where to look, and the spread is measurable before you change anything.
+Measure the weights on your own workload, over repeated runs; there is no
+known-good value. What holds today: *if* your prefill replicas are unevenly
+loaded, look at the scorer weights, and measure the spread before changing them.
 
 ## Which plugins to add — usually none
 
-The router ships ordering policies, fairness policies, usage-limit policies and
-a saturation detector, and most of them are driven by something the *client*
-sends. Adding one the traffic cannot drive changes nothing and makes the
-configuration harder to read. Check the input before the plugin:
+The router ships ordering, fairness and usage-limit policies and a saturation
+detector. Most are driven by something the *client* sends. A plugin your
+traffic cannot drive changes nothing and makes the config harder to read. Check
+the input first:
 
 | plugin | needs | inert without it |
 |---|---|---|
@@ -355,25 +332,22 @@ configuration harder to read. Check the input before the plugin:
 | sheddable-band tuning (`defaultNegativePriorityBand`) | an `InferenceObjective` with `priority < 0` | unclassified traffic defaults to priority 0, which is **non-sheddable**, so the negative band is never used |
 | `priority-holdback-policy` | several priorities *and* `--allow-experimental-plugins` | nothing to hold back |
 
-A benchmark harness sending plain OpenAI completions drives none of these, and
-nor does most single-tenant production traffic. The flow-control block above is
-the configuration that matters; the plugin surface is for when you have
-genuinely distinct classes of traffic to separate, and then the first step is
-creating the `InferenceObjective`s that classify them.
+A benchmark harness sending plain OpenAI completions drives none of these, nor
+does most single-tenant production traffic. The flow-control block above is what
+matters. The plugins are for genuinely distinct classes of traffic, and then the
+first step is the `InferenceObjective`s that classify them.
 
-One that is worth knowing about even unconfigured: sheddability is derived
-purely from `InferenceObjective.spec.priority < 0`. There is no `sheddable:
-true` field, and traffic with no matching objective is non-sheddable. So a
-cluster with no `InferenceObjective`s at all cannot shed anything by priority,
-whatever the bands say.
+Worth knowing even unconfigured: sheddability comes only from
+`InferenceObjective.spec.priority < 0`. There is no `sheddable: true` field, and
+traffic with no matching objective is non-sheddable. A cluster with no
+`InferenceObjective`s cannot shed anything by priority, whatever the bands say.
 
 ## Changing router configuration
 
-**The router reads its configuration once, at startup.** It is passed
-`--config-file /config/<name>.yaml` and there is no reload or watch. The
-`/config` volume is mounted without `subPath`, so an edited ConfigMap *does*
-appear in the pod within about a minute — but nothing re-reads it, so the
-change has no effect until the process restarts.
+**The router reads its configuration once, at startup** (`--config-file
+/config/<name>.yaml`, no reload or watch). The `/config` volume has no
+`subPath`, so an edited ConfigMap *does* reach the pod within about a minute,
+but nothing re-reads it until the process restarts.
 
 **Restarting the router is a brief outage, not a rolling update.** On a stock
 deployment:
@@ -383,22 +357,23 @@ deployment:
 - the pod carries both the Envoy proxy and the EPP, and the model Service
   points at it, so it is the data plane and not a sidecar
 
-There is no overlap and no PodDisruptionBudget. Every in-flight request is
-dropped and new ones are refused until the readiness probe passes, typically
-10-30 seconds. **Change router configuration while the fleet is idle.** During
-a benchmark or a production window it will corrupt the run or drop traffic.
+There is no overlap and no PodDisruptionBudget. In-flight requests are dropped
+and new ones refused until the readiness probe passes, typically 10-30 seconds.
+**Change router configuration while the fleet is idle**; during a benchmark or
+production window it corrupts the run or drops traffic.
 
 ```bash
+# Patch the config, restart the router, and wait for it
 kubectl -n <ns> patch cm <model>-router-epp --type merge --patch-file patch.json
 kubectl -n <ns> rollout restart deploy/<model>-router-epp
 kubectl -n <ns> rollout status  deploy/<model>-router-epp --timeout=180s
 ```
 
-Then confirm what the router actually loaded, not what the ConfigMap says —
-defaults and plugin instantiation happen at load, and only the log shows the
-effective result:
+Then confirm what the router loaded, not what the ConfigMap says. Defaults and
+plugins are resolved at load, and only the log shows the result:
 
 ```bash
+# Print the prefill profile the router loaded
 kubectl -n <ns> logs deploy/<model>-router-epp -c epp \
   | grep -o 'prefill:{Filters.*Scorers: \[[^]]*\]'
 ```

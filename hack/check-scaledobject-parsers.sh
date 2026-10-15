@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=94
+EXPECT_CASES=116
 RAN=0
 FAILED=0
 
@@ -487,6 +487,248 @@ check 'metricType: the shipped template is not warned about' \
     'silent' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 2 4 2>&1 >/dev/null | grep -q 'metricType' && echo warned || echo silent)"
 
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# so_apply_plan / so_repoint_stale: which scaler an address names, and what an
+# adopt keeps
+# ----------------------------------------------------------------------------
+# Executed against a stubbed kubectl that records every patch and apply. Two
+# failures this covers, both found by review and neither visible to `bash -n`:
+#
+#   - In the out-of-reach shape (controller in its own namespace, managing a
+#     tenant one) WVA_NS is the TENANT namespace when NAMESPACE is set, and every
+#     trigger was written as wva-external-scaler.<tenant>, where nothing runs.
+#     KEDA falls back to CPU and the install looks healthy.
+#   - `apply: adopt` merge-patches the triggers LIST, which replaces it, so every
+#     re-run stripped the keys set by hand on the trigger (defaultOutputTokens,
+#     warmPool, ...), and repointed objects already working against a live WVA.
+#
+# Cases are asserted on what reached the API server -- the recorded patch and
+# apply -- never on the library source.
+command -v yq >/dev/null 2>&1 || {
+    printf 'FATAL: yq is required to run the plan checks (so_plan_rows reads the plan with it).\n' >&2
+    exit 1
+}
+
+SOW="$WORK/so"
+mkdir -p "$SOW"
+
+# STUB_SVC          "ns=present ns2=forbidden" -- any other namespace is NotFound
+# STUB_RB           the RoleBinding list served for every namespace
+# STUB_SOS          the ScaledObject list served for every namespace and -A
+# STUB_SO_FORBIDDEN 1: a GET of one named ScaledObject is Forbidden
+so_stub() {
+    printf '%s\n' "$*" >> "$SOW/kubectl.log"
+    local a ns="" prev=""
+    local empty='{"items":[]}'
+    for a in "$@"; do
+        [ "$prev" = "-n" ] && ns="$a"
+        prev="$a"
+    done
+    case "$1 $2" in
+        "get svc")
+            case " ${STUB_SVC:-} " in
+                *" $ns=present "*) echo "service/wva-external-scaler"; return 0 ;;
+                *" $ns=forbidden "*)
+                    echo "Error from server (Forbidden): services \"wva-external-scaler\" is forbidden: User \"tenant\" cannot get resource \"services\" in API group \"\" in the namespace \"$ns\"" >&2
+                    return 1 ;;
+            esac
+            echo 'Error from server (NotFound): services "wva-external-scaler" not found' >&2
+            return 1 ;;
+        "get rolebinding")
+            printf '%s\n' "${STUB_RB:-$empty}" ;;
+        "get scaledobject")
+            case "$3" in
+                -A|-n) printf '%s\n' "${STUB_SOS:-$empty}" ;;
+                *)
+                    if [ -n "${STUB_SO_FORBIDDEN:-}" ]; then
+                        echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden' >&2
+                        return 1
+                    fi
+                    local one
+                    one=$(printf '%s' "${STUB_SOS:-$empty}" \
+                        | jq -ce --arg n "$3" '.items[] | select(.metadata.name == $n)') || {
+                        echo "Error from server (NotFound): scaledobjects.keda.sh \"$3\" not found" >&2
+                        return 1
+                    }
+                    # The one jsonpath the library asks of a named object:
+                    # its spec.fallback, empty when it has none.
+                    case " $* " in
+                        *" jsonpath={.spec.fallback} "*)
+                            printf '%s' "$one" | jq -c '.spec.fallback // empty' ;;
+                        *) printf '%s\n' "$one" ;;
+                    esac ;;
+            esac ;;
+        "patch scaledobject")
+            local p="" next=0
+            for a in "$@"; do
+                [ "$next" = 1 ] && { p="$a"; next=0; }
+                [ "$a" = "-p" ] && next=1
+            done
+            printf '%s\n' "$p" >> "$SOW/patched" ;;
+        "apply -f")
+            cat >> "$SOW/applied" ;;
+        *) return 0 ;;
+    esac
+}
+
+# run_so <function> [VAR=value...] runs it in a subshell against the stub and
+# echoes its verdict: REFUSED when it refused, else OK. WARN is appended when it
+# warned. What it wrote is left in $SOW/patched and $SOW/applied.
+run_so() {
+    local fn="$1"
+    shift
+    : > "$SOW/kubectl.log"; : > "$SOW/patched"; : > "$SOW/applied"; : > "$SOW/out"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { printf '%s\n' "$1" >> "$SOW/warned"; }
+        log_error() { printf 'REFUSED\n' >> "$SOW/out"; printf '%s\n' "$1" > "$SOW/refusal"; exit 1; }
+        kubectl() { so_stub "$@"; }
+        : > "$SOW/warned"
+        WVA_NS=tenant WVA_NS_EXPLICIT='' WVA_DEFAULT_SO_PLAN='' WVA_DEFAULT_SO_NS=''
+        STUB_SVC='' STUB_RB='' STUB_SOS='' STUB_SO_FORBIDDEN=''
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        "$fn" "$SOW/plan.yaml" >/dev/null 2>&1
+    )
+    local v
+    v="$(head -1 "$SOW/out")"
+    [ -n "$v" ] || v=OK
+    [ -s "$SOW/warned" ] && v="$v WARN"
+    printf '%s' "$v"
+}
+
+# The address a run wrote: from the created object, else the patch.
+written_addr() {
+    { grep -h 'scalerAddress:' "$SOW/applied" 2>/dev/null | sed -E 's/.*scalerAddress:[[:space:]]*"?([^"]*)"?.*/\1/'
+      jq -r '.spec.triggers[0].metadata.scalerAddress // empty' "$SOW/patched" 2>/dev/null
+    } | head -1
+}
+
+plan_entry() {   # plan_entry <apply>
+    cat > "$SOW/plan.yaml" <<YAML
+plan:
+  - apply: "$1"
+    namespace: tenant
+    kind: Deployment
+    name: decode
+    modelID: "Qwen/Qwen3-0.6B"
+    minReplicas: 1
+    maxReplicas: 4
+    variantCost: "10.0"
+YAML
+}
+
+RB_CTL='{"items":[{"metadata":{"name":"wva-manager-wva-ctl"},"subjects":[{"kind":"ServiceAccount","name":"wva-controller-manager","namespace":"wva-ctl"}]}]}'
+# so_adopted <scaler namespace> -- an adopted object carrying two hand-set keys.
+so_adopted() {
+    printf '{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"scaleTargetRef":{"name":"decode"},"minReplicaCount":1,"maxReplicaCount":4,"triggers":[{"type":"external-push","name":"wva-external-scaler","metadata":{"scalerAddress":"wva-external-scaler.%s.svc.cluster.local:9090","modelID":"Qwen/Qwen3-0.6B","variantCost":"10.0","defaultOutputTokens":"512","warmPool":"pool-a"}}]}}]}' "$1"
+}
+
+# --- which scaler a created object names
+plan_entry yes
+check 'apply: out of reach, the scaler comes from the RoleBinding the installer wrote' \
+    'OK|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_RB='$RB_CTL'")|$(written_addr)"
+
+check 'apply: no scaler in WVA_NS and nothing names one -- refused, nothing written' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan)|$(written_addr)"
+
+check 'apply: the refusal names the command that fixes it' \
+    'yes' \
+    "$(grep -q 'NAMESPACE=tenant make scaledobjects-apply WVA_NS=<controller-namespace> WVA_WATCH_NS=tenant' "$SOW/refusal" && echo yes || echo no)"
+
+# Following that command must scan the TENANT namespace. With WVA_NS given and
+# no WVA_WATCH_NS, so_target_namespaces scanned the controller's own, empty one.
+tns() { ( unset WVA_WATCH_NS WVA_DEFAULT_SO_NS; for kv in "$@"; do eval "$kv"; done; so_target_namespaces 2>/dev/null ); }
+check 'plan: NAMESPACE differing from an explicit WVA_NS is the namespace scanned'     'tenant' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=tenant)"
+check 'plan: an explicit WVA_WATCH_NS still wins'     'other' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=tenant WVA_WATCH_NS=other)"
+check 'plan: no NAMESPACE scans WVA_NS, as before'     'wva-ctl' "$(tns WVA_SCOPE=namespace WVA_NS=wva-ctl NAMESPACE_EXPLICIT=)"
+
+check 'apply: an explicit WVA_NS the tenant may not read is used, with a warning' \
+    'OK WARN|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden')|$(written_addr)"
+
+check 'apply: an explicit WVA_NS with no scaler Service is refused' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl)|$(written_addr)"
+
+check 'apply: two live installs named in the namespace -- refused, not guessed' \
+    'REFUSED|' \
+    "$(run_so so_apply_plan "STUB_SVC='wva-ctl=present other=present'" "STUB_RB='$RB_CTL'" "STUB_SOS='$(so_adopted other | sed 's/decode/elsewhere/g')'")|$(written_addr)"
+
+# --- what an adopt keeps
+plan_entry adopt
+check 'adopt: keeps the hand-set trigger keys (defaultOutputTokens, warmPool)' \
+    'OK|512|pool-a|Qwen/Qwen3-0.6B' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'")|$(jq -r '.spec.triggers[0].metadata | [.defaultOutputTokens, .warmPool, .modelID] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+# Keeping trigger keys and the fallback rules are separate: the keys are trigger
+# metadata, the fallback is spec, metricType is the trigger's own and always
+# AverageValue. One patch has to carry all three.
+check 'adopt: keeps hand-set keys AND adds a fallback AND writes AverageValue' \
+    'OK|512|pool-a|AverageValue|3,1,currentReplicasIfHigher' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'")|$(jq -r '[.spec.triggers[0].metadata.defaultOutputTokens, .spec.triggers[0].metadata.warmPool, .spec.triggers[0].metricType, (.spec.fallback | [.failureThreshold, .replicas, .behavior] | map(tostring) | join(","))] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+check 'adopt: an object with its own fallback keeps it, and its hand-set keys' \
+    'OK|512|false' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl | jq -c '.items[0].spec.fallback = {failureThreshold: 5, replicas: 1}')'")|$(jq -r '[.spec.triggers[0].metadata.defaultOutputTokens, (.spec | has("fallback") | tostring)] | join("|")' "$SOW/patched" 2>/dev/null)"
+
+check 'adopt: out of reach, re-applying keeps the address the object already works on' \
+    'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'" >/dev/null; written_addr)"
+
+check 'adopt: an object on another LIVE install is not moved without WVA_NS' \
+    'wva-external-scaler.other.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl "STUB_SVC='wva-ctl=present other=present'" "STUB_SOS='$(so_adopted other)'" >/dev/null; written_addr)"
+
+check 'adopt: an explicit WVA_NS does move it' \
+    'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_apply_plan WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl "STUB_SVC='wva-ctl=present other=present'" "STUB_SOS='$(so_adopted other)'" >/dev/null; written_addr)"
+
+check 'adopt: an object that cannot be read is not patched over' \
+    '0' \
+    "$(run_so so_apply_plan STUB_SVC='wva-ctl=present' "STUB_SOS='$(so_adopted wva-ctl)'" STUB_SO_FORBIDDEN=1 >/dev/null; grep -c . "$SOW/patched")"
+
+# --- what the plan says about an adopted object
+STUB_SOS="$(so_adopted wva-ctl)"
+kubectl() { so_stub "$@"; }
+IFS=$'\037' read -r _n _min _max _cost _pol _wva e_model e_kept e_addr <<< "$(so_existing_info tenant decode)"
+check 'plan: so_existing_info reads the modelID, kept keys and address back' \
+    'Qwen/Qwen3-0.6B|defaultOutputTokens,warmPool|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "${e_model:-}|${e_kept:-}|${e_addr:-}"
+unset -f kubectl
+STUB_SOS=''
+
+kept_note() {
+    local note='' existing_kept="$1" existing_name=decode-so
+    so_kept_keys_note 2>/dev/null
+    printf '%s' "$note"
+}
+check 'plan: the note names the keys an adopt keeps' \
+    'yes' \
+    "$(case "$(kept_note 'defaultOutputTokens,warmPool')" in *'defaultOutputTokens, warmPool'*) echo yes ;; *) echo no ;; esac)"
+
+prefer() {   # prefer <discovered> <existing> [SO_PREFER_EXISTING_MODEL]
+    local model="$1" existing_model="$2" existing_name=decode-so note=''
+    SO_PREFER_EXISTING_MODEL="${3:-true}" so_prefer_existing_model tenant decode 2>/dev/null
+    printf '%s' "$model"
+}
+check 'plan: a re-discovered modelID does not replace the one the object carries' \
+    'Qwen/Qwen3-0.6B' "$(prefer /models/qwen Qwen/Qwen3-0.6B)"
+check 'plan: verify-scaledobjects still sees what the container serves' \
+    '/models/qwen' "$(prefer /models/qwen Qwen/Qwen3-0.6B false)"
+
+# --- repoint: Forbidden is not dead
+REPOINT_SOS='{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.gone.svc.cluster.local:9090","modelID":"m"}}]}}]}'
+check 'repoint: an address in a namespace that cannot be read is left alone' \
+    '0' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl "STUB_SVC='wva-ctl=present gone=forbidden'" "STUB_SOS='$REPOINT_SOS'" >/dev/null; grep -c . "$SOW/patched")"
+check 'repoint: an explicit WVA_NS the tenant may not read is accepted, and a dead address repointed' \
+    'OK WARN|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden' "STUB_SOS='$REPOINT_SOS'")|$(written_addr)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d model-identification assertion(s) failed.\n' "$FAILED" >&2

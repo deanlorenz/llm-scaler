@@ -1,17 +1,13 @@
 # The steady-state engine
 
-llm-scaling-manager is a **global optimizer**: each cycle it builds a capacity model for your
-inference workloads and computes how many replicas each one should have. It does not patch
-replica counts directly: it publishes a target over the KEDA external-scaler contract, and
-KEDA owns the HPA that acts on it.
-This guide explains, at a high level, the **steady-state engine**: the terms it uses, the
-metrics it reads, the thresholds that govern it, and the algorithm that turns those into replica
-targets.
+llm-scaling-manager is a **global optimizer**. Each cycle it builds a capacity model of
+your inference workloads and computes how many replicas each needs. It never patches replica
+counts: it publishes a target over the KEDA external-scaler contract, and KEDA's HPA acts on it.
 
-It is aimed at operators tuning and observing the scaling manager. For the full configuration
-field reference and the EPP coordination workflow, see
-[Saturation Scaling Configuration](../reference/scaling-policy.md); for the
-complete metrics catalog see
+This page explains the **steady-state engine** for operators who tune and observe it: its
+terms, the metrics it reads, its thresholds, and how it turns them into replica targets. Every
+configuration field and the EPP coordination workflow are in
+[Saturation Scaling Configuration](../reference/scaling-policy.md); every metric is in
 [Metrics & Health Monitoring](../reference/metrics.md).
 
 ## Terminology
@@ -29,8 +25,7 @@ complete metrics catalog see
 ## Overview
 
 There is one saturation analyzer: the token-based engine described here. The
-earlier percentage-based analyzer has been removed, so there is nothing to select
-between — what follows is simply how saturation analysis works.
+earlier percentage-based analyzer has been removed, so there is nothing to choose.
 
 | Aspect | **Token-based analyzer** |
 |---|---|
@@ -41,9 +36,8 @@ between — what follows is simply how saturation analysis works.
 | Zero-replica sizing | supported (capacity derived from deployment args) |
 | GPU-constrained fair-share | supported (with the limiter) |
 
-It builds an explicit capacity model in units of KV-cache tokens, so a single
-decision can jump from, say, 2 → 5 replicas, or size a variant that currently has
-**zero** replicas.
+Because it models capacity in KV-cache tokens, one decision can jump from, say,
+2 → 5 replicas, or size a variant that has **zero** replicas.
 
 ### Configuring it
 
@@ -66,24 +60,24 @@ limiter is enabled).
 
 ### 1. Per-replica capacity = the tighter of two ceilings
 
-A replica can't serve past whichever wall it hits first — **memory** or **compute** — so its
-usable capacity is the **smaller** of two ceilings, both in KV-cache tokens:
+A replica stops at whichever limit it hits first, **memory** or **compute**. Its usable
+capacity is the **smaller** of two ceilings, both in KV-cache tokens:
 
 - **Memory ceiling** = `KV_token_capacity × kvCacheThreshold`.
   `KV_token_capacity` (= `num_gpu_blocks × block_size`) is the pod's physical KV-cache size,
   read from `vllm:cache_config_info` (or derived from the deployment's engine args when the
-  metric is absent). `kvCacheThreshold` (default **0.80**) reserves headroom — only 80% of the
-  cache is treated as usable.
-- **Compute ceiling** = how many concurrent tokens the GPU can actually *process* before
-  scheduling throughput — not memory — becomes the bottleneck (common for long-generation
-  workloads). The engine estimates it from live queue behavior when a replica is queue-saturated,
-  otherwise from recent history, otherwise from the deployment's batch/sequence limits. *(The
+  metric is absent). `kvCacheThreshold` (default **0.80**) reserves headroom: only 80% of the
+  cache counts as usable.
+- **Compute ceiling** = how many concurrent tokens the GPU can *process* before scheduling
+  throughput, not memory, is the bottleneck (common for long generations). The engine estimates
+  it from live queue behavior when a replica is queue-saturated, else from recent history, else
+  from the deployment's batch/sequence limits. *(The
   detailed estimation chain is in the [developer guide](../reference/scaling-policy.md).)*
 
-A variant's per-replica capacity is the **median** of its ready replicas' capacities (median so
-one outlier pod doesn't skew it). A variant with no ready replicas borrows capacity derived from
-its deployment args or from a compatible sibling variant — this is what lets the engine size a
-zero-replica variant.
+A variant's per-replica capacity is the **median** of its ready replicas' capacities, so one
+outlier pod does not skew it. A variant with no ready replicas borrows capacity from its
+deployment args or a compatible sibling variant. That is how the engine sizes a zero-replica
+variant.
 
 ### 2. Demand — the tokens the model needs to serve
 
@@ -96,49 +90,44 @@ demand = tokens_in_use          (live: kv_cache_usage × capacity)
                                    before they reach any pod)
 ```
 
-The upstream scheduler-queue term accounts for load that hasn't landed on a pod yet; its
-input-token portion is discounted by the observed prefix-cache hit rate when available.
+The scheduler-queue term counts load that has not reached a pod yet. When known, the
+prefix-cache hit rate discounts its input tokens.
 
 #### The throughput floor
 
-The three terms above are all **occupancy**: what the fleet is holding right
-now. Occupancy is a state of the fleet rather than a property of the load, and
-it falls as replicas are added, so a fleet that is keeping up reads as one that
-needs fewer replicas. At a constant request rate with no queue ever forming,
-occupancy can point at one replica when three are needed.
+The three terms above are all **occupancy**: what the fleet holds right now.
+Occupancy belongs to the fleet, not the load, and it falls as replicas are
+added, so a fleet that keeps up looks like one that needs fewer replicas. At a
+constant request rate with no queue, occupancy can point at one replica when
+three are needed.
 
 What a replica can do does not move with the fleet. The engine records **mu**,
-the completion rate one replica sustained the last time it was observed
-saturated, per role and per output-length bucket, alongside the capacity
-reading taken at the same moment. A fleet offered `lambda` requests per second
-then needs `lambda / mu` replicas to keep up, which in this engine's
-(demand, per-replica capacity) terms is a demand of `(lambda / mu) x capacity`
-tokens. That figure is a **floor** under the occupancy demand above: it only
-ever raises demand, never lowers it.
+the completion rate one replica sustained when last seen saturated, per role and
+per output-length bucket, with the capacity reading taken at the same moment. A
+fleet offered `lambda` requests per second needs `lambda / mu` replicas, which
+in this engine's terms is a demand of `(lambda / mu) x capacity` tokens. That
+figure is a **floor** under the occupancy demand: it only ever raises demand.
 
-Because mu is measured per request shape, a shift in shape re-prices the fleet
-without anyone re-tuning a threshold. This is what catches a shape change
-before a queue forms.
+mu is measured per request shape, so a shape change re-prices the fleet with no
+threshold re-tuned. This catches a shape change before a queue forms.
 
-Three rules keep it honest, each of which cost a measured mistake to establish;
-the runs are recorded in
-[analyzer evidence](../developer-guide/analyzer-evidence.md):
+Three rules keep it honest. Each was learned from a measured mistake; the runs
+are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 
-- **The floor is not capped at the fleet's own size.** What it can order is
-  fixed by the load and the per-replica rate, and does not move as replicas are
-  added. Capped, it held a fleet but never grew one, and the order arrived
-  after the lone replica had already tipped into preemption.
+- **The floor is not capped at the fleet's size.** What it orders depends on
+  the load and the per-replica rate, not on how many replicas exist. Capped, it
+  held a fleet but never grew one, and the order came after the lone replica
+  had already tipped into preemption.
 - **A reading the fleet has not earned may hold the fleet but not grow it.** A
-  rate borrowed from a neighbouring output-length bucket, or a window holding
+  rate borrowed from a neighbouring output-length bucket, or a window with
   fewer than two saturated readings, is capped at the role's anticipated
-  supply. The first reading at a saturation under-reads, and an order placed on
-  it over-provisions in a way that removes the saturation which would have
-  corrected it.
+  supply. The first reading at a saturation under-reads, and ordering on it
+  over-provisions and removes the very saturation that would have corrected it.
 - **A backlog is work to drain, not residency.** `B` queued requests are priced
   as `B / 60s` extra arrivals on top of `lambda`, not as `B` requests resident
-  at once, which sized fleets to hold queues that were gone before the replicas
-  arrived. Prefill's share of the scheduler queue is dropped entirely: more
-  prefill replicas do not fix a decode that is full.
+  at once. Pricing them as resident sized fleets for queues that were gone
+  before the replicas arrived. Prefill's share of the scheduler queue is dropped:
+  more prefill replicas do not fix a full decode.
 
 ### 3. The scaling signal
 
@@ -148,8 +137,8 @@ The engine aggregates to model level:
 - **`TotalAnticipatedSupply`** = Σ ((ready + **pending**) replicas × per-replica capacity)
 - **`TotalDemand`** = the demand above
 
-We want demand to sit at the target utilization of supply — so the supply we *need* is
-`demand ÷ scaleUpThreshold` (e.g. at 0.85, demand should be 85% of supply). That gives two
+Demand should sit at the target utilization of supply, so the supply *needed* is
+`demand ÷ scaleUpThreshold` (at 0.85, demand should be 85% of supply). That gives two
 signals:
 
 ```text
@@ -157,21 +146,20 @@ RequiredCapacity  = max(0, TotalDemand / scaleUpThreshold  − TotalAnticipatedS
 SpareCapacity     = max(0, TotalSupply  − TotalDemand / scaleDownBoundary)             → scale down
 ```
 
-- **`RequiredCapacity > 0`** → the supply we need exceeds what's already in flight → **scale up**.
-  Because *anticipated* supply counts pending replicas, an in-flight scale-up shrinks
-  `RequiredCapacity` — this avoids counting the same scale-up twice.
-- **`SpareCapacity > 0`** → even after inflating demand to the `scaleDownBoundary`, supply is
-  left over → **scale-down is safe**.
-- Neither → **no change**. The band between the two thresholds is a stable no-change
-  region, and keeping it wide is the main thing that reduces flapping. A published scale-down
-  is also held across cycles (`WVA_STICKY_SCALE_DOWN`, on by default), because the HPA takes
-  the maximum published
-  inside its scale-down window and one noisy sample would otherwise pin the fleet; that hold
-  is counted in cycles, not seconds.
+- **`RequiredCapacity > 0`** → needed supply exceeds what is already in flight → **scale up**.
+  *Anticipated* supply counts pending replicas, so an in-flight scale-up shrinks
+  `RequiredCapacity` and is not counted twice.
+- **`SpareCapacity > 0`** → supply is left over even with demand inflated to
+  `scaleDownBoundary` → **scale-down is safe**.
+- Neither → **no change**. The band between the two thresholds is the no-change region;
+  keeping it wide is the main defence against flapping. A published scale-down is also held
+  across cycles (`WVA_STICKY_SCALE_DOWN`, on by default). The HPA takes the maximum published
+  inside its scale-down window, so one noisy sample would otherwise pin the fleet. The hold is
+  counted in cycles, not seconds.
 
-> The engine also reports a model `utilization = TotalDemand / TotalSupply` for observability, but the
-> decision is driven by `RequiredCapacity`/`SpareCapacity` above — **not** by comparing that
-> ratio to the thresholds. (This `SpareCapacity` token signal is distinct from the
+> The engine also reports `utilization = TotalDemand / TotalSupply`, but only for observability.
+> The decision uses `RequiredCapacity`/`SpareCapacity`, **not** that ratio against the
+> thresholds. (This `SpareCapacity` token signal is distinct from the
 > `wva_spare_capacity` *metric*, which is a 0–1 headroom fraction — see [Metrics](#metrics).)
 
 ### 4. Replica target
@@ -186,10 +174,9 @@ prefill/decode-disaggregated models) keeps the two roles coupled so the model st
 
 ### 5. (Optional) GPU-constrained fair-share
 
-When a `limiters:` entry is declared, the desired counts are capped by actually-available GPUs,
-fair-shared across competing models weighted by each model's `priority`. With no limiter declared,
-scale-up is unconstrained and the optimizer simply minimizes cost. Priority weighting applies
-**only** in limiter mode.
+With a `limiters:` entry declared, desired counts are capped by the GPUs available and
+fair-shared across models, weighted by each model's `priority`. With no limiter, scale-up is
+unconstrained and the optimizer minimizes cost. Priority applies **only** with a limiter.
 
 ## Thresholds
 
@@ -217,22 +204,22 @@ per-model/per-namespace overrides).
 
 ### Aligning thresholds with EPP
 
-`kvCacheThreshold` and `queueLengthThreshold` define **what "a saturated endpoint" means**, and
-they should be **agreed with EPP** (the request router). EPP and the scaling manager read the **same two
-model-server metrics** — `vllm:kv_cache_usage_perc` and `vllm:num_requests_waiting` — but act at
-different layers: EPP routes and, under load, queues/sheds requests as endpoints approach
-saturation; the scaling manager decides when the pool is saturated and adds replicas. EPP's
-Saturation Detector exposes two thresholds that map one-to-one to this engine's:
+`kvCacheThreshold` and `queueLengthThreshold` define **what "a saturated endpoint" means**, so
+**agree them with EPP** (the request router). Both read the **same two model-server metrics**,
+`vllm:kv_cache_usage_perc` and `vllm:num_requests_waiting`, but act at different layers. EPP
+routes and, under load, queues or sheds requests as endpoints near saturation. The scaling
+manager decides when the pool is saturated and adds replicas. EPP's Saturation Detector has two
+thresholds that map one-to-one to this engine's:
 
 | EPP (`saturationDetector` / `utilization-detector`) | Default | This engine | Default |
 |---|---|---|---|
 | `kvCacheUtilThreshold` | `0.8` | `kvCacheThreshold` | `0.80` |
 | `queueDepthThreshold` | `5` | `queueLengthThreshold` | `5` |
 
-If the two disagree, routing and scaling fight each other:
-- **This engine higher than EPP** → EPP queues requests in flow-control (raising latency,
-  and inflating this engine's own `scheduler_queue` demand term) while the engine still sees
-  headroom → scale-up lags.
+If they disagree, routing and scaling fight:
+- **This engine higher than EPP** → EPP queues requests in flow control (raising latency and
+  this engine's `scheduler_queue` demand term) while the engine still sees headroom → scale-up
+  lags.
 - **This engine lower than EPP** → it scales up while EPP is still comfortably balancing →
   over-provisioning.
 
@@ -251,8 +238,8 @@ for the full apply/verify workflow.
 
 ### Input — what the engine reads from your inference engines
 
-Scraped from vLLM and the EPP scheduler. If these are missing or stale, the engine degrades or skips the
-model — check the health metrics below.
+Scraped from vLLM and the EPP. If they are missing or stale, the engine degrades or skips the
+model; check the health metrics below.
 
 | Metric | Type | Used for |
 |---|---|---|

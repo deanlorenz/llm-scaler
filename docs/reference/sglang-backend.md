@@ -2,51 +2,48 @@
 
 ## Overview
 
-llm-scaling-manager supports both [vLLM](https://github.com/vllm-project/vllm)
-and [SGLang](https://github.com/sgl-project/sglang) inference engines. The scaling manager reads
-each engine's Prometheus metrics to estimate load and capacity, then drives the
-scale subresource through HPA/KEDA exactly as it does for vLLM.
+llm-scaling-manager works with both [vLLM](https://github.com/vllm-project/vllm)
+and [SGLang](https://github.com/sgl-project/sglang). It reads each engine's
+Prometheus metrics to estimate load and capacity, then scales through HPA/KEDA
+the same way for both.
 
-The inference engine is **auto-detected per variant** — you do not configure it.
-A deployment with no SGLang signal is treated as vLLM, so existing vLLM
-deployments are unaffected.
+The engine is **detected per variant**; you do not configure it. A deployment
+with no SGLang signal is treated as vLLM, so vLLM deployments are unaffected.
 
 ## How detection works
 
-The scaling manager inspects the variant's scale-target pod template (the Deployment/LeaderWorkerSet
-the ScaledObject points at) and classifies it as SGLang when **either**:
+The scaling manager reads the pod template of the variant's scale target (the
+Deployment or LeaderWorkerSet the ScaledObject points at). It is SGLang when
+**either**:
 
 - a container image reference contains `sglang` (e.g. `lmsysorg/sglang:...`), or
-- a container command/args invoke `sglang.launch_server` / `sglang serve`
-  (including inside a `/bin/sh -c "..."` wrapper).
+- a container command or args invoke `sglang.launch_server` / `sglang serve`
+  (also inside a `/bin/sh -c "..."` wrapper).
 
-Otherwise the variant is treated as **vLLM** (the default).
+Otherwise it is **vLLM** (the default).
 
-**Any container counts, sidecars included.** An SGLang signal in a sidecar
-decides the whole pod (`internal/inferenceengine/engine.go`), so a vLLM engine
-with an `sglang-router` sidecar whose image is `lmsysorg/sglang-router:...` (or
-any image reference containing `sglang`) is detected as SGLang. The scaling
-manager then looks for `sglang:*` series that the vLLM engine never emits, and
-the model gets no saturation metrics: a `MetricsUnavailable` Warning event and
-no scaling decision. There is no field to override detection. The fix is to
-keep the `sglang` signal out of the scale target's pod template: run the router
-as its own Deployment rather than as a sidecar of the engine, or pull its image
-under a reference that does not contain `sglang` and launch it with a command
-that does not contain `sglang.launch_server` or `sglang serve`.
+**Any container counts, sidecars included** (`internal/inferenceengine/engine.go`).
+A vLLM engine with an `sglang-router` sidecar (image `lmsysorg/sglang-router:...`,
+or any reference containing `sglang`) is detected as SGLang. The scaling manager
+then looks for `sglang:*` series the vLLM engine never emits, so the model gets
+no saturation metrics: a `MetricsUnavailable` Warning event and no scaling
+decision. There is no override field. To fix it, keep the `sglang` signal out
+of the scale target's pod template:
 
-There is nothing engine-specific to declare. A workload is registered by
-creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
-ScaledObject works for either engine: the engine is read off the scale
-target's pod template, not off any field you set. Register it with
-[step 4 of the namespace install](../guides/install-in-namespace/README.md#4-register-the-workloads);
-every key the trigger takes is in [ScaledObject trigger metadata](scaledobject-trigger.md),
-and what the pod itself must carry is in [workload preparation](workload-preparation.md).
+- run the router as its own Deployment, not as a sidecar of the engine; or
+- pull its image under a reference without `sglang`, and launch it with a
+  command without `sglang.launch_server` or `sglang serve`.
+
+Nothing else is engine-specific. Register the workload with a KEDA ScaledObject,
+exactly as for vLLM; the same ScaledObject works for either engine. Register it
+with [step 4 of the namespace install](../guides/install-in-namespace/README.md#4-register-the-workloads).
+Every trigger key is in [ScaledObject trigger metadata](scaledobject-trigger.md),
+and what the pod must carry is in [workload preparation](workload-preparation.md).
 
 ## Metrics
 
-The scaling manager requires the same autoscaling signals from either engine. SGLang exposes them
-under `sglang:*` metric names (labeled with `model_name`, which the scaling manager filters on).
-The mapping:
+Both engines must provide the same signals. SGLang names them `sglang:*`,
+labelled with `model_name`, which the scaling manager filters on:
 
 | Signal | vLLM | SGLang |
 |--------|------|--------|
@@ -60,15 +57,15 @@ The mapping:
 | Prefix-cache hit rate | `vllm:prefix_cache_hits / _queries` | `sglang:cached_tokens_total / sglang:prompt_tokens_total` |
 | Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` |
 
-> Make sure your Prometheus (or VictoriaMetrics) scrapes the SGLang pods' `/metrics`
-> endpoint, the same way you scrape vLLM. The scaling manager only consumes metrics that are
-> actually present in your monitoring backend.
+> Your Prometheus (or VictoriaMetrics) must scrape the SGLang pods' `/metrics`,
+> just as it scrapes vLLM. The scaling manager only uses metrics that are in
+> your monitoring backend.
 
 ## Serving-flag mapping
 
-When a variant has no live metrics yet (e.g. a freshly created or scaled-to-zero
-variant), the scaling manager estimates capacity from the deployment's serving flags. SGLang flags
-map onto the same internal parameters as their vLLM counterparts:
+A variant with no live metrics yet (new, or scaled to zero) gets a capacity
+estimate from its serving flags. SGLang flags map onto the same parameters as
+vLLM's:
 
 | Parameter | vLLM flag | SGLang flag |
 |-----------|-----------|-------------|
@@ -82,24 +79,21 @@ map onto the same internal parameters as their vLLM counterparts:
 
 ## Caveats
 
-- **vLLM remains the default.** Anything without an SGLang signal is treated as
-  vLLM, but the signal is read from every container, so an SGLang sidecar beside
-  a vLLM engine flips the pod to SGLang; see [How detection works](#how-detection-works).
-- **A variant runs a single engine.** Mixing vLLM and SGLang containers within one
-  variant's pod is not supported.
-- **Metric availability.** SGLang exposes no `sglang:*` series unless it is
-  started with `--enable-metrics` (an SGLang server argument; this repo's e2e
-  uses an SGLang emulator, so the flag itself is not exercised here). Then check
-  that Prometheus has the series for your model:
+- **vLLM is the default.** Anything without an SGLang signal is vLLM. The signal
+  is read from every container, so an SGLang sidecar beside a vLLM engine flips
+  the pod to SGLang; see [How detection works](#how-detection-works).
+- **One engine per variant.** Mixing vLLM and SGLang containers in one variant's
+  pod is not supported.
+- **Metrics need `--enable-metrics`.** SGLang exposes no `sglang:*` series
+  without this server argument. (This repo's e2e uses an SGLang emulator, so the
+  flag itself is not exercised here.) Then check Prometheus has your model:
   `count(sglang:token_usage{model_name="<modelID>"})` must be non-zero.
-- **Scale-to-zero reads the SGLang counter.** Idleness is measured from
-  `sglang:num_requests_total` rather than the vLLM counter: the detected engine is
-  passed to the enforcer, which selects the series for it
-  (`CollectModelRequestCountForEngine`). Earlier releases asked for
-  `vllm:request_success_total` whatever the engine, so an SGLang model had no such
-  series, read as permanently idle, and was refused parking outright to keep it
-  safe. That gate is gone; `test/e2e/scale_to_zero_sglang_test.go` covers the
-  round trip.
+- **Scale-to-zero reads the SGLang counter.** Idleness comes from
+  `sglang:num_requests_total`: the detected engine is passed to the enforcer,
+  which picks the series (`CollectModelRequestCountForEngine`). Earlier releases
+  always asked for `vllm:request_success_total`, so an SGLang model looked
+  permanently idle and was refused parking. That gate is gone;
+  `test/e2e/scale_to_zero_sglang_test.go` covers the round trip.
 
 ## See also
 

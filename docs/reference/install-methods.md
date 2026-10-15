@@ -1,7 +1,7 @@
 # Install methods and platform notes
 
-How the installer is invoked, for cases the [guides](../guides/) do not
-cover: GitOps, a direct Kustomize apply, or reading exactly what the script does.
+How to run the installer in cases the [guides](../guides/) do not cover: GitOps,
+a direct Kustomize apply, or seeing exactly what the script does.
 
 > The guides are the supported paths. This page is reference.
 
@@ -9,16 +9,17 @@ cover: GitOps, a direct Kustomize apply, or reading exactly what the script does
 
 ### Method 1: Automated Deployment Script (Recommended)
 
-The deployment script provides a complete, automated setup including:
+The script sets up:
 
-- The scaling manager controller with RBAC configuration
-- Prometheus stack (or connects to existing)
-- llm-d infrastructure (Gateway, Scheduler, vLLM)
-- KEDA for external metrics (ScaledObject-driven)
-- ServiceMonitors for metric collection
-- ScaledObjects are yours to create — they are how a workload reaches the scaling manager
-- Automatic GPU detection
-- Environment-specific optimizations
+- the scaling manager controller and its RBAC;
+- a Prometheus stack, or a connection to an existing one;
+- llm-d infrastructure (Gateway, Scheduler, vLLM);
+- KEDA for external metrics (ScaledObject-driven);
+- ServiceMonitors for metric collection;
+- GPU detection and environment-specific settings.
+
+ScaledObjects are yours to create: they are how a workload reaches the scaling
+manager.
 
 #### Quick Start with Make
 
@@ -52,7 +53,7 @@ bash install.sh
 
 #### Script Configuration Options
 
-The script accepts both command-line flags and environment variables:
+The script takes command-line flags and environment variables.
 
 **Command-line flags** (`deploy/install.sh`):
 
@@ -68,18 +69,23 @@ Options:
   -h, --help               Show help
 ```
 
-`--check` is what `make check-prereqs` runs. Use it before a real install: it
-verifies the tools, the cluster connection, and that you can create everything the
-install produces — the last of which is the usual reason an install dies halfway.
+`--check` is what `make check-prereqs` runs. Run it before a real install. It
+checks the tools, the cluster connection, and that you may create everything the
+install creates; missing rights are the usual reason an install dies halfway.
 
-**llm-d stack** (gateway, EPP, ModelService): deploy using the [llm-d guides](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline) directly. For EPP-only setup (llm-d-router-standalone chart + tokenreview RBAC), use `deploy/install-epp.sh` after `install.sh`.
+**llm-d stack** (gateway, EPP, ModelService): deploy it with the [llm-d
+guides](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline). For
+an EPP only (llm-d-router-standalone chart + tokenreview RBAC), run
+`deploy/install-epp.sh` after `install.sh`.
 
-**Environment variables**: every option the script reads is tabulated in
+**Environment variables**: every one the script reads is in the
 [Configuration Reference](configuration.md).
 
 #### Script deployment examples
 
-**ScaledObjects** are not created by `install.sh` — create them with `kubectl apply`, or let your tests/operators manage them. KEDA creates and owns the HPA behind each one; you never create an HPA yourself.
+`install.sh` creates no **ScaledObjects**. Create them with `kubectl apply`, or
+let your tests or operators manage them. KEDA creates and owns the HPA behind
+each one; never create an HPA yourself.
 
 ##### Example 1: Base the scaling manager infra + EPP
 
@@ -116,22 +122,22 @@ export DEPLOY_LWS=true
 
 ### Method 2: Kustomize (GitOps and direct installs)
 
-The overlays are plain Kustomize, so you can apply them yourself — for Argo CD or
-Flux, or to review exactly what lands. Scope, namespace and limiter are the same
-decisions as above; see [Choosing your install](../guides/).
+The overlays are plain Kustomize, so you can apply them yourself: for Argo CD or
+Flux, or to review what lands. Scope, namespace and limiter are the same choices
+as above; see [Choosing your install](../guides/).
 
 **The overlays alone are not a complete install.** `deploy/install.sh` does four
-things around them that the raw apply does not, and each one has bitten somebody:
+things around them:
 
 | What the script does | If you skip it |
 | --- | --- |
-| Writes `PROMETHEUS_URL` into the controller ConfigMap | The controller starts, looks healthy, and reads no metrics — it uses the shipped in-cluster default, which is not your Prometheus |
-| Renames the ClusterRoles and ClusterRoleBindings per install, with a hash of the namespace | A second install **takes the bindings from the first**, which silently loses all its permissions |
-| Checks that no incompatible install already exists | Two controllers scaling the same workloads |
-| Keeps the Namespace on undeploy, and deletes only this install's renamed ClusterRoles | `kubectl delete -k` removes the **Namespace** — taking the model servers in it — and the unrenamed **ClusterRoles**, breaking every other install on the cluster that binds them |
+| Writes `PROMETHEUS_URL` into the controller ConfigMap | The controller looks healthy but reads no metrics: it uses the shipped in-cluster default, which is not your Prometheus |
+| Renames the ClusterRoles and ClusterRoleBindings per install, with a hash of the namespace | A second install **takes the first install's bindings**, which silently loses all its permissions |
+| Checks that no incompatible install already exists | Two controllers scale the same workloads |
+| Keeps the Namespace on undeploy, and deletes only this install's renamed ClusterRoles | `kubectl delete -k` removes the **Namespace** (and the model servers in it) and the unrenamed **ClusterRoles**, breaking every other install that binds them |
 
-So use this method when you are installing **one** scaling manager and wiring Prometheus
-yourself, or when a GitOps tool owns the manifests. Otherwise prefer Method 1.
+Use this method when you install **one** scaling manager and wire Prometheus
+yourself, or when a GitOps tool owns the manifests. Otherwise use Method 1.
 
 #### Applying the overlays directly
 
@@ -147,12 +153,10 @@ kubectl apply -k ../../overlays/cluster-scoped/kubernetes
 #             ../../overlays/namespace-scoped/openshift
 ```
 
-Then point the controller at your Prometheus — without this it will not collect
-anything:
+Then point the controller at your Prometheus. Without this it collects nothing:
 
 ```bash
-# NOTE: the overlays hardcode `namespace: wva-system`. Only deploy/install.sh
-# rewrites that to $WVA_NS, so a raw `apply -k` lands in wva-system.
+# Set the Prometheus URL and restart (a raw apply -k lands in wva-system; only install.sh rewrites it to $WVA_NS)
 kubectl -n wva-system edit configmap wva-manager-config
 # under config.yaml, set:
 #   prometheus:
@@ -160,18 +164,18 @@ kubectl -n wva-system edit configmap wva-manager-config
 kubectl -n wva-system rollout restart deployment wva-controller-manager
 ```
 
-If you will run **more than one** scaling manager on this cluster, rename the
-ClusterRoles and ClusterRoleBindings in your overlay first — otherwise the second
-install takes them from the first. `deploy/lib/common.sh:wva_append_crb_name_patches`
-is the patch set the script generates; the names are listed in
+Running **more than one** scaling manager on this cluster? Rename the
+ClusterRoles and ClusterRoleBindings in your overlay first, or the second
+install takes them from the first. The script's patch set is
+`deploy/lib/common.sh:wva_append_crb_name_patches`; the names are in
 `WVA_SHARED_CLUSTER_ROLE_BINDINGS` and `WVA_OWNED_CLUSTER_ROLES`.
 
 #### Undeploy
 
-`kubectl delete -k` is **not** the inverse of the apply: the overlay contains a
-Namespace and the shared ClusterRoles, and deleting those takes the workloads in
-that namespace and the permissions of every other install with it. Delete the
-install's own objects and leave the shared ones:
+`kubectl delete -k` is **not** the inverse of the apply. The overlay holds a
+Namespace and the shared ClusterRoles; deleting them takes the workloads in that
+namespace and every other install's permissions. Delete only this install's own
+objects:
 
 ```bash
 kubectl kustomize config/overlays/cluster-scoped/kubernetes \
@@ -179,16 +183,16 @@ kubectl kustomize config/overlays/cluster-scoped/kubernetes \
   | kubectl delete -f - --ignore-not-found
 ```
 
-Or just use `./deploy/install.sh --undeploy`, which does exactly this.
+`./deploy/install.sh --undeploy` does exactly this.
 
 
 ## After the controller: warm pools
 
-Installing the scaling manager does not create a warm pool, and a namespace does not need one to
-autoscale. A pool trades held accelerators for scale-up latency, so it is worth
-it only where a model's load time actually costs something — see [Weights and the
-model cache](workload-preparation.md#weights-and-the-model-cache) for why that load is not
-a storage problem.
+Installing the scaling manager creates no warm pool, and a namespace does not
+need one to autoscale. A pool trades held accelerators for faster scale-up, so it
+pays only where a model's load time really costs something. [Weights and the
+model cache](workload-preparation.md#weights-and-the-model-cache) explains why
+that load is not a storage problem.
 
 To see whether this namespace has models that could share one:
 
@@ -196,26 +200,23 @@ To see whether this namespace has models that could share one:
 deploy/warmpool.sh plan -n <namespace>
 ```
 
-`plan` reads only. It groups the namespace's models by what a pool would have to
-provide — accelerator, and devices per replica, the two things a warm copy cannot
-change — and prints a `create` command for each group it can serve, plus any pool
-that is declared and unused or selected and missing.
+`plan` only reads. It groups the namespace's models by accelerator and devices
+per replica (the two things a warm copy cannot change), and prints a `create`
+command for each group it can serve. It also lists pools that are declared but
+unused, or selected but missing.
 
-The sizing arguments in what it prints are placeholders: they set the Pod memory
-limit, which *is* the warm-set budget, and only you know how many models of what
-size a pool must hold at once. `deploy/warmpool.sh sizing -n <namespace>` answers
-that against this cluster's actual nodes.
+The sizing arguments it prints are placeholders. They set the Pod memory limit,
+which *is* the warm-set budget, and only you know how many models of what size a
+pool must hold at once. `deploy/warmpool.sh sizing -n <namespace>` answers that
+against this cluster's nodes.
 
-Full reasoning, the configuration surface, and the removal path are in the [warm
-pool guide](../guides/warm-pool/).
+Reasoning, configuration and removal: the [warm pool guide](../guides/warm-pool/).
 
 ## Platform-specific guides
 
-For platform-specific instructions and considerations:
+- **[Kubernetes Guide](../../deploy/kubernetes/)**: kube-prometheus-stack setup, GPU operator installation, and ServiceMonitor configuration
+- **[OpenShift Guide](../../deploy/openshift/)**: User Workload Monitoring (Thanos), Routes, Security Context Constraints (SCC), and the GPU operator on OpenShift
+- **[Kind Guide (Local Testing)](../../deploy/kind-emulator/)**: local development and testing with Kind and emulated GPUs
 
-- **[Kubernetes Guide](../../deploy/kubernetes/)**: Detailed Kubernetes-specific instructions including kube-prometheus-stack setup, GPU operator installation, and ServiceMonitor configuration
-- **[OpenShift Guide](../../deploy/openshift/)**: OpenShift-specific instructions including User Workload Monitoring (Thanos), Routes, Security Context Constraints (SCC), and GPU operator on OpenShift
-- **[Kind Guide (Local Testing)](../../deploy/kind-emulator/)**: Local development and testing with Kind clusters and emulated GPUs
-
-Each guide includes platform-specific examples, troubleshooting, and quick start commands. All guides use the same [Configuration Reference](configuration.md) documented below.
-
+Each has examples, troubleshooting and quick start commands, and uses the same
+[Configuration Reference](configuration.md).
