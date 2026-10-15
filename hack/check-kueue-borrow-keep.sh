@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 #
 # Executes policy_with_limiters() in deploy/lib/limiter_policy.sh and asserts
-# that rebuilding a Kueue quota entry KEEPS the borrowing settings written by
-# hand into the live one: kueue.borrowNamespaces (the pilot list) and, unless
-# WVA_QUOTA_KUEUE_BORROW is given, kueue.countBorrowable.
+# that rebuilding a Kueue quota entry KEEPS the whole kueue block written by
+# hand into the live one -- borrowNamespaces (the pilot list),
+# assumeTestedVersion, controllerNamespace, the timings, refreshInterval,
+# resources -- and, unless WVA_QUOTA_KUEUE_BORROW is given, countBorrowable.
 #
 # It exists because `make deploy-wva WVA_QUOTA_KUEUE=true` with WVA_LIMITER set,
 # and `make enable-physical-limiter WVA_LIMITER_TYPE=quota`, rebuilt the entry
 # from install variables, and no variable carries borrowNamespaces: a re-run
 # dropped the pilot list, and borrowing was counted for every namespace from
-# then on. The document stayed valid, so nothing failed.
+# then on. The first fix kept only borrowNamespaces and countBorrowable, so a
+# re-run still dropped assumeTestedVersion (a digest-only Kueue image then
+# stops borrowing) and every timing. The document stayed valid, so nothing
+# failed.
 #
 # The installer composes AFTER its apply reset the policy, so it hands the
 # limiters it read before the apply in LIMITERS_KEEP_FROM; the cluster-policy
@@ -52,6 +56,13 @@ OLD_ENTRY='- name: install-quota
     enabled: true
     countBorrowable: false
     borrowNamespaces: [team-a]
+    assumeTestedVersion: true
+    controllerNamespace: kueue-ops
+    borrowCooldown: 20m
+    placementTimeout: 9m
+    lenderDebounce: 90s
+    refreshInterval: 45s
+    resources: [nvidia.com/gpu, example.com/gpu]
   namespaceQuotas:
     default:
       H100: -1'
@@ -78,6 +89,15 @@ OUT="$(policy_with_limiters "$LIVE_POLICY" "$ENTRY" compose)"
 [ "$(field "$OUT" '.kueue.countBorrowable')" = "false" ] \
     && ok "enable-physical-limiter keeps countBorrowable: false when WVA_QUOTA_KUEUE_BORROW is not given" \
     || fail "enable-physical-limiter dropped countBorrowable: $(field "$OUT" '.kueue')"
+# R4: every hand-written field of the block, not only the pilot list.
+for kv in 'assumeTestedVersion=true' 'controllerNamespace=kueue-ops' 'borrowCooldown=20m' \
+    'placementTimeout=9m' 'lenderDebounce=90s' 'refreshInterval=45s' \
+    'resources | join(",")=nvidia.com/gpu,example.com/gpu' 'enabled=true'; do
+    f="${kv%%=*}" want="${kv#*=}"
+    [ "$(field "$OUT" ".kueue.$f")" = "$want" ] \
+        && ok "enable-physical-limiter keeps kueue.$f" \
+        || fail "enable-physical-limiter dropped kueue.$f: $(field "$OUT" '.kueue')"
+done
 [ "$(printf '%s\n' "$OUT" | yq '.limiters | length')" = "1" ] \
     && ok "one quota entry after the rebuild, not two" \
     || fail "the rebuild left $(printf '%s\n' "$OUT" | yq '.limiters | length') entries"
@@ -106,18 +126,37 @@ OUT="$(LIMITERS_KEEP_FROM="$KEEP" policy_with_limiters "$RESET_POLICY" "$ENTRY")
 [ "$(field "$OUT" '.kueue.countBorrowable')" = "false" ] \
     && ok "deploy-wva keeps countBorrowable read before its apply" \
     || fail "deploy-wva dropped countBorrowable: $(field "$OUT" '.kueue')"
+for kv in 'assumeTestedVersion=true' 'controllerNamespace=kueue-ops' 'placementTimeout=9m' \
+    'resources | join(",")=nvidia.com/gpu,example.com/gpu'; do
+    f="${kv%%=*}" want="${kv#*=}"
+    [ "$(field "$OUT" ".kueue.$f")" = "$want" ] \
+        && ok "deploy-wva keeps kueue.$f read before its apply" \
+        || fail "deploy-wva dropped kueue.$f: $(field "$OUT" '.kueue')"
+done
+
+# 3b. What the install sets wins over what is kept: WVA_QUOTA_KUEUE_BORROW=false
+#     over a live entry that counts borrowing writes false, and the old
+#     enabled: false is overlaid by the enabled: true the install writes.
+OFF_LIVE="$(printf '%s\n' "$LIVE_POLICY" | yq '.limiters[0].kueue.enabled = false | del(.limiters[0].kueue.countBorrowable)')"
+OFF_ENTRY="$(WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_SCOPE=cluster limiter_set_yaml quota default)"
+OUT="$(WVA_QUOTA_KUEUE_BORROW=false policy_with_limiters "$OFF_LIVE" "$OFF_ENTRY" compose)"
+[ "$(field "$OUT" '.kueue.countBorrowable')" = "false" ] && [ "$(field "$OUT" '.kueue.enabled')" = "true" ] \
+    && [ "$(field "$OUT" '.kueue.placementTimeout')" = "9m" ] \
+    && ok "the install variables overlay the kept block: countBorrowable false, enabled true, the rest kept" \
+    || fail "the install variables did not overlay the kept block: $(field "$OUT" '.kueue')"
 
 # 4. Another name, the only Kueue quota entry: still the one replaced.
 RENAMED="$(printf '%s\n' "$LIVE_POLICY" | yq '.limiters[0].name = "tenant-quota"')"
 OUT="$(policy_with_limiters "$RENAMED" "$ENTRY" compose)"
 [ "$(field "$OUT" '.kueue.borrowNamespaces | join(",")')" = "team-a" ] \
+    && [ "$(field "$OUT" '.kueue.assumeTestedVersion')" = "true" ] \
     && ok "a renamed single Kueue entry is kept from" \
     || fail "a renamed single Kueue entry was not kept from: $(field "$OUT" '.kueue')"
 
 # Controls: nothing is added where there is nothing to keep, or no kueue block.
 OUT="$(policy_with_limiters "$RESET_POLICY" "$ENTRY")"
-[ "$(field "$OUT" '.kueue.borrowNamespaces')" = "null" ] \
-    && ok "control: no live entry, no borrowNamespaces invented" \
+[ "$(field "$OUT" '.kueue.borrowNamespaces')" = "null" ] && [ "$(field "$OUT" '.kueue.enabled')" = "true" ] \
+    && ok "control: no live entry, the new entry as built and no borrowNamespaces invented" \
     || fail "borrowNamespaces invented from nothing: $(field "$OUT" '.kueue')"
 PLAIN="$(WVA_QUOTAS='H100=8' WVA_SCOPE=cluster limiter_set_yaml quota default)"
 OUT="$(policy_with_limiters "$LIVE_POLICY" "$PLAIN" compose)"
@@ -126,5 +165,7 @@ OUT="$(policy_with_limiters "$LIVE_POLICY" "$PLAIN" compose)"
     || fail "a kueue block was added to an entry without one: $(field "$OUT" '.kueue')"
 
 echo "check-kueue-borrow-keep: $PASS passed, $FAIL failed"
-[ "$PASS" -gt 0 ] || { echo "FAIL: no case ran"; exit 1; }
+# A run that ended early passes nothing it skipped: count the cases.
+RAN=$((PASS + FAIL))
+[ "$RAN" -eq 24 ] || { echo "FAIL: $RAN cases ran, not 24. Update the count deliberately."; exit 1; }
 [ "$FAIL" -eq 0 ]
