@@ -622,6 +622,13 @@ cmd_apply() {
         log_warning "jq is not installed; skipping the per-node report (enginecache.sh status needs it)"
         return 0
     fi
+    # The claim binds to its static volume a few seconds after the apply;
+    # give it 20 s, so the report below does not read that delay as a fault.
+    local tries=0
+    while [ "$tries" -lt 10 ] && [ "$(kubectl get pvc -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.status.phase}' 2>/dev/null || true)" = Pending ]; do
+        tries=$((tries + 1))
+        sleep 2
+    done
     cmd_status report || true
 }
 
@@ -680,6 +687,28 @@ ec_nodes() {
     fi
 }
 
+# claim_unbound_reason says why the claim is not Bound. A claim on a static
+# volume binds a few seconds after the volume exists, so a volume that exists
+# is a delay, not a fault. Only a volume that is not there is blamed on leave
+# to create it, and a volume that cannot be read is said to be unknown.
+claim_unbound_reason() {
+    local vol found err_file
+    vol="$(kubectl get pvc -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)"
+    if [ -z "$vol" ]; then
+        echo "  the claim is not bound and names no volume -- re-run apply"
+        return
+    fi
+    err_file="$(mktemp)"
+    if ! found="$(kubectl get pv "$vol" -o name --ignore-not-found 2>"$err_file")"; then
+        echo "  the claim is not bound, and its volume ${vol} could not be read ($(tr '\n' ' ' < "$err_file")) -- whether it exists is not known; reading PersistentVolumes needs cluster-scoped read"
+    elif [ -n "$found" ]; then
+        echo "  the claim is not bound yet: its volume ${vol} exists, and a claim on it binds within seconds -- run status again"
+    else
+        echo "  the claim is not bound: its volume ${vol} is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
+    fi
+    rm -f "$err_file"
+}
+
 # cmd_status prints, per node, whether the node is prepared. Ready is the
 # marker present and the directory writable by the preparer's UID; a pod
 # that keeps failing shows its reason, and no pod at all is a node the
@@ -702,7 +731,7 @@ cmd_status() {
     echo "${path}  (claim ${CLAIM}: ${bound:-missing}; seed: ${seed:-none}; nodes: $(accelerator_selector_text "$selector"))"
     if [ "$bound" != Bound ]; then
         rc=1
-        [ -z "$bound" ] || echo "  the claim is not bound: its volume is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
+        [ -z "$bound" ] || claim_unbound_reason
     fi
     printf '  %-28s %-12s %s\n' NODE CACHE PREPARER
     accelerator_print_excluded "$excluded"

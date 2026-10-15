@@ -594,7 +594,11 @@ case "\$1 \$2" in
         *) echo "stub kubectl: the claim read names no claim:\$ARGV" >&2; exit 2 ;;
       esac
       case "\$ARGV" in
-        *"jsonpath={.status.phase}"*) printf '%s' "\${STUB_PVC_PHASE-Bound}" ;;
+        *"jsonpath={.status.phase}"*)
+            if [ -n "\${STUB_BIND_AFTER:-}" ]; then
+                n=\$(( \$(cat "$T/bind.n" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$T/bind.n"
+                if [ "\$n" -ge "\$STUB_BIND_AFTER" ]; then printf Bound; else printf Pending; fi
+            else printf '%s' "\${STUB_PVC_PHASE-Bound}"; fi ;;
         *"jsonpath={.metadata.name}/{.spec.storageClassName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf 'engine-cache/%s' "\${STUB_PVC_CLASS-}" ;;
         *"jsonpath={.spec.volumeName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_VOLUME-$PVNAME}" ;;
         *"jsonpath={.spec.storageClassName}"*) printf '%s' "\${STUB_PVC_CLASS-}" ;;
@@ -617,6 +621,13 @@ case "\$1 \$2" in
   "get pv")      refuse -n
                  case "\$ARGV" in
                    *"jsonpath={.spec.hostPath.path}"*) case "\$ARGV" in *" $PVNAME "*) printf '%s' "\${STUB_PV_PATH-/mnt/local/weights/check-ns/engine-cache}" ;; *) echo "stub kubectl: pv read for a volume that is not the claim's:\$ARGV" >&2; exit 2 ;; esac ;;
+                   *" -o name "*)
+                       case "\$ARGV" in *" $PVNAME "*) ;; *) echo "stub kubectl: pv read for a volume that is not the claim's:\$ARGV" >&2; exit 2 ;; esac
+                       case "\${STUB_PV_STATE:-exists}" in
+                         exists) printf 'persistentvolume/%s\n' "$PVNAME" ;;
+                         absent) case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "Error from server (NotFound): persistentvolumes $PVNAME not found" >&2; exit 1 ;; esac ;;
+                         forbidden) echo "Error from server (Forbidden): persistentvolumes $PVNAME is forbidden: stub" >&2; exit 1 ;;
+                       esac ;;
                    *) want -l "$LBL"; want -o json; cat "$T/pvs.json" ;;
                  esac ;;
   "delete pv")   refuse -n; echo deleted ;;
@@ -673,7 +684,27 @@ if STUB_DS_SELECTOR='a=b"c' PATH="$STUB_PATH" bash deploy/enginecache.sh status 
     grep -q 'this script did not write' "$T/edited.out" && ok "status: a DaemonSet nodeSelector this script did not write is refused before kubectl" || fail "status on an edited DaemonSet: $(tail -1 "$T/edited.out")"; fi
 if STUB_NODES_ERROR='Error from server (Forbidden): nodes is forbidden: User cannot list' PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/forb.out" 2>&1; then fail "status must fail when nodes cannot be listed"; else
     grep -q 'cluster-reader' "$T/forb.out" && ok "status: a Forbidden node list names the permission (cluster-reader)" || fail "status Forbidden: $(tail -1 "$T/forb.out")"; fi
-if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pending.out" 2>&1; then fail "status must fail while the claim is not Bound"; else grep -q 'the claim is not bound: its volume is cluster-scoped and was not created' "$T/pending.out" && ok "status: an unbound claim is reported with why, and fails" || fail "status: unbound claim: $(head -2 "$T/pending.out" | tr '\n' ';')"; fi
+if STUB_PV_STATE=absent STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pending.out" 2>&1; then fail "status must fail while the claim is not Bound"; else grep -q "the claim is not bound: its volume ${PVNAME} is cluster-scoped and was not created" "$T/pending.out" && ok "status: an unbound claim whose volume is not there is blamed on leave to create it, and fails" || fail "status: unbound claim: $(head -2 "$T/pending.out" | tr '\n' ';')"; fi
+# a claim whose volume exists is a binding delay, not missing rights; a
+# volume that cannot be read is unknown, never absent
+if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pendpv.out" 2>&1; then fail "status must fail while the claim is not Bound, even with its volume there"; else
+    grep -q "the claim is not bound yet: its volume ${PVNAME} exists" "$T/pendpv.out" && ! grep -q 'leave to create' "$T/pendpv.out" \
+        && ok "status: an unbound claim whose volume exists is a binding delay, with no blame on permissions" || fail "status: unbound claim, volume there: $(sed -n 2p "$T/pendpv.out")"; fi
+if STUB_PV_STATE=forbidden STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/pendforb.out" 2>&1; then fail "status must fail while the claim is not Bound, volume unreadable"; else
+    grep -q "its volume ${PVNAME} could not be read (Error from server (Forbidden)" "$T/pendforb.out" && ! grep -q 'was not created' "$T/pendforb.out" \
+        && ok "status: an unbound claim whose volume read is Forbidden says so, never that the volume is absent" || fail "status: unbound claim, volume Forbidden: $(sed -n 2p "$T/pendforb.out")"; fi
+# apply waits briefly for the claim to bind before its report (sleep is a
+# stand-in that returns at once, so the wait costs nothing here)
+mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
+rm -f "$T/bind.n"
+STUB_BIND_AFTER=3 STUB_PVC_CLASS=node-local-engine-cache PATH="$T/fastsleep:$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/latebind.out" 2>&1 || true
+grep -q 'claim engine-cache: Bound' "$T/latebind.out" && ! grep -q 'not bound' "$T/latebind.out" \
+    && ok "apply: a claim that binds a few seconds after the apply is reported Bound, not as a fault" || fail "apply, claim binding late: reads=$(cat "$T/bind.n" 2>/dev/null); $(grep -E 'claim engine-cache|not bound' "$T/latebind.out" | tr '\n' ';')"
+rm -f "$T/bind.n"
+STUB_BIND_AFTER=99 STUB_PVC_CLASS=node-local-engine-cache PATH="$T/fastsleep:$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/slowbind.out" 2>&1 || true
+[ "$(cat "$T/bind.n" 2>/dev/null || echo 0)" -ge 10 ] && grep -q "the claim is not bound yet: its volume ${PVNAME} exists" "$T/slowbind.out" && ! grep -q 'leave to create' "$T/slowbind.out" \
+    && ok "apply: a claim still Pending after the wait, its volume there, is reported as not bound yet" || fail "apply, claim still Pending: reads=$(cat "$T/bind.n" 2>/dev/null); $(grep -E 'not bound' "$T/slowbind.out" | tr '\n' ';')"
+rm -f "$T/bind.n"
 # apply: refuses before anything lands without PV rights; refuses a foreign claim; the OpenShift notice
 : > "$T/calls"
 if STUB_NO_PV=1 STUB_PVC_PHASE="" PATH="$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/nopv.out" 2>&1; then fail "apply must refuse without leave to create PersistentVolumes"; else
