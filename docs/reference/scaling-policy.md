@@ -1186,9 +1186,12 @@ built-in defaults for every field it leaves unset, and those override
 - [ ] The llm-d router (EPP) runs in the model's namespace and Prometheus
       scrapes it. It must publish `llm_d_epp_request_ttft_seconds` (for TTFT)
       and `llm_d_epp_request_streaming_tpot_seconds` (for TPOT); an older router
-      without them leaves the SLO unjudged, with no error. Check:
-      `sum by (model_name) (rate(llm_d_epp_request_ttft_seconds_count{namespace="<ns>", streaming="true"}[5m]))`
-      returns the model.
+      without them leaves the SLO unjudged, with no error. Check that
+      `sum by (model_name, target_model_name) (rate(llm_d_epp_request_ttft_seconds_count{namespace="<ns>", streaming="true"}[5m]))`
+      returns the model (as `target_model_name`, or as `model_name` where that
+      is empty), and for TPOT that
+      `count(llm_d_epp_request_streaming_tpot_seconds_count{namespace="<ns>"})`
+      returns a series.
 - [ ] Clients **stream**. Only streaming requests are counted.
 - [ ] For a TPOT target: clients send `stream_options.include_usage`, or vLLM
       runs with `--enable-force-include-usage`. Without it TTFT is judged and
@@ -1204,39 +1207,50 @@ built-in defaults for every field it leaves unset, and those override
 **Turn it on**
 
 1. **Save the model's current `Effective scaling policy` line**, to compare
-   with in step 5. It is logged when the resolved policy changes, not every
-   cycle:
+   with in step 5. It is logged only when the resolved policy changes, by the
+   leader, so read every controller Pod:
 
    ```bash
-   kubectl logs -n <controller-ns> deploy/<controller> | grep 'Effective scaling policy' | grep '"<model>"' | tail -1
+   kubectl logs -n <controller-ns> -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 | grep 'Effective scaling policy' | grep '"modelID": "<model>"' | tail -1
    ```
 
-2. **Pick the tier.** Three ways, each needing no restart:
-   - a new tier, named by each of the model's ScaledObjects (step 4);
-   - the tier the model already uses: add to it, and keep its own values;
-   - `default`, which turns it on for every model that uses `default`.
+   Nothing back (the line has rotated out): save the ConfigMap entry the model
+   resolves to instead (step 3), and compare that in step 5.
 
-3. **Write the tier with every field it relies on.** Read `default` first:
+2. **Find the tier the model is on, and pick the tier to change.** A model's
+   tier is the one its ScaledObjects name (`scalingPolicy:`); with none, the
+   tier `default` names in `defaultPolicy:`, and only with neither, `default`
+   itself. The policy line shows `"(default entry)"` for both of the last two,
+   so read `default` for a `defaultPolicy:` key. Then, each needing no
+   restart:
+   - a new tier, named by each of the model's ScaledObjects (step 4);
+   - the tier the model is on: add to it, and keep its own values;
+   - the `defaultPolicy:` tier, or `default` when there is none, which turns it
+     on for every model that uses it.
+
+3. **Write the tier with every field it relies on.** Read the ConfigMap first:
    `kubectl get configmap wva-scaling-policy-config -n <controller-ns> -o yaml`
    (or the namespace-local map, if the model's namespace has one). A tier's
    entry does not inherit what it leaves unset: `kvCacheThreshold`,
    `queueLengthThreshold` and `priority` take built-in defaults, and an entry
-   with an `analyzers:` list takes the built-in band too
+   with an `analyzers:` list takes the built-in band too -- 0.85 and 0.70 for
+   `scaleUpThreshold` and `scaleDownBoundary`
    ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)). The
    list also replaces saturation's inherited `parameters:` and `score`. So copy
-   from `default` every one of those the tier does not already set, and keep
-   the tier's own values where it does:
+   every one of those the tier does not already set from the tier the model is
+   on now (step 2), and keep the tier's own values where it does. Replace each
+   `<...>` below; do not paste the example values:
 
    ```yaml
    slo-watch: |
-     scaleUpThreshold: 0.85        # copied from default
-     scaleDownBoundary: 0.70
-     kvCacheThreshold: 0.80
-     queueLengthThreshold: 5
-     priority: 1.0
+     scaleUpThreshold: <current>       # every field copied from the model's tier now
+     scaleDownBoundary: <current>
+     kvCacheThreshold: <current>
+     queueLengthThreshold: <current>
+     priority: <current>
      analyzers:
-       - name: saturation          # keep it, with default's score and parameters
-         score: 1.0
+       - name: saturation              # keep it, with the current score and parameters
+         score: <current>
        - name: slo
      slo:
        tpot: {target: 100ms}                  # a mean
@@ -1247,12 +1261,13 @@ built-in defaults for every field it leaves unset, and those override
    `scalingPolicy: slo-watch` in the trigger metadata of every one of the
    model's ScaledObjects ([Named Policy Tiers](#3-named-policy-tiers)).
 
-5. **Check nothing moved.** The model's new `Effective scaling policy` line
-   must match the one saved in step 1 in every field but `slo`, which shows
-   the targets, for example `tpot mean<=100ms, ttft p95<=2s (observe)`.
-   `"scalingPolicy": "(default entry)"` means step 4 did not take. Saturation's
-   `parameters:`, `score` and `queueLengthThreshold` are not in that line:
-   compare those in the ConfigMap.
+5. **Check nothing moved.** Every field of the model's new
+   `Effective scaling policy` line must match the one saved in step 1 except
+   `slo`, which shows the targets, for example
+   `tpot mean<=100ms, ttft p95<=2s (observe)`, and, for a new tier,
+   `scalingPolicy`, which must read `slo-watch`: `"(default entry)"` there means
+   step 4 did not take. Saturation's `parameters:`, `score` and
+   `queueLengthThreshold` are not in that line: compare those in the ConfigMap.
 
 **See the result**
 
@@ -1266,7 +1281,10 @@ built-in defaults for every field it leaves unset, and those override
   ```
 
   returns the objectives missed in the last window; `wva_slo_attainment_ratio`
-  is the share of requests whose TTFT met the target.
+  is the share of requests whose TTFT met the target. An empty result is not a
+  pass: a model missing from
+  `max by (exported_namespace, model_name, objective) (wva_slo_observed_seconds)`
+  was not judged (see "When it does not judge" below).
 - The **SLO** row of the operational dashboard (collapsed by default): observed
   against target per objective, what it judged and why it did not.
 - The series under [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics),
@@ -1392,7 +1410,8 @@ not readings of the fleet:
   rarely spans it, possibly for good. Read `pinned-default` as not a
   measurement: on an accelerator whose real floor is well above the default, it
   can call a target feasible that no fill meets. With no line: `no-line` (too
-  few readings -- warming up, or replicas idle below a fill of 0.15) or
+  few readings -- warming up, or replicas outside the band: idle below a fill
+  of 0.15, or overloaded above 0.80) or
   `declined` (enough readings, and the fit refused them: most often a card whose
   ITL sits below the default intercept).
 - `wva_slo_fill` is before any scale-up headroom: compare it with
@@ -1422,9 +1441,12 @@ not readings of the fleet:
   out, so a variant served only by bridges reads `no-line` or
   `no-output-length`.
 - Each cycle logs `slo-model`, `slo-variant` and `slo-transient` lines at
-  verbosity 3: the judged figures; each variant's line (its key, A, B, and what
-  the window was offered and held) and the fill before the clamp; and why a
-  window is excluded, since when, and for how long.
+  verbosity 3: the judged figures; each variant's line (its key, A, B, the
+  rows considered, and the readings the window kept and held) and the fill
+  before the clamp; and why a window is excluded, since when, and for how long.
+  The controller runs at `--v=2` by default, so none of these is logged until
+  you set `--v=3` in the controller Deployment's args. Set it before you need
+  the answer: `wva_slo_excluded` alone says the reason, not since when.
 
 ### Default Configuration
 

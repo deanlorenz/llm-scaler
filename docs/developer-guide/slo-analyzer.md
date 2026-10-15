@@ -45,7 +45,7 @@ hands the optimizer `namedResults[0]`, saturation's.
        headroom, where `PredictedITL` is read.
    - `judge` reads the router: the TPOT mean as `_sum ÷ _count` (both or
      nothing); the TTFT percentile and attainment from `newHistogram`, only
-     above `minSamples` (`max(50, 1000/(100-p))`).
+     at or above `minSamples` (`max(50, 1000/(100-p))`).
    - `noteTransient` decides, per objective, whether the window is judged:
      `unobserved` when the model was not analyzed on the previous cycle
      (`a.cycle > m.analyzedCycle+1`, or first sight); `zero-replicas` or
@@ -82,8 +82,10 @@ instance and its own keys.
 
 - **A reading** is a row of the variant that is Ready, not lent by the warm
   pool, with a finite positive ITL and `0 < k ≤ 0.80`. `Reading` counts each
-  reason a row was turned away; `Offered` the readings the window kept,
-  `BelowBand` those it dropped below `k = 0.15`.
+  reason a row was turned away; `Offered` the readings the window kept (logged
+  as `kept`), `BelowBand` those it dropped below `k = 0.15`. A variant whose
+  replicas all run above 0.80 empties its window: `no-line`, with
+  `aboveBand` counting why.
 - **The window** (`Window`) holds at most 20 readings for at most 30 minutes.
   Nothing clears it on a change of shape.
 - **The fit.** With 10 readings spanning 0.30 of `k`, a least-squares `Fit`,
@@ -102,11 +104,12 @@ instance and its own keys.
 ## Answering the two common questions
 
 - *Why was a model's window not judged at 10:05?* `wva_slo_excluded` says the
-  reason. At `-v=3` the `slo-transient` line says when each mark was set, for
+  reason. At `--v=3` (the default is 2) the `slo-transient` line says when each mark was set, for
   how long it holds, the cycles since the model was last analyzed, and when
   each variant began pending.
 - *What fill did a variant price at, from which line?* The `slo-variant` line:
-  `lineKey`, `lineA`, `lineB`, `lineTier`, what the window was offered and held,
+  `lineKey`, `lineA`, `lineB`, `lineTier`, the rows `considered`, the readings the
+  window `kept` and `held`, `scaleUpThreshold`,
   `targetFill` before the clamp, and the batch cap's inputs.
 
 ## Tests

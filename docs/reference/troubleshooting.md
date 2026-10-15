@@ -542,17 +542,10 @@ The `wva_slo_*` series carry the model's namespace as `exported_namespace`
 ### `WVAModelSLOMissed`
 
 At least half of the judged minutes of the last 30, and at least 5, were over
-target. To mitigate now, give the model more capacity than saturation asks
-for:
+target.
 
-- raise its floor: `minReplicaCount` on each variant's ScaledObject
-  (`kubectl edit scaledobject <so> -n <ns>`; where a tool generates the
-  ScaledObject, change it there, or the next apply undoes it), or
-- lower the tier's `scaleUpThreshold` (and write the tier's other fields out,
-  see [Turn it on](scaling-policy.md#slo-observe-only), step 3).
-
-**First, rule out a target no capacity can meet.** More replicas do not help
-then: loosen the target, or move the model to faster hardware.
+**1. Check the target can be met at all.** If it cannot, more replicas do not
+help: loosen the target, or move the model to faster hardware.
 
 ```promql
 # tpot: 1 for "infeasible" -- even an almost empty replica is over the target
@@ -564,7 +557,16 @@ rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:re
 `infeasible` read from a `pinned-default` line is not reliable: that line's
 intercept is a default for no particular card.
 
-Then find the cause, per objective:
+**2. If it can, mitigate:** give the model more capacity than saturation asks
+for:
+
+- raise its floor: `minReplicaCount` on each variant's ScaledObject
+  (`kubectl edit scaledobject <so> -n <ns>`; where a tool generates the
+  ScaledObject, change it there, or the next apply undoes it), or
+- lower the tier's `scaleUpThreshold` (and write the tier's other fields out,
+  see [Turn it on](scaling-policy.md#slo-observe-only), step 3).
+
+**3. Then find the cause**, per objective:
 
 ```promql
 # tpot: the mean ITL the variant would show sized for the target, against the target
