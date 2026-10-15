@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=35
+EXPECT_CASES=44
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -257,7 +257,33 @@ pw_kubectl() {
     case "$*" in
         "get scaledobject -A"*)
             [ -z "${PW_SO_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects" at the cluster scope' >&2; return 1; }
+            [ -z "${PW_SO_NOTYPE:-}" ] || { echo "error: the server doesn't have a resource type \"scaledobject\"" >&2; return 1; }
             printf '%s\n' "${PW_SOS:-}" ;;
+        # The optimizer mode: PW_STATUS is what the controller publishes
+        # (FORBIDDEN refuses the read; unset is no status ConfigMap), PW_POLICY
+        # the default entry of its policy (unset is no policy ConfigMap).
+        "get configmap wva-controller-status "*)
+            case "${PW_STATUS:-}" in
+                "") echo 'Error from server (NotFound): configmaps "wva-controller-status" not found' >&2; return 1 ;;
+                FORBIDDEN) echo 'Error from server (Forbidden): configmaps "wva-controller-status" is forbidden: User "u" cannot get resource "configmaps"' >&2; return 1 ;;
+                *) printf '%s' "$PW_STATUS" ;;
+            esac ;;
+        "get configmap wva-scaling-policy-config "*)
+            [ -n "${PW_POLICY:-}" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; return 1; }
+            printf '%s\n' "$PW_POLICY" ;;
+        # May the controller patch pods? PW_CANI yes, no, or (unset) this user
+        # may not impersonate it. PW_HAS_RB / PW_HAS_ROLE: the two halves of
+        # the grant exist.
+        "auth can-i "*)
+            case "${PW_CANI:-}" in
+                yes) echo yes ;;
+                no) echo no; return 1 ;;
+                *) echo 'Error from server (Forbidden): users "u" is forbidden: User "u" cannot impersonate resource "serviceaccounts"' >&2; return 1 ;;
+            esac ;;
+        "get rolebinding wva-pod-writer-"*)
+            [ -n "${PW_HAS_RB:-}" ] || { echo 'Error from server (NotFound): rolebindings.rbac.authorization.k8s.io not found' >&2; return 1; } ;;
+        "get role wva-pod-writer "*)
+            [ -n "${PW_HAS_ROLE:-}" ] || { echo 'Error from server (NotFound): roles.rbac.authorization.k8s.io "wva-pod-writer" not found' >&2; return 1; } ;;
         "get pods -A"*)
             [ -z "${PW_PODS_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): pods is forbidden: User "u" cannot list resource "pods" at the cluster scope' >&2; return 1; }
             printf '%s\n' "${PW_MARKED:-}" ;;
@@ -335,7 +361,71 @@ ns-x"
     else
         fail "POD WRITES: unreadable pods must warn and list the model namespaces" "$out"
     fi
+
+    # An ACTIVE optimizer moves the deletion cost of every model's pods, marked
+    # or not. Before, a namespace with no mark yet lost patch on the upgrade,
+    # and nothing was printed.
+    PW_MARKED="" PW_STATUS=active pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-m ns-p ns-q" ]; then
+        ok "POD WRITES: an active optimizer with no marks yet is granted in every namespace of its models"
+    else
+        fail "POD WRITES: an active optimizer must be granted in ns-m, ns-p and ns-q, got [$(applied)]" "$out"
+    fi
+    PW_MARKED="" PW_POLICY='optimizer:
+  type: utilizationShare
+  utilizationShare:
+    shadow: false' pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-m ns-p ns-q" ]; then
+        ok "POD WRITES: a controller with no status is read from its policy: active is granted everywhere"
+    else
+        fail "POD WRITES: an active block in the policy must grant in ns-m, ns-p and ns-q, got [$(applied)]" "$out"
+    fi
+    PW_STATUS=FORBIDDEN pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-m ns-p" ] && printf '%s' "$out" | grep -q 'Could not tell whether the utilization-share optimizer is active' \
+        && printf '%s' "$out" | grep -q 'ns-m ns-q'; then
+        ok "POD WRITES: an unreadable optimizer mode is warned with the model namespaces, never taken for off"
+    else
+        fail "POD WRITES: an unreadable mode must warn and list ns-m ns-q" "$out"
+    fi
+
+    # The short Service name (wva-external-scaler.<ns>:9090) calls this
+    # controller too. An address naming no controller is warned, not guessed.
+    PW_SOS="ns-c wva-external-scaler.wva-system:9090 pool-c -
+ns-u 10.0.0.9:9090 - llama"
+    PW_MARKED="" pw_case wva_regrant_pod_writers wva-system
+    if [ "$(applied)" = "ns-c" ]; then
+        ok "POD WRITES: a pool addressed by the short Service name (wva-external-scaler.<ns>:port) is granted"
+    else
+        fail "POD WRITES: wva-external-scaler.wva-system:9090 must count as this controller, got [$(applied)]" "$out"
+    fi
+    if printf '%s' "$out" | grep -q 'does not say which controller' && printf '%s' "$out" | grep -q 'ns-u (10.0.0.9:9090)'; then
+        ok "POD WRITES: a pool or model whose address names no controller is warned about"
+    else
+        fail "POD WRITES: ns-u, addressed by IP, must be named as unattributable" "$out"
+    fi
+
+    # SCALER_BACKEND=none: no ScaledObject kind at all is none, not unknown.
+    PW_SO_NOTYPE=1 pw_case wva_regrant_pod_writers wva-system
+    if [ -z "$(applied)" ] && ! printf '%s' "$out" | grep -q 'UNKNOWN'; then
+        ok "POD WRITES: a cluster without the ScaledObject kind has nothing to grant, and says nothing"
+    else
+        fail "POD WRITES: a missing ScaledObject kind must read as none, not UNKNOWN" "$out"
+    fi
     unset PW_SOS PW_MARKED
+
+    # Asked without impersonation, the grant counts only when both halves
+    # exist: a RoleBinding whose Role was deleted grants nothing.
+    if [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 PW_HAS_ROLE=1 wva_pod_writes_allowed ns-a wva-system) )" = yes ] \
+        && [ "$( (kubectl() { pw_kubectl "$@"; }; PW_CANI=yes wva_pod_writes_allowed ns-a wva-system) )" = yes ]; then
+        ok "POD WRITES: the RoleBinding and the Role together read as already allowed"
+    else
+        fail "POD WRITES: a whole grant, or a can-i yes, must read as yes"
+    fi
+    if [ "$( (kubectl() { pw_kubectl "$@"; }; PW_HAS_RB=1 wva_pod_writes_allowed ns-a wva-system) )" = unknown ]; then
+        ok "POD WRITES: a RoleBinding without its Role is not already allowed"
+    else
+        fail "POD WRITES: a RoleBinding whose Role is gone must read as unknown, so the grant is made again"
+    fi
 
     # Before the apply that removes the old grant, and only where the
     # installer applies cluster RBAC.
@@ -347,6 +437,20 @@ ns-x"
         ok "POD WRITES: deploy_wva_controller re-grants before its apply, and install.sh sources pod_writer.sh"
     else
         fail "POD WRITES: wva_regrant_pod_writers must run before the overlay apply (line ${regrant_at:-none} vs ${apply_at:-none}), from an install.sh that sources it"
+    fi
+    # And only where the installer applies cluster RBAC: the phases that carry
+    # the bindings (all, prereqs), for a cluster-scoped controller. The three
+    # lines above the call, whitespace aside.
+    guard=""
+    if [ -n "$regrant_at" ] && [ "$regrant_at" -gt 3 ]; then
+        guard="$(printf '%s\n' "$iw" | sed -n "$((regrant_at - 3)),${regrant_at}p" | sed 's/^[[:space:]]*//' | tr '\n' '|')"
+    fi
+    want_guard='case "${WVA_APPLY_SCOPE:-all}" in|all|prereqs)|if [ "$(wva_install_scope)" = "cluster" ]; then|wva_regrant_pod_writers "$WVA_NS"|'
+    if [ "$guard" = "$want_guard" ]; then
+        ok "POD WRITES: the re-grant sits inside the all|prereqs and cluster-scope guards"
+    else
+        fail "POD WRITES: wva_regrant_pod_writers must sit directly inside the all|prereqs and cluster-scope guards" "got:  $guard
+want: $want_guard"
     fi
 fi
 

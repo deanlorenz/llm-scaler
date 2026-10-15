@@ -88,32 +88,7 @@ us_quota_keys() {
     yq -r '[.limiters[]? | select(.type == "quota") | .. | select(tag == "!!int") | path | .[-1]] | unique | .[]'
 }
 
-# us_block_state -- off, shadow or active, or other:<type> for an optimizer
-# block this script does not own (other:not-a-map when it is not a map). Then a
-# second word: physical when the block also plans inventory-only groups.
-us_block_state() {
-    local p tag type shadow physical mode
-    p="$(cat)"
-    tag="$(printf '%s\n' "$p" | yq -r '.optimizer | tag')" || return 1
-    case "$tag" in
-        '!!null') echo "off plain"; return 0 ;;
-        '!!map') ;;
-        *) echo "other:not-a-map plain"; return 0 ;;
-    esac
-    type="$(printf '%s\n' "$p" | yq -r '.optimizer.type // ""')" || return 1
-    shadow="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.shadow // false) | tostring')" || return 1
-    physical="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.physicalGroups // false) | tostring')" || return 1
-    if [ -z "$type" ]; then
-        mode=off
-    elif [ "$type" != utilizationShare ]; then
-        mode="other:$type"
-    elif [ "$shadow" = true ]; then
-        mode=shadow
-    else
-        mode=active
-    fi
-    if [ "$physical" = true ]; then echo "$mode physical"; else echo "$mode plain"; fi
-}
+# us_block_state lives in lib/pod_writer.sh, which the installer shares.
 
 # us_policy_with_mode <shadow|active|off> [physical] -- the policy with the
 # block in that mode. Every other key, of the block and of the policy, is kept.

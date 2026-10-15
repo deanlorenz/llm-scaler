@@ -18,9 +18,10 @@
 # controller namespace, so two controllers granted in one namespace do not
 # overwrite each other's subject.
 #
-# Every function up to wva_pod_writer_marked_namespaces needs only kubectl. The
-# installer's two (wva_regrant_pod_writers, wva_remove_pod_writers) also log
-# through log_info and log_warning, which deploy/install.sh defines.
+# Every function up to wva_pod_writer_marked_namespaces needs only kubectl; the
+# two that read the optimizer's mode also need yq. The installer's two
+# (wva_regrant_pod_writers, wva_remove_pod_writers) also log through log_info
+# and log_warning, which deploy/install.sh defines.
 #
 # Run as a script, it prints the grant for an admin to apply:
 #
@@ -108,8 +109,8 @@ wva_grant_pod_writes() {
 
 # wva_pod_writes_allowed echoes yes when the controller in $2 may already patch
 # pods in $1, no when the API server says it may not, and unknown when that
-# cannot be asked (impersonating the controller is not allowed) and no
-# role/wva-pod-writer binding for it can be seen either. Unknown is never no.
+# cannot be asked (impersonating the controller is not allowed) and the grant
+# this file makes cannot be seen whole either. Unknown is never no.
 wva_pod_writes_allowed() {
     local ns="$1" controller_ns="$2" out binding
     out="$(kubectl auth can-i patch pods -n "$ns" \
@@ -118,9 +119,11 @@ wva_pod_writes_allowed() {
         yes) echo yes; return 0 ;;
         no|"no "*) echo no; return 0 ;;
     esac
-    # Not allowed to ask. The binding this grant makes is the next best answer.
+    # Not allowed to ask. The grant this file makes is the next best answer,
+    # and it is both halves: a RoleBinding whose Role was deleted grants nothing.
     binding="$(wva_pod_writer_binding "$controller_ns" 2>/dev/null)" || { echo unknown; return 0; }
-    if kubectl get rolebinding "$binding" -n "$ns" -o name >/dev/null 2>&1; then
+    if kubectl get rolebinding "$binding" -n "$ns" -o name >/dev/null 2>&1 \
+        && kubectl get role "$WVA_POD_WRITER_ROLE" -n "$ns" -o name >/dev/null 2>&1; then
         echo yes
     else
         echo unknown
@@ -159,16 +162,39 @@ wva_ensure_pod_writes() {
 # wva_pod_writer_namespaces echoes, one per line and sorted, the namespaces
 # holding ScaledObjects that call the controller in $1: with $2 = pools, those
 # declaring a warm pool (trigger metadata warmPoolName); with $2 = models, the
-# others. Fails, with kubectl's message on stderr, when they cannot be listed
-# cluster-wide -- an unreadable list is not an empty one.
+# others. A trigger calls it when its scalerAddress starts with
+# wva-external-scaler.<$1>. or wva-external-scaler.<$1>: -- the long and the
+# short Service name.
+#
+# With $2 = unattributed it echoes "<namespace> <address>" instead, for each
+# trigger that carries warmPoolName or modelID but whose address names no
+# wva-external-scaler.<namespace> at all (an IP, another host, the bare
+# Service name): which controller it calls cannot be told from the address.
+#
+# A cluster without the ScaledObject kind (SCALER_BACKEND=none, no KEDA) has
+# none, and echoes nothing. Fails, with kubectl's message on stderr, when they
+# cannot be listed cluster-wide -- an unreadable list is not an empty one.
 wva_pod_writer_namespaces() {
     local controller_ns="$1" kind="$2" out
-    local tmpl='{{range .items}}{{$ns := .metadata.namespace}}{{range .spec.triggers}}{{with .metadata}}{{$ns}} {{or .scalerAddress "-"}} {{or .warmPoolName "-"}}{{"\n"}}{{end}}{{end}}{{end}}'
-    out="$(kubectl get scaledobject -A -o go-template="$tmpl" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
-    printf '%s\n' "$out" | awk -v addr="wva-external-scaler.${controller_ns}." -v kind="$kind" '
-        NF == 3 && index($2, addr) == 1 {
-            if (kind == "pools" && $3 != "-") print $1
-            if (kind == "models" && $3 == "-") print $1
+    local tmpl='{{range .items}}{{$ns := .metadata.namespace}}{{range .spec.triggers}}{{with .metadata}}{{$ns}} {{or .scalerAddress "-"}} {{or .warmPoolName "-"}} {{or .modelID "-"}}{{"\n"}}{{end}}{{end}}{{end}}'
+    if ! out="$(kubectl get scaledobject -A -o go-template="$tmpl" 2>&1)"; then
+        case "$out" in
+            *"doesn't have a resource type"*) return 0 ;;
+        esac
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    printf '%s\n' "$out" | awk -v dot="wva-external-scaler.${controller_ns}." \
+        -v colon="wva-external-scaler.${controller_ns}:" -v kind="$kind" '
+        NF >= 3 {
+            model = (NF >= 4) ? $4 : "-"
+            if (index($2, dot) == 1 || index($2, colon) == 1) {
+                if (kind == "pools" && $3 != "-") print $1
+                if (kind == "models" && $3 == "-") print $1
+                next
+            }
+            if (kind == "unattributed" && ($3 != "-" || model != "-") && $2 !~ /^wva-external-scaler\.[^.:]+[.:]/)
+                print $1 " " $2
         }' | sort -u
 }
 
@@ -182,6 +208,68 @@ wva_pod_writer_marked_namespaces() {
     printf '%s\n' "$out" | grep -v '^$' | sort -u || true
 }
 
+# us_block_state -- off, shadow or active, or other:<type> for an optimizer
+# block deploy/utilization-share.sh does not own (other:not-a-map when it is not
+# a map), for the policy on stdin. Then a second word: physical when the block
+# also plans inventory-only groups. Needs yq. Here rather than in
+# deploy/utilization-share.sh so the installer reads a live policy the same way.
+us_block_state() {
+    local p tag type shadow physical mode
+    p="$(cat)"
+    tag="$(printf '%s\n' "$p" | yq -r '.optimizer | tag')" || return 1
+    case "$tag" in
+        '!!null') echo "off plain"; return 0 ;;
+        '!!map') ;;
+        *) echo "other:not-a-map plain"; return 0 ;;
+    esac
+    type="$(printf '%s\n' "$p" | yq -r '.optimizer.type // ""')" || return 1
+    shadow="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.shadow // false) | tostring')" || return 1
+    physical="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.physicalGroups // false) | tostring')" || return 1
+    if [ -z "$type" ]; then
+        mode=off
+    elif [ "$type" != utilizationShare ]; then
+        mode="other:$type"
+    elif [ "$shadow" = true ]; then
+        mode=shadow
+    else
+        mode=active
+    fi
+    if [ "$physical" = true ]; then echo "$mode physical"; else echo "$mode plain"; fi
+}
+
+# wva_live_optimizer_mode echoes the utilization-share mode the controller in
+# $1 runs with now: off, invalid, shadow or active (or other:<type>).
+#
+# First from the status it publishes (ConfigMap wva-controller-status, key
+# utilizationShare), which is what it applied. A controller too old to publish
+# one is read from its policy instead: the default entry of
+# wva-scaling-policy-config in its own namespace, which is where a
+# cluster-scoped controller reads it. Fails, with kubectl's message on stderr,
+# when neither can be read: unknown is not off.
+wva_live_optimizer_mode() {
+    local ns="$1" out state
+    if out="$(kubectl get configmap wva-controller-status -n "$ns" -o jsonpath='{.data.utilizationShare}' 2>&1)"; then
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+    else
+        case "$out" in
+            *NotFound*|*"not found"*) ;;
+            *) printf '%s\n' "$out" >&2; return 1 ;;
+        esac
+    fi
+    if ! out="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>&1)"; then
+        case "$out" in
+            *NotFound*|*"not found"*) echo off; return 0 ;;
+        esac
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    state="$(printf '%s\n' "$out" | us_block_state 2>&1)" || { printf 'the policy in %s does not parse: %s\n' "$ns" "$state" >&2; return 1; }
+    printf '%s\n' "${state% *}"
+}
+
 # wva_regrant_pod_writers carries the pod-write grant across an upgrade of the
 # cluster-scoped controller in $1.
 #
@@ -189,13 +277,15 @@ wva_pod_writer_marked_namespaces() {
 # ClusterRole, and this release's apply takes it away. A warm pool created then
 # brought no grant of its own, so its controller disables it; an active
 # utilization-share optimizer can no longer clear the marks it wrote, which stay
-# on the pods. So the grant is made here, BEFORE the apply that removes the old
-# one, in each namespace that holds a warm pool calling this controller or a
-# marked pod of a model calling it. Where it cannot be made, each namespace is
-# named with the command an admin runs. Where the namespaces cannot be read,
-# that is said too: unknown is not none.
+# on the pods, and an active one moves no pod at all. So the grant is made
+# here, BEFORE the apply that removes the old one, in each namespace that holds
+# a warm pool calling this controller, a marked pod of a model calling it, or --
+# when the optimizer is active -- any model calling it. Where it cannot be
+# made, each namespace is named with the command an admin runs. Where the
+# namespaces or the optimizer's mode cannot be read, that is said too: unknown
+# is not none.
 wva_regrant_pod_writers() {
-    local controller_ns="$1" pools models marked want ns err="" unread=0 hint
+    local controller_ns="$1" pools models marked want ns err="" unread=0 hint mode odd
     hint="$(wva_pod_writer_admin_hint '<namespace>' "$controller_ns")"
     if ! pools="$(wva_pod_writer_namespaces "$controller_ns" pools 2>&1)"; then
         unread=1 err="$pools"
@@ -207,10 +297,25 @@ wva_regrant_pod_writers() {
         log_warning "  This release removes patch on pods from the controller's ClusterRole. In each namespace with a warm pool or an active optimizer, run: $hint"
         return 0
     fi
+    if odd="$(wva_pod_writer_namespaces "$controller_ns" unattributed 2>/dev/null)" && [ -n "$odd" ]; then
+        log_warning "These ScaledObject triggers declare a warm pool or a model, but their scalerAddress does not say which controller they call, so no grant was made for them: $(printf '%s\n' "$odd" | awk '{printf "%s (%s) ", $1, $2}')"
+        log_warning "  If one calls the controller in $controller_ns, run in its namespace: $hint"
+    fi
     want="$pools"
+    if mode="$(wva_live_optimizer_mode "$controller_ns" 2>&1)"; then
+        if [ "$mode" = active ]; then
+            # Active moves the deletion cost of any model's pods, marks or not.
+            want="$(printf '%s\n%s\n' "$want" "$models")"
+        fi
+    else
+        log_warning "Could not tell whether the utilization-share optimizer is active: $mode"
+        if [ -n "$models" ]; then
+            log_warning "  If it is, run this for each namespace of its models ($(printf '%s ' $models)): $hint"
+        fi
+    fi
     if ! marked="$(wva_pod_writer_marked_namespaces 2>&1)"; then
         log_warning "Could not list pods cluster-wide, so the namespaces holding utilization-share transfer marks are UNKNOWN: $marked"
-        if [ -n "$models" ]; then
+        if [ -n "$models" ] && [ "$mode" != active ]; then
             log_warning "  If the optimizer is active, run this for each namespace of its models ($(printf '%s ' $models)): $hint"
         fi
     else
@@ -222,10 +327,10 @@ wva_regrant_pod_writers() {
     [ -n "$want" ] || return 0
     for ns in $want; do
         if err="$(wva_grant_pod_writes "$ns" "$controller_ns" 2>&1)"; then
-            log_info "Kept the controller's patch on pods in $ns (role/${WVA_POD_WRITER_ROLE}): its warm pool or utilization-share marks need it"
+            log_info "Kept the controller's patch on pods in $ns (role/${WVA_POD_WRITER_ROLE}): its warm pool or the utilization-share optimizer needs it"
         else
             log_warning "Could not grant the controller patch on pods in $ns (role/${WVA_POD_WRITER_ROLE}): $err"
-            log_warning "  Its warm pool stops lending, or the optimizer cannot clear its marks there, until an admin runs: $(wva_pod_writer_admin_hint "$ns" "$controller_ns")"
+            log_warning "  Its warm pool stops lending, or the optimizer cannot move or clear marks on its pods there, until an admin runs: $(wva_pod_writer_admin_hint "$ns" "$controller_ns")"
         fi
     done
 }

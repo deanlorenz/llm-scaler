@@ -167,9 +167,11 @@ utilization-share optimizer patch pods. A namespace-scoped controller keeps
 For a cluster-scoped controller, the upgrade grants `wva-pod-writer` before it
 removes the old grant. It does so in each namespace that holds:
 
-- a warm pool that calls this controller, or
+- a warm pool that calls this controller,
 - a pod with a utilization-share transfer mark, of a model that calls this
-  controller.
+  controller, or
+- any model that calls this controller, when the utilization-share optimizer
+  is active (not shadow).
 
 It prints each namespace it granted in. Then read its warnings:
 
@@ -182,11 +184,16 @@ It prints each namespace it granted in. Then read its warnings:
   ```bash
   bash deploy/lib/pod_writer.sh <namespace> <controller namespace> | kubectl apply -f -
   ```
+- **`Could not tell whether the utilization-share optimizer is active`**: the
+  installer could not read the controller's status or policy. If the optimizer
+  is active, run the command above in each namespace the warning lists.
+- **`... does not say which controller they call`**: a ScaledObject declares a
+  warm pool or a model, but its `scalerAddress` is not
+  `wva-external-scaler.<namespace>...`. If it calls this controller, run the
+  command above in its namespace.
 
-If the optimizer is active, also run `make utilization-share-activate` once for
-each namespace of its models. The upgrade only finds namespaces that already
-hold a mark. Activate grants in its own namespace and names any other
-namespace that still lacks the grant.
+A cluster without the ScaledObject kind (`SCALER_BACKEND=none`) has no warm
+pools or models to grant for, and the upgrade says nothing.
 
 ### The external-scaler NetworkPolicy
 
