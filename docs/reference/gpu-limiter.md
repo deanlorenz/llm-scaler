@@ -230,11 +230,24 @@ times:
   (`make enable-physical-limiter` restarts it). The pod goes NotReady, which is
   visible and alertable.
 
+The check lists nodes with a 2s timeout and asks again at most every 30s.
+
+- **Forbidden**: the controller may not list nodes. It stays not ready.
+- **Unauthorized**: the API server did not accept the controller's credentials.
+  This is an authentication problem, not missing RBAC. It stays not ready.
+- **Any other error** (slow or restarting API server): the check keeps its last
+  answer. Before the first answer arrives, it reports not ready and asks again
+  on every probe. This delays readiness only; the startup and liveness probes
+  read `/healthz`, so a slow API server never restarts the pod.
+
 Without this, every variant would be charged to no accelerator pool, get no GPU
 budget, and never scale up again, which looks exactly like an idle cluster.
 
-Fix: grant the node read (`make setup-prereqs` creates the node-reader
-ClusterRole and binding), or remove the limiter from cluster policy.
+Fix for Forbidden: grant the node read (`make setup-prereqs` creates the
+node-reader ClusterRole and binding), or remove the limiter from cluster policy.
+Fix for Unauthorized: check the controller's ServiceAccount token (for example,
+that the pod mounts a current token and the ServiceAccount still exists), then
+restart the pod.
 
 A namespace-scoped controller also counts the GPUs that Pods in **other
 namespaces** hold on the same nodes. Its cache holds only its own namespace, so

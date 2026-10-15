@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
@@ -90,7 +91,7 @@ func TestFlushCreatesOnceAndSkipsUnchanged(t *testing.T) {
 		t.Errorf("leader = %q, want POD_NAME", got)
 	}
 	for _, k := range []string{KeyPolicyNamespace, KeyPolicyConfigMap, KeyPolicyResourceVersion, KeyPolicyAccepted,
-		KeyPolicyError, KeyLimiter, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
+		KeyPolicyError, KeyPolicyIgnored, KeyLimiter, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
 		if _, ok := cm.Data[k]; !ok {
 			t.Errorf("key %q missing", k)
 		}
@@ -211,23 +212,96 @@ func TestFlushKeepsStateWhenForbidden(t *testing.T) {
 func TestRecordPolicy(t *testing.T) {
 	w := &writes{}
 	p, _ := newTestPublisher(t, w)
-	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "42", errors.New("bad threshold"))
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "42", errors.New("bad threshold"), nil)
 	d := p.Data()
 	if d[KeyPolicyNamespace] != "policy-ns" || d[KeyPolicyConfigMap] != "wva-scaling-policy-config" ||
 		d[KeyPolicyResourceVersion] != "42" || d[KeyPolicyAccepted] != "false" || d[KeyPolicyError] != "bad threshold" {
 		t.Errorf("data = %v", d)
 	}
-	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "43", nil)
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "43", nil, nil)
 	d = p.Data()
-	if d[KeyPolicyResourceVersion] != "43" || d[KeyPolicyAccepted] != "true" || d[KeyPolicyError] != "" {
+	if d[KeyPolicyResourceVersion] != "43" || d[KeyPolicyAccepted] != "true" || d[KeyPolicyError] != "" ||
+		d[KeyPolicyIgnored] != "" {
 		t.Errorf("data = %v", d)
+	}
+
+	// An accepted entry with fields ignored as unusable: still accepted, and
+	// every ignored field is named with its value and the reason.
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "44", nil, []config.IgnoredField{
+		{Field: "scaleToZero.retentionPeriod", Value: "5 minutes", Reason: errors.New("bad duration")},
+		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
+	})
+	d = p.Data()
+	want := `policy-ns/wva-scaling-policy-config: scaleToZero.retentionPeriod="5 minutes": bad duration; shapeChangeHoldSeconds="-1": must be >= 0`
+	if d[KeyPolicyAccepted] != "true" || d[KeyPolicyIgnored] != want {
+		t.Errorf("policyIgnored = %q, want %q (data = %v)", d[KeyPolicyIgnored], want, d)
+	}
+
+	// The next load without them clears the key.
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "45", nil, nil)
+	if got := p.Data()[KeyPolicyIgnored]; got != "" {
+		t.Errorf("policyIgnored after a clean load = %q, want empty", got)
+	}
+}
+
+// With a separate policy namespace, policyIgnored comes from the controller's
+// own ConfigMap and the version from the policy namespace's. Recording either
+// must not overwrite the other.
+func TestSeparatePolicyKeepsIgnoredAndVersionApart(t *testing.T) {
+	w := &writes{}
+	p, _ := newTestPublisher(t, w)
+	ignored := []config.IgnoredField{
+		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
+	}
+	want := `own-ns/wva-scaling-policy-config: shapeChangeHoldSeconds="-1": must be >= 0`
+
+	p.RecordClusterPolicy(nil, "policy-ns", "wva-scaling-policy-config", "7", nil)
+	p.RecordIgnored(nil, "own-ns", "wva-scaling-policy-config", ignored)
+	d := p.Data()
+	if d[KeyPolicyResourceVersion] != "7" || d[KeyPolicyIgnored] != want {
+		t.Errorf("after RecordIgnored: data = %v", d)
+	}
+
+	p.RecordClusterPolicy(nil, "policy-ns", "wva-scaling-policy-config", "8", nil)
+	d = p.Data()
+	if d[KeyPolicyResourceVersion] != "8" || d[KeyPolicyIgnored] != want {
+		t.Errorf("a cluster policy load changed policyIgnored: data = %v", d)
+	}
+
+	p.RecordIgnored(nil, "own-ns", "wva-scaling-policy-config", nil)
+	d = p.Data()
+	if d[KeyPolicyResourceVersion] != "8" || d[KeyPolicyIgnored] != "" {
+		t.Errorf("after a clean own ConfigMap: data = %v", d)
+	}
+}
+
+// policyIgnored names its source and lists at most ten fields: a tenant
+// decides how many entries the ConfigMap has.
+func TestPolicyIgnoredNamesItsSourceAndCapsTheList(t *testing.T) {
+	ignored := make([]config.IgnoredField, 13)
+	for i := range ignored {
+		ignored[i] = config.IgnoredField{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")}
+	}
+	got := ignoredText("own-ns", "cm", ignored)
+	if !strings.HasPrefix(got, "own-ns/cm: ") {
+		t.Errorf("policyIgnored = %q, want it to start with its source", got)
+	}
+	if n := strings.Count(got, "shapeChangeHoldSeconds"); n != 10 {
+		t.Errorf("policyIgnored lists %d fields, want 10", n)
+	}
+	if !strings.HasSuffix(got, "; +3 more") {
+		t.Errorf("policyIgnored = %q, want it to end with the count not listed", got)
+	}
+	if got := ignoredText("own-ns", "cm", nil); got != "" {
+		t.Errorf("policyIgnored with nothing ignored = %q, want empty", got)
 	}
 }
 
 func TestNilPublisherIsSafe(t *testing.T) {
 	var p *Publisher
-	p.RecordPolicy(nil, "a", "b", "1", nil)
-	p.ObserveConfig(nil)
+	p.RecordPolicy(nil, "a", "b", "1", nil, nil)
+	p.RecordClusterPolicy(nil, "a", "b", "1", nil)
+	p.RecordIgnored(nil, "a", "b", nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeOff, nil)
 	if p.Data() != nil {
 		t.Error("nil publisher returned data")
@@ -266,7 +340,7 @@ func TestStartWritesAndCoalesces(t *testing.T) {
 
 	// Three changes inside one debounce window land as one update.
 	p.SetUtilizationShare(constants.UtilizationShareModeShadow, nil)
-	p.RecordPolicy(nil, testNamespace, "wva-scaling-policy-config", "7", nil)
+	p.RecordPolicy(nil, testNamespace, "wva-scaling-policy-config", "7", nil, nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeActive, nil)
 	waitFor("the coalesced write", func() bool {
 		d := read()

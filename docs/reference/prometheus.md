@@ -827,6 +827,12 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Labels**: `namespace`, `configmap`, optional `controller_instance`
 - **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
 
+### `wva_config_ignored_fields`
+- **Type**: Gauge
+- **Description**: fields in a scaling-policy ConfigMap's entries whose value cannot be used, at its last load: a `scaleToZero.retentionPeriod` that is not a duration or is under 30s, or a negative `shapeChangeHoldSeconds`. Each acts as unset, so the layer below applies; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 means a setting you wrote is not in force. The `ConfigFieldIgnored` event names the entry, field and value. Each field is also counted in `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
+
 ### `wva_node_access_denied`
 - **Type**: Gauge
 - **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.
@@ -1120,7 +1126,7 @@ Every reason the controller sets:
 | reason | set by | means | do |
 | --- | --- | --- | --- |
 | `variant-floor` | scale-to-zero policy | scale-to-zero is on, but a variant has `minReplicaCount > 0`, so the model never parks | set every variant's `minReplicaCount` to 0, or turn scale-to-zero off for the model. Alert: `WVAModelWillNotScaleToZero` |
-| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
+| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
 | `engine-unsupported` | scale-to-zero policy | the model runs both vLLM and SGLang, so no single request counter measures idleness; it is not parked | run one engine per model. Not alerted on by design |
 | `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |

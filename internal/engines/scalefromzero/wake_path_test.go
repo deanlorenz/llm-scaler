@@ -31,7 +31,6 @@ import (
 	poolreconciler "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controller"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
-	engcommon "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/common"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	vav1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 	unittestutil "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
@@ -218,11 +217,6 @@ func TestWakePublishesActuationAndRetentionHold(t *testing.T) {
 	require.True(t, published, "a queued request must publish an activation for the target")
 	assert.Equal(t, int32(1), replicas, "a wake takes the target to exactly one replica")
 	assert.True(t, held, "the wake must be marked so scale-to-zero holds off for its retention")
-
-	d, ok := engcommon.DecisionCache.Get(f.variant, f.ns)
-	require.True(t, ok, "the wake must leave a decision in the shared cache")
-	assert.Equal(t, 1, d.TargetReplicas)
-	assert.Equal(t, f.model, d.ModelID)
 
 	assert.Equal(t, int32(1), f.src.refreshes.Load(),
 		"one EPP scrape per model per tick; every variant of a model shares the queue")

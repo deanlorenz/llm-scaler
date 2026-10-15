@@ -153,4 +153,8 @@ spec:
         emptyDir:
           sizeLimit: 64Mi
       serviceAccountName: controller-manager
-      terminationGracePeriodSeconds: 10
+      # Above the manager's GracefulShutdownTimeout (25s, cmd/main.go), so the
+      # engines finish their cycle and the lease is released before SIGKILL.
+      # At 10s a slow shutdown was killed first and the successor waited out
+      # the 60s LeaseDuration. cmd/shutdown_test.go keeps the two in step.
+      terminationGracePeriodSeconds: 40

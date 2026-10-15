@@ -70,6 +70,7 @@ var (
 	policyNamespaceUnverified           *prometheus.GaugeVec
 	configRejectedEntries               *prometheus.GaugeVec
 	configUnknownKeys                   *prometheus.GaugeVec
+	configIgnoredFields                 *prometheus.GaugeVec
 	podAccessDenied                     *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
@@ -555,6 +556,14 @@ func InitMetrics(registry prometheus.Registerer) error {
 		configRejectedEntriesLabels,
 	)
 
+	configIgnoredFields = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigIgnoredFields,
+			Help: "Fields of a scaling-policy ConfigMap's entries whose value cannot be used; they act as unset, the entries still apply",
+		},
+		configRejectedEntriesLabels,
+	)
+
 	sfzQueueFallbackLabels := []string{"pool"}
 	if controllerInstance != "" {
 		sfzQueueFallbackLabels = append(sfzQueueFallbackLabels, constants.LabelControllerInstance)
@@ -777,6 +786,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(configUnknownKeys); err != nil {
 		return fmt.Errorf("failed to register configUnknownKeys metric: %w", err)
+	}
+	if err := registry.Register(configIgnoredFields); err != nil {
+		return fmt.Errorf("failed to register configIgnoredFields metric: %w", err)
 	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
@@ -1417,11 +1429,25 @@ func SetConfigUnknownKeys(namespace, name string, unknown int) {
 	configUnknownKeys.With(labels).Set(float64(unknown))
 }
 
-// DeleteConfigEntryGauges removes the wva_config_rejected_entries and
-// wva_config_unknown_keys series of the scaling-policy ConfigMap
-// namespace/name. Called when the ConfigMap is deleted: a deleted ConfigMap has
-// no entries, and its last count would otherwise be reported for as long as the
-// controller runs.
+// SetConfigIgnoredFields records how many fields of the scaling-policy
+// ConfigMap namespace/name could not be used at its last load. Set on every
+// load, so a fixed ConfigMap reads 0.
+func SetConfigIgnoredFields(namespace, name string, ignored int) {
+	if configIgnoredFields == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configIgnoredFields.With(labels).Set(float64(ignored))
+}
+
+// DeleteConfigEntryGauges removes the wva_config_rejected_entries,
+// wva_config_unknown_keys and wva_config_ignored_fields series of the
+// scaling-policy ConfigMap namespace/name. Called when the ConfigMap is
+// deleted: a deleted ConfigMap has no entries, and its last count would
+// otherwise be reported for as long as the controller runs.
 func DeleteConfigEntryGauges(namespace, name string) {
 	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
 	if controllerInstance != "" {
@@ -1432,6 +1458,9 @@ func DeleteConfigEntryGauges(namespace, name string) {
 	}
 	if configUnknownKeys != nil {
 		configUnknownKeys.Delete(labels)
+	}
+	if configIgnoredFields != nil {
+		configIgnoredFields.Delete(labels)
 	}
 }
 

@@ -101,7 +101,7 @@ func TestClaimShareTransferForAPDPair(t *testing.T) {
 			decision.ShareGroupKey("", "A100"): entries,
 		}, time.Now())
 	}
-	if !(&Engine{config: pdShareConfig(t)}).requirePrefill("m", selNS) {
+	if !(&Engine{config: pdShareConfig(t)}).requirePrefill(modelGroup{modelID: "m", namespace: selNS}) {
 		t.Fatal("setup: requirePrefill did not resolve")
 	}
 
