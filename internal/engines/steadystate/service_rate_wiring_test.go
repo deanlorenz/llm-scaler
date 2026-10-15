@@ -110,15 +110,25 @@ func TestPruneAnalyzerSeries_DeletesTheServiceRateOfADepartedModel(t *testing.T)
 
 // A model with no replica rows skips analysis, and its service rate must not
 // stay published at the last value for as long as it stays parked. Only its
-// own series go -- the target series stay, as zeroObservedReplicas keeps them
-// -- and the next analyzed cycle publishes them again.
-func TestDropServiceRateSeries_SkippedModel(t *testing.T) {
+// own series go -- the target series stay -- its observed-replicas count reads
+// 0, and the next analyzed cycle publishes them again. Driven through
+// onNothingObserved, the one call the skip path makes, so neither effect can
+// be dropped from it alone.
+func TestOnNothingObserved_SkippedModel(t *testing.T) {
 	e, registry := engineConfigEngine(t)
 	for _, m := range []string{"m1", "m2"} {
-		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v")})
+		nr := serviceRateResult(0.68, "v-"+m)
+		nr.Result.VariantCapacities[0].ObservedReplicas = 3
+		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{nr})
 	}
+	require.Equal(t, map[string]float64{"v-m1": 3, "v-m2": 3},
+		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelVariantName))
 
-	e.dropServiceRateSeries("ns", "m2")
+	e.onNothingObserved("ns", "m2")
+
+	assert.Equal(t, map[string]float64{"v-m1": 3, "v-m2": 0},
+		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelVariantName),
+		"a skipped cycle must read as nothing observed for that model only")
 
 	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
 		assert.ElementsMatch(t, []string{"m1"}, seriesLabels(t, registry, name, constants.LabelModelName),
@@ -128,12 +138,12 @@ func TestDropServiceRateSeries_SkippedModel(t *testing.T) {
 		seriesLabels(t, registry, constants.WVAAnalyzerTarget, constants.LabelModelName),
 		"the target series are kept through a skipped cycle")
 
-	e.recordAnalyzerMetrics("ns", "m2", []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v")})
+	e.recordAnalyzerMetrics("ns", "m2", []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v-m2")})
 	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
 		assert.ElementsMatch(t, []string{"m1", "m2"}, seriesLabels(t, registry, name, constants.LabelModelName),
 			"%s: the next analyzed cycle publishes again", name)
 	}
-	e.dropServiceRateSeries("ns", "never-published")
+	e.onNothingObserved("ns", "never-published")
 }
 
 func TestEvictAllAnalyzerSeries_ClearsEveryServiceRateSeries(t *testing.T) {

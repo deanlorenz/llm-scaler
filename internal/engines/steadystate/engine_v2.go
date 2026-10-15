@@ -487,6 +487,23 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	}
 }
 
+// onNothingObserved is what a cycle whose collection returned no replica rows
+// does to the analyzer series, for a model scaled to zero or one whose pods
+// are not scraped. The analyzers do not run on that cycle, so without it:
+//   - the observed-replicas series keeps last cycle's count for as long as
+//     the gap lasts, reading as a fully scraped fleet in exactly the case it
+//     exists to expose (zeroObservedReplicas);
+//   - the service rate and its line read as a parked fleet still priced at
+//     its last rate for as long as it stays parked (dropServiceRateSeries).
+//
+// One call, so the two cannot be separated at the call site. A cycle whose
+// collection or analysis FAILS does not come here: it leaves every analyzer
+// series at its last value, wva_analyzer_target included.
+func (e *Engine) onNothingObserved(namespace, modelID string) {
+	e.zeroObservedReplicas(namespace, modelID)
+	e.dropServiceRateSeries(namespace, modelID)
+}
+
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
 // (analyzer, variant) this model published last cycle. Called on the cycle
 // that skips analysis because the model had no replica rows at all: the
@@ -500,8 +517,8 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 }
 
 // dropServiceRateSeries deletes every service-rate series this model
-// published last cycle, wva_pricing_k included, and forgets them. Called on the
-// same skipped cycle as zeroObservedReplicas, and unlike it deletes rather
+// published last cycle, wva_pricing_k included, and forgets them. Called from
+// onNothingObserved beside zeroObservedReplicas, and unlike it deletes rather
 // than zeroes: a rate of 0 would read as a replica that completes nothing, and
 // "absent" is what the series document for a variant nothing priced. The next
 // cycle that analyzes the model publishes them again.
