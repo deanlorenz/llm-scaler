@@ -793,7 +793,12 @@ func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName s
 	// The cost is that such a fleet gets no cross-variant head start, which is
 	// the feature degrading to its pre-existing behaviour rather than
 	// misfiring. wva_engine_config's `unresolved` label says why.
-	if !rec.EngineParams.Complete() {
+	//
+	// An unread checkpoint withholds the key too, on the same reasoning: two
+	// variants serving `$MODEL` agree on an empty model whichever checkpoints
+	// they load. It withholds only sharing; the variant's own restore is
+	// gated on Complete() alone (see EngineParams.ModelUnresolved).
+	if !rec.EngineParams.Complete() || rec.EngineParams.ModelUnresolved {
 		return ""
 	}
 	return rec.EngineParams.Fingerprint()

@@ -17,6 +17,8 @@ func defaultSGLangEngineParams() EngineParams {
 		KvCacheDtype:         "auto",
 		WeightDtype:          "auto",
 		TensorParallelSize:   1,
+		DataParallelSize:     1,
+		PipelineParallelSize: 1,
 		// SGLang auto-derives --max-running-requests from available memory when
 		// unset; 256 is a conservative placeholder that underestimates capacity
 		// (safe: it biases toward scale-up rather than overload).
@@ -139,6 +141,39 @@ func applySGLangParam(key, value string, params *EngineParams) applyResult {
 		}
 	case "disable_cuda_graph":
 		params.EnforceEager = true
+	case "dp_size", "data_parallel_size":
+		return applyParallelSize(value, &params.DataParallelSize)
+	case "pp_size", "pipeline_parallel_size":
+		return applyParallelSize(value, &params.PipelineParallelSize)
+	case "ep_size", "expert_parallel_size":
+		v, err := strconv.Atoi(value)
+		if err != nil || v < 1 {
+			return applyUnusable
+		}
+		params.ExpertParallel = v > 1
+	case "enable_ep_moe":
+		params.ExpertParallel = true
+	case "speculative_algorithm", "speculative_num_steps", "speculative_num_draft_tokens",
+		"speculative_eagle_topk", "speculative_draft_model_path":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		addSpeculativePart(params, key, value)
+	case "disaggregation_transfer_backend":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.KVConnector = value
+	case "enable_hierarchical_cache":
+		params.KVOffloadingBackend = "hierarchical"
+	case "hicache_size":
+		return applyOffloadSize(value, params)
+	case "disable_radix_cache":
+		params.PrefixCachingDisabled = true
+	case "model_path", "model":
+		applyModel(value, &params.ModelPath, params)
+	case "revision":
+		applyModel(value, &params.ModelRevision, params)
 	default:
 		// Not a flag this parser maps. parseArgsWith decides whether
 		// that is harmless or the wrong-parser signal.

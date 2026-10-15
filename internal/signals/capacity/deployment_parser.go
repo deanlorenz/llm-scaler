@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"encoding/json"
 	"math"
 	"slices"
 	"strconv"
@@ -164,6 +165,59 @@ type EngineParams struct {
 	// compared for capacity, where a tag that changes on every rebuild would
 	// refuse every record across a routine rollout.
 	Image string
+
+	// The layout and features that decide what one replica of a wide-EP or
+	// P/D engine holds and how fast it runs, and that no field above
+	// describes. Without them two variants that differ only in, say, MTP on
+	// and off, or TP1-DP8 with and without expert parallelism, hashed alike
+	// and compared capacity-compatible -- the ordinary canary pair on these
+	// fleets. Each is hashed and compared; see IsCapacityCompatible.
+	//
+	// Only the scale target's LEADER pod template is read (an LWS group's
+	// workers are assumed to run the leader's flags).
+	DataParallelSize     int  // default 1 (vLLM --data-parallel-size / SGLang --dp-size)
+	PipelineParallelSize int  // default 1 (vLLM --pipeline-parallel-size / SGLang --pp-size)
+	ExpertParallel       bool // vLLM --enable-expert-parallel / SGLang --ep-size > 1 or --enable-ep-moe
+	// SpeculativeConfig is vLLM's --speculative-config, re-encoded so key
+	// order and spacing do not split it, or SGLang's --speculative-* flags as
+	// sorted key=value pairs. Empty is no speculative decoding.
+	SpeculativeConfig string
+	// KVConnector is the KV transfer connector: vLLM --kv-transfer-config's
+	// kv_connector, or SGLang --disaggregation-transfer-backend. Empty is
+	// none.
+	KVConnector string
+	// KV offloading beyond GPU memory: vLLM --kv-offloading-size (GiB) and
+	// --kv-offloading-backend, SGLang --hicache-size and
+	// --enable-hierarchical-cache ("hierarchical").
+	KVOffloadingSize    float64
+	KVOffloadingBackend string
+	// PrefixCachingDisabled is vLLM --no-enable-prefix-caching or SGLang
+	// --disable-radix-cache. The zero value is the engines' default, on.
+	PrefixCachingDisabled bool
+	// ModelPath and ModelRevision are the checkpoint served: vLLM's
+	// positional model or --model, SGLang's --model-path, and --revision. An
+	// FP8 and a BF16 checkpoint of one model ID otherwise hashed alike while
+	// their KV caches differ ~2x.
+	ModelPath     string
+	ModelRevision string
+	// ModelUnresolved is true when the checkpoint could not be read -- a
+	// `$MODEL` nothing resolved. It is NOT in Unresolved, and on purpose:
+	// Unresolved withholds a variant's own restore after a restart, and a
+	// model given as a variable is common enough that withholding on it would
+	// start such fleets cold on every restart, the TTFT direction. It
+	// withholds only cross-variant sharing (engineFingerprint), where two
+	// unread checkpoints comparing equal is the false equality that matters.
+	ModelUnresolved bool
+}
+
+// parallelSize is a parallel size as the engine runs it: unset is 1, its
+// default, so a configuration built without the field compares equal to one
+// parsed from flags that do not set it.
+func parallelSize(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // Complete reports whether every flag this parser maps was actually read.
@@ -188,6 +242,8 @@ func defaultEngineParams() EngineParams {
 		KvCacheDtype:          "auto",
 		WeightDtype:           "auto",
 		TensorParallelSize:    1,
+		DataParallelSize:      1,
+		PipelineParallelSize:  1,
 		MaxNumSeqs:            256,
 		IsV1Engine:            true, // default since vLLM v0.8
 		ChunkedPrefillEnabled: true, // V1 engine uses chunked prefill by default
@@ -241,7 +297,9 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 		// reference in a container's args is expanded from its own
 		// environment, and merging two containers' envs would let a sidecar
 		// supply a value the engine never sees.
-		parseArgs(allArgs, &params, envValues(&container))
+		env := envValues(&container)
+		parseArgs(allArgs, &params, env)
+		applyPositionalModel(allArgs, &params, env)
 	}
 
 	// V1 engine always enables chunked prefill regardless of flag
@@ -375,6 +433,12 @@ var mappedValueKeys = map[string]struct{}{
 	"max_num_seq":             {},
 	"max_num_seqs":            {},
 	"max_model_len":           {},
+	"data_parallel_size":      {},
+	"pipeline_parallel_size":  {},
+	"speculative_config":      {},
+	"kv_transfer_config":      {},
+	"kv_offloading_size":      {},
+	"kv_offloading_backend":   {},
 	// SGLang
 	"mem_fraction_static":  {},
 	"page_size":            {},
@@ -385,6 +449,27 @@ var mappedValueKeys = map[string]struct{}{
 	"context_length":       {},
 	"max_prefill_tokens":   {},
 	"chunked_prefill_size": {},
+	"dp_size":              {},
+	"pp_size":              {},
+	"ep_size":              {},
+	"expert_parallel_size": {},
+	"hicache_size":         {},
+
+	"speculative_algorithm":           {},
+	"speculative_num_steps":           {},
+	"speculative_num_draft_tokens":    {},
+	"speculative_eagle_topk":          {},
+	"speculative_draft_model_path":    {},
+	"disaggregation_transfer_backend": {},
+}
+
+// modelKeys are the flags that name the checkpoint. They are not in
+// mappedValueKeys: one that cannot be read sets ModelUnresolved instead of
+// Unresolved (see the field).
+var modelKeys = map[string]struct{}{
+	"model":      {},
+	"model_path": {},
+	"revision":   {},
 }
 
 // normalizeKey replaces hyphens with underscores and strips the leading
@@ -462,6 +547,9 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 				// resolving a configMapKeyRef would mean giving it one. That
 				// is a deliberate choice and a reviewable change, not a
 				// permission to grant.
+				if _, ok := modelKeys[key]; ok {
+					params.ModelUnresolved = true
+				}
 				noteUnresolved(params, key)
 				continue
 			}
@@ -607,6 +695,39 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 		params.ChunkedPrefillEnabled = true
 	case "no_enable_chunked_prefill":
 		params.ChunkedPrefillEnabled = false
+	case "data_parallel_size":
+		return applyParallelSize(value, &params.DataParallelSize)
+	case "pipeline_parallel_size":
+		return applyParallelSize(value, &params.PipelineParallelSize)
+	case "enable_expert_parallel":
+		params.ExpertParallel = true
+	case "no_enable_expert_parallel":
+		params.ExpertParallel = false
+	case "speculative_config":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.SpeculativeConfig = canonicalJSON(value)
+	case "kv_transfer_config":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.KVConnector = kvConnectorOf(value)
+	case "kv_offloading_size":
+		return applyOffloadSize(value, params)
+	case "kv_offloading_backend":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.KVOffloadingBackend = value
+	case "enable_prefix_caching":
+		params.PrefixCachingDisabled = false
+	case "no_enable_prefix_caching":
+		params.PrefixCachingDisabled = true
+	case "model":
+		applyModel(value, &params.ModelPath, params)
+	case "revision":
+		applyModel(value, &params.ModelRevision, params)
 	default:
 		// Not a flag this parser maps. parseArgsWith decides whether
 		// that is harmless or the wrong-parser signal.
@@ -662,6 +783,98 @@ func usableWord(v string) bool {
 	return v != ""
 }
 
+// applyParallelSize reads a data- or pipeline-parallel size: a positive
+// integer.
+func applyParallelSize(value string, field *int) applyResult {
+	v, err := strconv.Atoi(value)
+	if err != nil || v < 1 {
+		return applyUnusable
+	}
+	*field = v
+	return applyOK
+}
+
+// applyOffloadSize reads a KV offloading size in GiB: finite and not negative.
+func applyOffloadSize(value string, params *EngineParams) applyResult {
+	v, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return applyUnusable
+	}
+	params.KVOffloadingSize = v
+	return applyOK
+}
+
+// applyModel sets a checkpoint field, or marks the checkpoint unread when the
+// flag has no value.
+func applyModel(value string, field *string, params *EngineParams) {
+	if !usableWord(value) {
+		params.ModelUnresolved = true
+		return
+	}
+	*field = value
+}
+
+// applyPositionalModel reads vLLM's positional model, `vllm serve <model>`,
+// which wins over --model as it does in vLLM. A reference nothing resolves
+// marks the checkpoint unread.
+func applyPositionalModel(args []string, params *EngineParams, env map[string]string) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "serve" || strings.HasPrefix(args[i+1], "-") {
+			continue
+		}
+		v, ok := resolveRefs(args[i+1], env)
+		if !ok {
+			params.ModelUnresolved = true
+			return
+		}
+		applyModel(v, &params.ModelPath, params)
+		return
+	}
+}
+
+// canonicalJSON re-encodes a JSON value so that key order and spacing do not
+// change it (encoding/json writes object keys sorted). A value that is not
+// JSON is kept with its whitespace removed: still a stable text, and two
+// configurations that differ only in formatting it then split, the safe
+// direction.
+func canonicalJSON(value string) string {
+	var v any
+	if err := json.Unmarshal([]byte(value), &v); err == nil {
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+	}
+	return strings.Join(strings.Fields(value), "")
+}
+
+// kvConnectorOf is the connector a --kv-transfer-config names. A config that
+// is not JSON, or names none, is kept whole (canonicalJSON): it still tells
+// two configurations apart.
+func kvConnectorOf(value string) string {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(value), &cfg); err == nil {
+		if c, ok := cfg["kv_connector"].(string); ok && c != "" {
+			return c
+		}
+	}
+	return canonicalJSON(value)
+}
+
+// addSpeculativePart records one SGLang --speculative-* flag in
+// SpeculativeConfig, kept as sorted key=value pairs so flag order does not
+// change it.
+func addSpeculativePart(params *EngineParams, key, value string) {
+	key = strings.TrimPrefix(key, "speculative_")
+	var parts []string
+	if params.SpeculativeConfig != "" {
+		parts = strings.Split(params.SpeculativeConfig, ";")
+	}
+	parts = slices.DeleteFunc(parts, func(p string) bool { return strings.HasPrefix(p, key+"=") })
+	parts = append(parts, key+"="+value)
+	slices.Sort(parts)
+	params.SpeculativeConfig = strings.Join(parts, ";")
+}
+
 // IsCapacityCompatible checks whether two EngineParams configurations
 // would produce equivalent per-replica capacity (both k1 and k2).
 // Used by Store.FindCompatible to identify variants
@@ -677,6 +890,11 @@ func usableWord(v string) bool {
 //     EffectiveMaxBatchedTokens only when chunked prefill is off (see
 //     resolveEffectiveMaxBatchedTokens), so on the V1 path -- where chunked
 //     prefill is the default -- it is otherwise invisible to this predicate.
+//
+// The parallel layout, expert parallelism, speculative decoding, the KV
+// connector, KV offloading, prefix caching and the checkpoint are compared:
+// each changes what one replica holds or how fast it drains, so a figure
+// measured with one is not a bound for the other.
 //
 // EnforceEager is deliberately NOT compared: no CUDA graphs changes the
 // inter-token latency, and so the ITL line, but it does not change how much
@@ -713,7 +931,17 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.MaxNumSeqs == other.MaxNumSeqs &&
 		p.MaxModelLen == other.MaxModelLen &&
 		p.WeightDtype == other.WeightDtype &&
-		p.Quantization == other.Quantization
+		p.Quantization == other.Quantization &&
+		parallelSize(p.DataParallelSize) == parallelSize(other.DataParallelSize) &&
+		parallelSize(p.PipelineParallelSize) == parallelSize(other.PipelineParallelSize) &&
+		p.ExpertParallel == other.ExpertParallel &&
+		p.SpeculativeConfig == other.SpeculativeConfig &&
+		p.KVConnector == other.KVConnector &&
+		p.KVOffloadingSize == other.KVOffloadingSize &&
+		p.KVOffloadingBackend == other.KVOffloadingBackend &&
+		p.PrefixCachingDisabled == other.PrefixCachingDisabled &&
+		p.ModelPath == other.ModelPath &&
+		p.ModelRevision == other.ModelRevision
 }
 
 // resolveEffectiveMaxBatchedTokens computes the per-step token budget

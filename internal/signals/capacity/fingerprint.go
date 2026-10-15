@@ -22,13 +22,12 @@ import (
 // cold once" as the expected cost.
 //
 // AND IT COVERS MORE THAN THE FIELD LIST. Changing how a hashed value is
-// DERIVED changes every digest just as surely as adding a field, and this PR
-// did it twice after bumping to 2 -- splitting the unresolved key sets per
-// engine, and recording string-flag failures. Two builds both stamped v=2
-// therefore produce different digests for the same Deployment. Nothing
-// persists a digest across a restart today, so no further bump is owed; the
-// rule to carry forward is that the version tracks the field list and the
-// values' derivation together.
+// DERIVED changes every digest just as surely as adding a field. The rule is
+// that the version tracks the field list and the values' derivation together.
+// It matters more now than when version 2 was cut: the learned-state snapshot
+// stores a digest per variant across a restart, so a change that moves
+// digests without a bump makes a restart reject what it should have
+// restored, with nothing to say why.
 //
 // Version 2 adds the unresolved-flag set. Measured on a cluster: an
 // llm-d/llmdbench Deployment passes `--block-size $VLLM_BLOCK_SIZE`, the
@@ -39,7 +38,11 @@ import (
 //
 // Version 3 adds the engine image. Two engines with identical flags on
 // different engine releases hashed identically, so a canary on a new release
-// would have borrowed the old release's measured latency line as its own.
+// would have borrowed the old release's measured latency line as its own. The
+// same version adds the parallel layout (data and pipeline parallel sizes,
+// expert parallelism), speculative decoding, the KV connector, KV offloading,
+// prefix caching and the checkpoint served -- one bump for both, so the one
+// cold start after the upgrade is paid once.
 const FingerprintVersion = 3
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
@@ -121,6 +124,19 @@ func (p *EngineParams) Fingerprint() string {
 		// every rebuild splits the key on each rollout: the safe direction,
 		// since the cost is that the new image learns its own line.
 		"image=" + p.Image,
+		"data_parallel_size=" + strconv.Itoa(parallelSize(p.DataParallelSize)),
+		"pipeline_parallel_size=" + strconv.Itoa(parallelSize(p.PipelineParallelSize)),
+		"expert_parallel=" + strconv.FormatBool(p.ExpertParallel),
+		"speculative_config=" + p.SpeculativeConfig,
+		"kv_connector=" + p.KVConnector,
+		"kv_offloading_size=" + canonicalFloat(p.KVOffloadingSize),
+		"kv_offloading_backend=" + p.KVOffloadingBackend,
+		"prefix_caching_disabled=" + strconv.FormatBool(p.PrefixCachingDisabled),
+		"model=" + p.ModelPath,
+		"model_revision=" + p.ModelRevision,
+		// Hashed for the reason Unresolved is: an unread checkpoint must not
+		// collide with a read one.
+		"model_unresolved=" + strconv.FormatBool(p.ModelUnresolved),
 	}
 
 	h := sha256.New()
@@ -198,6 +214,17 @@ func (p *EngineParams) FingerprintValues() []string {
 		strconv.FormatBool(p.EnforceEager),
 		strings.Join(p.Unresolved, ","),
 		p.Image,
+		strconv.Itoa(parallelSize(p.DataParallelSize)),
+		strconv.Itoa(parallelSize(p.PipelineParallelSize)),
+		strconv.FormatBool(p.ExpertParallel),
+		p.SpeculativeConfig,
+		p.KVConnector,
+		canonicalFloat(p.KVOffloadingSize),
+		p.KVOffloadingBackend,
+		strconv.FormatBool(p.PrefixCachingDisabled),
+		p.ModelPath,
+		p.ModelRevision,
+		strconv.FormatBool(p.ModelUnresolved),
 	}
 }
 

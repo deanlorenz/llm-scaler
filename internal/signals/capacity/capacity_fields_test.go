@@ -34,6 +34,16 @@ var (
 		"MaxModelLen",
 		"WeightDtype",
 		"Quantization",
+		"DataParallelSize",
+		"PipelineParallelSize",
+		"ExpertParallel",
+		"SpeculativeConfig",
+		"KVConnector",
+		"KVOffloadingSize",
+		"KVOffloadingBackend",
+		"PrefixCachingDisabled",
+		"ModelPath",
+		"ModelRevision",
 	}
 	// Each of these needs its reason, because "ignored" is the dangerous half
 	// of the list and an unexplained entry here is how a field gets dropped.
@@ -61,6 +71,10 @@ var (
 		// record removes a MAX clamp, which over-states capacity. The latency
 		// fingerprint hashes it instead.
 		"Image": "a tag changes every rebuild; refusing records removes a max clamp",
+		// Provenance, as Unresolved: two variants whose checkpoint could not
+		// be read compare by the ModelPath both hold, and comparing the bit
+		// too would make the equality non-reflexive in the same way.
+		"ModelUnresolved": "provenance; withholds sharing in engineFingerprint instead",
 	}
 )
 
@@ -130,6 +144,16 @@ func TestEveryComparedFieldChangesTheAnswer(t *testing.T) {
 		"MaxModelLen":               func(p *EngineParams) { p.MaxModelLen = 8192 },
 		"WeightDtype":               func(p *EngineParams) { p.WeightDtype = "float16" },
 		"Quantization":              func(p *EngineParams) { p.Quantization = "awq" },
+		"DataParallelSize":          func(p *EngineParams) { p.DataParallelSize = 8 },
+		"PipelineParallelSize":      func(p *EngineParams) { p.PipelineParallelSize = 2 },
+		"ExpertParallel":            func(p *EngineParams) { p.ExpertParallel = true },
+		"SpeculativeConfig":         func(p *EngineParams) { p.SpeculativeConfig = testSpeculativeConfig },
+		"KVConnector":               func(p *EngineParams) { p.KVConnector = testKVConnector },
+		"KVOffloadingSize":          func(p *EngineParams) { p.KVOffloadingSize = 64 },
+		"KVOffloadingBackend":       func(p *EngineParams) { p.KVOffloadingBackend = testOffloadBackend },
+		"PrefixCachingDisabled":     func(p *EngineParams) { p.PrefixCachingDisabled = true },
+		"ModelPath":                 func(p *EngineParams) { p.ModelPath = testModelPath },
+		"ModelRevision":             func(p *EngineParams) { p.ModelRevision = testModelRevision },
 	}
 
 	for _, name := range capacityCompared {

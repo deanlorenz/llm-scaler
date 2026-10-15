@@ -954,4 +954,17 @@ var EngineConfigFlagLabels = []string{
 	// describes. One value per configuration, so no cardinality beyond the
 	// configurations themselves.
 	"image",
+	"data_parallel_size",
+	"pipeline_parallel_size",
+	"expert_parallel",
+	"speculative_config",
+	"kv_connector",
+	"kv_offloading_size",
+	"kv_offloading_backend",
+	"prefix_caching_disabled",
+	// The checkpoint served, and whether it could be read: a model given as
+	// an unresolved variable is not used as a key for sharing.
+	"model",
+	"model_revision",
+	"model_unresolved",
 }

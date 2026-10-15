@@ -212,9 +212,10 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	//
 	// The hardware is compared too: a variant moved to another GPU product,
 	// or to another GPU count, was measured on hardware it no longer runs on.
-	// An unresolved accelerator on either side is not a move. Data and
-	// pipeline parallelism are not parsed (EngineParams has neither), so a
-	// reshape that changes only them is not seen here -- a known limit.
+	// An unresolved accelerator on either side is not a move. A reshape of
+	// the data or pipeline parallelism is an argument change and replaces the
+	// record like any other; the GPU count itself still comes from the pod's
+	// GPU request, so one made through a DRA claim reads as unknown.
 	//
 	// This function writes the record afresh every cycle, so what it carried
 	// from the live record it replaced is carried again from its own record
@@ -422,9 +423,11 @@ func sameHardware(rec *Record, accelerator string, gpuCount int) bool {
 // kvTotalCarries reports whether a KV total measured under prev still bounds
 // an engine started with cur, so it may stand as the new engine's k1.
 //
-// The cache must be sized alike: the engine, the model's dtypes and
-// quantization, the memory share, the block size, the tensor parallelism,
-// CUDA graphs, and the overrides that set it outright. The image is not
+// The cache must be sized alike: the engine, the checkpoint and its dtypes and
+// quantization, the memory share, the block size, the parallel layout
+// (tensor, data and pipeline, and expert parallelism, which moves the
+// weights), speculative decoding (a draft model's weights and cache), CUDA
+// graphs, and the overrides that set it outright. The image is not
 // compared: a release can move the cache a little either way, and the
 // carried total is then off by as much -- the same allowance
 // IsCapacityCompatible makes.
@@ -443,5 +446,9 @@ func kvTotalCarries(prev, cur EngineParams) bool {
 		prev.KvCacheDtype == cur.KvCacheDtype && prev.TensorParallelSize == cur.TensorParallelSize &&
 		prev.NumGpuBlocksOverride == cur.NumGpuBlocksOverride && prev.TotalKvTokensOverride == cur.TotalKvTokensOverride &&
 		prev.EnforceEager == cur.EnforceEager &&
+		parallelSize(prev.DataParallelSize) == parallelSize(cur.DataParallelSize) &&
+		parallelSize(prev.PipelineParallelSize) == parallelSize(cur.PipelineParallelSize) &&
+		prev.ExpertParallel == cur.ExpertParallel && prev.SpeculativeConfig == cur.SpeculativeConfig &&
+		prev.ModelPath == cur.ModelPath && prev.ModelRevision == cur.ModelRevision &&
 		cur.EffectiveMaxBatchedTokens <= prev.EffectiveMaxBatchedTokens && cur.MaxNumSeqs <= prev.MaxNumSeqs
 }
