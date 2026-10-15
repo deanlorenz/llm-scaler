@@ -728,6 +728,7 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		allocation.ReservePromised(g.Nodes, promised)
 	}
 	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
+	e.reportQuotaAloneAllocation(ctx, optimizer, requests, allocation.WithholdPromised(constraints, promised), decisions)
 	// The share plans on what the pass left for the models it does not plan,
 	// and plans its own models afresh: it overrides their targets, so what the
 	// pass ordered for them is not spent.

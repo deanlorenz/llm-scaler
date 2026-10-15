@@ -413,7 +413,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	*freeThisCycle += o.fitRescaleToNodes(req, records, stateMap, targets, roles, grown, limited)
 
 	decisions := buildDecisionsWithOptimizer(req, stateMap, vcMap, targets, "rescale")
-	applyGPULimitAttribution(decisions, limited, constraints)
+	o.attributeGPULimits(decisions, limited, constraints)
 	for i := range decisions {
 		if decisions[i].Action == domain.ActionScaleDown {
 			decisions[i].SetDecisionReason(domain.ActionScaleDown, domain.DecisionReasonRescale,

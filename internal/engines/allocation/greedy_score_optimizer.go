@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -30,9 +31,14 @@ type GreedyByScoreOptimizer struct {
 	// keeps the additive fair-share behaviour unchanged.
 	Rescale RescaleFlags
 
+	// quiet suppresses the pass's side effects: limit attribution, which
+	// publishes warm-pool headroom and contention and counts limited decisions.
+	// Set only on the copy ShadowOptimize runs.
+	quiet bool
+
 	// pass is what the last pass left of the budgets, for the warm pool's
-	// headroom (RepublishHeadroom) and the utilization share (LastPass);
-	// dropped when the next pass starts.
+	// headroom (RepublishHeadroom) and the utilization share (LastPass). Not
+	// recorded by a shadow pass; dropped when the next pass starts.
 	pass *passHeadroom
 
 	// spends is what this pass took from the budgets, in order, per model:
@@ -60,7 +66,38 @@ type spendOp struct {
 
 // spend records a debit the pass made, for model.
 func (o *GreedyByScoreOptimizer) spend(model, ns, key string, gpus int) {
-	o.spends = append(o.spends, spendOp{model: model, ns: ns, key: key, gpus: gpus})
+	if !o.quiet {
+		o.spends = append(o.spends, spendOp{model: model, ns: ns, key: key, gpus: gpus})
+	}
+}
+
+// ShadowOptimize runs the optimizer over constraints for comparison only: it
+// returns the decisions a real pass would make, and publishes nothing, counts
+// nothing and logs nothing. The engine uses it to show, beside the real
+// allocation, what a subset of the limiters alone would have allowed.
+func (o *GreedyByScoreOptimizer) ShadowOptimize(
+	ctx context.Context,
+	requests []ModelScalingRequest,
+	constraints []*ResourceConstraints,
+) []domain.VariantDecision {
+	shadow := *o
+	shadow.quiet = true
+	// The shadow is what the quota alone would allow: no physical limiter,
+	// so no node fit, and the cycle's view is not consumed.
+	shadow.Nodes = nil
+	return shadow.Optimize(ctrl.LoggerInto(ctx, logr.Discard()), requests, constraints)
+}
+
+// attributeGPULimits is applyGPULimitAttribution unless the pass is a shadow.
+func (o *GreedyByScoreOptimizer) attributeGPULimits(
+	decisions []domain.VariantDecision,
+	limited gpuLimitTracker,
+	constraints []*ResourceConstraints,
+) {
+	if o.quiet {
+		return
+	}
+	applyGPULimitAttribution(decisions, limited, constraints)
 }
 
 // NewGreedyByScoreOptimizer creates a new GreedyByScoreOptimizer.
@@ -121,9 +158,12 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	constraints []*ResourceConstraints,
 ) []domain.VariantDecision {
 	logger := ctrl.LoggerFrom(ctx).WithName(o.Name())
-	// One pass consumes one node view; what it left is in o.pass.
+	// One pass consumes one node view; what it left is in o.pass. A shadow
+	// pass runs on a copy and touches neither.
 	defer func() { o.Nodes = nil }()
-	o.pass, o.spends = nil, nil
+	if !o.quiet {
+		o.pass, o.spends = nil, nil
+	}
 	declared := declaredAccelerators(requests)
 	available := mergeConstraints(constraints, declared...)
 	availableByNS := mergeNamespaceConstraints(constraints, declared...)
@@ -181,7 +221,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		stateMap := buildStateMap(w.req.VariantStates)
 		vcMap := buildCapacityMap(w.records)
 		decisions := buildDecisionsWithOptimizer(w.req, stateMap, vcMap, w.targets, "greedy-by-score")
-		applyGPULimitAttribution(decisions, w.limited, constraints)
+		o.attributeGPULimits(decisions, w.limited, constraints)
 		logger.V(logging.DEBUG).Info("Greedy-by-score optimizer decisions (scale-up)",
 			"modelID", w.req.ModelID,
 			"decisions", len(decisions))
@@ -214,7 +254,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 
 	// The warm pool's headroom, from what this pass left: every replica it
 	// ordered is debited, from the budgets and from the nodes.
-	if len(constraints) > 0 {
+	if !o.quiet && len(constraints) > 0 {
 		o.pass = &passHeadroom{available: available, byNamespace: availableByNS, nodes: o.Nodes,
 			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends}
 		o.pass.publish(time.Now())
@@ -239,7 +279,7 @@ func (o *GreedyByScoreOptimizer) RepublishHeadroom(planned map[string]bool, prom
 }
 
 // LastPass is what the last pass left, for the utilization share's step that
-// follows it; nil when there was none.
+// follows it; nil when there was none (or it was a shadow).
 func (o *GreedyByScoreOptimizer) LastPass() *PassLeft {
 	if o.pass == nil {
 		return nil
