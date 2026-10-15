@@ -344,7 +344,7 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_borrow_relaxed`
 - **Type**: Gauge
-- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, rising linearly to 1 over the next 6 hours, when the variant is on its own figure again. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
+- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, then rising linearly toward 1 over the next 6 hours. When the relaxation completes the variant is on its own figure again: the borrow ends, and this series and the `k2` series of `wva_learned_state_borrowed` disappear, so the gauge never reads 1. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
 - **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`. Present only while `wva_learned_state_borrowed{quantity="k2"}` is.
 
 ### `wva_learned_state_restores_total`
@@ -357,7 +357,7 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.
 - **Labels**: `operation`: `read` or `write`. Both are published at 0 from startup.
-- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory:
+- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`):
   ```promql
   increase(wva_learned_state_snapshot_errors_total{operation="read"}[15m]) > 0
   ```

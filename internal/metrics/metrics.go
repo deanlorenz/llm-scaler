@@ -299,7 +299,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateRelaxed = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateBorrowRelaxed,
-			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising to 1 over the next 6 hours. Present only while the variant borrows k2.",
+			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising toward 1 over the next 6 hours. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
 		},
 		learnedRelaxedLabels,
 	)
@@ -313,7 +313,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: constants.WVALearnedStateSnapshotErrorsTotal,
-			Help: "Failed reads and writes of the learned-state snapshot ConfigMap (LEARNED_STATE_SNAPSHOT), by operation. A read error -- typically Forbidden -- blocks every write until a read succeeds.",
+			Help: "Failed reads and writes of the learned-state snapshot ConfigMap (LEARNED_STATE_SNAPSHOT), by operation. A failed read of the ConfigMap -- typically Forbidden -- blocks every write until a read succeeds; a snapshot that was read but cannot be parsed is counted as a read error too, and is replaced by the next write.",
 		},
 		[]string{constants.LabelOperation},
 	)
