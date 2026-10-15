@@ -138,6 +138,13 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 	logger := log.FromContext(ctx)
 	systemNamespace := config.SystemNamespace()
 
+	// A deleted ConfigMap has no rejected entries and no unknown keys. Cleared
+	// for every scaling-policy ConfigMap, before any of the returns below: the
+	// gauges were set wherever one was loaded.
+	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+		metrics.DeleteConfigEntryGauges(namespace, name)
+	}
+
 	// Cluster policy first. The policy namespace holds no workloads, so it is
 	// never "tracked", and the tracking check below would return before ever
 	// reaching it — meaning an admin who DELETED the limiters left the

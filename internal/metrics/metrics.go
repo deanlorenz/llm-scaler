@@ -1414,6 +1414,24 @@ func SetConfigUnknownKeys(namespace, name string, unknown int) {
 	configUnknownKeys.With(labels).Set(float64(unknown))
 }
 
+// DeleteConfigEntryGauges removes the wva_config_rejected_entries and
+// wva_config_unknown_keys series of the scaling-policy ConfigMap
+// namespace/name. Called when the ConfigMap is deleted: a deleted ConfigMap has
+// no entries, and its last count would otherwise be reported for as long as the
+// controller runs.
+func DeleteConfigEntryGauges(namespace, name string) {
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	if configRejectedEntries != nil {
+		configRejectedEntries.Delete(labels)
+	}
+	if configUnknownKeys != nil {
+		configUnknownKeys.Delete(labels)
+	}
+}
+
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading
 // the EPP flow-control queue from Prometheus (true) or scraping the EPP directly
 // (false), per pool. It is a gauge rather than a counter because what matters is

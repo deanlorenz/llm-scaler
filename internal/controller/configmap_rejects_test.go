@@ -332,3 +332,44 @@ func gaugeValue(t *testing.T, registry *prometheus.Registry, name string) float6
 	}
 	return -1
 }
+
+// TestDeletedConfigMapClearsItsEntryGauges: the rejected-entry and unknown-key
+// gauges are set on every load, and a deleted ConfigMap is never loaded again,
+// so its last counts used to be reported for as long as the controller ran.
+func TestDeletedConfigMapClearsItsEntryGauges(t *testing.T) {
+	for _, ns := range []string{rejectsSystemNS, rejectsPolicyNS} {
+		t.Run(ns, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			if err := metrics.InitMetrics(registry); err != nil {
+				t.Fatal(err)
+			}
+			f := newRejectsFixture(t)
+			if ns == rejectsPolicyNS {
+				f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
+			}
+			f.apply(ns, map[string]string{config.GlobalDefaultsKey: quotaDefault})
+			f.apply(ns, map[string]string{config.GlobalDefaultsKey: typoQuotaDefault, "some-tier": invalidQuotaDefault})
+			if got := gaugeValue(t, registry, constants.WVAConfigRejectedEntries); got != 1 {
+				t.Fatalf("setup: %s = %v, want 1", constants.WVAConfigRejectedEntries, got)
+			}
+			if got := gaugeValue(t, registry, constants.WVAConfigUnknownKeys); got != 1 {
+				t.Fatalf("setup: %s = %v, want 1", constants.WVAConfigUnknownKeys, got)
+			}
+
+			ctx := context.Background()
+			key := types.NamespacedName{Namespace: ns, Name: config.ScalingPolicyConfigMapName()}
+			if err := f.c.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Namespace: key.Namespace, Name: key.Name}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{constants.WVAConfigRejectedEntries, constants.WVAConfigUnknownKeys} {
+				if got := gaugeValue(t, registry, name); got != -1 {
+					t.Errorf("%s still reported after the ConfigMap was deleted: %v", name, got)
+				}
+			}
+		})
+	}
+}

@@ -796,13 +796,13 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 
 ### `wva_config_rejected_entries`
 - **Type**: Gauge
-- **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one.
+- **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one. The series is removed when the ConfigMap is deleted.
 - **Labels**: `namespace`, `configmap`, optional `controller_instance`
 - **Use Case**: any value above 0 means the ConfigMap does not say what is running. The `ConfigEntryRejected` event on the ConfigMap names the entry.
 
 ### `wva_config_unknown_keys`
 - **Type**: Gauge
-- **Description**: keys in a scaling-policy ConfigMap's entries that the schema does not define, at its last load. They are ignored; the entries still apply.
+- **Description**: keys in a scaling-policy ConfigMap's entries that the schema does not define, at its last load. They are ignored; the entries still apply. The series is removed when the ConfigMap is deleted.
 - **Labels**: `namespace`, `configmap`, optional `controller_instance`
 - **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
 
