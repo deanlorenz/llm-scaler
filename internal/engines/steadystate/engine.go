@@ -49,6 +49,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/external"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
@@ -134,6 +135,19 @@ type Engine struct {
 	// Also pre-registered in analyzers under domain.SaturationAnalyzerName.
 	// Typed as domain.Analyzer to allow injection in tests.
 	saturationV2Analyzer domain.Analyzer
+
+	// sloAnalyzer is the built-in slo analyzer, also registered in analyzers
+	// under domain.SLOAnalyzerName: held here so the per-cycle sweeps reach its
+	// learned state whether or not any model runs it. Nil in tests that build
+	// an Engine by hand.
+	sloAnalyzer sloStateKeeper
+	// sloFailedSince is when the current run of failed cycles began, zero
+	// while cycles succeed. Read by beginSLOCycle, written by optimize: both
+	// on the executor's goroutine.
+	sloFailedSince time.Time
+	// reportedCollisions is the external analyzer labels already logged as
+	// taken by a built-in, so each is logged once.
+	reportedCollisions map[string]bool
 
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *capacity.Store
@@ -317,6 +331,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// collector does not read the store itself.
 	replicaCollector := collector.NewReplicaMetricsCollector(promSource, client, apiReader, recorder, podLocator)
 	replicaCollector.SetBridgeResolver(decision.DefaultBridges)
+	// The slo analyzer keeps its learned state as long as saturation keeps its
+	// own: LEARNED_STATE_VARIANT_TIMEOUT governs both.
+	sloAnalyzer := slo.New(replicaCollector, capacityStore).WithStateTimeout(satV2.Horizons().VariantTimeout)
 
 	engine = Engine{
 		client:                  client,
@@ -330,6 +347,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		policies:                scalingpolicy.NewChangeReporter(),
 		metricsRegistry:         metricsRegistry,
 		saturationV2Analyzer:    satV2,
+		sloAnalyzer:             sloAnalyzer,
 		capacityStore:           capacityStore,
 		lastGoodAnalysis:        make(map[string]map[string]time.Time),
 		lastAnalyzerSeries:      make(map[string]analyzerSeries),
@@ -338,6 +356,13 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		metricsEmitter:          metrics.NewMetricsEmitter(),
 		analyzers: []analyzerEntry{
 			{name: domain.SaturationAnalyzerName, analyzer: satV2},
+			// Built in and always registered: it runs only for a model whose
+			// policy lists it under analyzers:, and its router queries run only
+			// for such a model, so registering it costs nothing elsewhere, and
+			// enabling it needs no restart. Its result is
+			// published and, like every non-saturation result, not yet consumed
+			// (docs/proposals/slo-tiers.md, phase 0).
+			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
 	}
@@ -363,6 +388,10 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// ReplicaMetrics struct and used by the queueing model analyzer to
 	// estimate per-replica arrival rate and model queue behavior.
 	registration.RegisterQueueingModelQueries(metricsRegistry)
+
+	// The router latency the slo analyzer judges an SLO on. Run only when that
+	// analyzer asks for them.
+	registration.RegisterSLOQueries(metricsRegistry)
 
 	return &engine
 }
@@ -483,7 +512,17 @@ func (e *Engine) reconcileExternalAnalyzers(ctx context.Context) {
 	desired := make(map[string]struct{}, len(catalog))
 	for label, def := range catalog {
 		if _, isBuiltin := builtin[label]; isBuiltin {
-			logger.V(logging.DEBUG).Info("Skipping external analyzer: name collides with a built-in", "label", label)
+			// Once per name at the default level, not every cycle at DEBUG:
+			// a catalog entry that stopped running because a built-in took
+			// its name (slo did) must be visible in a default log.
+			if !e.reportedCollisions[label] {
+				logger.Info("Skipping external analyzer: its name is a built-in analyzer's, and the built-in runs instead",
+					"label", label)
+				if e.reportedCollisions == nil {
+					e.reportedCollisions = map[string]bool{}
+				}
+				e.reportedCollisions[label] = true
+			}
 			continue
 		}
 		d, err := toExternalDefinition(label, def)
@@ -658,6 +697,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		status := "success"
 		if retErr != nil {
 			status = "error"
+			if e.sloFailedSince.IsZero() {
+				e.sloFailedSince = start
+			}
 		}
 		metrics.ObserveOptimizationDuration(time.Since(start).Seconds(), status)
 		metrics.SetModelsProcessed(modelsProcessed)
@@ -668,6 +710,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	e.reconcileExternalAnalyzers(ctx)  // sync the runtime external-analyzer registry with the catalog
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
 	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
+	metrics.SweepSLO(time.Now())       // drop the SLO series of a model no longer published
 
 	if e.Config.ScaleToZeroEnabled() {
 		logger.Info("Scaling to zero is enabled")
@@ -682,6 +725,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	}
 
 	if len(activeVAs) == 0 {
+		// A cycle, though it analyzes nothing: the models parked through it
+		// were not watched, and the slo analyzer must see that it skipped them.
+		e.beginSLOCycle()
 		logger.Info("No active VariantAutoscalings found, skipping optimization")
 		metrics.PublishUtilizationShare(nil) // no group to report: the share gauges go too
 		// This cycle analyzes nothing, so no analyzer series gets refreshed and
@@ -757,6 +803,11 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		// always print inventory until optimizer consumes it
 		logger.Info("Collected cluster accelerator inventory (Limited Mode)", "inventory", inventory)
 	}
+	// The slo analyzer's cycle starts here, past every early error return: the
+	// executor retries a failed cycle within a fraction of a second, and
+	// counting the failure and its retry as two cycles read as a skipped one,
+	// leaving every SLO model unobserved for a window and its grace.
+	e.beginSLOCycle()
 
 	// Group VAs by model for per-model capacity analysis
 	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)
@@ -950,6 +1001,7 @@ func (e *Engine) resolveModelPolicy(
 	}
 
 	e.policies.ReportEffectivePolicy(ctx, namespace, modelID, tier, resolved)
+	e.policies.ReportSLOMisconfiguration(ctx, namespace, modelID, resolved.SLOMisconfiguration())
 	return resolved
 }
 

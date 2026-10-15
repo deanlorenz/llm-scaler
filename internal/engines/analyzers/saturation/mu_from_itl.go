@@ -276,36 +276,29 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
 	variantName string, now time.Time, logger logr.Logger) itl.Model {
-	// The lock is analyzer-wide: recordSaturatedThroughput,
-	// saturatedThroughputReading and EvictStaleHistory all take it, for every
-	// model this instance handles. So it covers the window mutation and
-	// nothing else -- the log lines below are emitted after it is dropped,
-	// rather than serialising every other model's cycle behind this one's
-	// scan, fit and two Info calls.
-	a.mu.Lock()
 	// Stamped here as well as in noteReplicaStart, because this function
-	// CREATES learned state (the window below, and the baseline it writes at
-	// the end) and the sweep's rule is that an unstamped key counts as stale.
-	// Stamping only in noteReplicaStart made that rule hold by the order two
-	// calls happen in a third file -- fitLines calls noteReplicaStart just
-	// before the decode guard that reaches this function -- so any early
-	// return added to noteReplicaStart, or a reordering of those two calls,
-	// would have deleted every learned ITL baseline on the first sweep 24h
-	// later, silently, falling back to itl.DefaultBaselineSec. A producer of
-	// learned state stamps its own key.
+	// CREATES learned state (the window, and the baseline the tracker writes
+	// on a full fit) and the sweep's rule is that an unstamped key counts as
+	// stale. Stamping only in noteReplicaStart made that rule hold by the
+	// order two calls happen in a third file -- fitLines calls
+	// noteReplicaStart just before the decode guard that reaches this
+	// function -- so any early return added to noteReplicaStart, or a
+	// reordering of those two calls, would have deleted every learned ITL
+	// baseline on the first sweep 24h later, silently, falling back to
+	// itl.DefaultBaselineSec. A producer of learned state stamps its own key.
+	//
+	// The analyzer-wide lock covers the stamp and nothing else: the tracker
+	// takes its own around the window, and the scan, the fit and the log
+	// lines below are not serialised behind every other model's cycle.
+	a.mu.Lock()
 	a.noteVariantSeen(key, now)
-	w, ok := a.itlWindows[key]
-	if !ok {
-		w = itl.NewWindow(
-			itl.DefaultWindowMaxSize,
-			itl.DefaultObservationMaxAge,
-			itl.DefaultMinSamples,
-			itl.DefaultMinKSpread,
-			itl.DefaultMinObservableK,
-			itl.DefaultMaxObservableK,
-		)
-		a.itlWindows[key] = w
-	}
+	a.mu.Unlock()
+
+	// Which rows are readings, the window's confidence gate (Ready: enough
+	// samples, far enough apart in k), and the two tiers below are the
+	// tracker's: the slo analyzer fits with the same rules.
+	r := a.itlTracker.Observe(key, variantName, replicas, now)
+
 	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
 	// never prints and a diagnostic nobody can read is the problem it was
 	// written to solve. It is one line per variant per cycle, against the
@@ -313,112 +306,43 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	//
 	// Counted per reason, because "the window is empty" has four different
 	// causes with four different fixes, and a run that cannot tell them apart
-	// costs a rebuild to find out which one it was.
-	var considered, notReady, noITL, noK, aboveBand, added int
-	for _, rm := range replicas {
-		if rm.VariantName != variantName {
-			continue
-		}
-		considered++
-		if !rm.Ready || rm.FromWarmPool {
-			notReady++
-			continue
-		}
-		if !(rm.AvgITL > 0) {
-			noITL++
-			continue
-		}
-		if !(rm.KvUsageInstant > 0) {
-			noK++
-			continue
-		}
-		if rm.KvUsageInstant > itl.DefaultMaxObservableK {
-			aboveBand++
-			continue
-		}
-		w.Add(rm.KvUsageInstant, rm.AvgITL, now)
-		added++
-	}
-	w.Prune(now)
-	// The window's own confidence gate, not itl.Fit's. Fit will draw a line
-	// through any two points that are not on top of each other; Ready is
-	// what says the points are enough of them and far enough apart in k to
-	// mean something (DefaultMinSamples, DefaultMinKSpread). The throughput
-	// analyzer gates on it for the same reason, and a derived mu overrides
-	// the measured one, so it has to clear a higher bar than two readings.
-	obs := w.Observations()
-	ready := w.Ready()
-	baseline, learned := a.itlBaseline[key]
-	a.mu.Unlock()
-	if !learned || !(baseline > 0) {
-		baseline = itl.DefaultBaselineSec
-	}
-
-	// Below DefaultMinObservableK the window drops the reading itself, so
-	// `added` counts what was offered and len(obs) what was kept.
+	// costs a rebuild to find out which one it was. Below
+	// DefaultMinObservableK the window drops the reading itself, so `offered`
+	// counts what was offered and `held` what was kept.
 	logger.V(logging.DEFAULT).Info("itl-window",
 		"variant", variantName, "key", key,
-		"replicas", considered, "offered", added, "held", len(obs),
-		"notReady", notReady, "noITL", noITL, "noK", noK, "aboveBand", aboveBand,
-		"ready", ready, "minSamples", itl.DefaultMinSamples)
-	if ready {
-		if model, ok := itl.Fit(obs); ok {
-			// Remember B, not A. B is the hardware floor and belongs to the
-			// card; A is contention and moves with the workload. Only a
-			// PHYSICAL floor is worth keeping -- ValidModel admits a negative
-			// intercept as long as the line is positive at saturation, and a
-			// negative B pinned into the next fit would be worse than the
-			// constant it replaced.
-			if model.B > 0 {
-				a.mu.Lock()
-				a.itlBaseline[key] = model.B
-				a.mu.Unlock()
-			}
-			logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",
-				"a", model.A, "b", model.B, "held", len(obs), "baselineLearned", true)
-			return model
-		}
+		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
+		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
+	switch {
+	case r.Tier == itl.TierOLS:
+		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",
+			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", true)
+	case r.Tier == itl.TierPinnedB:
+		// The fleet's replicas are at nearly the same load, so there is no
+		// spread in k to fit a slope and an intercept from. That is the
+		// NORMAL case, not a degenerate one: the router balances, so it
+		// balances k too, and a run on 2026-09-24 sat at queue 0 on every
+		// replica but one with the window never once Ready. Requiring the
+		// full fit would have left the derivation inert on every fleet that
+		// is actually working. So B is pinned to what THIS key measured and
+		// only A is fitted -- the weaker answer, and still one about the
+		// shape arriving now. The slope is fitted against whatever B is
+		// pinned, so B decides the line's steepness as much as its offset.
+		//
+		// Downstream a derived mu both orders replicas (floor.Estimate's
+		// mayOrder) and settles the whole variant's shape-change hold
+		// (fleetHasMeasuredItself) on sight, which is why the tracker keeps
+		// the sample floor Ready would have applied: only the spread is
+		// waived. It costs about a cycle -- six replicas clear ten in two --
+		// and nothing in the case this exists for: once the shape lightens,
+		// an over-provisioned fleet sits at a k far below
+		// DefaultMinObservableK and is priced from the readings the window
+		// already holds from when it was working.
+		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
+			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored)
+	case r.Declined:
+		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}
-	// The fleet's replicas are at nearly the same load, so there is no spread
-	// in k to fit a slope and an intercept from. That is the NORMAL case, not
-	// a degenerate one: the router balances, so it balances k too, and a run
-	// on 2026-09-24 sat at queue 0 on every replica but one with the window
-	// never once Ready. Requiring the full fit would have left the derivation
-	// inert on every fleet that is actually working.
-	//
-	// So B is pinned to the hardware floor and only A is fitted, which is what
-	// the throughput analyzer does for the same reason. It is the weaker
-	// answer, and it is still an answer about the shape arriving now, which
-	// the measured window it replaces is not.
-	//
-	// Ready() is two conditions and only one of them is the fleet's fault. The
-	// k-SPREAD is what a balanced router cannot supply; the sample COUNT is
-	// not, and waiving both was wrong. FitPinnedB answers from a SINGLE pair,
-	// and downstream a derived mu both orders replicas (floor.Estimate's
-	// mayOrder) and settles the whole variant's shape-change hold
-	// (fleetHasMeasuredItself) on sight. Neither should rest on one reading
-	// from one replica on one cycle. So the sample floor Ready would have
-	// applied still applies here; only the spread requirement is waived.
-	//
-	// It costs about a cycle: every Ready replica whose k is in range
-	// contributes an observation per cycle, so six replicas clear ten in two.
-	// It costs nothing in the case this derivation exists for -- once the
-	// shape lightens, an over-provisioned fleet sits at a k far below
-	// DefaultMinObservableK, contributes no new observations at all, and is
-	// priced from the ones the window already holds from when it was working.
-	if len(obs) < itl.DefaultMinSamples {
-		return itl.Model{}
-	}
-	// Pinned to what THIS key measured, not to a constant. The slope is fitted
-	// against whatever B is pinned, so B decides the line's steepness as much
-	// as its offset -- at a pricing point well above the observed k the slope
-	// dominates, and a B that is 3x too high halves the ITL the model reports.
-	model, ok := itl.FitPinnedB(obs, baseline)
-	if !ok {
-		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", len(obs))
-		return itl.Model{}
-	}
-	logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
-		"a", model.A, "b", model.B, "held", len(obs), "baselineLearned", learned)
-	return model
+	return r.Model
 }

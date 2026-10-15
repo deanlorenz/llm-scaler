@@ -865,6 +865,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registerServiceRateMetrics(registry); err != nil {
 		return err
 	}
+	if err := registerSLOMetrics(registry); err != nil {
+		return err
+	}
 
 	return nil
 }

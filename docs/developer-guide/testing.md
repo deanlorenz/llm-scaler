@@ -286,6 +286,11 @@ failed against good code.
   Bump the tag, and check the pod's age, not just its image.
 - The restart is best-effort: if the suite may not patch the Deployment, it
   warns and continues.
+- After a restart, wait before creating a ScaledObject. `restartWVAController`
+  returns only once the scaler Service routes to the new pod alone. A
+  ScaledObject created while KEDA cannot reach the scaler gets a CPU-only HPA
+  that KEDA never fixes. Specs that create one after a restart call
+  `waitForKEDAExternalMetricWired`, which recreates it once if that happened.
 
 ### E2E shared fixtures
 
@@ -300,6 +305,18 @@ go doc ./test/e2e/fixtures
 # Compile the e2e package without running specs
 go test ./test/e2e/... -run TestDoesNotExist
 ```
+
+**Helpers that reuse the controller's labels need their own NetworkPolicy
+allow.** The e2e installs the controller in the model namespace, and the
+shipped `wva-external-scaler` NetworkPolicy selects every Pod there that
+carries the controller's labels. It admits only `:8443`, `:8081` and `:9090`.
+A test Pod that borrows those labels (the warm-pool relays made with
+`fixtures.ControllerDriverLabels`) is cut off on any other port. On kind it
+only shows on a worker node, because traffic from the control-plane node
+itself is not filtered, so the failure is intermittent: `dial tcp ...: i/o
+timeout`. `fixtures.CreateHTTPDriver` adds a policy that admits the relay port
+on that one Pod. Do the same for any new helper; do not widen the shipped
+policy.
 
 ### Configuration
 
@@ -359,6 +376,10 @@ and `kustomize-build` run; the e2e jobs are PR-only.
 
 `ci-e2e-openshift.yaml` (the GPU OpenShift run) is manual
 (`workflow_dispatch` only); its PR and `/ok-to-test` triggers are disabled.
+When they are enabled, a fork PR runs only on `/ok-to-test <sha>` or
+`/retest <sha>`, where `<sha>` is the full 40-character SHA of the head commit
+you reviewed. The run is refused if the head has moved since; review the new
+commits and approve the new SHA.
 
 Every commit also needs a DCO sign-off (`git commit -s`); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#commits).

@@ -34,6 +34,9 @@ import (
 var (
 	labelMatchers = regexp.MustCompile(`\{[^}]*\}`)
 	quotedStrings = regexp.MustCompile(`"[^"]*"`)
+	// rangeSelectors are [5m] ranges and [30m:1m] subqueries. A subquery step
+	// reads as an identifier, ":1m", because a metric name may hold a colon.
+	rangeSelectors = regexp.MustCompile(`\[[^\]]*\]`)
 	// identifiers matches Prometheus metric naming: alphanumerics, underscores,
 	// and colons for recording rules.
 	identifiers = regexp.MustCompile(`\b([a-zA-Z_:][a-zA-Z0-9_:]*)\b`)
@@ -68,20 +71,20 @@ var promQLKeywords = map[string]bool{
 	"query_type": true, "reason": true, "direction": true, "limiter_name": true,
 	"accelerator_type": true, "accelerator_vendor": true, "accelerator_model": true,
 	"controller_instance": true, "deployment": true, "service": true, "le": true,
+	"objective": true, "statistic": true,
 }
 
 // ExtractMetricNames returns the metric names an expression references.
 func ExtractMetricNames(expr string) []string {
 	expr = labelMatchers.ReplaceAllString(expr, "")
 	expr = quotedStrings.ReplaceAllString(expr, "")
+	expr = rangeSelectors.ReplaceAllString(expr, "")
 
 	var out []string
 	for _, name := range identifiers.FindAllString(expr, -1) {
 		if promQLKeywords[name] {
 			continue
 		}
-		// Bare numbers with unit suffixes never match the identifier pattern, but
-		// PromQL duration literals inside [] do not either, so nothing else to skip.
 		out = append(out, name)
 	}
 	return out
@@ -100,6 +103,14 @@ var ExternalMetrics = map[string]bool{
 	// there is no namespace, which is why the join partner has to be a
 	// model-keyed WVA series (see constants.WVAModelReplicas).
 	"llm_d_epp_request_error_total": true,
+	// EPP's TTFT histogram, the series the slo analyzer judges TTFT from.
+	// WVAModelSLOUnjudged reads its streaming request count to tell clients
+	// without include_usage from an idle model. Like the error counter, the
+	// EPP's own exposition has no namespace label; the join uses the one
+	// Prometheus adds from the scrape target, which the collector's router
+	// queries already select on, so it holds wherever the analyzer judges at
+	// all.
+	"llm_d_epp_request_ttft_seconds": true,
 }
 
 // IsKnown reports whether name is a defined metric, allowing for the suffixes the
@@ -185,16 +196,37 @@ func RepoRoot() string {
 // hand-maintained slice, which is a second place to remember: a metric added to
 // constants but not to the list made any alert naming it fail, and the error
 // pointed at the alert rather than at the list.
+//
+// Every non-test file of internal/constants, not metrics.go alone: the
+// utilization-share and SLO metrics are declared in files of their own, and an
+// alert on one of them was otherwise reported as naming an unknown metric.
 func WVAMetricNames() (map[string]bool, error) {
-	path := filepath.Join(RepoRoot(), "internal", "constants", "metrics.go")
-	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, path, nil, 0)
+	dir := filepath.Join(RepoRoot(), "internal", "constants")
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
+		return nil, fmt.Errorf("listing %s: %w", dir, err)
 	}
-
 	names := make(map[string]bool)
-	ast.Inspect(parsed, func(n ast.Node) bool {
+	fset := token.NewFileSet()
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		collectMetricNames(parsed, names)
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no wva_ metric constants found in %s", dir)
+	}
+	return names, nil
+}
+
+// collectMetricNames adds every wva_ string constant in file to names.
+func collectMetricNames(file *ast.File, names map[string]bool) {
+	ast.Inspect(file, func(n ast.Node) bool {
 		spec, ok := n.(*ast.ValueSpec)
 		if !ok {
 			return true
@@ -216,9 +248,4 @@ func WVAMetricNames() (map[string]bool, error) {
 		}
 		return true
 	})
-
-	if len(names) == 0 {
-		return nil, fmt.Errorf("no wva_ metric constants found in %s", path)
-	}
-	return names, nil
 }

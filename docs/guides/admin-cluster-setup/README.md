@@ -68,8 +68,8 @@ them and an uninstall removes only its own.
 | `wva-kueue-reader-role` + binding | Kueue ClusterQueues and ResourceFlavors are cluster-scoped. Inert without Kueue |
 | `wva-policy-namespace-reader-role` + binding | `get` on named Namespaces, to find the cluster policy |
 | `wva-manager-cluster-monitoring-view` | **OpenShift only**: lets the controller query Thanos |
-| ServiceAccounts `wva-controller-manager`, `wva-epp-metrics-reader` | referenced by the RBAC above |
-| Secret `wva-epp-metrics-token` | a **non-expiring** token the controller uses to scrape the EPP. On OpenShift also `wva-controller-manager-token`, for the ServiceMonitor |
+| ServiceAccounts `wva-controller-manager`, `wva-epp-metrics-reader` and, on OpenShift, `wva-metrics-scraper` | referenced by the RBAC and the ServiceMonitor above |
+| Secret `wva-epp-metrics-token` | a **non-expiring** token the controller uses to scrape the EPP. On OpenShift also `wva-metrics-scraper-token`, which the ServiceMonitor scrapes with; it grants only `get /metrics` |
 | ConfigMap `wva-metrics-server-ca` | **OpenShift only**: the CA the ServiceMonitor checks the controller's certificate with |
 | The ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
 | Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-controller-status-role`, `wva-learned-state-role` + RoleBindings | RBAC forbids granting what you do not hold |

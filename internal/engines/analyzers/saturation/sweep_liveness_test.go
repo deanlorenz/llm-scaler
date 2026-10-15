@@ -60,13 +60,13 @@ var _ = Describe("the sweep's liveness test", func() {
 
 		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
 		a.noteITL(key, rms, decodeV, base, logr.Discard())
-		a.itlBaseline[key] = 0.011 // as an OLS fit would have left it earlier
+		a.itlTracker.SetBaseline(key, 0.011) // as an OLS fit would have left it earlier
 
 		measured := a.startSeconds[key]
 		Expect(measured).To(BeNumerically(">", 0),
 			"the fixture must have produced a start estimate, or this proves nothing")
-		Expect(a.itlWindows).To(HaveKey(key))
-		Expect(a.itlWindows[key].Len()).To(BeZero(),
+		Expect(a.itlWindowLens()).To(HaveKey(key))
+		Expect(a.itlWindowLens()[key]).To(BeZero(),
 			"the fixture must leave the window EMPTY -- that is the case under test")
 
 		// Cycles in realistic steps, each sweeping before the analysis
@@ -86,7 +86,7 @@ var _ = Describe("the sweep's liveness test", func() {
 				"cannot put it back while the Pod lives")
 		Expect(a.startSeconds[key]).To(Equal(measured),
 			"and it must be the figure that was measured, not a reseeded one")
-		Expect(a.itlBaseline).To(HaveKey(key),
+		Expect(a.itlBaselines()).To(HaveKey(key),
 			"the learned baseline would otherwise be replaced by "+
 				"itl.DefaultBaselineSec in the next pinned-B fit")
 	})
@@ -102,7 +102,7 @@ var _ = Describe("the sweep's liveness test", func() {
 
 		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
 		a.noteITL(key, rms, decodeV, base, logr.Discard())
-		a.itlBaseline[key] = 0.011
+		a.itlTracker.SetBaseline(key, 0.011)
 		Expect(a.startSeconds).To(HaveKey(key))
 
 		// The variant is deleted: nothing reports it again, so nothing
@@ -113,8 +113,8 @@ var _ = Describe("the sweep's liveness test", func() {
 
 		Expect(a.startSeconds).NotTo(HaveKey(key))
 		Expect(a.startOutliers).NotTo(HaveKey(key))
-		Expect(a.itlBaseline).NotTo(HaveKey(key))
-		Expect(a.itlWindows).NotTo(HaveKey(key))
+		Expect(a.itlBaselines()).NotTo(HaveKey(key))
+		Expect(a.itlWindowLens()).NotTo(HaveKey(key))
 		Expect(a.variantSeenAt).NotTo(HaveKey(key),
 			"the stamp itself must age out, or it is the unbounded map now")
 	})
@@ -132,7 +132,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		a.noteReplicaStart(key, ns, "prefill-v",
 			[]domain.ReplicaMetrics{belowBand("pod-p", "prefill-v", 40)}, logr.Discard())
 		Expect(a.startSeconds).To(HaveKey(key))
-		Expect(a.itlWindows).NotTo(HaveKey(key),
+		Expect(a.itlWindowLens()).NotTo(HaveKey(key),
 			"a prefill variant has no ITL window, which is the point")
 
 		gone := base.Add(2 * capacity.HistoryEvictionTimeout)

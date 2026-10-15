@@ -103,10 +103,12 @@ type SaturationAnalyzer struct {
 	// shape_change.go for what the event is for.
 	fleetShape map[string]*shapeMemo
 
-	// itlWindows is one rolling window of (k, ITL) readings PER VARIANT, from
-	// which ITL(k) = A*k + B is fitted so mu can be derived for the shape the
-	// fleet is serving NOW rather than waiting for it to saturate under it
-	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
+	// itlTracker holds one rolling window of (k, ITL) readings PER VARIANT,
+	// from which ITL(k) = A*k + B is fitted so mu can be derived for the shape
+	// the fleet is serving NOW rather than waiting for it to saturate under it
+	// (mu_from_itl.go), and the B of each key's last full fit. Keyed like the
+	// throughput windows and swept with them. The slo analyzer fits its lines
+	// with the same itl.Tracker, so the two never apply different rules.
 	//
 	// Per variant, and NOT pooled across the variants that share an engine
 	// configuration -- although ITL(k) is largely a property of the weights,
@@ -117,7 +119,12 @@ type SaturationAnalyzer struct {
 	// cannot blend two different traffic shapes into a figure describing
 	// neither, and does not make one variant's fit depend on the order the
 	// others happened to be iterated in.
-	itlWindows map[string]*itl.Window
+	//
+	// The B it remembers is the zero-contention decode step for THAT model on
+	// THAT accelerator. It is what the one-parameter fallback pins, so a fleet
+	// that has once been measured never falls back to a constant guessed for
+	// another card.
+	itlTracker *itl.Tracker
 	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
 	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
@@ -131,11 +138,6 @@ type SaturationAnalyzer struct {
 	// the fleet on it but not grow it: the line is evidence about a
 	// configuration, not about this variant's own load.
 	itlLines map[string]learnedLine
-	// itlBaseline is the last B an OLS fit produced for each window key: the
-	// zero-contention decode step for THAT model on THAT accelerator. It is
-	// what the one-parameter fallback pins, so a fleet that has once been
-	// measured never falls back to a constant guessed for another card.
-	itlBaseline map[string]float64
 	// startSeconds is the running estimate of how long one replica of each
 	// variant takes to become Ready, keyed like the ITL windows and swept with
 	// them. The demand floor projects the backlog forward over it, so it is a
@@ -281,9 +283,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
-		itlWindows:             make(map[string]*itl.Window),
+		itlTracker:             itl.NewTracker(),
 		itlLines:               make(map[string]learnedLine),
-		itlBaseline:            make(map[string]float64),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
@@ -502,26 +503,15 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// every later fit and projection for that key. Only the liveness test
 	// changed, from "its window is empty" to "nothing has reported it".
 	now := a.now()
-	for _, w := range a.itlWindows {
-		w.Prune(now)
-	}
-	for key := range a.itlWindows {
-		if a.variantIsStale(key, now, variantTimeout) {
-			delete(a.itlWindows, key)
-			evicted.ITLWindows++
-		}
-	}
-	// Separate loops, not one pass over itlWindows: noteReplicaStart runs for
-	// every role while noteITL runs for decode only, so a prefill or RoleBoth
-	// variant has a start estimate and no window at all. Sweeping these
-	// through the window map left those keys unbounded -- the very leak the
-	// sweep was wired up to close.
-	for key := range a.itlBaseline {
-		if a.variantIsStale(key, now, variantTimeout) {
-			delete(a.itlBaseline, key)
-			evicted.ITLBaselines++
-		}
-	}
+	// The tracker sweeps windows and baselines in separate passes, and the
+	// start estimates below have their own loop, not one pass over the
+	// windows: noteReplicaStart runs for every role while noteITL runs for
+	// decode only, so a prefill or RoleBoth variant has a start estimate and
+	// no window at all. Sweeping these through the window map left those keys
+	// unbounded -- the very leak the sweep was wired up to close.
+	evicted.ITLWindows, evicted.ITLBaselines = a.itlTracker.Sweep(now, func(key string) bool {
+		return a.variantIsStale(key, now, variantTimeout)
+	})
 	for key := range a.startSeconds {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startSeconds, key)

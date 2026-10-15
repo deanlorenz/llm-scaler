@@ -17,7 +17,7 @@ production on it.
 
 Pin a release tag or a digest, and deploy with the manifests from the **same**
 release. An image older than the manifests crash-loops on flags it does not
-know.
+know. Before the first release, pin a digest.
 
 ```bash
 git checkout v0.9.0
@@ -160,6 +160,119 @@ they enable. Do this, in order:
      kubectl get cm wva-controller-status -n "$NS" \
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
+
+#### Other changes that need an action
+
+- **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
+  now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
+  `wva-controller-manager-token` is deleted. Only the admin phase does both.
+  `make deploy-wva INSTALL_PHASE=wva` alone keeps scraping with the old token.
+  ```bash
+  NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift   # (cluster admin)
+  # out-of-reach shape: the controller runs in wva-<namespace>
+  NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>
+  # cluster scope
+  make setup-prereqs ENVIRONMENT=openshift SCOPE=cluster WVA_NS=<controller namespace>
+  ```
+- **The install stops when KEDA is absent**, before it creates anything. It
+  prints the command that installs KEDA
+  (`KEDA_HELM_INSTALL=true NAMESPACE=<namespace> make setup-prereqs`). The
+  controller-only phase (`INSTALL_PHASE=wva`) never installs KEDA, so there it
+  always stops.
+- **kube-prometheus-stack is pinned** (`KUBE_PROMETHEUS_STACK_CHART_VERSION`,
+  default `92.7.0`). A newer release already installed is kept, with a
+  warning. Set the variable to install that exact version, including an older
+  one.
+
+#### Prometheus TLS verification is on by default
+
+Earlier releases skipped TLS verification for every Prometheus. This release
+verifies the certificate of any `https://` Prometheus, except the one the
+installer deploys itself, which has no CA to verify with.
+
+A re-run keeps what the controller runs with now:
+
+- **A CA path, same Prometheus.** `PROMETHEUS_CA_CERT_PATH` is kept, and so is
+  the verification setting it had. If verification was off, it stays off, and
+  the installer warns that the CA path is unused. A volume and mount you added
+  with `kubectl patch` survive re-runs. With GitOps, keep them in your overlay.
+- **A CA path, different `PROMETHEUS_URL`.** The CA path is dropped, because
+  the new Prometheus may use another CA. The installer warns, and prints the
+  re-run that keeps it.
+- **Verification off, no CA, same Prometheus.** It stays off, and the
+  installer warns
+  `TLS verification for <url> stays OFF, as it was before this upgrade`.
+  Turning it on with no CA would stop the controller connecting.
+- **Verification off, but a different `PROMETHEUS_URL`.** The new Prometheus
+  is verified, and the installer says so. Pass
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` to keep it off.
+
+An explicit `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` or `PROMETHEUS_CA_CERT_PATH`
+always wins.
+
+To turn verification on, do one of these:
+
+- Mount the CA that signed the Prometheus certificate, and re-run with
+  `PROMETHEUS_CA_CERT_PATH=<file>` ([TLS configuration](prometheus.md#tls-configuration)).
+- Re-run with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false`, if a public CA signed
+  the certificate.
+
+When a Prometheus setting changes, the installer restarts the controller. The
+controller reads these settings only when it starts.
+
+If the installer cannot read the controller's current config, it stops before
+changing anything, and asks you to re-run with
+`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` or `=false`. It does not stop when
+you pass `PROMETHEUS_CA_CERT_PATH`, or for the Prometheus it deploys itself.
+
+The re-run commands the installer prints carry `PROMETHEUS_URL`, `IMG`,
+`DEPLOY_PROMETHEUS=false` and `ENVIRONMENT` when you set them. Add every other
+variable you installed with.
+
+#### Patch on pods moves to Role `wva-pod-writer`
+
+The controller's ClusterRole no longer lets it patch pods. Each namespace that
+needs it gets Role `wva-pod-writer` instead. Only warm pools and the
+utilization-share optimizer patch pods. A namespace-scoped controller keeps
+`patch` in its own Role, so nothing changes for it.
+
+For a cluster-scoped controller, the upgrade grants `wva-pod-writer` before it
+removes the old grant. It does so in each namespace that holds:
+
+- a warm pool that calls this controller,
+- a pod with a utilization-share transfer mark, of a model that calls this
+  controller, or
+- any model that calls this controller, when the utilization-share optimizer
+  is active (not shadow). The re-run also removes the `optimizer:` block
+  ([Re-running the installer resets the default entry](scaling-policy.md#re-running-the-installer-resets-the-default-entry)),
+  so run these again, in order:
+  ```bash
+  make utilization-share-shadow NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>
+  make utilization-share-activate NAMESPACE=<models namespace> CONTROLLER_NAMESPACE=<controller namespace>
+  ```
+
+It prints each namespace it granted in. Then read its warnings:
+
+- **`Could not grant the controller patch on pods in <namespace>`**: that warm
+  pool stops lending, or the optimizer cannot clear its marks there. A cluster
+  admin runs the command the warning prints.
+- **`... are UNKNOWN`**: the installer could not list ScaledObjects or pods
+  across the cluster. Re-run the upgrade as a cluster admin, or grant by hand in
+  each namespace with a warm pool or an active optimizer, from the repository
+  root:
+  ```bash
+  bash deploy/lib/pod_writer.sh <namespace> <controller namespace> | kubectl apply -f -
+  ```
+- **`Could not tell whether the utilization-share optimizer is active`**: the
+  installer could not read the controller's status or policy. If the optimizer
+  is active, run the command above in each namespace the warning lists.
+- **`... does not say which controller they call`**: a ScaledObject declares a
+  warm pool or a model, but its `scalerAddress` is not
+  `wva-external-scaler.<namespace>...`. If it calls this controller, run the
+  command above in its namespace.
+
+A cluster without the ScaledObject kind (`SCALER_BACKEND=none`) has no warm
+pools or models to grant for, and the upgrade says nothing.
 
 #### Policy that starts to apply
 
@@ -371,6 +484,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | `wva-manager-config` and `wva-scaling-policy-config` | back up your policy first |
 | the install's ClusterRoles and ClusterRoleBindings | suffixed per install, so other installs keep theirs. Cluster-scoped: a namespace owner gets Forbidden on these, and the uninstall says which are left for a cluster admin |
 | the controller's Role and RoleBinding in a namespace it managed from outside (`WVA_WATCH_NS`) | |
+| RoleBinding `wva-pod-writer-<suffix>` in every workload namespace, and Role `wva-pod-writer` where no other controller's binding uses it | made by `deploy/warmpool.sh create`, utilization-share activate, and the upgrade to this release |
 | `wva-utilization-share-history` and `wva-controller-status` | written by the controller, not rendered, so deleted by name |
 | the ScaledObjects **this installer created** | KEDA restores each workload to its pre-autoscaling replica count as they go. Keep them with `UNDEPLOY_SCALEDOBJECTS=false` |
 
@@ -385,7 +499,33 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the dashboard ConfigMap `wva-operation-dashboard` | shared by every install on the cluster | (cluster admin, if it is in a shared monitoring namespace) `kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>` |
 | cluster policy in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding `wva-policy-reader-<suffix>` | the ConfigMap is written by `make enable-physical-limiter`; the Role and RoleBinding by it and by `make setup-prereqs` (for a controller that manages its own namespace, when the policy namespace exists) | (cluster admin) see below |
 | ClusterRoles and bindings from an install older than per-install suffixes | they may be bound by another install | (cluster admin) delete by hand once no install uses them |
+| Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` the uninstall could not read or delete | it may not list RoleBindings across the cluster, or delete them there. It lists each one with its `kubectl delete` command, or says it could not look | (cluster admin) see [Leftover pod-write grants](#leftover-pod-write-grants) |
+| Role `wva-pod-writer` in a namespace another controller also uses | that controller's binding still needs it | nothing; it goes with that controller |
+| Role `wva-pod-writer` and RoleBinding `wva-pod-writer-<suffix>` everywhere, when the controller Deployment is still there | the delete failed, or its result could not be read. A running controller still needs the grant | remove the Deployment, then run the uninstall again |
 | utilization-share transfer marks on pods | written while the optimizer acted | [Transfer marks left on pods](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade); set `shadow: true` and wait a cycle **before** uninstalling to avoid them |
+
+### Leftover pod-write grants
+
+List the pod-write bindings, and the controller namespace each one is for:
+
+```bash
+kubectl get rolebinding -A -l app.kubernetes.io/name=workload-variant-autoscaler \
+  -o 'custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ROLE:.roleRef.name,CONTROLLER:.subjects[0].namespace' \
+  | grep -E '^NAMESPACE|wva-pod-writer'
+```
+
+For each row whose `CONTROLLER` is the namespace you uninstalled:
+
+```bash
+kubectl delete rolebinding <NAME> -n <NAMESPACE>
+```
+
+Then delete the Role in that namespace, once no other `wva-pod-writer-*`
+binding is left there:
+
+```bash
+kubectl delete role wva-pod-writer -n <NAMESPACE>
+```
 
 ### Adopted ScaledObjects
 

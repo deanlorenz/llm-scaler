@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
@@ -360,6 +361,53 @@ type presenceNoter interface {
 	NoteVariantsPresent(namespace, modelID string, variantNames []string)
 }
 
+// beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
+// which a model it did not analyze on the cycle before is unobserved. Called
+// once per cycle that gets past its error returns: on the no-model return, and
+// before the models are analyzed.
+//
+// Failed cycles do not count, so a failure and the executor's retry a moment
+// later are one cycle. But failures that went on for an optimization interval
+// or more are cycles nobody saw: they count as one skipped cycle, so a model
+// is not judged on recovery as if it had been watched throughout. A slow cycle
+// that succeeds is not a failure and counts once, however long it took; one
+// slow failure lasting an interval does count as a skipped cycle, which costs a
+// window and its grace unjudged and is the safe direction.
+func (e *Engine) beginSLOCycle() {
+	failedSince := e.sloFailedSince
+	e.sloFailedSince = time.Time{}
+	if e.sloAnalyzer == nil {
+		return
+	}
+	if !failedSince.IsZero() && time.Since(failedSince) >= e.sloMissedAfter() {
+		e.sloAnalyzer.BeginCycle()
+	}
+	e.sloAnalyzer.BeginCycle()
+}
+
+// sloMissedAfter is how long a run of failed cycles lasts before it counts as
+// a skipped cycle: one optimization interval, or the loader's default when none
+// is configured (only a hand-built test Engine has none).
+func (e *Engine) sloMissedAfter() time.Duration {
+	if e.Config != nil {
+		if d := e.Config.OptimizationInterval(); d > 0 {
+			return d
+		}
+	}
+	return config.DefaultOptimizationInterval
+}
+
+// sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
+// its learned state is stamped by notePresentVariants and aged by
+// evictStaleLearnedState, like the saturation analyzer's.
+type sloStateKeeper interface {
+	presenceNoter
+	EvictStale(now time.Time) slo.Evicted
+	BeginCycle()
+}
+
+var _ sloStateKeeper = (*slo.Analyzer)(nil)
+
 // Pinned at compile time: the assertion in notePresentVariants fails silently
 // at run time, so a rename of the method would otherwise let a parked fleet's
 // learned state age out again with every test green.
@@ -384,8 +432,14 @@ func (e *Engine) notePresentVariants(
 	ctx context.Context,
 	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 ) {
-	noter, ok := e.saturationV2Analyzer.(presenceNoter)
-	if !ok {
+	var noters []presenceNoter
+	if noter, ok := e.saturationV2Analyzer.(presenceNoter); ok {
+		noters = append(noters, noter)
+	}
+	if e.sloAnalyzer != nil {
+		noters = append(noters, e.sloAnalyzer)
+	}
+	if len(noters) == 0 {
 		return
 	}
 	note := func(groups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling) {
@@ -397,7 +451,9 @@ func (e *Engine) notePresentVariants(
 			for i := range modelVAs {
 				names = append(names, modelVAs[i].Name)
 			}
-			noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
+			for _, noter := range noters {
+				noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
+			}
 		}
 	}
 	note(modelGroups)
@@ -409,14 +465,16 @@ func (e *Engine) notePresentVariants(
 	note(utils.GroupVariantAutoscalingByModel(parked))
 }
 
-// evictStaleLearnedState sweeps the two stores of learned per-variant state
+// evictStaleLearnedState sweeps the stores of learned per-variant state
 // whose eviction functions existed with no caller at all.
 //
 // The saturation analyzer's EvictStaleHistory takes the k2 history and, beside
 // it, the accelerator memo, the saturated-throughput windows, the ITL windows
 // (with the learned baseline and start estimate keyed to them) and the
-// decode-saturation memory. The capacity store's EvictStale takes its records.
-// Both are keyed by variant, so until now a renamed, deleted or recreated
+// decode-saturation memory. The capacity store's EvictStale takes its records,
+// and the slo analyzer's EvictStale its lines, accelerator memos and
+// transient memos, on the same variant timeout.
+// All are keyed by variant, so until now a renamed, deleted or recreated
 // variant left its entry behind for the lifetime of the process -- exactly the
 // leak the analyzer's own comment describes: "one window per variant that has
 // EVER been seen, including deleted and renamed ones".
@@ -485,6 +543,13 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)
+	}
+	if e.sloAnalyzer != nil {
+		if ev := e.sloAnalyzer.EvictStale(time.Now()); ev.Any() {
+			logger.Info("evicted stale slo analyzer state",
+				"lines", ev.Lines, "baselines", ev.Baselines,
+				"transients", ev.Transients, "accelerators", ev.Accelerators)
+		}
 	}
 }
 
@@ -593,6 +658,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+			metrics.DeleteSLOModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -609,6 +675,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+		metrics.DeleteSLOModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }
@@ -798,10 +865,11 @@ func runRegisteredAnalyzer(
 ) (result *domain.AnalyzerResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Plugin failure is non-fatal; log at debug to avoid spamming
-			// operator logs every optimize cycle.
-			logger.V(logging.DEBUG).Info("registered analyzer panicked; result discarded",
-				"name", entry.name, "modelID", modelID, "panic", fmt.Sprintf("%v", r))
+			// Non-fatal, and logged where an operator sees it: a built-in
+			// analyzer (slo) runs through here too, and a panic at debug left
+			// its series stale with nothing in a default log to say why.
+			logger.Error(fmt.Errorf("%v", r), "registered analyzer panicked; result discarded",
+				"name", entry.name, "modelID", modelID)
 			result = nil
 		}
 	}()

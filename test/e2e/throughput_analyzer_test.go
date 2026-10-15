@@ -13,6 +13,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,6 +132,10 @@ func restartWVAController(ctx context.Context) error {
 	// pod's own annotations through the template, so the pod that carries it is
 	// the one this restart created and no other.
 	stamp := time.Now().UTC().Format(time.RFC3339)
+	oldPods, err := wvaControllerPods(ctx)
+	if err != nil {
+		return err
+	}
 	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"` + restartedAtAnnotation + `":"` +
 		stamp + `"}}}}}`)
 	if _, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Patch(
@@ -170,7 +175,139 @@ func restartWVAController(ctx context.Context) error {
 	if !rolledOut {
 		return fmt.Errorf("wva-controller-manager rollout did not complete within %ds", cfg.PodReadyTimeout)
 	}
-	return waitForWVALeadership(ctx, stamp, deadline, poll)
+	if err := waitForWVALeadership(ctx, stamp, deadline, poll); err != nil {
+		return err
+	}
+	return waitForScalerEndpoints(ctx, stamp, oldPods, deadline, poll)
+}
+
+// externalScalerService is the Service KEDA dials for the external scaler
+// (config/base/manager/external-scaler-service.yaml with the wva- prefix).
+const externalScalerService = "wva-external-scaler"
+
+// wvaControllerPods names the controller-manager Pods that exist now.
+//
+// By owner, not by label: the e2e may install the controller in the model
+// namespace, where the warm-pool relays wear the controller's labels on
+// purpose (fixtures.ControllerDriverLabels) and would otherwise be waited on
+// as though they were a controller that never goes away.
+func wvaControllerPods(ctx context.Context) ([]string, error) {
+	pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "control-plane=controller-manager",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list controller pods: %w", err)
+	}
+	var names []string
+	for i := range pods.Items {
+		for _, owner := range pods.Items[i].OwnerReferences {
+			if owner.Kind == "ReplicaSet" && strings.HasPrefix(owner.Name, "wva-controller-manager-") {
+				names = append(names, pods.Items[i].Name)
+				break
+			}
+		}
+	}
+	return names, nil
+}
+
+// waitForScalerEndpoints blocks until KEDA's route to the external scaler
+// leads to the pod this restart created, and only to it.
+//
+// The leader wait is not enough on its own. KEDA dials the scaler through its
+// Service, and for a few seconds after a rollout the EndpointSlice can still
+// carry the old pod -- Terminating, no longer listening -- or carry the new
+// one before it is Ready. CI saw KEDA's calls to :9090 time out for 5 to 45 s
+// after a restart, and a ScaledObject created in that window gets an empty
+// metric spec and a CPU-only HPA that KEDA never re-derives (see
+// waitForKEDAExternalMetricWired). So: every old pod is gone, every endpoint
+// behind the gRPC port is the new pod, and that endpoint is Ready, which the
+// EndpointSlice controller derives from the pod's own readiness probe.
+func waitForScalerEndpoints(
+	ctx context.Context, stamp string, oldPods []string, deadline time.Time, poll time.Duration,
+) error {
+	var last string
+	for time.Now().Before(deadline) {
+		last = scalerEndpointsNotReady(ctx, stamp, oldPods)
+		if last == "" {
+			return nil
+		}
+		time.Sleep(poll)
+	}
+	return fmt.Errorf("external scaler endpoints did not settle on the restarted pod within %ds: %s",
+		cfg.PodReadyTimeout, last)
+}
+
+// scalerEndpointsNotReady returns why the scaler Service does not yet route
+// only to the restarted pod, or "" when it does.
+func scalerEndpointsNotReady(ctx context.Context, stamp string, oldPods []string) string {
+	for _, name := range oldPods {
+		_, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			return "old pod " + name + " still exists"
+		}
+		if !errors.IsNotFound(err) {
+			return fmt.Sprintf("get old pod %s: %v", name, err)
+		}
+	}
+	slices, err := k8sClient.DiscoveryV1().EndpointSlices(cfg.WVANamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: discoveryv1.LabelServiceName + "=" + externalScalerService,
+	})
+	if err != nil {
+		return fmt.Sprintf("list endpointslices: %v", err)
+	}
+	readyNew := 0
+	for i := range slices.Items {
+		slice := &slices.Items[i]
+		// Only slices that carry the gRPC port route KEDA's calls. A Pod that
+		// matches the Service's selector without the named port -- a relay
+		// wearing the controller's labels -- lands in a port-less slice.
+		if !slicePortNamed(slice, "grpc") {
+			continue
+		}
+		for _, ep := range slice.Endpoints {
+			if ep.TargetRef == nil {
+				return "endpoint without a target pod"
+			}
+			pod, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).Get(ctx, ep.TargetRef.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Sprintf("endpoint pod %s: %v", ep.TargetRef.Name, err)
+			}
+			if pod.DeletionTimestamp != nil || pod.Annotations[restartedAtAnnotation] != stamp {
+				return "endpoint still lists pod " + pod.Name + ", which this restart did not create"
+			}
+			if ep.Conditions.Ready == nil || !*ep.Conditions.Ready {
+				return "endpoint for " + pod.Name + " is not Ready"
+			}
+			if !podReady(pod) {
+				return "pod " + pod.Name + " is not Ready"
+			}
+			readyNew++
+		}
+	}
+	if readyNew == 0 {
+		return "no Ready endpoint for the restarted pod"
+	}
+	return ""
+}
+
+// slicePortNamed reports whether an EndpointSlice carries the named port.
+func slicePortNamed(slice *discoveryv1.EndpointSlice, name string) bool {
+	for _, p := range slice.Ports {
+		if p.Name != nil && *p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// podReady reports the pod's Ready condition.
+func podReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // restartedAtAnnotation is the pod-template annotation kubectl rollout restart
@@ -372,6 +509,9 @@ var _ = Describe("ThroughputAnalyzer wiring health check", Label("smoke", "throu
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, modelSvcName, modelDecodeDeployment, variantName, 1, 10, cfg.MonitoringNS,
 			fixtures.WithWVATriggerMetadata(modelID, "30.0"))).To(Succeed())
 		DeferCleanup(func() { _ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, modelSvcName) })
+
+		By("Waiting for KEDA to wire the external metric (created shortly after a controller restart)")
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, modelSvcName)
 	})
 
 	AfterAll(func() {
@@ -611,6 +751,9 @@ var _ = Describe("ThroughputAnalyzer TA-only mode", Label("full", "throughput"),
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, modelSvcName, modelDecodeDeployment, variantName, 1, 10, cfg.MonitoringNS,
 			fixtures.WithWVATriggerMetadata(modelID, "30.0"))).To(Succeed())
 		DeferCleanup(func() { _ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, modelSvcName) })
+
+		By("Waiting for KEDA to wire the external metric (created shortly after a controller restart)")
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, modelSvcName)
 
 		By("Starting sustained load for TA-only scenario")
 		targetURL := fmt.Sprintf("http://%s:8000/v1/completions", serviceName)
