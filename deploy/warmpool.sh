@@ -1318,16 +1318,17 @@ YAML
 
 # pool_resolve_scaler_addr sets POOL_SCALER_ADDR, the scaler's address for the
 # pool's ScaledObject: the TLS form when the controller serves this installer's
-# TLS (scaler_tls.sh). Once per run, in the calling shell, so the controller is
+# TLS (scaler_tls.sh), or, when the controller cannot be read, when
+# WVA_SCALER_TLS=true says it does. Once per run, in the calling shell, so the controller is
 # read and any warning printed once, not per use in the manifest.
 pool_resolve_scaler_addr() {
     [ -z "${POOL_SCALER_ADDR:-}" ] || return 0
     local mode
-    mode="$(wva_scaler_mode_of "$WVA_NAMESPACE")"
+    mode="$(wva_scaler_address_mode "$WVA_NAMESPACE")"
     if [ "$mode" = unknown ]; then
-        log_warning "Cannot read Deployment wva-controller-manager in $WVA_NAMESPACE, so whether its scaler serves TLS is unknown. The pool uses the plaintext address; on a TLS install it stays not-Ready."
+        log_warning "Cannot read Deployment wva-controller-manager in $WVA_NAMESPACE, so whether its scaler serves TLS is unknown. The pool uses the plaintext address; on a TLS install it stays not-Ready. Set WVA_SCALER_TLS=true or WVA_SCALER_TLS=false to say which."
+        mode=plaintext
     fi
-    [ "$mode" = tls ] || mode=plaintext
     POOL_SCALER_ADDR="$(wva_scaler_address "$WVA_NAMESPACE" "$mode")"
 }
 

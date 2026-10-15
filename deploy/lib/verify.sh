@@ -423,7 +423,7 @@ wva_verify_scaler_tls() {
     client_ca="$(wva_scaler_flag_of "$dep" --external-scaler-client-ca)"
     san="$(wva_scaler_flag_of "$dep" --external-scaler-client-san)"
     if [ -z "$cert_path" ]; then
-        log_info "External scaler: plaintext gRPC (no TLS). WVA_SCALER_TLS=true serves mutual TLS; see docs/reference/security-model.md#network-exposure."
+        log_info "External scaler: plaintext gRPC (no TLS). To serve mutual TLS and move the ScaledObjects that name it:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true)  (see docs/reference/configuration.md#external-scaler-mutual-tls)."
         # ScaledObjects on the TLS address or reference cannot reach it.
         if declare -F wva_scaler_plaintext_scaledobjects >/dev/null; then
             rc=0
@@ -464,8 +464,8 @@ wva_verify_scaler_tls() {
             log_info "  serving certificate: Secret $secret, expires $end, names: ${sans:-none}"
             if ! openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1; then
                 log_warning "  The external scaler certificate in Secret $secret has EXPIRED: KEDA's handshakes fail and nothing scales. Re-run make deploy-wva to re-issue it (cert-manager renews its own)."
-            elif ! openssl x509 -in "$crt" -noout -checkend $((30 * 86400)) >/dev/null 2>&1; then
-                log_warning "  The external scaler certificate in Secret $secret expires within 30 days ($end). Re-run make deploy-wva to re-issue it (cert-manager renews its own)."
+            elif ! openssl x509 -in "$crt" -noout -checkend $((${WVA_SCALER_RENEW_DAYS:-30} * 86400)) >/dev/null 2>&1; then
+                log_warning "  The external scaler certificate in Secret $secret expires within ${WVA_SCALER_RENEW_DAYS:-30} days ($end). Re-run make deploy-wva to re-issue it (cert-manager renews its own)."
             fi
             for host in "wva-external-scaler.${WVA_NS}.svc" "wva-external-scaler.${WVA_NS}.svc.cluster.local"; do
                 case " $sans " in
@@ -481,17 +481,17 @@ wva_verify_scaler_tls() {
 
     # KEDA's side, as the admin phase recorded it.
     if declare -F wva_scaler_keda_marker_state >/dev/null && [ -n "$san" ]; then
-        wva_scaler_keda_marker_state
+        wva_scaler_keda_marker_state "$san"
         if [ "$WVA_SCALER_KEDA_READY" != true ]; then
             log_warning "  KEDA's side is not usable: ${WVA_SCALER_KEDA_WHY}. KEDA cannot present a client certificate and nothing scales. A cluster admin runs:  $(wva_make_cmd setup-prereqs)"
         else
             log_info "  KEDA's client certificate: ClusterTriggerAuthentication $(wva_scaler_keda_auth_name), expires ${WVA_SCALER_KEDA_NOT_AFTER}"
             if [ "$WVA_SCALER_KEDA_STALE" = true ]; then
-                log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)"
+                log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)  and then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
             fi
             wva_scaler_keda_ca_report log_warning
             if [ "$WVA_SCALER_KEDA_EXPIRING" = true ]; then
-                log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)"
+                log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
             fi
         fi
     fi

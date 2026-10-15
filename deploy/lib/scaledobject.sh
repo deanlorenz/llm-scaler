@@ -56,15 +56,16 @@ fi
 # so_scaler_addr echoes the scalerAddress for the scaler in namespace $1: the
 # TLS form when that controller serves this installer's TLS, else the plaintext
 # form. A controller with hand-set TLS flags keeps the plaintext form; whoever
-# set them owns KEDA's side too.
+# set them owns KEDA's side too. When that controller cannot be read, an
+# explicit WVA_SCALER_TLS=true or false decides (wva_scaler_address_mode).
 so_scaler_addr() {
     local mode=plaintext
-    if declare -F wva_scaler_mode_of >/dev/null; then
-        mode="$(wva_scaler_mode_of "$1")"
+    if declare -F wva_scaler_address_mode >/dev/null; then
+        mode="$(wva_scaler_address_mode "$1")"
         if [ "$mode" = unknown ]; then
-            log_warning "Cannot read Deployment wva-controller-manager in $1, so whether its scaler serves TLS is unknown. Writing the plaintext address; if it serves TLS, these ScaledObjects stay not-Ready (make verify-deployment names them)."
+            log_warning "Cannot read Deployment wva-controller-manager in $1, so whether its scaler serves TLS is unknown. Writing the plaintext address; if it serves TLS, these ScaledObjects stay not-Ready (make verify-deployment names them). Set WVA_SCALER_TLS=true or WVA_SCALER_TLS=false to say which."
+            mode=plaintext
         fi
-        [ "$mode" = tls ] || mode=plaintext
     fi
     if declare -F wva_scaler_address >/dev/null; then
         wva_scaler_address "$1" "$mode"
