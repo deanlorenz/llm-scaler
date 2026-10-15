@@ -503,6 +503,82 @@ else
   fail "--min-hold 90s alone was refused or mangled"
 fi
 
+# --- a re-run of create keeps the trigger keys set on the pool by hand --------
+# `kubectl apply` of a ScaledObject replaces its triggers list, so re-running
+# create dropped every switch knob set on the pool afterwards
+# (warmPoolSwitchSpareThreshold, warmPoolMinSwitchInterval, warmPoolPreloadTop,
+# warmPoolGPUMemoryUtilization) and the pool went back to controller defaults in
+# silence. --dry-run never reads the cluster, so these run a REAL create against
+# a stub kubectl on PATH and read what it was asked to apply.
+WP_STUB="$(mktemp -d)"
+cat > "$WP_STUB/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "get scaledobject")
+    if [ -n "${STUB_SO_FORBIDDEN:-}" ]; then
+      echo 'Error from server (Forbidden): scaledobjects.keda.sh "x" is forbidden' >&2; exit 1
+    fi
+    if [ -n "${STUB_SO:-}" ]; then printf '%s\n' "$STUB_SO"; exit 0; fi
+    echo 'Error from server (NotFound): scaledobjects.keda.sh "x" not found' >&2; exit 1 ;;
+  "get deployment"|"get leaderworkerset")
+    echo 'Error from server (NotFound): not found' >&2; exit 1 ;;
+  "apply -f")
+    cat >> "$STUB_DIR/applied"; exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$WP_STUB/kubectl"
+
+LIVE_POOL_SO='{"metadata":{"name":"wva-warm-pool-pool"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.old.svc.cluster.local:9090","warmPoolName":"pool","warmPoolSleepMinSize":"1","warmPoolMinHold":"2m","warmPoolSwitchSpareThreshold":"0.3","warmPoolMinSwitchInterval":"10m","warmPoolPreloadTop":"2","warmPoolGPUMemoryUtilization":"0.85"}}]}}'
+
+# create_live [VAR=value...] -- run create against the stub, echo what it applied.
+# Its exit status is left in $WP_STUB/rc.
+create_live() {
+  : > "$WP_STUB/applied"
+  env PATH="$WP_STUB:$PATH" STUB_DIR="$WP_STUB" "$@" bash "$SCRIPT" create -n tenant --name pool \
+    --proxy-image example.invalid/proxy:v1 --wva-namespace wva-system \
+    --models 2 --model-size 8B --accelerator NVIDIA-H100-80GB-HBM3 \
+    --runtime-class none --reserve 3 >/dev/null 2>&1
+  echo "$?" > "$WP_STUB/rc"
+  cat "$WP_STUB/applied"
+}
+
+KEPT_POOL="$(create_live STUB_SO="$LIVE_POOL_SO")"
+kept_ok=1
+for kv in warmPoolSwitchSpareThreshold=0.3 warmPoolMinSwitchInterval=10m warmPoolPreloadTop=2 warmPoolGPUMemoryUtilization=0.85 warmPoolMinHold=2m; do
+  [ "$(TRIGGER_GET "$KEPT_POOL" "${kv%%=*}")" = "${kv#*=}" ] || { kept_ok=0; echo "    lost ${kv%%=*}"; }
+done
+if [ "$kept_ok" = 1 ]; then
+  ok "re-running create keeps every hand-set trigger key it does not write"
+else
+  fail "re-running create dropped hand-set trigger keys from the pool ScaledObject"
+fi
+if [ "$(TRIGGER_GET "$KEPT_POOL" warmPoolSleepMinSize)" = "3" ] \
+   && [ "$(TRIGGER_GET "$KEPT_POOL" scalerAddress)" = "wva-external-scaler.wva-system.svc.cluster.local:9090" ]; then
+  ok "the keys create does write still take this run's values (reserve, scaler address)"
+else
+  fail "a key create writes kept the live value instead of this run's"
+fi
+NEW_HOLD="$(PATH="$WP_STUB:$PATH" STUB_DIR="$WP_STUB" STUB_SO="$LIVE_POOL_SO" bash -c ': > "$STUB_DIR/applied"; bash "$0" create -n tenant --name pool --proxy-image example.invalid/proxy:v1 --wva-namespace wva-system --models 2 --model-size 8B --accelerator NVIDIA-H100-80GB-HBM3 --runtime-class none --type bridge --min-hold 45s >/dev/null 2>&1; cat "$STUB_DIR/applied"' "$SCRIPT")"
+if [ "$(TRIGGER_GET "$NEW_HOLD" warmPoolMinHold)" = "45s" ]; then
+  ok "a flag given on this run (--min-hold) replaces the live value rather than being kept"
+else
+  fail "--min-hold on a re-run did not replace the live warmPoolMinHold"
+fi
+FIRST_POOL="$(create_live)"
+if [ "$(TRIGGER_GET "$FIRST_POOL" warmPoolSwitchSpareThreshold)" = "absent" ] && [ "$(cat "$WP_STUB/rc")" = 0 ]; then
+  ok "a first create (no live ScaledObject) adds no kept keys"
+else
+  fail "a first create failed, or invented trigger keys"
+fi
+DENIED_POOL="$(create_live STUB_SO_FORBIDDEN=1)"
+if [ "$(cat "$WP_STUB/rc")" != 0 ] &&[ "$(printf '%s\n' "$DENIED_POOL" | grep -c 'kind:')" = "0" ]; then
+  ok "an unreadable live ScaledObject is a refusal, and nothing is applied"
+else
+  fail "create replaced a pool ScaledObject it could not read, dropping whatever was set on it"
+fi
+rm -rf "$WP_STUB"
+
 if [ "$FAILED" -eq 0 ]; then
   echo "Warm pool manifest checks passed."
 else

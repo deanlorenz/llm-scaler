@@ -3,13 +3,12 @@
 # commands a tool would run are the same strings.
 name: install-in-namespace
 
-env:
-  static:
-    namespace:
-      run: export NAMESPACE=<your-namespace>
-
 prerequisites:
+  namespace:
+    note: The namespace your model servers run in.
+    run: export NAMESPACE=<your-namespace>
   check:
+    note: Read-only. Reports the namespace, its model servers and the Prometheus it found.
     run: make check-prereqs
 
 deploy:
@@ -18,9 +17,7 @@ deploy:
   controller:
     run: make deploy-wva
   readiness:
-    note: |
-      What the model servers need before anything scales them. Reports first;
-      changes nothing until you ask.
+    note: Report what the model servers still need. Changes nothing.
     run: make workload-patch NAMESPACE=${NAMESPACE}
   register:
     run: |
@@ -32,7 +29,8 @@ verify:
   objects:
     run: kubectl get scaledobject,hpa -n ${NAMESPACE}
   decisions:
-    run: kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep scaling-decision
+    note: Needs read access to the controller's logs.
+    run: kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager --tail=-1 | grep scaling-decision
 
 visualize:
   dashboard:

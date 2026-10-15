@@ -180,9 +180,11 @@ check_prerequisites() {
 # Echoes: yes | no | unknown
 can_i_as() {
     local subject="$1"; shift
-    local out rc
-    out=$(kubectl auth can-i "$@" --as "$subject" 2>&1)
-    rc=$?
+    local out rc=0
+    # stdout only: the answer is yes/no there, and a warning on stderr is not
+    # an answer (kc_capture).
+    kc_capture auth can-i "$@" --as "$subject" || rc=$?
+    out="$KC_OUT"
     case "$out" in
         yes*) echo yes ;;
         no*)  [ $rc -ne 0 ] && echo no || echo unknown ;;
@@ -209,13 +211,14 @@ wva_cluster_policy_ns() {
     # label" answered with the built-in default policy namespace when the truth
     # was that the question could not be asked — and the label may point
     # somewhere else entirely. "unknown" is echoed so the caller can say so.
-    out=$(kubectl get namespace "$managed" \
-        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1); rc=$?
+    rc=0
+    kc_capture get namespace "$managed" \
+        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' || rc=$?
     if [ $rc -ne 0 ]; then
-        printf '%s' "$out" | grep -qi 'forbidden' && { echo unknown; return 0; }
+        printf '%s' "$KC_ERR" | grep -qi 'forbidden' && { echo unknown; return 0; }
         return 0
     fi
-    pointed="$out"
+    pointed="$KC_OUT"
     [ -n "$pointed" ] || return 0
     kubectl get namespace "$pointed" >/dev/null 2>&1 || return 0
     echo "$pointed"
@@ -266,9 +269,10 @@ wva_cluster_policy_limiter() {
     # || rc=$?, not ; rc=$? -- see the note in install_core.sh. Without it a
     # Forbidden listing kills this under `set -e` before the Forbidden branch
     # below can return "unknown", and the caller's own assignment fails too.
-    listing=$(kubectl get configmap -n "$policy_ns" -o name 2>&1) || rc=$?
+    kc_capture get configmap -n "$policy_ns" -o name || rc=$?
+    listing="$KC_OUT"
     if [ $rc -ne 0 ]; then
-        printf '%s' "$listing" | grep -qi 'forbidden' && echo "unknown"
+        printf '%s' "$KC_ERR" | grep -qi 'forbidden' && echo "unknown"
         return 0
     fi
     cm="$(printf '%s\n' "$listing" | grep -E "configmap/(wva-)?scaling-policy-config$" | head -1 | cut -d/ -f2 || true)"
@@ -602,10 +606,13 @@ wva_kueue_source_configured() {
     cands="$WVA_NS"
     if [ "$(wva_install_scope)" = "namespace" ] && [ "$managed" = "$WVA_NS" ]; then
         rc=0
-        out="$(kubectl get namespace "$managed" \
-            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1)" || rc=$?
+        # Streams apart (kc_capture): a warning on stderr is neither the label
+        # nor a NotFound.
+        kc_capture get namespace "$managed" \
+            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' || rc=$?
+        out="$KC_OUT"
         if [ "$rc" -ne 0 ]; then
-            case "$out" in
+            case "$KC_ERR" in
                 *NotFound*|*"not found"*) policy_ns=wva-policy ;;
                 *)
                     # The label may point anywhere; wva-policy is still worth a look.
@@ -619,9 +626,10 @@ wva_kueue_source_configured() {
     fi
     for ns in $cands; do
         rc=0
-        out="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>&1)" || rc=$?
+        kc_capture get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' || rc=$?
+        out="$KC_OUT"
         if [ "$rc" -ne 0 ]; then
-            case "$out" in
+            case "$KC_ERR" in
                 *NotFound*|*"not found"*) ;;
                 *) unread="$unread $ns/wva-scaling-policy-config;" ;;
             esac
@@ -677,7 +685,7 @@ wva_check_kueue_namespace_read() {
         unknown*)
             [ "$answer" != yes ] || return 0
             log_warning "Could not tell whether a Kueue quota source is configured for this controller: not readable with your permissions:${source#unknown}."
-            log_warning "  If one is, $sa needs get on $target ($([ "$answer" = no ] && echo 'it does NOT have it' || echo 'could not verify: checking needs impersonate permission')), or the namespace is bounded at nothing and does not scale up. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            log_warning "  If one is, $sa needs get on $target ($([ "$answer" = no ] && echo 'it does NOT have it' || echo 'could not verify: checking needs impersonate permission')), or the namespace is bounded at nothing and does not scale up. A cluster admin re-running '$(wva_make_cmd setup-prereqs)' grants it."
             return 0
             ;;
     esac
@@ -695,13 +703,13 @@ earlier version created lacks this read, and this phase cannot change it.
 
 Ask a cluster admin to run, once, for this namespace:
 
-    NAMESPACE=$WVA_NS make setup-prereqs$([ "$(wva_install_scope)" = cluster ] && echo " SCOPE=cluster")
+    $(wva_make_cmd setup-prereqs)
 
 then re-run this install."
             ;;
         *)
             log_warning "A Kueue quota source is configured ($source); could not verify that $sa may get $target (checking needs impersonate permission)."
-            log_warning "  If the kueue-reader role predates that read, the namespace is bounded at nothing. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            log_warning "  If the kueue-reader role predates that read, the namespace is bounded at nothing. A cluster admin re-running '$(wva_make_cmd setup-prereqs)' grants it."
             ;;
     esac
 }
@@ -735,16 +743,26 @@ check_permissions() {
     # it was written for, with advice telling them to run the command that had
     # just failed. Existence of those objects is checked separately, by
     # require_prereqs_present, which is the right question for this phase.
-    kinds="$(wva_rendered_kinds || true)"
-    if [ "${INSTALL_PHASE:-all}" = "wva" ] && [ -n "$kinds" ]; then
-        kinds="$(printf '%s
-' "$kinds" | grep -vxF -f <(printf '%s
-' "${WVA_PREREQ_KINDS[@]}") || true)"
+    # Filtered by object (wva_rendered_kinds controller), not by kind name: an
+    # admin-owned object of a kind the tenant otherwise owns -- the
+    # wva-external-scaler NetworkPolicy -- must not make this phase ask for
+    # rights to create it.
+    if [ "${INSTALL_PHASE:-all}" = "wva" ]; then
+        kinds="$(wva_rendered_kinds controller || true)"
+    else
+        kinds="$(wva_rendered_kinds || true)"
     fi
     if [ -z "$kinds" ]; then
         log_warning "Could not render the install overlay, so this check falls back to the kinds each scope is expected to create. It may miss something the overlay adds; the install itself renders the same overlay and will fail if it is broken."
         kinds=$'ConfigMap\nDeployment\nRole\nRoleBinding\nSecret\nService\nServiceAccount\nServiceMonitor'
         wva_scope_is_tenant || kinds="$kinds"$'\nClusterRole\nClusterRoleBinding\nNamespace'
+        # The fallback obeys the phase too. Unfiltered, it asked a tenant in the
+        # controller-only phase for create rights on Roles, RoleBindings,
+        # Secrets, ServiceAccounts and ServiceMonitors -- the admin's half
+        # (WVA_PREREQ_KINDS) -- and refused the install that phase exists for.
+        if [ "${INSTALL_PHASE:-all}" = "wva" ]; then
+            kinds="$(printf '%s\n' "$kinds" | grep -vxF -f <(printf '%s\n' "${WVA_PREREQ_KINDS[@]}") || true)"
+        fi
     fi
 
     for kind in $kinds; do
@@ -829,9 +847,9 @@ is cluster-scoped, and without it the controller cannot reach Prometheus at all.
 You do not need those rights to run the controller. Have an admin create them
 once for this namespace:
 
-    NAMESPACE=$ns make setup-prereqs$([ "$(wva_install_scope)" = cluster ] && echo " SCOPE=cluster")
+    $(wva_make_cmd setup-prereqs)
 
-then install with 'NAMESPACE=$ns make deploy-wva INSTALL_PHASE=wva', which needs none of them."
+then install with '$(wva_make_cmd deploy-wva) INSTALL_PHASE=wva', which needs none of them."
         fi
         log_error "You cannot create everything this install produces. Denied:
 $(printf '  - %s\n' "${denied[@]}")

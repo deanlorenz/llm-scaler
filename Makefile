@@ -44,15 +44,18 @@ NAMESPACE           ?= llm-d-optimized-baseline
 # Install scope: cluster | namespace. Empty means the historical default —
 # namespace on OpenShift, cluster elsewhere. See deploy/lib/common.sh.
 WVA_SCOPE           ?=
-# Declare a GPU limiter at install: none | gpu-inventory | quota. Default none,
-# matching the shipped config — see docs/reference/gpu-limiter.md.
+# Declare a GPU limiter at install: none | gpu-inventory | quota. Unset keeps the
+# limiter the live policy already declares (a first install has none, matching the
+# shipped config); none removes it -- the default was none before, so every
+# re-install silently unbounded a bounded controller.
+# See docs/reference/gpu-limiter.md.
 # `quota` additionally REQUIRES WVA_QUOTAS, the per-accelerator budget
 # (WVA_QUOTAS='H200=8 A100=4'); there is no default, and an empty quota entry is
 # a budget of zero rather than unlimited. WVA_QUOTA_SCOPE is namespace|cluster.
 # WVA_QUOTA_KUEUE=true also reads Kueue: per namespace and accelerator type the
 # smaller of the Kueue nominal quota and WVA_QUOTAS applies (name the types with
 # -1 to let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/.
-WVA_LIMITER         ?= none
+WVA_LIMITER         ?=
 # A ScaledObject is how a workload registers with WVA. WVA_DEFAULT_SO=true has the
 # installer create one per llm-d model server; WVA_DEFAULT_SO_NS picks the
 # namespace, or "all" for every namespace holding one (cluster-scoped installs).
@@ -126,6 +129,10 @@ SCALE_DOWN_BOUNDARY         ?=
 E2E_MONITORING_NAMESPACE    ?= workload-variant-autoscaler-monitoring
 E2E_EMULATED_LLMD_NAMESPACE ?= llm-d-sim
 E2E_KEDA_NAMESPACE          ?= keda-system
+# The KEDA_NAMESPACE deploy-e2e-infra hands the install: on kind, where the
+# installer Helm-installs KEDA itself, the namespace it installs it into. A
+# KEDA_NAMESPACE already in the environment wins, since deploy_keda uses it too.
+E2E_KEDA_NAMESPACE_ENV = $(if $(filter kind-emulator,$(ENVIRONMENT)),KEDA_NAMESPACE=$${KEDA_NAMESPACE:-$(E2E_KEDA_NAMESPACE)},)
 E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controller
 # llm-d-benchmark CLI configuration
 # Ensure brew-installed tools (helm >=3.19) take precedence over Rancher Desktop.
@@ -1013,6 +1020,14 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 	@# Measured: the controller came up in llm-d-sim while every ScaledObject named
 	@# wva-external-scaler.workload-variant-autoscaler-system, so no decision ever
 	@# reached KEDA and four specs sat at one replica for their full 600s.
+	@# KEDA_NAMESPACE is passed EXPLICITLY on kind (E2E_KEDA_NAMESPACE_ENV).
+	@# The install writes the external-scaler NetworkPolicy only when a source
+	@# it trusts says where KEDA runs, and on kind none does yet: KEDA is
+	@# Helm-installed into KEDA_NAMESPACE AFTER the controller, so no
+	@# external-metrics APIService exists when the policy is decided. Without
+	@# it, CI ran with :9090 open and never exercised the policy users get.
+	@# Other platforms bring their own KEDA, whose namespace this target does
+	@# not know, so they are left to the install's own resolution.
 	@echo "Deploying e2e test infrastructure..."
 	@if [ -n "$(IMG)" ]; then \
 		echo "IMG is set to '$(IMG)'"; \
@@ -1033,6 +1048,7 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
+		$(E2E_KEDA_NAMESPACE_ENV) \
 		WVA_IMAGE_REPO=$$IMAGE_REPO \
 		WVA_IMAGE_TAG=$$IMAGE_TAG \
 		WVA_IMAGE_DIGEST=$$IMAGE_DIGEST \
@@ -1048,6 +1064,7 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
+		$(E2E_KEDA_NAMESPACE_ENV) \
 		$(MAKE) deploy-wva \
 			ENVIRONMENT=$(ENVIRONMENT) \
 			WVA_NS=$(CONTROLLER_NAMESPACE) \
@@ -1197,7 +1214,8 @@ test-e2e-full: ## Run full e2e test suite
 # Convenience targets for local e2e testing
 
 # Convenience target that deploys KEDA infra + runs smoke tests.
-# Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
+# It never deletes the cluster: DELETE_CLUSTER has no effect here. Remove it with
+# `make destroy-kind-cluster` (or `kind delete cluster`) when done.
 .PHONY: test-e2e-smoke-with-setup
 test-e2e-smoke-with-setup:
 	$(MAKE) deploy-e2e-infra DEPLOY_ALERTING_RULES=true SCALER_BACKEND=keda
@@ -1234,7 +1252,8 @@ test-e2e-multi-controller: ## Run multi-controller e2e tests
 test-e2e-multi-controller-with-setup: deploy-e2e-infra test-e2e-multi-controller
 
 # Convenience target that deploys KEDA infra + runs full test suite.
-# Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
+# It never deletes the cluster: DELETE_CLUSTER has no effect here. Remove it with
+# `make destroy-kind-cluster` (or `kind delete cluster`) when done.
 # LWS is installed because the full suite includes LeaderWorkerSet scale-from-zero tests.
 .PHONY: test-e2e-full-with-setup
 test-e2e-full-with-setup:
