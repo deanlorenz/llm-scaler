@@ -380,9 +380,9 @@ it was wanted), `BENCHMARK_ENGINE_CACHE_SEED=auto` copies the old
 `<claim>[:<subPath>]` seeds from that claim. `make engine-cache-status
 NAMESPACE=$BENCHMARK_NAMESPACE` lists the nodes.
 
-To check the cache is warm before a pass, do not start a second replica.
-Ask the standup's first replica of each role which key it compiled under,
-then check that key on every node, with no GPU:
+To check the torch.compile cache is on every node before a pass, do not
+start a second replica. Ask the standup's first replica of each role which
+key it compiled under, then check that key on every node, with no GPU:
 
 ```bash
 make engine-cache-keys NAMESPACE=$BENCHMARK_NAMESPACE ENGINE_CACHE_PODS='<decode pod> <prefill pod>'
@@ -390,8 +390,10 @@ make engine-cache-verify NAMESPACE=$BENCHMARK_NAMESPACE ENGINE_CACHE_KEYS='<key>
 ```
 
 Prefill and decode compile under different keys, so name one pod of each role.
+Copy the keys as `engine-cache-keys` prints them, rank list included.
 Run `make engine-cache-publish` first if the nodes have not been seeded with
-what the first starts compiled. What each result means:
+what the first starts compiled. The check does not cover the FlashInfer and
+Triton caches. What each result means:
 [Check the cache without a second start](../../reference/workload-preparation.md#check-the-cache-without-a-second-start).
 
 After a standup, check what was rendered:

@@ -514,7 +514,8 @@ makes every node merge the new keys.
 
 #### Check the cache without a second start
 
-You do not need to start an engine on a node to know it would start warm.
+You can check that every node holds the torch.compile cache without
+starting an engine there.
 
 1. Start each engine configuration once.
 2. Run `make engine-cache-publish`, so every node gets what it compiled.
@@ -523,27 +524,59 @@ You do not need to start an engine on a node to know it would start warm.
 ```bash
 # the key(s) the running engine pods used: one per configuration
 make engine-cache-keys NAMESPACE=<ns> ENGINE_CACHE_PODS='<decode pod> <prefill pod>'
-# every usable node: is each key there, and can every file under it be read
-make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='torch_compile_cache/<hash>[,...]'
+# every usable node: is each key there, with every rank, and readable
+make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>...]'
 ```
+
+Pass the keys exactly as `engine-cache-keys` prints them, for example
+`torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
+the rank directories the engine wrote. Each one must be on the node.
 
 `engine-cache-verify` prints one line per node and key:
 
-- `present`: the key is there and every file under it can be read.
-- `ABSENT`: the node would compile on its next start.
-- `UNREADABLE`: a file under the key cannot be read.
-- `COULD NOT CHECK`: no Ready preparer on the node, or the exec failed or was
-  Forbidden. This is never reported as absent.
+- `present`: the key is there, with every listed rank, and every file under it
+  can be read.
+- `ABSENT`: the key, or one of its ranks, is not on the node. The line names a
+  missing rank. That node recompiles torch.compile on its next start.
+- `UNREADABLE`: a file under the key cannot be read, or other users cannot
+  read it. The engine may run as a different user than the check.
+- `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
+  Forbidden, or timed out. This is never reported as absent.
 
 It exits non-zero unless every key is present on every node. It needs
 `pods/exec` in the namespace, plus the node list `engine-cache-status` needs.
 `engine-cache-keys` warns when an engine compiled outside `VLLM_CACHE_ROOT`
 (its cache root was not writable); that start did not fill the node cache.
 
-Details: a key is the directory vLLM names in its log line `Using cache
-directory: <VLLM_CACHE_ROOT>/torch_compile_cache/<hash>/rank_0_0/...`, and
-every rank of one configuration shares it. The check reads that directory
-through the preparer pod already running on each node (`kubectl exec`, no GPU).
+What it does not check: the FlashInfer and Triton caches (`flashinfer/` and
+`triton/` beside `vllm/`). A node can be `present` for every key and still
+build those kernels on its next start. Only a real start shows that.
+
+<details>
+<summary>Details: what a key is and how the check reads it</summary>
+
+A key is the directory between `VLLM_CACHE_ROOT` and the rank directory in
+the engine's log. vLLM writes one of two layouts:
+
+- `torch_compile_cache/<hash>/rank_<r>_<dp>/<prefix>`, logged as `Using cache
+  directory: ... for vLLM's torch.compile`.
+- `torch_compile_cache/torch_aot_compile/<hash>/rank_<r>_<dp>/model` when
+  `VLLM_USE_AOT_COMPILE` is on, logged as `Directly load AOT compilation from
+  path ...` or `saved AOT compiled function to ...`.
+
+Every rank of one configuration shares the key; each rank has its own
+`rank_<r>_<dp>` directory under it. A key without `@ranks` (or a bare hash,
+read as `torch_compile_cache/<hash>`) is present when any rank is there.
+
+The check runs in the preparer pod already on each node (`kubectl exec`, no
+GPU). That pod runs as root on Kubernetes, so it can read any file. To catch
+files the engine could not read, it also reports any file without read
+permission for other users, and any directory without read and search
+permission for them. Symbolic links are not followed or counted. The read
+stops after 300 seconds, and after 280 inside the pod when its image has
+`timeout`.
+
+</details>
 
 #### What it costs
 
