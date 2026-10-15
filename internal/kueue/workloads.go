@@ -140,6 +140,12 @@ func workloadOwnerUIDs(o client.Object) []string {
 // Until it has synced -- and for good, if it never does (no watch permission,
 // say) -- every read goes to the API server instead, so a Forbidden or a
 // missing Kueue surfaces as the error it is rather than as an empty cache.
+// Once synced, the cluster-wide list is asked again every reprobeEvery: a
+// grant revoked after the sync leaves the informer's reflector failing in the
+// background while its store stays as it was, which would read as fresh
+// forever (K2-4). A Forbidden probe sends every read back to the API server,
+// whose Forbidden withholds borrowing as lenders-unreadable, until a later
+// probe passes.
 type InformerWorkloads struct {
 	cache cache.Cache
 	api   client.Client
@@ -152,9 +158,16 @@ type InformerWorkloads struct {
 	indexed   bool
 	warned    bool
 	// deniedAt is when a cluster-wide list was last Forbidden; the informer
-	// is not started until a later probe passes.
+	// is not started, or not read, until a later probe passes.
 	deniedAt time.Time
+	// probedAt is when the cluster-wide list was last asked and passed.
+	probedAt time.Time
 }
+
+// reprobeEvery is how often a started informer's cluster-wide list is asked
+// again, so a revoked grant is noticed within it rather than read as a cache
+// that stopped changing.
+const reprobeEvery = 5 * time.Minute
 
 // deniedRetryAfter is how long a Forbidden probe holds the informer back
 // before it is asked again: RBAC changes rarely.
@@ -189,18 +202,24 @@ func (w *InformerWorkloads) synced(ctx context.Context) (schema.GroupVersionKind
 		// retries and logs for as long as the process runs: a
 		// namespace-scoped install whose admin has not granted the
 		// cluster-wide read (D1). One cheap list asks first.
-		probe := &unstructured.UnstructuredList{}
-		probe.SetGroupVersionKind(gvk.GroupVersion().WithKind(KindWorkload + "List"))
-		if err := w.api.List(ctx, probe, client.Limit(1)); apierrors.IsForbidden(err) {
-			w.deniedAt = w.now()
+		if w.denied(ctx, gvk) {
 			return gvk, false, false, nil
 		}
-		w.deniedAt = time.Time{}
 		inf, err := w.cache.GetInformer(ctx, obj, cache.BlockUntilSynced(false))
 		if err != nil {
 			return gvk, false, false, nil // the API serves meanwhile
 		}
 		w.informer, w.gvk, w.startedAt, w.indexed, w.warned = inf, gvk, w.now(), false, false
+	} else if !w.deniedAt.IsZero() || w.now().Sub(w.probedAt) >= reprobeEvery {
+		// Started: is the cluster-wide read still granted (K2-4)?
+		if !w.deniedAt.IsZero() && w.now().Sub(w.deniedAt) < deniedRetryAfter {
+			return gvk, false, false, nil
+		}
+		if w.denied(ctx, gvk) {
+			kueueLogger(ctx).Info("The cluster-wide Kueue Workload read is Forbidden now; the informer is not read until it is granted again, and borrowing is withheld as lenders-unreadable",
+				"recheckAfter", deniedRetryAfter.String())
+			return gvk, false, false, nil
+		}
 	}
 	if !w.informer.HasSynced() {
 		if !w.warned && w.now().Sub(w.startedAt) > notSyncedWarnAfter {
@@ -218,6 +237,20 @@ func (w *InformerWorkloads) synced(ctx context.Context) (schema.GroupVersionKind
 		}
 	}
 	return gvk, true, w.indexed, nil
+}
+
+// denied asks for one Workload cluster-wide and reports whether the API said
+// Forbidden, recording when (deniedAt) or that it passed (probedAt). Any other
+// answer is not a denial: the reads that follow report it. Callers hold w.mu.
+func (w *InformerWorkloads) denied(ctx context.Context, gvk schema.GroupVersionKind) bool {
+	probe := &unstructured.UnstructuredList{}
+	probe.SetGroupVersionKind(gvk.GroupVersion().WithKind(KindWorkload + "List"))
+	if err := w.api.List(ctx, probe, client.Limit(1)); apierrors.IsForbidden(err) {
+		w.deniedAt = w.now()
+		return true
+	}
+	w.deniedAt, w.probedAt = time.Time{}, w.now()
+	return false
 }
 
 // Workloads implements WorkloadSource.
@@ -249,5 +282,5 @@ func (w *InformerWorkloads) Workloads(ctx context.Context, ns string, owner type
 func (w *InformerWorkloads) Indexed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.informer != nil && w.indexed && w.informer.HasSynced()
+	return w.informer != nil && w.indexed && w.informer.HasSynced() && w.deniedAt.IsZero()
 }
