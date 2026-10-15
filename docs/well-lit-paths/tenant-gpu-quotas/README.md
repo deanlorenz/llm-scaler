@@ -44,7 +44,7 @@ install, re-run `make deploy-wva` with `WVA_LIMITER=none`.
 - Latency when a cap binds: a model held at its allowance queues what another
   replica would have served. That shows up as TTFT (time to first token).
 - A fairness gap between capped and uncapped tenants
-  ([ceilings, not reservations](#three-things-that-surprise-people)), and an
+  ([ceilings, not reservations](#things-that-surprise-people)), and an
   owner for the policy.
 
 ## Evidence
@@ -115,10 +115,11 @@ The two shapes, with examples, are in the reference:
   fallback for namespaces you did not list. The fallback's key, `default`, is
   **reserved**: the real `default` namespace cannot be given a quota by
   listing it. Exclude it, or omit the reserved key so anything unlisted is
-  denied.
+  denied. Excluding it leaves it unlimited unless a `scope: cluster` quota
+  bounds it.
 - A value of `-1` means unlimited.
 
-### Three things that surprise people
+### Things that surprise people
 
 **A quota does not bound the cluster.** It counts only what the scaling
 manager's own variants hold, so it can hand out capacity unmanaged workloads
@@ -129,17 +130,43 @@ statement.
 
 **Ceilings, not reservations.** A finite cap guarantees a tenant never
 *exceeds* it, never that it can *reach* it. The cluster aggregate is the sum of
-the finite caps. Under today's optimizer, a namespace that is unlimited (`-1`)
-draws from that aggregate without adding to it, and can use budget a capped
-peer would have used. Nobody exceeds their own authorization, but know this
-before you promise a team its number.
+the finite caps. Under the default optimizer, a namespace that is unlimited
+(`-1`) draws from that aggregate without adding to it, and can use budget a
+capped peer would have used. Nobody exceeds their own authorization, but know
+this before you promise a team its number.
 
-**An excluded namespace has no quota.** It does not draw on the tenants'
-quota, and a full tenant quota does not stop it. Only a `scope: cluster` quota
-bounds it. Without one, the scaling manager does not limit it at all. If that
-is not what you want, add a `scope: cluster` quota. The tenants and the excluded
-namespace then share it. The utilization-share optimizer does not share an
-excluded namespace unless a `scope: cluster` quota covers it.
+**An excluded namespace has no quota.** It does not use the tenants' quota,
+and a full tenant quota does not stop it. Only a `scope: cluster` quota bounds
+it, and only on the accelerator types that quota lists. Without one, the
+scaling manager does not limit it at all. It does not check free GPUs either:
+if the cluster is full, new pods stay Pending. Such a namespace can take GPUs
+your tenants expect to use, because the scaling manager reserves nothing. A
+Kubernetes `ResourceQuota` or Kueue is the real boundary. The utilization-share
+optimizer does not share an excluded namespace unless a `scope: cluster` quota
+covers it.
+
+To bound it, add a `scope: cluster` quota beside the tenants' quota:
+
+```yaml
+limiters:
+  - name: cluster-cap
+    type: quota
+    scope: cluster
+    quotas:
+      A100: 20   # team-a 8 + team-b 6 + up to 6 for ns-x
+  - name: tenants
+    type: quota
+    scope: namespace
+    exclude: [ns-x]
+    namespaceQuotas:
+      team-a: { A100: 8 }
+      team-b: { A100: 6 }
+```
+
+The cluster quota caps everyone, tenants too, so size it as the tenants' caps
+plus what `ns-x` may use. It reserves nothing: while team-a is idle, `ns-x` can
+use team-a's part. If `ns-x` is planned first, it can take the whole cluster
+quota, and a tenant then gets less than its cap.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.

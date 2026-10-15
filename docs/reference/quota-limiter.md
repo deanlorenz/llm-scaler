@@ -111,8 +111,9 @@ limiters:
 > ⚠️ **Reserved key collision.** `default` in `namespaceQuotas` is the fallback
 > for unlisted namespaces, so the Kubernetes namespace named `default` cannot be
 > given a quota by listing it. Either list it in `exclude` to bypass this
-> limiter, or use a strict allowlist (no `default` key), so every unlisted
-> namespace, `default` included, is denied.
+> limiter, which leaves it unlimited unless a `scope: cluster` quota bounds it,
+> or use a strict allowlist (no `default` key), so every unlisted namespace,
+> `default` included, is denied.
 
 ### Special values
 
@@ -130,16 +131,24 @@ value is rejected at startup (see Validation).
 When the allocator evaluates a request for namespace `N` and type `T` in
 `namespace` scope:
 
-1. If `N` appears in `exclude`, the limiter **passes through** — the request is
-   returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply. Only a `scope: cluster` quota or the physical inventory bounds
-   `N`, in the optimizer and in scale-from-zero wakes. The other tenants' free
-   quota does not: `N` neither draws on it nor is refused by it. With neither,
-   the scaling manager does not limit `N`. The utilization-share optimizer does not share an excluded
-   namespace unless a finite `scope: cluster` quota also covers its
-   accelerator type: this quota does not bound it, so there is no budget to
-   share
-   ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+1. If `N` appears in `exclude`, this limiter does not apply to `N` and records
+   no usage for it. Other limiters still apply.
+   - Only a `scope: cluster` quota bounds `N`. The tenants' quota does not:
+     `N` does not use it, and a full tenant quota does not stop `N`.
+   - A `scope: cluster` quota bounds `N` only on the accelerator types it
+     lists with a finite number. On any other type, `N` has no limit.
+   - Without a `scope: cluster` quota, the scaling manager does not limit `N`.
+     It does not check free GPUs: if the cluster is full, new pods stay
+     `Pending`.
+   - With a `scope: cluster` quota, the tenants and `N` share it. It reserves
+     nothing. If `N` is planned first, it can take the whole cluster quota,
+     and a tenant then gets less than its cap.
+   - The utilization-share optimizer shares `N` only when a finite
+     `scope: cluster` quota covers its accelerator type
+     ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+   - The controller logs a `WARNING` when no finite `scope: cluster` quota
+     covers the types the namespace quota names, and when an `exclude` entry
+     is not a valid namespace name (it never matches).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace
@@ -154,6 +163,32 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 The fall-through to `default` is therefore at the **namespace** granularity, not
 per `(namespace, type)`: it applies only when `N` is wholly unlisted.
+
+> ⚠️ **An excluded namespace can use GPUs your tenants expect.** Without a
+> `scope: cluster` quota it has no limit, and the scaling manager reserves
+> nothing for the tenants. If tenants must keep their GPUs, use a Kubernetes
+> `ResourceQuota` or Kueue: those are the real boundary.
+
+<details>
+<summary>How an excluded namespace is planned</summary>
+
+A namespace quota's per-type `Pools` are the sum of its tenants' free quota.
+For a namespace it excludes (and no other namespace quota caps), the default
+optimizer, the rescale pass, the scale-from-zero check (`FitsGPUBudget`,
+`GPUBudgets`) and the `LimitedBy` attribution skip those pools. They use the
+budget of the `scope: cluster` quotas alone (`uncappedBudget` in
+`internal/engines/allocation/gpu_budget.go`). A type no such quota lists is
+unbounded. Every GPU a tenant or an excluded namespace takes is charged to that
+budget, so they share it.
+
+The exclusion is read from the quota itself (`ResourceConstraints.ExcludedNamespaces`),
+not from a namespace being absent from the caps. A tenant missing from the
+usage map is therefore never treated as excluded.
+
+Out of scope: a namespace that one namespace quota excludes and another caps.
+It is capped, and is still bound by the first quota's tenant total as well.
+
+</details>
 
 ### Kueue as a quota source
 
@@ -444,11 +479,10 @@ closed-allowlist semantics:
   quota (no cross-namespace leak). An **unlimited** (`-1`) per-namespace entry is
   carried as a sentinel and bounds the model only by the cluster budget for that
   type (or is unbounded if the cluster does not cap it). An **excluded**
-  namespace is omitted entirely, so it is "open". It is bound only by the
-  providers that bound every namespace: a cluster-scoped quota or the physical
-  inventory. A namespace-scoped quota's per-type `Pools` (the sum of the
-  tenants' caps) do not bound it. Every GPU it takes is charged to those
-  providers, so tenants and excluded namespaces still share a cluster quota.
+  namespace is omitted from `NamespacePools` and listed in
+  `ExcludedNamespaces`. Only a `scope: cluster` quota bounds it, on the types
+  it lists; the tenants' `Pools` do not. Every GPU it takes is charged to the
+  cluster quota, so tenants and excluded namespaces share it.
 - **Multi-entry (composite)** quota configs are fully consulted: the engine
   computes constraints from *each* constituent of a `CompositeLimiter`.
 
@@ -468,9 +502,9 @@ Remaining boundaries:
   the relevant type does not scale under the V2 `GreedyByScore` optimizer (its
   fair-share loop stops when the finite cluster aggregate is zero). This is a
   benign under-provision, not an isolation breach; configure a finite cluster or
-  per-namespace cap for any type you expect to scale under V2. In a cycle where
-  a model of an excluded namespace also scales with no cluster quota, the loop
-  keeps going and the unlimited namespace scales too.
+  per-namespace cap for any type you expect to scale under V2. An excluded
+  namespace does not change this: its models keep scaling, and the unlimited
+  namespace still does not.
 - An **unlimited (`-1`) cluster-scope** quota scales up: `GetResourcePools`
   emits it as a sentinel pool that `mergeConstraints` carries through as an
   unbounded budget, so the type allocates up to demand. (This differs from the
@@ -495,7 +529,7 @@ not inputs to it. Two properties follow from that:
 > **Ceilings, not reservations.** A finite per-namespace cap guarantees a tenant
 > will never *exceed* it — it does **not** guarantee the tenant can *reach* it.
 > Under V2 the cluster aggregate is the **sum of the finite namespace caps**, and
-> under today's optimizer an **unlimited (`-1`)** namespace competing for the
+> under the default optimizer an **unlimited (`-1`)** namespace competing for the
 > same accelerator type draws from that shared aggregate without contributing
 > to it,
 > so it can consume budget a finite-capped peer would otherwise have used (no
@@ -505,8 +539,8 @@ not inputs to it. Two properties follow from that:
 > cluster-scope cap.
 >
 > An **excluded** namespace does not draw from that aggregate. Only a
-> `scope: cluster` quota or the physical inventory bounds it. Without one, the
-> scaling manager does not limit it. With one, tenants and the excluded namespace share it, so a
+> `scope: cluster` quota bounds it. Without one, the scaling manager does not
+> limit it. With one, the tenants and the excluded namespace share it, so a
 > tenant may still not reach its cap. The utilization-share optimizer does not
 > share an excluded namespace unless a `scope: cluster` quota covers it.
 
@@ -593,7 +627,7 @@ discovery or API calls are needed.
 Every namespace being decided about must be **present** in that map, with an
 empty inner map when it holds nothing. `NamespaceResourcePools` builds caps only
 for the namespaces it is given, so an absent one silently loses its quota and is
-judged as an excluded namespace: by a cluster quota or the inventory alone. Both callers guarantee it: the saturation
+judged against the cluster aggregate. Both callers guarantee it: the saturation
 engine for every namespace it optimizes, the scale-from-zero engine for the
 namespace it places into.
 

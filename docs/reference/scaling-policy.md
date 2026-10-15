@@ -180,7 +180,8 @@ prefill is best-effort. That follows the llm-d router: with no prefill endpoint
 it sends the request to a decode endpoint, which runs both stages itself. The
 router already skips disaggregation for short prompts and high prefix-cache hits,
 so decode-only is a normal mode, not a failure. If prefill cannot be placed (no
-free GPUs on its accelerator, or a namespace quota excludes it), waking decode
+free GPUs on its accelerator, or its namespace quota does not allow that
+accelerator), waking decode
 alone still serves the queued request; refusing would trade a slower model for no
 model.
 
@@ -331,7 +332,7 @@ reports `invalid`) and the controller logs
 **An excluded namespace needs a cluster quota.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
-unlimited and counts as none. Without one, their models stay on today's
+unlimited and counts as none. Without one, their models stay on the default
 optimizer, which does not limit them at all, and the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.
@@ -339,9 +340,8 @@ are shared again; their role series appear instead.
 <details>
 <summary>Details: why, and what the cluster group gets</summary>
 
-The namespace quota does not bound an excluded namespace. The only budget left
-would be the other tenants' free quota, which does not count what the excluded
-namespace holds.
+The namespace quota does not bound an excluded namespace. Without a cluster
+quota there is no budget to share.
 
 With a `scope: cluster` quota, the excluded namespace's models form the cluster
 group. Every GPU a tenant's own group fills is also charged to the cluster
