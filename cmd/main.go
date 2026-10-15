@@ -145,6 +145,91 @@ func startupExitCode(ctx context.Context, log logr.Logger, err error, msg string
 // killed.
 const exitCodeTerminated = 143
 
+// optimizeLooper is an engine whose optimize loop runs until its context ends.
+type optimizeLooper interface {
+	StartOptimizeLoop(ctx context.Context)
+}
+
+// optimizeLoopRunnable is the manager runnable for one engine: setup builds
+// the engine, and the runnable then runs its loop.
+//
+// The loop runs IN the runnable, not in a goroutine it spawns: it blocks until
+// ctx ends, so the manager's graceful shutdown waits for an in-flight cycle
+// before it releases the lease. Returning at once told the manager this
+// runnable was finished while the loop was starting.
+//
+// A setup error is returned, never os.Exit: the manager stops on a runnable's
+// error, releases the lease and returns it from mgr.Start.
+func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error)) manager.RunnableFunc {
+	return func(ctx context.Context) error {
+		engine, err := setup(ctx)
+		if err != nil {
+			return err
+		}
+		engine.StartOptimizeLoop(ctx)
+		return nil
+	}
+}
+
+// registerMetricsSource adds src to reg under name.
+//
+// Returned, not os.Exit: this runs inside a manager runnable, and exiting there
+// skipped graceful shutdown and the lease release, so the successor waited out
+// the full LeaseDuration.
+func registerMetricsSource(reg *source.SourceRegistry, name string, src source.MetricsSource) error {
+	if err := reg.Register(name, src); err != nil {
+		return fmt.Errorf("registering the %s metrics source: %w", name, err)
+	}
+	return nil
+}
+
+// managerOptions builds the manager's options: leader election, probes,
+// metrics and webhook servers, and the shutdown budget. The cache is set by
+// the caller. A function of its own so a test can check what main hands the
+// manager, not only the constants it is built from.
+func managerOptions(cfg *config.Config, metricsServerOptions metricsserver.Options,
+	webhookServer webhook.Server) ctrl.Options {
+	// Configure leader election with configurable timeouts to prevent lease renewal failures
+	// Default values are: LeaseDuration=60s, RenewDeadline=50s, RetryPeriod=10s
+	// These can be overridden via command-line flags in manager.yaml
+	// Increased from controller-runtime defaults (15s, 10s, 2s) to provide more tolerance
+	// for network latency and API server delays
+
+	leaseDurationVal := cfg.LeaseDuration()
+	gracefulShutdownTimeout := managerGracefulShutdownTimeout
+	renewDeadlineVal := cfg.RenewDeadline()
+	retryPeriodVal := cfg.RetryPeriod()
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
+		WebhookServer:          webhookServer,
+		HealthProbeBindAddress: cfg.ProbeAddr(),
+		LeaderElection:         cfg.EnableLeaderElection(),
+		LeaderElectionID:       cfg.LeaderElectionID(),
+		// Leader election timeout configuration (from Config, can be overridden via flags/env/ConfigMap)
+		LeaseDuration: &leaseDurationVal,
+		RenewDeadline: &renewDeadlineVal,
+		RetryPeriod:   &retryPeriodVal,
+		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
+		// when the Manager ends. This requires the binary to immediately end when the
+		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
+		// speeds up voluntary leader transitions as the new leader don't have to wait
+		// LeaseDuration time first.
+		//
+		// This is safe to enable because the program ends immediately after the manager stops
+		// (see mgr.Start() call at the end of main()), and because the engine
+		// runnables block until their loops have returned, so the lease is not
+		// released while a cycle is still publishing. This enables fast failover
+		// during deployments and upgrades, reducing downtime from ~60s to ~1-2s.
+		LeaderElectionReleaseOnCancel: true,
+		// Set explicitly, and below the pod's terminationGracePeriodSeconds
+		// (config/base/manager/deployment.yaml): if runnables outlive the grace
+		// period the kubelet's SIGKILL lands before the lease is released, and
+		// the successor waits the full LeaseDuration with GetMetrics unanswered.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
+	}
+}
+
 // defaultLogVerbosity is the -v the shipped deployment runs at: config/base/manager
 // passes no -v, so this value decides which V() levels reach the logs. The
 // saturation analyzer's per-replica capacity lines sit at V(logging.DEFAULT) and
@@ -427,45 +512,7 @@ func main() {
 	// Use configurable REST client timeout from Config (default 60s, can be overridden via --rest-client-timeout flag)
 	restConfig.Timeout = cfg.RestTimeout()
 
-	// Configure leader election with configurable timeouts to prevent lease renewal failures
-	// Default values are: LeaseDuration=60s, RenewDeadline=50s, RetryPeriod=10s
-	// These can be overridden via command-line flags in manager.yaml
-	// Increased from controller-runtime defaults (15s, 10s, 2s) to provide more tolerance
-	// for network latency and API server delays
-
-	leaseDurationVal := cfg.LeaseDuration()
-	gracefulShutdownTimeout := managerGracefulShutdownTimeout
-	renewDeadlineVal := cfg.RenewDeadline()
-	retryPeriodVal := cfg.RetryPeriod()
-	mgrOptions := ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: cfg.ProbeAddr(),
-		LeaderElection:         cfg.EnableLeaderElection(),
-		LeaderElectionID:       cfg.LeaderElectionID(),
-		// Leader election timeout configuration (from Config, can be overridden via flags/env/ConfigMap)
-		LeaseDuration: &leaseDurationVal,
-		RenewDeadline: &renewDeadlineVal,
-		RetryPeriod:   &retryPeriodVal,
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// This is safe to enable because the program ends immediately after the manager stops
-		// (see mgr.Start() call at the end of main()), and because the engine
-		// runnables block until their loops have returned, so the lease is not
-		// released while a cycle is still publishing. This enables fast failover
-		// during deployments and upgrades, reducing downtime from ~60s to ~1-2s.
-		LeaderElectionReleaseOnCancel: true,
-		// Set explicitly, and below the pod's terminationGracePeriodSeconds
-		// (config/base/manager/deployment.yaml): if runnables outlive the grace
-		// period the kubelet's SIGKILL lands before the lease is released, and
-		// the successor waits the full LeaseDuration with GetMetrics unanswered.
-		GracefulShutdownTimeout: &gracefulShutdownTimeout,
-	}
+	mgrOptions := managerOptions(cfg, metricsServerOptions, webhookServer)
 
 	watchNS := cfg.WatchNamespace()
 	if watchNS != "" {
@@ -678,7 +725,7 @@ func main() {
 	}
 
 	// Register optimization engine loops with the manager. Only start when leader.
-	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		sourceRegistry := source.NewSourceRegistry()
 		setupLog.Info("Initializing metrics source registry")
 
@@ -690,14 +737,11 @@ func main() {
 		// Register PrometheusSource with default config
 		promSource := prometheus.NewPrometheusSource(ctx, promAPI, prometheus.DefaultPrometheusSourceConfig())
 
-		// Register in global source registry
-		// Returned, not os.Exit: this runs inside a manager runnable, and exiting
-		// here skipped graceful shutdown and the lease release, so the successor
-		// waited out the full LeaseDuration. The manager stops on a runnable's
-		// error, releases the lease and returns it from mgr.Start.
-		if err := sourceRegistry.Register("prometheus", promSource); err != nil {
+		// Register in global source registry (registerMetricsSource returns its
+		// error rather than exiting; see optimizeLoopRunnable).
+		if err := registerMetricsSource(sourceRegistry, "prometheus", promSource); err != nil {
 			setupLog.Error(err, "failed to register prometheus source in source registry")
-			return fmt.Errorf("registering the prometheus metrics source: %w", err)
+			return nil, err
 		}
 
 		// Build the initial GPU limiter from the effective limiter mode — the
@@ -708,7 +752,7 @@ func main() {
 		gpuLimiter, err := allocation.NewLimiterFromConfig(cfg, mgr.GetClient())
 		if err != nil {
 			setupLog.Error(err, "failed to build GPU limiter")
-			return err
+			return nil, err
 		}
 		setupLog.Info("GPU limiter constructed", "type", cfg.EffectiveLimiterMode(), "name", gpuLimiter.Name())
 
@@ -785,7 +829,7 @@ func main() {
 		registration.RegisterAlwaysOnQueries(sourceRegistry)
 		if taRegistered {
 			if err := engine.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer()); err != nil {
-				return err
+				return nil, err
 			}
 			setupLog.Info("ThroughputAnalyzer registered (enabled in saturation config)")
 		} else {
@@ -793,12 +837,7 @@ func main() {
 				"enables 'throughput'. Add it to the analyzers config and restart the " +
 				"controller to enable it.")
 		}
-		// Run the loop IN the runnable, not in a goroutine it spawns: it blocks
-		// until ctx ends, so the manager's graceful shutdown waits for an
-		// in-flight cycle before it releases the lease. Returning at once told
-		// the manager this runnable was finished while the loop was starting.
-		engine.StartOptimizeLoop(ctx)
-		return nil
+		return engine, nil
 	}))
 
 	if err != nil {
@@ -807,10 +846,10 @@ func main() {
 	}
 
 	// Register scale from zero engine loop with the manager. Only start when leader.
-	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		engine, err := scalefromzero.NewEngine(mgr.GetClient(), mgr.GetEventRecorderFor("workload-variant-autoscaler-scalezero-engine"), ds, cfg)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Same registry as the saturation engine: one call registers a workload for
 		// both. Its own Enricher, because the two loops run at different rates and
@@ -854,12 +893,7 @@ func main() {
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
 			return allocation.NewLimiterFromConfig(cfg, mgr.GetClient())
 		})
-		// Run the loop IN the runnable, not in a goroutine it spawns: it blocks
-		// until ctx ends, so the manager's graceful shutdown waits for an
-		// in-flight cycle before it releases the lease. Returning at once told
-		// the manager this runnable was finished while the loop was starting.
-		engine.StartOptimizeLoop(ctx)
-		return nil
+		return engine, nil
 	}))
 
 	if err != nil {
