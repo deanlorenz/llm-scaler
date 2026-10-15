@@ -83,13 +83,13 @@ var _ = Describe("Analyzer state and inputs", func() {
 		key := windowKey("ns", "m", agg)
 		clock = clock.Add(windowTimeout - time.Minute)
 		a.NoteVariantsPresent("ns", "m", []string{"agg"})
-		Expect(a.EvictStale(clock.Add(2 * time.Minute)).Lines).To(BeZero(),
+		Expect(a.EvictStale(clock.Add(2*time.Minute)).Lines).To(BeZero(),
 			"parked, so not analyzed, but present")
 		Expect(a.lines.Baselines()).To(HaveKey(key))
 		stamped := clock
 		clock = clock.Add(windowTimeout)
 		a.NoteVariantsPresent("ns", "m", []string{"ag"})
-		Expect(a.EvictStale(stamped.Add(windowTimeout + 2*time.Minute)).Lines).To(Equal(1),
+		Expect(a.EvictStale(stamped.Add(windowTimeout+2*time.Minute)).Lines).To(Equal(1),
 			`"ag" must not keep "agg" alive`)
 	})
 

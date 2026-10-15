@@ -188,10 +188,11 @@ var _ = Describe("noteTransient", func() {
 
 	It("reads jitter in the engine's interval as a cycle, not a gap", func() {
 		at := clock
-		for _, step := range []time.Duration{15, 15, 19, 15, 25, 15} {
-			at = at.Add(step * time.Second)
+		for _, step := range []time.Duration{15 * time.Second, 15 * time.Second, 19 * time.Second,
+			15 * time.Second, 25 * time.Second, 15 * time.Second} {
+			at = at.Add(step)
 			ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
-			Expect(ttft).To(BeEmpty(), "a %ds step", step)
+			Expect(ttft).To(BeEmpty(), "a %v step", step)
 		}
 	})
 
