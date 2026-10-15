@@ -1237,12 +1237,14 @@ func (e *Engine) collectV2ModelRequest(
 	// The optimizer's input is the composite of every analyzer that ran,
 	// never saturation's own entry, even when it runs alone (buildComposite).
 	// Saturation contributes only when the policy lists it; it is the
-	// composite's identity and unit either way. The thresholds are
-	// saturation's own, a per-analyzer override included: the composite's
-	// demand is saturation's, and the warm pool's pressure reads the same pair.
-	eligibleAnalyzers := namedResults
+	// composite's identity and unit either way. The slo analyzer never
+	// contributes: it only observes, so its series are published and its
+	// result sizes nothing. The thresholds are saturation's own, a
+	// per-analyzer override included: the composite's demand is saturation's,
+	// and the warm pool's pressure reads the same pair.
+	eligibleAnalyzers := excludeByName(namedResults, domain.SLOAnalyzerName)
 	if !config.AnalyzerEnabled(domain.SaturationAnalyzerName) {
-		eligibleAnalyzers = excludeByName(namedResults, domain.SaturationAnalyzerName)
+		eligibleAnalyzers = excludeByName(eligibleAnalyzers, domain.SaturationAnalyzerName)
 	}
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)

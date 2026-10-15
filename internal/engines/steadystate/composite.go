@@ -41,9 +41,9 @@ import (
 // would read as "no basis to size" and hold the model, below what either
 // analyzer asks for.
 //
-// eligibleAnalyzers is namedResults less saturation when the policy does not
-// list it (the caller decides that once); saturation remains the identity
-// source either way.
+// eligibleAnalyzers is namedResults less the observe-only slo analyzer, and
+// less saturation when the policy does not list it (the caller decides that
+// once); saturation remains the identity source either way.
 //
 // Every slice and map is copied, so the optimizer's bookkeeping on the
 // composite cannot reach back into an analyzer's own result.
