@@ -114,15 +114,19 @@ const managerGracefulShutdownTimeout = 25 * time.Second
 // process should exit with.
 //
 // Startup steps run under the signal context, so a SIGTERM during one cancels
-// it and the step returns the context's error. That is a requested shutdown,
-// not a fault: it is logged as an info line and exits 0. Logged as the step's
-// own failure ("CRITICAL: Failed to connect to Prometheus") it reads as an
-// outage, and the exit code 1 counts against the pod.
+// it and the step returns the context's error. That is logged as an info line,
+// not as the step's own failure ("CRITICAL: Failed to connect to Prometheus"),
+// which would read as an outage the signal did not cause.
+//
+// It still exits non-zero, with exitCodeTerminated. The SIGTERM is not always
+// an operator's: the startup probe gives up after 60s, and a controller still
+// waiting for Prometheus then gets killed. Exiting 0 there would show a
+// Prometheus outage as "Completed".
 //
 // Both must hold: the context is done AND the step's error is that
 // cancellation. A step that failed for its own reason -- a Forbidden, a
 // refused connection -- just as a SIGTERM arrived is still a failure, and is
-// reported as one.
+// reported as one, with exit code 1.
 //
 // It lives in main.go, not a file of its own: `make build` and the Dockerfile
 // compile cmd/main.go alone, so a non-test helper in another file of package
@@ -130,11 +134,16 @@ const managerGracefulShutdownTimeout = 25 * time.Second
 func startupExitCode(ctx context.Context, log logr.Logger, err error, msg string) int {
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 		log.Info("Shutdown requested during startup; exiting", "step", msg, "error", err.Error())
-		return 0
+		return exitCodeTerminated
 	}
 	log.Error(err, msg)
 	return 1
 }
+
+// exitCodeTerminated is the exit code for a startup cut short by SIGTERM: 128
+// plus the signal number, the status a shell reports for a process SIGTERM
+// killed.
+const exitCodeTerminated = 143
 
 // defaultLogVerbosity is the -v the shipped deployment runs at: config/base/manager
 // passes no -v, so this value decides which V() levels reach the logs. The

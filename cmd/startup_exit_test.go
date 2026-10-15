@@ -13,11 +13,15 @@ import (
 
 const testStep = "CRITICAL: Failed to connect to Prometheus"
 
-// A SIGTERM during a startup step cancels the step. That must exit 0 with an
-// info line, not report the step as failed and exit 1. Anything else -- a real
-// failure, with or without a shutdown under way -- exits 1 with the step's
-// error.
+// A SIGTERM during a startup step cancels the step. That must log an info
+// line, not report the step as failed, and exit 143, not 0: the startup probe
+// sends the same SIGTERM to a controller stuck waiting for Prometheus, and 0
+// would show that outage as "Completed". Anything else -- a real failure, with
+// or without a shutdown under way -- exits 1 with the step's error.
 func TestStartupExitCode(t *testing.T) {
+	if exitCodeTerminated != 128+15 {
+		t.Fatalf("exitCodeTerminated = %d, want 143 (128 + SIGTERM)", exitCodeTerminated)
+	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
@@ -33,13 +37,13 @@ func TestStartupExitCode(t *testing.T) {
 			name:     "shutdown cancels the step",
 			ctx:      cancelled,
 			err:      fmt.Errorf("listing namespaces: %w", context.Canceled),
-			wantCode: 0,
+			wantCode: exitCodeTerminated,
 		},
 		{
 			name:     "the context's deadline ends the step",
 			ctx:      expired,
 			err:      fmt.Errorf("query: %w", context.DeadlineExceeded),
-			wantCode: 0,
+			wantCode: exitCodeTerminated,
 		},
 		{
 			name:     "real failure, no shutdown",
@@ -74,8 +78,8 @@ func TestStartupExitCode(t *testing.T) {
 			if len(lines) != 1 {
 				t.Fatalf("log = %q, want one line", lines)
 			}
-			if shutdown := strings.Contains(lines[0], "Shutdown requested during startup"); shutdown != (tc.wantCode == 0) {
-				t.Errorf("log = %q: shutdown line = %v, want %v", lines[0], shutdown, tc.wantCode == 0)
+			if shutdown := strings.Contains(lines[0], "Shutdown requested during startup"); shutdown != (tc.wantCode == exitCodeTerminated) {
+				t.Errorf("log = %q: shutdown line = %v, want %v", lines[0], shutdown, tc.wantCode == exitCodeTerminated)
 			}
 			if !strings.Contains(lines[0], testStep) {
 				t.Errorf("log = %q, want the step named", lines[0])
