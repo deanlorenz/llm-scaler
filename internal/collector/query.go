@@ -65,7 +65,7 @@ func (c *ReplicaMetricsCollector) refreshShared(
 	}
 
 	fetched, err := c.source.Refresh(ctx, source.RefreshSpec{Queries: missing, Params: params})
-	if err != nil {
+	if err != nil && fetched == nil {
 		return nil, err
 	}
 
@@ -81,6 +81,12 @@ func (c *ReplicaMetricsCollector) refreshShared(
 	}
 	c.cycleMu.Unlock()
 
+	// Memoized above even when every query failed, so the next model in this
+	// namespace reads the failed results instead of asking a down Prometheus
+	// again; the error is returned once, to the model that asked.
+	if err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 

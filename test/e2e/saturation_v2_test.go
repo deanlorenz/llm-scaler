@@ -206,6 +206,15 @@ var _ = Describe("Saturation V2 engine", Label("smoke", "full"), Ordered, func()
 		// wrong metric and could not read even that, and the next spec was
 		// left to discover it 120 s later. Seen in CI: one all-empty entry in
 		// CurrentMetrics, with ScalingActive=False FailedGetResourceMetric.
+		//
+		// The wiring is waited for first, with the one-time ScaledObject
+		// recreate: this ScaledObject is created in BeforeAll, and when that
+		// lands while the controller is restarting (the spec before restarts
+		// it), KEDA's one call for the metric spec is refused and KEDA never
+		// asks again -- the HPA stays on CPU for the whole timeout below.
+		By("Confirming KEDA has wired its external metric onto the HPA")
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, scalerBaseName)
+
 		By("Verifying KEDA read wva_desired_replicas for the V2 smoke variant")
 		Eventually(func(g Gomega) {
 			reportIfHPAOnCPUDefault(cfg.LLMDNamespace, modelDecodeDeployment)

@@ -211,9 +211,9 @@ func (h *Handler) leader() bool {
 // Called at the top of every RPC, including ones whose answer does not depend on
 // the ref, because registration is the point and the answer is incidental. It
 // never fails and never rejects: metadata that does not parse is still a
-// registration — the engine reports the bad trigger once per cycle with the
-// object's name attached, which is a far better diagnostic than a workload that
-// silently never appears.
+// registration — the enricher reports the bad trigger, once per change, as a
+// log line and a Warning event on the ScaledObject, which is a far better
+// diagnostic than a workload that silently never appears.
 func (h *Handler) observe(ref *pb.ScaledObjectRef) {
 	if ref == nil || h.registry == nil {
 		return

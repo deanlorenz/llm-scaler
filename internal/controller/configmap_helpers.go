@@ -22,7 +22,6 @@ import (
 	"slices"
 
 	"github.com/go-logr/logr"
-	yaml "gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,14 +39,16 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 
 // parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
 // by key, why each entry that was dropped was dropped: a YAML error, or a
-// Normalize or Validate failure. An entry that parsed is never in it.
+// Normalize or Validate failure. An entry that parsed is never in it. A key the
+// schema does not define drops nothing (config.DecodeScalingPolicy); the
+// reconciler reports it (reportUnknownKeys).
 func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int, map[string]error) {
 	configs := make(config.ScalingPolicySet)
 	rejected := map[string]error{}
 	count := 0
 	for key, yamlStr := range cmData {
-		var satConfig config.ScalingPolicy
-		if err := yaml.Unmarshal([]byte(yamlStr), &satConfig); err != nil {
+		satConfig, err := config.DecodeScalingPolicy(yamlStr)
+		if err != nil {
 			errorType := "Failed to parse saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)

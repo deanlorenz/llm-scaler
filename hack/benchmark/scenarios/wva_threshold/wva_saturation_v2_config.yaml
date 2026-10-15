@@ -13,5 +13,3 @@ data:
     scaleDownBoundary: 0.70
     kvCacheThreshold: 0.80
     queueLengthThreshold: 5
-    kvSpareTrigger: 0.1
-    queueSpareTrigger: 3

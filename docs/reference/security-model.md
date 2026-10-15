@@ -436,7 +436,8 @@ scaling manager asks for; the quota bounds what the cluster admits
 | Condition | Behaviour | Direction |
 | --- | --- | --- |
 | No limiter declared (the shipped policy) | scaling is bounded only by each workload's `maxReplicaCount`; scale-from-zero wakes without a capacity check | **open** |
-| A limiter entry that fails validation | the whole `default` policy is rejected, thresholds included, and no limiter is built; logged at ERROR | **open** |
+| A limiter entry that fails validation, at startup | the whole `default` entry is rejected, and the controller refuses to start (`refusing to start unbounded`) | closed |
+| A limiter entry that fails validation, while running | the whole `default` entry is rejected and the previous one stays in force. A `ConfigEntryRejected` event and an ERROR log say the controller will refuse to start on its next restart until the entry is fixed | held |
 | Policy namespace resolved, reading its ConfigMap fails with any error other than NotFound | the controller refuses to start (`refusing to start unbounded`) | closed |
 | Policy namespace resolved, no ConfigMap in it | empty policy: no limiters | **open** |
 | Cannot tell whether `wva-policy` exists (an API error other than NotFound or Forbidden) | refuses to start | closed |

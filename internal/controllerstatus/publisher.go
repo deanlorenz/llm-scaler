@@ -24,8 +24,9 @@
 //	                       deleted). Compare for equality, not order:
 //	                       resourceVersions are opaque.
 //	policyAccepted         "true", or "false" when the ConfigMap's "default"
-//	                       entry was rejected; the controller then runs without
-//	                       that entry.
+//	                       entry was rejected; the controller then keeps the
+//	                       "default" entry previously in force, or runs
+//	                       without one when there was none.
 //	policyError            why the "default" entry was rejected; empty when
 //	                       accepted.
 //	limiter                the limiter in force, "<mode>/<entry names>": for
