@@ -1030,24 +1030,33 @@ wrong:
   allowed", so the rule can neither fire nor resolve. With `CONTROLLER_INSTANCE`
   set and two controllers managing one model, add `controller_instance` to the
   `by` and the `on`.
-- **Count judged miss-minutes; do not bridge gaps.** The observed and attainment
-  series disappear below the sample minimum and while a window is excluded,
-  and an absent series resets an alert's `for:`. On a whole-node model one
-  exclusion lasts a replica's start time plus the window plus its grace, often
-  over ten minutes, so no `last_over_time` range is safely long enough.
-  Counting minutes in which a judged value missed, over a longer window, is
-  immune to the gaps:
+- **Count misses against judged minutes; do not bridge gaps.** The observed and
+  attainment series disappear below the sample minimum and while a window is
+  excluded, and an absent series resets an alert's `for:`. On a whole-node
+  model one exclusion lasts a replica's start time plus the window plus its
+  grace, often over ten minutes, so no `last_over_time` range is safely long
+  enough. Count the minutes in which a judged value missed, and divide by the
+  minutes that were judged at all. A fixed count of wall-clock minutes is
+  wrong too: a fleet that misses while a replica starts every ten minutes is
+  judged for only a few minutes in each ten, and never reaches it.
 
   ```promql
+  # misses: minutes in which a judged value was above its target
   count_over_time((
       max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)
     > on (exported_namespace, model_name, objective, statistic)
       max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
-  )[30m:1m]) >= 10
+  )[30m:1m])
+  # divided by judged minutes, at least half, and at least 5 misses
+    / on (exported_namespace, model_name, objective, statistic)
+  count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)[30m:1m])
+    >= 0.5
   ```
 
-  One expression covers both objectives: a TTFT percentile above its target is
-  the same miss as attainment below the percentile.
+  `WVAModelSLOMissed` adds `and` the misses count `>= 5`, so a model judged
+  for two minutes does not page on one. One expression covers both
+  objectives: a TTFT percentile above its target is the same miss as
+  attainment below the percentile.
 - **Gate on the analyzer still publishing.** A model the engine skipped (a
   Prometheus outage, or a policy that stopped listing `slo`) keeps its series
   for ten minutes at their last values:
@@ -1066,13 +1075,17 @@ wrong:
 
 - **Alert on "unjudged" too.** A fleet that scales up more often than once
   every window-plus-grace is never judged, which is exactly when misses
-  happen. `WVAModelSLOUnjudged` fires when targets are set, the model has
-  replicas, and nothing has been judged for an hour:
+  happen. `WVAModelSLOUnjudged` fires when a target has been set for at least
+  an hour, the model has replicas, and nothing has been judged in that hour.
+  The `offset 1h` term is what keeps a newly deployed model, or a new target,
+  quiet for its first hour:
 
   ```promql
   max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
     unless on (exported_namespace, model_name, objective, statistic)
   max by (exported_namespace, model_name, objective, statistic) (last_over_time(wva_slo_observed_seconds[1h]))
+    and on (exported_namespace, model_name, objective, statistic)
+  max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds offset 1h)
   ```
 
   Read it with `wva_slo_window_requests` and `wva_slo_excluded` to tell
@@ -1657,8 +1670,8 @@ notifications link to it.
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
-| `WVAModelSLOMissed` | warning | 5m | in at least 10 of the last 30 judged minutes, a model's router-measured TTFT percentile or TPOT mean was above its declared target, while the analyzer still publishes and the model has replicas | TPOT: compare `wva_slo_fill` with the tier's `kvCacheThreshold × scaleUpThreshold`. TTFT: read `wva_slo_engine_queue_seconds` and `wva_slo_prefill_seconds` per prefilling variant, and the router's flow-control queue. On this release the analyzer observes, so the fix is the tier's thresholds | [SLO metrics](#slo-analyzer-metrics) |
-| `WVAModelSLOUnjudged` | info | 15m | targets are set and the model has replicas, but no window of an objective has been judged for an hour | read `wva_slo_window_requests` and `wva_slo_excluded`: a fleet that never holds still, too little traffic, or histograms not scraped | [SLO metrics](#slo-analyzer-metrics) |
+| `WVAModelSLOMissed` | warning | 2m | in at least half of the judged minutes of the last 30, and at least 5 of them, a model's router-measured TTFT percentile or TPOT mean was above its declared target, while the analyzer still publishes and the model has replicas | TPOT: compare `wva_slo_fill` with the tier's `kvCacheThreshold × scaleUpThreshold`. TTFT: read `wva_slo_engine_queue_seconds` and `wva_slo_prefill_seconds` per prefilling variant, and the router's flow-control queue. On this release the analyzer observes, so the fix is the tier's thresholds | [SLO metrics](#slo-analyzer-metrics) |
+| `WVAModelSLOUnjudged` | info | 15m | a target has been set for at least an hour and the model has replicas, but no window of that objective has been judged in the hour | read `wva_slo_window_requests` and `wva_slo_excluded`: a fleet that never holds still, too little traffic, or histograms not scraped | [SLO metrics](#slo-analyzer-metrics) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAPolicyNamespaceUnverified` | warning | 10m | the controller may not read Namespaces, so it cannot tell whether an admin published cluster policy for it. It runs on its own ConfigMap, which may be weaker than the admin intends | (cluster admin) `NAMESPACE=<ns> make setup-prereqs`, then restart the controller: the value is set once at startup | [T: policy namespace unverified](troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified) |

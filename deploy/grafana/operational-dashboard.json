@@ -2684,12 +2684,20 @@
             {
               "expr": "wva_slo_observed_seconds{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             },
             {
               "expr": "wva_slo_target_seconds{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
-              "refId": "B"
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2701,6 +2709,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2718,7 +2730,11 @@
             {
               "expr": "wva_slo_window_requests{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} requests",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2730,6 +2746,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2747,7 +2767,11 @@
             {
               "expr": "wva_slo_attainment_ratio{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{statistic}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2759,6 +2783,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2776,7 +2804,11 @@
             {
               "expr": "wva_slo_fill{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2788,6 +2820,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2805,7 +2841,11 @@
             {
               "expr": "wva_slo_predicted_itl_seconds{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2817,6 +2857,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2834,7 +2878,11 @@
             {
               "expr": "wva_slo_source{$namespace_label=~\"$namespace\"} == 1",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} {{source}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2846,6 +2894,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2863,12 +2915,20 @@
             {
               "expr": "wva_slo_prefill_seconds{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} prefill",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             },
             {
               "expr": "wva_slo_engine_queue_seconds{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} queue",
-              "refId": "B"
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2880,6 +2940,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2897,7 +2961,11 @@
             {
               "expr": "wva_slo_prefill_utilization{$namespace_label=~\"$namespace\"}",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2909,6 +2977,10 @@
               }
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         },
         {
@@ -2924,9 +2996,13 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_excluded{$namespace_label=~\"$namespace\", reason!=\"\"} == 1",
+              "expr": "max by ($namespace_label, model_name, objective, reason) (wva_slo_excluded{$namespace_label=~\"$namespace\"}) == 1",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}}: {{reason}}",
-              "refId": "A"
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
             }
           ],
           "fieldConfig": {
@@ -2934,6 +3010,10 @@
               "unit": "short"
             },
             "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
           }
         }
       ]

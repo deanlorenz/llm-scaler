@@ -130,6 +130,9 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	}
 	for _, vs := range fleet.variants {
 		vc, reading := a.priceVariant(input, vs, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
+		// Only a reading priceVariant made was priced for TPOT; one made below
+		// carries TTFT inputs alone and has no output length to lack.
+		pricedForTPOT := reading != nil
 		// The TTFT curve's inputs, for every variant that prefills: observed
 		// and published, nothing priced from them yet (ttft.go).
 		if cfg.SLO != nil && cfg.SLO.TTFT != nil && vs.Role != domain.RoleDecode {
@@ -141,9 +144,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 			reading.PrefillSeconds, reading.EngineQueueSeconds = in.prefillSeconds, in.queueSeconds
 			reading.PrefillUtilization, reading.PrefillCeiling = in.utilization, in.ceiling
 		}
-		// Only a variant that generates is priced for TPOT, so only its reading
-		// can lack the output length; a prefill reading carries TTFT inputs alone.
-		if !shapeKnown && reading != nil && isGenerating(vs.Role) {
+		if !shapeKnown && pricedForTPOT {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
 			reading.Fill, reading.PredictedITL = math.NaN(), math.NaN()

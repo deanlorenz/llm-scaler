@@ -14,6 +14,11 @@ import (
 // requests the fleet is serving (transientGrace).
 const minTransientGrace = 120 * time.Second
 
+// maxTransientGrace bounds the grace. A mean request of twenty minutes is not
+// one the router window can judge anyway, and a bogus service time must not
+// leave a model unjudged for hours (or overflow time.Duration).
+const maxTransientGrace = 30 * time.Minute
+
 // startingMaxAge is how old a not-Ready Pod may be and still be starting. An
 // older one was Ready and failed its probe: a flap, not a new replica, and not
 // a reason to stop judging the fleet it belongs to.
@@ -80,7 +85,7 @@ func transientOf(states []domain.VariantReplicaState, in func(domain.VariantRepl
 // transientGrace is the grace after a transient: the router window clears the
 // requests that began in it only once the longest of them has finished, so it
 // is the longer of minTransientGrace and one and a half times the longest mean
-// request duration among the model's ready replicas.
+// request duration among the model's ready replicas, at most maxTransientGrace.
 func transientGrace(rows []domain.ReplicaMetrics) time.Duration {
 	longest := 0.0
 	for _, rm := range rows {
@@ -88,7 +93,9 @@ func transientGrace(rows []domain.ReplicaMetrics) time.Duration {
 			longest = rm.AvgServiceTime
 		}
 	}
-	return max(minTransientGrace, time.Duration(1.5*longest*float64(time.Second)))
+	// Clamped in seconds, before the conversion can overflow.
+	grace := min(1.5*longest, maxTransientGrace.Seconds())
+	return max(minTransientGrace, time.Duration(grace*float64(time.Second)))
 }
 
 // noteTransient records this cycle and returns, per objective, why the router's

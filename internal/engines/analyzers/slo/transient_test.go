@@ -43,6 +43,19 @@ var _ = Describe("transientOf", func() {
 			[]domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0, 90)}, constants.SLOExcludedStarting),
 		Entry("an old not-Ready Pod is a readiness flap, not a start",
 			[]domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0, 7200)}, ""),
+		Entry("a Pod a second short of the flap age is starting",
+			[]domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0, startingMaxAge.Seconds()-1)}, constants.SLOExcludedStarting),
+		Entry("a Pod at exactly the flap age is a flap",
+			[]domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0, startingMaxAge.Seconds())}, ""),
+		Entry("a negative age (clock skew) is not a start",
+			[]domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0, -1)}, ""),
+		Entry("one young Pod beside an old one is starting",
+			[]domain.VariantReplicaState{vs(domain.RoleBoth, 4, 2, 0, 7200, 90)}, constants.SLOExcludedStarting),
+		Entry("two old Pods are flaps",
+			[]domain.VariantReplicaState{vs(domain.RoleBoth, 4, 2, 0, 7200, 3600)}, ""),
+		Entry("ages read and none of them pending: the ages win over the count",
+			[]domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 3,
+				PendingReplicas: 1, PendingAges: []float64{}}}, ""),
 		Entry("steady", []domain.VariantReplicaState{vs(domain.RoleBoth, 2, 0, 0), vs(domain.RoleDecode, 1, 0, 0)}, ""),
 	)
 })
@@ -57,6 +70,12 @@ var _ = Describe("transientGrace", func() {
 			{Ready: true, FromWarmPool: true, AvgServiceTime: 9000},
 		}
 		Expect(transientGrace(rows)).To(Equal(300 * time.Second))
+	})
+
+	It("is at most the cap, however long a bogus service time says requests take", func() {
+		Expect(transientGrace([]domain.ReplicaMetrics{{Ready: true, AvgServiceTime: 1e12}})).To(Equal(maxTransientGrace))
+		Expect(transientGrace([]domain.ReplicaMetrics{{Ready: true, AvgServiceTime: maxTransientGrace.Seconds()}})).
+			To(Equal(maxTransientGrace))
 	})
 })
 
@@ -169,23 +188,35 @@ var _ = Describe("Analyze with a transient", func() {
 		}
 	})
 
-	It("excludes TTFT, and only TTFT, while a P/D model's prefill replica starts", func() {
-		registry := prometheus.NewRegistry()
-		Expect(metrics.InitMetrics(registry)).To(Succeed())
-		rl := &domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0.9, 3, 0.95, inf, 1.0)}
-		a := New(fakeRouter{latency: rl}, nil)
-		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
-			ModelID: "m", Namespace: "ns", Config: policy(0, 3*time.Second), ArrivalRate: 1,
-			VariantStates: []domain.VariantReplicaState{vs(domain.RolePrefill, 2, 1, 0), vs(domain.RoleDecode, 2, 0, 0)},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		ttft := map[string]string{constants.LabelObjective: constants.SLOObjectiveTTFT}
-		_, observed := gaugeIn(registry, constants.WVASLOObservedSeconds, ttft)
-		Expect(observed).To(BeFalse(), "a prefill replica starting delays first tokens")
-		on, _ := gaugeIn(registry, constants.WVASLOExcluded, map[string]string{
-			constants.LabelObjective: constants.SLOObjectiveTTFT, constants.LabelReason: constants.SLOExcludedStarting})
-		Expect(on).To(Equal(1.0))
-	})
+	DescribeTable("excludes per objective while a P/D model's replica starts",
+		func(prefillPending, decodePending int, tpotExcluded bool) {
+			registry := prometheus.NewRegistry()
+			Expect(metrics.InitMetrics(registry)).To(Succeed())
+			rl := &domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0.9, 3, 0.95, inf, 1.0),
+				TPOTSumRate: 0.04, TPOTCountRate: 1}
+			a := New(fakeRouter{latency: rl}, nil)
+			_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
+				ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 3*time.Second), ArrivalRate: 1,
+				VariantStates: []domain.VariantReplicaState{vs(domain.RolePrefill, 2, prefillPending, 0),
+					vs(domain.RoleDecode, 2, decodePending, 0)},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			excluded := func(objective string) float64 {
+				v, ok := gaugeIn(registry, constants.WVASLOExcluded, map[string]string{
+					constants.LabelObjective: objective, constants.LabelReason: constants.SLOExcludedStarting})
+				Expect(ok).To(BeTrue(), objective)
+				return v
+			}
+			for objective, want := range map[string]bool{constants.SLOObjectiveTTFT: true, constants.SLOObjectiveTPOT: tpotExcluded} {
+				_, observed := gaugeIn(registry, constants.WVASLOObservedSeconds,
+					map[string]string{constants.LabelObjective: objective})
+				Expect(observed).To(Equal(!want), objective+" observed")
+				Expect(excluded(objective) == 1).To(Equal(want), objective+" excluded")
+			}
+		},
+		Entry("a prefill replica starting delays first tokens, not the tokens after", 1, 0, false),
+		Entry("a decode replica starting delays both", 0, 1, true),
+	)
 
 	It("holds the exclusion for the grace the fleet's longest requests need", func() {
 		registry := prometheus.NewRegistry()

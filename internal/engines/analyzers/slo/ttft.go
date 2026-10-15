@@ -42,9 +42,8 @@ type ceilingSample struct {
 // stopped queueing still has utilization measured against something: dropping
 // it would leave the low-load half of the curve, the healthy half, unobserved.
 type ceilingState struct {
-	samples   []ceilingSample
-	last      float64
-	learnedAt time.Time
+	samples []ceilingSample
+	last    float64
 }
 
 // ttftInputs is one variant's prefill-curve inputs this cycle. Any field is
@@ -61,10 +60,12 @@ type ttftInputs struct {
 // prefill replica holds its KV until decode pulls it, so a decode short of
 // capacity fills prefill's cache, its queue grows and its compute sits idle --
 // a reading of decode, not of prefill. So the replica's own KV must be below
-// the range the engine is still working in.
+// the range the engine is still working in. A KV of exactly 0 is the collector's
+// "not read" (a replica computing a prefill holds some cache), so it is no
+// evidence the cache is free.
 func saturatedForCeiling(rm domain.ReplicaMetrics) bool {
 	return rm.QueueLength > 0 && finite(rm.PrefillComputedTokenRate) && rm.PrefillComputedTokenRate > 0 &&
-		finite(rm.KvUsageInstant) && rm.KvUsageInstant < itl.DefaultMaxObservableK
+		finite(rm.KvUsageInstant) && rm.KvUsageInstant > 0 && rm.KvUsageInstant < itl.DefaultMaxObservableK
 }
 
 // observeTTFTInputs returns this cycle's inputs for one variant: the
@@ -139,7 +140,7 @@ func (a *Analyzer) observeTTFTInputs(key, variant, role string, rows []domain.Re
 		for i, s := range st.samples {
 			rates[i] = s.rate
 		}
-		st.last, st.learnedAt = quantileOf(rates, ceilingQuantile), now
+		st.last = quantileOf(rates, ceilingQuantile)
 	}
 	out.ceiling = st.last
 	a.mu.Unlock()

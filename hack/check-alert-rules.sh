@@ -33,7 +33,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 # promtool reads plain rule files, not the PrometheusRule wrapper.
 "$YQ" '{"groups": .spec.groups}' "$RULE" > "$WORK/full.yaml" || exit 1
-if [ "$("$YQ" '[.groups[].rules[]] | length' "$WORK/full.yaml")" -lt 1 ]; then
+N=$("$YQ" '[.groups[].rules[]] | length' "$WORK/full.yaml")
+case "$N" in '' | *[!0-9]*) N=0 ;; esac
+if [ "$N" -lt 1 ]; then
   echo "FAIL: no rules extracted from $RULE" >&2
   exit 1
 fi

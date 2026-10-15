@@ -98,6 +98,55 @@ var _ = Describe("observeTTFTInputs", func() {
 		Expect(a.ceilings["k"].samples).To(BeEmpty())
 	})
 
+	DescribeTable("samples a queued replica only while its rate and KV say it computes",
+		func(tok, kv float64, sampled bool) {
+			a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+				[]domain.ReplicaMetrics{pre("a", 1, 1, 0.5, tok, 3, kv)}, clock)
+			if sampled {
+				Expect(a.ceilings["k"].samples).To(HaveLen(1))
+			} else {
+				Expect(a.ceilings["k"].samples).To(BeEmpty())
+			}
+		},
+		Entry("KV just below the observable range", 1000.0, math.Nextafter(0.80, 0), true),
+		Entry("KV at the observable limit", 1000.0, 0.80, false),
+		Entry("KV not read (the collector leaves 0)", 1000.0, 0.0, false),
+		Entry("KV NaN", 1000.0, math.NaN(), false),
+		Entry("no prefill tokens computed", 0.0, 0.4, false),
+		Entry("prefill rate NaN", math.NaN(), 0.4, false),
+	)
+
+	// sampleAt feeds one saturated cycle at the given offset from the start.
+	sampleAt := func(start time.Time, offset time.Duration) ttftInputs {
+		return a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+			[]domain.ReplicaMetrics{pre("a", 1, 1, 0.5, 10000, 3, 0.4)}, start.Add(offset))
+	}
+
+	It("reports no ceiling from nine cycles, however long they span", func() {
+		start := clock
+		var in ttftInputs
+		for i := range 9 {
+			in = sampleAt(start, time.Duration(i)*time.Minute)
+		}
+		Expect(math.IsNaN(in.ceiling)).To(BeTrue(), "nine cycles over eight minutes")
+	})
+
+	It("reports a ceiling from ten cycles spanning exactly five minutes, and none a second short", func() {
+		start := clock
+		for i := range 9 {
+			sampleAt(start, time.Duration(i)*30*time.Second)
+		}
+		in := sampleAt(start, ceilingMinSpan-time.Second)
+		Expect(math.IsNaN(in.ceiling)).To(BeTrue(), "ten cycles over 4:59")
+
+		a = New(nil, nil)
+		for i := range 9 {
+			sampleAt(start, time.Duration(i)*30*time.Second)
+		}
+		in = sampleAt(start, ceilingMinSpan)
+		Expect(in.ceiling).To(BeNumerically("~", 10000, 1e-9), "ten cycles over exactly 5:00")
+	})
+
 	It("keeps the last ceiling after the window runs dry, and ages the samples", func() {
 		cycles(12, 10000)
 		learned := a.ceilings["k"].last
@@ -208,6 +257,23 @@ var _ = Describe("TTFT inputs in what Analyze publishes", func() {
 		}
 		_, ok = gaugeIn(registry, constants.WVASLOPrefillSeconds, preVar)
 		Expect(ok).To(BeTrue())
+	})
+
+	It("names no TPOT source for an aggregated variant under a TTFT-only policy", func() {
+		a := New(nil, nil)
+		both := domain.VariantReplicaState{VariantName: "pre", Role: domain.RoleBoth, CurrentReplicas: 1}
+		// No output length is reported: the reading carries TTFT inputs only,
+		// so it was never priced for TPOT and cannot lack what TPOT needs.
+		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
+			ModelID: "m", Namespace: "ns", Config: policy(0, 3*time.Second), ArrivalRate: 1,
+			VariantStates:  []domain.VariantReplicaState{both},
+			ReplicaMetrics: []domain.ReplicaMetrics{pre("p", 1, 0.8, 0.2, 5000, 0, 0.3)},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		_, ok := gaugeIn(registry, constants.WVASLOPrefillSeconds, preVar)
+		Expect(ok).To(BeTrue(), "the TTFT inputs are published")
+		_, ok = gaugeIn(registry, constants.WVASLOSource, preVar)
+		Expect(ok).To(BeFalse(), "no TPOT objective, so no TPOT source")
 	})
 
 	It("publishes nothing about prefill without a TTFT objective", func() {

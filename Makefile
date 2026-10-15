@@ -2911,7 +2911,8 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
-PROMTOOL ?= $(LOCALBIN)/promtool
+# The version is in the name, so raising PROMTOOL_VERSION installs it afresh.
+PROMTOOL ?= $(LOCALBIN)/promtool-$(PROMTOOL_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -2947,7 +2948,7 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 .PHONY: promtool
 promtool: $(PROMTOOL) ## Download promtool locally if necessary.
 $(PROMTOOL): $(LOCALBIN)
-	@bash hack/install-promtool.sh $(LOCALBIN) $(PROMTOOL_VERSION)
+	@bash hack/install-promtool.sh $(PROMTOOL) $(PROMTOOL_VERSION)
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.

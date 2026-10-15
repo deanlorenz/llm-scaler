@@ -1,11 +1,16 @@
 # promtool unit tests for the SLO alerts. hack/check-alert-rules.sh copies the
 # shipped PrometheusRule groups, annotations stripped, to rules.yaml beside
 # this file and runs promtool test rules on it.
+#
+# An excluded window is written as `stale`, then `_`: the analyzer deletes the
+# observed series, so Prometheus writes a staleness marker and the series is
+# absent at once, not for the five-minute lookback a plain gap would give.
 rule_files:
   - rules.yaml
 evaluation_interval: 1m
 tests:
-  # 1. A sustained, judged TTFT miss with a live analyzer fires.
+  # 1. A sustained, judged TTFT miss with a live analyzer fires once five
+  #    misses are counted (t=4m) and for: 2m has passed (t=6m), not before.
   - interval: 1m
     input_series:
       - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
@@ -17,6 +22,13 @@ tests:
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
     alert_rule_test:
+      - eval_time: 5m
+        alertname: WVAModelSLOMissed
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts:
@@ -41,11 +53,12 @@ tests:
         alertname: WVAModelSLOMissed
         exp_alerts: []
 
-  # 3. Fewer than 10 judged miss-minutes (judged for 5, then excluded) does not fire.
+  # 3. Fewer than five judged misses (judged for 4 minutes, then excluded) does
+  #    not fire, though every judged minute missed.
   - interval: 1m
     input_series:
       - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
-        values: '5x5 stale'
+        values: '5x3 stale'
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
         values: '3x60'
       - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -53,7 +66,7 @@ tests:
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
     alert_rule_test:
-      - eval_time: 30m
+      - eval_time: 20m
         alertname: WVAModelSLOMissed
         exp_alerts: []
 
@@ -71,15 +84,19 @@ tests:
         values: '_x10 0.1x50'
       - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="new"}'
         values: '_x10 300+1x50'
-      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
-        values: '2x60'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m",pod="old"}'
+        values: '2x15'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m",pod="new"}'
+        values: '_x10 2x50'
     alert_rule_test:
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts:
           - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
 
-  # 5. Targets set, replicas present, nothing judged for an hour: info alert.
+  # 5. A target set from t=0, replicas present, nothing ever judged. A new
+  #    model is quiet for its first hour (the target must have existed an hour
+  #    ago), then for: 15m: pending from 60m, firing from 75m.
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -87,12 +104,115 @@ tests:
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x120'
     alert_rule_test:
+      - eval_time: 20m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
       - eval_time: 80m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
           - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
-  # 6. A parked model (no replicas) does not fire either.
+  # 6. Judged for the first 10 minutes, then never again: the last judgement
+  #    leaves the hour at 70m, then for: 15m, so firing from 85m and not at 80m.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '2x10 stale'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x120'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x120'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 7. A parked model (no replicas) fires neither alert.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5x10 stale'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x120'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x120'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WVAModelSLOMissed
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 8. A fleet that keeps scaling up while it misses: judged 3 minutes in every
+  #    10 (a replica starts every 10 minutes, each excluding 7), every judged
+  #    minute a miss. Counted in wall-clock minutes this never reaches a fixed
+  #    count; counted against judged minutes it fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x60'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x60'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 9. Misses in fewer than half of the judged minutes: 9 misses, then 21
+  #    minutes that meet the target. Does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5x8 2x21'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x60'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x60'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WVAModelSLOMissed
+        exp_alerts: []
+
+  # 10. Recovery: a miss for 30 minutes, then the target met. Still firing at
+  #     40m (20 misses of 30 judged), resolved by 50m (10 of 30).
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5x29 2x60'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x90'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x90'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x90'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 50m
+        alertname: WVAModelSLOMissed
+        exp_alerts: []
+
+  # 11. The freshness gate is per objective: a TTFT miss whose request count
+  #     froze does not fire because TPOT's count still moves.
   - interval: 1m
     input_series:
       - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -100,10 +220,16 @@ tests:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
         values: '3x60'
       - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x19 320x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
-        values: '0x60'
+        values: '2x60'
     alert_rule_test:
+      - eval_time: 15m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts: []
