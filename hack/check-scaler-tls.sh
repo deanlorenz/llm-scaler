@@ -325,6 +325,9 @@ run() {
         WVA_SCOPE=namespace
         KEDA_NAMESPACE_EXPLICIT=true
         KEDA_NAMESPACE=keda
+        # What the previous run read back must not leak into this one.
+        unset WVA_SCALER_TLS_ON WVA_SCALER_TLS_PROVIDER_RESOLVED WVA_SCALER_CLIENT_CA_HASH WVA_SCALER_TLS_WANTED \
+            WVA_SCALER_TLS_MIGRATE_ROWS WVA_SCALER_KEDA_DEFERRED WVA_SCALER_TLS_MIGRATE_MODE
         local kv
         for kv in "$@"; do eval "$kv"; done
         declare -F "${call%% *}" >/dev/null || { echo "${call%% *} is not defined" >"$WORK/refusal"; exit 2; }
@@ -332,14 +335,16 @@ run() {
         local st=$?
         # Plain assignments, not `declare -p`: sourced inside run, a declare
         # would make them local to it.
-        printf 'WVA_SCALER_TLS_ON=%q\nWVA_SCALER_TLS_PROVIDER_RESOLVED=%q\nWVA_SCALER_CLIENT_CA_HASH=%q\nWVA_SCALER_TLS_WANTED=%q\nWVA_SCALER_TLS_MIGRATE_ROWS=%q\nWVA_SCALER_KEDA_DEFERRED=%q\n' \
+        printf 'WVA_SCALER_TLS_ON=%q\nWVA_SCALER_TLS_PROVIDER_RESOLVED=%q\nWVA_SCALER_CLIENT_CA_HASH=%q\nWVA_SCALER_TLS_WANTED=%q\nWVA_SCALER_TLS_MIGRATE_ROWS=%q\nWVA_SCALER_KEDA_DEFERRED=%q\nWVA_SCALER_TLS_MIGRATE_MODE=%q\n' \
             "${WVA_SCALER_TLS_ON:-}" "${WVA_SCALER_TLS_PROVIDER_RESOLVED:-}" "${WVA_SCALER_CLIENT_CA_HASH:-}" \
-            "${WVA_SCALER_TLS_WANTED:-}" "${WVA_SCALER_TLS_MIGRATE_ROWS:-}" "${WVA_SCALER_KEDA_DEFERRED:-}" >"$WORK/vars"
+            "${WVA_SCALER_TLS_WANTED:-}" "${WVA_SCALER_TLS_MIGRATE_ROWS:-}" "${WVA_SCALER_KEDA_DEFERRED:-}" \
+            "${WVA_SCALER_TLS_MIGRATE_MODE:-}" >"$WORK/vars"
         exit "$st"
     )
     RC=$?
     WVA_SCALER_TLS_ON="" WVA_SCALER_TLS_PROVIDER_RESOLVED="" WVA_SCALER_CLIENT_CA_HASH=""
     WVA_SCALER_TLS_WANTED="" WVA_SCALER_TLS_MIGRATE_ROWS="" WVA_SCALER_KEDA_DEFERRED=""
+    WVA_SCALER_TLS_MIGRATE_MODE=""
     # shellcheck disable=SC1091
     . "$WORK/vars" 2>/dev/null || true
 }
@@ -739,9 +744,10 @@ reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA=absent KEDA_HELM_INSTALL=true
 ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && [ "$WVA_SCALER_KEDA_DEFERRED" = true ] && [ ! -s "$WORK/keda-writes" ]' "deferred: exit $RC, on=$WVA_SCALER_TLS_ON deferred=$WVA_SCALER_KEDA_DEFERRED, keda writes '$(tr '\n' ' ' <"$WORK/keda-writes")'"
-run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true STUB_CM=absent
+# The install runs it in the shell wva_scaler_tls_prepare set WANTED in.
+run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true WVA_SCALER_TLS_WANTED=true STUB_CM=absent
 ok '[ "$RC" = 0 ] && grep -q "cta/$CTA" "$WORK/keda-writes"' "deferred: after KEDA, exit $RC, wrote '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/refusal")"
-run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true STUB_CM=absent STUB_KEDA=absent
+run wva_scaler_tls_after_keda WVA_SCALER_KEDA_DEFERRED=true WVA_SCALER_TLS_WANTED=true STUB_CM=absent STUB_KEDA=absent
 ok '[ "$RC" = 1 ]' "deferred: KEDA still absent after its install is a refusal, whatever the default (exit $RC)"
 
 echo "== default: no right to create a ClusterTriggerAuthentication: plaintext, with a warning"
@@ -920,12 +926,20 @@ run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent KEDA_NA
     "STUB_APISERVICE='openshift-keda keda-metrics-apiserver'"
 ok '[ "$RC" = 0 ] && grep -q "kubectl rollout restart deployment/keda-operator -n openshift-keda" "$WORK/warnings"' "restart command on a CMA-style cluster: $(grep -i restart "$WORK/warnings")"
 
-echo "== a first write of KEDA's side while KEDA runs asks for a restart (uninstall, then reinstall)"
+echo "== a first write of KEDA's side while KEDA runs and ScaledObjects use the TLS address asks for a restart"
+reset_store
+fresh_k
+echo '{}' >"$STORE/deployment@keda__keda-operator.json"
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "written for the first time while KEDA.s operator is running" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "reinstall: no restart notice: $(cat "$WORK/warnings")"
+
+echo "== a first write of KEDA's side while KEDA runs, with no ScaledObject on the TLS address, is a note, not a warning"
 reset_store
 fresh_k
 echo '{}' >"$STORE/deployment@keda__keda-operator.json"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
-ok '[ "$RC" = 0 ] && grep -q "written for the first time while KEDA.s operator is running" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "reinstall: no restart notice: $(cat "$WORK/warnings")"
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && ! grep -q "rollout restart" "$WORK/warnings" && grep -q "written for the first time. If this scaler was installed here before" "$WORK/info" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/info"' "plain first install with KEDA running: exit $RC, on=$WVA_SCALER_TLS_ON, warnings '$(cat "$WORK/warnings")', info '$(grep -i restart "$WORK/info")'"
 reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
@@ -1111,6 +1125,38 @@ reset_store
 run wva_scaler_tls_provision_openssl
 ok 'grep -q "serving certificate is valid 365 days, KEDA.s client certificate 3650 days" "$WORK/info"' "issued line: $(grep issued "$WORK/info")"
 
+# ---------------------------------------------------------------- moving back while plaintext stays
+# The fix that install and verify print for ScaledObjects stranded on the TLS
+# address is WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true; on a controller
+# that is already plaintext, that run must move them, or the advice loops.
+echo "== plaintext controller, ScaledObjects on the TLS address, WVA_SCALER_TLS=false + migrate: they move back"
+reset_store
+fresh_k
+put_deploy plaintext
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true WVA_APPLY_SCOPE=controller
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && [ "$WVA_SCALER_TLS_MIGRATE_MODE" = plaintext ]' "plaintext + migrate: exit $RC, on=$WVA_SCALER_TLS_ON rows='$WVA_SCALER_TLS_MIGRATE_ROWS' mode='$WVA_SCALER_TLS_MIGRATE_MODE' (want apps/app-so, plaintext): $(cat "$WORK/refusal" "$WORK/warnings")"
+ok '! grep -q "not-Ready" "$WORK/warnings"' "plaintext + migrate: still warns that they are stranded: $(cat "$WORK/warnings")"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=plaintext
+PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
+ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_PLAIN_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0] | has(\"authenticationRef\")")" = false ]' "plaintext + migrate: patch '$PATCHED'"
+
+echo "== the default stays plaintext (KEDA side not written) with migrate: TLS ScaledObjects move back"
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS_MIGRATE=true WVA_APPLY_SCOPE=controller STUB_CM=absent
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && [ "$WVA_SCALER_TLS_MIGRATE_ROWS" = apps/app-so ] && [ "$WVA_SCALER_TLS_MIGRATE_MODE" = plaintext ]' "default, no marker, migrate: exit $RC, on=$WVA_SCALER_TLS_ON rows='$WVA_SCALER_TLS_MIGRATE_ROWS' mode='$WVA_SCALER_TLS_MIGRATE_MODE': $(cat "$WORK/refusal")"
+
+# ---------------------------------------------------------------- a stale CA on the first turn-on
+echo "== controller phase, first turn-on, KEDA trusts an old CA: stays plaintext (default) or refuses (explicit)"
+rm -rf "$STORE"; cp -r "$WORK/store.admin" "$STORE"
+rm -f "$WORK/so.json"
+marker_edit '.data.caSha256 = "0000"'
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_APPLY_SCOPE=controller STUB_CM=absent
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && ! grep -q -- "--external-scaler-cert-path" "$WORK/k/kustomization.yaml"' "stale CA, first turn-on: TLS went on although every handshake would fail (exit $RC, on=$WVA_SCALER_TLS_ON)"
+ok 'grep -q "stays on plaintext" "$WORK/warnings" && grep -q "KEDA trusts a different CA" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "stale CA, first turn-on: no warning with the fix: $(cat "$WORK/warnings")"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true WVA_APPLY_SCOPE=controller STUB_CM=absent
+ok '[ "$RC" = 1 ] && grep -q "KEDA trusts a different CA" "$WORK/refusal" && grep -q "setup-prereqs" "$WORK/refusal" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/refusal"' "stale CA, explicit: exit $RC, $(cat "$WORK/refusal")"
 
 # ---------------------------------------------------------------- the marker is the installer's
 echo "== a ConfigMap wva-scaler-keda-auth this installer did not write is refused, not overwritten"

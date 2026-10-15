@@ -885,8 +885,16 @@ wva_scaler_keda_auth_apply() {
         log_warning "KEDA's client certificate or the CA it trusts changed. KEDA keeps the TLS of a connection it already has until it restarts, so restart KEDA's operator now:  $(wva_scaler_keda_restart_cmd)"
     elif [ "$obj_state" = absent ] && wva_scaler_keda_operator_may_run; then
         # A first write while KEDA runs: after an uninstall and reinstall, KEDA
-        # still holds the connection it built with the old certificate.
-        log_warning "KEDA's side was written for the first time while KEDA's operator is running. If this scaler was installed here before (an uninstall and reinstall), KEDA still holds the old certificate and every handshake fails until it restarts. Then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+        # still holds the connection it built with the old certificate. That
+        # matters only when ScaledObjects already dial the TLS address, or when
+        # they cannot be listed; on a plain first install it is a note.
+        local tls_rows tls_rc=0
+        tls_rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || tls_rc=$?
+        if [ "$tls_rc" != 0 ] || [ -n "$tls_rows" ]; then
+            log_warning "KEDA's side was written for the first time while KEDA's operator is running, and ScaledObjects already use the scaler's TLS address (or they cannot be listed). If this scaler was installed here before (an uninstall and reinstall), KEDA still holds the old certificate and every handshake fails until it restarts. Then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+        else
+            log_info "KEDA's side was written for the first time. If this scaler was installed here before and KEDA's operator was not restarted since, restart it:  $(wva_scaler_keda_restart_cmd)"
+        fi
     fi
 }
 
@@ -1250,7 +1258,15 @@ wva_scaler_tls_prepare() {
             fi ;;
         *)
             wva_scaler_keda_marker_state
-            if [ "$WVA_SCALER_KEDA_READY" != true ]; then
+            # KEDA trusting an old CA fails every handshake. A controller that
+            # already has TLS keeps it and is warned (below); one that does
+            # not yet is not turned on into that.
+            if [ "$WVA_SCALER_KEDA_READY" = true ] && [ "$WVA_SCALER_KEDA_CA_STALE" = true ] \
+                && [ "$WVA_SCALER_TLS_KEPT" != true ]; then
+                WVA_SCALER_KEDA_READY=false
+                WVA_SCALER_KEDA_WHY="KEDA trusts a different CA than the one that signs the scaler's certificate now, so every handshake would fail. A cluster admin runs:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+                wva_scaler_keda_not_ready "$WVA_SCALER_KEDA_WHY"
+            elif [ "$WVA_SCALER_KEDA_READY" != true ]; then
                 if [ "$WVA_SCALER_TLS_KEPT" = true ]; then
                     log_warning "External scaler TLS stays on, but KEDA's side is not usable: $WVA_SCALER_KEDA_WHY. A cluster admin runs:  $(wva_make_cmd setup-prereqs)"
                 else
@@ -1318,11 +1334,20 @@ wva_scaler_tls_stay_plaintext() {
 }
 
 # wva_scaler_tls_warn_stranded warns about ScaledObjects on the TLS address or
-# reference while the scaler stays on plaintext: they are not-Ready.
+# reference while the scaler stays on plaintext: they are not-Ready. With
+# WVA_SCALER_TLS_MIGRATE=true it moves them back to the plaintext address
+# instead, once the controller is applied (WVA_SCALER_TLS_MIGRATE_ROWS).
 wva_scaler_tls_warn_stranded() {
     local rows rc=0
     rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
     [ "$rc" = 0 ] && [ -n "$rows" ] || return 0
+    if [ "${WVA_SCALER_TLS_MIGRATE:-false}" = true ]; then
+        WVA_SCALER_TLS_MIGRATE_ROWS="$rows"
+        WVA_SCALER_TLS_MIGRATE_MODE=plaintext
+        log_info "The external scaler stays on plaintext gRPC. These ScaledObjects move back to the plaintext scaler address once the controller is applied (WVA_SCALER_TLS_MIGRATE=true):"
+        printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
+        return 0
+    fi
     log_warning "These ScaledObjects use the scaler's TLS address or authenticationRef, but it stays on plaintext, so they are not-Ready:"
     printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
     log_warning "  Fix what keeps TLS off (above), or move them back:  $(wva_scaler_tls_migrate_cmd false)"

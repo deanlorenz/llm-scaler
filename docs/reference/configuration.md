@@ -529,7 +529,8 @@ ScaledObject that mixes them is not-Ready, and nothing it targets scales;
 ScaledObject's scaler trigger in place: the address, and the
 `authenticationRef`. Each is not-Ready for a few seconds while the two catch
 up; the fallback holds its replicas. The same flag with `WVA_SCALER_TLS=false`
-moves them back. A ScaledObject managed by GitOps is put back by GitOps:
+moves them back. It also moves them back whenever the scaler stays on
+plaintext, for example while KEDA's side is not ready. A ScaledObject managed by GitOps is put back by GitOps:
 change it at the source.
 
 **Who writes what:**
@@ -568,7 +569,8 @@ plaintext.
   restarts, and every handshake fails. The installer prints the command:
   - `make setup-prereqs`, when the CA or KEDA's certificate changed;
   - `make setup-prereqs`, when it writes KEDA's side for the first time while
-    KEDA runs (it cannot tell a reinstall from a first install);
+    KEDA runs and ScaledObjects already use the TLS address. That is what a
+    reinstall looks like. On a plain first install it only notes the command;
   - `make undeploy-wva` (the admin's), when it removed KEDA's side.
 
   ```bash
@@ -580,7 +582,8 @@ plaintext.
 
 - **OpenShift** rotates its service CA by itself. When it does, a cluster admin
   re-runs `make setup-prereqs`, then restarts KEDA's operator.
-  `make verify-deployment` warns when KEDA trusts an old CA.
+  `make verify-deployment` warns when KEDA trusts an old CA. Until it is fixed,
+  `make deploy-wva` does not turn TLS on for a controller that is on plaintext.
 
 **Check it.** `make verify-deployment` prints:
 
