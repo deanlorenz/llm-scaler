@@ -107,6 +107,26 @@ optimizer:
 			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "false"))
 			Expect(d[controllerstatus.KeyPolicyError]).To(ContainSubstring("kvCacheThreshold"))
 		})
+
+		It("records the default entry's ignored fields, and clears them on a clean load", func() {
+			r := newReconciler(policyConfigMap(systemNS, "", quotaShadowPolicy+
+				"scaleToZero:\n  retentionPeriod: 5 minutes\nshapeChangeHoldSeconds: -1\n"))
+			reconcile(r, systemNS)
+
+			d := status.Data()
+			// Ignored, not rejected: the entry and its limiter still apply.
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "true"))
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "quota/install-quota"))
+			Expect(d[controllerstatus.KeyPolicyIgnored]).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+			Expect(d[controllerstatus.KeyPolicyIgnored]).To(ContainSubstring(`shapeChangeHoldSeconds="-1"`))
+
+			var cm corev1.ConfigMap
+			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &cm)).To(Succeed())
+			cm.Data[config.GlobalDefaultsKey] = quotaShadowPolicy
+			Expect(r.Reader.(client.Client).Update(ctx, &cm)).To(Succeed())
+			reconcile(r, systemNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+		})
 	})
 
 	Context("when a separate policy namespace holds the policy", func() {

@@ -28,6 +28,11 @@
 //	                       that entry.
 //	policyError            why the "default" entry was rejected; empty when
 //	                       accepted.
+//	policyIgnored          the fields of the accepted "default" entry that were
+//	                       ignored because their value cannot be used, each as
+//	                       <field>="<value>": <reason>, joined by "; ". The
+//	                       entry still applies and those fields act as unset.
+//	                       Empty when none.
 //	limiter                the limiter in force, "<mode>/<entry names>": for
 //	                       example "quota/install-quota",
 //	                       "inventory/gpu-inventory", or "none".
@@ -59,6 +64,7 @@ import (
 	"maps"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +95,7 @@ const (
 	KeyPolicyResourceVersion = "policyResourceVersion"
 	KeyPolicyAccepted        = "policyAccepted"
 	KeyPolicyError           = "policyError"
+	KeyPolicyIgnored         = "policyIgnored"
 	KeyLimiter               = "limiter"
 	KeyUtilizationShare      = "utilizationShare"
 	KeyUtilizationShareError = "utilizationShareError"
@@ -175,6 +182,7 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 			KeyPolicyResourceVersion: "",
 			KeyPolicyAccepted:        strconv.FormatBool(true),
 			KeyPolicyError:           "",
+			KeyPolicyIgnored:         "",
 			KeyLimiter:               string(config.LimiterTypeNone),
 			KeyUtilizationShare:      constants.UtilizationShareModeOff,
 			KeyUtilizationShareError: "",
@@ -186,12 +194,14 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 
 // RecordPolicy records that the policy ConfigMap namespace/name at
 // resourceVersion has been applied, with rejected the reason its "default"
-// entry was dropped (nil when it was accepted). An empty resourceVersion
-// records that no policy ConfigMap is in force. It refreshes the values
-// derived from cfg in the same update, so a reader never sees the new version
-// beside the old limiter or optimizer mode. Call it only after the content is
-// applied to cfg.
-func (p *Publisher) RecordPolicy(cfg *config.Config, namespace, name, resourceVersion string, rejected error) {
+// entry was dropped (nil when it was accepted) and ignored the fields of that
+// entry that were cleared as unusable (nil when none). An empty
+// resourceVersion records that no policy ConfigMap is in force. It refreshes
+// the values derived from cfg in the same update, so a reader never sees the
+// new version beside the old limiter or optimizer mode. Call it only after the
+// content is applied to cfg.
+func (p *Publisher) RecordPolicy(cfg *config.Config, namespace, name, resourceVersion string,
+	rejected error, ignored []config.IgnoredField) {
 	if p == nil {
 		return
 	}
@@ -202,6 +212,7 @@ func (p *Publisher) RecordPolicy(cfg *config.Config, namespace, name, resourceVe
 		d[KeyPolicyResourceVersion] = resourceVersion
 		d[KeyPolicyAccepted] = strconv.FormatBool(rejected == nil)
 		d[KeyPolicyError] = errText(rejected)
+		d[KeyPolicyIgnored] = ignoredText(ignored)
 	})
 }
 
@@ -418,6 +429,14 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func ignoredText(ignored []config.IgnoredField) string {
+	parts := make([]string, len(ignored))
+	for i, f := range ignored {
+		parts[i] = f.String()
+	}
+	return strings.Join(parts, "; ")
 }
 
 // sleep waits d or until ctx is done, reporting whether the full wait elapsed.

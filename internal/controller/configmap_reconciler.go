@@ -145,7 +145,7 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 			// to this controller's own namespace, handing limit-setting to whoever
 			// writes that — the party the policy namespace exists to take it from.
 			r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-			r.Status.RecordPolicy(r.Config, namespace, name, "", nil)
+			r.Status.RecordPolicy(r.Config, namespace, name, "", nil, nil)
 			logger.Info("Cluster policy ConfigMap deleted: no limiters or quotas are in force",
 				"policyNamespace", namespace, "configMap", name)
 		}
@@ -249,7 +249,7 @@ func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *c
 func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, cm *corev1.ConfigMap) {
 	logger := log.FromContext(ctx)
 
-	configs, _, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
+	configs, _, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
 	policy, ok := configs[config.GlobalDefaultsKey]
 	if !ok {
 		// An empty or absent default entry means no bound was declared. That must
@@ -257,14 +257,15 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 		// place: a cluster admin who deletes a quota expects it to stop applying.
 		r.Config.UpdateClusterPolicy(nil)
 		r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(),
-			rejected[config.GlobalDefaultsKey])
+			rejected[config.GlobalDefaultsKey], nil)
 		logger.Info("Policy namespace ConfigMap has no default entry: no cluster limiters or quotas are in force",
 			"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName())
 		return
 	}
 
 	r.Config.UpdateClusterPolicy(&policy)
-	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
+	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil,
+		ignored[config.GlobalDefaultsKey])
 	logger.Info("Loaded cluster policy from the policy namespace",
 		"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
 		"limiters", len(policy.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
@@ -280,7 +281,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 	}
 
 	// Parse scaling policy entries
-	configs, count, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
+	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
 
 	// Update global or namespace-local config
 	if isGlobal {
@@ -308,7 +309,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 			r.Status.ObserveConfig(r.Config)
 		} else {
 			r.Status.RecordPolicy(r.Config, namespace, cm.GetName(), cm.GetResourceVersion(),
-				rejected[config.GlobalDefaultsKey])
+				rejected[config.GlobalDefaultsKey], ignored[config.GlobalDefaultsKey])
 		}
 		logger.Info("Updated global scaling policy from ConfigMap", "entries", count)
 		r.warnIfThroughputRegistrationDiverged(logger, cm)

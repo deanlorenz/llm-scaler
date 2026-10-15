@@ -82,7 +82,11 @@ them.
 A `retentionPeriod` that is not a positive duration (for example `5 minutes` or
 `0s`) is ignored, and the field acts as if it were not set. The rest of the
 entry still applies. The controller logs a warning each time it reads the
-ConfigMap, not just the first time.
+ConfigMap, not just the first time. It also counts each ignored field in
+`wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
+For the `default` entry of the cluster policy, the `policyIgnored` key of the
+[controller-status ConfigMap](operations.md#what-the-controller-is-running-with)
+names the field.
 
 #### How long until a model actually reaches zero
 

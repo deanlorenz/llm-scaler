@@ -69,7 +69,7 @@ func TestDefaultEntryWithBadRetentionKeepsLimiters(t *testing.T) {
 			"shapeChangeHoldSeconds: -10\n" +
 			"limiters:\n  - type: quota\n    name: team-quota\n    scope: cluster\n    quotas: { H100: 8 }\n",
 	}
-	configs, count, rejected := parseScalingPolicyConfigRejects(data, logr.Discard())
+	configs, count, rejected, _ := parseScalingPolicyConfigRejects(data, logr.Discard())
 	if count != 1 || len(rejected) != 0 {
 		t.Fatalf("parsed %d entries, rejected %v; want the default entry kept", count, rejected)
 	}

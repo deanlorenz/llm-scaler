@@ -729,9 +729,17 @@ type IgnoredField struct {
 	Reason error
 }
 
+// String formats the field as `<field>="<value>": <reason>`, the form the
+// controller-status ConfigMap reports it in.
+func (f IgnoredField) String() string {
+	return fmt.Sprintf("%s=%q: %v", f.Field, f.Value, f.Reason)
+}
+
 // ResetUnusableFields clears each setting whose value cannot be used, so the
 // entry behaves as if that one field were unset, and returns what it cleared.
-// The caller warns once per ConfigMap load with the result.
+// The caller warns with the result on every read of the ConfigMap, counts each
+// field as an error, and reports the "default" entry's in the controller
+// status.
 //
 // These are reset instead of failing Validate because a failing entry is
 // dropped whole. For the "default" entry that drops its limiters too, so a typo

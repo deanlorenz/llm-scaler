@@ -34,16 +34,28 @@ import (
 // parseScalingPolicyConfig parses saturation scaling configuration from ConfigMap data.
 // Returns the parsed configs and count of successfully parsed entries.
 func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int) {
-	configs, count, _ := parseScalingPolicyConfigRejects(cmData, logger)
+	configs, count, _, _ := parseScalingPolicyConfigRejects(cmData, logger)
 	return configs, count
 }
+
+// ignoredFieldErrorType is the error_type a field cleared by
+// ResetUnusableFields is counted under, once per field per ConfigMap read.
+const ignoredFieldErrorType = "Ignored unusable saturation scaling config field"
 
 // parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
 // by key, why each entry that was dropped was dropped: a YAML error, or a
 // Normalize or Validate failure. An entry that parsed is never in it.
-func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int, map[string]error) {
+//
+// ignored holds, by key, the fields of each KEPT entry that were cleared
+// because their value could not be used (ScalingPolicy.ResetUnusableFields).
+// The entry still applies; only those fields act as unset. A dropped entry is
+// reported in rejected only.
+func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (
+	config.ScalingPolicySet, int, map[string]error, map[string][]config.IgnoredField,
+) {
 	configs := make(config.ScalingPolicySet)
 	rejected := map[string]error{}
+	ignored := map[string][]config.IgnoredField{}
 	count := 0
 	for key, yamlStr := range cmData {
 		var satConfig config.ScalingPolicy
@@ -69,11 +81,14 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		satConfig.ApplyEntryDefaults()
 		// An unusable value in one of these fields is ignored, not fatal:
 		// rejecting the entry would drop everything else in it, and for the
-		// default entry that includes its limiters.
-		for _, f := range satConfig.ResetUnusableFields() {
+		// default entry that includes its limiters. Counted as an error as well
+		// as logged, so it is as visible as a rejected entry.
+		fieldsIgnored := satConfig.ResetUnusableFields()
+		for _, f := range fieldsIgnored {
 			logger.Info("WARNING: ignoring an unusable value in a saturation scaling config entry; "+
 				"the field is treated as unset",
 				"key", key, "field", f.Field, "value", f.Value, "reason", f.Reason.Error())
+			metrics.RecordError(constants.ComponentController, ignoredFieldErrorType)
 		}
 		if err := satConfig.Validate(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
@@ -124,9 +139,12 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 				"key", key, "analyzers", slices.Sorted(maps.Keys(satConfig.AnalyzerDefinitions)))
 		}
 		configs[key] = satConfig
+		if len(fieldsIgnored) > 0 {
+			ignored[key] = fieldsIgnored
+		}
 		count++
 	}
-	return configs, count, rejected
+	return configs, count, rejected, ignored
 }
 
 // isNamespaceConfigEnabled checks if a namespace has the opt-in label for namespace-local ConfigMaps.

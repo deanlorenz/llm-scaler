@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
@@ -90,7 +91,7 @@ func TestFlushCreatesOnceAndSkipsUnchanged(t *testing.T) {
 		t.Errorf("leader = %q, want POD_NAME", got)
 	}
 	for _, k := range []string{KeyPolicyNamespace, KeyPolicyConfigMap, KeyPolicyResourceVersion, KeyPolicyAccepted,
-		KeyPolicyError, KeyLimiter, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
+		KeyPolicyError, KeyPolicyIgnored, KeyLimiter, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
 		if _, ok := cm.Data[k]; !ok {
 			t.Errorf("key %q missing", k)
 		}
@@ -211,22 +212,41 @@ func TestFlushKeepsStateWhenForbidden(t *testing.T) {
 func TestRecordPolicy(t *testing.T) {
 	w := &writes{}
 	p, _ := newTestPublisher(t, w)
-	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "42", errors.New("bad threshold"))
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "42", errors.New("bad threshold"), nil)
 	d := p.Data()
 	if d[KeyPolicyNamespace] != "policy-ns" || d[KeyPolicyConfigMap] != "wva-scaling-policy-config" ||
 		d[KeyPolicyResourceVersion] != "42" || d[KeyPolicyAccepted] != "false" || d[KeyPolicyError] != "bad threshold" {
 		t.Errorf("data = %v", d)
 	}
-	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "43", nil)
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "43", nil, nil)
 	d = p.Data()
-	if d[KeyPolicyResourceVersion] != "43" || d[KeyPolicyAccepted] != "true" || d[KeyPolicyError] != "" {
+	if d[KeyPolicyResourceVersion] != "43" || d[KeyPolicyAccepted] != "true" || d[KeyPolicyError] != "" ||
+		d[KeyPolicyIgnored] != "" {
 		t.Errorf("data = %v", d)
+	}
+
+	// An accepted entry with fields ignored as unusable: still accepted, and
+	// every ignored field is named with its value and the reason.
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "44", nil, []config.IgnoredField{
+		{Field: "scaleToZero.retentionPeriod", Value: "5 minutes", Reason: errors.New("bad duration")},
+		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
+	})
+	d = p.Data()
+	want := `scaleToZero.retentionPeriod="5 minutes": bad duration; shapeChangeHoldSeconds="-1": must be >= 0`
+	if d[KeyPolicyAccepted] != "true" || d[KeyPolicyIgnored] != want {
+		t.Errorf("policyIgnored = %q, want %q (data = %v)", d[KeyPolicyIgnored], want, d)
+	}
+
+	// The next load without them clears the key.
+	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "45", nil, nil)
+	if got := p.Data()[KeyPolicyIgnored]; got != "" {
+		t.Errorf("policyIgnored after a clean load = %q, want empty", got)
 	}
 }
 
 func TestNilPublisherIsSafe(t *testing.T) {
 	var p *Publisher
-	p.RecordPolicy(nil, "a", "b", "1", nil)
+	p.RecordPolicy(nil, "a", "b", "1", nil, nil)
 	p.ObserveConfig(nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeOff, nil)
 	if p.Data() != nil {
@@ -266,7 +286,7 @@ func TestStartWritesAndCoalesces(t *testing.T) {
 
 	// Three changes inside one debounce window land as one update.
 	p.SetUtilizationShare(constants.UtilizationShareModeShadow, nil)
-	p.RecordPolicy(nil, testNamespace, "wva-scaling-policy-config", "7", nil)
+	p.RecordPolicy(nil, testNamespace, "wva-scaling-policy-config", "7", nil, nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeActive, nil)
 	waitFor("the coalesced write", func() bool {
 		d := read()
