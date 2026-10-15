@@ -322,7 +322,7 @@ func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
 	assert.Contains(t, expr, "increase(wva_borrow_releases_total[1h])")
 	assert.Contains(t, expr, "by (exported_namespace, model_name)",
 		"group by the scraped model namespace, as the other per-model alerts do")
-	assert.Regexp(t, `>\s*3\s*$`, expr)
+	assert.Regexp(t, `>\s*3\.5\s*$`, expr, "3.5: increase() reads three losses as about 3.1")
 }
 
 // Kueue's preemptions are not releases: they are counted on

@@ -27,7 +27,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; `wva_constraint_provider_skipped{reason="unobserved"}`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
 | Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `reason` in `limiterBudgets`; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold (withheld), Kueue cannot be trusted right now (frozen), or there is nothing to draw (counted, but 0) | [borrowing is withheld](#borrowing-is-withheld) |
 | scaled past nominal | a model holds more GPUs than its ClusterQueue's `nominalQuota`; `used` above `guaranteed` in `limiterBudgets`; `wva_kueue_borrowed_gpus > 0` | expected: borrowing is on by default for a Kueue-backed namespace quota | [past nominal](#a-model-runs-past-its-kueue-nominal-quota) |
-| a Kueue borrowing alert fires | `WVAKueueBorrowDrift`, `WVAKueueVersionUnknown`, `WVAKueueLenderWaitingPastCooldown` | Kueue accounts differently, its version cannot be read, a lender is not getting its capacity back | [Kueue borrowing alerts](#kueue-borrowing-alerts) |
+| a Kueue borrowing alert fires | `WVAKueueReaderStale`, `WVAKueueControllerDown`, `WVAKueueBorrowDrift`, `WVAKueueVersionUnknown`, `WVAKueueVersionUntested`, `WVAKueueLenderWaitingPastCooldown` | a read is failing, the Kueue controller is not running, Kueue accounts differently, its version cannot be read or is untested, a lender is not getting its capacity back | [Kueue borrowing alerts](#kueue-borrowing-alerts) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
@@ -411,15 +411,10 @@ What to do:
   for example a prefill pinned to RDMA nodes. It then stays `Pending`, and
   `WVAKueuePodsUnplaced` fires. Check the pod's scheduling message with
   `kubectl describe pod`; free or add a node it can use.
-- **The Kueue reader is stale** (`WVAKueueReaderStale`, reason `stale` on
-  `wva_quota_borrow_withheld`): borrowing is frozen at the last figures, so
-  nothing new is borrowed and nothing is given back. To hand capacity back by
-  hand meanwhile, lower the borrowing model's `maxReplicaCount` on its
-  ScaledObject, or set `countBorrowable: false` on the quota entry, which caps
-  every namespace at nominal.
+- **Borrowing is frozen as `stale`**: see
+  [WVAKueueReaderStale](#wvakueuereaderstale).
 - **The Kueue controller is down** (reason `kueue-controller-down`): see
-  [Borrowing is withheld](#borrowing-is-withheld). Borrowing freezes: nothing
-  new is borrowed, nothing is given back, and nothing borrowed is taken away.
+  [WVAKueueControllerDown](#wvakueuecontrollerdown).
 - **A lender waits past the cooldown**: see
   [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown).
 - **Pods refused by a ResourceQuota**: no shipped alert covers this. No
@@ -565,10 +560,63 @@ What to do, if it is not wanted:
 
 ## Kueue borrowing alerts
 
-Runbooks for the alerts on Kueue borrowing. `WVAKueueReaderStale`,
-`WVAKueuePodsUnplaced` and `WVAKueueBorrowThrashing` point at
+Runbooks for the alerts on Kueue borrowing. `WVAKueuePodsUnplaced` and
+`WVAKueueBorrowThrashing` point at
 [replicas dropped](#replicas-dropped-under-kueue-borrowing);
 `WVAKueueNeverRead` at [never read](#a-kueue-backed-quota-was-never-read).
+In the commands, `<kueue-ns>` is where Kueue runs: `kueue-system`, or the
+entry's `kueue.controllerNamespace`.
+
+### WVAKueueReaderStale
+
+**Fires when** borrowing in one namespace has been frozen as `stale` for 5
+minutes. The alert names the namespace and the quota entry.
+
+Nothing new is borrowed there and nothing is given back. Two causes:
+
+- **Every namespace of the entry fires at once**: the last Kueue read failed,
+  or is older than twice `refreshInterval`.
+- **One namespace fires alone**: only its ResourceQuota read is failing. After
+  five refresh intervals it becomes `resourcequota-unreadable` instead.
+
+```bash
+$LOGS | grep 'external quota source unreadable' | tail -3
+kubectl auth can-i list resourcequotas -n <namespace> --as=system:serviceaccount:$NS:wva-controller-manager
+```
+
+The log line names the read that failed; usually RBAC or a missing CRD. To
+hand capacity back by hand meanwhile, lower the borrowing model's
+`maxReplicaCount` on its ScaledObject, or set `countBorrowable: false` on the
+entry, which caps the namespace at nominal.
+
+### WVAKueueControllerDown
+
+**Fires when** borrowing has been frozen as `kueue-controller-down` for 5
+minutes: Kueue's API answers, but no running Kueue controller is seen.
+
+Nothing new is borrowed, nothing is given back, and nothing borrowed is taken
+away. Kueue itself admits and preempts nothing while it is down.
+
+```bash
+kubectl get deploy kueue-controller-manager -n <kueue-ns>
+kubectl get lease c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> -o jsonpath='{.spec.renewTime}{"\n"}'
+kubectl auth can-i get deployments/kueue-controller-manager -n <kueue-ns> \
+  --as=system:serviceaccount:$NS:wva-controller-manager
+kubectl auth can-i get leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> \
+  --as=system:serviceaccount:$NS:wva-controller-manager
+```
+
+- **Kueue is not running**, or its Lease is not renewed: fix Kueue.
+- **`no` above**: a namespace-scoped install needs the Role in the Kueue
+  namespace. A cluster admin runs `NAMESPACE=<namespace>
+  KUEUE_NAMESPACE=<kueue-ns> make setup-prereqs`, with the other variables the
+  install used.
+- **Kueue runs elsewhere than `kueue-system`**: set
+  `kueue.controllerNamespace` on the entry.
+- **Kueue runs with a custom leader-election ID**: the scaling manager reads
+  only the default Lease, `c1f6bfd2.kueue.x-k8s.io`, so such a Kueue always
+  reads as down. Borrowing cannot be counted there; set
+  `countBorrowable: false`.
 
 ### WVAKueueBorrowDrift
 
@@ -587,31 +635,44 @@ $LOGS | grep 'Kueue borrowing applied' | tail -1     # kueueBorrowed per queue r
 ```
 
 Usual causes: a Kueue feature borrowing does not detect (`waitForPodsReady`
-with `blockAdmission`), a second scaling manager borrowing in the same cohort,
-or a Kueue release whose accounting changed. Brief drift while Kueue admits or
-preempts is normal; 15 minutes is not. If it persists, set
-`countBorrowable: false` on the entry and report the two figures.
+with `blockAdmission`), or a Kueue release whose accounting changed. Brief
+drift while Kueue admits or preempts is normal; 15 minutes is not. If it
+persists, set `countBorrowable: false` on the entry and report the two
+figures.
 
 ### WVAKueueVersionUnknown
 
-**Fires when** `wva_kueue_controller_version_known` is 0: the controller cannot
-tell which Kueue release runs, and withholds borrowing as
-`kueue-version-unknown` everywhere (unless `kueue.assumeTestedVersion: true`).
+**Fires when** `wva_kueue_controller_version_known` has been 0 for 10 minutes,
+per controller instance: the controller cannot tell which Kueue release runs,
+and withholds borrowing as `kueue-version-unknown`.
+
+The gauge is 1 once the version is read, or when the entry sets
+`kueue.assumeTestedVersion: true`. It is published only while some quota
+entry counts borrowing, so a cluster with borrowing off never fires.
 
 ```bash
-kubectl get deploy kueue-controller-manager -n kueue-system \
+kubectl get deploy kueue-controller-manager -n <kueue-ns> \
   -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
-kubectl auth can-i get deployments/kueue-controller-manager -n kueue-system \
+kubectl auth can-i get deployments/kueue-controller-manager -n <kueue-ns> \
   --as=system:serviceaccount:$NS:wva-controller-manager
 ```
 
 - **The image has no version tag** (a digest only): if the release is a
   [tested one](quota-limiter.md#supported-kueue-versions), set
-  `kueue.assumeTestedVersion: true` on the entry.
-- **The Deployment cannot be read** (`no` above, or not found): the reason is
-  then `kueue-controller-down`, and `assumeTestedVersion` does not lift it.
-  Re-run the admin phase for the Role in the Kueue namespace, or set
-  `kueue.controllerNamespace` where Kueue runs elsewhere.
+  `kueue.assumeTestedVersion: true` on the entry. The alert clears.
+- **The Deployment cannot be read** (`no` above, or not found): borrowing is
+  frozen as `kueue-controller-down`, which `assumeTestedVersion` does not
+  lift. See [WVAKueueControllerDown](#wvakueuecontrollerdown).
+
+### WVAKueueVersionUntested
+
+**Fires when** (severity `info`) Kueue has run a release outside the
+[tested range](quota-limiter.md#supported-kueue-versions) for 30 minutes.
+
+Borrowing is withheld (`kueue-version-untested`): every namespace stays at
+its nominal quota, and nothing is evicted. Run a tested release to count
+borrowing again. `assumeTestedVersion` does not lift this reason: it only
+stands in for a version that cannot be read.
 
 ### WVAKueueLenderWaitingPastCooldown
 
