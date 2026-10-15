@@ -35,7 +35,7 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 	if e.config == nil {
 		return nil, false
 	}
-	zNamespace, zCluster, ok := e.config.UtilizationShareWakeScores(group.namespace, group.modelID)
+	zNamespace, zCluster, ok := e.config.UtilizationShareWakeScores(group.namespace, group.modelID, group.tiers())
 	if !ok {
 		return nil, false
 	}
@@ -46,7 +46,10 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 	decodes, prefills := splitByRole(candidates)
 	sortByCost(decodes)
 	sortByCost(prefills)
-	needPrefill := e.requirePrefill(group) && !covered.prefill
+	// A model with no prefill variant has no prefill to wait for, as in
+	// selectServingSet: requiring one there left nothing to claim with, so a
+	// decode-only model never woke by a claim.
+	needPrefill := len(prefills) > 0 && e.requirePrefill(group) && !covered.prefill
 	last, lastAcc := "", ""
 	for _, set := range shareWakeSets(decodes, prefills, !covered.decode, needPrefill) {
 		if !sameResolvedAccelerator(set) {

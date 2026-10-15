@@ -1,16 +1,17 @@
 package config
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Named scaling policies: reusable tiers, selected per variant by the
 // `scalingPolicy` key in its scaler's trigger metadata.
 //
 // A policy is a SCALING TIER — "interactive", "standard", "batch" — carrying
-// thresholds, priority and analyzer selection. It does not decide scale-to-zero
-// for the variants that name it: scale-to-zero is read from the default entry,
-// the tier its defaultPolicy names, or a per-model override — not from a tier a
-// variant names (the enforcement path calls ResolveScalingPolicy, which passes
-// no tier). It is deliberately
+// thresholds, priority, analyzer selection and the scale-to-zero and
+// scale-from-zero settings of the models whose variants name it (see
+// ModelTiers for a model whose variants name more than one). It is deliberately
 // IDENTITY-FREE: no model, no namespace. That is the whole point. Per-(model,
 // namespace) entries bind settings to identity, so "loosen the thresholds for
 // everything interactive" is an edit per model; a tier makes it one edit, and the
@@ -27,6 +28,30 @@ import "strings"
 // {modelID}#{namespace} key form could never work.
 //
 // See docs/proposals/wva-keda-external-scaler.md §7.5.
+
+// ModelTiers returns the policy tiers a model is resolved under, given the tier
+// each of its variants names (one element per variant, "" for none). Sorted
+// and distinct, so the result is the same on every cycle.
+//
+// A variant that names no tier follows the ones that do. Its thresholds already
+// did (one tier per model, the smallest named), so its scale-to-zero,
+// scale-from-zero and weight follow too: a P/D model with only its decode tagged
+// must not be held at its untagged prefill's default. "" is returned only when
+// no variant names a tier, and then it is the only element. Empty input is
+// treated as one untagged variant.
+func ModelTiers(named []string) []string {
+	var tiers []string
+	for _, tier := range named {
+		if tier != "" && !slices.Contains(tiers, tier) {
+			tiers = append(tiers, tier)
+		}
+	}
+	if len(tiers) == 0 {
+		return []string{""}
+	}
+	slices.Sort(tiers)
+	return tiers
+}
 
 // PolicyEntryKey reports whether a ConfigMap entry names a policy tier, rather
 // than the default entry or a per-model override.

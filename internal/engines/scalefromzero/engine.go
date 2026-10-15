@@ -639,8 +639,10 @@ func (e *Engine) publishActivation(
 
 	// Record event just before Actuation.Applied = true. Only when this call
 	// changed the published decision: the loop republishes the same activation
-	// every tick until KEDA has scaled the target off zero.
-	if changed && targetWorkloadReplicas > 0 {
+	// every tick until KEDA has scaled the target off zero. A wake always
+	// publishes at least one replica (the only caller passes 1), so a changed
+	// decision is always a scale-up.
+	if changed {
 		e.recorder.Eventf(&va, corev1.EventTypeNormal, constants.K8SEventScaledUp, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
 	}
 	va.Status.Actuation.Applied = true

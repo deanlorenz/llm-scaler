@@ -573,13 +573,26 @@ func (c *Config) NamespaceHasLocalPolicy(namespace string) bool {
 // with its own scaling-policy map is not planned in the cluster group (section
 // 8.2), so there its wakes claim nothing: zCluster is +Inf. ok is false when
 // the optimizer is not acting.
-func (c *Config) UtilizationShareWakeScores(namespace, modelID string) (zNamespace, zCluster float64, ok bool) {
+//
+// tiers are the tiers the model's variants name (ModelTiers). The weight is
+// resolved per tier and the highest wins: steady state weighs the model under
+// its tier, and a wake resolved with no tier ignored a tier's weightClass, so
+// a critical model claimed as a standard one.
+func (c *Config) UtilizationShareWakeScores(namespace, modelID string, tiers []string) (zNamespace, zCluster float64, ok bool) {
 	us, selected, err := c.UtilizationShare()
 	if err != nil || !selected || us.Shadow {
 		return 0, 0, false
 	}
-	policy := ResolveScalingPolicy(c.ScalingPolicyConfigForNamespace(namespace), modelID, namespace)
-	w, _ := us.Weight(policy.WeightClass, policy.Weight) // an invalid weight resolves to the default class
+	entries := c.ScalingPolicyConfigForNamespace(namespace)
+	if len(tiers) == 0 {
+		tiers = []string{""}
+	}
+	w := 0.0
+	for _, tier := range tiers {
+		policy := ResolveScalingPolicyForTier(entries, modelID, namespace, tier)
+		tw, _ := us.Weight(policy.WeightClass, policy.Weight) // an invalid weight resolves to the default class
+		w = max(w, tw)
+	}
 	zNamespace, zCluster = -w, -w
 	if c.NamespaceHasLocalPolicy(namespace) {
 		zCluster = math.Inf(1)

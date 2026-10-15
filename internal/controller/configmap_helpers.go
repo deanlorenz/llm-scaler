@@ -75,17 +75,15 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			rejected[key] = err
 			continue
 		}
-		// Apply defaults before validation (handles omitempty zero-values like
-		// scaleUpThreshold). Entry defaults only: priority and the capacity
-		// thresholds stay zero ("unset") so tiers and overrides inherit them in
-		// the merge; the resolved policy is fully defaulted after it.
-		satConfig.ApplyEntryDefaults()
 		// An unusable value in one of these fields is ignored, not fatal:
 		// rejecting the entry would drop everything else in it, and for the
 		// default entry that includes its limiters. Cleared before Validate, so
 		// it cannot fail the entry.
 		fieldsIgnored := satConfig.ResetUnusableFields()
-		if err := satConfig.Validate(); err != nil {
+		// Validated as a defaulted COPY. The stored entry keeps every field it
+		// does not set at zero ("unset"), so a tier or override inherits it in
+		// the merge; the resolved policy is fully defaulted after it.
+		if err := satConfig.ValidateEntry(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)

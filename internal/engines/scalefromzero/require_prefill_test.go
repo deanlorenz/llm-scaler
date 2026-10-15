@@ -67,6 +67,48 @@ func TestRequirePrefillResolvesPerModelAndTierEntries(t *testing.T) {
 			want:  true,
 		},
 		{
+			// Any one tier requiring prefill is enough, wherever it sorts.
+			name: "the second of two tiers turns it on",
+			entries: map[string]config.ScalingPolicy{
+				"default": {},
+				"a":       {},
+				"b":       {ScaleFromZero: &config.ScaleFromZeroEnvelope{RequirePrefill: &on}},
+			},
+			group: group("a", "b"),
+			want:  true,
+		},
+		{
+			name: "the second of two tiers turns it on, variants in reverse order",
+			entries: map[string]config.ScalingPolicy{
+				"default": {},
+				"a":       {},
+				"b":       {ScaleFromZero: &config.ScaleFromZeroEnvelope{RequirePrefill: &on}},
+			},
+			group: group("b", "a"),
+			want:  true,
+		},
+		{
+			name: "no tier requires it",
+			entries: map[string]config.ScalingPolicy{
+				"default": {},
+				"a":       {},
+				"b":       {ScaleFromZero: &config.ScaleFromZeroEnvelope{RequirePrefill: &off}},
+			},
+			group: group("a", "b"),
+			want:  false,
+		},
+		{
+			// An untagged variant follows the tagged one, as the thresholds do:
+			// the default entry is not folded in beside a named tier.
+			name: "an untagged variant follows the tagged tier, not the default",
+			entries: map[string]config.ScalingPolicy{
+				"default": {ScaleFromZero: &config.ScaleFromZeroEnvelope{RequirePrefill: &on}},
+				"pd-gpu":  {ScaleFromZero: &config.ScaleFromZeroEnvelope{RequirePrefill: &off}},
+			},
+			group: group("pd-gpu", ""),
+			want:  false,
+		},
+		{
 			name: "another model's override does not apply",
 			entries: map[string]config.ScalingPolicy{
 				"default": {},

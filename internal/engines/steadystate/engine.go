@@ -1018,18 +1018,21 @@ func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (strin
 	return named[0], named
 }
 
-// variantTiers returns every policy tier a model's variants selected, with ""
-// standing for the variants that named none (they resolve the default entry and
-// its defaultPolicy). Sorted, so the result is the same on every cycle.
+// variantTiers returns every policy tier a model's variants selected
+// (config.ModelTiers). A variant that names no tier follows the ones that do,
+// as it does for the thresholds (modelPolicy); "" stands for the default entry
+// and its defaultPolicy only when no variant names a tier.
+//
+// It used to keep "" beside the named tiers, so a P/D model with only its
+// decode tagged was also folded with the default entry: its thresholds
+// followed the decode's tier while a default that disabled scale-to-zero kept
+// the whole model, every GPU of it, from ever parking.
 func variantTiers(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) []string {
-	var tiers []string
+	named := make([]string, 0, len(vas))
 	for i := range vas {
-		if p := vas[i].Spec.ScalingPolicy; !slices.Contains(tiers, p) {
-			tiers = append(tiers, p)
-		}
+		named = append(named, vas[i].Spec.ScalingPolicy)
 	}
-	slices.Sort(tiers)
-	return tiers
+	return config.ModelTiers(named)
 }
 
 // scaleToZeroPolicy resolves the scale-to-zero half of a model's policy from
@@ -1046,13 +1049,15 @@ func variantTiers(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) []str
 //
 // The result is the first tier's resolved entry with its scaleToZero envelope
 // replaced by the folded verdict; the enforcer and the blocked-reason readout
-// read only that envelope, so both see the same answer.
+// read only that envelope, so both see the same answer. disabledBy lists the
+// tiers whose resolution disables scale-to-zero ("" for the default entry), so
+// a policy-forbids-zero on a model with mixed tiers can be traced to one.
 func scaleToZeroPolicy(
 	cfg *config.Config,
 	configMap map[string]config.ScalingPolicy,
 	modelID, namespace string,
 	tiers []string,
-) config.ScalingPolicy {
+) (policy config.ScalingPolicy, disabledBy []string) {
 	if len(tiers) == 0 {
 		tiers = []string{""}
 	}
@@ -1064,12 +1069,27 @@ func scaleToZeroPolicy(
 		if i == 0 {
 			out = resolved
 		}
-		enabled = enabled && config.ResolveScaleToZeroEnabled(cfg, &resolved)
+		if !config.ResolveScaleToZeroEnabled(cfg, &resolved) {
+			enabled = false
+			disabledBy = append(disabledBy, tier)
+		}
 		retention = max(retention, config.ResolveScaleToZeroRetention(&resolved))
 	}
 	out.ScaleToZero = &config.ScaleToZeroEnvelope{
 		Enabled:         &enabled,
 		RetentionPeriod: retention.String(),
+	}
+	return out, disabledBy
+}
+
+// tierNames spells policy tiers for a log line: "" is the default entry.
+func tierNames(tiers []string) []string {
+	out := make([]string, 0, len(tiers))
+	for _, tier := range tiers {
+		if tier == "" {
+			tier = config.GlobalDefaultsKey
+		}
+		out = append(out, tier)
 	}
 	return out
 }
@@ -1594,7 +1614,7 @@ func (e *Engine) applyScaleToZeroEnforcement(
 	// Resolved before the gates below, not after, because the gates are half of
 	// what decides whether this model can ever park and the policy is the other
 	// half — reporting one without the other cannot say which is binding.
-	satConfig := scaleToZeroPolicy(e.Config, e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace, tiers)
+	satConfig, disabledBy := scaleToZeroPolicy(e.Config, e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace, tiers)
 	scaleToZeroEnabled := config.ResolveScaleToZeroEnabled(e.Config, &satConfig)
 	modelEngine, engineSupported := soleEngineFor(scaleTargets)
 
@@ -1617,6 +1637,18 @@ func (e *Engine) applyScaleToZeroEnforcement(
 		constants.ScalingBlockedReasonsPolicy, blockedReasons)
 	if e.recordBlockedModel(namespace, modelID, blockedReasons) {
 		scalingpolicy.LogBlockedTransition(ctx, namespace, modelID, blockedReasons)
+	}
+	// policy-forbids-zero names no tier, and with mixed tiers the operator
+	// cannot tell which one disabled it. Said once per change of that set.
+	var forbiddenBy []string
+	if slices.Contains(blockedReasons, constants.ScalingBlockedPolicyForbidsZero) {
+		forbiddenBy = tierNames(disabledBy)
+	}
+	if e.recordForbiddenBy(namespace, modelID, forbiddenBy) && len(forbiddenBy) > 0 {
+		logger.Info("Scale-to-zero is disabled by the scaling policy of a tier this model's variants name; "+
+			"enable scaleToZero on every such tier",
+			"modelID", modelID, "namespace", namespace,
+			"tiers", tierNames(tiers), "disabledBy", forbiddenBy)
 	}
 
 	if len(decisions) == 0 {

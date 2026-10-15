@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"time"
 
@@ -441,22 +440,14 @@ func (e *Engine) placementBasisChanged(namespace, summary string) bool {
 //
 // When the model's variants selected different tiers, any one of them requiring
 // prefill is enough: the setting states a time-to-first-token requirement, and a
-// decode-only wake is the thing it forbids.
+// decode-only wake is the thing it forbids. A variant that names no tier
+// follows the ones that do (config.ModelTiers).
 func (e *Engine) requirePrefill(group modelGroup) bool {
 	if e.config == nil {
 		return false
 	}
 	entries := e.config.ScalingPolicyConfigForNamespace(group.namespace)
-	tiers := []string{""}
-	if len(group.variants) > 0 {
-		tiers = tiers[:0]
-		for i := range group.variants {
-			if tier := group.variants[i].Spec.ScalingPolicy; !slices.Contains(tiers, tier) {
-				tiers = append(tiers, tier)
-			}
-		}
-	}
-	for _, tier := range tiers {
+	for _, tier := range group.tiers() {
 		resolved := config.ResolveScalingPolicyForTier(entries, group.modelID, group.namespace, tier)
 		if resolved.RequirePrefillOnScaleFromZero() {
 			return true

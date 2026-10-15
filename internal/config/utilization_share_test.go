@@ -443,15 +443,33 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 		p := parsePolicy(quotaLimiters)
 		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
-		zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m")
+		zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", nil)
 		Expect(ok).To(BeTrue())
 		Expect(zNs).To(Equal(-1.0))
 		Expect(zCl).To(Equal(-1.0))
 
 		c.UpdateScalingPolicyConfigForNamespace("tenant", map[string]ScalingPolicy{GlobalDefaultsKey: {WeightClass: "critical"}})
-		zNs, zCl, _ = c.UtilizationShareWakeScores("tenant", "m")
+		zNs, zCl, _ = c.UtilizationShareWakeScores("tenant", "m", nil)
 		Expect(zNs).To(BeNumerically("<", -1.0), "its own map counts in its own quota group")
 		Expect(math.IsInf(zCl, 1)).To(BeTrue(), "a tenant-set weight claims nothing cluster-wide")
+	})
+
+	It("weighs the model under its tiers, the highest weight winning", func() {
+		c := NewTestConfig()
+		p := parsePolicy(quotaLimiters)
+		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+			GlobalDefaultsKey: p,
+			"bulk":            {WeightClass: "best-effort"},
+			"hot":             {WeightClass: "critical"},
+		})
+		crit := DefaultWeightClasses["critical"]
+		for _, tiers := range [][]string{{"hot"}, {"bulk", "hot"}, {"hot", "bulk"}} {
+			zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", tiers)
+			Expect(ok).To(BeTrue())
+			Expect(zNs).To(Equal(-crit), "tiers %v", tiers)
+			Expect(zCl).To(Equal(-crit), "tiers %v", tiers)
+		}
 	})
 
 	It("is off in shadow mode", func() {
@@ -459,7 +477,7 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 		p := parsePolicy(quotaLimiters)
 		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare, UtilizationShare: &UtilizationShareConfig{Shadow: true}}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
-		_, _, ok := c.UtilizationShareWakeScores("ns", "m")
+		_, _, ok := c.UtilizationShareWakeScores("ns", "m", nil)
 		Expect(ok).To(BeFalse())
 	})
 })

@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -153,7 +154,7 @@ func TestScaleToZeroPolicyTakesTheLongestRetention(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scaleToZeroPolicy(config.NewTestConfig(), tc.policies, "m", "ns", tc.tiers)
+			got, _ := scaleToZeroPolicy(config.NewTestConfig(), tc.policies, "m", "ns", tc.tiers)
 			if r := config.ResolveScaleToZeroRetention(&got); r != tc.want {
 				t.Fatalf("retention = %v, want %v", r, tc.want)
 			}
@@ -161,5 +162,48 @@ func TestScaleToZeroPolicyTakesTheLongestRetention(t *testing.T) {
 				t.Fatal("every tier inherits enabled from the default; the fold must keep it enabled")
 			}
 		})
+	}
+}
+
+// With mixed tiers, policy-forbids-zero must be traceable to the tier that
+// disabled it: the fold names every tier whose resolution disables it, and the
+// enforcer reports that set once per change.
+func TestScaleToZeroPolicyNamesTheTiersThatDisableIt(t *testing.T) {
+	on, off := true, false
+	policies := map[string]config.ScalingPolicy{
+		"default":     {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on}},
+		"batch":       {},
+		"interactive": {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
+		"realtime":    {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
+	}
+	got, disabledBy := scaleToZeroPolicy(config.NewTestConfig(), policies, "m", "ns",
+		[]string{"batch", "interactive", "realtime"})
+	if config.ResolveScaleToZeroEnabled(nil, &got) {
+		t.Fatal("two tiers disable scale-to-zero; the fold must disable it")
+	}
+	if want := []string{"interactive", "realtime"}; !slices.Equal(disabledBy, want) {
+		t.Fatalf("disabledBy = %v, want %v", disabledBy, want)
+	}
+	if _, disabledBy := scaleToZeroPolicy(config.NewTestConfig(), policies, "m", "ns", []string{"batch"}); disabledBy != nil {
+		t.Fatalf("an enabled tier reported disabledBy = %v", disabledBy)
+	}
+	if got := tierNames([]string{"", "batch"}); !slices.Equal(got, []string{"default", "batch"}) {
+		t.Fatalf("tierNames = %v, want the default entry spelled out", got)
+	}
+
+	e := &Engine{}
+	if !e.recordForbiddenBy("ns", "m", []string{"interactive"}) {
+		t.Fatal("first set must be reported")
+	}
+	if e.recordForbiddenBy("ns", "m", []string{"interactive"}) {
+		t.Fatal("an unchanged set must stay quiet")
+	}
+	// The blocked-reason bookkeeping shares the entry and must not reset it.
+	e.recordBlockedModel("ns", "m", []string{"policy-forbids-zero"})
+	if e.recordForbiddenBy("ns", "m", []string{"interactive"}) {
+		t.Fatal("recording the reasons forgot the tiers")
+	}
+	if !e.recordForbiddenBy("ns", "m", []string{"interactive", "realtime"}) {
+		t.Fatal("a second tier disabling it is a change")
 	}
 }

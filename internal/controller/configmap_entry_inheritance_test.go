@@ -60,6 +60,53 @@ func TestParsedEntriesInheritCapacityThresholdsAndPriority(t *testing.T) {
 	}
 }
 
+// A tier or per-model override that says only `analyzerName: saturation` must
+// not replace the default entry's band or analyzer list. Defaulting each
+// stored V2-shaped entry gave it the built-in band (0.85/0.70) and a
+// saturation-only analyzer list, which the merge then copied over the
+// default's tuned 0.9 and its throughput analyzer.
+func TestParsedEntriesInheritBandAndAnalyzers(t *testing.T) {
+	data := map[string]string{
+		"default": "scaleUpThreshold: 0.9\nscaleDownBoundary: 0.6\n" +
+			"analyzers:\n  - name: saturation\n  - name: throughput\n",
+		"batch":     "analyzerName: saturation\nkvCacheThreshold: 0.7\n",
+		"one-model": "model_id: m\nnamespace: ns\nanalyzerName: saturation\nkvCacheThreshold: 0.7\n",
+	}
+	configs, count := parseScalingPolicyConfig(data, logr.Discard())
+	if count != 3 {
+		t.Fatalf("parsed %d entries, want 3", count)
+	}
+	for _, tc := range []struct{ name, model, tier string }{
+		{name: "tier", model: "other", tier: "batch"},
+		{name: "override", model: "m", tier: ""},
+	} {
+		got := config.ResolveScalingPolicyForTier(configs, tc.model, "ns", tc.tier)
+		if got.KvCacheThreshold != 0.7 {
+			t.Errorf("%s: kvCacheThreshold = %v, want the entry's 0.7", tc.name, got.KvCacheThreshold)
+		}
+		if got.ScaleUpThreshold != 0.9 || got.ScaleDownBoundary != 0.6 {
+			t.Errorf("%s: band = (%v, %v), want the default's (0.9, 0.6)", tc.name,
+				got.ScaleUpThreshold, got.ScaleDownBoundary)
+		}
+		if !got.AnalyzerEnabled("saturation") || !got.AnalyzerEnabled("throughput") || len(got.Analyzers) != 2 {
+			t.Errorf("%s: analyzers = %+v, want the default's saturation and throughput", tc.name, got.Analyzers)
+		}
+	}
+
+	// The stored entries are left as written; only the resolved policy is defaulted.
+	if b := configs["batch"]; b.ScaleUpThreshold != 0 || len(b.Analyzers) != 0 {
+		t.Errorf("stored tier was defaulted: band %v, analyzers %+v", b.ScaleUpThreshold, b.Analyzers)
+	}
+	// A V2-shaped tier on its own still resolves to a full V2 policy.
+	alone, _ := parseScalingPolicyConfig(map[string]string{"batch": "analyzerName: saturation\n"}, logr.Discard())
+	got := config.ResolveScalingPolicyForTier(alone, "m", "ns", "batch")
+	if got.ScaleUpThreshold != config.DefaultScaleUpThreshold || len(got.Analyzers) != 1 ||
+		got.Analyzers[0].Score != 1 || got.Analyzers[0].Enabled == nil || !*got.Analyzers[0].Enabled {
+		t.Errorf("lone V2 tier resolved to band %v, analyzers %+v; want the built-in defaults",
+			got.ScaleUpThreshold, got.Analyzers)
+	}
+}
+
 // A bad scaleToZero.retentionPeriod in the default entry must not drop the
 // entry. Dropping it drops its limiters, which turns off GPU quota enforcement
 // over a typo in an unrelated field.

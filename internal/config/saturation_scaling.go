@@ -476,10 +476,11 @@ func (c *ScalingPolicy) Normalize() error {
 // QueueLengthThreshold) are always defaulted when zero — the analyzer needs them
 // to size per-replica capacity. The scaling band (ScaleUpThreshold,
 // ScaleDownBoundary) and the Analyzers list are defaulted only for V2-shaped
-// configs (see ApplyEntryDefaults). A stored ConfigMap entry gets
-// ApplyEntryDefaults at parse time instead, so the fields it leaves out stay
-// zero and Merge() inherits them; the final resolved config is defaulted here
-// and calibrated post-merge via ApplyV2ThresholdDefaults().
+// configs (see ApplyEntryDefaults). A stored ConfigMap entry is never
+// defaulted (it is validated as a defaulted copy, ValidateEntry), so the
+// fields it leaves out stay zero and Merge() inherits them; the final resolved
+// config is defaulted here and calibrated post-merge via
+// ApplyV2ThresholdDefaults().
 func (c *ScalingPolicy) ApplyDefaults() {
 	if c.Priority == 0 {
 		c.Priority = DefaultPriority
@@ -494,16 +495,14 @@ func (c *ScalingPolicy) ApplyDefaults() {
 	c.ApplyEntryDefaults()
 }
 
-// ApplyEntryDefaults is ApplyDefaults for one STORED ConfigMap entry, before it
-// is merged with anything: it fills only what an entry needs to validate (the
-// band and analyzer list of a V2-shaped entry) and leaves priority and the
-// capacity thresholds at zero when the entry does not set them.
+// ApplyEntryDefaults fills what a V2-shaped policy needs to validate and run:
+// its band and its analyzer list. ApplyDefaults calls it on the resolved
+// policy; ValidateEntry calls it on a copy of one stored entry.
 //
-// Zero is "unset" to Merge. Defaulting those three on every entry made each one
-// look set, so a tier or a per-model override that never mentioned
-// kvCacheThreshold silently replaced the default entry's tuned value with
-// 0.80. The resolved policy gets them from ApplyDefaults after the merge
-// (ResolveScalingPolicyForTier).
+// It is never applied to a stored entry itself. Zero and empty are "unset" to
+// Merge, so a defaulted band or analyzer list on a tier that only said
+// `analyzerName: saturation` replaced the default entry's tuned band and
+// analyzer list during the merge.
 func (c *ScalingPolicy) ApplyEntryDefaults() {
 	if c.IsV2() {
 		if c.ScaleUpThreshold == 0 {
@@ -519,6 +518,10 @@ func (c *ScalingPolicy) ApplyEntryDefaults() {
 				{Name: "saturation", Score: 1.0, Enabled: &enabled},
 			}
 		}
+		// The list may be shared with a stored entry (Merge and struct copies
+		// do not copy slices). Defaulting it in place would write to the
+		// stored entry, from many goroutines at once.
+		c.Analyzers = slices.Clone(c.Analyzers)
 		// Apply per-entry defaults
 		for i := range c.Analyzers {
 			if c.Analyzers[i].Score == 0 {
@@ -530,6 +533,15 @@ func (c *ScalingPolicy) ApplyEntryDefaults() {
 			}
 		}
 	}
+}
+
+// ValidateEntry validates one stored ConfigMap entry as it would run: a copy
+// gets the entry defaults (ApplyEntryDefaults) and is validated. The entry
+// itself is left as written, so the fields it does not set stay unset and a
+// tier or per-model override inherits them from the layer below in Merge.
+func (c ScalingPolicy) ValidateEntry() error {
+	c.ApplyEntryDefaults()
+	return c.Validate()
 }
 
 // ApplyV2ThresholdDefaults fills zero-valued V2 thresholds (ScaleUpThreshold,
