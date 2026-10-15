@@ -26,8 +26,9 @@ import (
 
 const testGPUProduct = "NVIDIA-H100-80GB-HBM3"
 
-func gpuNode(name string) *corev1.Node {
-	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{
+// gpuNode is the fixture GPU node gpu-1, the node gpuPod places Pods on.
+func gpuNode() *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1", Labels: map[string]string{
 		"nvidia.com/gpu.product": testGPUProduct}}}
 }
 
@@ -72,7 +73,7 @@ func TestNamespaceScopedUsageCountsOtherTenants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	node := gpuNode("gpu-1")
+	node := gpuNode()
 	if err := direct.Create(ctx, node); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestForbiddenPodListIsReported(t *testing.T) {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	node := gpuNode("gpu-1")
+	node := gpuNode()
 	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
 	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node, gpuPod("mine-0", "mine", 2)).Build()
 	forbidden := true
@@ -156,7 +157,7 @@ func TestForbiddenPodListIsReported(t *testing.T) {
 	if got := byType[testGPUProduct]; got != 2 {
 		t.Errorf("fallback usage = %d, want the cache's 2", got)
 	}
-	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 1 {
+	if got := podAccessDenied(t, registry); got != 1 {
 		t.Errorf("%s = %v, want 1", constants.WVAPodAccessDenied, got)
 	}
 
@@ -164,7 +165,7 @@ func TestForbiddenPodListIsReported(t *testing.T) {
 	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 0 {
+	if got := podAccessDenied(t, registry); got != 0 {
 		t.Errorf("%s = %v after access was granted, want 0", constants.WVAPodAccessDenied, got)
 	}
 }
@@ -183,7 +184,7 @@ func TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure(t *testing.T) {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	node := gpuNode("gpu-1")
+	node := gpuNode()
 	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
 	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node, gpuPod("mine-0", "mine", 2)).Build()
 	reader := fake.NewClientBuilder().WithScheme(s).
@@ -197,7 +198,7 @@ func TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure(t *testing.T) {
 	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 0 {
+	if got := podAccessDenied(t, registry); got != 0 {
 		t.Errorf("%s = %v with no physical limiter in force, want 0", constants.WVAPodAccessDenied, got)
 	}
 
@@ -205,7 +206,7 @@ func TestForbiddenPodListWithoutPhysicalLimiterIsNotAFailure(t *testing.T) {
 	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := gauge(t, registry, constants.WVAPodAccessDenied); got != 1 {
+	if got := podAccessDenied(t, registry); got != 1 {
 		t.Errorf("%s = %v once a physical limiter is in force, want 1", constants.WVAPodAccessDenied, got)
 	}
 }
@@ -219,7 +220,7 @@ func TestPodListIsServedFromTheWatchCache(t *testing.T) {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	node := gpuNode("gpu-1")
+	node := gpuNode()
 	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
 	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
 	var sent []metav1.ListOptions
@@ -245,14 +246,15 @@ func TestPodListIsServedFromTheWatchCache(t *testing.T) {
 	}
 }
 
-func gauge(t *testing.T, registry *prometheus.Registry, name string) float64 {
+// podAccessDenied reads wva_pod_access_denied from registry, or -1 when absent.
+func podAccessDenied(t *testing.T, registry *prometheus.Registry) float64 {
 	t.Helper()
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range families {
-		if f.GetName() == name {
+		if f.GetName() == constants.WVAPodAccessDenied {
 			v := 0.0
 			for _, m := range f.GetMetric() {
 				v += m.GetGauge().GetValue()
