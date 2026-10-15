@@ -154,6 +154,12 @@ type SaturationAnalyzer struct {
 	// the arguments a variant left priced the new engine's service rate with
 	// the old engine's latency.
 	itlArgs map[string]string
+	// itlBaselineStash is a key's ITL baseline put aside under the arguments
+	// it was learned under (stashKey), for a rollback to them: the slope
+	// refits from new readings within a window, the baseline only on a full
+	// fit, which a fleet the router balances rarely spans -- dropped, a
+	// rollback priced the engine that measured it at the default intercept.
+	itlBaselineStash map[string]float64
 	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
 	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
@@ -327,6 +333,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		fleetShape:             make(map[string]*shapeMemo),
 		itlTracker:             itl.NewTracker(),
 		itlArgs:                make(map[string]string),
+		itlBaselineStash:       make(map[string]float64),
 		itlLines:               make(map[string]learnedLine),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -585,6 +592,18 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.startSeconds, key)
 			delete(a.startOutliers, key)
 			evicted.StartEstimates++
+		}
+	}
+	// The arguments the ITL state was learned under, and the baselines put
+	// aside for a rollback, go with their variant.
+	for key := range a.itlArgs {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlArgs, key)
+		}
+	}
+	for key := range a.itlBaselineStash {
+		if base, _, _ := strings.Cut(key, "#"); a.variantIsStale(base, now, variantTimeout) {
+			delete(a.itlBaselineStash, key)
 		}
 	}
 	// Belt and braces, and deliberately kept as such. Today

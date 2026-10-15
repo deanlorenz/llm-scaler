@@ -542,8 +542,9 @@ to the ConfigMap `wva-learned-state` at most once a minute, and the next
 controller reads it on its first cycle.
 If that read fails it is retried every minute; until it succeeds, for at
 most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
-strength and none is started or moved, so one started before the read
-cannot replace the stored one.
+strength and none is started or moved, so none started in that time
+replaces the stored one. After 10 minutes bounds start as usual, and a read
+that succeeds later keeps those over the stored ones.
 
 What is restored, and what is not:
 
@@ -556,8 +557,9 @@ What is restored, and what is not:
   keeps them; only the ITL baseline, a latency figure, needs the same image
   too;
 - a variant whose arguments changed while the controller was down restores
-  only its old measured capacity, and only as a **lower-only, expiring
-  figure** (`P2-prior` in the [cycle log](cycle-log.md)): it is used where it
+  its old measured capacity only as a **lower-only, expiring figure**, and
+  its old saturated throughput only as a hold-only floor (below). The
+  capacity (`P2-prior` in the [cycle log](cycle-log.md)) is used where it
   is below what the variant would otherwise be priced at, for 30 minutes of
   serving at full strength, then relaxes to the variant's own figure over 6
   hours of serving -- the same rule as a capacity borrowed from a sibling.

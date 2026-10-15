@@ -177,3 +177,72 @@ func TestAPendingRestartSurvivesARestart(t *testing.T) {
 		t.Errorf("the pending restart was lost across a restart: %+v", lb)
 	}
 }
+
+// The restart completes once: the bound then relaxes as any other.
+func TestARestartedBoundRelaxesAfterItsHold(t *testing.T) {
+	a, _, clock := waProcess(mtParams(64, "vllm:v1"))
+	key := rrKey(a, "variant-a")
+	b := mtParams(64, "vllm:v1")
+	a.mu.Lock()
+	a.lowerBounds[key] = &lowerBound{
+		armed: true, since: *clock, tick: *clock, seen: *clock,
+		donor: "variant-a", own: true, donorK2: 4000, args: b.ArgsFingerprint(), argsVersion: capacity.FingerprintVersion,
+		prior: 4000, priorSince: *clock, priorUsed: *clock,
+	}
+	a.notePreviousFigureLocked(key, rrWindow(3000))
+	a.mu.Unlock()
+	var got k2Borrow
+	for range 120 {
+		*clock = clock.Add(time.Minute)
+		got, _ = a.borrowedK2(key, "test-model", 12800, b, true, true)
+	}
+	if got.relaxed <= 0 {
+		t.Errorf("two hours after the restart the bound has not relaxed: %+v", got)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lowerBounds[key].rearmPending {
+		t.Error("the restart is still pending after the bound re-armed")
+	}
+}
+
+// A restart waiting for a previous figure goes with the figure: the variant's
+// own window retired it here, by a rollback, and a mark left behind re-armed
+// the sibling borrow -- spent again since -- at full strength once the window
+// was swept, on no new evidence.
+func TestARetiredPreviousFigureLeavesNoPendingRestart(t *testing.T) {
+	a, own, _, clock := lbProcess(t, 4000)
+	lbSpend(t, a, own, clock)
+	argsA, argsB := mtParams(256, "vllm:v1").ArgsFingerprint(), mtParams(64, "vllm:v1").ArgsFingerprint()
+	a.mu.Lock()
+	a.computeCapacityHistory[own] = rrWindow(9000)
+	a.k2WindowArgs[own] = argsA
+	a.k2WindowUnderLocked(own, argsB)
+	if lb := a.lowerBounds[own]; lb == nil || !lb.rearmPending {
+		a.mu.Unlock()
+		t.Fatal("precondition: the change of arguments left a restart pending")
+	}
+	a.k2WindowUnderLocked(own, argsA)
+	a.mu.Unlock()
+	// The change of arguments restarted the sibling borrow: new evidence.
+	// It runs its course again while the variant serves on its own window.
+	mtServe(a, clock, BorrowedK2Hold+BorrowedK2Relax+time.Minute)
+	a.mu.Lock()
+	delete(a.computeCapacityHistory, own)
+	delete(a.k2WindowArgs, own)
+	a.mu.Unlock()
+	if got, ok := a.borrowedK2(own, "test-model", 12800, mtParams(256, "vllm:v1"), true, true); ok {
+		t.Errorf("the spent borrow re-armed on a stale pending restart: %+v", got)
+	}
+}
+
+// The legacy form of a running borrow (a start alone) of a variant forgotten
+// before the restore is installed spent too.
+func TestAForgetBeforeTheRestoreEndsALegacyBorrowClock(t *testing.T) {
+	a, own, _, clock := lbProcess(t, 4000)
+	a.ForgetVariant("test-ns", "test-model", "variant-b", "t1")
+	a.RestoreLearnedState(LearnedState{K2BorrowedSince: map[string]time.Time{own: clock.Add(-10 * time.Minute)}})
+	if got, ok := a.borrowedK2(own, "test-model", 12800, mtParams(256, "vllm:v1"), true, true); ok {
+		t.Errorf("the forgotten variant borrows again: %+v", got)
+	}
+}

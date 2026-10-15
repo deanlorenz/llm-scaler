@@ -313,7 +313,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateRelaxed = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateBorrowRelaxed,
-			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising toward 1 over the next 6 hours. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
+			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes of serving), rising toward 1 over the next 6 hours of serving; an idle, parked or mid-rollout variant holds its place. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
 		},
 		learnedRelaxedLabels,
 	)
@@ -334,7 +334,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateRestores = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: constants.WVALearnedStateRestoresTotal,
-			Help: "Variants whose restored learned state was checked against their engine configuration after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: whole (the configuration matched; everything installed), args (the arguments matched on another engine image; everything but the ITL baseline installed), prior (the arguments differed; only the k2 and throughput windows installed, as lower-only figures and a hold-only service rate), incomplete (the configuration could not be read completely; only the k2 and throughput windows installed, as the variant's own under the same unread configuration, and otherwise as lower-only figures and a hold-only service rate) or differs (a document from before the arguments were recorded, whose configuration differs; only the k2 windows installed, as lower-only figures).",
+			Help: "Variants whose restored learned state was checked against their engine configuration after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: whole (the configuration matched; everything installed), args (the arguments matched on another engine image; everything but the ITL baseline installed), prior (the arguments differed; only the k2 and throughput windows installed, as lower-only figures and a hold-only service rate), incomplete (the configuration could not be read completely; only the k2 and throughput windows installed, as the variant's own under the same unread configuration, and otherwise as lower-only figures and a hold-only service rate; nothing when the document recorded no arguments) or differs (a document from before the arguments were recorded, whose configuration differs; only the k2 windows installed, as lower-only figures).",
 		},
 		[]string{constants.LabelOutcome},
 	)

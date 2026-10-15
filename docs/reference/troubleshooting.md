@@ -453,7 +453,12 @@ failed reads and writes, and the log says why (logger `learned-state`):
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
   `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
-  the stored state is not overwritten meanwhile.
+  the stored state is not overwritten meanwhile. For the first 10 minutes
+  lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
+  starts; after that they start as usual, and a read that succeeds later
+  keeps those over the stored ones -- a borrow the snapshot had as spent
+  runs its hold and relaxation again. Fix the Role within 10 minutes to
+  avoid it.
 - `Learned state: snapshot not restored` -- the document names no writer, or
   a controller in another namespace wrote it (a ConfigMap copied by hand).
 - `Learned state: the snapshot was over its size bound` -- the least recently

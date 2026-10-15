@@ -454,7 +454,7 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_borrow_relaxed`
 - **Type**: Gauge
-- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, then rising linearly toward 1 over the next 6 hours. When the relaxation completes the variant is on its own figure again: the borrow ends, and this series and the `k2` series of `wva_learned_state_borrowed` disappear, so the gauge never reads 1. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
+- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes of serving, then rising linearly toward 1 over the next 6 hours of serving. Serving means a Ready replica of the variant's own with requests on it in that output-length bucket: a variant that is idle, parked or mid-rollout holds its place, so the gauge can stay flat overnight. When the relaxation completes the variant is on its own figure again: the borrow ends, and this series and the `k2` series of `wva_learned_state_borrowed` disappear, so the gauge never reads 1. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
 - **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`. Present only while `wva_learned_state_borrowed{quantity="k2"}` is.
 
 ### `wva_learned_state_k2_source`
@@ -482,7 +482,7 @@ across a restart, are otherwise visible only in the logs.
   - `whole`: the configuration matched; everything was restored;
   - `args`: the arguments matched on another engine image; everything but the ITL baseline was restored;
   - `prior`: the arguments differed; the measured capacity was kept as a lower-only figure (`P2-prior`), and the old saturated throughput holds the throughput floor hold-only -- it may keep the fleet, never grow it -- for at most 30 minutes plus 6 hours of serving;
-  - `incomplete`: the configuration could not be read completely; the measured capacity and saturated throughput were kept as the variant's own when it runs the same unread configuration it was saved under, and otherwise as for `prior`;
+  - `incomplete`: the configuration could not be read completely; the measured capacity and saturated throughput were kept as the variant's own when it runs the same unread configuration it was saved under, and otherwise as for `prior`; nothing, when the snapshot recorded no engine arguments for the variant;
   - `differs`: a snapshot from an older release whose configuration differs; only the measured capacity was kept, as a lower-only figure.
 - **Use Case**: After a restart, `incomplete` or `differs` well above `whole` and `args` means the snapshot was mostly kept as lower-only figures -- flags the controller cannot resolve, or an upgrade that changed how configurations are identified. Many `prior` means many rollouts while the controller was down ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
 

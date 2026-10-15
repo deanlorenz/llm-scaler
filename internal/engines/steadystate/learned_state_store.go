@@ -568,7 +568,12 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		case lb.Prior <= 0 && (!lb.Armed || spentBound(lb)):
 			e.spare, e.at = true, lb.Tick
 		case lb.Armed && !lb.Tick.IsZero():
+			// Its clock waits while the variant idles, its figure's last use
+			// does not: one in use overnight is not one a retuned key left.
 			e.at = lb.Tick
+			if lb.PriorUsed.After(e.at) {
+				e.at = lb.PriorUsed
+			}
 		case !lb.Armed && !lb.PriorUsed.IsZero():
 			e.at = lb.PriorUsed
 		}

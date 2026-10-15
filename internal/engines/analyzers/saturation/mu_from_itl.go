@@ -242,19 +242,30 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // itlUnderArgs drops key's ITL window and baseline when they were learned
 // under engine arguments other than args, the ones its variant runs now, and
 // records args for them. A key seen for the first time adopts args, as an
-// untagged k2 window does (window_args.go). Unlike a k2 window nothing is put
-// aside for a rollback: a line refits within its window, where a k2 waits for
-// a saturation.
+// untagged k2 window does (window_args.go). The baseline is put aside under
+// the arguments it was learned under, and a rollback to them gets it back
+// (itlBaselineStash); the window is not: the slope refits from new readings
+// within it.
 func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 	if args == "" {
 		return
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	tag, ok := a.itlArgs[key]
 	a.itlArgs[key] = args
-	a.mu.Unlock()
-	if ok && tag != args {
-		a.itlTracker.Sweep(a.now(), func(k string) bool { return k == key })
+	if !ok || tag == args {
+		return
+	}
+	// The tracker's lock is taken under a.mu here, as EvictStaleHistory takes
+	// it: the tracker never calls back into the analyzer.
+	if b, ok := a.itlTracker.Baseline(key); ok {
+		a.itlBaselineStash[stashKey(key, tag)] = b
+	}
+	a.itlTracker.Sweep(a.now(), func(k string) bool { return k == key })
+	if b, ok := a.itlBaselineStash[stashKey(key, args)]; ok {
+		delete(a.itlBaselineStash, stashKey(key, args))
+		a.itlTracker.SetBaseline(key, b)
 	}
 }
 

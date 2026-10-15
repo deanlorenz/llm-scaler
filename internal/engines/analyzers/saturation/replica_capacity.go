@@ -583,7 +583,9 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	if !(adm.bridge || (adm.rollout && adm.admitted())) || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+	// A bridge, or a Ready replica of the variant's own mid-rollout.
+	atReading := adm.bridge || (adm.rollout && adm.admitted())
+	if !atReading || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
 	}
 	why := "a warm-pool bridge"

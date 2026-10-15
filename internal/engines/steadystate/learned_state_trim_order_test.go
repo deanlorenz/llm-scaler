@@ -108,3 +108,22 @@ func TestTheLowerBoundsAreHeldUntilTheSnapshotIsRead(t *testing.T) {
 	e.restoreLearnedState(ctx, now.Add(learnedStateBoundHold))
 	assert.Equal(t, []bool{true, false}, spy.held, "a store that stays unreadable does not hold them for good")
 }
+
+// A running bound holding a figure goes by the figure's last use when that is
+// later than its clock: the clock waits while the variant idles, the figure is
+// still in use.
+func TestTheSizeBoundKeepsABoundWhoseFigureIsInUse(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	s := saturation.LearnedState{
+		LowerBounds: map[string]saturation.LowerBoundSnapshot{
+			"ns|v|m|H100|1|both|b1|q5": {Armed: true, Since: now.Add(-11 * time.Hour), Tick: now.Add(-10 * time.Hour), Seen: now,
+				Own: true, DonorK2: 4000, Prior: 4000, PriorSince: now.Add(-11 * time.Hour), PriorUsed: now},
+		},
+		K2: map[string]capacity.RollingAverageSnapshot{
+			"ns|v|m|H100|1|both|b2|q5": {Values: []float64{4000}, LastUsed: now.Add(-time.Hour), LastWritten: now.Add(-time.Hour)},
+		},
+	}
+	entries := learnedStateEntries(s)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "k2|ns|v|m|H100|1|both|b2|q5", entries[0].key, "the bound in use went before an hour-old window")
+}

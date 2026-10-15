@@ -61,3 +61,38 @@ func TestTheITLWindowTakesNoReadingsMidRollout(t *testing.T) {
 		t.Errorf("mid-rollout the ITL window took %d readings", n)
 	}
 }
+
+// A rollback to the arguments a baseline was learned under gets it back: the
+// slope refits within a window, the baseline only on a full fit.
+func TestARollbackGetsTheITLBaselineBack(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	const key = "test-ns|test-model|decode-a|H100|1"
+	a.itlUnderArgs(key, "args-a")
+	a.itlTracker.SetBaseline(key, 0.0012)
+	a.itlUnderArgs(key, "args-b")
+	a.itlUnderArgs(key, "args-a")
+	if b, ok := a.itlBaselines()[key]; !ok || b != 0.0012 {
+		t.Errorf("the rollback lost the baseline its arguments measured: %v %v", b, ok)
+	}
+}
+
+// The cycle checks the ITL state against the arguments the variant runs.
+func TestACycleDropsTheITLBaselineOfArgumentsTheVariantLeft(t *testing.T) {
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+	a := NewSaturationAnalyzer(store)
+	in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "decode-a", 4000, 16000, 0, 100, 50)},
+		[]domain.VariantReplicaState{{VariantName: "decode-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode}})
+	key := a.itlWindowKey("test-ns", "test-model", "decode-a", "H100", 1)
+	if _, err := a.Analyze(context.Background(), in); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	a.itlTracker.SetBaseline(key, 0.011)
+	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")})
+	if _, err := a.Analyze(context.Background(), in); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if b, ok := a.itlBaselines()[key]; ok {
+		t.Errorf("the cycle kept the baseline of the arguments the variant left: %v", b)
+	}
+}

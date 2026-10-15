@@ -180,9 +180,14 @@ type lowerBound struct {
 	rearmPending bool
 }
 
-// clearPrior drops the variant's previous figure.
+// clearPrior drops the variant's previous figure, and the restart it was
+// waiting to complete (rearmPending): the variant's own window retired it, or
+// a forget did, and the mark left behind re-armed a spent sibling borrow at
+// full strength the next time the bucket's window was empty -- on no new
+// evidence.
 func (lb *lowerBound) clearPrior() {
 	lb.prior, lb.priorSince, lb.priorAge, lb.priorUsed = 0, time.Time{}, 0, time.Time{}
+	lb.rearmPending = false
 }
 
 // boundArgs is the arguments a lower bound records as evidence: the
@@ -209,7 +214,7 @@ func (lb *lowerBound) argsChanged(args string) bool {
 // arguments the variant runs next; only a newer figure replacing it is new
 // (rearmPending).
 func (lb *lowerBound) newArgs(args string, own bool) bool {
-	return lb.argsChanged(args) && !(own && lb.own)
+	return lb.argsChanged(args) && (!own || !lb.own)
 }
 
 // rearms says whether a spent bound may start again on a figure of donorK2
