@@ -19,9 +19,9 @@
 
 > **Experimental.** Measured on H200s at 1 GPU per Pod, one run per
 > configuration ([what was measured](measured.md)): two aggregated models, and
-> two P/D-disaggregated models whose four roles share one quota. The P/D run in
-> [measured.md](measured.md#pd-two-disaggregated-models-under-one-quota) is the
-> most recent valid one; a later rerun is in progress. Not yet measured with
+> two P/D-disaggregated models whose four roles share one quota (two runs, at
+> two prompt lengths; [P/D results](measured.md#pd-two-disaggregated-models-under-one-quota)).
+> Not yet measured with
 > this optimizer: whole-node or multi-GPU pods, and a cluster-wide quota. The
 > defaults are starting points.
 
@@ -67,9 +67,9 @@ burst first was served at once — median time to first token 0.07 s, against
 25.6 s with the same fleet planned but not moved — because GPUs were already
 waiting for it. The model that burst second was no worse off: the same p95
 (287 s), and a median of 144 s against 215 s. That run's GPU cost was not
-measured. On the P/D run, the output-heavy burst was served at p95 95 ms
-against 42 s, and the prompt-heavy burst was overloaded in every arm, for
-36 % more GPU-seconds.
+measured. On the latest P/D run, both bursts were served with sharing: p95
+90 ms against 51 s for the output-heavy model, and 6.0 s against 96 s for the
+prompt-heavy one, for 39 % more GPU-seconds.
 
 ## What it needs
 
@@ -225,7 +225,8 @@ two 8B models at 1 GPU per replica:
 | With those fixes | First burst gained (12 s against 35 s); second lost (p95 313 s against 139 s): the spare sat on the idle model, draining long outputs. Led to the headroom cap. |
 | With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
 | With the idle-fill fix | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
-| Both models P/D, four roles, 10-GPU quota | Output-heavy burst 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
+| Both models P/D, four roles, 10-GPU quota, 20 000-token prompts | Output-heavy burst 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
+| The same, 15 000-token prompts | Output-heavy burst 0.090 s against 51 s; prompt-heavy burst 6.0 s against 96 s, with no failed requests against 116; +39% GPU-seconds. |
 
 Every number, table and timeline is in [measured](measured.md).
 
