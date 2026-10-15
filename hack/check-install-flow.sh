@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=45
+EXPECT_CASES=48
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -583,11 +583,17 @@ fi
 # re-run upgraded everyone's Prometheus to it.
 tr -d '\r' < "$ROOT/deploy/lib/deploy_prometheus_kube_stack.sh" > "$WORK/deploy_prometheus_kube_stack.sh"
 kps_default="$(tr -d '\r' < "$ROOT/deploy/install.sh" | sed -n 's/^KUBE_PROMETHEUS_STACK_CHART_VERSION=\${KUBE_PROMETHEUS_STACK_CHART_VERSION:-\([^}]*\)}$/\1/p')"
+# KPS_LIST is what `helm list -o json` answers: the releases already installed.
+KPS_LIST='[]'
 kps_run() {
     : > "$KUBECTL_LOG"
     (
         openssl() { return 0; }
-        jq() { echo; }
+        helm() {
+            printf 'helm %s\n' "$*" >> "$KUBECTL_LOG"
+            case "$1" in list) printf '%s\n' "$KPS_LIST" ;; esac
+            return 0
+        }
         install_operational_dashboard() { :; }
         MONITORING_NAMESPACE=mon PROMETHEUS_SECRET_NAME=s PROMETHEUS_PORT=9090 PROMETHEUS_URL=u \
             DEPLOY_OPERATIONAL_DASHBOARD=false SKIP_HELM_REPO_UPDATE=true
@@ -609,6 +615,30 @@ if grep -q '^helm upgrade --install kube-prometheus-stack' "$KUBECTL_LOG"; then
 else
     ok "an empty KUBE_PROMETHEUS_STACK_CHART_VERSION refuses rather than installing unpinned"
 fi
+# The release is shared. A newer one another install put there is kept, not
+# downgraded to this install's default pin -- unless the pin was set on purpose.
+kps_version_used() { grep '^helm upgrade --install kube-prometheus-stack' "$KUBECTL_LOG" | sed -n 's/.*--version \([^ ]*\).*/\1/p'; }
+KPS_LIST='[{"name":"kube-prometheus-stack","chart":"kube-prometheus-stack-99.1.0"}]'
+KUBE_PROMETHEUS_STACK_CHART_VERSION="$kps_default" KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT='' kps_run
+if [ "$(kps_version_used)" = 99.1.0 ] && grep -q 'newer than this install' "$WORK/kps.out"; then
+    ok "a newer installed kube-prometheus-stack is kept, with a warning, not downgraded"
+else
+    fail "a newer installed kube-prometheus-stack must be kept (want --version 99.1.0 and a warning)" "$(kps_version_used); $(cat "$WORK/kps.out")"
+fi
+KUBE_PROMETHEUS_STACK_CHART_VERSION="$kps_default" KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT="$kps_default" kps_run
+if [ "$(kps_version_used)" = "$kps_default" ]; then
+    ok "an explicit KUBE_PROMETHEUS_STACK_CHART_VERSION is honoured over a newer installed release"
+else
+    fail "an explicit chart version must win (want $kps_default)" "$(kps_version_used)"
+fi
+KPS_LIST='[{"name":"kube-prometheus-stack","chart":"kube-prometheus-stack-80.0.0"}]'
+KUBE_PROMETHEUS_STACK_CHART_VERSION="$kps_default" KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT='' kps_run
+if [ "$(kps_version_used)" = "$kps_default" ] && ! grep -q 'newer than this install' "$WORK/kps.out"; then
+    ok "an older installed kube-prometheus-stack is upgraded to the pin, quietly"
+else
+    fail "an older installed release must be upgraded to the pin $kps_default" "$(kps_version_used); $(cat "$WORK/kps.out")"
+fi
+KPS_LIST='[]'
 
 echo ""
 echo "check-install-flow: $PASS passed, $FAIL failed"

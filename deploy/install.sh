@@ -86,7 +86,9 @@ PROM_CA_CERT_PATH=${PROM_CA_CERT_PATH:-"/tmp/prometheus-ca.crt"}
 PROMETHEUS_SECRET_NAME=${PROMETHEUS_SECRET_NAME:-"prometheus-web-tls"}
 # Pinned like KEDA_CHART_VERSION. Unpinned, every install took whatever the chart
 # repository served that day, and a re-run upgraded the release shared by every
-# WVA on the cluster to it.
+# WVA on the cluster to it. A newer release already installed is kept unless the
+# caller set it (kps_chart_version_to_install), so the default never downgrades.
+KUBE_PROMETHEUS_STACK_CHART_VERSION_EXPLICIT=${KUBE_PROMETHEUS_STACK_CHART_VERSION:-}
 KUBE_PROMETHEUS_STACK_CHART_VERSION=${KUBE_PROMETHEUS_STACK_CHART_VERSION:-92.7.0}
 
 # Flags for deployment steps

@@ -82,7 +82,8 @@ Environment Variables:
                                cluster already has a Prometheus outside MONITORING_NAMESPACE.
   PROMETHEUS_FORCE_INSTALL     Install even then (default: false). Two operators will contend over the same CRs.
   KUBE_PROMETHEUS_STACK_CHART_VERSION
-                               Chart version the Prometheus stack is installed at (default: 92.7.0)
+                               Chart version the Prometheus stack is installed at (default: 92.7.0).
+                               A newer release already installed is kept unless you set this.
   PROMETHEUS_URL               Where WVA reads metrics from. Required when Prometheus is not deployed here.
   PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
                                false; true for the Prometheus this install deploys. See TLS
