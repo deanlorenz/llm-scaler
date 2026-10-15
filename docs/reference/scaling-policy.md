@@ -328,13 +328,30 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
-A namespace that a namespace quota lists in `exclude` is not shared unless a
-`scope: cluster` quota also covers it. The namespace quota does not bound it, so
-the only budget left would be the other tenants' free quota, which does not
-count what the excluded namespace holds. Its models stay on today's optimizer,
-and the controller logs them once:
-`Utilization share: not sharing models no quota bounds`. To share them, add a
-`scope: cluster` quota for their accelerator type.
+**An excluded namespace needs a cluster quota.** To share the models of a
+namespace that a namespace quota lists in `exclude`, add a finite
+`scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
+unlimited and counts as none. Without one, their models stay on today's
+optimizer, and the controller logs them once:
+`Utilization share: not sharing models no quota bounds`. No line says when they
+are shared again; their role series appear instead.
+
+<details>
+<summary>Details: why, and what the cluster group gets</summary>
+
+The namespace quota does not bound an excluded namespace. The only budget left
+would be the other tenants' free quota, which does not count what the excluded
+namespace holds.
+
+With a `scope: cluster` quota, the excluded namespace's models form the cluster
+group. Every GPU a tenant's own group fills is also charged to the cluster
+quota. So the cluster group gets only what the cluster quota leaves after the
+tenants' claims: its free GPUs, less every tenant group's free quota, never
+below zero. For example, a cluster quota of 20
+with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
+fill 4, and the groups together fill at most 14.
+
+</details>
 
 A model whose variants run on more than one accelerator type, or whose analyzer
 result is not live this cycle, is left to today's optimizer for that cycle.
