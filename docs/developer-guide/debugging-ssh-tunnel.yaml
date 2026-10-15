@@ -76,6 +76,11 @@ spec:
     - name: metrics
       port: 8443
       targetPort: 8443
+    # The external-scaler gRPC port, for a ScaledObject whose scalerAddress
+    # points at the local controller through the tunnel.
+    - name: scaler
+      port: 9090
+      targetPort: 9090
 ---
 apiVersion: apps/v1
 kind: Deployment

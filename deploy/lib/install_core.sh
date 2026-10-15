@@ -3,7 +3,7 @@
 # Core install orchestration for deploy/install.sh.
 # Requires vars: ENVIRONMENT, SCRIPT_DIR, SKIP_CHECKS, deployment toggles.
 # Requires funcs sourced by install.sh: parse_args(), check_prerequisites(),
-# set_tls_verification(), set_wva_logging_level(), create_namespaces(), deploy_*(), verify_deployment(), print_summary().
+# set_wva_logging_level(), create_namespaces(), deploy_*(), verify_deployment(), print_summary().
 # llm-d install: see llm-d project guides or deploy/install-epp.sh for kind EPP setup.
 #
 
@@ -94,10 +94,10 @@ wva_missing_prereqs() {
         #       account the install was told about (wva_prometheus_scraper_sa).
         case "$kind/$name" in
             NetworkPolicy/wva-external-scaler)
-                echo "OPTIONAL $kind/$name|admitting only KEDA to the external scaler (:9090); without it the port is reachable by any Pod (KEDA_NAMESPACE=<ns> make setup-prereqs writes it)"
+                echo "OPTIONAL $kind/$name|admitting only KEDA to the external scaler (:9090); without it the port is reachable by any Pod ($(wva_make_cmd setup-prereqs "KEDA_NAMESPACE=<ns>") writes it)"
                 continue ;;
             ClusterRoleBinding/wva-metrics-reader-rolebinding-*)
-                echo "OPTIONAL $kind/$name|Prometheus reading the controller's /metrics (PROMETHEUS_SA=<ns>/<sa> make setup-prereqs grants it)"
+                echo "OPTIONAL $kind/$name|Prometheus reading the controller's /metrics ($(wva_make_cmd setup-prereqs 'PROMETHEUS_SA=<ns>/<sa>') grants it)"
                 continue ;;
         esac
         case "$kind" in
@@ -167,7 +167,7 @@ require_prereqs_present() {
         for entry in "${optional[@]}"; do
             log_info "  - ${entry%%|*}: needed only by ${entry#*|}"
         done
-        log_info "  To add them, ask an admin to re-run 'NAMESPACE=$WVA_NS make setup-prereqs'."
+        log_info "  To add them, ask an admin to re-run '$(wva_make_cmd setup-prereqs)'."
     fi
 
     if [ ${#missing[@]} -ne 0 ]; then
@@ -176,7 +176,7 @@ $(printf '  - %s\n' "${missing[@]}")
 
 Ask a cluster admin to run, once, for this namespace:
 
-    NAMESPACE=$WVA_NS make setup-prereqs$([ "$(wva_install_scope)" = cluster ] && echo " SCOPE=cluster")
+    $(wva_make_cmd setup-prereqs)
 
 after which this phase needs no cluster-scoped rights and you can re-run it, and
 every later upgrade, yourself."
@@ -187,7 +187,7 @@ every later upgrade, yourself."
         # only to exist, and a controller whose RBAC is genuinely absent fails
         # visibly at readiness rather than silently.
         log_info "Cannot read some cluster-admin prerequisites (reading them is not permitted for you), so this cannot confirm they exist: ${unverifiable[*]}"
-        log_info "  If they are missing, the controller will install and then fail to become ready; ask an admin to run 'NAMESPACE=$WVA_NS make setup-prereqs'."
+        log_info "  If they are missing, the controller will install and then fail to become ready; ask an admin to run '$(wva_make_cmd setup-prereqs)'."
         return 0
     fi
     log_success "Prerequisites are in place for $WVA_NS"
@@ -215,14 +215,24 @@ print_prereqs_summary() {
     echo "    plus the scaler backend and monitoring, if this cluster had none"
     if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then
         echo ""
-        echo "  NOT created: NetworkPolicy/wva-external-scaler, so the external scaler"
-        echo "  port (:9090) is open to any Pod. See the warning above."
+        case "${WVA_SCALER_NP_STATE:-}" in
+            unknown|unrecognised)
+                # Left as it is: one may exist, so "open" would be a guess.
+                echo "  NOT written: NetworkPolicy/wva-external-scaler. Its state is UNKNOWN"
+                echo "  (left as it is; see the warning above). Check:"
+                echo "      kubectl get networkpolicy wva-external-scaler -n $WVA_NS"
+                ;;
+            *)
+                echo "  NOT created: NetworkPolicy/wva-external-scaler, so the external scaler"
+                echo "  port (:9090) is open to any Pod. See the warning above."
+                ;;
+        esac
     fi
     echo ""
     echo "  NOT created: the controller itself. Whoever owns $WVA_NS installs it,"
     echo "  and every later upgrade, with no cluster-scoped rights:"
     echo ""
-    echo "      NAMESPACE=${WVA_NS} make deploy-wva$([ "$scope" = cluster ] && echo ' SCOPE=cluster')"
+    echo "      $(wva_make_cmd deploy-wva)"
     echo ""
     echo "  Re-run this phase only when the WVA version changes what it needs"
     echo "  cluster-wide (new RBAC rules), not for an ordinary controller upgrade."
@@ -321,7 +331,7 @@ main() {
         # premise, ScaledObjects are its own output. This reports what is already
         # registered, so the reader knows whether 'adopt' will come up in the plan.
         wva_report_scaledobjects
-        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-none}"
+        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-<unset: keeps the live limiter>}"
         exit 0
     fi
 
@@ -415,7 +425,6 @@ main() {
         fi
     fi
 
-    set_tls_verification
     set_wva_logging_level
 
     if [ "${WVA_ENV_SOURCED:-false}" = "true" ]; then

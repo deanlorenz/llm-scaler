@@ -2,53 +2,38 @@
 
 ## Overview
 
-This guide installs one scaling manager (llm-scaling-manager) that sizes the llm-d model
-servers in **every** namespace. The scaling manager decides how many replicas each variant needs
-and hands the decision to KEDA, which owns the HPA and does the scaling.
+This guide installs one scaling manager (llm-scaling-manager) that sizes the
+llm-d model servers in **every** namespace. It decides how many replicas each
+variant needs and hands that number to KEDA, which does the scaling.
 
 Use it when one team runs the cluster. Where namespaces belong to different
-teams, prefer one controller per namespace — see
-[Install the scaling manager in a namespace](../install-in-namespace/) — which keeps
-failure domains, policy and upgrades separate.
+teams, install [one controller per namespace](../install-in-namespace/) instead:
+failure domains, policy and upgrades stay separate.
 
-**This scope is WIP**, and the install says so as it runs. It is not disabled and
-is not going away: what it does not get is the preflight's namespace-centric
-checks, which are written for a single namespace where llm-d is already serving.
-In this shape the namespaces the scaling manager manages need not exist yet, need not hold model
-servers yet, and are discovered rather than named — so those checks would be
-asking the wrong questions. `SKIP_CHECKS=true` installs without them.
+**This scope is work in progress**, and the install says so. It skips the
+preflight's per-namespace checks, because the namespaces it will manage are
+discovered and may not hold model servers yet.
 
 ## Prerequisites
 
-- cluster-admin rights
-- llm-d model servers somewhere on the cluster
-- KEDA. On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy command to
-  install it with Helm if the cluster has none; on OpenShift, install the Custom
-  Metrics Autoscaler operator first. The install never adds KEDA on its own.
-- a Prometheus scraping those model servers
+- [ ] Cluster-admin rights.
+- [ ] llm-d model servers somewhere on the cluster.
+- [ ] **KEDA.** On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy
+  command to install it. On OpenShift, install the Custom Metrics Autoscaler
+  operator first.
+- [ ] A Prometheus that scrapes the model servers.
+- [ ] **The `flowControl` feature gate on every EPP.** The install checks only
+  the EPPs in the controller's own namespace, so check the others yourself.
+  Add this to each `EndpointPickerConfig` and restart the EPP:
 
-Every EPP the controller will size from needs the `flowControl` feature gate:
-it publishes the router queue the scaling manager reads as demand, and that
-queue is the only signal for a model at zero replicas. The install checks the
-gate only on EPPs in the namespace it watches (`WVA_WATCH_NS`, or the
-controller's own namespace), so a cluster-wide install does **not** see the
-EPPs in your model namespaces. Check each one yourself, and enable the gate in
-its `EndpointPickerConfig`:
-
-```yaml
-featureGates:
-- flowControl
-```
-
-The gate is what publishes the queue depth. At zero replicas there are no
-model-server metrics at all, so that queue is the only evidence anyone is asking
-for a model — without it scale-from-zero can never fire. It also changes what the
-engine metrics mean while running: flow control admits only what an engine can
-absorb, so `vllm:num_requests_waiting` can sit at 0 while requests are genuinely
-queued at the router.
+  ```yaml
+  featureGates:
+  - flowControl
+  ```
 
 <!-- guide:prerequisites.check start -->
 ```bash
+# Read-only. Reports what the install would need.
 make check-prereqs SCOPE=cluster
 ```
 <!-- guide:prerequisites.check end -->
@@ -63,51 +48,51 @@ make deploy-wva SCOPE=cluster
 ```
 <!-- guide:deploy.all end -->
 
-One command, because at this scope the cluster-admin half and the install half are
-the same person: it runs [`setup-prereqs`](../admin-cluster-setup/) —
-cluster-scoped RBAC, the namespace, the ServiceMonitor — and then the controller.
-Where those are separate people, the namespace guide splits them into two steps.
+At this scope one person is both the cluster admin and the installer, so one
+command runs [`setup-prereqs`](../admin-cluster-setup/) (cluster RBAC, the
+namespace, the ServiceMonitor) and then installs the controller.
+
+**Check the NetworkPolicy line it prints.** The scaler port `:9090` is limited
+to KEDA's namespace only when the installer can find KEDA. If it warns that
+`:9090` is open to every Pod, run the fix it prints:
+
+```bash
+# Limit the scaler port to KEDA's namespace
+KEDA_NAMESPACE=<keda namespace> make setup-prereqs SCOPE=cluster WVA_NS=<controller namespace>
+```
 
 ### 2. Register the workloads
 
 Nothing scales until a ScaledObject exists. At this scope the plan covers every
-namespace holding model servers, so read it before applying it.
-
-The same is true of `make workload-patch`, which reports the pod-spec settings
-autoscaling needs — a drain hook, and weights on a volume. Say which you mean,
-because `SCOPE` defaults to `namespace` everywhere in this repo:
-
-```bash
-make workload-patch SCOPE=cluster        # every namespace holding model servers
-make workload-patch NAMESPACE=<ns>       # one namespace
-```
-
-With neither, it scans the controller's own namespace and reports
-`No model servers found in scope` — which is accurate and not what you meant.
-
-`SCOPE=cluster` matters most with `WVA_WORKLOAD_PATCH_APPLY=true`, which replaces
-the pods it patches: at this scope that is a rolling restart of every model
-server on the cluster. See [Writing the
-patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch).
+namespace with model servers, so read it before applying it.
 
 <!-- guide:deploy.register start -->
 ```bash
-# SCOPE=cluster here too. Without it the scan covers only the controller's
-# OWN namespace, finds nothing, and says "Deploy them first" about model
-# servers that are deployed -- in the namespaces a cluster-wide controller
-# exists to manage.
+# Plan and apply ScaledObjects in every namespace with model servers. Keep SCOPE=cluster.
 make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 # edit wva-plan.yaml: apply: yes|no|adopt, the modelID, the replica bounds
 make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:deploy.register end -->
 
-One entry per model server, applying nothing until you say so. `apply` takes
-`yes`, `no`, or `adopt` — the last repoints a ScaledObject something else already
-owns rather than adding a second. Each entry also carries `minReplicas`,
-`maxReplicas` and `variantCost`; the file explains all of them in its own
-comments. There is an example in
-[Install the scaling manager in a namespace](../install-in-namespace/README.md#4-register-the-workloads).
+The plan has one entry per model server and applies nothing until you say so.
+`apply: adopt` points an existing ScaledObject at the scaling manager instead of
+adding a second. The file's own comments explain every field; there is an
+example in [Install the scaling manager in a
+namespace](../install-in-namespace/README.md#4-register-the-workloads).
+
+Check the model servers are safe to scale with `make workload-patch`, again
+with the scope:
+
+```bash
+# Report what the model servers need (drain hook, model cache), across the cluster
+make workload-patch SCOPE=cluster
+# or for one namespace
+make workload-patch NAMESPACE=<ns>
+```
+
+See [Writing the
+patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch).
 
 ## Verification
 
@@ -117,23 +102,17 @@ kubectl get scaledobject,hpa -A
 ```
 <!-- guide:verify.objects end -->
 
-**`READY True` on the ScaledObject** is the signal, together with a number in
-the HPA's `TARGETS` — `1/1 (avg)` is the scaling manager saying one replica is the right size.
+Look for **`READY True`** on the ScaledObject and a number in the HPA's
+`TARGETS`. `1/1 (avg)` means one replica is the right size. Do not use
+`CurrentMetrics` as the check ([why](#why-not-currentmetrics)).
 
-Do not read `CurrentMetrics` as the check. On a ScaledObject whose trigger the scaling manager
-never answers, it is still populated — with an empty entry, `[{"type":""}]` —
-while `READY` is `False` and `TARGETS` reads `<unknown>/1 (avg)` and nothing is
-being scaled. Measured on kind: it says "populated" in exactly the case you are
-verifying against.
-
-`TARGETS` showing `<unknown>` means KEDA could not reach the scaler. The usual
-cause is a ScaledObject naming a different install's namespace — most easily hit
-by installing cluster-wide over a namespace-scoped install, or the other way
-round, since the object keeps the old address. Repoint it at the install that is
-running:
+`TARGETS` showing `<unknown>` means KEDA cannot reach the scaler. Usually the
+ScaledObject names another install's namespace, for example after switching
+between a namespace-scoped and a cluster-wide install. Repoint it:
 
 <!-- guide:troubleshoot.repoint start -->
 ```bash
+# Point ScaledObjects at the running install's scaler.
 make scaledobjects-repoint
 ```
 <!-- guide:troubleshoot.repoint end -->
@@ -146,32 +125,17 @@ make undeploy-wva SCOPE=cluster
 ```
 <!-- guide:cleanup.uninstall end -->
 
-Prometheus, KEDA and the namespaces stay — they are shared, and this install may
-not have created them. `UNDEPLOY_SHARED=true` removes them too.
+**This touches every namespace:**
 
-### Uninstalling touches every namespace
+- **ScaledObjects the installer created are deleted** everywhere, and KEDA puts
+  each workload back to its earlier replica count: a cluster-wide resize.
+- **ScaledObjects you adopted are kept and listed.** They still call the removed
+  scaler, and one parked at zero cannot wake. Repoint or delete them.
 
-The uninstall lists ScaledObjects that call this controller across the whole
-cluster, and treats them by who made them:
-
-- **ScaledObjects the installer created are deleted**, in every namespace. They
-  carry `restoreToOriginalReplicaCount: true`, so KEDA puts each workload back to
-  the replica count it had before it was autoscaled — a cluster-wide resize, as
-  part of the uninstall.
-- **ScaledObjects you adopted (`apply: adopt`) are kept and listed.** They still
-  point at the external scaler you just removed, so KEDA keeps their HPAs calling
-  a scaler that is gone, and any of them parked at zero cannot be woken. Repoint
-  or delete them.
-
-`UNDEPLOY_SCALEDOBJECTS=false` keeps the created ones too. Upgrade and uninstall
-in full: [Upgrade and uninstall](../../reference/upgrade-and-uninstall.md).
-
-That removes the **autoscaler only**. Model servers keep serving in every
-namespace the controller was managing, which matters more here than in a
-single-namespace install: one `undeploy` can leave many namespaces running.
-
-If a namespace's model came from
-[Install a small llm-d model](../install-small-model/), remove it per namespace:
+`UNDEPLOY_SCALEDOBJECTS=false` keeps the created ones too. Prometheus, KEDA and
+the namespaces stay; `UNDEPLOY_SHARED=true` removes them as well. Model servers
+keep serving in every namespace. If a namespace's model came from [Install a
+small llm-d model](../install-small-model/), remove it per namespace:
 
 <!-- guide:cleanup.model start -->
 ```bash
@@ -179,30 +143,53 @@ make benchmark-teardown BENCHMARK_NAMESPACE=<the model namespace>
 ```
 <!-- guide:cleanup.model end -->
 
-## Configuration
+Full detail: [Upgrade and uninstall](../../reference/upgrade-and-uninstall.md).
 
-Optional.
+## Configuration
 
 | Parameter | Default | Example |
 | --- | --- | --- |
-| `SCOPE` | `namespace` — **set `cluster` for this guide** | `cluster` |
-| `WVA_NS` | `workload-variant-autoscaler-system` | `wva-system` |
-| `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
+| `SCOPE` | `namespace`. **Set `cluster` for this guide**, on every command | `cluster` |
+| `WVA_NS` | `workload-variant-autoscaler-system`. Where the controller runs; differs from `NAMESPACE` at this scope | `wva-system` |
+| `KEDA_NAMESPACE` | detected. Without it, no NetworkPolicy is written | `keda` |
+| `KEDA_HELM_INSTALL` | `false` | `true` |
+| `IMG` | the image built from main, a **floating** tag ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 
-Every permission a cluster-scoped install holds — including read on every
-ConfigMap and patch on every pod in the cluster — is listed in the
-[security model](../../reference/security-model.md#cluster-scoped-both-platforms).
+A cluster-scoped install can read every ConfigMap and patch every pod in the
+cluster; every permission is in the [security
+model](../../reference/security-model.md#cluster-scoped-both-platforms). Full
+list of settings: [Configuration reference](../../reference/configuration.md).
 
-Full list: [Configuration reference](../../reference/configuration.md).
+## Details
+
+- **Why `SCOPE=cluster` on every command.** `SCOPE` defaults to `namespace`
+  everywhere in this repo. Without it, `scaledobjects-plan` and
+  `workload-patch` scan only the controller's own namespace, find nothing, and
+  report `No model servers found in scope` or "Deploy them first".
+  With `WVA_WORKLOAD_PATCH_APPLY=true`, `SCOPE=cluster` means a rolling restart
+  of every model server on the cluster.
+- **Why `flowControl`.** At zero replicas there are no model-server metrics, so
+  the router queue the gate publishes is the only sign anyone wants the model.
+  Without it scale-from-zero never fires. While running, flow control admits only
+  what an engine can absorb, so `vllm:num_requests_waiting` can read 0 while
+  requests wait at the router.
+- **Why the NetworkPolicy matters.** Without it any Pod can call the scaler on
+  `:9090`. How the namespace is found: [the scaler
+  NetworkPolicy](../admin-cluster-setup/README.md#the-scaler-networkpolicy).
+
+### Why not `CurrentMetrics`
+
+On a ScaledObject whose trigger the scaling manager never answers, it still
+shows an empty entry, `[{"type":""}]`, while `READY` is `False`, `TARGETS`
+reads `<unknown>/1 (avg)` and nothing scales.
 
 ## Next
 
-- `make benchmark-smoke NAMESPACE=<ns>` — drive load at one of the namespaces
-  this controller manages and snapshot the dashboard
+- `make benchmark-smoke NAMESPACE=<ns>`: drive load at one managed namespace
+  and snapshot the dashboard
 - [Bound every install by real GPUs](../admin-gpu-bounding/)
-- `deploy/warmpool.sh plan -n <ns>` — read-only: whether a namespace this
-  controller manages has models that could share a [warm pool](../warm-pool/),
-  which holds engines loaded so a scale-up serves while its replica starts
+- `deploy/warmpool.sh plan -n <ns>`: read-only check of whether a namespace has
+  models that could share a [warm pool](../warm-pool/)
 - [After the install](../../reference/operations.md)
-- [Install methods](../../reference/install-methods.md) — GitOps, direct
+- [Install methods](../../reference/install-methods.md): GitOps, direct
   Kustomize, and what the script does
