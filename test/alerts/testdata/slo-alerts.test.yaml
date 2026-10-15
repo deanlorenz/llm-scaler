@@ -28,11 +28,11 @@ tests:
       - eval_time: 7m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 30m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
@@ -92,11 +92,12 @@ tests:
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
 
   # 5. A target set from t=0, replicas present, nothing ever judged. A new
   #    model is quiet for its first hour (the target must have existed an hour
-  #    ago), then for: 15m: pending from 60m, firing from 75m.
+  #    ago: 60 of the hour's 61 samples, true from 59m), then for: 15m:
+  #    firing from 74m.
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -107,13 +108,13 @@ tests:
       - eval_time: 20m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 70m
+      - eval_time: 73m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 80m
+      - eval_time: 75m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
-          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
   # 6. Judged for the first 10 minutes, then never again: the last judgement
   #    leaves the hour at 70m, then for: 15m, so firing from 85m and not at 80m.
@@ -132,7 +133,7 @@ tests:
       - eval_time: 90m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
-          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
   # 7. A parked model (no replicas) fires neither alert.
   - interval: 1m
@@ -171,7 +172,7 @@ tests:
       - eval_time: 45m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
   # 9. Misses in fewer than half of the judged minutes: 9 misses, then 21
   #    minutes that meet the target. Does not fire.
@@ -206,7 +207,7 @@ tests:
       - eval_time: 40m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 50m
         alertname: WVAModelSLOMissed
         exp_alerts: []
@@ -229,7 +230,7 @@ tests:
       - eval_time: 15m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts: []
@@ -254,7 +255,7 @@ tests:
       - eval_time: 135m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
-          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
   # 13. A quiet model: requests below the sample minimum all hour, nothing
   #     excluded. Too little traffic to judge is not something to act on.
@@ -291,7 +292,7 @@ tests:
         exp_alerts: []
 
   # 15. A fleet excluded the whole time (it keeps scaling up), with traffic:
-  #     pending from 60m, firing from 75m.
+  #     firing from 74m (59m, then for: 15m).
   - interval: 1m
     input_series:
       - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
@@ -303,13 +304,13 @@ tests:
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x150'
     alert_rule_test:
-      - eval_time: 70m
+      - eval_time: 73m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
-      - eval_time: 80m
+      - eval_time: 75m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
-          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
 
   # 16. TPOT sees no requests while TTFT sees plenty: clients do not send
   #     include_usage. TPOT is unjudged and fires; TTFT, judged, does not.
@@ -333,4 +334,59 @@ tests:
       - eval_time: 90m
         alertname: WVAModelSLOUnjudged
         exp_alerts:
-          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
+
+  # 17. Excluded a little over half the time (11 minutes in every 20, about
+  #     0.55 of the hour): a fleet that rarely holds still. Fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x160'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x160'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '1x10 0x8 1x10 0x8 1x10 0x8 1x10 0x8 1x10 0x8 1x10 0x8 1x10 0x8 1x10 0x8'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x160'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 18. Excluded a little under half the time (9 minutes in every 20, about
+  #     0.45): mostly still, and too quiet to judge in the rest. Quiet.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x160'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '30x160'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '1x8 0x10 1x8 0x10 1x8 0x10 1x8 0x10 1x8 0x10 1x8 0x10 1x8 0x10 1x8 0x10'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x160'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 19. An idle model: replicas up, the router reporting both objectives with
+  #     no requests at all. Nothing to act on -- neither TPOT (no TTFT traffic
+  #     either, so not missing include_usage) nor TTFT fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '1x150'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []

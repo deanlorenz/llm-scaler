@@ -526,7 +526,8 @@ Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uni
 
 **Symptom**: `WVAModelSLOMissed` (warning) or `WVAModelSLOUnjudged` (info)
 fires, or the SLO dashboard row stays empty for a model whose policy sets
-targets.
+targets. Both alerts carry `component: slo`, so they can be routed apart from
+pages.
 
 **On this release the slo analyzer only observes**, so neither alert means the
 autoscaler failed: the fleet is sized by the saturation analyzer, and a miss
@@ -534,29 +535,41 @@ says that tier's thresholds do not meet the SLO. It is a tuning finding to act
 on in working hours, not an outage. Set up in
 [`slo` (observe only)](scaling-policy.md#slo-observe-only).
 
+The `wva_slo_*` series carry the model's namespace as `exported_namespace`
+(see [the labels](prometheus.md#slo-analyzer-metrics)); filter on that, not on
+`namespace`.
+
 ### `WVAModelSLOMissed`
 
 At least half of the judged minutes of the last 30, and at least 5, were over
 target. To mitigate now, give the model more capacity than saturation asks
 for:
 
-- raise its floor (`minReplicaCount` on the variant's ScaledObject), or
+- raise its floor: `minReplicaCount` on each variant's ScaledObject
+  (`kubectl edit scaledobject <so> -n <ns>`; where a tool generates the
+  ScaledObject, change it there, or the next apply undoes it), or
 - lower the tier's `scaleUpThreshold` (and copy the band, see
   [#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)).
 
 Then find the cause, per objective:
 
 ```promql
-# tpot: how full decode runs, against the fill the target allows
-wva_slo_fill{model_name="<model>"}              # the fill the TPOT target allows
-# compare with the tier's kvCacheThreshold x scaleUpThreshold: running above it misses
+# tpot: the mean ITL the variant would show sized for the target, against the target
+wva_slo_predicted_itl_seconds{model_name="<model>"}
+wva_slo_target_seconds{model_name="<model>", objective="tpot"}
+# and the fill the target allows: below the tier's static point
+# (kvCacheThreshold x scaleUpThreshold, 0.68 by default), the tier runs decode
+# fuller than the target allows
+wva_slo_fill{model_name="<model>"}
 # ttft: queue against prefill time, per variant that prefills
 wva_slo_engine_queue_seconds{model_name="<model>"}
 wva_slo_prefill_seconds{model_name="<model>"}
 ```
 
 A queue that grows while prefill time stays flat is a capacity miss; a prefill
-time that grows is a slow prefill (long prompts, a cold prefix cache). After a
+time that grows is a slow prefill (long prompts, a cold prefix cache). Only
+completed requests count, so under shedding the alert can resolve while
+requests are refused: read `llm_d_epp_request_error_total` too. After a
 controller restart the old and new series overlap for a few minutes; the alert
 already handles that.
 
@@ -566,37 +579,57 @@ tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 
-A target set for the whole last hour, and no window judged in it. Read why:
+A target set for the whole last hour, and no window judged in it. First, the
+policy side -- the model's last `Effective scaling policy` line in the
+controller log:
+
+```bash
+$LOGS | grep 'Effective scaling policy' | grep '"modelID": "<model>"' | tail -1
+```
+
+| the line shows | means |
+| --- | --- |
+| `"scalingPolicy"` is not the tier you set | the model's variants do not all name it (the alphabetically first name wins), or the tier is defined only in the global map and the namespace has its own map, which replaces it whole |
+| `"slo": "off"` | the tier it reached has no `slo` block, and does not list the analyzer |
+| `"slo"` ends `(analyzer not listed)` | targets set, `slo` not under `analyzers:` (also logged as `SLO policy is half-configured`) |
+| `"slo"` ends `(observe)` | the policy is right: read the router side below |
+
+Then the router side:
 
 ```promql
 wva_slo_window_requests{model_name="<model>"}   # requests the router recorded, per objective
 wva_slo_excluded{model_name="<model>"} == 1     # the reason a window is not judged
+# the share of the last day it was judged
+1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded{model_name="<model>"})[1d:5m])
 ```
 
 | what you see | means | fix |
 | --- | --- | --- |
 | `excluded` 1 for `starting` or `zero-replicas`, most of the time | the fleet never holds still for the window plus its grace: constant scale-ups, or a replica that keeps starting | expected on a fleet that keeps scaling; check the starts are real (`kubectl get pods -n <ns>`) |
-| `excluded` 1 for `unobserved` | the analyzer could not see the model's earlier cycles: just after a controller restart, or the engine keeps skipping the model | if it persists, the model's replicas lack metrics on some cycles: [metrics](#metrics-stale-or-missing) |
-| requests present but low, nothing excluded | too little traffic: a p90 needs 100 requests in the 5-minute window, a TPOT mean 50 | expected on a quiet model; silence the alert for it |
-| `tpot` requests `0`, `ttft` requests high | clients do not send `stream_options.include_usage` | have them send it, or run vLLM with `--enable-force-include-usage` |
+| `excluded` 1 for `unobserved` | the analyzer did not analyze the model on the cycle before: just after a controller restart, or the engine keeps skipping the model | if it persists, the model's replicas lack metrics on some cycles: [metrics](#metrics-stale-or-missing) |
+| requests present but low, nothing excluded | too little traffic: a p90 needs 100 requests in the 5-minute window, a TPOT mean 50 | nothing to do: the alert does not fire for this, and the model is judged once traffic returns |
+| `tpot` requests `0`, `ttft` requests high | clients do not send `stream_options.include_usage`, or the router's TPOT query fails (`wva_metrics_collection_errors_total{query_type="router_latency"}` rising) | have clients send it, or run vLLM with `--enable-force-include-usage`; for a failing query, [metrics](#metrics-stale-or-missing) |
 | no `window_requests` series at all | the router's histograms are not read | below |
 
-When there is no `window_requests` series, check, in order:
+When there is no `window_requests` series, check:
 
 ```promql
-# 1. Does Prometheus have the router's histogram for the model, in its namespace?
-sum by (namespace, model_name) (rate(llm_d_epp_request_ttft_seconds_count[5m]))
+# Does Prometheus have the router's histogram for the model, and where?
+sum by (namespace, model_name, target_model_name, streaming) (rate(llm_d_epp_request_ttft_seconds_count[5m]))
 ```
+
+Here `namespace` is right: it is the router's own scrape label.
 
 - **No series anywhere**: the router (EPP) is not scraped, or is too old to
   publish `llm_d_epp_*`. Check its ServiceMonitor / PodMonitor and version.
 - **A series in another namespace**: the EPP runs outside the model's
   namespace. The analyzer reads the router in the model's namespace only.
-- **A series, but only `streaming="false"`**: the clients do not stream; only
-  streaming requests are counted.
-- **A series in the right place**: the policy does not list `slo` under
-  `analyzers:` (the controller logs `SLO policy is half-configured`), or every
-  variant does not name the tier.
+- **Only `streaming="false"`**: the clients do not stream; only streaming
+  requests are counted.
+- **A series under another name**: the analyzer takes the model from
+  `target_model_name`, or `model_name` where that is empty; clients that address
+  an alias or an objective name show up under it, not under the model ID the
+  controller logs.
 
 ## Utilization-Share Optimizer
 

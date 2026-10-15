@@ -126,10 +126,13 @@ spec:
       for: 2m
       labels:
         severity: warning
+        # Observe only on this release: route on this label to a ticket queue
+        # rather than a page if a tuning finding should not wake anyone.
+        component: slo
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} missed its {{ $labels.objective }} SLO ({{ $labels.statistic }}) in {{ $value | humanizePercentage }} of judged minutes"
-        description: "Over the last 30 minutes the router-measured {{ $labels.objective }} {{ $labels.statistic }} was above the target in at least half of the minutes that were judged, and in at least 5. Windows covering a wake or a starting replica are not judged, so a fleet that keeps scaling up still fires. The slo analyzer only observes on this release: this says the tier's thresholds do not meet the SLO, not that the autoscaler failed. Mitigate with a higher floor or a lower scaleUpThreshold; the runbook says how to find the cause. Resolves once judged minutes that meet the target outnumber the misses."
+        description: "Over the last 30 minutes the router-measured {{ $labels.objective }} {{ $labels.statistic }} was above the target in at least half of the minutes that were judged, and in at least 5. Windows covering a wake or a starting replica are not judged, and the minutes judged between scale-ups still count, so misses outside them still fire it. Only completed requests count: under shedding it can resolve while requests are refused (read llm_d_epp_request_error_total). The slo analyzer only observes on this release: this says the tier's thresholds do not meet the SLO, not that the autoscaler failed. Mitigate with a higher floor or a lower scaleUpThreshold; the runbook says how to find the cause. Resolves once judged minutes that meet the target outnumber the misses."
 
     # Fires only when there is something to act on: the fleet was excluded for
     # at least half the hour (it never holds still), the router's series are
@@ -141,6 +144,7 @@ spec:
       for: 15m
       labels:
         severity: info
+        component: slo
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} has had no judged {{ $labels.objective }} window for an hour"

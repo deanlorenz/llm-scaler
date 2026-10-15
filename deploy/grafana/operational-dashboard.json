@@ -2673,7 +2673,7 @@
           "id": 77,
           "title": "TTFT: observed vs target, by model",
           "type": "timeseries",
-          "description": "What the router measured over 5 minutes against what the policy declares: the TTFT percentile named in the legend. A gap is a window not judged: too few requests, or excluded for a wake, a starting replica or a restart (the panel at the bottom of the row). A percentile past the router's largest bucket is +Inf, which Grafana also draws as a gap: read the attainment panel beside it.",
+          "description": "What the router measured over 5 minutes against what the policy declares: the TTFT percentile named in the legend. A gap is a window not judged: too few requests, or excluded for a wake, a starting replica or a restart (the panel at the bottom of the row). A percentile past the router's largest bucket is +Inf, which Grafana also draws as a gap: read the TTFT attainment panel below.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2868,7 +2868,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
             },
             "overrides": []
           },
@@ -2906,7 +2906,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
             },
             "overrides": []
           },
@@ -2919,7 +2919,7 @@
           "id": 82,
           "title": "Where each variant's SLO pricing came from",
           "type": "state-timeline",
-          "description": "The source of each variant's TPOT pricing over time: own (a full fit), pinned, pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid. A change of colour is the variant moving from one to another.",
+          "description": "The source of each variant's TPOT pricing over time, one row per variant: own (a full fit), pinned (intercept from an earlier fit), pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid. A change of colour is the variant moving from one to another.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2928,8 +2928,8 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, variant_name, source) (wva_slo_source{$namespace_label=~\"$namespace\"}) == 1",
-              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} {{source}}",
+              "expr": "max by ($namespace_label, model_name, variant_name) ((wva_slo_source{$namespace_label=~\"$namespace\", source=\"own\"} == 1) * 1 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned\"} == 1) * 2 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned-default\"} == 1) * 3 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-line\"} == 1) * 4 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-output-length\"} == 1) * 5 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"infeasible\"} == 1) * 6 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"input-invalid\"} == 1) * 7)",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A",
               "datasource": {
                 "type": "prometheus",
@@ -2940,7 +2940,61 @@
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "1": {
+                      "text": "own",
+                      "color": "green",
+                      "index": 0
+                    },
+                    "2": {
+                      "text": "pinned",
+                      "color": "blue",
+                      "index": 1
+                    },
+                    "3": {
+                      "text": "pinned-default",
+                      "color": "yellow",
+                      "index": 2
+                    },
+                    "4": {
+                      "text": "no-line",
+                      "color": "purple",
+                      "index": 3
+                    },
+                    "5": {
+                      "text": "no-output-length",
+                      "color": "orange",
+                      "index": 4
+                    },
+                    "6": {
+                      "text": "infeasible",
+                      "color": "red",
+                      "index": 5
+                    },
+                    "7": {
+                      "text": "input-invalid",
+                      "color": "dark-red",
+                      "index": 6
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
             },
             "overrides": []
           },
@@ -2987,7 +3041,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
             },
             "overrides": []
           },
@@ -3025,7 +3079,7 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               },
-              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+              "noValue": "No data: no model here lists the slo analyzer, or no variant here is priced for this (a TTFT-only policy, a variant with no line yet, no prefilling variant)"
             },
             "overrides": []
           },
@@ -3038,7 +3092,7 @@
           "id": 85,
           "title": "Why a window was not judged",
           "type": "state-timeline",
-          "description": "Per model and objective, the reason its window is excluded this cycle: zero-replicas (waking), starting (a replica starting, a scale-up in progress), or unobserved (just after a controller restart, or after cycles the engine skipped the model). Capacity that cannot be scheduled is not excluded. Empty while judged.",
+          "description": "Per model and objective, the reason its window is excluded this cycle: zero-replicas (waking), starting (a replica starting, a scale-up in progress), or unobserved (just after a controller restart, or after cycles the engine skipped the model). Capacity that cannot be scheduled is not excluded: at once for a Deployment, after 30 minutes pending for a LeaderWorkerSet group. Empty while judged.",
           "gridPos": {
             "h": 8,
             "w": 12,

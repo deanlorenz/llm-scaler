@@ -1177,7 +1177,8 @@ enforcement ships, because enforcing will need an explicit `slo.mode: enforce`.
 Use it to see whether a tier meets an SLO before any of it sizes a fleet.
 
 One thing about turning it on **can** change scaling: a tier that lists
-`analyzers:` resets its band (step 2 below). Copy the band and you are safe.
+`analyzers:` resets its band -- its `scaleUpThreshold` and `scaleDownBoundary`
+(step 2 below). Copy the band and you are safe.
 
 **Before you start**
 
@@ -1214,9 +1215,12 @@ One thing about turning it on **can** change scaling: a tier that lists
    `score`. Read them from the `default` key (`kubectl get configmap
    wva-scaling-policy-config -o yaml`). This is
    [#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149).
-3. **Check nothing moved.** The controller logs `Effective scaling policy` for
-   the model; its band must be the one it had before, and its `slo` field
-   shows the targets, for example `tpot mean<=100ms, ttft p90<=3s (observe)`.
+3. **Check nothing moved.** Before the change, save the model's last
+   `Effective scaling policy` line (it is logged when the resolved policy
+   changes, not every cycle). After it, the new line's band must match the
+   saved one, and its `slo` field shows the targets, for example
+   `tpot mean<=100ms, ttft p90<=3s (observe)`. Saturation's `parameters:` and
+   `score` are not in that line: compare those in the ConfigMap.
 
 **See the result**
 
@@ -1225,8 +1229,10 @@ One thing about turning it on **can** change scaling: a tier that lists
 - The series under [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics),
   and two alerts, `WVAModelSLOMissed` and `WVAModelSLOUnjudged`. Their runbook is
   [A model misses, or is never judged against, its SLO](troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo).
-- Nothing at all within a few minutes: work through the checklist above, then
-  the runbook.
+- The first judged point comes a window plus its grace after you turn it on
+  (7 to 35 minutes; see below), and again after every controller restart. No
+  `wva_slo_window_requests` series at all after a few minutes: work through the
+  checklist above, then the runbook.
 
 **When it does not judge**
 
@@ -1238,20 +1244,26 @@ request, at most 30 minutes.
 - **A wake from zero, or a replica starting.** Excluded for the window plus the
   grace after the transient ends. The exclusion is per objective: a prefill
   replica starting excludes TTFT and leaves TPOT judged.
-- **After the analyzer could not see the model** (`unobserved`): its first
-  window after a controller restart or after it was first configured, and the
-  first after a model the engine skipped -- as it skips a woken model whose Pods
-  have no metrics yet.
-- **Capacity that cannot be placed is judged, not excluded.** A Pod that cannot
-  be scheduled is not "starting", so a scale-up blocked on quota or nodes shows
-  up as misses. A LeaderWorkerSet group lists no Pod ages, so its pending
-  replicas count as starting for at most 30 minutes.
+- **After the analyzer could not see the model** (`unobserved`), for the window
+  plus the grace: after a controller restart or leader change, after it was
+  first configured, and after any cycle on which the engine did not analyze the
+  model -- as it does not analyze a woken model whose Pods have no metrics yet.
+- **Capacity that cannot be placed is judged, not excluded** -- at once for a
+  Deployment, late for a LeaderWorkerSet. A Pod that cannot be scheduled is not
+  "starting", so a scale-up of a Deployment blocked on quota or nodes shows up
+  as misses from the next window. A LeaderWorkerSet group lists no Pod ages, so
+  its pending replicas count as starting until they have been pending for 30
+  minutes: a whole-node P/D scale-up blocked on nodes shows misses only after
+  about 30 + 5 + the grace, some 45 minutes in the example below.
 
 On a whole-node P/D model this is long. With a 4-minute replica start and a mean
-request of 400 s (a ~6 000-token generation at ~60 ms per token), one scale-up
+request of 400 s (a ~6 000-token generation at ~60 ms per token, plus its
+prefill and queue time), one scale-up
 leaves the model unjudged for about 4 + 5 + 10 = 19 minutes, for TTFT on a
 prefill or decode start and for TPOT on a decode start. A fleet that scales up
-more often than that is never judged, and `WVAModelSLOUnjudged` says so.
+more often than that is never judged, and `WVAModelSLOUnjudged` says so. The
+share of the last day a model was judged is
+`1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:5m])`.
 
 **Rules**
 
@@ -1291,9 +1303,9 @@ more often than that is never judged, and `WVAModelSLOUnjudged` says so.
 
 - **Only completed streaming requests count.** The router records a request when
   its stream ends, with the TTFT it had; a request shed, timed out or abandoned
-  is never recorded, so attainment reads high under overload. A request's TTFT
-  is recorded up to its whole generation after its first token -- late, not
-  larger.
+  is never recorded, so attainment reads high under overload. A request is
+  recorded when its stream ends, up to a whole generation after its first
+  token; the value recorded is still its TTFT.
 - **The router's TTFT includes its flow-control queue**; the engine's own TTFT
   does not.
 
@@ -1311,12 +1323,22 @@ not readings of the fleet:
   for it; `wva_slo_source` where the line came from (`own`: fitted; `pinned`: its
   intercept held at an earlier fit's; `pinned-default`: held at a default for no
   particular card). After a controller restart a line is `pinned-default` until
-  the fleet spans enough fill to fit again.
+  the fleet spans enough fill to fit again -- on a whole-node replica, which
+  rarely spans it, possibly for good. Read `pinned-default` as not a
+  measurement: on an accelerator whose real floor is well above the default, it
+  can call a target feasible that no fill meets.
 - Its demand and per-replica capacity are published as `wva_analyzer_demand` /
   `wva_analyzer_target` with `analyzer_name="slo"`, in output tokens per second.
   For one generating variant, `demand ÷ (target × scaleUpThreshold)` is the
   replica count the TPOT target alone would ask for; compare it with
   `wva_desired_replicas`. The target is `0` for a variant it could not price.
+  With the tier's `scaleUpThreshold` (0.85 here):
+
+  ```promql
+  max by (exported_namespace, model_name) (wva_analyzer_demand{analyzer_name="slo"})
+    / on (exported_namespace, model_name)
+  (0.85 * max by (exported_namespace, model_name) (wva_analyzer_target{analyzer_name="slo"} > 0))
+  ```
 - **Known to be off** in three cases: speculative decoding (the engine's ITL is
   per step, not per token), a high prefix-cache hit rate (the per-request KV
   footprint is under-counted), and a pod running several data-parallel ranks
@@ -1327,7 +1349,9 @@ not readings of the fleet:
   Under a TTFT target every variant that prefills publishes the inputs TTFT will
   be priced from: `wva_slo_prefill_seconds`, `wva_slo_engine_queue_seconds`, and,
   for a prefill role, `wva_slo_prefill_utilization` against a learned ceiling.
-  Warm-pool bridges are left out, so a variant served only by bridges reads
+  On an aggregated variant the engine records prefill and queue time when a
+  request finishes, so those two trail by a whole generation. Pods lent by a
+  warm pool (bridges) are left out, so a variant served only by bridges reads
   `no-line` or `no-output-length`.
 - Each cycle logs `slo-model` and `slo-variant` lines at verbosity 3.
 
