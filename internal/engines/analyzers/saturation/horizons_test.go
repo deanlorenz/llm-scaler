@@ -186,7 +186,7 @@ var _ = Describe("learned-state horizons", func() {
 		a.computeCapacityHistory[historyKey] = ra
 
 		// A saturated queue, so Priority 1 fires and takes the reset branch.
-		k2, src := a.computeK2(historyKey, "m", "ns", "decode-v",
+		k2, src, _ := a.computeK2(historyKey, "m", "ns", "decode-v",
 			20,      // queueLen, above the threshold below
 			900000,  // tokensInUse: this episode's reading
 			600,     // avgOutput

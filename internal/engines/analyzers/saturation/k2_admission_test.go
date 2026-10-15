@@ -10,27 +10,44 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
+// admissionVariant is the one decode variant these cycles run.
+const admissionVariant = "variant-d"
+
 // k2AdmissionCycle runs one Analyze over a single decode row that is full and
 // queued (queue 30 over the threshold of 5, 600 000 of 1 162 240 tokens
 // resident), shaped by mutate, and returns the k2-decision priorities logged
 // for the variant.
 func k2AdmissionCycle(t *testing.T, analyzer *SaturationAnalyzer, totalKv int64, mutate func(*domain.ReplicaMetrics)) []string {
 	t.Helper()
+	seen, _ := k2AdmissionAnalyze(t, analyzer, totalKv, mutate)
+	return seen
+}
+
+// k2AdmissionAnalyze is k2AdmissionCycle that also returns the price the
+// variant got.
+func k2AdmissionAnalyze(t *testing.T, analyzer *SaturationAnalyzer, totalKv int64, mutate func(*domain.ReplicaMetrics)) ([]string, float64) {
+	t.Helper()
 	ctx, logs := observedCtx(t)
-	rm := makeReplicaMetrics("pod-d", "variant-d", 600_000, totalKv, 30, 1000, 1000)
+	rm := makeReplicaMetrics("pod-d", admissionVariant, 600_000, totalKv, 30, 1000, 1000)
 	mutate(&rm)
-	_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
+	result, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
 		[]domain.VariantReplicaState{
-			{VariantName: "variant-d", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},
+			{VariantName: admissionVariant, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},
 		}))
 	require.NoError(t, err)
 	var seen []string
 	for _, e := range logs.FilterMessage("k2-decision").All() {
-		if f := e.ContextMap(); f["variant"] == "variant-d" {
+		if f := e.ContextMap(); f["variant"] == admissionVariant {
 			seen = append(seen, stringField(t, f, "priority"))
 		}
 	}
-	return seen
+	var price float64
+	for _, vc := range result.VariantCapacities {
+		if vc.VariantName == admissionVariant {
+			price = vc.PerReplicaCapacity
+		}
+	}
+	return seen, price
 }
 
 func k2Windows(a *SaturationAnalyzer) int {
@@ -64,8 +81,10 @@ func TestK2Admission_RecordsOnlyReadyOwnReplicas(t *testing.T) {
 			}
 			assert.Equal(t, k2ReasonObsUnadmitted, seen[0],
 				"the saturated reading is named as declined, then the chain falls through")
-			assert.Len(t, seen, 2, "the decline, then the tier it fell through to")
-			assert.NotEqual(t, "P1-obs", seen[1])
+			require.Len(t, seen, 3, "the decline, the tier it fell through to, and the reading pricing the cycle")
+			assert.Equal(t, "P4-k1", seen[1], "no window, no engine parameters: the chain gives k1")
+			assert.Equal(t, k2ReasonObsUnadmitted, seen[2],
+				"600 000 resident is under k1, so the row is priced at it for this cycle")
 			assert.Zero(t, k2Windows(analyzer), "nothing is written to the variant's k2 window")
 		})
 	}
@@ -82,7 +101,8 @@ func TestK2Admission_UnadmittedRowReadsTheWindow(t *testing.T) {
 		rm.TokensInUse = 300_000 // a frozen, lower reading that would pull the window down
 		rm.KvCacheUsage = float64(rm.TokensInUse) / float64(rm.TotalKvCapacityTokens)
 	})
-	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P2-hist"}, seen)
+	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P2-hist", k2ReasonObsUnadmitted}, seen,
+		"the window is read; the frozen reading is lower, so it prices this cycle only")
 	analyzer.mu.Lock()
 	defer analyzer.mu.Unlock()
 	for _, ra := range analyzer.computeCapacityHistory {
@@ -98,21 +118,21 @@ func TestK2Admission_BridgeDoesNotOverwriteTheLiveRecord(t *testing.T) {
 	store := capacity.NewStore()
 	analyzer := NewSaturationAnalyzer(store)
 	k2AdmissionCycle(t, analyzer, 1_162_240, func(*domain.ReplicaMetrics) {})
-	rec := store.Get("test-ns", "test-model", "variant-d")
+	rec := store.Get("test-ns", "test-model", admissionVariant)
 	require.NotNil(t, rec)
 	require.Equal(t, capacity.LearnedFromLive, rec.LearnedFrom)
 	require.EqualValues(t, 1_162_240, rec.TotalKvCapacityTokens)
 
 	// The pool runs at a lower --gpu-memory-utilization: a smaller cache.
 	k2AdmissionCycle(t, analyzer, 700_000, func(rm *domain.ReplicaMetrics) { rm.FromWarmPool = true })
-	rec = store.Get("test-ns", "test-model", "variant-d")
+	rec = store.Get("test-ns", "test-model", admissionVariant)
 	require.NotNil(t, rec)
 	assert.EqualValues(t, 1_162_240, rec.TotalKvCapacityTokens, "the variant's own cache, not the pool engine's")
 
 	// A not-Ready replica's cache is real -- it is the variant's own engine --
 	// so its record is still filed.
 	k2AdmissionCycle(t, analyzer, 1_100_000, func(rm *domain.ReplicaMetrics) { rm.Ready = false })
-	rec = store.Get("test-ns", "test-model", "variant-d")
+	rec = store.Get("test-ns", "test-model", admissionVariant)
 	require.NotNil(t, rec)
 	assert.EqualValues(t, 1_100_000, rec.TotalKvCapacityTokens)
 }
@@ -122,7 +142,94 @@ func TestK2Admission_BridgeDoesNotCreateALiveRecord(t *testing.T) {
 	store := capacity.NewStore()
 	analyzer := NewSaturationAnalyzer(store)
 	k2AdmissionCycle(t, analyzer, 700_000, func(rm *domain.ReplicaMetrics) { rm.FromWarmPool = true })
-	if rec := store.Get("test-ns", "test-model", "variant-d"); rec != nil {
+	if rec := store.Get("test-ns", "test-model", admissionVariant); rec != nil {
 		assert.NotEqual(t, capacity.LearnedFromLive, rec.LearnedFrom)
 	}
+}
+
+// A variant only a bridge is carrying is priced at what the saturated bridge
+// holds, not at k1: the reading is the only one there is, and the cycle that
+// showed the bridge full is the one that must not price it higher. Nothing is
+// recorded from it.
+func TestK2Admission_ABridgeAloneIsPricedAtWhatItHolds(t *testing.T) {
+	store := capacity.NewStore()
+	analyzer := NewSaturationAnalyzer(store)
+	seen, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) { rm.FromWarmPool = true })
+	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P4-k1", k2ReasonObsUnadmitted}, seen)
+	assert.InDelta(t, 600_000, price, 0.5, "priced at the bridge's resident tokens, not at k1 (929 792)")
+	assert.Zero(t, k2Windows(analyzer), "the reading is not written to the variant's window")
+	if rec := store.Get("test-ns", "test-model", admissionVariant); rec != nil {
+		assert.NotEqual(t, capacity.LearnedFromLive, rec.LearnedFrom, "nor filed as its live capacity")
+	}
+}
+
+// Lower-only: an unadmitted reading ABOVE what the chain gives does not price
+// the row up. The window measured 600 000; a not-Ready Pod holding 800 000
+// stays at the window's figure.
+func TestK2Admission_AnUnadmittedReadingNeverPricesAboveTheChain(t *testing.T) {
+	analyzer := NewSaturationAnalyzer(capacity.NewStore())
+	require.Equal(t, []string{"P1-obs"}, k2AdmissionCycle(t, analyzer, 1_162_240, func(*domain.ReplicaMetrics) {}))
+	seen, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) {
+		rm.Ready = false
+		rm.TokensInUse = 800_000
+		rm.KvCacheUsage = float64(rm.TokensInUse) / float64(rm.TotalKvCapacityTokens)
+	})
+	assert.Equal(t, []string{k2ReasonObsUnadmitted, "P2-hist"}, seen)
+	assert.InDelta(t, 600_000, price, 0.5)
+}
+
+// A not-Ready Pod files its cache, which is the variant's own, but at the
+// capacity the chain gave: the reading that priced its cycle is not recorded
+// in the store either.
+func TestK2Admission_ANotReadyPodFilesTheChainsFigure(t *testing.T) {
+	store := capacity.NewStore()
+	analyzer := NewSaturationAnalyzer(store)
+	_, price := k2AdmissionAnalyze(t, analyzer, 1_162_240, func(rm *domain.ReplicaMetrics) { rm.Ready = false })
+	assert.InDelta(t, 600_000, price, 0.5, "the cycle is priced at the reading")
+	rec := store.Get("test-ns", "test-model", admissionVariant)
+	require.NotNil(t, rec)
+	assert.Equal(t, capacity.LearnedFromLive, rec.LearnedFrom)
+	assert.EqualValues(t, memoryBound(1_162_240, 0.8), rec.EffectiveCapacity,
+		"the record holds the chain's figure (k1 here), not the unrecorded reading")
+}
+
+// A bridge reads a sibling's lower k2 like any row, but does not start the
+// variant's borrow clock: the hold is spent by the variant's own replicas.
+func TestK2Admission_ABridgeDoesNotStartTheBorrowClock(t *testing.T) {
+	store := capacity.NewStore()
+	analyzer := NewSaturationAnalyzer(store)
+	params := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256}
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params})
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params})
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+		{VariantName: "variant-b", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	run := func(b domain.ReplicaMetrics) {
+		ctx, _ := observedCtx(t)
+		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+			makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50), // variant-a measures 4000
+			b,
+		}, states))
+		require.NoError(t, err)
+	}
+	clocks := func() int {
+		analyzer.mu.Lock()
+		defer analyzer.mu.Unlock()
+		n := 0
+		for k := range analyzer.k2BorrowedSince {
+			if ns, v, _, ok := splitVariantKey(k); ok && ns == "test-ns" && v == "variant-b" {
+				n++
+			}
+		}
+		return n
+	}
+	bridge := makeReplicaMetrics("pool-0", "variant-b", 1000, 16000, 0, 100, 50)
+	bridge.FromWarmPool = true
+	run(bridge)
+	run(bridge)
+	assert.Zero(t, clocks(), "a bridge read the borrow without starting variant-b's clock")
+
+	run(makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50))
+	assert.Equal(t, 1, clocks(), "the variant's own replica starts it")
 }

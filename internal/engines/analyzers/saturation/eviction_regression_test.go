@@ -45,7 +45,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		// this comment asserted the general rule. k1 is the bound that holds.
 		const historyKey = "hist-key"
 		k2From := func(a *SaturationAnalyzer) (int64, capacity.K2Source) {
-			return a.computeK2(historyKey, model, ns, variant,
+			k2, src, _ := a.computeK2(historyKey, model, ns, variant,
 				0,     // queueLen: not saturated, so Priority 1 cannot fire
 				0,     // tokensInUse
 				600,   // avgOutput
@@ -55,6 +55,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				90000, // k1
 				90000, // kvCeiling
 				domain.RoleDecode, false, "", logr.Discard())
+			return k2, src
 		}
 
 		It("reports a retained measurement as historical however old the figure is", func() {
@@ -129,7 +130,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// max_num_seqs=16 binds hard: derived is 16*(1000+3000) = 64,000,
 			// below the 95,000 on record.
 			params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 16}
-			k2, src := a.computeK2(historyKey, model, ns, variant,
+			k2, src, _ := a.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10,
 				params,
 				919859, // k1: large, so it clamps neither figure
@@ -145,7 +146,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// And the figure it displaced, to pin the direction rather than
 			// assert it: the same call with no history reaches Priority 3.
 			fresh := NewSaturationAnalyzer(capacity.NewStore())
-			derived, derivedSrc := fresh.computeK2(historyKey, model, ns, variant,
+			derived, derivedSrc, _ := fresh.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10, params, 919859, 919859,
 				domain.RoleDecode, false, "", logr.Discard())
 			Expect(derivedSrc).To(Equal(capacity.K2SrcDerived))

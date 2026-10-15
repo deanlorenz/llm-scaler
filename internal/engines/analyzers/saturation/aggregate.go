@@ -136,9 +136,11 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 				capacityLabel = k2SourceLabel(ownRows)
 			} else {
 				// Only bridges reported. The variant's own per-replica capacity is
-				// unmeasured this cycle, and the bridge's reading is the closest
-				// thing to it that was actually observed -- lower than the truth,
-				// which asks for one replica too many rather than one too few.
+				// unmeasured this cycle, and the bridge's is the closest thing to
+				// it -- lower than the truth, which asks for one replica too many
+				// rather than one too few. A saturated bridge is priced at its
+				// reading for the cycle where that is lower than the chain
+				// (K2SrcUnadmitted), though the reading is never recorded.
 				// Zero would be worse than either: the optimizer skips a variant
 				// whose per-replica capacity is <= 0 (cost_aware_optimizer.go), so
 				// a variant a bridge is currently carrying would stop being scaled

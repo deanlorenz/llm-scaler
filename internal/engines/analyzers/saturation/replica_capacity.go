@@ -103,7 +103,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	case !rm.Ready:
 		unadmitted = "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"
 	}
-	k2, k2Priority := a.computeK2(
+	k2, k2Priority, k2Recordable := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -259,6 +259,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// engine's, and a record filed live under the variant it is lent to
 	// would price that variant -- once parked, and as a compatible sibling's
 	// clamp -- on an engine it does not run.
+	//
+	// A not-Ready Pod files its cache, which is the variant's own, but at
+	// the capacity the chain gave: a reading it may not record
+	// (K2SrcUnadmitted) prices this cycle and goes no further.
 	if !rm.FromWarmPool {
 		var existingParams *capacity.EngineParams
 		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
@@ -270,7 +274,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			NumGpuBlocks:          rm.NumGpuBlocks,
 			BlockSize:             rm.BlockSize,
 			TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
-			EffectiveCapacity:     effectiveCapacity,
+			EffectiveCapacity:     min(k1, k2Recordable),
 			EngineParams:          existingParams,
 			LearnedFrom:           capacity.LearnedFromLive,
 		})
@@ -414,7 +418,9 @@ const derivedBucket = "derived"
 // 2. Historical → rolling average from previous observations
 // 3. Derived (from deployment args) → formula-based estimate
 // 4. Fallback → k1 (memory-bound only)
-// Returns the k2 value and the priority level (1–4) that produced it.
+// Returns the k2 the replica is priced on this cycle, the source that produced
+// it, and the k2 the chain gave -- the figure the capacity store may keep. The
+// first and last differ only for an unadmitted row (unadmittedPrice).
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
 // and variantName are for the log lines only. A non-empty unadmitted says why
 // this replica's reading may not be recorded (computeReplicaCapacity): a
@@ -433,7 +439,72 @@ func (a *SaturationAnalyzer) computeK2(
 	downstreamSaturated bool,
 	unadmitted string,
 	logger logr.Logger,
+) (k2 int64, src capacity.K2Source, recordable int64) {
+	chain, chainSrc := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
+		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
+		unadmitted, logger)
+	return a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
+		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, unadmitted, logger)
+}
+
+// unadmittedPrice returns the k2 a row is priced on this cycle, its source,
+// and the k2 the chain gave, which is what the capacity store may keep.
+//
+// The two differ only for an unadmitted row (a warm-pool bridge, or a Pod
+// that is not Ready) that is saturated. Its reading may not be written -- it
+// describes the pool's engine, or a frozen Pod -- but it is what that row is
+// holding NOW, and for a variant a bridge alone is carrying it is the only
+// reading there is: falling through to derived, or to k1 for prefill, priced
+// the bridge higher in the very cycle that showed it full, so fewer of the
+// variant's own replicas were ordered while the bridge was its only supply
+// and was saturated. So the row is priced at its reading for this cycle, and
+// only where that is LOWER than the chain -- a reading may only make one
+// cycle more conservative, never a record.
+func (a *SaturationAnalyzer) unadmittedPrice(
+	chain int64, chainSrc capacity.K2Source,
+	historyKey, modelID, namespace, variantName string,
+	queueLen int, tokensInUse int64,
+	queueThreshold float64,
+	kvCeiling int64,
+	downstreamSaturated bool,
+	unadmitted string,
+	logger logr.Logger,
+) (k2 int64, src capacity.K2Source, recordable int64) {
+	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
+	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
+	if unadmitted == "" || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+		return chain, chainSrc, chain
+	}
+	logger.V(logging.DEFAULT).Info("k2-decision",
+		"modelID", modelID, "namespace", namespace, "variant", variantName,
+		"priority", capacity.K2SrcUnadmitted.String(), "historyKey", historyKey,
+		"reason", "priced this cycle at the saturated reading, lower than the chain; not recorded",
+		"k2", tokensInUse, "chainK2", chain, "chainPriority", chainSrc.String())
+	return tokensInUse, capacity.K2SrcUnadmitted, chain
+}
+
+// k2Chain is the priority chain itself: P1 (a saturated reading, recorded),
+// P2 (the variant's window), P3 (derived) and P4 (k1), with the lower-only
+// borrow from a compatible sibling after P3 and P4. An unadmitted row
+// (unadmitted != "") never writes the window and never starts the variant's
+// borrow clock: a bridge serving a variant whose own Pods are pending would
+// otherwise spend the borrow's hold before the variant ran a replica of its
+// own.
+func (a *SaturationAnalyzer) k2Chain(
+	historyKey string,
+	modelID, namespace, variantName string,
+	queueLen int, tokensInUse int64,
+	avgOutput, avgInput float64,
+	queueThreshold float64,
+	engineParams *capacity.EngineParams,
+	k1 int64,
+	kvCeiling int64,
+	role string,
+	downstreamSaturated bool,
+	unadmitted string,
+	logger logr.Logger,
 ) (int64, capacity.K2Source) {
+	armBorrowClock := unadmitted == ""
 	// Priority 1: Observed (queue saturated)
 	//
 	// A reading above the KV cache's PHYSICAL ceiling is a scrape artifact
@@ -537,7 +608,7 @@ func (a *SaturationAnalyzer) computeK2(
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
-			"reason", unadmitted+"; not recorded",
+			"reason", unadmitted+"; not recorded (it may still price this cycle, lower-only)",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading:
 		k2Observed := tokensInUse
@@ -674,7 +745,7 @@ func (a *SaturationAnalyzer) computeK2(
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams); ok {
+			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, armBorrowClock); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, capacity.K2SrcBorrowed
 			}
@@ -688,7 +759,7 @@ func (a *SaturationAnalyzer) computeK2(
 	}
 
 	// Priority 4: Fallback to k1
-	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams); ok {
+	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, armBorrowClock); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
 		return b.k2, capacity.K2SrcBorrowed
 	}

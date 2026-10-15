@@ -101,7 +101,13 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 // k2 above k1 was "lower", was reported as P2-borrow and started the clock,
 // while capacity -- clamped to k1 either way -- did not move. ok is false when
 // there is nothing to borrow, or the relaxation has run its course.
-func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams) (k2Borrow, bool) {
+//
+// armClock false is a row that may not record the variant's k2 (a warm-pool
+// bridge, a Pod that is not Ready): it reads a borrow on the clock as it
+// stands, and when no clock has started it reads the borrow at full hold
+// without starting one. The hold is the variant's own replicas' to spend, not
+// a bridge's.
+func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams, armClock bool) (k2Borrow, bool) {
 	if own <= 0 || ownParams == nil {
 		return k2Borrow{}, false
 	}
@@ -148,7 +154,9 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 	since, started := a.k2BorrowedSince[clockKey]
 	if !started {
 		since = now
-		a.k2BorrowedSince[clockKey] = since
+		if armClock {
+			a.k2BorrowedSince[clockKey] = since
+		}
 	}
 	a.mu.Unlock()
 

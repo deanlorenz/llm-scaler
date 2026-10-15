@@ -72,7 +72,7 @@ func TestBusiestQueueLoadPrefillAndDecode(t *testing.T) {
 // roleSaturated keeps its rule now that the KV half is shared (kvFull).
 func TestRoleSaturatedSharesKvFull(t *testing.T) {
 	roles := map[string]string{"d": domain.RoleDecode}
-	row := domain.ReplicaMetrics{VariantName: "d", QueueLength: 5, TokensInUse: 900, TotalKvCapacityTokens: 1000}
+	row := domain.ReplicaMetrics{VariantName: "d", Ready: true, QueueLength: 5, TokensInUse: 900, TotalKvCapacityTokens: 1000}
 	if !roleSaturated([]domain.ReplicaMetrics{row}, roles, domain.RoleDecode, 5, 0.8) {
 		t.Error("a decode queued at the threshold with its KV full is not saturated")
 	}

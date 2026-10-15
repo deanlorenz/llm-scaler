@@ -1,6 +1,9 @@
 package saturation
 
-import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+import (
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+)
 
 // k2ReasonObsImplausible labels the diagnostic emitted when an observation is
 // discarded for exceeding the KV cache's physical ceiling. It is deliberately
@@ -21,9 +24,10 @@ const k2ReasonObsDownstream = "P1-obs-downstream"
 // k2ReasonObsUnadmitted labels the diagnostic emitted when a saturated reading
 // is left unrecorded because the row is a warm-pool bridge or a Pod that is not
 // Ready -- the rows the saturated-throughput write already refuses
-// (computeReplicaCapacity). Not a capacity.K2Source: the analyzer falls through
-// to the next priority.
-const k2ReasonObsUnadmitted = "P1-obs-unadmitted"
+// (computeReplicaCapacity). The analyzer falls through to the next priority;
+// where the reading is lower than what that gives, it prices the row for the
+// cycle as capacity.K2SrcUnadmitted, whose label this is.
+var k2ReasonObsUnadmitted = capacity.K2SrcUnadmitted.String()
 
 const (
 	satReasonP0Store = "P0-store" // capacity from store or compatible-variant record; no live replicas
