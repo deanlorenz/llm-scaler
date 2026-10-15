@@ -233,3 +233,25 @@ tests:
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts: []
+
+  # 12. A target set, removed at 21m, and set again at 56m, nothing ever
+  #     judged: "set for an hour" counts the whole hour, so it stays quiet
+  #     until an hour after the target came back (pending ~115m, firing ~130m).
+  #     A check of one instant an hour ago fired at 76m and flapped.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x20 stale _x34 3x90'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 76m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+      - eval_time: 135m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
