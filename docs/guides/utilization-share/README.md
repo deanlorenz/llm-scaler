@@ -53,15 +53,18 @@ make utilization-share-activate
 For two to three minutes after this, and after every controller restart, nothing
 in the group scales and its models show `quiet-period`.
 
-Activate also lets the controller patch pods in `NAMESPACE` (Role
-`wva-pod-writer`): the optimizer changes pods' deletion cost, and the
-controller's ClusterRole only reads pods. You need the right to create Roles in
-that namespace. If models in several namespaces share one budget, run activate
-once for each of them. Activate grants only in `NAMESPACE`. With a cluster quota
-or the inventory, it warns about each other namespace whose models this
-controller scales and where the grant is missing, and prints the command to run
-there. With `clusterNamespaces`, it warns only about those. With quotas per
-namespace, no other namespace shares the budget, so it warns about none.
+If models in several namespaces share one budget, run activate in each of them.
+Activate tells you which:
+
+- It grants the controller `patch` on pods in `NAMESPACE` only. You need the
+  right to create Roles there.
+- For every other namespace that shares the budget and has no grant, it prints
+  a warning with the command to run there:
+  `make utilization-share-activate NAMESPACE=<ns> CONTROLLER_NAMESPACE=<controller ns>`.
+- No warning means no other namespace needs it.
+
+Which namespaces share a budget is under
+[Details](#which-namespaces-share-a-budget).
 
 On a cluster-wide quota, `clusterNamespaces` lets you act on a few namespaces
 first. Weights, floors and every other key are in the [scaling policy
@@ -203,6 +206,22 @@ model](../install-small-model/) twice.
   block. If the marks do not clear, or the pods cannot be read, it stops with
   the block in shadow.
 - Each step runs `deploy/utilization-share.sh`; `--help` lists its options.
+
+### Which namespaces share a budget
+
+Activate follows the controller's own grouping:
+
+- **Quota with namespace-scoped entries:** each namespace an entry covers has
+  its own budget, even with no figure for it (that is a zero budget). Only a
+  namespace listed in the `exclude:` of every such entry shares the cluster
+  budget. A `scope: cluster` entry, a `gpu-inventory` limiter and
+  `physicalGroups` do not change this.
+- **Quota with only `scope: cluster` entries:** every namespace shares it.
+- **`gpu-inventory` alone:** namespaces share only with `physicalGroups: true`.
+- **No limiter:** nothing is shared.
+
+`clusterNamespaces`, when set, narrows the shared namespaces to the ones it
+lists.
 
 ### Who can read the controller's endpoint
 

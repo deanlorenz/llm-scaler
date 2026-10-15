@@ -83,14 +83,36 @@ expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | u
 expect "state: another optimizer" "other:fancy plain" "$(printf 'optimizer:\n  type: fancy\n' | us_block_state)"
 expect "budget: quotas per namespace share nothing" namespace "$(printf '%s\n' "$QUOTA_POLICY" | us_budget_scope)"
 expect "budget: a cluster quota is shared" cluster "$(printf '%s\n' "$CLUSTER_POLICY" | us_budget_scope)"
-# Models outside the quota namespaces still form a cluster group, under a
-# gpu-inventory limiter beside the quotas or with physicalGroups: true.
-expect "budget: quotas per namespace beside gpu-inventory are shared" cluster \
+# As the controller builds its groups (utilization_share_groups.go): beside a
+# quota it builds no gpu-inventory limiter and ignores physicalGroups, and a
+# namespace a namespace-scoped entry covers -- even with no figure, a zero
+# budget -- gets its own group. Only a namespace excluded from every such entry
+# shares the cluster group. These two said "cluster" before, and activate
+# warned about namespaces that share nothing.
+expect "budget: quotas per namespace beside gpu-inventory share nothing" namespace \
     "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_budget_scope)"
-expect "budget: quotas per namespace with physicalGroups are shared" cluster \
+expect "budget: quotas per namespace with physicalGroups share nothing" namespace \
     "$(printf '%s\n' "$TUNED_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
 expect "budget: physicalGroups false shares nothing" namespace \
     "$(printf '%s\n' "$TUNED_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = false' | us_budget_scope)"
+EXCL_POLICY="$(printf '%s\n' "$QUOTA_POLICY" | yq '.limiters[0].exclude = ["ns-x", "ns-y"]')"
+expect "budget: a namespace excluded from the quota shares the cluster group" cluster \
+    "$(printf '%s\n' "$EXCL_POLICY" | us_budget_scope)"
+expect "budget: the excluded namespaces are the ones that share" "ns-x ns-y" \
+    "$(printf '%s\n' "$EXCL_POLICY" | us_excluded_namespaces | paste -sd' ' -)"
+# Two namespace-scoped entries: a namespace one of them still covers has its own group.
+expect "budget: excluded from only one of two entries shares nothing" namespace \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "q2", "type": "quota", "scope": "namespace", "exclude": ["ns-y"]}] | .limiters[1].exclude = ["ns-z"]' | us_budget_scope)"
+expect "budget: excluded from both entries shares" "ns-y" \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "q2", "type": "quota", "scope": "namespace", "exclude": ["ns-y"]}]' | us_excluded_namespaces)"
+# A cluster entry beside a namespace-scoped one: every covered namespace is
+# still its own group, so nothing is shared.
+expect "budget: a cluster quota beside a namespace quota shares nothing" namespace \
+    "$(printf '%s\n' "$QUOTA_POLICY" | yq '.limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]' | us_budget_scope)"
+expect "budget: the inventory alone forms no group" none "$(printf '%s\n' "$INV_POLICY" | us_budget_scope)"
+expect "budget: the inventory with physicalGroups is shared" cluster \
+    "$(printf '%s\n' "$INV_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
+expect "budget: no limiter forms no group" none "$(printf 'scaleUpThreshold: 0.85\n' | us_budget_scope)"
 
 out="$(printf '%s\n' "$TUNED_POLICY" | us_policy_with_mode active)"
 expect "active: shadow false" false "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.shadow')"
@@ -325,7 +347,7 @@ printf '%s\n' \
 echo yes > "$STATE/cani.team-c"
 run activate
 vcase "activate: warns about each other namespace of the budget without a grant, and grants only its own" \
-    eval '[ $RC -eq 0 ] && says "may not patch pods in team-b" && says "activate -n team-b --controller-namespace team-a" && ! says "pods in team-c" && ! says "pods in team-d" && ! says "pods in team-e" && ! grep -q "namespace: team-b" "$STATE/applied"'
+    eval '[ $RC -eq 0 ] && says "may not patch pods in team-b" && says "make utilization-share-activate NAMESPACE=team-b CONTROLLER_NAMESPACE=team-a" &&! says "pods in team-c" && ! says "pods in team-d" && ! says "pods in team-e" && ! grep -q "namespace: team-b" "$STATE/applied"'
 fresh "$CLUSTER_POLICY"; touch "$STATE/sos.forbidden"; run activate
 vcase "activate: an unreadable ScaledObject list is warned as unknown, not taken for none" \
     eval '[ $RC -eq 0 ] && says "other namespaces sharing this budget are unknown"'
@@ -342,6 +364,16 @@ printf '%s\n' \
 run activate
 vcase "activate: quotas per namespace warn about no other namespace" \
     eval '[ $RC -eq 0 ] && ! says "pods in team-b" && says "no other namespace shares this budget"'
+# A namespace excluded from the quota shares the cluster group, so it is the
+# one named -- and only it: team-b is covered by the quota and shares nothing.
+fresh "$(printf '%s\n' "$TUNED_POLICY" | yq '.limiters[0].exclude = ["team-c"]')"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate
+vcase "activate: names the namespace excluded from the quota, and only it" \
+    eval '[ $RC -eq 0 ] && says "may not patch pods in team-c" && says "make utilization-share-activate NAMESPACE=team-c CONTROLLER_NAMESPACE=team-a" && ! says "pods in team-b"'
 # clusterNamespaces limits a cluster budget to the namespaces it lists. team-c
 # is listed and has no grant, so it is still warned about: a warning about
 # nobody must not pass.
@@ -522,7 +554,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=81
+CASES_EXPECTED=90
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

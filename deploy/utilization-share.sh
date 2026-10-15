@@ -88,20 +88,45 @@ us_quota_keys() {
     yq -r '[.limiters[]? | select(.type == "quota") | .. | select(tag == "!!int") | path | .[-1]] | unique | .[]'
 }
 
-# us_budget_scope -- namespace when every quota entry is per namespace and
-# nothing else forms a cluster group, so no two namespaces share a budget;
-# cluster otherwise (a cluster quota, the inventory, which is cluster-wide, or
-# per-namespace quotas beside a gpu-inventory limiter or physicalGroups: true).
+# us_budget_scope -- whether namespaces share a budget, the way the controller
+# builds its share groups (internal/engines/allocation/utilization_share_groups.go):
+#
+#   cluster    some namespaces share one group per accelerator
+#   namespace  every planned namespace has its own budget
+#   none       no group at all, so nothing is shared
+#
+# With a quota entry, only quota entries count: the controller builds no
+# gpu-inventory limiter beside one, and ignores physicalGroups. A namespace
+# that a namespace-scoped entry covers -- listed, or by `default`, or not at
+# all, which is a zero budget -- gets its own group. So the cluster group holds
+# only the namespaces excluded from EVERY namespace-scoped entry
+# (us_excluded_namespaces), or every namespace when there is no
+# namespace-scoped entry. Without a quota, the inventory forms a cluster group
+# only with physicalGroups: true, and no limiter forms none.
 us_budget_scope() {
-    local p scopes extra
+    local p kind out
     p="$(cat)"
-    [ "$(printf '%s\n' "$p" | us_limiter_kind)" = quota ] || { echo cluster; return 0; }
-    scopes="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota") | .scope // ""] | unique | join(" ")')" || return 1
-    [ "$scopes" = namespace ] || { echo cluster; return 0; }
-    # A gpu-inventory limiter beside them, or physicalGroups: true, plans the
-    # models outside those namespaces in one cluster group per accelerator.
-    extra="$(printf '%s\n' "$p" | yq -r '([.limiters[]? | select(.type == "gpu-inventory" or .type == "inventory")] | length > 0) or (.optimizer.utilizationShare.physicalGroups == true)')" || return 1
-    if [ "$extra" = true ]; then echo cluster; else echo namespace; fi
+    kind="$(printf '%s\n' "$p" | us_limiter_kind)" || return 1
+    case "$kind" in
+        none) echo none; return 0 ;;
+        inventory)
+            out="$(printf '%s\n' "$p" | yq -r '.optimizer.utilizationShare.physicalGroups == true')" || return 1
+            if [ "$out" = true ]; then echo cluster; else echo none; fi
+            return 0
+            ;;
+    esac
+    out="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota" and .scope == "namespace")] | length')" || return 1
+    if [ "$out" = 0 ]; then echo cluster; return 0; fi
+    out="$(printf '%s\n' "$p" | us_excluded_namespaces)" || return 1
+    if [ -n "$out" ]; then echo cluster; else echo namespace; fi
+}
+
+# us_excluded_namespaces -- the namespaces excluded from every namespace-scoped
+# quota entry, one per line: under a quota with namespace-scoped entries, the
+# only namespaces that share the cluster group.
+us_excluded_namespaces() {
+    yq -r '[.limiters[]? | select(.type == "quota" and .scope == "namespace") | (.exclude // [])] as $e
+        | ($e[0] // []) | .[] | select(. as $n | ($e | map(select(contains([$n]))) | length) == ($e | length))'
 }
 
 # us_cluster_namespaces -- the block's clusterNamespaces, one per line: the only
@@ -539,18 +564,24 @@ verb_shadow() {
 # grants it there. It grants nothing there itself.
 #
 # Which namespaces share the budget, from the policy (us_budget_scope): none
-# when every quota is per namespace and nothing else forms a cluster group;
-# otherwise every namespace, or only those in clusterNamespaces when the block
-# lists some. A cluster budget is split per accelerator, which this script
+# when every planned namespace has its own budget or no group forms; under
+# namespace-scoped quotas, only the namespaces excluded from all of them;
+# otherwise every namespace. clusterNamespaces, when the block lists some,
+# narrows either. A cluster budget is split per accelerator, which this script
 # cannot see, so the warning says "if". A list it cannot read is said, not
 # taken for none.
 warn_ungranted_namespaces() {
-    local list ns only odd
-    if [ "$(printf '%s\n' "$POLICY" | us_budget_scope)" = namespace ]; then
-        info "every quota is per namespace, so no other namespace shares this budget"
-        return 0
-    fi
+    local list ns only excluded odd
+    case "$(printf '%s\n' "$POLICY" | us_budget_scope)" in
+        namespace)
+            info "every planned namespace has its own quota, so no other namespace shares this budget"
+            return 0 ;;
+        none)
+            info "this limiter forms no shared group, so no other namespace shares this budget"
+            return 0 ;;
+    esac
     only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
+    excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
         warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
         return 0
@@ -563,12 +594,22 @@ warn_ungranted_namespaces() {
         if [ -n "$only" ] && ! grep -qxF -- "$ns" <<<"$only"; then
             continue
         fi
+        if [ -n "$excluded" ] && ! grep -qxF -- "$ns" <<<"$excluded"; then
+            continue
+        fi
         case "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" in
             yes) ;;
-            no) warn "the controller may not patch pods in $ns. If its models use the same accelerator, they share this budget and the optimizer cannot move their pods. Run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
-            *) warn "could not tell whether the controller may patch pods in $ns. If its models use the same accelerator, they share this budget; run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
+            no) warn "the controller may not patch pods in $ns. If its models use the same accelerator, they share this budget and the optimizer cannot move their pods. Run: $(us_activate_cmd "$ns")" ;;
+            *) warn "could not tell whether the controller may patch pods in $ns. If its models use the same accelerator, they share this budget; run: $(us_activate_cmd "$ns")" ;;
         esac
     done
+}
+
+# us_activate_cmd <ns> -- the make command that runs activate in <ns> for this
+# controller and policy.
+us_activate_cmd() {
+    printf 'make utilization-share-activate NAMESPACE=%s CONTROLLER_NAMESPACE=%s%s\n' "$1" "$CONTROLLER_NS" \
+        "${POLICY_NS:+ POLICY_NAMESPACE=$POLICY_NS}"
 }
 
 verb_activate() {
