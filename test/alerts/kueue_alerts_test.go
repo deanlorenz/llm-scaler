@@ -28,19 +28,36 @@ func findAlert(t *testing.T, name string) kueueAlert {
 	return kueueAlert{}
 }
 
-// R8, R11: the stale alert fires per namespace and says which, because a
-// single namespace's failing ResourceQuota read freezes that namespace alone;
-// a summary that blamed the Kueue reader sent on-call to the wrong read.
-func TestKueueReaderStaleNamesTheNamespace(t *testing.T) {
+// R2-4: a failed Kueue read freezes every namespace of the entry, so the
+// stale alert pages once per entry, counting namespaces, not once per
+// namespace (200 pages for one fault).
+func TestKueueReaderStalePagesOncePerEntry(t *testing.T) {
 	a := findAlert(t, "WVAKueueReaderStale")
 	assert.Equal(t, []string{"wva_quota_borrow_withheld"}, ExtractMetricNames(a.Expr))
 	assert.Contains(t, a.Expr, `{reason="stale"}`)
+	assert.Contains(t, a.Expr, "count by (limiter_name)")
+	assert.Regexp(t, `>=\s*2\s*$`, a.Expr)
+	assert.Equal(t, "5m", a.For)
+	assert.Equal(t, "warning", a.Severity)
+	assert.Contains(t, a.Summary, "$labels.limiter_name")
+	assert.NotContains(t, a.Summary, "$labels.exported_namespace", "aggregated away")
+	assert.True(t, strings.HasSuffix(a.Runbook, "#wvakueuereaderstale"))
+}
+
+// R8, R11, R2-3, R2-4: a namespace stale alone in its entry is named, and the
+// description is right at the defaults: a failing ResourceQuota read turns into
+// resourcequota-unreadable after five 30s refresh intervals, before 5 minutes.
+func TestKueueReaderStaleNamespaceOnlyWhenAlone(t *testing.T) {
+	a := findAlert(t, "WVAKueueReaderStaleNamespace")
+	assert.Equal(t, []string{"wva_quota_borrow_withheld", "wva_quota_borrow_withheld"}, ExtractMetricNames(a.Expr))
 	assert.Contains(t, a.Expr, "max by (limiter_name, exported_namespace)")
-	assert.Regexp(t, `==\s*1\s*$`, a.Expr)
+	assert.Contains(t, a.Expr, "and on (limiter_name)")
+	assert.Regexp(t, `==\s*1\)\s*$`, a.Expr)
 	assert.Equal(t, "5m", a.For)
 	assert.Equal(t, "warning", a.Severity)
 	assert.Contains(t, a.Summary, "$labels.exported_namespace")
-	assert.Contains(t, a.Description, "ResourceQuota", "the description names the per-namespace cause too")
+	assert.Contains(t, a.Description, "before this alert fires", "the ResourceQuota cause is bounded at the defaults")
+	assert.NotContains(t, a.Description, "fires alone", "the round-1 claim, impossible at the defaults")
 	assert.True(t, strings.HasSuffix(a.Runbook, "#wvakueuereaderstale"))
 }
 
@@ -72,6 +89,15 @@ func TestKueueVersionUnknownIsPerControllerInstance(t *testing.T) {
 	a := findAlert(t, "WVAKueueVersionUnknown")
 	assert.Contains(t, a.Expr, "max by (controller_instance) (wva_kueue_controller_version_known)")
 	assert.Contains(t, a.Description, "assumeTestedVersion: true", "the documented fix")
+}
+
+// R2-5: a Deployment that cannot be read sets the version gauge to 0 and
+// freezes borrowing as kueue-controller-down; one fault pages once, through
+// the expression, matched per controller instance.
+func TestKueueVersionUnknownIsQuietWhileControllerDown(t *testing.T) {
+	a := findAlert(t, "WVAKueueVersionUnknown")
+	assert.Contains(t, a.Expr, "unless on (controller_instance)")
+	assert.Contains(t, a.Expr, `wva_quota_borrow_withheld{reason="kueue-controller-down"}`)
 }
 
 // R6: the drift alert compares Kueue's own figures with the scaling manager's

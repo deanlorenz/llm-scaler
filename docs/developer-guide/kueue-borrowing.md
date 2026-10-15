@@ -204,7 +204,10 @@ Deployment read whose image carries no version withholds with
 `kueue-version-unknown`, unless `kueue.assumeTestedVersion`, which lifts that
 reason only. `wva_kueue_controller_version_known` is `Known ||
 assumeTestedVersion`, published only while some entry counts borrowing, so an
-opted-out cluster never pages `WVAKueueVersionUnknown`.
+opted-out cluster never pages `WVAKueueVersionUnknown`. The alert's `unless`
+on `wva_quota_borrow_withheld{reason="kueue-controller-down"}`, per
+`controller_instance`, keeps a Deployment that cannot be read (0 and down) to
+one page, `WVAKueueControllerDown`.
 
 **Never-read.** An entry with a static `-1` and no successful Kueue read is an
 unobserved provider: `wva_constraint_provider_skipped{reason="unobserved"}`,

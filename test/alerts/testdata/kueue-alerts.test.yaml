@@ -8,8 +8,40 @@ rule_files:
   - rules.yaml
 evaluation_interval: 1m
 tests:
-  # 1. WVAKueueReaderStale fires per namespace, and only for the namespace
-  #    that stayed stale for 5 minutes: team-b recovers after 3.
+  # 1. A failed Kueue read freezes every namespace of the entry: one
+  #    WVAKueueReaderStale for entry kq, not one page per namespace, and no
+  #    per-namespace alert. A stale namespace of entry other, alone there,
+  #    is named on its own.
+  - interval: 1m
+    input_series:
+      - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-a",accelerator="H100",reason="stale",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-b",accelerator="H100",reason="stale",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-c",accelerator="A100",reason="stale",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_quota_borrow_withheld{limiter_name="other",exported_namespace="team-d",accelerator="H100",reason="stale",pod="wva-a"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WVAKueueReaderStale
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WVAKueueReaderStale
+        exp_alerts:
+          - exp_labels: {severity: warning, limiter_name: kq}
+      - eval_time: 10m
+        alertname: WVAKueueReaderStaleNamespace
+        exp_alerts:
+          - exp_labels: {severity: warning, limiter_name: other, exported_namespace: team-d}
+      - eval_time: 10m
+        alertname: WVAKueueControllerDown
+        exp_alerts: []
+
+  # 1b. The per-namespace alert waits until the namespace is the entry's only
+  #     stale one: team-b recovers after 3 minutes, and team-a, alone from
+  #     then, fires 5 minutes later. The entry-wide alert never reaches 5
+  #     minutes with two.
   - interval: 1m
     input_series:
       - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-a",accelerator="H100",reason="stale",pod="wva-a"}'
@@ -18,14 +50,17 @@ tests:
         values: '1x3 _x16'
     alert_rule_test:
       - eval_time: 4m
-        alertname: WVAKueueReaderStale
+        alertname: WVAKueueReaderStaleNamespace
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: WVAKueueReaderStaleNamespace
         exp_alerts: []
       - eval_time: 10m
-        alertname: WVAKueueReaderStale
+        alertname: WVAKueueReaderStaleNamespace
         exp_alerts:
           - exp_labels: {severity: warning, limiter_name: kq, exported_namespace: team-a}
       - eval_time: 10m
-        alertname: WVAKueueControllerDown
+        alertname: WVAKueueReaderStale
         exp_alerts: []
 
   # 2. Kueue controller down: one alert per quota entry, however many
@@ -44,6 +79,9 @@ tests:
       - eval_time: 10m
         alertname: WVAKueueReaderStale
         exp_alerts: []
+      - eval_time: 10m
+        alertname: WVAKueueReaderStaleNamespace
+        exp_alerts: []
 
   # 3. WVAKueueVersionUnknown names the controller instance that cannot read
   #    the version; the one that can stays quiet.
@@ -58,6 +96,28 @@ tests:
         alertname: WVAKueueVersionUnknown
         exp_alerts:
           - exp_labels: {severity: warning, controller_instance: west}
+
+  # 3b. A Deployment that cannot be read sets the version gauge to 0 and
+  #     freezes borrowing as kueue-controller-down. Instance west pages once,
+  #     as WVAKueueControllerDown; instance east, version 0 with Kueue up (a
+  #     digest-only image), still pages WVAKueueVersionUnknown.
+  - interval: 1m
+    input_series:
+      - series: 'wva_kueue_controller_version_known{controller_instance="east",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_kueue_controller_version_known{controller_instance="west",pod="wva-b"}'
+        values: '0x20'
+      - series: 'wva_quota_borrow_withheld{controller_instance="west",limiter_name="kq",exported_namespace="team-a",accelerator="H100",reason="kueue-controller-down",pod="wva-b"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WVAKueueVersionUnknown
+        exp_alerts:
+          - exp_labels: {severity: warning, controller_instance: east}
+      - eval_time: 15m
+        alertname: WVAKueueControllerDown
+        exp_alerts:
+          - exp_labels: {severity: warning, limiter_name: kq}
 
   # 4. An untested Kueue release is said, at info, after 30 minutes.
   - interval: 1m

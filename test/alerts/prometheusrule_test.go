@@ -271,7 +271,9 @@ func TestKueueLenderWaitingComparesAgainstTheCooldownGauge(t *testing.T) {
 }
 
 // O1: drift above 0 for 15 minutes is a warning; an unknown controller version
-// warns too. Each points at its own runbook anchor.
+// warns too. Each points at its own runbook anchor. The version alert also
+// reads the withheld gauge, to stay quiet while WVAKueueControllerDown fires
+// (TestKueueVersionUnknownIsQuietWhileControllerDown).
 func TestKueueDriftAndVersionAlerts(t *testing.T) {
 	want := map[string]struct {
 		metric, forDur, anchor string
@@ -279,6 +281,8 @@ func TestKueueDriftAndVersionAlerts(t *testing.T) {
 		"WVAKueueBorrowDrift":    {"wva_kueue_borrow_drift_gpus", "15m", "#wvakueueborrowdrift"},
 		"WVAKueueVersionUnknown": {"wva_kueue_controller_version_known", "10m", "#wvakueueversionunknown"},
 	}
+	// The metric each alert is about comes first; the version alert names
+	// the withheld gauge after it, in its unless.
 	found := 0
 	for _, group := range loadRule(t).Spec.Groups {
 		for _, r := range group.Rules {
@@ -287,7 +291,7 @@ func TestKueueDriftAndVersionAlerts(t *testing.T) {
 				continue
 			}
 			found++
-			assert.Equal(t, []string{w.metric}, ExtractMetricNames(r.Expr), r.Alert)
+			assert.Equal(t, w.metric, ExtractMetricNames(r.Expr)[0], r.Alert)
 			assert.Equal(t, w.forDur, r.For, r.Alert)
 			assert.Equal(t, "warning", r.Labels["severity"], r.Alert)
 			assert.True(t, strings.HasSuffix(r.Annotations["runbook_url"], w.anchor), r.Alert)
@@ -295,7 +299,7 @@ func TestKueueDriftAndVersionAlerts(t *testing.T) {
 	}
 	assert.Equal(t, len(want), found, "every new alert is defined")
 	assert.Regexp(t, `>\s*0\s*$`, alertExpr(t, "WVAKueueBorrowDrift"))
-	assert.Regexp(t, `==\s*0\s*$`, alertExpr(t, "WVAKueueVersionUnknown"))
+	assert.Contains(t, alertExpr(t, "WVAKueueVersionUnknown"), "(wva_kueue_controller_version_known) == 0)")
 }
 
 // A Kueue-backed quota entry whose -1 caps were never bounded by a read must
