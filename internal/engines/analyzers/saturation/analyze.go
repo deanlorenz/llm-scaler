@@ -85,6 +85,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
 		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
+		PricingK: pricingK(satConfig),
 	}, nil
 }
 
@@ -147,6 +148,11 @@ type cycle struct {
 	// see noteLineMismatch -- and a second map holding the same fact could
 	// drift from the first.
 	itlBorrowedFrom map[string]string
+	// itlSamples is how many readings each decode variant's OWN ITL window
+	// holds after this cycle's, whatever line it ends up priced on. Carried
+	// for the service-rate signal (attachServiceRates), where it is the
+	// number that explains a variant with no line.
+	itlSamples map[string]int
 }
 
 // demandParts is what priceDemand produces and applyFloorAndHolds consumes.
@@ -310,6 +316,7 @@ func (c *cycle) resolvePricing() {
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
 	c.itlBorrowedFrom = make(map[string]string, len(c.gpusByVariant))
+	c.itlSamples = make(map[string]int, len(c.gpusByVariant))
 	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
 		variants = append(variants, variant)
@@ -365,6 +372,10 @@ func (c *cycle) fitLines() {
 		// oscillation of PR #40 on a heterogeneous cluster), and a blended
 		// ITL line is meaningless for either product.
 		own := c.a.noteITL(variantKey, c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
+		// The variant's own window, by the same key noteITL just wrote, and
+		// before any borrow below: a borrowed line says nothing about how
+		// close this variant is to fitting one of its own.
+		c.itlSamples[variant] = c.a.itlWindowLen(variantKey)
 		physicsKey := c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
 			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant])
 
@@ -518,6 +529,9 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
 		!c.cfg.EnableLearnedStateReuse, c.logger)
+	// The service-rate signal rides on the variant records, so it reaches the
+	// engine on the same path as the target it explains.
+	c.attachServiceRates(variantCapacities, caps)
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,
 	// utilization, and RoleCapacities are assembled downstream by the engine's
