@@ -168,8 +168,10 @@ cm_issue() {
 #   STUB_CTA           FORBIDDEN makes the ClusterTriggerAuthentication unreadable
 #   STUB_CONFIGMAPS    FORBIDDEN makes ConfigMaps in the controller namespace unreadable
 #   STUB_FORBID_NS     the namespace a Forbidden message names
-#   STUB_APISERVICE    "<namespace> <service>" behind the external-metrics APIService (else NotFound)
-#   STUB_NP            the namespace an existing wva-external-scaler NetworkPolicy admits (else NotFound)
+#   STUB_APISERVICE    "<namespace> <service>" behind the external-metrics APIService (else
+#                      NotFound); FORBIDDEN makes it unreadable
+#   STUB_NP            the namespace an existing wva-external-scaler NetworkPolicy admits (else
+#                      NotFound); FORBIDDEN makes it unreadable
 #   STUB_KEDA_DEPLOYS  FORBIDDEN makes the Deployments in KEDA's namespace unreadable
 #   STUB_KEDA_OBJ_NS   KEDA_CLUSTER_OBJECT_NAMESPACE on KEDA's operator (else unset)
 # A file $STORE/deployment@<ns>__keda-operator.json is KEDA's operator in <ns>.
@@ -210,9 +212,11 @@ stub_kubectl() {
             fi
             ;;
         "get apiservice v1beta1.external.metrics.k8s.io "*)
+            [ "${STUB_APISERVICE:-}" != FORBIDDEN ] || { forbidden; return 1; }
             if [ -n "${STUB_APISERVICE:-}" ]; then printf '%s' "$STUB_APISERVICE"; else notfound; return 1; fi
             ;;
         "get networkpolicy wva-external-scaler -n $NS "*)
+            [ "${STUB_NP:-}" != FORBIDDEN ] || { forbidden; return 1; }
             if [ -n "${STUB_NP:-}" ]; then printf '9090 |%s \n' "$STUB_NP"; else notfound; return 1; fi
             ;;
         "get deployments -n "*" -o json")
@@ -1092,6 +1096,22 @@ echo "== the issued line gives each certificate's own lifetime"
 reset_store
 run wva_scaler_tls_provision_openssl
 ok 'grep -q "serving certificate is valid 365 days, KEDA.s client certificate 3650 days" "$WORK/info"' "issued line: $(grep issued "$WORK/info")"
+
+
+# ---------------------------------------------------------------- where KEDA runs: Forbidden is not absent
+# probe_apisvc and probe_np print the return code of the common.sh readers:
+# 1 is "none there", 2 "could not look".
+probe_apisvc() { local r=0; wva_keda_apiservice_ns >/dev/null || r=$?; echo "rc=$r"; }
+probe_np() { local r=0; wva_scaler_np_keda_ns "$NS" >/dev/null || r=$?; echo "rc=$r"; }
+echo "== a Forbidden APIService or NetworkPolicy read naming notfound-prod is could-not-look"
+run probe_apisvc STUB_APISERVICE=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -qx "rc=2" "$WORK/stdout"' "Forbidden APIService read returned '$(cat "$WORK/stdout")', want rc=2"
+run probe_np STUB_NP=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -qx "rc=2" "$WORK/stdout"' "Forbidden NetworkPolicy read returned '$(cat "$WORK/stdout")', want rc=2"
+run probe_apisvc
+ok 'grep -qx "rc=1" "$WORK/stdout"' "NotFound APIService returned '$(cat "$WORK/stdout")', want rc=1"
+run probe_np
+ok 'grep -qx "rc=1" "$WORK/stdout"' "NotFound NetworkPolicy returned '$(cat "$WORK/stdout")', want rc=1"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
