@@ -195,7 +195,9 @@ removes the old grant. It does so in each namespace that holds:
 - a pod with a utilization-share transfer mark, of a model that calls this
   controller, or
 - any model that calls this controller, when the utilization-share optimizer
-  is active (not shadow).
+  is active (not shadow). The re-run also removes the `optimizer:` block
+  ([Re-running the installer resets the default entry](scaling-policy.md#re-running-the-installer-resets-the-default-entry)),
+  so run `make utilization-share-shadow`, then `make utilization-share-activate` again.
 
 It prints each namespace it granted in. Then read its warnings:
 
