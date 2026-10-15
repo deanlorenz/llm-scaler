@@ -59,7 +59,8 @@ type Server struct {
 	// TLSConfig, when set, serves the scaler over TLS (see NewTLSConfig); a
 	// client that does not complete the handshake -- a plaintext one, or one
 	// without an accepted client certificate when the config demands one --
-	// reaches no RPC. Nil serves plaintext, which is the default: KEDA's
+	// reaches no RPC, and is logged at most once per remote host per minute
+	// (refusalLoggingCreds). Nil serves plaintext, which is the default: KEDA's
 	// external trigger dials plaintext unless its authentication names a CA.
 	TLSConfig *tls.Config
 	// DecisionInterval reports the engines' publish interval
@@ -73,6 +74,10 @@ type Server struct {
 	// listen for the microsecond caveat); elsewhere the gap is sub-millisecond
 	// and left as is.
 	listening atomic.Bool
+
+	// refusals rate-limits the log line for a refused TLS handshake. Shared by
+	// the standby and the full server, so the hand-off does not reset it.
+	refusals *refusalLog
 }
 
 // errNotListening is what Ready reports until the scaler port is bound.
@@ -148,8 +153,9 @@ func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("external-scaler")
 	// On every exit, including a cancellation that lands during the hand-off.
 	defer s.listening.Store(false)
+	s.refusals = newRefusalLog(nil)
 
-	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
+	full :=NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
 	// Only the full handler ever answers without a decision; the standby
 	// refuses instead, so its set would always read empty.
 	metrics.SetScalerUndecidedTargetsSource(full.UndecidedTargets)
@@ -282,7 +288,15 @@ func (s *Server) bind(ctx context.Context, handler pb.ExternalScalerServer, opts
 		grpc.ChainStreamInterceptor(recoverStream),
 	}, opts...)
 	if s.TLSConfig != nil {
-		opts = append(opts, grpc.Creds(credentials.NewTLS(s.TLSConfig)))
+		refusals := s.refusals
+		if refusals == nil {
+			refusals = newRefusalLog(nil)
+		}
+		opts = append(opts, grpc.Creds(&refusalLoggingCreds{
+			TransportCredentials: credentials.NewTLS(s.TLSConfig),
+			refusals:             refusals,
+			logger:               log.FromContext(ctx).WithName("external-scaler"),
+		}))
 	}
 	r := &served{srv: grpc.NewServer(opts...), err: make(chan error, 1)}
 	pb.RegisterExternalScalerServer(r.srv, handler)
