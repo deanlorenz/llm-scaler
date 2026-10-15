@@ -1087,6 +1087,12 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 | `wva_analyzer_target` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Per-replica target P, in the same unit as demand. | Same. |
 | `wva_analyzer_observed_replicas` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Replicas that reported metrics in the analyzer's last cycle. Compare with the target's **ready** replicas. | Lower than ready: a scrape gap. Higher: something the scale target does not own is serving the model. |
 
+**Never sum the `wva_analyzer_*` series across `analyzer_name`.** Each analyzer
+publishes in its own units, and `analyzer_name="CompositeSignal"` repeats the
+decision in saturation's units, so a sum counts demand at least twice. For
+what the optimizer acted on, filter on `analyzer_name="CompositeSignal"`; for
+one analyzer's own reading, filter on its name.
+
 ### SLO Analyzer Metrics
 
 Published for a model whose policy lists the `slo` analyzer and sets
@@ -1362,7 +1368,7 @@ Every reason the controller sets:
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |
 | `wake-no-capacity` | scale-from-zero | requests are queued for a model at zero, but no serving set (a decode, and a prefill when one is required) fits the GPU budget or the nodes, so it is not woken. Set while the wake is refused; cleared when it wakes or its queue empties | read the log line `Scale-from-zero: no variant woken for a model with pending requests`: `gpuBudgets` is what it was measured against, `demand` what it asked for. Free GPUs or raise the quota. Also set while the model is in a borrowing cooldown (`borrowCooldown`) after a borrowed replica of it was released: until it ends, the wake places only into a free node hole and borrows none. See [will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `wake-nominal-lent-out` | scale-from-zero | `wake-no-capacity` in a namespace whose ClusterQueue lent part of its nominal quota to a peer it cannot reclaim from: the wake was checked against its guaranteed figure plus the cohort's free pool, not its whole nominal | set `reclaimWithinCohort: Any` on the ClusterQueue if the model must wake into its nominal quota |
-| `no-composite-signal` | steady-state engine | no listed analyzer, saturation included, could size any variant this cycle; the model is sized on saturation's measured capacity alone | check the model's analyzers are live: `wva_analyzer_target{model_name="<model>"}`, and the cycle log's `composite-contributors` line at verbose level. Not alerted on |
+| `no-composite-signal` | steady-state engine | no listed analyzer could size any variant this cycle. With saturation listed, the model is sized on saturation's measured capacity alone; with it unlisted, the model holds where it is | check each listed analyzer: `wva_analyzer_target{model_name="<model>"}`, and run the controller at `--v=3` for the cycle log's `composite-contributors` line. Counted by the operational dashboard's *Models blocked from scaling* panel. Not alerted on |
 | `quiet-period`, `marks-unreadable`, `whole-replica-short`, `awaiting-release`, `quota-short`, `floor-pinned`, `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor`, `release-timeout`, `release-taken`, `release-shape-mismatch`, `reversal-hold`, `swinging`, `transfer-limit`, `burst-ending`, `fast-swing-capped`, `donor-not-steerable` | utilization-share optimizer, only while it acts | see the table below | see the table below |
 | `lender-reclaimed`, `borrow-unplaced`, `nominal-lent-out` | Kueue borrowing | see [reasons set by Kueue borrowing](#wva_model_scaling_blocked-reasons-set-by-kueue-borrowing) | same |
 

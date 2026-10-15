@@ -68,10 +68,10 @@ registration; there is no other custom resource.
    waiting requests, token rates. Per model: the router's queue and arrival
    rate.
 2. **Analyze.** The saturation analyzer works out how full each replica is
-   and how much capacity the model needs for its load. Throughput and custom
-   analyzers, when enabled, report metrics (`wva_analyzer_demand`,
-   `wva_analyzer_target`) but are not passed to the optimizer, so they do not
-   change the decision.
+   and how much capacity the model needs for its load. Every other analyzer
+   the policy lists (throughput, a custom one) works out the replicas it needs
+   too, and the model is sized to the largest of those needs, in saturation's
+   units. The `slo` analyzer only observes and never changes the decision.
 3. **Decide.** The optimizer splits that capacity across the model's
    variants. With no limiter it grows the variant with the lowest cost per
    unit of capacity (`variantCost` over what one replica serves) first. With

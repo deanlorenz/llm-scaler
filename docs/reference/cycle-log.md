@@ -73,8 +73,8 @@ thing here.
 
 ```text
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
-  "analyzer": "CompositeSignal", "live": true, "supply": 658534, "demand": 1041047, "util": 1.58,
-  "rc": 0, "sc": 50000, "scaleUpThreshold": 1.1, "scaleDownBoundary": 0.7,
+  "analyzer": "CompositeSignal", "live": true, "supply": 2170173, "demand": 2240000, "util": 1.03,
+  "rc": 465121, "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
   "variants": [{"name":"primary","prc":960000,"role":"both","reason":"C0-agree"},
                {"name":"v2","prc":403391,"role":"both","reason":"C1-single"}]}
 ```
@@ -85,7 +85,10 @@ determine `prc` per variant, so the numbers here are directly comparable to
 saturation's own `analyzer-result` line above. `prc` may differ from
 saturation's for a variant another analyzer disagreed with (`primary` above:
 960000 vs. saturation's 1152000, because another analyzer asked for more
-replicas than saturation alone would have).
+replicas than saturation alone would have). This is the same cycle as the
+saturation line: `demand` is the same 2240000, `supply` is one `primary` at
+960000 plus three `v2` at 403391, and the lower `prc` turns saturation's `rc`
+of 273121 into 465121.
 
 `variants[].reason` on the composite row is **not** an analyzer's capacity
 provenance (`P0-store`, `T1-ols`, ...) — it is the composite's own decision

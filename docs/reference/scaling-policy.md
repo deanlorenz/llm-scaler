@@ -1452,8 +1452,8 @@ got over a whole run, score their own per-request records.
   by nothing; the analyzer without targets has nothing to aim at. Either half
   alone is logged once as `SLO policy is half-configured`, and is not an error.
 - **Keep `saturation` in the list.** The list replaces the inherited one, and
-  saturation is what sizes the fleet; it runs even if left out, but loses its
-  `parameters:` and `score`.
+  saturation is what sizes the fleet. Left out, it still runs but sizes
+  nothing, and since `slo` only observes, the model would hold where it is.
 - **The block is replaced whole by an override**, not merged per objective: a
   per-model entry that sets only `ttft` has no `tpot`.
 - **A model gets the tier through its variants** (each names one in its
@@ -1644,15 +1644,31 @@ When `analyzers:` is omitted **and** `analyzerName: "saturation"` is set, the li
 defaults to `[{name: "saturation", score: 1.0}]`. When both are omitted the
 token-based analyzer still runs (see [Analyzer Selection](#analyzer-selection));
 the list is simply left empty, which also leaves the scaling band to be defaulted
-post-merge.
+post-merge. Either way saturation alone sizes the model.
+
+> **Upgrading a policy that lists `throughput` or an external analyzer.** Each
+> listed analyzer now sizes the model, where before only saturation did and the
+> others were published and ignored. Check these policies before you upgrade:
+>
+> - **Saturation and another analyzer listed.** The model is sized to the
+>   larger need, so the fleet grows when the other analyzer asks for more
+>   than saturation, and shrinks only when both agree.
+> - **Only the other analyzer listed.** It sizes the model alone. A role it
+>   cannot size (for example prefill, when it reports decode only) holds
+>   where it is: no scale-up, no scale-down. Add `saturation` to the list to
+>   keep saturation sizing the model.
+> - **`slo` listed.** No change: it only observes.
+>
+> To keep the old behaviour, list `saturation`, and remove the other entries
+> or set `enabled: false` on them.
 
 ### AnalyzerScoreConfig Fields
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
 | `name` | string | Analyzer name (must match a `RegisterAnalyzer` call) | required |
-| `enabled` | bool | Reserved — placeholder for future combine logic | `true` |
-| `score` | float64 | Reserved — placeholder for future combine logic | `1.0` |
+| `enabled` | bool | `false` keeps the entry but stops the analyzer running and sizing the model; on `saturation` it makes saturation unlisted (it still runs, for units and variants, and sizes nothing) | `true` |
+| `score` | float64 | Weight in the cross-model fair share under a GPU limiter: the combined decision takes the largest score among the analyzers that sized the model this cycle (saturation's when none did). It does not change one model's replica count | `1.0` |
 | `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleUpThreshold` |
 | `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleDownBoundary` |
 
@@ -1799,18 +1815,22 @@ The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` fo
 
 ### Saturation Always Runs
 
-The saturation analyzer executes on every cycle regardless of any future
-`enabled` flag — its `VariantCapacities` carry `Cost` and `AcceleratorName`
-required by the optimizer for variant selection and GPU accounting. On
-this branch saturation's `RequiredCapacity` and `SpareCapacity` are the
-only signals the optimizer consumes.
+The saturation analyzer executes on every cycle, listed or not, and
+`enabled: false` does not stop it: its `VariantCapacities` carry the variants,
+`Cost` and `AcceleratorName` the optimizer needs for variant selection and GPU
+accounting, and its demand is the unit every analyzer's need is converted into.
+The optimizer consumes one combined decision (`CompositeSignal`): the largest
+need among the listed analyzers, saturation included only when listed. `slo`
+never contributes to it.
 
 ### Resilience
 
 Each registered non-saturation analyzer runs in isolation: errors are
 logged and discarded, and panics are recovered. A faulty plugin analyzer
-cannot take down the optimize goroutine or block saturation from driving
-the scaling decision.
+cannot take down the optimize goroutine. While its last good reading is inside
+the staleness window, the roles it covers do not scale down, so a run that
+fails once does not shrink the fleet; after that it stops counting, and the
+other listed analyzers size the model without it.
 
 ## Best Practices: Coordinating with InferenceScheduler (End Point Picker)
 

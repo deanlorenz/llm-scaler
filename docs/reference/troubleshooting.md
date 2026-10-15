@@ -17,7 +17,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
-| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
+| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back; `wva_model_scaling_blocked{reason="no-composite-signal"}` | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics, no listed analyzer able to size it | [will not scale up](#a-model-will-not-scale-up) |
 | will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
@@ -74,6 +74,20 @@ wva_metrics_freshness_status{status!="fresh"} > 0         # decided on stale or 
 `wva_node_access_denied` is covered in [controller not Ready](#the-controller-is-not-ready-or-crash-looping);
 a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 [metrics](#metrics-stale-or-missing).
+
+**`no-composite-signal`**: no analyzer the policy lists could size any variant
+this cycle. With `saturation` listed, the model is still sized on saturation's
+measured capacity; without it, the model holds where it is, up and down. The
+dashboard's *Models blocked from scaling* panel counts it.
+
+1. Check each listed analyzer reports the model:
+   `wva_analyzer_target{model_name="<model>"}`, one `analyzer_name` per listed
+   analyzer.
+2. Run the controller at `--v=3` and read the `composite-contributors` line: per
+   variant, which analyzers sized it (`contributors`) and the replicas they
+   needed (`totalReplicas`).
+3. Look for `composite holds a role` in the log: a role no listed analyzer can
+   size, or one waiting out a listed analyzer's missed reading.
 
 ## A model will not wake from zero
 
@@ -225,7 +239,6 @@ wva_model_scaling_blocked{model_name="<model>"}
 | `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or accept that it stays up |
 | `activation-retention` | just woken and held for its retention period; clears by itself |
 | `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
-| `no-composite-signal` | no listed analyzer could size any variant this cycle; check `wva_analyzer_target{model_name="<model>"}` for each listed analyzer |
 
 No reason, and still not parked? A model that has never served a request has
 no request counter yet, so the controller keeps it where it is. Send one
