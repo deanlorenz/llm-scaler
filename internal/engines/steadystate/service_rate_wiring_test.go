@@ -129,6 +129,9 @@ func TestOnNothingObserved_SkippedModel(t *testing.T) {
 	assert.Equal(t, map[string]float64{"v-m1": 3, "v-m2": 0},
 		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelVariantName),
 		"a skipped cycle must read as nothing observed for that model only")
+	assert.Equal(t, map[string]float64{"m1": 4.5},
+		gaugeValues(t, registry, constants.WVAServiceRatePerReplica, constants.LabelModelName),
+		"the sibling model keeps its rate, at its value")
 
 	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
 		assert.ElementsMatch(t, []string{"m1"}, seriesLabels(t, registry, name, constants.LabelModelName),
