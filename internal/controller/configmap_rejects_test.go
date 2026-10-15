@@ -23,6 +23,8 @@ import (
 const (
 	rejectsSystemNS = "wva-rejects-system"
 	rejectsPolicyNS = "wva-rejects-policy"
+	// rejectsTenantNS is opted in to namespace-local scaling policy.
+	rejectsTenantNS = "wva-rejects-tenant"
 
 	// quotaDefault bounds the install with a quota limiter.
 	quotaDefault = `limiters:
@@ -148,10 +150,19 @@ func TestKeptDefaultWarnsOfTheRestart(t *testing.T) {
 		{name: "default in the controller's own ConfigMap while policy is separate", policyNS: true,
 			applyNS: rejectsSystemNS, key: config.GlobalDefaultsKey, wantWarning: false},
 		{name: "an entry other than default", applyNS: rejectsSystemNS, key: "some-tier", wantWarning: false},
+		// A namespace-local "default" tunes one namespace and bounds nothing,
+		// so a bad one never stops the controller from starting.
+		{name: "default in a namespace-local ConfigMap", applyNS: rejectsTenantNS,
+			key: config.GlobalDefaultsKey, wantWarning: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRejectsFixture(t)
+			tenant := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: rejectsTenantNS,
+				Labels: map[string]string{constants.NamespaceConfigEnabledLabelKey: constants.AnnotationValueTrue}}}
+			if err := f.c.Create(context.Background(), tenant); err != nil {
+				t.Fatal(err)
+			}
 			if tc.policyNS {
 				f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
 			}
