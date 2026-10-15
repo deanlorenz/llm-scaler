@@ -78,6 +78,7 @@ var _ = Describe("learned state across a restart", func() {
 	It("does not restore into a variant whose engine configuration changed", func() {
 		first := newProcess(params(256))
 		saved := carry(learn(first))
+		saved.Args = nil // a document from before the arguments were recorded
 
 		second := newProcess(params(64))
 		second.RestoreLearnedState(saved)
@@ -86,6 +87,7 @@ var _ = Describe("learned state across a restart", func() {
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.pendingRestore).To(BeEmpty(), "checked once, and dropped")
+		Expect(second.priorK2).To(BeEmpty(), "an older document takes no prior: it cannot say the arguments differed")
 	})
 
 	It("does not restore an entry past its horizon", func() {

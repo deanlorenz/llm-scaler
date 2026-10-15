@@ -393,15 +393,22 @@ With it on, the log says what happened (logger `learned-state`):
   or after a flush. Expected once.
 - `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
   their first cycle, and `aged`, `unusable` and `unattributable` count entries
-  not restored. Then, per variant on its first cycle, `learned state restored`,
-  or `learned state not restored: the variant's engine configuration differs
-  from the one it was learned under, or could not be read completely` -- a
-  flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
-  `envFrom`. Nothing is restored for that variant, by design. Expect it for
-  a variant whose engine image or flags changed while the controller was
-  down, and for every variant after an upgrade of the scaling manager that changes
-  the `fingerprint_version` label of `wva_engine_config` -- this release moves
-  it from 2 to 3.
+  not restored. Then, per variant on its first cycle, one of:
+  - `learned state restored`;
+  - `learned state restored without the ITL baseline: the engine image
+    changed, the arguments did not` -- a new release rolled out while the
+    controller was down. Capacity, throughput and start time are kept;
+  - `learned state not restored: the variant's engine arguments changed; its
+    k2 is kept as a lower-only prior` -- its flags changed while the
+    controller was down. The old capacity is used only where it is lower, and
+    expires (30 minutes, then a 6-hour relaxation);
+  - `learned state not restored: the variant's engine configuration differs
+    from the one it was learned under, or could not be read completely` -- a
+    flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
+    `envFrom`, or a snapshot written by an older release. Nothing is restored
+    for that variant, by design. Expect it for every variant after an upgrade
+    of the scaling manager that changes the `fingerprint_version` label of
+    `wva_engine_config` -- this release moves it from 2 to 3, once.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run

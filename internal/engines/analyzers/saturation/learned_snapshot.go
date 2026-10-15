@@ -19,13 +19,28 @@ import (
 // and the horizons are applied to them on the way in, exactly as the sweep
 // would have applied them had the controller not stopped.
 //
-// A PER-VARIANT ENTRY IS INSTALLED ONLY UNDER THE ENGINE CONFIGURATION IT WAS
+// A PER-VARIANT ENTRY IS INSTALLED ONLY UNDER THE ENGINE ARGUMENTS IT WAS
 // LEARNED UNDER. The configuration a variant runs is known only once its scale
 // target has been read, which happens per cycle in the engine, so restored
 // per-variant entries wait as pending and are installed, or rejected, the first
 // time Analyze sees their variant (installRestored). An entry whose variant
 // cannot be named from its key, or whose variant had no configuration when it
 // was written, cannot be checked and is not restored.
+//
+// Three outcomes, by how much of the configuration still holds:
+//
+//   - the whole configuration, image included: everything is installed;
+//   - the arguments but not the image (a rollout of a new release while the
+//     controller was down): the capacity, throughput and start-time figures
+//     are installed, as a live record keeps them across a routine image bump,
+//     and the per-variant ITL baseline is not -- latency is the engine's code;
+//   - neither: nothing is installed but the old k2, and that only as a PRIOR:
+//     lower-only and expiring, as a sibling's k2 is borrowed (k2_borrow.go).
+//     A figure measured under other arguments may only make the variant more
+//     conservative, and for a bounded time.
+//
+// A document written before the arguments were recorded (no Args entry) gets
+// the old rule: the whole configuration or nothing.
 //
 // "The configuration" means one this controller read COMPLETELY. A flag it
 // could not resolve -- `--max-num-seqs $VLLM_MAX_NUM_SEQS` from an envFrom --
@@ -70,6 +85,9 @@ type LearnedState struct {
 	// Config is the engine-configuration fingerprint each variant ran when
 	// this was exported, keyed namespace/variant.
 	Config map[string]string `json:"config,omitempty"`
+	// Args is the same configuration without the image
+	// (EngineParams.ArgsFingerprint), keyed alike.
+	Args map[string]string `json:"args,omitempty"`
 }
 
 // ThroughputSnapshot is a saturated-throughput window with the two side
@@ -135,16 +153,35 @@ func windowClocks(w capacity.RollingAverageSnapshot, now time.Time) (capacity.Ro
 // RestoredVariant is what installRestored did with one variant's entries.
 type RestoredVariant struct {
 	Namespace, Variant string
-	// Installed is false when the configuration differed.
+	// Installed is false when the arguments differed.
 	Installed bool
+	// ImageChanged is true when they were installed under the same arguments
+	// on another image, so the ITL baseline was left out.
+	ImageChanged bool
+	// Priors is how many k2 windows were kept as lower-only priors when the
+	// arguments differed.
+	Priors int
 	// Entries is how many entries were installed, or rejected.
 	Entries int
 }
 
+// priorK2 is a k2 measured under the arguments a variant ran before the ones
+// it runs now, kept after a restart as a lower-only, expiring prior: borrowedK2
+// takes it as it takes a sibling's figure.
+type priorK2 struct {
+	k2          int64
+	installedAt time.Time
+}
+
+// PriorK2Life is how long a prior k2 is kept from when it was installed: the
+// borrow's hold and relaxation, after which it could not be used anyway.
+const PriorK2Life = BorrowedK2Hold + BorrowedK2Relax
+
 // pendingVariant is one variant's restored entries awaiting the check.
 type pendingVariant struct {
-	expect string // the fingerprint they were learned under
-	state  LearnedState
+	expect     string // the fingerprint they were learned under
+	expectArgs string // the same without the image; empty in an older document
+	state      LearnedState
 }
 
 // alive says whether any of the entries could still be installed: one within
@@ -246,6 +283,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		ITLLines:        make(map[string]LineSnapshot, len(a.itlLines)),
 		K2BorrowedSince: make(map[string]time.Time, len(a.k2BorrowedSince)),
 		Config:          map[string]string{},
+		Args:            map[string]string{},
 	}
 	for k, ra := range a.computeCapacityHistory {
 		s.K2[k] = ra.Snapshot()
@@ -299,6 +337,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		ns, name, _ := strings.Cut(v, "/")
 		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams.Complete() {
 			s.Config[v] = rec.EngineParams.Fingerprint()
+			s.Args[v] = rec.EngineParams.ArgsFingerprint()
 		}
 	}
 
@@ -321,6 +360,11 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 			dropVariant(&s, v)
 		}
 		s.Config[v] = p.expect
+		if p.expectArgs != "" {
+			s.Args[v] = p.expectArgs
+		} else {
+			delete(s.Args, v)
+		}
 		mergeAbsent(s.K2, p.state.K2)
 		mergeAbsent(s.Throughput, p.state.Throughput)
 		mergeAbsent(s.VariantSeenAt, p.state.VariantSeenAt)
@@ -391,7 +435,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 		p := a.pendingRestore[v]
 		if p == nil {
-			p = &pendingVariant{expect: expect}
+			p = &pendingVariant{expect: expect, expectArgs: s.Args[v]}
 			a.pendingRestore[v] = p
 		}
 		return p
@@ -482,26 +526,63 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 		return RestoredVariant{}, false
 	}
 	// A configuration not read completely does not match, even an equal
-	// fingerprint: see the package comment.
-	match := rec.EngineParams.Complete() && rec.EngineParams.Fingerprint() == p.expect
+	// fingerprint: see the package comment. Nor does it take a prior: a
+	// figure is only known to come from OTHER arguments when both sides were
+	// read.
+	complete := rec.EngineParams.Complete()
+	whole := complete && rec.EngineParams.Fingerprint() == p.expect
+	args := complete && !whole && p.expectArgs != "" && rec.EngineParams.ArgsFingerprint() == p.expectArgs
+	prior := complete && !whole && !args && p.expectArgs != ""
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
 	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size()}
-	if !match {
-		return out, true
+	switch {
+	case whole:
+		out.Installed = true
+		out.Entries = a.installLocked(p.state, true)
+	case args:
+		out.Installed, out.ImageChanged = true, true
+		out.Entries = a.installLocked(p.state, false)
+	case prior:
+		out.Priors = a.installPriorsLocked(p.state.K2)
 	}
-	out.Installed = true
-	out.Entries = a.installLocked(p.state)
 	return out, true
+}
+
+// installPriorsLocked keeps each restored k2 window within the bucket
+// retention as a prior for its key, unless the key already has a window of its
+// own. Callers hold a.mu.
+func (a *SaturationAnalyzer) installPriorsLocked(k2 map[string]capacity.RollingAverageSnapshot) int {
+	if a.priorK2 == nil {
+		a.priorK2 = map[string]priorK2{}
+	}
+	wall := time.Now()
+	kept := 0
+	for k, w := range k2 {
+		w, inTime := windowClocks(w, wall)
+		if _, live := a.computeCapacityHistory[k]; live || !inTime || wall.Sub(w.LastUsed) > a.horizons.BucketRetention {
+			continue
+		}
+		ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize)
+		if !ok || ra.Len() == 0 {
+			continue
+		}
+		if v := int64(ra.Average()); v > 0 {
+			a.priorK2[k] = priorK2{k2: v, installedAt: a.now()}
+			kept++
+		}
+	}
+	return kept
 }
 
 // installLocked applies the horizons to a checked variant's entries, keeps
 // what is still within them and returns how many it kept. Callers hold a.mu.
 // The windows and the memo age on the wall clock, as they do live; the rest on
-// the analyzer's.
-func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
+// the analyzer's. latency is false when the image changed: the ITL baseline,
+// a latency figure, is then left out.
+func (a *SaturationAnalyzer) installLocked(s LearnedState, latency bool) int {
 	now := a.now()
 	wall := time.Now()
 	h := a.horizons
@@ -549,7 +630,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 		}
 		a.variantSeenAt[k] = seen
 		kept++
-		if b, ok := s.ITLBaseline[k]; ok && finitePositive(b) {
+		if b, ok := s.ITLBaseline[k]; ok && latency && finitePositive(b) {
 			if _, have := a.itlBaseline[k]; !have {
 				a.itlBaseline[k] = b
 			}
@@ -613,5 +694,6 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	clear(a.lastAccelerator)
 	clear(a.itlLines)
 	clear(a.k2BorrowedSince)
+	clear(a.priorK2)
 	clear(a.pendingRestore)
 }

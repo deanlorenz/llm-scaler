@@ -158,6 +158,20 @@ func (p *EngineParams) Fingerprint() string {
 	return hex.EncodeToString(h.Sum(nil))[:fingerprintLength]
 }
 
+// ArgsFingerprint is the fingerprint of the engine's arguments alone: the
+// configuration with the image left out, the identity sameArguments compares
+// (store.go). A learned capacity, throughput or start time survives a
+// routine image bump as a live record does; a latency line does not, and is
+// keyed on Fingerprint.
+func (p *EngineParams) ArgsFingerprint() string {
+	if p == nil {
+		return ""
+	}
+	q := *p
+	q.Image = ""
+	return q.Fingerprint()
+}
+
 // canonicalFloat renders a float so that equal values always produce equal
 // text. 'f' with precision -1 gives the shortest form that round-trips, so 0.9
 // is "0.9" and not "0.90000000000000002".

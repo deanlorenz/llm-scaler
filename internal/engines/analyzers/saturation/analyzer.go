@@ -72,6 +72,11 @@ type SaturationAnalyzer struct {
 	// measured gets its own clock: see k2_borrow.go for why per bucket and not
 	// per variant. Swept a retention after the relaxation ended.
 	k2BorrowedSince map[string]time.Time
+	// priorK2 is, per own historyKey, a k2 restored from before the variant's
+	// engine arguments changed (installRestored), kept as a lower-only prior
+	// that borrowedK2 takes like a sibling's figure. Swept PriorK2Life after
+	// it was installed.
+	priorK2 map[string]priorK2
 	// pendingRestore is learned state restored after a controller restart and
 	// not yet installed, keyed namespace/variant: it waits for its variant's
 	// first cycle, when the engine configuration it runs is known, and is
@@ -266,6 +271,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
+		priorK2:                make(map[string]priorK2),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -582,6 +588,12 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	for key, since := range a.k2BorrowedSince {
 		if a.now().Sub(since) > borrowLife {
 			delete(a.k2BorrowedSince, key)
+			evicted.K2Borrows++
+		}
+	}
+	for key, p := range a.priorK2 {
+		if a.now().Sub(p.installedAt) > PriorK2Life {
+			delete(a.priorK2, key)
 			evicted.K2Borrows++
 		}
 	}
