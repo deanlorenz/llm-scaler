@@ -80,13 +80,16 @@ those tiers allows it. It then waits for the longest `retentionPeriod` among
 them.
 
 A `retentionPeriod` that is not a positive duration (for example `5 minutes` or
-`0s`) is ignored, and the field acts as if it were not set. The rest of the
-entry still applies. The controller logs a warning each time it reads the
-ConfigMap, not just the first time. It also counts each ignored field in
-`wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
-For the `default` entry of the cluster policy, the `policyIgnored` key of the
-[controller-status ConfigMap](operations.md#what-the-controller-is-running-with)
-names the field.
+`0s`) is ignored and treated as unset. The rest of the entry still applies.
+You can see it in three places:
+
+- the controller log, on every read of the ConfigMap;
+- `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`;
+- the `policyIgnored` key of the
+  [controller-status ConfigMap](operations.md#what-the-controller-is-running-with),
+  for the `default` entry of the controller's own ConfigMap only. This holds
+  with a separate policy namespace too. That namespace's ConfigMap supplies
+  only limiters and the optimizer, so `retentionPeriod` has no effect there.
 
 #### How long until a model actually reaches zero
 

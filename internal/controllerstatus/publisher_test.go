@@ -244,10 +244,42 @@ func TestRecordPolicy(t *testing.T) {
 	}
 }
 
+// With a separate policy namespace, policyIgnored comes from the controller's
+// own ConfigMap and the version from the policy namespace's. Recording either
+// must not overwrite the other.
+func TestSeparatePolicyKeepsIgnoredAndVersionApart(t *testing.T) {
+	w := &writes{}
+	p, _ := newTestPublisher(t, w)
+	ignored := []config.IgnoredField{
+		{Field: "shapeChangeHoldSeconds", Value: "-1", Reason: errors.New("must be >= 0")},
+	}
+	want := `shapeChangeHoldSeconds="-1": must be >= 0`
+
+	p.RecordClusterPolicy(nil, "policy-ns", "wva-scaling-policy-config", "7", nil)
+	p.RecordIgnored(nil, ignored)
+	d := p.Data()
+	if d[KeyPolicyResourceVersion] != "7" || d[KeyPolicyIgnored] != want {
+		t.Errorf("after RecordIgnored: data = %v", d)
+	}
+
+	p.RecordClusterPolicy(nil, "policy-ns", "wva-scaling-policy-config", "8", nil)
+	d = p.Data()
+	if d[KeyPolicyResourceVersion] != "8" || d[KeyPolicyIgnored] != want {
+		t.Errorf("a cluster policy load changed policyIgnored: data = %v", d)
+	}
+
+	p.RecordIgnored(nil, nil)
+	d = p.Data()
+	if d[KeyPolicyResourceVersion] != "8" || d[KeyPolicyIgnored] != "" {
+		t.Errorf("after a clean own ConfigMap: data = %v", d)
+	}
+}
+
 func TestNilPublisherIsSafe(t *testing.T) {
 	var p *Publisher
 	p.RecordPolicy(nil, "a", "b", "1", nil, nil)
-	p.ObserveConfig(nil)
+	p.RecordClusterPolicy(nil, "a", "b", "1", nil)
+	p.RecordIgnored(nil, nil)
 	p.SetUtilizationShare(constants.UtilizationShareModeOff, nil)
 	if p.Data() != nil {
 		t.Error("nil publisher returned data")

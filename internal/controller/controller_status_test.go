@@ -157,6 +157,35 @@ optimizer:
 			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyResourceVersion, policy.ResourceVersion))
 		})
 
+		It("records the ignored fields of the controller's own default entry, not the policy namespace's", func() {
+			// Retention and the hold are read from the controller's own
+			// ConfigMap; in the policy namespace they have no effect, ignored
+			// or not.
+			r := newReconciler(
+				policyConfigMap(policyNS, "", quotaShadowPolicy+"shapeChangeHoldSeconds: -5\n"),
+				policyConfigMap(systemNS, "", "scaleToZero:\n  retentionPeriod: 5 minutes\n"),
+			)
+			reconcile(r, policyNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+
+			reconcile(r, systemNS)
+			ownIgnored := status.Data()[controllerstatus.KeyPolicyIgnored]
+			Expect(ownIgnored).To(ContainSubstring(`scaleToZero.retentionPeriod="5 minutes"`))
+			Expect(ownIgnored).NotTo(ContainSubstring("shapeChangeHoldSeconds"))
+
+			// A later load of the policy namespace does not clear it.
+			reconcile(r, policyNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ownIgnored))
+
+			// Fixing the controller's own ConfigMap does.
+			var own corev1.ConfigMap
+			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &own)).To(Succeed())
+			own.Data[config.GlobalDefaultsKey] = "scaleToZero:\n  retentionPeriod: 5m\n"
+			Expect(r.Reader.(client.Client).Update(ctx, &own)).To(Succeed())
+			reconcile(r, systemNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+		})
+
 		It("records a rejected default entry in the policy namespace", func() {
 			r := newReconciler(policyConfigMap(policyNS, "", rejectedPolicy))
 			reconcile(r, policyNS)

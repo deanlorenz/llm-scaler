@@ -261,7 +261,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `policyResourceVersion` | `metadata.resourceVersion` of the policy ConfigMap last **loaded**, accepted or rejected. Written only once that content is in force, so after an edit, a match with the ConfigMap's own `resourceVersion` means the controller runs with it. Empty when no policy ConfigMap is in force. Compare for equality only |
 | `policyAccepted` | `true`, or `false` when the `default` entry was rejected; the controller then runs without it |
 | `policyError` | why the `default` entry was rejected; empty when accepted |
-| `policyIgnored` | fields of the accepted `default` entry whose value could not be used, as `<field>="<value>": <reason>`, joined by `; `. The entry still applies; those fields act as unset. Empty when none |
+| `policyIgnored` | fields of the `default` entry in the controller's own ConfigMap whose value could not be used, as `<field>="<value>": <reason>`, joined by `; `. The entry still applies; those fields act as unset. Empty when none. With a separate policy namespace this is not the ConfigMap `policyConfigMap` names: the fields that can be ignored (retention, the shape-change hold) are read from the controller's own ConfigMap only |
 | `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |

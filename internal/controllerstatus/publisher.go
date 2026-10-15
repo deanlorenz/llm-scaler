@@ -28,11 +28,17 @@
 //	                       that entry.
 //	policyError            why the "default" entry was rejected; empty when
 //	                       accepted.
-//	policyIgnored          the fields of the accepted "default" entry that were
-//	                       ignored because their value cannot be used, each as
+//	policyIgnored          the fields of the "default" entry in the controller's
+//	                       OWN scaling-policy ConfigMap that were ignored
+//	                       because their value cannot be used, each as
 //	                       <field>="<value>": <reason>, joined by "; ". The
 //	                       entry still applies and those fields act as unset.
-//	                       Empty when none.
+//	                       Empty when none. That ConfigMap is where the fields
+//	                       that can be ignored (scale-to-zero retention, the
+//	                       shape-change hold) are read. With a separate policy
+//	                       namespace it is not the one policyConfigMap names,
+//	                       and the policy namespace's own ignored fields are
+//	                       not listed: they are not read there at all.
 //	limiter                the limiter in force, "<mode>/<entry names>": for
 //	                       example "quota/install-quota",
 //	                       "inventory/gpu-inventory", or "none".
@@ -193,9 +199,10 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 }
 
 // RecordPolicy records that the policy ConfigMap namespace/name at
-// resourceVersion has been applied, with rejected the reason its "default"
-// entry was dropped (nil when it was accepted) and ignored the fields of that
-// entry that were cleared as unusable (nil when none). An empty
+// resourceVersion has been applied, when that ConfigMap is also the
+// controller's own (no separate policy namespace). rejected is the reason its
+// "default" entry was dropped (nil when it was accepted) and ignored the fields
+// of that entry that were cleared as unusable (nil when none). An empty
 // resourceVersion records that no policy ConfigMap is in force. It refreshes
 // the values derived from cfg in the same update, so a reader never sees the
 // new version beside the old limiter or optimizer mode. Call it only after the
@@ -206,23 +213,48 @@ func (p *Publisher) RecordPolicy(cfg *config.Config, namespace, name, resourceVe
 		return
 	}
 	p.update(func(d map[string]string) {
-		observe(d, cfg)
-		d[KeyPolicyNamespace] = namespace
-		d[KeyPolicyConfigMap] = name
-		d[KeyPolicyResourceVersion] = resourceVersion
-		d[KeyPolicyAccepted] = strconv.FormatBool(rejected == nil)
-		d[KeyPolicyError] = errText(rejected)
+		recordPolicy(d, cfg, namespace, name, resourceVersion, rejected)
 		d[KeyPolicyIgnored] = ignoredText(ignored)
 	})
 }
 
-// ObserveConfig refreshes the values derived from cfg -- the limiter and the
-// utilization-share mode -- without touching the recorded policy version.
-func (p *Publisher) ObserveConfig(cfg *config.Config) {
+// RecordClusterPolicy is RecordPolicy for a policy ConfigMap in a separate
+// policy namespace. It leaves policyIgnored alone: the fields that can be
+// ignored are not read from that ConfigMap, so they are reported from the
+// controller's own one by RecordIgnored.
+func (p *Publisher) RecordClusterPolicy(cfg *config.Config, namespace, name, resourceVersion string,
+	rejected error) {
 	if p == nil {
 		return
 	}
-	p.update(func(d map[string]string) { observe(d, cfg) })
+	p.update(func(d map[string]string) {
+		recordPolicy(d, cfg, namespace, name, resourceVersion, rejected)
+	})
+}
+
+// RecordIgnored records the ignored fields of the "default" entry in the
+// controller's own ConfigMap when a separate policy namespace holds the
+// policy, and refreshes the values derived from cfg. It does not touch the
+// recorded policy version: that belongs to the policy namespace's ConfigMap.
+func (p *Publisher) RecordIgnored(cfg *config.Config, ignored []config.IgnoredField) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) {
+		observe(d, cfg)
+		d[KeyPolicyIgnored] = ignoredText(ignored)
+	})
+}
+
+// recordPolicy writes the policy ConfigMap's identity, version and verdict,
+// and the values derived from cfg.
+func recordPolicy(d map[string]string, cfg *config.Config, namespace, name, resourceVersion string, rejected error) {
+	observe(d, cfg)
+	d[KeyPolicyNamespace] = namespace
+	d[KeyPolicyConfigMap] = name
+	d[KeyPolicyResourceVersion] = resourceVersion
+	d[KeyPolicyAccepted] = strconv.FormatBool(rejected == nil)
+	d[KeyPolicyError] = errText(rejected)
 }
 
 // SetUtilizationShare records the optimizer's mode, one of the
