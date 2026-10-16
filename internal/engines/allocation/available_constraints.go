@@ -27,27 +27,6 @@ func (s SkippedProvider) String() string {
 	return s.Name + ": " + s.Reason
 }
 
-// NeverReadSkips reports, as unobserved skipped providers, the quota entries
-// that read Kueue, leave a type unlimited (-1) in their static caps, and have
-// never read Kueue (ResourceConstraints.KueueNeverRead): nothing bounds that
-// type until a read succeeds (B11). Reported only: their constraints stay in
-// the decision, so every finite static cap of the entry still applies. Never-
-// read is not fail-closed; wva_kueue_never_read is the Kueue-specific signal.
-func NeverReadSkips(constraints []*ResourceConstraints) []SkippedProvider {
-	var out []SkippedProvider
-	for _, c := range constraints {
-		if c == nil || !c.KueueNeverRead {
-			continue
-		}
-		out = append(out, SkippedProvider{
-			Name:   c.ProviderName,
-			Reason: "Kueue never read: its -1 caps bound nothing until a read succeeds; its finite static caps still apply",
-			Cause:  constants.ProviderSkipUnobserved,
-		})
-	}
-	return out
-}
-
 // ComputeAvailableConstraints computes constraints from every provider that can
 // supply them this cycle, and names the ones that could not.
 //

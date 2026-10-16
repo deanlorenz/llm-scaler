@@ -40,9 +40,10 @@ func (p lentOutProvider) ComputeConstraints(context.Context, map[string]int, map
 
 // B10, review T2: a wake is checked against guaranteed plus the free pool --
 // within nominal -- never the whole nominal a peer holds and need not give
-// back. The wake's outcome path names the refusal nominal-lent-out, and so
-// does wva_model_scaling_blocked; a namespace that lent nothing is refused as
-// no-capacity, with no such reason, and a model that later wakes clears it.
+// back. The wake's outcome path names the refusal nominal-lent-out, and
+// wva_model_scaling_blocked carries wake-nominal-lent-out; a namespace that
+// lent nothing is refused as no-capacity, and the reason becomes
+// wake-no-capacity (SR-M1: a refused wake names its cause).
 func TestWakeIntoLentNominalReportsNominalLentOut(t *testing.T) {
 	ctx := context.Background()
 	decision.DefaultGPUUsage.Reset()
@@ -62,14 +63,14 @@ func TestWakeIntoLentNominalReportsNominalLentOut(t *testing.T) {
 		outcome SelectionOutcome
 		reason  string
 	}{
-		{"nominal lent out: nominal-lent-out, outcome and metric", lentOutProvider{}, OutcomeNominalLentOut, "nominal-lent-out"},
-		{"control: nothing lent out: no-capacity, and the reason clears", lentOutProvider{notLent: true}, OutcomeNoCapacity, ""},
+		{"nominal lent out: nominal-lent-out outcome, wake-nominal-lent-out metric", lentOutProvider{}, OutcomeNominalLentOut, "wake-nominal-lent-out"},
+		{"control: nothing lent out: no-capacity, and the reason becomes wake-no-capacity", lentOutProvider{notLent: true}, OutcomeNoCapacity, "wake-no-capacity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &Engine{gpuLimiter: tc.p}
-			if tc.reason == "" {
+			if tc.outcome == OutcomeNoCapacity {
 				// The same model refused for the lent nominal by an earlier tick.
-				e.reportLentOutBlocked(group, true)
+				e.reportWakeBlocked(group, "wake-nominal-lent-out")
 			}
 			_, selected, outcome := e.wakeVerdict(ctx, group, set, coverage{})
 			if len(selected) != 0 || outcome != tc.outcome {
@@ -79,5 +80,63 @@ func TestWakeIntoLentNominalReportsNominalLentOut(t *testing.T) {
 				t.Fatalf("wva_model_scaling_blocked reason %q, want %q", got, tc.reason)
 			}
 		})
+	}
+}
+
+// SR-M1 and the one-owner rule: the steady-state engine sets nominal-lent-out
+// for a capped serving model. A wake this loop refuses, then stops refusing,
+// must clear only its own reason and leave the steady-state engine's series
+// standing; and a refused wake names a reason, where it used to name none.
+func TestARefusedWakeNeverDeletesTheSteadyStateReason(t *testing.T) {
+	ctx := context.Background()
+	decision.DefaultGPUUsage.Reset()
+	t.Cleanup(decision.DefaultGPUUsage.Reset)
+	decision.PublishGPUUsage(map[string]int{"H100": 2}, nil)
+	allocation.DefaultBorrowInFlight.Reset()
+	registry := prometheus.NewRegistry()
+	if err := metrics.InitMetrics(registry); err != nil {
+		t.Fatal(err)
+	}
+	group := modelGroup{namespace: "chat", modelID: "m"}
+	set := []Candidate{cand("d", "decode", "H100", 1, 1)}
+	held := func() map[string]bool {
+		out := map[string]bool{}
+		mfs, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mf := range mfs {
+			if mf.GetName() != "wva_model_scaling_blocked" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "reason" {
+						out[l.GetValue()] = true
+					}
+				}
+			}
+		}
+		return out
+	}
+
+	// The steady-state engine: the model is capped while its nominal is lent.
+	metrics.SetModelScalingBlockedReasons("chat", "m", []string{"lender-reclaimed", "borrow-unplaced", "nominal-lent-out"},
+		[]string{"nominal-lent-out"})
+
+	e := &Engine{gpuLimiter: lentOutProvider{}}
+	if _, selected, _ := e.wakeVerdict(ctx, group, set, coverage{}); len(selected) != 0 {
+		t.Fatalf("woke %v, want nothing", names(selected))
+	}
+	e.gpuLimiter = lentOutProvider{notLent: true}
+	if _, selected, _ := e.wakeVerdict(ctx, group, set, coverage{}); len(selected) != 0 {
+		t.Fatalf("woke %v, want nothing", names(selected))
+	}
+	got := held()
+	if !got["nominal-lent-out"] {
+		t.Fatalf("the steady-state engine's nominal-lent-out was deleted by the wake loop: %v", got)
+	}
+	if !got["wake-no-capacity"] {
+		t.Fatalf("a wake refused for want of capacity names no reason: %v", got)
 	}
 }

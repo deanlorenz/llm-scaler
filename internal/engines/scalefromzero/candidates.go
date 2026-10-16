@@ -21,10 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	accel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -83,6 +85,8 @@ func (e *Engine) buildCandidates(
 	var (
 		candidates []Candidate
 		pool       *poolutil.EndpointPool
+		// extra is the pools other variants resolve to, beyond pool.
+		extra []string
 	)
 
 	for _, va := range group.variants {
@@ -117,6 +121,8 @@ func (e *Engine) buildCandidates(
 		}
 		if pool == nil {
 			pool = variantPool
+		} else if variantPool != nil && poolKey(variantPool) != poolKey(pool) {
+			extra = append(extra, poolKey(variantPool))
 		}
 
 		candidates = append(candidates, Candidate{
@@ -137,7 +143,37 @@ func (e *Engine) buildCandidates(
 	if pool == nil {
 		return nil, nil, nil
 	}
+	e.noteExtraPool(logger, group, pool, extra)
 	return candidates, pool, nil
+}
+
+// poolKey is an InferencePool's namespace/name.
+func poolKey(p *poolutil.EndpointPool) string {
+	return p.Namespace + "/" + p.Name
+}
+
+// noteExtraPool logs a model whose variants resolve to more than one
+// InferencePool: its queue is read from the first (used) alone, so demand
+// queued behind the others (extra) wakes nothing. Logged when the set
+// changes, not every tick, and once more when it clears.
+func (e *Engine) noteExtraPool(logger logr.Logger, group modelGroup, used *poolutil.EndpointPool, extra []string) {
+	slices.Sort(extra)
+	extra = slices.Compact(extra)
+	now := strings.Join(extra, ",")
+	prev, _ := e.extraPools.Load(group.key())
+	if prevS, _ := prev.(string); prevS == now {
+		return
+	}
+	if now == "" {
+		e.extraPools.Delete(group.key())
+		logger.Info("Model resolves to one InferencePool again",
+			"namespace", group.namespace, "modelID", group.modelID, "pool", poolKey(used))
+		return
+	}
+	e.extraPools.Store(group.key(), now)
+	logger.Info("Model resolves to more than one InferencePool; scale-from-zero reads the queue of the first only",
+		"namespace", group.namespace, "modelID", group.modelID,
+		"used", poolKey(used), "ignored", extra)
 }
 
 // candidateAccelerator returns the variant's accelerator exactly as declared.

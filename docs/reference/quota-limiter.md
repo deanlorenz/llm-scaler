@@ -334,11 +334,10 @@ an error from a Kueue outage would *lift* the declared cap. Instead:
 - with none — Kueue not installed, RBAC missing, first read failing — the
   error is logged every cycle until a read succeeds. A Forbidden or a missing
   CRD is reported as such, never folded into "Kueue grants nothing". An entry
-  that leaves a type at `-1` is then skipped as an unobserved provider
-  (`wva_constraint_provider_skipped{reason="unobserved"}`, plus
-  `wva_kueue_never_read` and the alert `WVAKueueNeverRead`): the other
-  limiters still bound, and Kueue still gates pods past its quota. Otherwise
-  the **static entry alone** applies.
+  that leaves a type at `-1` reports `wva_kueue_never_read` (alert
+  `WVAKueueNeverRead`): its finite caps still bound, a `-1` type is bounded
+  only by the other limiters, and Kueue still gates pods past its quota.
+  Otherwise the **static entry alone** applies.
 
 With borrowing counted, a failed read after a good one is published too: the
 reason `stale` on `wva_quota_borrow_withheld`, and the alert
@@ -525,8 +524,8 @@ entries of all but one: two that borrow at once can count the same free GPU.
   never borrowed capacity, and not guaranteed alone either (under Kueue's
   default `Never`, an idle queue's guaranteed is 0). A wake blocked because
   the queue's nominal is lent to a peer that need not give it back reports
-  `nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking into a
-  gated pod.
+  `wake-nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking
+  into a gated pod.
 - **The utilization-share optimizer** keeps borrowed GPUs a group already
   holds, as no debt, and starts no new borrowing.
 
@@ -729,6 +728,14 @@ The policy entry is rejected for any of:
 - Negative quota values other than `-1`.
 - A quota value above 1,048,576.
 - Empty accelerator type or namespace key.
+
+Reserved names: `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and
+`lender-cannot-reclaim` are what a held-back decision is reported under when
+no quota entry held it. A quota entry with one of them is still accepted in
+this release, with a warning: the log line `WARNING: Quota limiter entry has a
+reserved name`, a count in `wva_errors_total` under that `error_type`, and the
+`limiterWarnings` key of the controller status. A later release rejects it.
+Rename the entry ([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
 - In a `kueue:` block, an empty resource name or a `refreshInterval` that is not
   a positive duration; a `kueue:` block on a `gpu-inventory` entry.
 

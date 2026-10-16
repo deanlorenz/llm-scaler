@@ -815,6 +815,16 @@ func (c *Config) EffectiveLimiterSummary() string {
 	return types.String() + "/" + strings.Join(names, ",")
 }
 
+// EffectiveLimiterWarnings returns the warnings about the limiters in force
+// that still apply as written: a quota entry named one of
+// ReservedLimiterNames (ReservedLimiterNameWarnings). Empty when none.
+// Thread-safe.
+func (c *Config) EffectiveLimiterWarnings() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ReservedLimiterNameWarnings(c.effectiveLimitersLocked())
+}
+
 // EffectiveQuotaEntries returns the quota entries the quota limiter should
 // enforce, taken from the inline quota entries on the global saturation "default"
 // entry (each deep-copied). Empty when none are declared. Reads the live config,

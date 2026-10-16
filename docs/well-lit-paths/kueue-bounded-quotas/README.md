@@ -43,9 +43,9 @@ What backs it: [Evidence](#evidence).
 
 Failures are visible. A failed read freezes borrowing at the last figures
 (`wva_quota_borrow_withheld{reason="stale"}`, alert `WVAKueueReaderStale`).
-An entry never read is a skipped provider
-(`wva_constraint_provider_skipped{reason="unobserved"}`, `wva_kueue_never_read`,
-alert `WVAKueueNeverRead`) while the other limiters still bound.
+An entry never read shows as `wva_kueue_never_read` (alert `WVAKueueNeverRead`):
+its finite caps still bound, and a type at `-1` is bounded by the other
+limiters.
 
 ## When not to take it
 

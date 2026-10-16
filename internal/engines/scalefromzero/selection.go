@@ -90,8 +90,8 @@ const (
 	// lent part of its nominal quota to a peer it cannot reclaim from (its
 	// reclaimWithinCohort Never): the wake was checked against its guaranteed
 	// figure plus the cohort's free pool, not its whole nominal, so it does not
-	// wake into a pod Kueue would gate (B10). The same reason as
-	// nominal-lent-out on wva_model_scaling_blocked.
+	// wake into a pod Kueue would gate (B10). Reported as
+	// wake-nominal-lent-out on wva_model_scaling_blocked.
 	OutcomeNominalLentOut SelectionOutcome = "nominal-lent-out"
 	// OutcomePrefillRequired means a decode variant would fit, but no prefill
 	// could be placed alongside it and the policy requires one.

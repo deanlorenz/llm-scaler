@@ -170,8 +170,15 @@ type VariantDecision struct {
 	// intent and leaves this false.
 	WasLimited bool
 	// LimitedBy names the constraint provider whose pool bound the decision
-	// (empty when no provider imposes a finite bound).
+	// (empty when no provider imposes a finite bound). It is the one value
+	// the limiter_name label of wva_decisions_limited_total carries: on a tie,
+	// the first provider in the declared order.
 	LimitedBy string
+	// LimitedByAlso names the other providers whose pools bound the decision
+	// exactly as tightly as LimitedBy's, in the declared order; nil when one
+	// bound alone. The ResourceConstrained Event and the scaling-decision line
+	// name them beside LimitedBy.
+	LimitedByAlso []string
 
 	// --- Replica bounds ---
 	// MinReplicas is the minimum number of replicas for this variant (from VA spec field).
