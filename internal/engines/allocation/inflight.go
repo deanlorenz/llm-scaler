@@ -52,11 +52,18 @@ const InFlightOwner = "in-flight"
 type InFlightLedger struct {
 	mu      sync.Mutex
 	entries map[string]*inFlightEntry
-	// sighted is every variant key a committed admission named in this
-	// process (InFlightAdmission.ExistingOnly). The ledger is not persisted,
-	// so after a restart no variant is sighted yet.
-	sighted map[string]bool
+	// sighted is, per variant key a committed admission named in this
+	// process (InFlightAdmission.ExistingOnly), when it last did. The ledger
+	// is not persisted, so after a restart no variant is sighted yet. A key
+	// not named for sightedFor is dropped (Commit): a deleted variant does
+	// not stay, and every cycle names the variants it decides.
+	sighted map[string]time.Time
 }
+
+// sightedFor is how long a variant stays sighted with no committed admission
+// naming it. Past it, the next admission is a first sighting again, and may
+// start a hold bounded by its TTL, as after a restart.
+const sightedFor = 2 * InFlightTTL
 
 // inFlightEntry is one variant's replicas in flight.
 type inFlightEntry struct {
@@ -140,7 +147,7 @@ type placedAt struct {
 
 // NewInFlightLedger returns an empty ledger.
 func NewInFlightLedger() *InFlightLedger {
-	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]bool{}}
+	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}}
 }
 
 // DefaultInFlight is the process-wide ledger both engines share.
@@ -254,6 +261,7 @@ func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now
 		}
 		l.entries[k] = prev
 	}
+	maps.DeleteFunc(l.sighted, func(_ string, at time.Time) bool { return now.Sub(at) > sightedFor })
 	for _, a := range adms {
 		l.admitLocked(a, now, true)
 	}
@@ -263,9 +271,9 @@ func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now
 // (InFlightAdmission.ExistingOnly); a provisional admission does not.
 func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight bool) {
 	key, shape, want, placedNow, placed := a.Key, a.Shape, a.Want, a.PlacedNow, a.Placed
-	sighted := l.sighted[key]
+	_, sighted := l.sighted[key]
 	if sight {
-		l.sighted[key] = true
+		l.sighted[key] = now
 	}
 	if want <= placedNow {
 		delete(l.entries, key)
