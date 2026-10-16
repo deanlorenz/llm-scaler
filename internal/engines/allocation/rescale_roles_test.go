@@ -67,7 +67,9 @@ func TestRescaleReclaimsWholePodsFromBothRoles(t *testing.T) {
 // TestRescaleReclaimsNoPodBelowAFloor: the rounded cut never takes a role
 // below its floor. Prefill, with no demand, would be cut furthest, but its
 // floor is its two 8-GPU pods -- minReplicas 2, or a scale-down hold -- so at
-// a target of 24 the one pod the cut buys comes from decode.
+// a target of 24 the one pod the cut buys comes from decode. The split
+// reserves the floor and reclaimRole keeps minReplicas, so this pins that the
+// summed cut is taken from the role that can give it.
 func TestRescaleReclaimsNoPodBelowAFloor(t *testing.T) {
 	two := 2
 	req := pdWholeNodeRequest(2, 0, 100)

@@ -399,7 +399,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, ceilByRole)
 		roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
 		// Each role's share is at or above the floor reserved in the split.
-		reclaimWholeReplicas(ctx, satNamed, records, stateMap, roles, tgtByRole, curByRole, floorByRole, targets)
+		reclaimWholeReplicas(ctx, satNamed, records, stateMap, roles, tgtByRole, curByRole, targets)
 	}
 
 	limited := make(gpuLimitTracker)
@@ -539,12 +539,12 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 // gave another model never reached it. The cuts are summed instead and shed as
 // whole replicas: first what fits within each role's own cut, then what is
 // left of the sum, from the role with the most of its cut still unshed first,
-// each role no further than its cut rounded up to one replica. No role goes
-// below its floor (minReplicas and the composite's release floor), the model
-// sheds no more than the summed cut, and a role under a scale-down hold is not
-// cut at all. It mutates targets.
+// each role no further than its cut rounded up to one replica. The model sheds
+// no more than the summed cut, a role under a scale-down hold is not cut at
+// all, and reclaimRole keeps every variant at its minReplicas. It mutates
+// targets.
 func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
-	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, floor, targets map[string]int) {
+	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
 	cut := make(map[string]int, len(roles))
 	total := 0
 	for _, role := range roles {
@@ -557,10 +557,9 @@ func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []
 		return
 	}
 	shed := make(map[string]int, len(roles))
-	room := func(role string) int { return max(cur[role]-floor[role]-shed[role], 0) }
 	for _, role := range roles {
 		if cut[role] > 0 {
-			shed[role] = reclaimRole(ctx, e, records, role, stateMap, targets, min(cut[role], room(role)))
+			shed[role] = reclaimRole(ctx, e, records, role, stateMap, targets, cut[role])
 			total -= shed[role]
 		}
 	}
@@ -574,7 +573,7 @@ func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []
 			continue
 		}
 		limit := ceilToReplica(left, roleReplicaStepGPUs(records, role, stateMap))
-		n := reclaimRole(ctx, e, records, role, stateMap, targets, min(total, limit, room(role)))
+		n := reclaimRole(ctx, e, records, role, stateMap, targets, min(total, limit))
 		shed[role] += n
 		total -= n
 	}
