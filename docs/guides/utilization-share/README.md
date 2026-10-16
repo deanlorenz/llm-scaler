@@ -145,18 +145,19 @@ them](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-dow
 
 ## Under the physical GPU limiter
 
-**A cluster-admin task:** the policy is the cluster's, in `wva-policy`. With a
+**A cluster-admin task, on a cluster-scoped controller only.** With a
 `gpu-inventory` limiter and no quota, the budget is every GPU of a type on the
 cluster. Three things differ:
 
 - **Add `PHYSICAL_GROUPS=true` to the shadow step.** Without
   `physicalGroups: true` the optimizer plans no group and moves nothing. The
   check warns about this.
-- **It turns the optimizer on for every self-managed controller**, not just
-  yours: they all read `wva-policy`. Admin-owned controllers (cluster-scoped or
-  out-of-reach) read their own ConfigMap. A controller reads a policy in another
-  namespace only at start, so add `RESTART=1`, or the step stops and says the
-  block was written but not read.
+- **A namespace-scoped controller refuses `physicalGroups`.** Every such
+  controller would plan the same free GPUs of the whole cluster. Its mode reads
+  `invalid` and today's optimizer runs. The self-managed controllers all read
+  `wva-policy`, so `physicalGroups` there turns the optimizer off for every one
+  of them; give each a namespace quota instead. A cluster-scoped controller
+  reads its own ConfigMap, so write the block there.
 - **Spare GPUs are shared with everything on the cluster.** A GPU a donor
   releases can be taken by a pod the scaling manager did not place. That
   transfer ends `release-taken`.

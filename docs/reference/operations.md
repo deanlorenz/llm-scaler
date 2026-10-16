@@ -267,6 +267,8 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
 | `leader` | the pod that wrote it |
 | `controllerInstance` | the `controller_instance` metrics label, when set |
+| `clusterQuotaPerController` | present while a namespace-scoped controller enforces a `scope: cluster` quota: it is charged only its own variants' GPUs, so the quota caps this controller, not the cluster |
+| `podListDenied` | present while a namespace-scoped controller under `gpu-inventory` cannot list Pods in every namespace, so GPUs other namespaces hold read as free (`wva_pod_access_denied`) |
 | `formatVersion` | `1`; bumped only for an incompatible change to these keys |
 
 Only the leader writes it, and only when a value changes. A failed write is
