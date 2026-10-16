@@ -903,18 +903,34 @@ unmanaged training job holds 8 gives serving 8, not 16.
     cycle is charged one cycle late.
   - Gated pods are listed in every namespace of a Kueue entry, whether it
     counts borrowing or not (`countBorrowable: false`, a queue in no cohort).
-  - Where no borrowing is counted, a replica Kueue still holds at its gate
-    after `placementTimeout` is released all the same, when the namespace
-    holds more than its Kueue figure: Kueue admits nothing past that figure,
-    and with nothing borrowed it preempts nothing for it either. The wait
-    stretches up to three times while the cluster autoscaler reports
-    `TriggeredScaleUp` on the pod. The release lowers the target by whole
-    units (a replica, a P/D pair) and never below `minReplicas`, as for a
-    borrowed replica. It raises the same `BorrowedCapacityReleased` Event
-    (cause `placement-timeout`; the message says the replica was held at
-    Kueue's admission gate), counts on `wva_borrow_releases_total`, and the
-    decision says `borrow-unplaced`. A replica Kueue admitted that waits for
-    a node (`Unschedulable`) is not released this way.
+  - A gated pod whose Workload Kueue has already reserved quota for
+    (`QuotaReserved`, waiting on an admission check such as a
+    ProvisioningRequest) is part of what Kueue reserved: it is counted as
+    admitted, and never released for waiting at the gate. A LeaderWorkerSet
+    is matched by the set: while one of its groups is reserved, its gated
+    pods all read as reserved.
+  - Where no borrowing is counted, a replica Kueue still holds at its gate,
+    waiting for quota, after `placementTimeout` is released all the same,
+    when the namespace holds more than its Kueue figure. Kueue reclaims
+    nothing from a cohort for it. It may still preempt lower-priority work
+    inside the queue itself, which takes as long as the victims' termination
+    grace period: if such work has a grace period longer than
+    `placementTimeout` (a training job with 10 minutes, say), raise
+    `placementTimeout` above it, or the replacement is released before the
+    victim is gone. The cluster autoscaler does not act on a gated pod, so
+    the wait is not stretched.
+  - That release lowers the target by whole units (a replica, a P/D pair)
+    and never below `minReplicas`, as for a borrowed replica. It raises the
+    `BorrowedCapacityReleased` Event with cause `kueue-gate` (the message
+    says the replica was held at Kueue's admission gate), counts on
+    `wva_borrow_releases_total{cause="kueue-gate"}`, and the decision says
+    `borrow-unplaced`. It starts no borrowing cooldown, and
+    `WVAKueueBorrowThrashing` does not count it. A replica Kueue admitted
+    that waits for a node (`Unschedulable`) is not released this way.
+  - An entry that counts borrowing is held to this only for its namespaces
+    whose queue is in no cohort. A namespace it withholds for another reason
+    (a stale read, an unreadable ResourceQuota) may still be admitted by
+    borrowing, and is left to the borrowing rules.
 - A variant Kueue does not manage at all (no `queue-name`) holds GPUs Kueue
   never reserved. They are subtracted from the charge all the same, so beside
   an unmanaged training job the charge reads low by up to what that variant
@@ -942,8 +958,10 @@ borrowing it takes, so the scaling manager assumes its own borrowers go first.
 - Only new growth counts. A replica the pass orders again while the first
   order is still in flight was yielded for once already.
 - A wake from zero is treated the same. When the wake grows a model into
-  nominal its queue lent out, the next steady-state cycle lowers this scaling
-  manager's own borrower in that cohort, once per wake.
+  nominal its queue lent out, the next steady-state cycle that counts
+  borrowing lowers this scaling manager's own borrower in that cohort, once
+  per wake. A wake whose replica is dropped before then lowers nobody. The
+  pending wakes are kept in memory: a restart forgets them.
 - A borrower gives back whole units: one replica, or a whole P/D pair at the
   model's prefill:decode ratio. No variant goes below its `minReplicas`. A
   pair that would give back more than one replica past what is reclaimed
