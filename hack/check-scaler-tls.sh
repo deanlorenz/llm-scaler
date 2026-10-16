@@ -17,7 +17,9 @@
 #                          this install puts KEDA there
 #   ScaledObjects          those naming the scaler on the plaintext address hold
 #                          TLS back unless WVA_SCALER_TLS_MIGRATE=true, which
-#                          moves them to the TLS address and authenticationRef
+#                          moves them to the TLS address and authenticationRef,
+#                          only once the new Pods alone serve the scaler, and
+#                          then re-wires an HPA KEDA built without the metric
 #   openssl certificates   the serving certificate names both Service hosts and
 #                          chains to the CA; the client one carries the pinned
 #                          identity; a re-run changes nothing that is still
@@ -154,6 +156,54 @@ cm_issue() {
     done
 }
 
+# stub_wired succeeds when KEDA has wired the scaler's metric, per STUB_UNWIRED:
+# unset (wired), always, hpa (the HPA lacks it, the status lists it), or
+# until-rewire (wired once a re-wire patch was sent).
+stub_wired() {
+    case "${STUB_UNWIRED:-}" in
+        "") return 0 ;;
+        until-rewire) grep -q "wvaRewire" "$WORK/patches" ;;
+        *) return 1 ;;
+    esac
+}
+# stub_emn: the ScaledObject's status.externalMetricNames.
+stub_emn() {
+    if stub_wired || [ "${STUB_UNWIRED:-}" = hpa ]; then echo '["s0-wva-desired-replicas"]'; else echo '[]'; fi
+}
+# stub_hpa: the HPA KEDA built, with the external metric only when wired.
+stub_hpa() {
+    if stub_wired; then
+        echo '{"spec":{"metrics":[{"type":"External","external":{"metric":{"name":"s0-wva-desired-replicas"}}}]}}'
+    else
+        echo '{"spec":{"metrics":[{"type":"Resource","resource":{"name":"cpu"}}]}}'
+    fi
+}
+# stub_pods <name>...: Ready controller Pods; a name ending in "~" is terminating.
+stub_pods() {
+    printf '%s\n' "$@" | jq -R . | jq -s '{items: [.[] | if endswith("~")
+        then {metadata: {name: rtrimstr("~"), deletionTimestamp: "2026-01-01T00:00:00Z"}, status: {conditions: [{type: "Ready", status: "False"}]}}
+        else {metadata: {name: .}, status: {conditions: [{type: "Ready", status: "True"}]}} end]}'
+}
+# stub_eps: the scaler Service EndpointSlices. $WORK/eps.d holds one file per
+# read, taken in order, the last one repeating; default: wva-new, ready.
+stub_eps() {
+    local f n
+    if [ -d "$WORK/eps.d" ]; then
+        f="$(ls "$WORK/eps.d" | sort -n | head -1)"
+        n="$(ls "$WORK/eps.d" | wc -l)"
+        cat "$WORK/eps.d/$f"
+        [ "$n" -le 1 ] || rm -f "$WORK/eps.d/$f"
+    else
+        eps_json wva-new
+    fi
+}
+# eps_json <name>...: one EndpointSlice; a name ending in "~" is terminating.
+eps_json() {
+    printf '%s\n' "$@" | jq -R . | jq -s '{items: [{endpoints: [.[] | if endswith("~")
+        then {targetRef: {name: rtrimstr("~")}, conditions: {ready: false, serving: true, terminating: true}}
+        else {targetRef: {name: .}, conditions: {ready: true}} end]}]}'
+}
+
 # stub_kubectl answers from $STORE and STUB_* variables:
 #   STUB_CM            present | absent | anything else (discovery error)
 #   STUB_DEPLOY        FORBIDDEN makes the controller Deployment unreadable
@@ -250,7 +300,22 @@ stub_kubectl() {
             ;;
         "get scaledobject "*" -n "*" -o json")
             set -- $a
-            jq --arg n "$3" --arg ns "$5" '.items[] | select(.metadata.name == $n and .metadata.namespace == $ns)' "$WORK/so.json"
+            jq --arg n "$3" --arg ns "$5" --argjson w "$(stub_emn)" \
+                '.items[] | select(.metadata.name == $n and .metadata.namespace == $ns) | .status.externalMetricNames //= $w' "$WORK/so.json"
+            ;;
+        "get hpa "*" -n "*" -o json")
+            stub_hpa
+            ;;
+        "get pods -n $NS -l "*" -o json")
+            if [ -f "$WORK/pods.json" ]; then cat "$WORK/pods.json"; else stub_pods wva-new; fi
+            ;;
+        "get endpointslices -n $NS -l kubernetes.io/service-name=wva-external-scaler -o json")
+            [ "${STUB_EPS:-}" != FORBIDDEN ] || { forbidden; return 1; }
+            stub_eps
+            ;;
+        "get leases -n $NS -o json")
+            [ "${STUB_LEASES:-}" != FORBIDDEN ] || { forbidden; return 1; }
+            jq -n --arg h "${STUB_LEASE_HOLDER:-wva-new_0f1e}" '{items: [{metadata: {name: "72dd1cf1.llm-d.ai"}, spec: {holderIdentity: $h}}]}'
             ;;
         "patch scaledobject "*) printf '%s\n' "$a" >>"$WORK/patches" ;;
         "get deployment wva-controller-manager -n $NS -o json")
@@ -335,6 +400,11 @@ run() {
         # What the previous run read back must not leak into this one.
         unset WVA_SCALER_TLS_ON WVA_SCALER_TLS_PROVIDER_RESOLVED WVA_SCALER_CLIENT_CA_HASH WVA_SCALER_TLS_WANTED \
             WVA_SCALER_TLS_MIGRATE_ROWS WVA_SCALER_KEDA_DEFERRED WVA_SCALER_TLS_MIGRATE_MODE
+        # No waiting in a check: each wait reads once, unless a case says otherwise.
+        WVA_SCALER_SETTLE_TIMEOUT=0
+        WVA_SCALER_REWIRE_WAIT=0
+        WVA_SCALER_POLL_SECONDS=0
+        WVA_VERIFY_WIRE_WAIT=0
         local kv
         for kv in "$@"; do eval "$kv"; done
         declare -F "${call%% *}" >/dev/null || { echo "${call%% *} is not defined" >"$WORK/refusal"; exit 2; }
@@ -356,7 +426,7 @@ run() {
     . "$WORK/vars" 2>/dev/null || true
 }
 
-reset_store() { rm -rf "$STORE"; mkdir -p "$STORE"; rm -f "$WORK/so.json"; }
+reset_store() { rm -rf "$STORE" "$WORK/eps.d"; mkdir -p "$STORE"; rm -f "$WORK/so.json" "$WORK/pods.json"; }
 
 # secret_file <name> <key> <out>: a stored Secret key, decoded.
 secret_file() {
@@ -1317,6 +1387,74 @@ so_fixture app-so "$SO_PLAIN_ADDR"
 run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls WVA_CONTROLLER_ROLLED_OUT=false
 ok '[ ! -s "$WORK/patches" ] && grep -q "rollout did not finish" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "make deploy-wva" "$WORK/warnings" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/warnings"' "rollout not finished: patched '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
 ok 'grep -q "WVA_CONTROLLER_ROLLED_OUT=true" "$ROOT/deploy/lib/infra_wva.sh"' "deploy_wva_controller does not record a finished rollout, so the migration never runs"
+
+# A finished rollout is not enough: `rollout status` returns while the old Pod
+# is still terminating and still an endpoint. Measured on an OpenShift cluster,
+# KEDA then reconciled the moved ScaledObject against the old plaintext Pod,
+# built the HPA without the metric, and never asked again.
+echo "== ScaledObjects do not move while an old Pod is still behind the scaler Service"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+mkdir -p "$WORK/eps.d"
+eps_json wva-old~ wva-new >"$WORK/eps.d/1.json"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls
+ok '[ ! -s "$WORK/patches" ] && grep -q "not yet the only thing serving the scaler" "$WORK/warnings" && grep -q "wva-old" "$WORK/warnings" && grep -q "WVA_SCALER_TLS_MIGRATE=true" "$WORK/warnings"' "old endpoint: moved anyway, or not said why: patched '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+
+echo "== ScaledObjects do not move while an old controller Pod is terminating"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+stub_pods wva-old~ wva-new >"$WORK/pods.json"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls
+ok '[ ! -s "$WORK/patches" ] && grep -q "still terminating: wva-old" "$WORK/warnings"' "terminating Pod: moved anyway: patched '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+
+echo "== ScaledObjects do not move while the old Pod holds the leader lease"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls STUB_LEASE_HOLDER=wva-old_77aa
+ok '[ ! -s "$WORK/patches" ] && grep -q "leader lease" "$WORK/warnings"' "old leader: moved anyway: patched '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+
+echo "== the move waits for the old endpoint to go, then moves"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+mkdir -p "$WORK/eps.d"
+eps_json wva-old~ wva-new >"$WORK/eps.d/1.json"
+eps_json wva-old~ wva-new >"$WORK/eps.d/2.json"
+eps_json wva-new >"$WORK/eps.d/3.json"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls WVA_SCALER_SETTLE_TIMEOUT=20
+ok '[ "$(grep -c "^get endpointslices" "$WORK/kubectl.log")" = 3 ] && grep -q "^patch scaledobject app-so -n apps --type merge" "$WORK/patches" && ! grep -q "NOT moved" "$WORK/warnings"' "waited move: read the endpoints $(grep -c '^get endpointslices' "$WORK/kubectl.log") times (want 3), patched '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+ok '[ "$(grep -n "^get endpointslices" "$WORK/kubectl.log" | tail -1 | cut -d: -f1)" -lt "$(grep -n "^patch scaledobject" "$WORK/kubectl.log" | head -1 | cut -d: -f1)" ]' "waited move: patched before the endpoints settled: $(grep -E '^(get endpointslices|patch)' "$WORK/kubectl.log" | tr '\n' ';')"
+
+echo "== EndpointSlices and Leases the installer may not read are not waited on, and it says so"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls STUB_EPS=FORBIDDEN STUB_LEASES=FORBIDDEN
+ok 'grep -q "^patch scaledobject app-so -n apps --type merge" "$WORK/patches" && grep -q "Not waited on before the move: the EndpointSlices and the leader Lease" "$WORK/info"' "unreadable endpoints and lease: patched '$(cat "$WORK/patches")', info $(cat "$WORK/info")"
+
+# KEDA asks for the metric spec once per spec change. If that call fails, the
+# HPA stays on the CPU default, Ready and Active, for good.
+echo "== after the move, an unwired HPA is re-wired by a trigger metadata change, then reported wired"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_PLAIN_ADDR"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls STUB_UNWIRED=until-rewire WVA_SCALER_REWIRE_TRIES=3
+REWIRES="$(grep -c "^patch scaledobject app-so -n apps --type json" "$WORK/patches")"
+ok '[ "$REWIRES" = 1 ] && grep -q "\"path\":\"/spec/triggers/0/metadata/wvaRewire\"" "$WORK/patches" && ! grep -q "has not wired the scaler.s metric onto the HPA" "$WORK/warnings" && grep -q "try 1 of 3" "$WORK/info"' "re-wire: $REWIRES re-wire patches (want 1): $(cat "$WORK/patches"); warnings $(cat "$WORK/warnings")"
+
+echo "== the re-wire is bounded, touches only this scaler's triggers, and ends with the fix"
+reset_store
+put_deploy openssl
+jq -n --arg a "$SO_PLAIN_ADDR" '{items: [{metadata: {namespace: "apps", name: "app-so"},
+    spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $a, modelID: "m"}},
+                      {type: "external-push", metadata: {scalerAddress: "other-scaler.elsewhere.svc:9090"}}]}}]}' >"$WORK/so.json"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls STUB_UNWIRED=always WVA_SCALER_REWIRE_TRIES=2
+REWIRES="$(grep -c "^patch scaledobject app-so -n apps --type json" "$WORK/patches")"
+ok '[ "$REWIRES" = 2 ] && ! grep -q "/spec/triggers/1/" "$WORK/patches"' "bounded re-wire: $REWIRES re-wire patches (want 2, trigger 0 only): $(cat "$WORK/patches")"
+ok 'grep -q "has not wired the scaler.s metric onto the HPA" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "kubectl patch scaledobject app-so -n apps --type json -p" "$WORK/stderr"' "bounded re-wire: no warning naming it with the fix: warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
 
 # ---------------------------------------------------------------- an unreadable controller and an explicit mode
 probe_addr_mode() { echo "mode=$(wva_scaler_address_mode "$NS")"; }

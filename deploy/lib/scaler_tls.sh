@@ -1520,26 +1520,265 @@ wva_scaler_tls_after_keda() {
     WVA_SCALER_TLS=true wva_scaler_keda_auth_apply
 }
 
+# wva_scaler_sole_server_state sets WVA_SCALER_SOLE_WHY to why the controller's
+# current Pods are not yet the only thing serving the scaler, or to empty when
+# they are: no controller Pod is terminating, every one left is Ready, the
+# Service's EndpointSlices list exactly those Pods (all ready), and, when the
+# controller elects a leader, one of them holds the lease.
+#
+# `kubectl rollout status` does not mean this. It returns once the new Pod is
+# Ready and the old ReplicaSet is scaled to zero, while the old Pod is still
+# terminating and can still be an endpoint. Measured on an OpenShift cluster:
+# the old Pod sent its GOAWAY at 13:40:23, KEDA reconciled the moved
+# ScaledObject at 13:40:27 and got a plaintext answer on the TLS address, and
+# the new Pod took the lease at 13:40:37.
+#
+# An EndpointSlice or Lease the caller may not read is not waited on; the names
+# of what was skipped are in WVA_SCALER_SOLE_SKIPPED.
+wva_scaler_sole_server_state() {
+    local out rc=0 live
+    WVA_SCALER_SOLE_WHY=""
+    WVA_SCALER_SOLE_SKIPPED=""
+    out="$(kubectl get pods -n "$WVA_NS" -l "$WVA_CONTROLLER_LABEL_SELECTOR" -o json 2>/dev/null)" || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$out" ]; then
+        WVA_SCALER_SOLE_WHY="the controller Pods in $WVA_NS cannot be read"
+        return 0
+    fi
+    WVA_SCALER_SOLE_WHY="$(printf '%s' "$out" | jq -r '
+        [.items[]? | select(.metadata.deletionTimestamp != null) | .metadata.name] as $old
+        | [.items[]? | select(.metadata.deletionTimestamp == null)
+           | select(([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 0)
+           | .metadata.name] as $unready
+        | [.items[]? | select(.metadata.deletionTimestamp == null) | .metadata.name] as $live
+        | if ($old | length) > 0 then "old controller Pod(s) still terminating: " + ($old | join(" "))
+          elif ($live | length) == 0 then "no controller Pod is running"
+          elif ($unready | length) > 0 then "controller Pod(s) not Ready: " + ($unready | join(" "))
+          else "" end' 2>/dev/null)" || WVA_SCALER_SOLE_WHY="the controller Pods in $WVA_NS cannot be parsed"
+    [ -z "$WVA_SCALER_SOLE_WHY" ] || return 0
+    live="$(printf '%s' "$out" | jq -c '[.items[]? | select(.metadata.deletionTimestamp == null) | .metadata.name] | sort')"
+
+    rc=0
+    out="$(kubectl get endpointslices -n "$WVA_NS" -l kubernetes.io/service-name=wva-external-scaler -o json 2>/dev/null)" || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$out" ]; then
+        WVA_SCALER_SOLE_SKIPPED="EndpointSlices"
+    else
+        WVA_SCALER_SOLE_WHY="$(printf '%s' "$out" | jq -r --argjson live "$live" '
+            [.items[]? | .endpoints[]?] as $eps
+            | ([$eps[] | .targetRef.name // ""] | unique) as $names
+            | [$eps[] | select((.conditions.ready // true) != true) | .targetRef.name // "?"] as $notready
+            | if $names != $live then "the scaler Service routes to " + (if ($names | length) == 0 then "no Pod" else ($names | join(" ")) end) + ", not only to " + ($live | join(" "))
+              elif ($notready | length) > 0 then "scaler endpoint(s) not ready: " + ($notready | join(" "))
+              else "" end' 2>/dev/null)" || WVA_SCALER_SOLE_WHY="the scaler EndpointSlices cannot be parsed"
+        [ -z "$WVA_SCALER_SOLE_WHY" ] || return 0
+    fi
+
+    # The lease, when the controller elects one. Until it holds it, the new
+    # Pod serves a standby that it rebinds on election.
+    rc=0
+    out="$(kubectl get deployment wva-controller-manager -n "$WVA_NS" -o json 2>/dev/null)" || rc=$?
+    if [ "$rc" = 0 ] && printf '%s' "$out" | jq -e '[.spec.template.spec.containers[]? | select(.name == "manager")
+            | (.args // [])[] | select(. == "--leader-elect" or . == "--leader-elect=true")] | length > 0' >/dev/null 2>&1; then
+        rc=0
+        out="$(kubectl get leases -n "$WVA_NS" -o json 2>/dev/null)" || rc=$?
+        if [ "$rc" != 0 ] || [ -z "$out" ]; then
+            WVA_SCALER_SOLE_SKIPPED="${WVA_SCALER_SOLE_SKIPPED:+$WVA_SCALER_SOLE_SKIPPED and }the leader Lease"
+        elif ! printf '%s' "$out" | jq -e --argjson live "$live" '[.items[]? | .spec.holderIdentity // "" | split("_")[0]
+                | select(. as $h | $live | index($h))] | length > 0' >/dev/null 2>&1; then
+            WVA_SCALER_SOLE_WHY="no current controller Pod holds the leader lease yet"
+        fi
+    fi
+}
+
+# wva_scaler_wait_sole_server waits, for at most WVA_SCALER_SETTLE_TIMEOUT
+# seconds (default 180), until wva_scaler_sole_server_state finds nothing in
+# the way. Returns 1 on timeout, with the reason in WVA_SCALER_SOLE_WHY.
+wva_scaler_wait_sole_server() {
+    local end
+    end=$(( $(date +%s) + ${WVA_SCALER_SETTLE_TIMEOUT:-180} ))
+    while :; do
+        wva_scaler_sole_server_state
+        [ -n "$WVA_SCALER_SOLE_WHY" ] || return 0
+        [ "$(date +%s)" -lt "$end" ] || return 1
+        sleep "${WVA_SCALER_POLL_SECONDS:-3}"
+    done
+}
+
+# wva_scaler_so_wiring echoes how KEDA wired ScaledObject $2 in namespace $1:
+#   wired        the HPA carries the external metric of every trigger naming
+#                this scaler, and status.externalMetricNames lists it
+#   unwired I..  it does not, for the triggers at these indices
+#   paused       KEDA is told not to scale it
+#   unknown      the ScaledObject or its HPA could not be read
+# KEDA names a trigger's metric s<index>-<name>. It asks the scaler for that
+# name only when the ScaledObject's spec changes, and builds the HPA without the
+# metric when the call fails: then it stays on the CPU default for good.
+wva_scaler_so_wiring() {
+    local ns="$1" name="$2" so hpa rc=0 hname
+    so="$(kubectl get scaledobject "$name" -n "$ns" -o json 2>/dev/null)" || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$so" ]; then echo unknown; return 0; fi
+    hname="$(printf '%s' "$so" | jq -r --arg n "$name" '.status.hpaName // ("keda-hpa-" + $n)' 2>/dev/null)" || hname="keda-hpa-$name"
+    rc=0
+    hpa="$(kubectl get hpa "$hname" -n "$ns" -o json 2>&1)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        if wva_scaler_not_found "$hpa"; then hpa='{}'; else echo unknown; return 0; fi
+    fi
+    printf '%s' "$so" | jq -r --arg p "wva-external-scaler.${WVA_NS}." --argjson h "$hpa" '
+        if ([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length) > 0 then "paused"
+        else
+          ([.spec.triggers // [] | to_entries[] | select((.value.metadata.scalerAddress // "") | startswith($p)) | .key]) as $idx
+          | ([$h.spec.metrics[]? | select(.type == "External") | .external.metric.name // ""]) as $hm
+          | (.status.externalMetricNames // []) as $em
+          | [$idx[] | . as $i | ("s" + ($i | tostring) + "-") as $pre
+             | select((([$hm[] | select(startswith($pre))] | length) == 0)
+                      or (([$em[] | select(startswith($pre))] | length) == 0))
+             | $i]
+          | if length == 0 then "wired" else "unwired " + (map(tostring) | join(" ")) end
+        end' 2>/dev/null || echo unknown
+}
+
+# wva_scaler_unwired_of checks the <namespace>/<name> rows in $1 and sets
+# WVA_SCALER_UNWIRED to "<namespace>/<name> <index>..." for each one KEDA has
+# not wired, and WVA_SCALER_WIRE_UNKNOWN to the rows it could not read.
+wva_scaler_unwired_of() {
+    local ns name st
+    WVA_SCALER_UNWIRED=""
+    WVA_SCALER_WIRE_UNKNOWN=""
+    while IFS=/ read -r ns name; do
+        [ -n "$name" ] || continue
+        st="$(wva_scaler_so_wiring "$ns" "$name")"
+        case "$st" in
+            wired|paused) ;;
+            unwired*) WVA_SCALER_UNWIRED="${WVA_SCALER_UNWIRED}${ns}/${name} ${st#unwired }"$'\n' ;;
+            *) WVA_SCALER_WIRE_UNKNOWN="${WVA_SCALER_WIRE_UNKNOWN}${ns}/${name}"$'\n' ;;
+        esac
+    done <<< "$1"
+}
+
+# wva_scaler_wait_wired waits up to $2 seconds for every row in $1 to be wired
+# (wva_scaler_unwired_of). Returns 1 while some are not.
+wva_scaler_wait_wired() {
+    local end
+    end=$(( $(date +%s) + $2 ))
+    while :; do
+        wva_scaler_unwired_of "$1"
+        [ -n "$WVA_SCALER_UNWIRED" ] || return 0
+        [ "$(date +%s)" -lt "$end" ] || return 1
+        sleep "${WVA_SCALER_POLL_SECONDS:-3}"
+    done
+}
+
+# WVA_SCALER_REWIRE_KEY is the trigger metadata key a re-wire writes. The scaler
+# ignores it. Changing it is a spec change, which is what makes KEDA ask for the
+# metric spec again; an annotation is not.
+WVA_SCALER_REWIRE_KEY=wvaRewire
+
+# wva_scaler_rewire_patch echoes the JSON patch that sets the re-wire key on
+# the trigger at index $1 to $2.
+wva_scaler_rewire_patch() {
+    jq -nc --arg i "$1" --arg k "$WVA_SCALER_REWIRE_KEY" --arg v "$2" \
+        '[{op: "add", path: ("/spec/triggers/" + $i + "/metadata/" + $k), value: $v}]'
+}
+
+# wva_scaler_rewire_cmd echoes, for a message, the command that re-wires the
+# unwired row $1 ("<namespace>/<name> <index>...").
+wva_scaler_rewire_cmd() {
+    local so idxs ns name i cmd=""
+    so="${1%% *}"
+    idxs="${1#* }"
+    ns="${so%%/*}"
+    name="${so#*/}"
+    for i in $idxs; do
+        cmd="${cmd:+$cmd; }kubectl patch scaledobject $name -n $ns --type json -p '$(wva_scaler_rewire_patch "$i" "$(date +%s)")'"
+    done
+    printf '%s\n' "$cmd"
+}
+
+# wva_scaler_rewire makes KEDA read the metric spec again for the unwired rows
+# in $1 ("<namespace>/<name> <index>..."): it patches the re-wire key on each
+# trigger that names this scaler. Only those triggers, only those ScaledObjects.
+wva_scaler_rewire() {
+    local row so idxs ns name i stamp
+    stamp="$(date +%s)"
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        so="${row%% *}"
+        idxs="${row#* }"
+        ns="${so%%/*}"
+        name="${so#*/}"
+        for i in $idxs; do
+            kubectl patch scaledobject "$name" -n "$ns" --type json \
+                -p "$(wva_scaler_rewire_patch "$i" "$stamp")" >/dev/null 2>&1 || true
+        done
+    done <<< "$1"
+}
+
+# wva_scaler_ensure_wired checks that KEDA wired the HPA of every ScaledObject
+# just moved ($1, <namespace>/<name> rows), and re-wires the ones it did not.
+#
+# KEDA asks the scaler for the metric spec once per spec change. The move is
+# one; a call that fails then (a Pod going away, or KEDA's connection for the
+# new address still backing off from the old mode, up to two minutes) leaves
+# the HPA on the CPU default for good. So: wait WVA_SCALER_REWIRE_WAIT seconds
+# (default 30), then up to WVA_SCALER_REWIRE_TRIES times (default 6) change the
+# re-wire key and wait again. Never deletes or recreates a ScaledObject:
+# KEDA does the same single call for a new one as for a changed one.
+wva_scaler_ensure_wired() {
+    local rows="$1" wait="${WVA_SCALER_REWIRE_WAIT:-30}" tries="${WVA_SCALER_REWIRE_TRIES:-6}" t=0
+    [ -n "$rows" ] || return 0
+    while ! wva_scaler_wait_wired "$rows" "$wait"; do
+        if [ "$t" -ge "$tries" ]; then
+            log_warning "=================================================================="
+            log_warning "KEDA has not wired the scaler's metric onto the HPA of these ScaledObjects, so they scale on the CPU default and WVA's decisions do not reach them:"
+            printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+            log_warning "  KEDA asks for the metric spec only when a ScaledObject's spec changes. Once the scaler answers (make verify-deployment), change it again:"
+            printf '%s' "$WVA_SCALER_UNWIRED" | while IFS= read -r row; do
+                [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")" >&2
+            done
+            log_warning "=================================================================="
+            return 1
+        fi
+        t=$((t + 1))
+        log_info "KEDA has not wired the scaler's metric for $(printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//' | paste -sd' ' -); changing trigger metadata $WVA_SCALER_REWIRE_KEY so it asks again (try $t of $tries)."
+        wva_scaler_rewire "$WVA_SCALER_UNWIRED"
+    done
+    if [ -n "$WVA_SCALER_WIRE_UNKNOWN" ]; then
+        log_info "Could not read these ScaledObjects or their HPAs, so whether KEDA wired them is not checked: $(printf '%s' "$WVA_SCALER_WIRE_UNKNOWN" | paste -sd' ' -)"
+    fi
+    return 0
+}
+
 # wva_scaler_tls_finish moves the ScaledObjects that must follow the scaler to
 # its new mode (WVA_SCALER_TLS_MIGRATE_ROWS), once the controller is applied.
 # Only once its rollout finished (WVA_CONTROLLER_ROLLED_OUT, set by
-# deploy_wva_controller): moved earlier, they dial a mode the old pod does not
-# serve. Otherwise it names them and the command that moves them later.
+# deploy_wva_controller) and the new Pods alone serve the scaler
+# (wva_scaler_wait_sole_server): moved earlier, KEDA dials a mode an old Pod
+# does not serve. Otherwise it names them and the command that moves them
+# later. After the move, it checks KEDA wired each HPA (wva_scaler_ensure_wired).
 wva_scaler_tls_finish() {
     [ -n "${WVA_SCALER_TLS_MIGRATE_ROWS:-}" ] || return 0
+    local why="" rows
     if [ "${WVA_CONTROLLER_ROLLED_OUT:-true}" != true ]; then
-        log_warning "The controller rollout did not finish, so these ScaledObjects were NOT moved to the $WVA_SCALER_TLS_MIGRATE_MODE scaler address:"
+        why="The controller rollout did not finish"
+    elif ! wva_scaler_wait_sole_server; then
+        why="The new controller Pods are not yet the only thing serving the scaler ($WVA_SCALER_SOLE_WHY)"
+    fi
+    if [ -n "$why" ]; then
+        log_warning "$why, so these ScaledObjects were NOT moved to the $WVA_SCALER_TLS_MIGRATE_MODE scaler address:"
         printf '%s\n' "$WVA_SCALER_TLS_MIGRATE_ROWS" | head -20 | sed 's/^/    /' >&2
-        log_warning "  Once  kubectl rollout status deployment/wva-controller-manager -n $WVA_NS  succeeds, move them:  $(wva_scaler_tls_migrate_cmd "$([ "$WVA_SCALER_TLS_MIGRATE_MODE" = tls ] && echo true || echo false)")"
+        log_warning "  Once  kubectl rollout status deployment/wva-controller-manager -n $WVA_NS  succeeds and the old Pods are gone, move them:  $(wva_scaler_tls_migrate_cmd "$([ "$WVA_SCALER_TLS_MIGRATE_MODE" = tls ] && echo true || echo false)")"
         WVA_SCALER_TLS_MIGRATE_ROWS=""
         return 0
     fi
-    wva_scaler_migrate_scaledobjects "$WVA_SCALER_TLS_MIGRATE_ROWS" "$WVA_SCALER_TLS_MIGRATE_MODE"
+    [ -z "${WVA_SCALER_SOLE_SKIPPED:-}" ] || log_info "Not waited on before the move: the $WVA_SCALER_SOLE_SKIPPED (not readable)."
+    rows="$WVA_SCALER_TLS_MIGRATE_ROWS"
+    wva_scaler_migrate_scaledobjects "$rows" "$WVA_SCALER_TLS_MIGRATE_MODE"
     WVA_SCALER_TLS_MIGRATE_ROWS=""
     if [ -n "$WVA_SCALER_MIGRATE_FAILED" ]; then
         log_warning "These ScaledObjects could not be moved to the $WVA_SCALER_TLS_MIGRATE_MODE scaler address. Until they are, they may stop scaling, and after a KEDA restart they can stop the others on their address too (GitOps may also put the old trigger back; change it at the source):"
         printf '%s' "$WVA_SCALER_MIGRATE_FAILED" | sed 's/^/    /' >&2
+        rows="$(printf '%s\n' "$rows" | grep -vxF -f <(printf '%s' "$WVA_SCALER_MIGRATE_FAILED") || true)"
     fi
+    wva_scaler_ensure_wired "$rows" || true
 }
 
 # wva_scaler_tls_permission_needs echoes "<resource> <namespace>" for each kind
