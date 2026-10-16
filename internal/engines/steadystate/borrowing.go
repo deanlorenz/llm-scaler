@@ -103,6 +103,10 @@ type borrowingState struct {
 	// cycle is this cycle's input to the governor, kept for the releases
 	// after the optimizer; zero when the cycle borrows nothing.
 	cycle allocation.BorrowCycle
+	// gatedCycle is the governor's input in a cycle that counts no borrowing
+	// and has Kueue-backed namespaces (governGated): only their replicas held
+	// at Kueue's admission gate are released. Zero otherwise.
+	gatedCycle allocation.BorrowCycle
 	// gated is this cycle's GPUs of managed pods at Kueue's admission gate,
 	// per namespace and accelerator (gatedGPUs), for what on-call sees.
 	gated map[string]map[string]int
@@ -127,19 +131,34 @@ type borrowingState struct {
 // that resolved, takes what is in flight and what managed pods hold at Kueue's
 // admission gate out of the shared pools. Without borrowing in the
 // constraints it returns them as they are, exactly as before borrowing was
-// counted.
+// counted; the pods at Kueue's gate are still listed and recorded, for the
+// quota charge.
 func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation.ResourceConstraints,
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
 	st.cycle, st.gated, st.cohortsByNS, st.credit, st.reclaimCredit = allocation.BorrowCycle{}, nil, nil, nil, nil
+	st.gatedCycle = allocation.BorrowCycle{}
 	if st.inFlight == nil {
 		st.inFlight = allocation.DefaultBorrowInFlight
 	}
 	st.inFlight.ObserveAt(observeVariants(requests), now)
 	if !allocation.HasBorrowing(constraints) {
-		st.inFlight.SetCycle(nil, nil, nil, now)
+		// The pods at Kueue's admission gate are listed in every Kueue-backed
+		// namespace all the same: the quota charge reads them from the record
+		// (KU1), so a replica Kueue keeps gated does not cancel what Kueue
+		// reserved for others.
+		var gated map[string]map[string]int
+		var admitted []allocation.AdmittedGPUs
+		kueueBacked := len(allocation.KueueNamespaces(constraints)) > 0
+		if kueueBacked {
+			gated, admitted, _ = e.gatedGPUs(ctx, constraints, now)
+		}
+		st.inFlight.SetCycle(gated, admitted, nil, now)
 		e.idlePreemptions(ctx, requests, scaleTargets, now)
+		if kueueBacked {
+			e.governGated(ctx, constraints, requests, now)
+		}
 		return constraints
 	}
 	physical := e.Config != nil && e.Config.HasPhysicalLimiter()
@@ -336,11 +355,14 @@ type gatedPod struct {
 	admittedAt time.Time
 }
 
-// gatedGPUs is, per namespace some borrowing constraint maps to a cohort, the
-// GPUs of pods held at Kueue's admission gate, per the accelerator their node
-// selector names ("" when none). They hold no reservation yet, so the cohort's
-// free pool still counts what Kueue is about to admit them onto. Read from the
-// manager's cached pod informer: one list per such namespace, no API call.
+// gatedGPUs is, per namespace some borrowing constraint maps to a cohort, and
+// per namespace a Kueue-backed constraint carries figures for
+// (allocation.KueueNamespaces), the GPUs of pods held at Kueue's admission
+// gate, per the accelerator their node selector names ("" when none). They
+// hold no reservation yet, so the cohort's free pool still counts what Kueue
+// is about to admit them onto, and the queue's charge does not count them as
+// reserved (KU1). Read from the manager's cached pod informer: one list per
+// such namespace, no API call.
 //
 // admitted is the pods seen gated and past the gate since: Kueue reserved them,
 // but a read taken before then does not show it, so they stay deducted from a
@@ -362,13 +384,21 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 		st.gatedErrLogged = map[string]bool{}
 	}
 	namespaces := map[string]bool{}
+	inCohort := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		for ns := range c.NamespaceCohorts {
 			namespaces[ns] = true
+			inCohort[ns] = true
 		}
+	}
+	// Every Kueue-backed namespace, borrowing counted or not: its charge
+	// reads its gated pods (KU1), and the placement timeout releases one
+	// gated for good (uncountedHeldPast).
+	for _, ns := range allocation.KueueNamespaces(constraints) {
+		namespaces[ns] = true
 	}
 	gated = map[string]map[string]int{}
 	listed := map[string]bool{}
@@ -379,8 +409,11 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			unreadable = append(unreadable, ns)
 			if !st.gatedErrLogged[ns] {
 				st.gatedErrLogged[ns] = true
-				ctrl.LoggerFrom(ctx).Error(err, "Cannot list the pods at Kueue's admission gate; nothing new is borrowed in the namespace's cohorts until a list succeeds",
-					"namespace", ns)
+				msg := "Cannot list the pods at Kueue's admission gate; nothing new is borrowed in the namespace's cohorts until a list succeeds"
+				if !inCohort[ns] {
+					msg = "Cannot list the pods at Kueue's admission gate; the namespace's quota charge counts them as admitted until a list succeeds"
+				}
+				ctrl.LoggerFrom(ctx).Error(err, msg, "namespace", ns)
 			}
 			continue
 		}

@@ -78,6 +78,32 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 	return allocation.BlockCohorts(constraints, st.governor.BlockedCohorts(now))
 }
 
+// governGated runs the governor in a cycle that counts no borrowing and has
+// Kueue-backed namespaces (a countBorrowable: false entry, queues in no
+// cohort): it observes the cycle, so that releaseBorrowed releases a replica
+// held at Kueue's admission gate past the placement timeout there
+// (BorrowGovernor.gatedRelease) and keeps the releases in flight in force as
+// a borrowing cycle does. Nothing about borrowing is decided: no preemption
+// read, no cohort closed, and the cycle is not a borrowing one for what
+// on-call sees (publishBorrowSignals).
+func (e *Engine) governGated(ctx context.Context, constraints []*allocation.ResourceConstraints,
+	requests []allocation.ModelScalingRequest, now time.Time) {
+	st := &e.borrowing
+	if st.governor == nil {
+		st.governor = allocation.NewBorrowGovernor(e.borrowSettings())
+	} else {
+		st.governor.SetSettings(e.borrowSettings())
+	}
+	e.loadBorrowLedger(ctx)
+	st.gatedCycle = allocation.BorrowCycle{
+		Now: now, Constraints: constraints, Requests: requests,
+		ScaleUpPending: e.scaleUpPending(ctx, requests, now),
+		NoHole:         allocation.NoHoleOf(st.inFlight.Unreserved(now).InFlight),
+	}
+	st.governor.Observe(st.gatedCycle)
+	allocation.DefaultBorrowCooldowns.Publish(st.governor)
+}
+
 // borrowBlocked is the greedy optimizer's per-variant borrowing block for this
 // cycle, nil when the cycle borrows nothing.
 func (e *Engine) borrowBlocked() func(namespace, modelID, variant string) bool {
@@ -148,20 +174,39 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		return
 	}
 	if st.cycle.Now.IsZero() {
-		st.governor.HoldReleases(now, requests, decisions)
+		if !st.gatedCycle.Now.IsZero() {
+			// Kueue-backed namespaces, none counting borrowing: their gated
+			// replicas past the placement timeout (governGated).
+			e.applyReleases(ctx, st.gatedCycle, decisions, scaleTargets)
+		} else {
+			st.governor.HoldReleases(now, requests, decisions)
+		}
 		e.persistBorrowLedger(ctx)
 		return
 	}
-	logger := ctrl.LoggerFrom(ctx)
 	initLossSeries(st.cycle)
+	e.applyReleases(ctx, st.cycle, decisions, scaleTargets)
+	e.persistBorrowLedger(ctx)
+}
+
+// applyReleases asks the governor for the cycle's releases, lowers decisions
+// by them, and logs, counts and records an Event for each.
+func (e *Engine) applyReleases(ctx context.Context, cycle allocation.BorrowCycle, decisions []domain.VariantDecision,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor) {
+	st := &e.borrowing
+	logger := ctrl.LoggerFrom(ctx)
 	// One release per model and cycle, however many variants it lowers: a
 	// P/D pair is one loss, as a LeaderWorkerSet group is (R7).
 	counted := map[string]bool{}
-	for _, r := range st.governor.Releases(st.cycle, decisions) {
-		logger.Info("Releasing borrowed capacity",
+	for _, r := range st.governor.Releases(cycle, decisions) {
+		msg := "Releasing borrowed capacity"
+		if r.AtGate {
+			msg = "Releasing replicas held at Kueue's admission gate past the placement timeout; the queue has no room for them"
+		}
+		logger.Info(msg,
 			"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
 			"from", r.From, "to", r.To, "cause", string(r.Cause))
-		if r.GuaranteedGPUs > 0 {
+		if r.GuaranteedGPUs > 0 && !r.AtGate {
 			logger.Info("A borrowed-capacity release goes below the namespace's guaranteed figure: "+
 				"the smallest unit that keeps the model serviceable is larger than what it borrows",
 				"namespace", r.Namespace, "modelID", r.ModelID, "cause", string(r.Cause), "guaranteedGPUs", r.GuaranteedGPUs)
@@ -176,7 +221,6 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 			e.checkLWSScaleDown(ctx, r, acc)
 		}
 	}
-	e.persistBorrowLedger(ctx)
 }
 
 // initLossSeries creates, at 0, the loss counters of every model in a

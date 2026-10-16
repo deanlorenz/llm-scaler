@@ -152,12 +152,25 @@ type ResourceConstraints struct {
 	// successfully: nothing bounds that type. Read only to report
 	// (wva_kueue_never_read).
 	KueueNeverRead bool
+	// KueueBacked is set on a namespace-scope quota entry that reads Kueue:
+	// its NamespacePools are Kueue's figures, charged with what Kueue
+	// reserved for others (KU1), whether or not it counts borrowing. The
+	// engine lists the pods at Kueue's admission gate in each of their
+	// namespaces, and releases a replica held there past the placement
+	// timeout (KueueNamespaces, uncountedHeldPast).
+	KueueBacked bool
 }
 
 // KueueReadReporter is an inventory that reports a Kueue source never read
 // (QuotaInventory).
 type KueueReadReporter interface {
 	KueueNeverRead() bool
+}
+
+// KueueBackedInventory is an inventory that reports whether its namespace
+// figures are read from Kueue (QuotaInventory).
+type KueueBackedInventory interface {
+	KueueBacked() bool
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

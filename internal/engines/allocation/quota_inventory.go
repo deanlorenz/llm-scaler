@@ -130,6 +130,14 @@ func (q *QuotaInventory) KueueNeverRead() bool {
 	return q.neverRead
 }
 
+// KueueBacked reports whether the entry is namespace-scoped and reads its
+// figures from Kueue, counting borrowing or not.
+func (q *QuotaInventory) KueueBacked() bool {
+	return q.source != nil && q.static.Scope == config.QuotaScopeNamespace && q.static.KueueEnabled()
+}
+
+var _ KueueBackedInventory = (*QuotaInventory)(nil)
+
 // BorrowEligibility evaluates the engine-side B1 conditions per namespace
 // (kueue.Eligibility in production).
 type BorrowEligibility interface {

@@ -31,17 +31,46 @@ var GateGrace = 30 * time.Second
 // from when its newest unplaced pod became so. since is the newest, for the
 // signals that ask whether anything is newly unplaced; the placement timeout
 // reads at (BorrowGovernor.timeoutReleases), so it counts replicas, never the
-// pods of one group as several.
+// pods of one group as several. gated is the part of at held at Kueue's
+// admission gate (countGated).
 func placement(ctx context.Context, k8sClient client.Client, namespace string,
-	scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) (unplaced int, since time.Time, pods []string, at map[string]time.Time) {
+	scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) (unplaced int, since time.Time, pods []string, at, gated map[string]time.Time) {
 	if k8sClient == nil || scaleTarget == nil {
-		return 0, time.Time{}, nil, nil
+		return 0, time.Time{}, nil, nil, nil
 	}
 	list, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
 	if err != nil {
-		return 0, time.Time{}, nil, nil
+		return 0, time.Time{}, nil, nil, nil
 	}
-	return countUnplaced(list, scaletarget.IsLeaderWorkerSet(scaleTarget), now)
+	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
+	unplaced, since, pods, at = countUnplaced(list, group, now)
+	return unplaced, since, pods, at, countGated(list, group, at)
+}
+
+// countGated is the replicas of at (countUnplaced's) one of whose unplaced
+// pods is held at Kueue's admission gate, each at its time in at: per pod, or
+// on a LeaderWorkerSet per group. Nil when none.
+func countGated(list []corev1.Pod, group bool, at map[string]time.Time) map[string]time.Time {
+	var out map[string]time.Time
+	for i := range list {
+		p := &list[i]
+		if !kueue.PodGated(p) || p.DeletionTimestamp != nil || p.Spec.NodeName != "" {
+			continue
+		}
+		key := p.Name
+		if group {
+			key = p.Labels[lwsv1.GroupIndexLabelKey]
+		}
+		t, unplaced := at[key]
+		if !unplaced {
+			continue // gated for less than GateGrace: not unplaced yet
+		}
+		if out == nil {
+			out = map[string]time.Time{}
+		}
+		out[key] = t
+	}
+	return out
 }
 
 // countUnplaced is placement over listed pods.
