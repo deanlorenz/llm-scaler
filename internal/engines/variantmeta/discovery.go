@@ -130,6 +130,8 @@ func Discover(
 			HeldKnown:       heldKnown,
 			FilledReplicas:  filledReplicas,
 			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
+			Tolerations:     scaletarget.PodTolerations(scaleTarget),
+			TopologyKey:     scaletarget.ExclusiveTopology(scaleTarget),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})

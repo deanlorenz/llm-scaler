@@ -1,5 +1,7 @@
 package domain
 
+import corev1 "k8s.io/api/core/v1"
+
 // DefaultVariantCost is the per-replica cost assumed when a variant declares no
 // cost (the llm-d.ai/variant-cost annotation is absent or unparseable). It lives
 // here, next to the variant metadata it belongs to, so every consumer
@@ -67,6 +69,13 @@ type VariantMetadata struct {
 	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
 	// says nothing about shape.
 	PodGPUs []int
+	// Tolerations are the tolerations of a replica's pods
+	// (scaletarget.PodTolerations): node fit places a pod only on a node whose
+	// NoSchedule and NoExecute taints they tolerate.
+	Tolerations []corev1.Toleration
+	// TopologyKey is the node label every pod of one replica must share a
+	// value of (an exclusive-topology LeaderWorkerSet), "" for none.
+	TopologyKey string
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -93,6 +102,8 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		HeldKnown:       m.HeldKnown,
 		FilledReplicas:  m.FilledReplicas,
 		PodGPUs:         m.PodGPUs,
+		Tolerations:     m.Tolerations,
+		TopologyKey:     m.TopologyKey,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,
 		AcceleratorName: m.AcceleratorName,

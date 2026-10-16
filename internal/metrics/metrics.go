@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,8 @@ var (
 	availableGpus                       *prometheus.GaugeVec
 	gpuDiscoveryUp                      *prometheus.GaugeVec
 	sfzQueueFallbackActive              *prometheus.GaugeVec
+	constraintProviderSkipped           *prometheus.GaugeVec
+	sfzWakeUnchecked                    *prometheus.CounterVec
 	nodeAccessDenied                    *prometheus.GaugeVec
 	policyNamespaceUnverified           *prometheus.GaugeVec
 	configRejectedEntries               *prometheus.GaugeVec
@@ -643,6 +646,27 @@ func InitMetrics(registry prometheus.Registerer) error {
 		sfzQueueFallbackLabels,
 	)
 
+	constraintProviderSkippedLabels := []string{constants.LabelProvider, constants.LabelReason}
+	sfzWakeUncheckedLabels := []string{constants.LabelNamespace}
+	if controllerInstance != "" {
+		constraintProviderSkippedLabels = append(constraintProviderSkippedLabels, constants.LabelControllerInstance)
+		sfzWakeUncheckedLabels = append(sfzWakeUncheckedLabels, constants.LabelControllerInstance)
+	}
+	constraintProviderSkipped = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConstraintProviderSkipped,
+			Help: "1 while a declared GPU limiter is left out of scaling decisions, by provider and reason; the others still bound",
+		},
+		constraintProviderSkippedLabels,
+	)
+	sfzWakeUnchecked = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScaleFromZeroWakeUnchecked,
+			Help: "Scale-from-zero wakes published without a GPU capacity check: every declared limiter unavailable and no recent snapshot",
+		},
+		sfzWakeUncheckedLabels,
+	)
+
 	enforcerModificationsLabels := []string{constants.LabelPolicyType}
 	if controllerInstance != "" {
 		enforcerModificationsLabels = append(enforcerModificationsLabels, constants.LabelControllerInstance)
@@ -856,6 +880,12 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(configIgnoredFields); err != nil {
 		return fmt.Errorf("failed to register configIgnoredFields metric: %w", err)
+	}
+	if err := registry.Register(constraintProviderSkipped); err != nil {
+		return fmt.Errorf("failed to register constraintProviderSkipped metric: %w", err)
+	}
+	if err := registry.Register(sfzWakeUnchecked); err != nil {
+		return fmt.Errorf("failed to register sfzWakeUnchecked metric: %w", err)
 	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
@@ -1538,6 +1568,53 @@ func DeleteConfigEntryGauges(namespace, name string) {
 	if configIgnoredFields != nil {
 		configIgnoredFields.Delete(labels)
 	}
+}
+
+// SetConstraintProvidersSkipped records which GPU constraint providers are
+// skipped for the reasons a producer OWNS. Every series carrying one of the
+// owned reasons is replaced by active (provider name -> reason): a provider
+// absent from active, or listed under a reason the producer does not own, has
+// no series of that producer's afterwards.
+//
+// Ownership is by reason, as SetModelScalingBlockedReasons does it, because two
+// producers publish here: the steady-state engine (unobserved, failed,
+// no_constraints) and the readiness gate (node_read_denied). Neither may clear
+// what the other set.
+func SetConstraintProvidersSkipped(owned []string, active map[string]string) {
+	if constraintProviderSkipped == nil {
+		return
+	}
+	for _, reason := range owned {
+		match := prometheus.Labels{constants.LabelReason: reason}
+		if controllerInstance != "" {
+			match[constants.LabelControllerInstance] = controllerInstance
+		}
+		constraintProviderSkipped.DeletePartialMatch(match)
+	}
+	for provider, reason := range active {
+		if !slices.Contains(owned, reason) {
+			continue
+		}
+		labels := prometheus.Labels{constants.LabelProvider: provider, constants.LabelReason: reason}
+		if controllerInstance != "" {
+			labels[constants.LabelControllerInstance] = controllerInstance
+		}
+		constraintProviderSkipped.With(labels).Set(1)
+	}
+}
+
+// CountScaleFromZeroWakeUnchecked counts one scale-from-zero wake published
+// without a GPU capacity check in namespace: limiters are declared, but every
+// provider was unavailable and no recent snapshot of their constraints existed.
+func CountScaleFromZeroWakeUnchecked(namespace string) {
+	if sfzWakeUnchecked == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	sfzWakeUnchecked.With(labels).Inc()
 }
 
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading

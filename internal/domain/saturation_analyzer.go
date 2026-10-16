@@ -2,6 +2,7 @@ package domain
 
 import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -265,6 +266,10 @@ type VariantReplicaState struct {
 	FilledReplicas int
 	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
 	PodGPUs []int
+	// Tolerations and TopologyKey say which nodes a replica's pods may land
+	// on; see VariantMetadata.
+	Tolerations []corev1.Toleration
+	TopologyKey string
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

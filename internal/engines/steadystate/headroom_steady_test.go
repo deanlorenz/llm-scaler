@@ -11,8 +11,8 @@ import (
 
 // A fleet of STEADY models must still publish headroom every cycle.
 //
-// The optimizer publishes it from the attribution pass, and that pass runs only
-// for a model that is scaling up. A namespace whose models all sit at no-change
+// The optimizer used to publish it from the attribution pass, and that pass
+// runs only for a model that is scaling up. A namespace whose models all sit at no-change
 // took neither that branch nor the idle-fleet one, so nothing was published --
 // and the warm pool, the only reader, was left without an answer for as long
 // as the fleet stayed calm. Measured on kind: one steady variant beside a pool
@@ -35,8 +35,9 @@ func TestASteadyFleetStillPublishesHeadroom(t *testing.T) {
 	e := &Engine{GPULimiter: quotaLimiterFor(ns, accel, 2), optimizer: allocation.NewGreedyByScoreOptimizer()}
 
 	// A request with no demand: nothing here scales up, so the optimizer's own
-	// attribution pass will not run for it.
-	_, constraints := e.selectV2Optimizer(t.Context(), []allocation.ModelScalingRequest{{
+	// attribution pass will not run for it. The pass publishes once it is over,
+	// whatever it decided.
+	requests := []allocation.ModelScalingRequest{{
 		ModelID:   "test-model",
 		Namespace: ns,
 		CompositeSignal: allocation.NamedAnalyzerResult{
@@ -44,10 +45,12 @@ func TestASteadyFleetStillPublishesHeadroom(t *testing.T) {
 		},
 		Variants:      []domain.VariantMetadata{{VariantName: "v", AcceleratorName: accel}},
 		VariantStates: []domain.VariantReplicaState{{VariantName: "v", CurrentReplicas: 1, GPUsPerReplica: 1}},
-	}})
+	}}
+	optimizer, constraints := e.selectV2Optimizer(t.Context(), requests)
 	if len(constraints) == 0 {
 		t.Fatal("no constraints were computed; the test is about what happens once they are")
 	}
+	optimizer.Optimize(t.Context(), requests, constraints)
 
 	free, state := decision.GPUHeadroomReading(ns, accel, v, time.Minute, time.Now())
 	if state != decision.HeadroomBounded {

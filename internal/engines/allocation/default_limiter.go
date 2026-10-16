@@ -62,9 +62,10 @@ func (l *DefaultLimiter) UsageBasis() UsageBasis {
 // a quota but zero current usage must still appear here (with an empty inner
 // map) for its caps to be materialized and enforced.
 //
-// Remaining gap (tracked by the limiter chain, sub-issue #1003): composing a
-// physical-inventory limiter with a quota limiter as min(physical, quota) within
-// a single ComputeConstraints. See docs/reference/quota-limiter.md.
+// A physical-inventory limiter and quota limiters compose as separate
+// DefaultLimiters grouped in a CompositeLimiter, not inside one
+// ComputeConstraints: each is fed its own usage basis, and the optimizer
+// intersects their constraints. See docs/reference/quota-limiter.md.
 func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map[string]int, usageByNamespace map[string]map[string]int) (*ResourceConstraints, error) {
 	// Step 1: Refresh inventory to get latest limits from the cluster
 	//
@@ -91,11 +92,12 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 
 	// Step 3: Expose per-type availability
 	rc := &ResourceConstraints{
-		ProviderName: l.name,
-		Pools:        l.inventory.GetResourcePools(),
-		TotalLimit:   l.inventory.TotalLimit(),
-		TotalUsed:    l.inventory.TotalUsed(),
-		TotalAvail:   l.inventory.TotalAvailable(),
+		ProviderName:    l.name,
+		Pools:           l.inventory.GetResourcePools(),
+		TotalLimit:      l.inventory.TotalLimit(),
+		TotalUsed:       l.inventory.TotalUsed(),
+		TotalAvail:      l.inventory.TotalAvailable(),
+		NamespaceScoped: namespaceScopedOf(l.inventory),
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
@@ -113,12 +115,18 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		activeNamespaces := slices.Collect(maps.Keys(usageByNamespace))
 		nsPools := nai.NamespaceResourcePools(activeNamespaces)
 		// A namespace-scoped inventory answers with a map, empty when none of
-		// the active namespaces is capped; a cluster-scoped one with nil.
-		rc.NamespaceScoped = nsPools != nil
+		// the active namespaces is capped; a cluster-scoped one with nil. An
+		// inventory that declares its scope (NamespaceScopedInventory) is
+		// read as it declares, whichever answer it gives here.
+		rc.NamespaceScoped = rc.NamespaceScoped || nsPools != nil
 		if len(nsPools) > 0 {
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)
+			// The aggregate is reported, never merged as a cluster bound: each
+			// namespace it holds is bounded by its own allowlist, and one it
+			// excludes bypasses it.
+			rc.NamespaceScoped = true
 		}
 	}
 	return rc, nil
