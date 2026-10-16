@@ -752,7 +752,8 @@ func main() {
 		// (wva_pod_access_denied) while a physical limiter reads the result. The
 		// limiter list is live, so that is asked per list, not decided here.
 		usageDiscovery = usageDiscovery.WithPodReader(mgr.GetAPIReader()).
-			WithPhysicalLimiterCheck(func() bool { return allocation.PhysicalUsageConfigured(cfg) })
+			WithPhysicalLimiterCheck(func() bool { return allocation.PhysicalUsageConfigured(cfg) }).
+			WithPodAccessDeniedHook(controllerStatus.SetPodListDenied)
 	}
 	usageRefresher := &gpuusage.Refresher{
 		Discovery: usageDiscovery,
@@ -823,6 +824,13 @@ func main() {
 		// rejection would discard the whole policy, and named here.
 		if dups := cfg.IgnoredPhysicalLimiters(); len(dups) > 0 {
 			setupLog.Info(config.IgnoredPhysicalLimitersMessage, "ignoredIndexes", dups)
+		}
+		// A cluster quota read by a namespace-scoped controller caps this
+		// controller only. Said at start; the engine says it again when a
+		// rebuilt limiter set still does (steadystate refreshLimiter).
+		if cfg.ClusterQuotaPerController() {
+			setupLog.Info(config.ClusterQuotaPerControllerMessage,
+				"watchNamespace", watchNS, "limiters", cfg.EffectiveLimiterSummary())
 		}
 
 		// Quota entries alone mean "no physical-capacity discovery" — including

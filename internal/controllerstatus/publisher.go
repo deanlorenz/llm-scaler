@@ -59,6 +59,17 @@
 //	limiterBudgets         the GPU budget the steady-state engine used in its
 //	                       last cycle, JSON (LimiterBudgets); absent until a
 //	                       cycle with a limiter. See KeyLimiterBudgets.
+//	clusterQuotaPerController
+//	                       present while a namespace-scoped controller
+//	                       enforces a scope: cluster quota: the warning
+//	                       (config.ClusterQuotaPerControllerMessage). That
+//	                       quota caps this controller only; absent otherwise.
+//	podListDenied          present while the GPU usage walk of a
+//	                       namespace-scoped controller is refused a
+//	                       cluster-wide Pod list and a physical limiter reads
+//	                       it: GPUs other namespaces hold on the same nodes
+//	                       count as free. Mirrors wva_pod_access_denied;
+//	                       absent otherwise.
 //
 // limiter and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -126,7 +137,20 @@ const (
 	// a model's cooldown. The steady-state engine writes it and reads it back
 	// on start.
 	KeyBorrowReleaseLedger = "borrowReleaseLedger"
+	// KeyClusterQuotaPerController carries the warning that a scope: cluster
+	// quota caps this namespace-scoped controller only. Derived from the
+	// applied configuration; absent when it does not apply.
+	KeyClusterQuotaPerController = "clusterQuotaPerController"
+	// KeyPodListDenied carries the warning that the GPU usage walk is refused
+	// a cluster-wide Pod list while a physical limiter reads it. Absent when
+	// it is not.
+	KeyPodListDenied = "podListDenied"
 )
+
+// PodListDeniedMessage is the KeyPodListDenied value.
+const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so GPU usage counts only its own " +
+	"namespace and GPUs other namespaces hold on the same nodes read as free to the physical limiter " +
+	"(wva_pod_access_denied). Grant list on pods cluster-wide, or bound this controller with a quota limiter alone."
 
 // persistedKeys are the keys a new term carries over from the ConfigMap it
 // finds, rather than overwriting with this process's empty start: state, not
@@ -537,6 +561,26 @@ func observe(d map[string]string, cfg *config.Config) {
 	mode, err := cfg.UtilizationShareMode()
 	d[KeyUtilizationShare] = mode
 	d[KeyUtilizationShareError] = errText(err)
+	if cfg.ClusterQuotaPerController() {
+		d[KeyClusterQuotaPerController] = config.ClusterQuotaPerControllerMessage
+	} else {
+		delete(d, KeyClusterQuotaPerController)
+	}
+}
+
+// SetPodListDenied records whether the GPU usage walk is refused a
+// cluster-wide Pod list while a physical limiter reads it.
+func (p *Publisher) SetPodListDenied(denied bool) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) {
+		if denied {
+			d[KeyPodListDenied] = PodListDeniedMessage
+		} else {
+			delete(d, KeyPodListDenied)
+		}
+	})
 }
 
 func errText(err error) string {

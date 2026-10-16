@@ -244,6 +244,56 @@ func TestRecordPolicy(t *testing.T) {
 	}
 }
 
+// A namespace-scoped controller is charged only what its own variants hold, so
+// a scope: cluster quota caps that controller, not the cluster. The status says
+// so while it applies, and drops the key when it no longer does.
+func TestClusterQuotaOnANamespaceScopedControllerIsPublished(t *testing.T) {
+	const key = "clusterQuotaPerController" // spelled out: the data contract
+	clusterQuota := &config.ScalingPolicy{Limiters: []config.QuotaLimiterConfig{{
+		Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8},
+	}}}
+	namespaceQuota := &config.ScalingPolicy{Limiters: []config.QuotaLimiterConfig{{
+		Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"team-a": {"H100": 8}},
+	}}}
+
+	cfg := config.NewTestConfig()
+	config.SetWatchNamespaceForTest(cfg, "team-a")
+	p, _ := newTestPublisher(t, &writes{})
+	cfg.UpdateClusterPolicy(clusterQuota)
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "1", nil)
+	if got := p.Data()[key]; !strings.Contains(got, "caps this controller, not the cluster") {
+		t.Errorf("%s = %q on a namespace-scoped controller under a cluster quota, want the warning", key, got)
+	}
+
+	cfg.UpdateClusterPolicy(namespaceQuota)
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "2", nil)
+	if got, found := p.Data()[key]; found {
+		t.Errorf("%s = %q under a namespace quota, want it absent", key, got)
+	}
+
+	// A cluster-scoped controller's cluster quota caps the cluster.
+	cluster := config.NewTestConfig()
+	cluster.UpdateClusterPolicy(clusterQuota)
+	q, _ := newTestPublisher(t, &writes{})
+	q.RecordClusterPolicy(cluster, "wva-system", "wva-scaling-policy-config", "1", nil)
+	if got, found := q.Data()[key]; found {
+		t.Errorf("%s = %q on a cluster-scoped controller, want it absent", key, got)
+	}
+}
+
+func TestPodListDeniedIsPublishedWhileItHolds(t *testing.T) {
+	p, _ := newTestPublisher(t, &writes{})
+	p.SetPodListDenied(true)
+	if got := p.Data()["podListDenied"]; !strings.Contains(got, "cannot list Pods cluster-wide") {
+		t.Errorf("podListDenied = %q while denied, want the warning", got)
+	}
+	p.SetPodListDenied(false)
+	if got, found := p.Data()["podListDenied"]; found {
+		t.Errorf("podListDenied = %q once listed, want it absent", got)
+	}
+}
+
 // With a separate policy namespace, policyIgnored comes from the controller's
 // own ConfigMap and the version from the policy namespace's. Recording either
 // must not overwrite the other.

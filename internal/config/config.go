@@ -853,6 +853,22 @@ func (c *Config) HasClusterQuota() bool {
 	})
 }
 
+// ClusterQuotaPerController reports whether this controller manages one
+// namespace and enforces a quota entry of scope: cluster. Such a quota is
+// charged what THIS controller's variants hold, so N namespace-scoped
+// controllers reading one shared cluster quota of Q may together hold N x Q:
+// the cap is per controller, not per cluster. Callers log
+// ClusterQuotaPerControllerMessage and publish it. Thread-safe.
+func (c *Config) ClusterQuotaPerController() bool {
+	return c.WatchNamespace() != "" && c.HasClusterQuota()
+}
+
+// ClusterQuotaPerControllerMessage is the warning for ClusterQuotaPerController.
+const ClusterQuotaPerControllerMessage = "This namespace-scoped controller enforces a scope: cluster quota. " +
+	"It is charged only what its own variants hold, so the quota caps this controller, not the cluster: " +
+	"every namespace-scoped controller reading the same policy may spend all of it. " +
+	"Bound tenants with a scope: namespace quota, or run one cluster-scoped controller for a cluster-wide cap."
+
 // KueueCountsBorrowable reports whether some quota entry counts Kueue
 // borrowing. Thread-safe.
 func (c *Config) KueueCountsBorrowable() bool {

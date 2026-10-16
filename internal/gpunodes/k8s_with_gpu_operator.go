@@ -35,6 +35,9 @@ type K8sWithGpuOperator struct {
 	// (podsDeniedNone, podsDeniedInfo or podsDeniedError), so it is logged when
 	// it starts or changes rather than on every refresh.
 	podsDenied atomic.Int32
+	// onPodAccessDenied, when set, is told every value wva_pod_access_denied
+	// is set to. See WithPodAccessDeniedHook.
+	onPodAccessDenied func(denied bool)
 }
 
 // How a Forbidden cluster-wide pod list was last reported.
@@ -78,6 +81,15 @@ func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator 
 // wva_pod_access_denied stays 0.
 func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
 	d.physicalLimiterInForce = inForce
+	return d
+}
+
+// WithPodAccessDeniedHook makes every change of wva_pod_access_denied also
+// call hook with the new value, and returns d. The controller publishes it in
+// its status ConfigMap (controllerstatus.KeyPodListDenied), beside the gauge
+// and the error logged once when the denial starts.
+func (d *K8sWithGpuOperator) WithPodAccessDeniedHook(hook func(denied bool)) *K8sWithGpuOperator {
+	d.onPodAccessDenied = hook
 	return d
 }
 
@@ -386,7 +398,7 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 	if d.podReader != nil {
 		pods, err := listAllPods(ctx, d.podReader)
 		if err == nil {
-			metrics.SetPodAccessDenied(false)
+			d.setPodAccessDenied(false)
 			d.podsDenied.Store(podsDeniedNone)
 			return pods, nil
 		}
@@ -409,15 +421,24 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 // else would clear the gauge then, and without clearing the remembered level,
 // a physical limiter turned off and on again would not log the denial again.
 func (d *K8sWithGpuOperator) ResetPodAccessDenied() {
-	metrics.SetPodAccessDenied(false)
+	d.setPodAccessDenied(false)
 	d.podsDenied.Store(podsDeniedNone)
+}
+
+// setPodAccessDenied sets wva_pod_access_denied and tells the hook
+// WithPodAccessDeniedHook installed, if any.
+func (d *K8sWithGpuOperator) setPodAccessDenied(denied bool) {
+	metrics.SetPodAccessDenied(denied)
+	if d.onPodAccessDenied != nil {
+		d.onPodAccessDenied(denied)
+	}
 }
 
 // reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
 // while a physical limiter is in force, and as information otherwise.
 func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	physical := d.physicalLimiterInForce == nil || d.physicalLimiterInForce()
-	metrics.SetPodAccessDenied(physical)
+	d.setPodAccessDenied(physical)
 	level := podsDeniedInfo
 	if physical {
 		level = podsDeniedError

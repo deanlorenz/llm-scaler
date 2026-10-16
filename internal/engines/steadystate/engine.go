@@ -714,6 +714,12 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	ctrl.LoggerFrom(ctx).Info("GPU limiter (re)built from config",
 		"limiterTypes", e.Config.EffectiveLimiterTypes().String(), "limiters", e.Config.EffectiveLimiterSummary(),
 		"name", limiter.Name())
+	// Once per build, which is once per change of the limiters: the
+	// controller-status key (clusterQuotaPerController) carries it between.
+	if e.Config.ClusterQuotaPerController() {
+		ctrl.LoggerFrom(ctx).Info(config.ClusterQuotaPerControllerMessage,
+			"watchNamespace", e.Config.WatchNamespace(), "limiters", e.Config.EffectiveLimiterSummary())
+	}
 }
 
 // limiterSignature detects when the limiter config changed. Delegates to the
