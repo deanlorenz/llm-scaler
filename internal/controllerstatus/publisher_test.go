@@ -264,7 +264,8 @@ func TestClusterQuotaOnANamespaceScopedControllerIsPublished(t *testing.T) {
 	p, _ := newTestPublisher(t, &writes{})
 	cfg.UpdateClusterPolicy(clusterQuota)
 	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "1", nil)
-	if got := p.Data()[key]; !strings.Contains(got, "caps this controller, not the cluster") {
+	if got := p.Data()[key]; !strings.Contains(got, "caps this controller, not the cluster") ||
+		!strings.Contains(got, "If it is the only controller reading this policy, that is the same cap") {
 		t.Errorf("%s = %q on a namespace-scoped controller under a cluster quota, want the warning", key, got)
 	}
 
@@ -321,7 +322,8 @@ func TestIgnoredPhysicalGroupsIsANoteNotAnInvalidMode(t *testing.T) {
 func TestPodListDeniedIsPublishedWhileItHolds(t *testing.T) {
 	p, _ := newTestPublisher(t, &writes{})
 	p.SetPodListDenied(true)
-	if got := p.Data()["podListDenied"]; !strings.Contains(got, "cannot list Pods cluster-wide") {
+	if got := p.Data()["podListDenied"]; !strings.Contains(got, "cannot list Pods cluster-wide") ||
+		!strings.Contains(got, "if none do, nothing is miscounted") {
 		t.Errorf("podListDenied = %q while denied, want the warning", got)
 	}
 	p.SetPodListDenied(false)

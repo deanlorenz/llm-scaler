@@ -159,8 +159,9 @@ const (
 
 // PodListDeniedMessage is the KeyPodListDenied value.
 const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so GPU usage counts only its own " +
-	"namespace and GPUs other namespaces hold on the same nodes read as free to the physical limiter " +
-	"(wva_pod_access_denied). Grant list on pods cluster-wide, or bound this controller with a quota limiter alone."
+	"namespace (wva_pod_access_denied). If other namespaces run GPU pods on the same nodes, their GPUs read as " +
+	"free to the physical limiter; if none do, nothing is miscounted. Grant list on pods cluster-wide, or bound " +
+	"this controller with a quota limiter alone."
 
 // persistedKeys are the keys a new term carries over from the ConfigMap it
 // finds, rather than overwriting with this process's empty start: state, not

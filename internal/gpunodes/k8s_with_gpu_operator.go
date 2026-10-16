@@ -449,8 +449,9 @@ func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	logger := log.FromContext(ctx)
 	if physical {
 		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
-			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
-			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
+			"this controller's own namespace. If other namespaces run GPU pods on the same nodes, their GPUs "+
+			"read as FREE and the physical limiter can admit scale-ups onto full nodes; if none do, nothing is "+
+			"miscounted. Grant list on pods cluster-wide, "+
 			"or drop gpu-inventory from the limiters and bound with a quota limiter alone: a quota "+
 			"beside gpu-inventory leaves the physical limiter reading this count.",
 			"metric", constants.WVAPodAccessDenied)

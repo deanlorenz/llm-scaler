@@ -865,9 +865,10 @@ func (c *Config) ClusterQuotaPerController() bool {
 
 // ClusterQuotaPerControllerMessage is the warning for ClusterQuotaPerController.
 const ClusterQuotaPerControllerMessage = "This namespace-scoped controller enforces a scope: cluster quota. " +
-	"It is charged only what its own variants hold, so the quota caps this controller, not the cluster: " +
-	"every namespace-scoped controller reading the same policy may spend all of it. " +
-	"Bound tenants with a scope: namespace quota, or run one cluster-scoped controller for a cluster-wide cap."
+	"It is charged only what its own variants hold, so the quota caps this controller, not the cluster. " +
+	"If it is the only controller reading this policy, that is the same cap. " +
+	"If other namespace-scoped controllers read it, each may spend all of it: bound tenants with a " +
+	"scope: namespace quota, or run one cluster-scoped controller for a cluster-wide cap."
 
 // KueueCountsBorrowable reports whether some quota entry counts Kueue
 // borrowing. Thread-safe.
