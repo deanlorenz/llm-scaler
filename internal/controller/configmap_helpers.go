@@ -104,30 +104,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+
 				"the optimizer is selected only from the \"default\" entry, beside limiters", "key", key)
 		}
-		// The limiters: list reads like a set of bounds that all apply; it is not.
-		// One mode is selected, quota wins, and anything else declared is built as
-		// nothing. Silence here is the hazard: the operator reads the config as
-		// bounded by real GPUs too, while nothing consults physical capacity and a
-		// scale-from-zero wake can land on a full accelerator.
-		//
-		// Only for the default entry: limiters anywhere else are ignored whole, and
-		// the warning above already says so.
-		if dropped := satConfig.UnenforcedLimiterTypes(); key == config.GlobalDefaultsKey && len(dropped) > 0 {
-			// "WARNING:" rather than a level, because logr has none between Info and
-			// Error: V-levels only go more verbose. Same convention as cmd/main.go.
-			logger.Info("WARNING: some declared limiters will NOT be enforced; a quota entry "+
-				"selects the quota limiter and it is the only one built, so physical "+
-				"GPU capacity is not consulted at all. Declare one kind, or track "+
-				"issue #1003 for bounding by min(physical, quota)",
-				"key", key, "notEnforced", dropped, "enforcing", config.LimiterTypeQuota)
-		}
-		// Quota findings that do not reject the config, such as a namespace in
-		// exclude that nothing bounds. Logged here, once per config change.
-		if key == config.GlobalDefaultsKey {
-			for _, w := range satConfig.LimiterWarnings() {
-				logger.Info("WARNING: "+w, "key", key)
-			}
-		}
 		// Analyzer DEFINITIONS are tier-level, like limiters. A named policy
 		// selects and weights analyzers by name; it does not get to invent the
 		// PromQL behind one, because that query runs against the shared Prometheus
@@ -147,6 +123,34 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		count++
 	}
 	return configs, count, rejected, ignored
+}
+
+// warnAboutLimiters logs the findings about the limiters of policy, the
+// "default" entry the cluster's limiters are read from. The caller calls it
+// only for that entry: limiters anywhere else are ignored whole, and a
+// warning about them would describe a bound nothing enforces.
+//
+// "WARNING:" rather than a level, because logr has none between Info and
+// Error: V-levels only go more verbose. Same convention as cmd/main.go.
+func warnAboutLimiters(logger logr.Logger, policy config.ScalingPolicy) {
+	key := config.GlobalDefaultsKey
+	// The limiters: list reads like a set of bounds that all apply; it is not.
+	// One mode is selected, quota wins, and anything else declared is built as
+	// nothing. Silence here is the hazard: the operator reads the config as
+	// bounded by real GPUs too, while nothing consults physical capacity and a
+	// scale-from-zero wake can land on a full accelerator.
+	if dropped := policy.UnenforcedLimiterTypes(); len(dropped) > 0 {
+		logger.Info("WARNING: some declared limiters will NOT be enforced; a quota entry "+
+			"selects the quota limiter and it is the only one built, so physical "+
+			"GPU capacity is not consulted at all. Declare one kind, or track "+
+			"issue #1003 for bounding by min(physical, quota)",
+			"key", key, "notEnforced", dropped, "enforcing", config.LimiterTypeQuota)
+	}
+	// Quota findings that do not reject the config, such as a namespace in
+	// exclude that nothing bounds. Logged once per config change.
+	for _, w := range policy.LimiterWarnings() {
+		logger.Info("WARNING: "+w, "key", key)
+	}
 }
 
 // maxIgnoredFieldsReported is how many ignored fields of one ConfigMap are

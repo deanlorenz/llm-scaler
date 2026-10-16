@@ -310,6 +310,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 	}
 
 	r.reportRejectedEntries(ctx, cm, rejected, nil, true)
+	warnAboutLimiters(logger, policy)
 	r.Config.UpdateClusterPolicy(&policy)
 	r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
@@ -469,6 +470,12 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		// raise their own quota, which is the entire thing WVA_POLICY_NAMESPACE
 		// exists to prevent. Say so rather than dropping it silently: a limiter
 		// block that reads as enforcing and enforces nothing is the worst outcome.
+		if !r.Config.PolicyNamespaceIsSeparate() {
+			// This ConfigMap's "default" entry is where the limiters are read.
+			if policy, ok := configs[config.GlobalDefaultsKey]; ok {
+				warnAboutLimiters(logger, policy)
+			}
+		}
 		if r.Config.PolicyNamespaceIsSeparate() {
 			for key, satConfig := range configs {
 				if len(satConfig.Limiters) > 0 {
