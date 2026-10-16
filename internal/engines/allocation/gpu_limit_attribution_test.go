@@ -157,6 +157,75 @@ var _ = Describe("GPU limit attribution (greedy-by-score)", func() {
 		Expect(d.WasLimited).To(BeFalse())
 	})
 
+	It("names the limiter for a model the last GPUs did not reach", func() {
+		// Quota H100:16, 8 in use: one 8-GPU replica is left, and two models
+		// each want one. The one served takes the last 8; the fair-share loop
+		// then stops with the other still asking, before its pick runs.
+		model := func(id string) ModelScalingRequest {
+			f := &satEntryFixture{
+				ModelID:          id,
+				Namespace:        "team-a",
+				AnalyzedAt:       time.Now(),
+				RequiredCapacity: 10000,
+				VariantCapacities: []vcFixture{
+					{VariantName: id + "-v", AcceleratorName: "H100", Cost: 5.0, ReplicaCount: 1, PerReplicaCapacity: 10000},
+				},
+			}
+			return withSatEntry(f, ModelScalingRequest{
+				ModelID:   id,
+				Namespace: "team-a",
+				VariantStates: []domain.VariantReplicaState{
+					{VariantName: id + "-v", CurrentReplicas: 1, GPUsPerReplica: 8},
+				},
+			})
+		}
+		constraints := []*ResourceConstraints{
+			{ProviderName: "team-quota", Pools: map[string]ResourcePool{"H100": {Limit: 16, Used: 8}}},
+		}
+		dm := decisionMap(optimizer.Optimize(ctx, []ModelScalingRequest{model("A"), model("B")}, constraints))
+
+		grown, held := dm["A-v"], dm["B-v"]
+		if held.TargetReplicas > grown.TargetReplicas {
+			grown, held = held, grown
+		}
+		Expect(grown.TargetReplicas).To(Equal(2), "one model takes the last 8 GPUs")
+		Expect(grown.WasLimited).To(BeFalse(), "it got all it asked for")
+		Expect(held.TargetReplicas).To(Equal(1), "nothing was left for the other")
+		Expect(held.WasLimited).To(BeTrue(), "the model the budget did not reach is limited")
+		Expect(held.LimitedBy).To(Equal("team-quota"))
+	})
+
+	It("does NOT mark a model at its own ceiling when the budget runs out", func() {
+		// As above, but B already sits at maxReplicas: running out of GPUs did
+		// not hold it back.
+		model := func(id string, maxReplicas *int) ModelScalingRequest {
+			f := &satEntryFixture{
+				ModelID:          id,
+				Namespace:        "team-a",
+				AnalyzedAt:       time.Now(),
+				RequiredCapacity: 10000,
+				VariantCapacities: []vcFixture{
+					{VariantName: id + "-v", AcceleratorName: "H100", Cost: 5.0, ReplicaCount: 1, PerReplicaCapacity: 10000},
+				},
+			}
+			return withSatEntry(f, ModelScalingRequest{
+				ModelID:   id,
+				Namespace: "team-a",
+				VariantStates: []domain.VariantReplicaState{
+					{VariantName: id + "-v", CurrentReplicas: 1, GPUsPerReplica: 8, MaxReplicas: maxReplicas},
+				},
+			})
+		}
+		one := 1
+		constraints := []*ResourceConstraints{
+			{ProviderName: "team-quota", Pools: map[string]ResourcePool{"H100": {Limit: 8}}},
+		}
+		dm := decisionMap(optimizer.Optimize(ctx, []ModelScalingRequest{model("A", nil), model("B", &one)}, constraints))
+
+		Expect(dm["A-v"].TargetReplicas).To(Equal(2))
+		Expect(dm["B-v"].WasLimited).To(BeFalse(), "a user ceiling is intent, not scarcity")
+	})
+
 	It("attributes to the namespace quota when it is the binding constraint", func() {
 		constraints := []*ResourceConstraints{
 			{ProviderName: "gpu-limiter", Pools: map[string]ResourcePool{"A100": {Limit: 100}}},

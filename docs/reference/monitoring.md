@@ -202,7 +202,7 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 | --- | --- |
 | `wva_node_access_denied` | `1` = a GPU limiter is declared alone but nodes are unreadable. Every variant gets no budget and **will not scale up**. Beside a quota it stays `0`; see the next row. |
 | `wva_constraint_provider_skipped` | `1` = a declared limiter is left out of decisions (by `provider` and `reason`); the others still bound. The opposite failure: scaling may go past what it would allow. |
-| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota can leave it flat: compare what the quota allows with what the model holds. |
+| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota raises it too, for the model the last GPUs did not reach. |
 | `wva_variant_at_max_replicas` | `1` = the variant sits on its own `maxReplicaCount`. With utilization still above the scale-up threshold, raise `maxReplicaCount`; more GPUs will not help. |
 | `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |
 | `wva_unattributed_gpus` | GPUs in use that could not be charged to a pool — usually a workload whose accelerator did not resolve |
@@ -391,7 +391,7 @@ Every reason the controller emits:
 | `ScaledUp` | Normal | ScaledObject | the controller decided to add replicas; the message is the decision reason | none |
 | `ScaledDown` | Normal | ScaledObject | the controller decided to remove replicas | none |
 | `ScaledToZero` | Normal | ScaledObject | the controller decided to park the model at zero | none; if unexpected, check the model's `scaleToZero` policy |
-| `ResourceConstrained` | Warning | ScaledObject | a limiter (GPU inventory or quota) capped the decision below what demand asked for | add GPUs or raise the quota, or accept it. A fully spent quota can record nothing: see [GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
+| `ResourceConstrained` | Warning | ScaledObject | a limiter (GPU inventory or quota) capped the decision below what demand asked for | add GPUs or raise the quota, or accept it. A fully spent quota records it too, for the model the last GPUs did not reach: see [GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `MetricsUnavailable` | Warning | ScaledObject | the model's metrics went from available to unavailable; recorded on that transition only | [Metrics health](metrics.md#the-metricsunavailable-event) |
 | `OptimizationFailed` | Warning | ScaledObject | the controller could not publish the replica metric KEDA reads (`Failed to emit metrics for external autoscalers`) | read the controller log for the error |
 | `UnattributedReadyPods` | Warning | ScaledObject | the scale target has Ready pods, but none of their metrics were attributed to it | check the pods' ownerReferences reach the scale target; on FMA, scrape the launcher pods ([FMA launcher pods](operations.md#fma-launcher-pods)) |

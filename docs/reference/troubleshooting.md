@@ -331,9 +331,12 @@ model cannot grow while others hold GPUs.
 | A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | `Upgrade note (transitional): this policy declares a physical GPU limiter and quotas, and both now bound scaling` | expected once after upgrading a policy that declares both kinds: the listed variants get a different target than the quota alone gave them, because the GPUs that exist now bound them too. Nothing to fix unless the physical bound is not wanted; then drop the `gpu-inventory` entry. Logged only when the set of variants changes, and removed in the next release |
 
-A **fully** spent quota can show none of these: the decision is `no-change`
-(`tgt` equals `curr` with `util` over the threshold) and no Event is recorded.
-Compare the quota with what the models hold. First find where the limiters come
+A **fully** spent quota shows the same signals: a model the last GPUs did not
+reach gets the `ResourceConstrained` Event and counts in
+`wva_decisions_limited_total`, named after the limiter that ran out, though its
+decision is `no-change`. The `scaling-decision` line carries the same name as
+`limitedBy`. To see where the GPUs went, compare the quota with what the models
+hold. First find where the limiters come
 from: when a policy namespace governs this controller (`wva-policy` by default),
 the limiters there apply and any in the controller's own ConfigMap are ignored:
 
