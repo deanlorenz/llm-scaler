@@ -128,17 +128,19 @@ func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[strin
 }
 
 // gpuBudgets is GPUBudgets with the declared accelerator names materialized as
-// keys (see mergeConstraints).
+// keys (see mergeConstraints). A namespace the quotas hold is bounded by
+// mergeWithAllowanceKeys, as the optimizer bounds it; any other reads the
+// cluster bounds as mergeConstraints keys them.
 func gpuBudgets(constraints []*ResourceConstraints, namespace string, declared ...string) (map[string]int, bool) {
 	if len(constraints) == 0 {
 		return nil, false
 	}
 
-	perType := mergeConstraints(constraints, declared...)
 	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints, declared...)[namespace]
 	if !nsScoped {
-		return perType, false
+		return mergeConstraints(constraints, declared...), false
 	}
+	perType := mergeWithAllowanceKeys(constraints, declared...)
 
 	// The allowlist decides what the namespace may use, still bounded by the
 	// cluster bounds: a namespace may not be granted more than they allow, and

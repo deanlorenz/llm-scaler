@@ -241,8 +241,14 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		o.pass, o.spends = nil, nil
 	}
 	declared := declaredAccelerators(requests)
-	available := mergeConstraints(constraints, declared...)
-	availableByNS := mergeNamespaceConstraints(constraints, declared...)
+	// The cluster budget holds every key a namespace allowance lists, so the
+	// bound on each is the same whatever names the workloads declare; the warm
+	// pool's cluster figure leaves those keys out (passHeadroom.clusterKeys).
+	// The namespace budgets hold the cluster's products, so the warm pool
+	// reads each product a namespace may use at its own figure.
+	available := mergeWithAllowanceKeys(constraints, declared...)
+	clusterKeys := slices.Collect(maps.Keys(mergeConstraints(constraints, declared...)))
+	availableByNS := mergeNamespaceConstraints(constraints, slices.Concat(declared, clusterProducts(constraints))...)
 	if len(constraints) == 0 {
 		// No constraints at all is not "no cluster bound": this optimizer denies
 		// rather than guesses. The engine never runs it so -- with no provider
@@ -357,7 +363,8 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	// ordered is debited, from the budgets and from the nodes.
 	if !o.quiet && len(constraints) > 0 {
 		o.pass = &passHeadroom{available: available, byNamespace: availableByNS, nodes: o.Nodes,
-			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends}
+			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends,
+			clusterKeys: clusterKeys}
 		o.pass.publish(time.Now())
 	}
 	return allDecisions

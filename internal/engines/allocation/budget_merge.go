@@ -69,6 +69,12 @@ func clusterBounds(constraints []*ResourceConstraints) []*ResourceConstraints {
 // NVIDIA-H100-SXM5-80GB: 4} merges to {H100: 5, ...HBM3: 4, ...SXM5: 4}, and the
 // family key keeps the two products to the 5 GPUs that exist.
 //
+// When some cluster bound does not list the family itself, the family is also
+// bounded by the sum of what fits under every bound on each product
+// (accelerator.ClusterAllowlistsBound): a physical pool of
+// {...HBM3: 8, ...PCIE: 2} beside a quota of {...HBM3: 2, ...PCIE: 8} merges
+// to H100: 4, not 10, since only 2 GPUs of each product fit under both.
+//
 // The unlimited sentinel (Limit < 0) is an unbounded budget, math.MaxInt, so the
 // optimizer allocates the type up to the model's fair-share demand. A finite
 // pool from any provider still wins through the minimum.
@@ -87,15 +93,6 @@ func clusterBounds(constraints []*ResourceConstraints) []*ResourceConstraints {
 //     the merged map alone, must deny both;
 //   - a workload that names the bare family is bounded by the family's SUM, not
 //     by one of its products, and debits through the family cascade.
-//
-// Every key a namespace allowance lists is materialized the same way
-// (namespaceKeys), so the cluster bound a namespace's key is held to
-// (clusterBudgetFor) does not depend on which names this cycle's workloads
-// declare. A namespace allowance of {A100: -1} under a cluster quota of
-// {NVIDIA-A100-SXM4-80GB: 8, NVIDIA-A100-PCIE-40GB: 8} is bounded at 16, the
-// sum of the products, and not at 0 because no workload names the bare A100.
-// A key a cluster bound spells too, ignoring case, keeps the cluster's
-// spelling.
 func mergeConstraints(constraints []*ResourceConstraints, declared ...string) map[string]int {
 	cluster := clusterBounds(constraints)
 	if len(cluster) == 0 {
@@ -107,32 +104,35 @@ func mergeConstraints(constraints []*ResourceConstraints, declared ...string) ma
 		names = slices.AppendSeq(names, maps.Keys(c.Pools))
 		keyed = append(keyed, c.Pools)
 	}
-	for _, name := range namespaceKeys(constraints) {
-		if !hasKey(keyed, name) {
-			names = append(names, name)
-		}
-	}
 	merged := make(map[string]int, len(names))
 	for _, name := range distinctSpellings(names) {
 		if !materialized(keyed, name) {
 			continue
 		}
-		budget, bounded := 0, false
-		for _, c := range cluster {
-			b, ok := clusterBound(c.Pools, name)
-			if !ok {
-				continue
-			}
-			if !bounded || b < budget {
-				budget, bounded = b, true
-			}
-		}
-		if bounded {
+		if budget, bounded := clusterBoundAll(keyed, name); bounded {
 			merged[name] = budget
 		}
 	}
 	clampProducts(merged)
 	return merged
+}
+
+// mergeWithAllowanceKeys is mergeConstraints with every key a namespace
+// allowance lists materialized too, as a declared name is (namespaceKeys).
+// The budgets a namespace's allowance is bounded by are read from it -- the
+// optimizer's pass, the placement check of a namespace the quotas hold, and
+// the warm pool's per-namespace headroom -- so the cluster bound on a key a
+// namespace lists is the same whatever names the cycle's workloads declare. A
+// namespace allowance of {H100: -1} under a cluster quota of
+// {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8} is bounded at 16, the
+// sum of the products, not at 0 because no workload names the bare H100.
+//
+// The extra keys are for those reads alone. A namespace the quotas do not
+// hold, the utilization share and the warm pool's cluster figure read
+// mergeConstraints: there an extra family key would read as a listed sibling
+// to accelerator.FindBudgetKey, and deny a product the cluster allows.
+func mergeWithAllowanceKeys(constraints []*ResourceConstraints, declared ...string) map[string]int {
+	return mergeConstraints(constraints, slices.Concat(declared, namespaceKeys(constraints))...)
 }
 
 // clusterBound is the budget one cluster bound puts on the accelerator called
@@ -142,6 +142,17 @@ func mergeConstraints(constraints []*ResourceConstraints, declared ...string) ma
 // not bounded.
 func clusterBound(pools map[string]ResourcePool, name string) (int, bool) {
 	avail, unlimited, bounds := accelerator.ClusterAllowlistBound(pools, name, poolBound)
+	if bounds && unlimited {
+		return math.MaxInt, true
+	}
+	return avail, bounds
+}
+
+// clusterBoundAll is clusterBound over several allowlists together:
+// accelerator.ClusterAllowlistsBound, with an unlimited bound read as
+// math.MaxInt.
+func clusterBoundAll(allowlists []map[string]ResourcePool, name string) (int, bool) {
+	avail, unlimited, bounds := accelerator.ClusterAllowlistsBound(allowlists, name, poolBound)
 	if bounds && unlimited {
 		return math.MaxInt, true
 	}
@@ -224,8 +235,9 @@ func resolvedNames(declared []string) []string {
 }
 
 // namespaceKeys is every accelerator name a provider's namespace allowances
-// list, for the cluster merge to materialize (see mergeConstraints), except
-// the unresolved placeholders (resolvedNames).
+// list, for mergeWithAllowanceKeys to materialize. Unordered, and a name two
+// allowances list appears twice; the merge sorts and folds them
+// (distinctSpellings) and drops the unresolved placeholders (resolvedNames).
 func namespaceKeys(constraints []*ResourceConstraints) []string {
 	var out []string
 	for _, c := range constraints {
@@ -236,7 +248,26 @@ func namespaceKeys(constraints []*ResourceConstraints) []string {
 			out = slices.AppendSeq(out, maps.Keys(perType))
 		}
 	}
-	return resolvedNames(out)
+	return out
+}
+
+// clusterProducts is every product name a cluster bound lists, for a
+// namespace merge to materialize: a namespace allowance of {H100: -1} under a
+// cluster quota of {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8} then
+// holds each product at what the namespace allows it, so the warm pool reads
+// each at that product's cluster figure and not at the family's sum. A
+// namespace whose allowance does not admit a product does not get it
+// (materialized). Unordered, and it may repeat names.
+func clusterProducts(constraints []*ResourceConstraints) []string {
+	var out []string
+	for _, c := range clusterBounds(constraints) {
+		for key := range c.Pools {
+			if !accelerator.IsFamily(key) {
+				out = append(out, key)
+			}
+		}
+	}
+	return out
 }
 
 // distinctSpellings returns names with spellings that differ only in case
@@ -423,10 +454,19 @@ func clusterBudgetFor(available map[string]int, name string) (int, bool) {
 // declared are materialized as keys in every namespace, as mergeConstraints
 // does for the cluster bounds, so an explicit family key admits the products
 // a holder does not list and a family name reads the family's sum.
+//
+// A family some holder lists only through products is bounded by the
+// products that fit under every holder and every cluster bound
+// (closedFamilyBudget), not by the holders' sum alone: the cluster figure for
+// the family may come from products the namespace may not use.
 func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...string) map[string]map[string]int {
 	holders := namespaceHolders(constraints)
 	if len(holders) == 0 {
 		return nil
+	}
+	var cluster []map[string]ResourcePool
+	for _, c := range clusterBounds(constraints) {
+		cluster = append(cluster, c.Pools)
 	}
 	merged := make(map[string]map[string]int, len(holders))
 	for ns, pools := range holders {
@@ -437,6 +477,10 @@ func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...s
 		inner := make(map[string]int, len(names))
 		for _, name := range distinctSpellings(names) {
 			if !materialized(pools, name) {
+				continue
+			}
+			if accelerator.ClosesFamily(pools, name) {
+				inner[name] = closedFamilyBudget(slices.Concat(pools, cluster), name)
 				continue
 			}
 			for i, perType := range pools {
@@ -458,6 +502,25 @@ func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...s
 		merged[ns] = inner // present (even if empty) marks a closed namespace
 	}
 	return merged
+}
+
+// closedFamilyBudget is what a namespace may use of a family it may use only
+// through products (accelerator.ClosesFamily), given its allowlists and the cluster
+// bounds' together: the sum, over every product any of them lists, of what
+// fits under all of them (accelerator.ClusterAllowlistsBound), -1 when that is
+// unlimited. A namespace allowance of {NVIDIA-H100-SXM5-80GB: -1} under a
+// cluster quota of {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8} may
+// use 0 H100s: a workload that names the bare family is not handed the HBM3
+// and PCIe GPUs its namespace may not use.
+//
+// The cluster bounds enter as the pass found them. The pass bounds the result
+// by the cluster budget it has left (effectiveAvailable), as for any key.
+func closedFamilyBudget(allowlists []map[string]ResourcePool, name string) int {
+	avail, unlimited, _ := accelerator.ClusterAllowlistsBound(allowlists, name, poolBound)
+	if unlimited {
+		return -1
+	}
+	return avail
 }
 
 // namespaceHolders groups every provider's allowlist for each namespace it
