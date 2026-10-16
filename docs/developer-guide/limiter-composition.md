@@ -181,7 +181,10 @@ sparse debits; `adopt` commits a clone's debits.
   constraints (`PassLeft.Replay`), so each group's `Budget` and `ClusterFree`
   are net of them; `shareNodeInputs` subtracts `PassLeft.NodeDebits` (other
   models' placements and the in-flight holds) from the node snapshot
-  (`shareFreeNodesAfter`) before the share holds its own promises.
+  (`shareFreeNodesAfter`) before the share holds its own promises. A node
+  counts by the view's rule (`allocation.NodeAdmits`: `accelerator.SameName`,
+  schedulable, taints tolerated by every receiver role's
+  `scaletarget.PodTolerations`).
 - The utilization share's cluster budget is the cluster bounds alone
   (`clusterBudgets`, over `mergeConstraints`): a namespace-scoped quota is no
   budget over every namespace. A model of a namespace such a quota excludes is

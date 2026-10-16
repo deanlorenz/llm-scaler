@@ -509,6 +509,16 @@ func eligibleNode(n *nodeSlot, acc string, tolerations []corev1.Toleration, anyT
 	return true
 }
 
+// NodeAdmits reports whether a pod of accelerator acc whose template carries
+// tolerations may land on n, by the node view's own rule (eligibleNode): n is
+// schedulable, carries acc (accelerator.SameName), and every taint it
+// carries is tolerated. The utilization share's node picture uses it, so the
+// share and the view agree on which nodes a pod may use.
+func NodeAdmits(n decision.NodeGPU, acc string, tolerations []corev1.Toleration) bool {
+	return eligibleNode(&nodeSlot{accelerator: n.Accelerator, unschedulable: n.Unschedulable, taints: n.Taints},
+		acc, tolerations, false)
+}
+
 // largest is the capacity of the largest node acc is eligible for, whatever
 // its taints: how large a replica one node could hold.
 func (v *NodeView) largest(acc string) int {

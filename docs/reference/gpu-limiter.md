@@ -348,7 +348,9 @@ Limits:
   family, though only one of its products may have budget left.
 - The utilization share sizes its moves with its own node picture: its holes
   are net of what today's optimizer placed for other models and of the
-  in-flight holds, but the share does not read taints.
+  in-flight holds, and it counts a node as node fit does (accelerator by
+  product or family, taints the receivers tolerate). It does not read the
+  templates' `nodeSelector` or node affinity.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.
