@@ -14,10 +14,13 @@ import (
 // H100 GPUs all in use.
 type idleLenderProvider struct{ f kueue.QueueFigures }
 
-func (idleLenderProvider) Name() string { return "cohort-quota" }
+// idleLenderName is idleLenderProvider's name.
+const idleLenderName = "idle-lender-quota"
+
+func (idleLenderProvider) Name() string { return idleLenderName }
 func (p idleLenderProvider) ComputeConstraints(context.Context, map[string]int, map[string]map[string]int) (*allocation.ResourceConstraints, error) {
 	return &allocation.ResourceConstraints{
-		ProviderName:   "cohort-quota",
+		ProviderName:   idleLenderName,
 		Pools:          map[string]allocation.ResourcePool{"H100": {Limit: 32, Used: 32}},
 		NamespacePools: map[string]map[string]allocation.ResourcePool{"b": {"H100": {Limit: 16}}},
 		NamespaceNominal: map[string]map[string]allocation.NominalFigures{"b": {"H100": {LentOut: p.f.LentOut,

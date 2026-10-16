@@ -25,7 +25,8 @@ func TestLentOutIsWhatPeersBorrow(t *testing.T) {
 			QueueResource{Nominal: 8}, []QueueResource{{Nominal: 0, Reserved: 8, Borrowed: 8}, {Nominal: 8}}, 0, 8, 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			qs := []QueueState{withReclaim(member("q", tc.q), ReclaimAny)}
+			qs := make([]QueueState, 0, 1+len(tc.peers))
+			qs = append(qs, withReclaim(member("q", tc.q), ReclaimAny))
 			for i, p := range tc.peers {
 				qs = append(qs, member(string(rune('a'+i)), p))
 			}
