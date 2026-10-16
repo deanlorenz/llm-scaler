@@ -152,7 +152,12 @@ func applyGPULimitAttribution(
 			emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
 			continue
 		default:
-			d.LimitedBy = bindingProvider(constraints, d.Namespace, d.AcceleratorName)
+			if names := bindingProviders(constraints, d.Namespace, d.AcceleratorName); len(names) > 0 {
+				d.LimitedBy, d.LimitedByAlso = names[0], names[1:]
+				if len(d.LimitedByAlso) == 0 {
+					d.LimitedByAlso = nil
+				}
+			}
 		}
 		emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
 
@@ -266,13 +271,29 @@ func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[strin
 //
 // Unlimited sentinels (Limit < 0) impose no bound and are skipped. Returns ""
 // when no provider finitely bounds the type, which leaves LimitedBy empty rather
-// than crediting a limiter that did not constrain anything.
+// than crediting a limiter that did not constrain anything. On a tie it is the
+// first provider in the declared order; bindingProviders names them all.
 func bindingProvider(constraints []*ResourceConstraints, namespace, accType string) string {
-	name := ""
+	if names := bindingProviders(constraints, namespace, accType); len(names) > 0 {
+		return names[0]
+	}
+	return ""
+}
+
+// bindingProviders is bindingProvider naming every provider tied at the
+// tightest bound, in the declared order: two limiters that leave the same
+// availability both held the decision back, and crediting only the first
+// sends the operator to raise one and find the other still binding. Nil when
+// no provider finitely bounds the type.
+func bindingProviders(constraints []*ResourceConstraints, namespace, accType string) []string {
+	names := make([]string, 0, 2)
 	tightest := math.MaxInt
 	consider := func(avail int, provider string) {
-		if avail < tightest {
-			tightest, name = avail, provider
+		switch {
+		case avail < tightest:
+			tightest, names = avail, append(names[:0], provider)
+		case avail == tightest && !slices.Contains(names, provider):
+			names = append(names, provider)
 		}
 	}
 	for _, c := range constraints {
@@ -296,7 +317,10 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 			consider(avail, c.ProviderName)
 		}
 	}
-	return name
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }
 
 // passHeadroom is what an optimizer pass left of the budgets: the cluster

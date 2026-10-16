@@ -1632,6 +1632,9 @@ func logScalingDecisions(
 		// Event and the limiter_name label of wva_decisions_limited_total
 		// name it. Absent when nothing did.
 		LimitedBy string `json:"limitedBy,omitempty"`
+		// LimitedByAlso names the limiters tied with LimitedBy: their pools
+		// left exactly as little.
+		LimitedByAlso []string `json:"limitedByAlso,omitempty"`
 	}
 
 	// maxReplicas per variant, from the request the optimizer was given. The
@@ -1665,7 +1668,7 @@ func logScalingDecisions(
 			AtMax:  atMax,
 		}
 		if d.WasLimited {
-			entry.LimitedBy = d.LimitedBy
+			entry.LimitedBy, entry.LimitedByAlso = d.LimitedBy, d.LimitedByAlso
 		}
 		grouped[k] = append(grouped[k], entry)
 		metrics.SetVariantAtMaxReplicas(d.Namespace, d.VariantName, atMax)

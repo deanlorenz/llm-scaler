@@ -76,6 +76,18 @@ var _ = Describe("bindingProvider", func() {
 		Expect(bindingProvider(constraints, "team-a", "L40S")).To(Equal("gpu-limiter"))
 	})
 
+	It("names every provider tied at the tightest bound, in the declared order", func() {
+		constraints := []*ResourceConstraints{
+			// 4 free under each: raising either one alone frees nothing.
+			{ProviderName: "gpu-limiter", Pools: map[string]ResourcePool{"H100": {Limit: 12, Used: 8}}},
+			{ProviderName: "team-quota", Pools: map[string]ResourcePool{"H100": {Limit: 4}}},
+			{ProviderName: "loose-quota", Pools: map[string]ResourcePool{"H100": {Limit: 16}}},
+		}
+		Expect(bindingProviders(constraints, "team-a", "H100")).To(Equal([]string{"gpu-limiter", "team-quota"}))
+		Expect(bindingProvider(constraints, "team-a", "H100")).To(Equal("gpu-limiter"),
+			"one name for the metric label: the first declared")
+	})
+
 	It("tolerates a nil constraint entry", func() {
 		Expect(bindingProvider([]*ResourceConstraints{nil}, "team-a", "A100")).To(BeEmpty())
 	})
@@ -128,6 +140,18 @@ var _ = Describe("GPU limit attribution (greedy-by-score)", func() {
 		Expect(d.TargetReplicas).To(Equal(2), "1 current + the single replica the budget affords")
 		Expect(d.WasLimited).To(BeTrue())
 		Expect(d.LimitedBy).To(Equal("gpu-limiter"))
+	})
+
+	It("names both limiters when two bound the decision equally", func() {
+		constraints := []*ResourceConstraints{
+			{ProviderName: "gpu-limiter", Pools: map[string]ResourcePool{"A100": {Limit: 2}}},
+			{ProviderName: "cluster-quota", Pools: map[string]ResourcePool{"A100": {Limit: 2}}},
+		}
+		d := decisionMap(optimizer.Optimize(ctx, oneVariantRequest(40000, nil), constraints))["v1"]
+
+		Expect(d.WasLimited).To(BeTrue())
+		Expect(d.LimitedBy).To(Equal("gpu-limiter"), "the metric label's one value: the first declared")
+		Expect(d.LimitedByAlso).To(Equal([]string{"cluster-quota"}))
 	})
 
 	It("marks a variant the budget could not grow at all", func() {

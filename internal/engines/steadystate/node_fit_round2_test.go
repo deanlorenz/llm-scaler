@@ -22,6 +22,11 @@ func TestTheConstrainedEventNamesWhatHeldItBack(t *testing.T) {
 	if got := constrainedMessage(&d); got != "V2 (optimizer: greedy-by-score)" {
 		t.Fatalf("no limiter named: %q", got)
 	}
+	// Two limiters tied: the event names both.
+	d.LimitedBy, d.LimitedByAlso = "gpu-limiter", []string{"team-quota"}
+	if got, want := constrainedMessage(&d), "V2 (optimizer: greedy-by-score) (limited by gpu-limiter and team-quota)"; got != want {
+		t.Fatalf("event message %q, want %q", got, want)
+	}
 }
 
 // Go minor 1: a cycle with no physical limiter logged "fitted to nodes again"

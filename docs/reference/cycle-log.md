@@ -82,6 +82,7 @@ One line per model, after the optimizer chose each variant's replica target.
 | `decisions[].action` | `scale-up`, `scale-down`, or `no-change` |
 | `decisions[].atMax` | `true` when the target is the variant's `maxReplicaCount`; absent otherwise. Same as `wva_variant_at_max_replicas` |
 | `decisions[].limitedBy` | what held the variant's scale-up back this cycle: a limiter entry's name, `gpu-limiter` for the physical limiter, `node-fit`, `pd-pair-borrows-whole` or `lender-cannot-reclaim`. Absent when nothing did. The same name as the `ResourceConstrained` Event and the `limiter_name` label of `wva_decisions_limited_total` |
+| `decisions[].limitedByAlso` | the other limiters that held it back exactly as tightly, in the `limiters:` order; absent when one did alone. The Event names them too; the metric label carries `limitedBy` alone |
 
 ### `throughput-demand-floor`
 

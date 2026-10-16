@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -937,12 +938,12 @@ func modeLabelForAnalyzer(analyzerName string) string {
 // constrainedMessage is a ResourceConstrained event's message: the decision's
 // reason and what held it back (LimitedBy) -- a limiter's name, or
 // allocation.NodeFitLimiterName when the pools held the GPUs but no node held
-// a whole replica.
+// a whole replica -- with every limiter tied with it (LimitedByAlso).
 func constrainedMessage(d *domain.VariantDecision) string {
 	if d.LimitedBy == "" {
 		return d.Reason()
 	}
-	return fmt.Sprintf("%s (limited by %s)", d.Reason(), d.LimitedBy)
+	return fmt.Sprintf("%s (limited by %s)", d.Reason(), strings.Join(append([]string{d.LimitedBy}, d.LimitedByAlso...), " and "))
 }
 
 // recordEvent ensures only one event is recorded per VA in an optimization cycle.
