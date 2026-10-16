@@ -374,12 +374,14 @@ it, the PRC of each variant another analyzer decided, and the holds:
     chosen frame's capacity sheds at most `X x r` of frame f's, `r` the largest
     `PRC_f / PRC_chosen` over the running variants, so the role's spare (the
     model's on an aggregated model) is capped at `spare_f / r` for each f. The
-    optimizer releases up to the larger of the spare and `RoleReleasable`, so
-    the bound is also published as `ReleaseBound`, which `initRoleState` caps
-    `RoleReleasable` at; and a role the bound lowered gets a `NoScaleDown` hold
-    (after `applyHolds`, so the spare stays bounded rather than zeroed) for the
-    share optimizer and rescale, which size from demand and never read the
-    spare.
+    optimizer releases up to the larger of the spare and `RoleReleasable`, the
+    capacity above the release target, so each frame's own releasable at the
+    release target, over `r`, is published as `ReleaseBound` whenever another
+    frame sizes the role, and `initRoleState` caps `RoleReleasable` at it. The
+    share optimizer and rescale size from demand and never read the spare;
+    they read the bound as a GPU floor (`releaseFloorGPUs`): the role's GPUs
+    less the bound priced at its densest running replica, so no choice of
+    replicas sheds more.
     *Scale-up* follows the chosen frame alone: a variant it grows may leave
     another frame short for one cycle, until the new replicas are read.
   - With one variant per role every frame gives saturation's PRC. A need
@@ -401,7 +403,11 @@ it, the PRC of each variant another analyzer decided, and the holds:
   the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
   such a model exactly its current GPUs in the water-fill, so the rest of the
   budget goes to the others; no role is reclaimed or filled in a direction it
-  is held against. A growing role's share is rounded to whole replicas
+  is held against. A role's release floor (a `NoScaleDown` hold, or the
+  release bound) is reserved both in the water-fill and in the model's split
+  across its roles. A growing role's share is lowered to what `fillRole` can
+  place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
+  variant's own pod size), and what that leaves goes to the roles cut most
   (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
   model's two roles on 8-GPU pods, neither a pod, and stayed free.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
