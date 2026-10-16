@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // InFlightTTL is how long a replica admitted onto a node hole holds that hole
@@ -65,7 +67,22 @@ type inFlightEntry struct {
 	expires time.Time
 	// placed counts the variant's replicas holding a node, ok false when it
 	// cannot tell.
-	placed func() (int, bool)
+	placed func() (Placed, bool)
+	// partial is the replicas part of whose pods hold a node, as last
+	// counted, and partialAt when that list was first seen as it is.
+	partial   []domain.PartialReplica
+	partialAt time.Time
+}
+
+// Placed is what a variant's pods hold, as an in-flight entry counts them
+// (InFlightLedger.Admit): Whole, the replicas every pod of which holds a node
+// (scheduled to it, or nominated for it); Partial, each replica -- a
+// LeaderWorkerSet group -- some but not all of whose pods do. The ledger
+// holds a partial replica's other pods in the topology domain its placed
+// pods are in (WN2).
+type Placed struct {
+	Whole   int
+	Partial []domain.PartialReplica
 }
 
 // placedAt is a placed count and when it was first observed.
@@ -88,7 +105,7 @@ var DefaultInFlight = NewInFlightLedger()
 // than placedNow ends the entry. A want higher than the entry's admits more
 // replicas and starts InFlightTTL afresh; an equal or lower want keeps the
 // clock, so a replica Pending for good is not held again every cycle.
-func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow int, placed func() (int, bool), now time.Time) {
+func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow int, placed func() (Placed, bool), now time.Time) {
 	if l == nil {
 		return
 	}
@@ -155,14 +172,14 @@ func (l *InFlightLedger) Reset() {
 func (l *InFlightLedger) settle(now time.Time) {
 	l.mu.Lock()
 	keys := slices.Sorted(maps.Keys(l.entries))
-	counts := make(map[string]func() (int, bool), len(keys))
+	counts := make(map[string]func() (Placed, bool), len(keys))
 	for _, k := range keys {
 		if e := l.entries[k]; e.placed != nil {
 			counts[k] = e.placed
 		}
 	}
 	l.mu.Unlock()
-	observed := map[string]int{}
+	observed := map[string]Placed{}
 	for _, k := range keys {
 		if f := counts[k]; f != nil {
 			if n, ok := f(); ok {
@@ -181,16 +198,20 @@ func (l *InFlightLedger) settle(now time.Time) {
 			delete(l.entries, k)
 			continue
 		}
-		n, ok := observed[k]
+		p, ok := observed[k]
 		if !ok {
 			continue
 		}
+		n := p.Whole
 		if n >= e.want {
 			delete(l.entries, k)
 			continue
 		}
 		if last := e.base; n > last && (len(e.seen) == 0 || n > e.seen[len(e.seen)-1].n) {
 			e.seen = append(e.seen, placedAt{n: n, at: now})
+		}
+		if !slices.EqualFunc(p.Partial, e.partial, samePartial) {
+			e.partial, e.partialAt = p.Partial, now
 		}
 	}
 }
@@ -223,11 +244,72 @@ func (l *InFlightLedger) holdOn(v *NodeView, now time.Time) {
 		r := v.fitOf(e.shape)
 		// Each held replica is charged to its own owner, numbered from the
 		// variant's first replica, so ReleaseUncreated can take back the
-		// holes of the replicas whose pods do not exist yet.
+		// holes of the replicas whose pods do not exist yet. A replica part
+		// of whose pods hold a node comes first: its pods exist, and only
+		// the rest are held, where its placed pods are (holdPartial).
 		for n := placed + 1; n <= e.want; n++ {
 			v.setOwner(inFlightReplicaOwner(k, n))
+			if i := n - placed - 1; i < len(e.partial) {
+				v.holdPartial(r, e.partial[i], e.partialAt.After(v.takenAt))
+				continue
+			}
 			v.place(r)
 		}
+	}
+}
+
+// samePartial reports whether two partial replicas count the same.
+func samePartial(a, b domain.PartialReplica) bool {
+	return a.Node == b.Node && slices.Equal(a.PlacedGPUs, b.PlacedGPUs)
+}
+
+// holdPartial holds, for one replica part of whose pods hold a node (p), the
+// pods that hold none yet -- r's pods less the placed ones' GPUs -- best-fit
+// in the topology domain of the node p's placed pods hold (r.domain; the
+// group's own domain, so it is not refused as taken), or anywhere r may land
+// when r has no topology key or the node is not in the view. Held whole, the
+// replica found no hole once its leader held one node, and the node its
+// workers need was free to anyone (WN2). unseen is set when the count is
+// newer than the view's snapshot: the placed pods' GPUs are then held on
+// their node too, as far as it has them free. Nothing is held when the rest
+// fit nowhere.
+func (v *NodeView) holdPartial(r replicaFit, p domain.PartialReplica, unseen bool) {
+	if v == nil || len(r.pods) == 0 {
+		return
+	}
+	rest := slices.Clone(r.pods)
+	for _, g := range p.PlacedGPUs {
+		if i := slices.Index(rest, g); i >= 0 {
+			rest = slices.Delete(rest, i, i+1)
+		}
+	}
+	rest = slices.DeleteFunc(rest, func(g int) bool { return g <= 0 })
+	node, known := v.slotOf(p.Node)
+	if known && unseen {
+		for _, g := range p.PlacedGPUs {
+			if f := v.free(node); f > 0 && g > 0 {
+				v.charge(node, min(g, f))
+			}
+		}
+	}
+	if len(rest) == 0 {
+		return
+	}
+	key, d := "", ""
+	if known && r.domain != "" {
+		if d = v.slots[node].labels[r.domain]; d != "" {
+			key = r.domain
+		}
+	}
+	taken, ok := v.bestFit(v.eligibleFit(r), largestFirst(rest), key, d)
+	if !ok {
+		return
+	}
+	for _, i := range slices.Sorted(maps.Keys(taken)) {
+		v.charge(i, taken[i])
+	}
+	if d != "" {
+		v.takeDomain(domainID(key, d))
 	}
 }
 
@@ -272,4 +354,5 @@ func (l *InFlightLedger) ReleaseUncreated(v *NodeView, created map[string]int) {
 		}
 		delete(v.owned, owner)
 	}
+	maps.DeleteFunc(v.domains, func(_, owner string) bool { return release[owner] })
 }

@@ -67,10 +67,13 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 		if st.HeldKnown {
 			placedNow = st.FilledReplicas
 		}
-		var placed func() (int, bool)
+		var placed func() (allocation.Placed, bool)
 		if acc, ns := scaleTargets[key], d.Namespace; acc != nil && e.client != nil {
 			c := e.client
-			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), c, ns, acc) }
+			placed = func() (allocation.Placed, bool) {
+				whole, partial, ok := variantmeta.PlacedGroups(context.Background(), c, ns, acc)
+				return allocation.Placed{Whole: whole, Partial: partial}, ok
+			}
 		}
 		// Every hole keeps its pod templates' placement, a guaranteed or
 		// unbounded one too: the pass fitted it with them (WN3).

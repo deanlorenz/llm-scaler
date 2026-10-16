@@ -118,7 +118,13 @@ sparse debits; `adopt` commits a clone's debits.
   does not already judge) is tolerated by `ReplicaShape.Tolerations`
   (`scaletarget.PodTolerations`, the leader's template). With
   `ReplicaShape.DomainKey` (`scaletarget.ExclusiveTopology`) and more than one
-  pod, all pods land in one value of that label (`domainsOf`, tried in order).
+  pod, all pods land in one value of that label (`domainsOf`, tried in order),
+  and a value holds one replica (`domainTaken`): one the view placed or held
+  a replica in (`NodeView.domains`, per owner, so `without` and
+  `ReleaseUncreated` free it with the owner's debits), or one a LeaderWorkerSet
+  group's pod is on (`decision.NodeGPU.LWSGroup`, set by `gpunodes.usageWalk`
+  from the `leaderworkerset.sigs.k8s.io/group-key` label; LWS's exclusive
+  anti-affinity matches any pod carrying it).
   `ReplicaShape.Placements` (the templates' nodeSelector and required node
   affinity) narrows the nodes further (`eligibleFit`) on every path: the
   greedy pass (`nodeFit.replica`), the borrowing placer, a wake (`shapeOf`)
@@ -197,9 +203,13 @@ of a `ReplicaShape` to hold a node, `base` placed when admitted, and later
 placed counts with when each was first seen. A count is applied only to a view
 whose snapshot (`NodeView.takenAt`, from `NodeGPUStore.Read`) was taken after
 it was seen; before, the snapshot does not show those pods on their nodes
-either. `settle` reads each entry's `placed` func (`variantmeta.PlacedReplicas`:
-scheduled or nominated pods, not deleting; LWS groups whole) outside the lock,
-and ends an entry at `want`.
+either. `settle` reads each entry's `placed` func (`variantmeta.PlacedGroups`:
+scheduled or nominated pods, not deleting; LWS groups whole, and apart from
+them each group only some of whose pods are placed, `domain.PartialReplica`)
+outside the lock, and ends an entry at `want`. `holdOn` holds a partial group
+first, by `holdPartial`: its unplaced pods only, in the topology domain of
+its placed pods' node, plus the placed pods' GPUs on that node when the count
+is newer than the view's snapshot.
 
 - Admission: the steady-state engine admits each decision's target after the
   enforcer (`admitInFlight`, only when the cycle had a node view), skipping

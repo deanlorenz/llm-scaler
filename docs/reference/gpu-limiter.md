@@ -317,7 +317,13 @@ the scaling manager asks for must also fit a node:
 - A node with a `NoSchedule` or `NoExecute` taint holds a replica only if its
   pod template tolerates the taint. A LeaderWorkerSet with an exclusive
   topology (`leaderworkerset.sigs.k8s.io/exclusive-topology`) places all pods
-  of a replica in one domain of that label.
+  of a replica in one domain of that label, and a domain holds one replica: a
+  domain where any LeaderWorkerSet group's pod already runs, or where another
+  replica was just placed or is held, is skipped. Free GPUs left in such a
+  domain are not counted for a new group.
+- A LeaderWorkerSet group whose leader holds a node while its workers do
+  not (or do not exist yet) keeps holes for those workers only, in the
+  leader's domain, until the in-flight hold ends.
 
 What holds a node: every pod scheduled to it that has not finished, and a
 Pending pod the scheduler has nominated it for (after preempting pods there).

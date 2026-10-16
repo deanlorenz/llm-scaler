@@ -124,9 +124,12 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf 
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
 			continue
 		}
-		var placed func() (int, bool)
+		var placed func() (allocation.Placed, bool)
 		if cl, acc := e.client, c.target; cl != nil && acc != nil {
-			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), cl, namespace, acc) }
+			placed = func() (allocation.Placed, bool) {
+				whole, partial, ok := variantmeta.PlacedGroups(context.Background(), cl, namespace, acc)
+				return allocation.Placed{Whole: whole, Partial: partial}, ok
+			}
 		}
 		key := namespace + "/" + c.VariantName
 		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)

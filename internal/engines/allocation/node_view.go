@@ -41,7 +41,10 @@ import (
 // (ReplicaShape.Flavor). A pod is placed best-fit, in the smallest hole that
 // holds it; the pods of a replica with a topology key
 // (ReplicaShape.DomainKey: an exclusive-topology LeaderWorkerSet) are placed
-// in one domain, the nodes sharing one value of that label.
+// in one domain, the nodes sharing one value of that label, and a domain
+// holds one such replica: none lands in a domain where a LeaderWorkerSet
+// group's pod is (decision.NodeGPU.LWSGroup) or where this view placed
+// another (domains).
 //
 // A NodeView is not safe for concurrent use: one optimizer pass, or one wake
 // decision, owns it.
@@ -76,6 +79,10 @@ type NodeView struct {
 	takenAt time.Time
 	// layouts is where an unknown pod layout is logged once per variant.
 	layouts *LayoutLog
+	// domains is the topology domains (domainID) this view placed an
+	// exclusive-topology replica in, each with the owner it was charged to:
+	// a domain holds one group (WN1). A clone copies it.
+	domains map[string]string
 }
 
 // nodeSlot is what the view reads of one node.
@@ -91,6 +98,9 @@ type nodeSlot struct {
 	// labels is the snapshot's own label map, read for a topology domain and
 	// never written (decision.NodeGPUStore.Read).
 	labels map[string]string
+	// group is set when a LeaderWorkerSet group's pod is on the node
+	// (decision.NodeGPU.LWSGroup).
+	group bool
 }
 
 // eligibleCache is the nodes, in order, eligible for one accelerator and set of
@@ -100,6 +110,11 @@ type eligibleCache struct {
 	mu      sync.Mutex
 	nodes   map[string][]int
 	largest map[string]int
+	// grouped is, per topology label key, the values of it whose nodes a
+	// LeaderWorkerSet group's pod is on (groupedDomains).
+	grouped map[string]map[string]bool
+	// index is each node's position by name (slotOf).
+	index map[string]int
 }
 
 // LayoutLog remembers the variants whose unknown pod layout a node view has
@@ -130,11 +145,11 @@ func newNodeViewAt(snap map[string]decision.NodeGPU, takenAt time.Time) *NodeVie
 	}
 	v := &NodeView{slots: make([]nodeSlot, 0, len(snap)), debit: map[int]int{},
 		elig: &eligibleCache{nodes: map[string][]int{}, largest: map[string]int{}}, owned: map[string]map[int]int{},
-		takenAt: takenAt, layouts: &LayoutLog{}}
+		takenAt: takenAt, layouts: &LayoutLog{}, domains: map[string]string{}}
 	for _, name := range slices.Sorted(maps.Keys(snap)) {
 		n := snap[name]
 		v.slots = append(v.slots, nodeSlot{name: name, accelerator: n.Accelerator, capacity: n.Capacity, used: n.Used,
-			unschedulable: n.Unschedulable, taints: n.Taints, labels: n.Labels})
+			unschedulable: n.Unschedulable, taints: n.Taints, labels: n.Labels, group: n.LWSGroup})
 	}
 	return v
 }
@@ -260,7 +275,7 @@ func (v *NodeView) Clone() *NodeView {
 		return nil
 	}
 	return &NodeView{slots: v.slots, debit: maps.Clone(v.debit), elig: v.elig,
-		takenAt: v.takenAt, layouts: v.layouts}
+		takenAt: v.takenAt, layouts: v.layouts, domains: maps.Clone(v.domains)}
 }
 
 // adopt takes another view's debits: the commit of a tentative placement made
@@ -277,6 +292,11 @@ func (v *NodeView) adopt(c *NodeView) {
 		}
 	}
 	v.debit = c.debit
+	for id := range c.domains {
+		if _, ok := v.domains[id]; !ok {
+			v.takeDomain(id)
+		}
+	}
 }
 
 // charge debits g GPUs of node i, charged to the view's owner.
@@ -343,6 +363,7 @@ func (v *NodeView) without(exclude func(owner string) bool) *NodeView {
 			}
 		}
 	}
+	maps.DeleteFunc(c.domains, func(_, owner string) bool { return exclude(owner) })
 	return c
 }
 
@@ -531,10 +552,14 @@ func (v *NodeView) place(r replicaFit) bool {
 	}
 	eligible := v.eligibleFit(r)
 	domains := []string{""}
-	if r.domain != "" && len(pods) > 1 {
+	exclusive := r.domain != "" && len(pods) > 1
+	if exclusive {
 		domains = v.domainsOf(eligible, r.domain)
 	}
 	for _, d := range domains {
+		if exclusive && v.domainTaken(r.domain, d) {
+			continue // a domain holds one group (WN1)
+		}
 		taken, ok := v.bestFit(eligible, pods, r.domain, d)
 		if !ok {
 			continue
@@ -542,9 +567,71 @@ func (v *NodeView) place(r replicaFit) bool {
 		for _, i := range slices.Sorted(maps.Keys(taken)) {
 			v.charge(i, taken[i])
 		}
+		if exclusive {
+			v.takeDomain(domainID(r.domain, d))
+		}
 		return true
 	}
 	return false
+}
+
+// domainID names value d of topology label key in NodeView.domains.
+func domainID(key, d string) string { return key + "\x00" + d }
+
+// takeDomain charges topology domain id to the view's owner.
+func (v *NodeView) takeDomain(id string) {
+	if v.domains == nil {
+		v.domains = map[string]string{}
+	}
+	v.domains[id] = v.owner
+}
+
+// domainTaken reports whether value d of topology label key already holds a
+// group: this view placed an exclusive-topology replica in it, or a
+// LeaderWorkerSet group's pod is on one of its nodes. LeaderWorkerSet's
+// exclusive placement is a pod anti-affinity against every other group's
+// pods in the domain, so either refuses a new group there.
+func (v *NodeView) domainTaken(key, d string) bool {
+	if _, ok := v.domains[domainID(key, d)]; ok {
+		return true
+	}
+	return v.groupedDomains(key)[d]
+}
+
+// groupedDomains is the values of label key whose nodes a LeaderWorkerSet
+// group's pod is on, computed once per view and key and shared by clones.
+func (v *NodeView) groupedDomains(key string) map[string]bool {
+	v.elig.mu.Lock()
+	defer v.elig.mu.Unlock()
+	if g, ok := v.elig.grouped[key]; ok {
+		return g
+	}
+	g := map[string]bool{}
+	for i := range v.slots {
+		if n := &v.slots[i]; n.group && n.labels[key] != "" {
+			g[n.labels[key]] = true
+		}
+	}
+	if v.elig.grouped == nil {
+		v.elig.grouped = map[string]map[string]bool{}
+	}
+	v.elig.grouped[key] = g
+	return g
+}
+
+// slotOf is the index of the node named name, false when the snapshot has
+// none.
+func (v *NodeView) slotOf(name string) (int, bool) {
+	v.elig.mu.Lock()
+	defer v.elig.mu.Unlock()
+	if v.elig.index == nil {
+		v.elig.index = make(map[string]int, len(v.slots))
+		for i := range v.slots {
+			v.elig.index[v.slots[i].name] = i
+		}
+	}
+	i, ok := v.elig.index[name]
+	return i, ok
 }
 
 // bestFit places pods, in order, each into the smallest hole among eligible
