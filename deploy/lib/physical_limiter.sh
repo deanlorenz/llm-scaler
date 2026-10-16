@@ -683,8 +683,12 @@ pl_revoke_kueue_borrow_read() {
 # warning, when $3 is unknown -- a policy that could not be read is not one
 # that counts nothing, and revoking on a guess would stop borrowing. Logs what
 # it did; returns 1 when a grant or revoke failed.
+#
+# A revoke of a read that was granted says to restart the controller: its
+# Workload informer keeps the Workloads it already cached, and a policy that
+# still counts borrowing would go on counting lenders from that stale copy.
 pl_sync_kueue_borrow_read() {
-    local ns="$1" sa="$2" want="$3" suffix err
+    local ns="$1" sa="$2" want="$3" suffix err had=no
     suffix="$(wva_ns_suffix "$ns")"
     case "$want" in
         yes)
@@ -695,9 +699,15 @@ pl_sync_kueue_borrow_read() {
             log_info "  $ns/$sa may read Kueue Workloads and LocalQueues in every namespace: its policy counts cohort borrowing (ClusterRole wva-kueue-borrow-reader-role-${suffix})"
             ;;
         no)
+            if kc_capture get clusterrolebinding "wva-kueue-borrow-reader-rolebinding-${suffix}" -o name && [ -n "$KC_OUT" ]; then
+                had=yes
+            fi
             if ! err="$(pl_revoke_kueue_borrow_read "$ns")"; then
                 log_warning "  Could not revoke the Kueue borrowing read of $ns/$sa: $err"
                 return 1
+            fi
+            if [ "$had" = yes ]; then
+                log_warning "  Revoked the cluster-wide Kueue Workload read of $ns/$sa: no policy it reads counts cohort borrowing. RESTART THE CONTROLLER in $ns (kubectl rollout restart deployment -n $ns <controller>): until then it keeps the Workloads it already cached."
             fi
             ;;
         *)
@@ -777,8 +787,27 @@ pl_can_list_pods() {
     esac
 }
 
-# pl_cohorts_of echoes, space-separated, the Kueue cohorts of the ClusterQueues
-# the LocalQueues in namespace $1 point at: nothing when none has a cohort.
+# pl_cohort_root echoes the root of cohort $1's tree. Kueue's hierarchical
+# cohorts (a Cohort object's spec.parentName, spec.parent before v1beta2) let
+# ClusterQueues in sibling cohorts borrow from each other through their
+# parent, so two borrowers are compared by the tree they share, not by their
+# direct cohort. A cohort with no Cohort object, or whose Cohort cannot be read
+# (no CRD, Forbidden), is taken as its own root: siblings under a parent that
+# cannot be read are not linked, and are not warned about. At most 8 levels.
+pl_cohort_root() {
+    local c="$1" depth=0
+    while [ "$depth" -lt 8 ]; do
+        kc_capture get cohorts.kueue.x-k8s.io "$c" -o jsonpath='{.spec.parentName}{.spec.parent}' || break
+        [ -n "$KC_OUT" ] && [ "$KC_OUT" != "$c" ] || break
+        c="$KC_OUT"
+        depth=$((depth + 1))
+    done
+    printf '%s' "$c"
+}
+
+# pl_cohorts_of echoes, space-separated, the root Kueue cohorts
+# (pl_cohort_root) of the ClusterQueues the LocalQueues in namespace $1 point
+# at: nothing when none has a cohort.
 # Returns non-zero when that cannot be told -- a cluster-scoped controller
 # (`*`) or an unknown one (`-`) manages more than one namespace, and a read
 # that fails is not an empty answer.
@@ -792,7 +821,7 @@ pl_cohorts_of() {
         # cohortName in v1beta2, cohort in v1beta1: one of them is set.
         kc_capture get clusterqueues.kueue.x-k8s.io "$cq" \
             -o jsonpath='{.spec.cohortName}{.spec.cohort}' || return 1
-        [ -z "$KC_OUT" ] || cohorts="$cohorts $KC_OUT"
+        [ -z "$KC_OUT" ] || cohorts="$cohorts $(pl_cohort_root "$KC_OUT")"
     done
     # shellcheck disable=SC2086 # one word per cohort
     [ -z "$cohorts" ] || printf '%s\n' $cohorts | sort -u | tr '\n' ' '
@@ -1523,7 +1552,7 @@ enable_physical_limiter() {
         if [ -n "$pods_unknown" ]; then
             log_warning "  Could not check (impersonation was not allowed) whether these namespace-scoped controllers may list Pods cluster-wide: ${pods_unknown}."
         fi
-        log_warning "    Without it the gpu-inventory limiter counts only the GPUs its own namespace holds: GPUs other namespaces hold on the same nodes read as FREE, and scale-ups are admitted onto full nodes. This command grants node read, not that."
+        log_warning "    Without it the gpu-inventory limiter counts only the GPUs its own namespace holds: if other namespaces run GPU pods on the same nodes, their GPUs read as FREE and scale-ups are admitted onto full nodes; if none do, nothing is miscounted. This command grants node read, not that."
         log_warning "    Each such controller says so at runtime: wva_pod_access_denied=1, and podListDenied in its wva-controller-status ConfigMap."
         log_warning "    Remedy: grant its ServiceAccount list on pods in every namespace, or bound it with a quota limiter instead (WVA_LIMITER_TYPE=quota) -- a quota beside gpu-inventory leaves the physical limiter reading the same undercount."
     fi

@@ -162,6 +162,17 @@ case "$1" in
         [ ! -f "$KDEPLOYS/lq-$ns" ] || cat "$KDEPLOYS/lq-$ns" ;;
       clusterqueues.kueue.x-k8s.io)
         [ ! -f "$KDEPLOYS/cq-$name" ] || cat "$KDEPLOYS/cq-$name" ;;
+      # The parent of Cohort <name>, from $KDEPLOYS/cohort-<name>; NotFound
+      # without that file.
+      cohorts.kueue.x-k8s.io)
+        if [ -f "$KDEPLOYS/cohort-$name" ]; then cat "$KDEPLOYS/cohort-$name"; else
+          echo "Error from server (NotFound): cohorts.kueue.x-k8s.io \"$name\" not found" >&2; exit 1; fi ;;
+      # One live ClusterRoleBinding: listed in KCRB_LIVE, else NotFound.
+      clusterrolebinding)
+        case " ${KCRB_LIVE:-} " in
+          *" $name "*) echo "clusterrolebinding.rbac.authorization.k8s.io/$name" ;;
+          *) echo "Error from server (NotFound): clusterrolebindings.rbac.authorization.k8s.io \"$name\" not found" >&2; exit 1 ;;
+        esac ;;
       # The live ClusterRoleBindings: $KDEPLOYS/crbs.json, else none.
       clusterrolebindings)
         if [ -f "$KDEPLOYS/crbs.json" ]; then cat "$KDEPLOYS/crbs.json"; else echo '{"items":[]}'; fi ;;
@@ -1091,10 +1102,45 @@ else
     fi
 fi
 rm -f "$DEPLOYS/crbs.json"
+
+# A revoked Workload read: the controller keeps the Workloads its informer
+# cached, so the admin is told to restart it -- and only when there was a
+# grant to revoke.
+revoke_tenant_a() { pl_sync_kueue_borrow_read tenant-a wva-controller-manager no; }
+case_begin
+run_enable PL_FN=revoke_tenant_a "KCRB_LIVE=wva-kueue-borrow-reader-rolebinding-$(wva_ns_suffix tenant-a)"
+if [ "$RC" -ne 0 ]; then
+    fail "revoking a granted Workload read failed: $(tail -4 "$WORK/out")"
+elif ! grep -q 'RESTART THE CONTROLLER in tenant-a' "$WORK/out"; then
+    fail "a revoked Workload read did not say to restart the controller: $(tail -4 "$WORK/out")"
+else
+    run_enable PL_FN=revoke_tenant_a
+    if grep -q 'RESTART THE CONTROLLER' "$WORK/out"; then
+        fail "a revoke with nothing granted asked for a restart: $(grep RESTART "$WORK/out")"
+    else
+        ok "a revoked Workload read says to restart the controller; nothing to revoke says nothing"
+    fi
+fi
+# Hierarchical cohorts: ClusterQueues in sibling cohorts under one parent
+# borrow from each other through it, so their borrowers share that tree.
+case_begin
+printf 'child-h' > "$DEPLOYS/cq-cq-h"
+printf 'child-i' > "$DEPLOYS/cq-cq-i"
+printf 'root' > "$DEPLOYS/cohort-child-h"
+printf 'root' > "$DEPLOYS/cohort-child-i"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-g tenant-h tenant-i'
+if ! grep -q 'KUEUE COHORT root IS BORROWED FROM BY MORE THAN ONE CONTROLLER: tenant-h/wva-controller-manager, tenant-i/wva-controller-manager\.' "$WORK/out"; then
+    fail "two borrowers in sibling cohorts under one parent were not named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+elif grep -q 'KUEUE COHORT other' "$WORK/out"; then
+    fail "a cohort with no parent and one borrower was warned about: $(grep 'KUEUE COHORT other' "$WORK/out")"
+else
+    ok "borrowers in sibling cohorts under one parent are named by the parent"
+fi
+rm -f "$DEPLOYS"/cohort-*
 rm -f "$DEPLOYS"/lq-* "$DEPLOYS"/cq-* "$DEPLOYS/tenant-h.json" "$DEPLOYS/tenant-i.json"
 
 case_begin
-CASES_EXPECTED=64
+CASES_EXPECTED=66
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

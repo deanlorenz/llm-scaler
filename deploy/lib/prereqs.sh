@@ -1157,7 +1157,7 @@ wva_check_limiter_pod_list() {
         yes) log_success "The controller can list Pods in every namespace, which the gpu-inventory limiter needs to see other namespaces' GPUs" ;;
         no)
             log_warning "The limiters '${lset}' include gpu-inventory, and $sa cannot list Pods in every namespace."
-            log_warning "  Its GPU usage then counts only the Pods of its own namespace: GPUs other namespaces hold on the same nodes read as FREE, and scale-ups can be admitted onto full nodes. The controller reports it as wva_pod_access_denied=1 and podListDenied in its wva-controller-status ConfigMap."
+            log_warning "  Its GPU usage then counts only the Pods of its own namespace: if other namespaces run GPU pods on the same nodes, their GPUs read as FREE and scale-ups can be admitted onto full nodes; if none do, nothing is miscounted. The controller reports it as wva_pod_access_denied=1 and podListDenied in its wva-controller-status ConfigMap."
             log_warning "  Remedy: grant $sa list on pods in every namespace, or bound this namespace with a quota limiter instead of gpu-inventory."
             ;;
         *) log_warning "Could not verify that $sa may list Pods in every namespace (checking needs impersonate permission). Without it the gpu-inventory limiter does not see GPUs other namespaces hold on the same nodes; watch wva_pod_access_denied." ;;
