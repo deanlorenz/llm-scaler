@@ -891,6 +891,18 @@ func (c *Config) KueueCountsBorrowable() bool {
 	return false
 }
 
+// KueueReleasesToNonReclaiming reports whether some quota entry counts, and
+// hands back, what lenders Kueue does not reclaim for lend
+// (releaseToNonReclaimingLenders). Thread-safe.
+func (c *Config) KueueReleasesToNonReclaiming() bool {
+	for _, e := range c.EffectiveQuotaEntries() {
+		if e.KueueReleasesToNonReclaiming() {
+			return true
+		}
+	}
+	return false
+}
+
 // KueueBorrowTimings returns the borrowing timings of the first quota entry that
 // counts Kueue borrowing, or the defaults when none does.
 // Thread-safe.

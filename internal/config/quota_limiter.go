@@ -211,6 +211,17 @@ type KueueQuotaSource struct {
 	// (kueue-version-unknown). It applies only to a version that cannot be
 	// read from a readable Deployment, and never lifts kueue-controller-down.
 	AssumeTestedVersion bool `yaml:"assumeTestedVersion,omitempty" json:"assumeTestedVersion,omitempty"`
+
+	// ReleaseToNonReclaimingLenders also counts what lenders Kueue does not
+	// reclaim for lend -- reclaimWithinCohort Never, or LowerPriority below
+	// the borrowing model's priority -- and hands it back when such a lender
+	// waits: the scaling manager lowers the borrowing models, lowest priority
+	// first, by whole units covering what the lender waits for. It makes the
+	// scaling manager Kueue's reclaim agent for those lenders. Off by
+	// default (experimental): that lending is then not counted
+	// (lender-cannot-reclaim), and a waiting lender only stops new borrowing
+	// in its cohort. It needs countBorrowable.
+	ReleaseToNonReclaimingLenders bool `yaml:"releaseToNonReclaimingLenders,omitempty" json:"releaseToNonReclaimingLenders,omitempty"`
 }
 
 // KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
@@ -294,6 +305,14 @@ func (q QuotaLimiterConfig) KueueCountsBorrowable() bool {
 	return q.KueueEnabled() && (q.Kueue.CountBorrowable == nil || *q.Kueue.CountBorrowable)
 }
 
+// KueueReleasesToNonReclaiming reports whether this entry counts what lenders
+// Kueue does not reclaim for lend, and hands it back when they wait
+// (releaseToNonReclaimingLenders, off by default). It needs the entry to
+// count borrowing.
+func (q QuotaLimiterConfig) KueueReleasesToNonReclaiming() bool {
+	return q.KueueCountsBorrowable() && q.Kueue.ReleaseToNonReclaimingLenders
+}
+
 // DefaultKueueRefreshInterval is how often Kueue quotas are re-read when the
 // entry does not say. The saturation cycle is of the same order, so a shorter
 // value would only add API calls the next decision cannot use.
@@ -361,6 +380,10 @@ func (k *KueueQuotaSource) validate(location string) error {
 		case d <= 0:
 			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q must be positive", location, f.name, f.value))
 		}
+	}
+	if k.ReleaseToNonReclaimingLenders && k.CountBorrowable != nil && !*k.CountBorrowable {
+		errs = append(errs, fmt.Errorf("%s.kueue.releaseToNonReclaimingLenders: true needs countBorrowable; "+
+			"with countBorrowable: false nothing is borrowed, so nothing is handed back", location))
 	}
 	return errors.Join(errs...)
 }
