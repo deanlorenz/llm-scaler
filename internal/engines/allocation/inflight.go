@@ -122,6 +122,10 @@ type InFlightAdmission struct {
 	Want      int
 	PlacedNow int
 	Placed    func() (Placed, bool)
+	// ExistingOnly admits only to an entry the variant already has: a
+	// target that does not grow the variant updates the growth still in
+	// flight and starts no hold of its own.
+	ExistingOnly bool
 }
 
 // InFlightMark is the entries a provisional admission (Provisional)
@@ -191,6 +195,8 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time) {
 	}
 	e, ok := l.entries[key]
 	switch {
+	case !ok && a.ExistingOnly:
+		return
 	case !ok:
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
 			expires: now.Add(InFlightTTL), placed: placed}

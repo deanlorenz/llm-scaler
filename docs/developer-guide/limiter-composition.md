@@ -219,8 +219,10 @@ is newer than the view's snapshot.
   `admitInFlight` commits the final targets (`Commit`: the marked entries set
   back, then the final admissions, under one lock), skipping the models the
   share plans (their fills are promises); placed-now is `FilledReplicas` when
-  the pods were listed. A cycle only fitted to nodes admits either way
-  (`cycleFitted`). The scale-from-zero engine admits
+  the pods were listed. Only a cycle fitted to nodes admits (`cycleFitted`).
+  Only growth starts an entry: a target at or below the current replicas
+  updates an entry the variant has (`InFlightAdmission.ExistingOnly`), so a
+  replacement pod at Kueue's gate after a preemption holds no hole. The scale-from-zero engine admits
   each woken candidate at want 1 (`wake_tick.go`).
 - TTL: `InFlightTTL` (5 minutes), from the admission that raised `want`; an
   equal or lower `want` keeps the clock, so a replica Pending for good is not

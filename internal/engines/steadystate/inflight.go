@@ -67,7 +67,11 @@ func (e *Engine) admitPassInFlight(requests []allocation.ModelScalingRequest, de
 }
 
 // inFlightAdmissions is what admitInFlight admits: per decided variant of a
-// model planned does not name, its target's replicas of its shape.
+// model planned does not name, its target's replicas of its shape. A variant
+// whose target does not grow it past its current replicas is admitted only
+// to an entry it already has -- growth ordered earlier whose pods hold no
+// node yet -- so a pod of it at Kueue's gate after a preemption holds no
+// hole a growing peer could use.
 func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) []allocation.InFlightAdmission {
 	var out []allocation.InFlightAdmission
@@ -111,7 +115,7 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 			shape.Flavor = f
 		}
 		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
-			PlacedNow: placedNow, Placed: placed})
+			PlacedNow: placedNow, Placed: placed, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas})
 	}
 	return out
 }
