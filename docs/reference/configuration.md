@@ -560,12 +560,19 @@ ScaledObjects".
 make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
 ```
 
-Once the new controller is running, this rewrites each ScaledObject's scaler
-trigger in place: the address, and the `authenticationRef`. KEDA's calls for
-each may fail for a few seconds while the two catch up; the fallback holds its
-replicas. If
-the controller rollout does not finish, nothing is moved, and the installer
-prints the command to run once it has. The same flag with
+Once the new controller Pods alone serve the scaler, this rewrites each
+ScaledObject's scaler trigger in place: the address, and the
+`authenticationRef`. "Alone" means the rollout is done, the old Pods are gone
+from the Service, and a new Pod holds the leader lease. KEDA's calls for each
+may fail for a few seconds while the two catch up; the fallback holds its
+replicas. If that does not happen within three minutes
+(`WVA_SCALER_SETTLE_TIMEOUT`, in seconds), nothing is moved, and the installer
+prints the command to run later.
+
+Then it checks that KEDA wired each HPA with the scaler's metric. If not, it
+changes the trigger metadata key `wvaRewire`, so KEDA asks for the metric
+again, for about three minutes. See
+[External scaler TLS on upgrade](upgrade-and-uninstall.md#external-scaler-tls-on-upgrade). The same flag with
 `WVA_SCALER_TLS=false` moves them back. It also moves them back whenever the
 scaler stays on plaintext, for example while KEDA's side is not ready.
 

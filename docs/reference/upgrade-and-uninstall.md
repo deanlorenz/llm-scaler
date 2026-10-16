@@ -704,8 +704,26 @@ To move to TLS, run:
 make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
 ```
 
-It moves the controller and its ScaledObjects together. KEDA's calls for each
-ScaledObject may fail for a few seconds while it moves.
+It moves the controller and its ScaledObjects together. The ScaledObjects move
+only once the new controller Pods alone serve the scaler: the rollout is done,
+the old Pods are gone from the Service, and a new Pod holds the leader lease.
+This can take a minute or two. KEDA's calls for each ScaledObject may fail for
+a few seconds while it moves.
+
+After the move, the installer checks that KEDA wired each HPA: the HPA carries
+the scaler's external metric. KEDA asks for that metric only when a
+ScaledObject's spec changes. If that one call fails, the HPA stays on the CPU
+default, and the ScaledObject still reads Ready. So when an HPA is not wired,
+the installer changes one trigger metadata key, `wvaRewire`, which makes KEDA
+ask again. It tries for about three minutes. It never deletes a ScaledObject
+and never restarts KEDA. If the HPA is still not wired, the install and
+`make verify-deployment` name the ScaledObject and print the command to run.
+
+After a move, KEDA keeps trying the old address, about once a minute or two.
+The scaler refuses it and logs `refused a TLS handshake` at a limited rate.
+This is expected and harmless: no ScaledObject uses that connection. KEDA
+keeps one connection per address and closes none until its operator restarts.
+The installer cannot close it without restarting KEDA, so it does not.
 
 - **Split install:** KEDA's side must be in place first. A cluster admin runs
   `make setup-prereqs`; then the tenant runs the command above. A tenant's
@@ -830,6 +848,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the namespace `$NS` | it may hold your model servers | `kubectl delete namespace "$NS"` only if nothing else lives there |
 | ScaledObjects you **adopted** (written by you or GitOps, pointed at this scaler) | not the installer's to delete. Their trigger now calls a scaler that is gone, and **a model parked at zero never wakes**: activation only comes from the scaler | see below |
 | Prometheus, KEDA, the EPP | shared; this install may not have created them | `UNDEPLOY_SHARED=true` removes them too, for everything on the cluster |
+| KEDA's connection to the scaler's TLS address, with the old client certificate | KEDA keeps it until its operator restarts. It matters only if you install the scaler in the same namespace again; the uninstall warns when a ScaledObject used that address | (cluster admin) after the reinstall, the `kubectl rollout restart deployment/keda-operator` command the uninstall printed |
 | the PrometheusRule `controller-manager-alerts` | the uninstall does not render the alerts component | `kubectl delete prometheusrule controller-manager-alerts -n "$NS"` |
 | the dashboard ConfigMap `wva-operation-dashboard` | shared by every install on the cluster | (cluster admin, if it is in a shared monitoring namespace) `kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>` |
 | cluster policy in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding `wva-policy-reader-<suffix>` | the ConfigMap is written by `make enable-physical-limiter`; the Role and RoleBinding by it and by `make setup-prereqs` (for a controller that manages its own namespace, when the policy namespace exists) | (cluster admin) see below |
