@@ -67,6 +67,35 @@ func TestGuaranteedReplicaChecksCoResources(t *testing.T) {
 	}
 }
 
+// A namespace on two queues that both grant H100 (multi-queue-namespace)
+// takes the smaller queue's nominal figures, its CPU headroom included: a
+// replica is admitted through one queue, and each has 64 CPUs. One 48-CPU
+// replica, not two. Before, the CPU headroom of the two queues was summed (128).
+func TestMultiQueueNominalCoFollowsMinRule(t *testing.T) {
+	rows := []config.ExternalBorrow{queueRow("cq-1", "H100", 16, 0, true), queueRow("cq-2", "H100", 16, 0, true)}
+	for i := range rows {
+		rows[i].CoUnused = map[string]int64{"cpu": 64000}
+	}
+	e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+		Kueue:           &config.KueueQuotaSource{Enabled: true, CountBorrowable: new(bool)}}
+	src := &fakeQuotaSource{}
+	src.push(multiQueueSnapshot("c", rows...), nil)
+	inv := NewQuotaInventoryWithSource(e, src)
+	inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+	c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil, map[string]map[string]int{"c": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := cpuModel("c", 2)
+	m.VariantStates[0].ReplicaRequests["cpu"] = 48000
+	got := addedGPUs(NewGreedyByScoreOptimizer().Optimize(context.Background(), []ModelScalingRequest{m},
+		[]*ResourceConstraints{physicalH100(64), c}))
+	if got["m"] != 8 {
+		t.Errorf("ordered %d GPUs, want 8: each queue has 64 CPUs, and one of them admits the replicas", got["m"])
+	}
+}
+
 // K2 on the nominal path: Kueue admits a replica within nominal only when its
 // CPU fits the queue's nominal CPU too, borrowing counted or not. A queue of
 // 16 GPUs and 64 CPUs, nothing reserved: one 48-CPU replica, not two. Before,
