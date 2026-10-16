@@ -94,9 +94,11 @@ install](../../reference/operations.md) before re-running.
 
 **Restart the controller between runs** with `make benchmark-restart-controller`.
 Otherwise learned capacity and the request-shape memo carry into the next run,
-and its first minutes look like a shape change. The target also deletes the
-`wva-learned-state` snapshot, so a controller with `LEARNED_STATE_SNAPSHOT` on
-starts cold too; a plain restart, or a new image digest, would restore it.
+and its first minutes look like a shape change. The target scales the
+controller to zero, deletes the `wva-learned-state` snapshot, and scales it
+back, so a controller with `LEARNED_STATE_SNAPSHOT` on starts cold too; a plain
+restart, or a new image digest, would restore it. No controller runs for the
+few seconds in between, so run it between runs, not during one.
 
 ### Check the router spreads load
 

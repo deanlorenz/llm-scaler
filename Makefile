@@ -2592,18 +2592,31 @@ benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply conf
 	$(MAKE) benchmark-restart-controller BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-restart-controller
-# The learned-state snapshot is deleted first: with LEARNED_STATE_SNAPSHOT on, a
+# The learned-state snapshot is deleted too: with LEARNED_STATE_SNAPSHOT on, a
 # restart restores what the controller learned, the state this target exists to
-# clear. A controller that finds it gone forgets what it holds and does not
-# write it back.
+# clear. It is deleted with no controller running. During a rolling restart a
+# replica that never read it -- an old non-leader taking the lease, or a new
+# pod -- writes it again, and the next leader then restores that.
 benchmark-restart-controller: ## Restart WVA controller to flush learned state (e.g., k2 history between runs)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-restart-controller BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) delete configmap wva-learned-state -n $(BENCHMARK_NAMESPACE) --ignore-not-found
-	kubectl rollout restart -n $(BENCHMARK_NAMESPACE) $(WVA_CONTROLLER_DEPLOY)
-	kubectl rollout status -n $(BENCHMARK_NAMESPACE) $(WVA_CONTROLLER_DEPLOY) --timeout=$(WVA_ROLLOUT_TIMEOUT)
+	@# K carries a request timeout; W does not: wait and rollout status carry
+	@# their own, and a request timeout would cut their watches short.
+	@set -e; K="kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) -n $(BENCHMARK_NAMESPACE)"; \
+	W="kubectl -n $(BENCHMARK_NAMESPACE)"; \
+	replicas=$$($$K get $(WVA_CONTROLLER_DEPLOY) -o jsonpath="{.spec.replicas}"); \
+	selector=$$($$K get $(WVA_CONTROLLER_DEPLOY) --subresource=scale -o jsonpath="{.status.selector}"); \
+	if [ -z "$$replicas" ] || [ -z "$$selector" ]; then \
+		echo "ERROR: could not read the replicas and selector of $(WVA_CONTROLLER_DEPLOY)"; exit 1; \
+	fi; \
+	$$K scale $(WVA_CONTROLLER_DEPLOY) --replicas=0; \
+	pods=$$($$K get pods -l "$$selector" -o name); \
+	if [ -n "$$pods" ]; then $$W wait --for=delete $$pods --timeout=$(WVA_ROLLOUT_TIMEOUT); fi; \
+	$$K delete configmap wva-learned-state --ignore-not-found; \
+	$$K scale $(WVA_CONTROLLER_DEPLOY) --replicas=$$replicas; \
+	$$W rollout status $(WVA_CONTROLLER_DEPLOY) --timeout=$(WVA_ROLLOUT_TIMEOUT)
 
 BURSTY_WORKLOAD    ?= bursty.yaml
 # How long to wait for the harness pod to COMPLETE. Must exceed the profile's own
