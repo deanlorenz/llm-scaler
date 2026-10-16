@@ -529,7 +529,23 @@ func (c *Config) UtilizationShare() (settings UtilizationShare, selected bool, e
 	if err != nil {
 		return UtilizationShare{}, false, err
 	}
+	if settings.PhysicalGroups && c.infrastructure.watchNamespace != "" {
+		return UtilizationShare{}, false, PhysicalGroupsNamespaceScopedError(c.infrastructure.watchNamespace)
+	}
 	return settings, true, nil
+}
+
+// PhysicalGroupsNamespaceScopedError is why utilizationShare.physicalGroups is
+// refused on a controller that manages one namespace. A physical group plans
+// every free GPU of a type on the cluster, and each such controller would plan
+// the same free GPUs: the first to place a replica keeps them, and the share
+// never gives them back to the others. A namespace quota bounds a tenant
+// instead; physicalGroups belongs on a cluster-scoped controller.
+func PhysicalGroupsNamespaceScopedError(watchNamespace string) error {
+	return fmt.Errorf("utilizationShare.physicalGroups is refused on a namespace-scoped controller (it manages %s): "+
+		"a physical group plans every free GPU of a type on the cluster, and every namespace-scoped controller "+
+		"would plan the same ones. Bound the namespace with a quota limiter and drop physicalGroups, or set it "+
+		"on a cluster-scoped controller", watchNamespace)
 }
 
 // IgnoredOptimizerNamespaces lists the namespaces whose namespace-local

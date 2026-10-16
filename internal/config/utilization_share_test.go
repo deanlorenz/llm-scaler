@@ -7,6 +7,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"gopkg.in/yaml.v3"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
 const quotaLimiters = `
@@ -318,6 +320,42 @@ optimizer:
 		_, selected, err := c.UtilizationShare()
 		Expect(selected).To(BeFalse())
 		Expect(err).To(MatchError(ContainSubstring("limiters")))
+	})
+
+	// Every namespace-scoped controller planning a physical group plans the
+	// same free GPUs of the whole cluster; the first to place keeps them.
+	It("refuses physicalGroups on a namespace-scoped controller, and keeps it on a cluster-scoped one", func() {
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(`
+limiters:
+  - type: gpu-inventory
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    physicalGroups: true
+`)})
+		us, selected, err := c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeTrue())
+		Expect(us.PhysicalGroups).To(BeTrue())
+
+		SetWatchNamespaceForTest(c, "team-a")
+		_, selected, err = c.UtilizationShare()
+		Expect(selected).To(BeFalse())
+		Expect(err).To(MatchError(ContainSubstring("physicalGroups is refused on a namespace-scoped controller (it manages team-a)")))
+		mode, modeErr := c.UtilizationShareMode()
+		Expect(mode).To(Equal(constants.UtilizationShareModeInvalid))
+		Expect(modeErr).To(HaveOccurred())
+	})
+
+	It("keeps a namespace-scoped controller's share without physicalGroups", func() {
+		SetWatchNamespaceForTest(c, "team-a")
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters + `
+optimizer:
+  type: utilizationShare
+`)})
+		_, selected, err := c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeTrue())
 	})
 
 	It("reports an unknown optimizer type", func() {
