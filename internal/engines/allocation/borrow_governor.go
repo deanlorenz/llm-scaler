@@ -89,6 +89,11 @@ type BorrowLedger struct {
 	// Backoff is the per (model, cohort) cooldowns, keyed
 	// "namespace/model@cohort" (B12).
 	Backoff map[string]BackoffEntry `json:"backoff,omitempty"`
+	// NoHole is, per "namespace/variant", the replicas ordered without a
+	// node hole the safety net still watches (M3): the shared record that
+	// marked them does not survive a restart, and without them a replica
+	// Kueue never placed within guaranteed waited Pending for good (AR2).
+	NoHole map[string]NoHoleReplicas `json:"noHole,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -224,6 +229,16 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) int {
 			g.backoff[k] = e
 		}
 	}
+	for _, k := range boundedKeys(l.NoHole, &dropped) {
+		h := l.NoHole[k]
+		if h.Replicas > maxLedgerReplicas {
+			dropped++
+			continue
+		}
+		if _, held := g.noHole[k]; !held && strings.Contains(k, "/") && h.Replicas > 0 && h.GPUs >= 0 && !h.Since.IsZero() {
+			g.noHole[k] = h
+		}
+	}
 	if l.IdleSince != nil && g.idleSince.IsZero() && !g.started {
 		g.idleSince = *l.IdleSince
 	}
@@ -282,6 +297,16 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 			out.Backoff[k] = BackoffEntry{Until: until.UTC(), Level: e.Level, LastAt: e.LastAt.Truncate(time.Second).UTC(),
 				Preempted: e.Preempted}
 		}
+	}
+	for k, h := range g.noHole {
+		if h.Replicas <= 0 || h.Since.IsZero() {
+			continue
+		}
+		if out.NoHole == nil {
+			out.NoHole = map[string]NoHoleReplicas{}
+		}
+		h.Since = h.Since.UTC()
+		out.NoHole[k] = h
 	}
 	return out
 }
@@ -869,8 +894,9 @@ func (g *BorrowGovernor) pinUnit(req ModelScalingRequest, unit map[string]int, s
 // hold (BorrowDraw.NoHole): how many, their GPUs, and since when: the
 // earliest order (BorrowDraw.OrderedAt), or when the governor first saw them.
 type NoHoleReplicas struct {
-	Replicas, GPUs int
-	Since          time.Time
+	Replicas int       `json:"replicas"`
+	GPUs     int       `json:"gpus"`
+	Since    time.Time `json:"since"`
 }
 
 // NoHoleOf is, per "namespace/variant", the replicas the entries ordered
