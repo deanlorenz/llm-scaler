@@ -15,6 +15,22 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
+// ReservedLimiterNames are the names that what held a decision back is
+// reported under -- the limiter_name label of wva_decisions_limited_total,
+// the ResourceConstrained Event and limitedBy in the scaling-decision line --
+// when it is not a quota entry: the physical limiter (whatever its entry is
+// named, it is reported as gpu-limiter), node fit, and the two Kueue
+// borrowing rules. A quota entry is reported under its own name, so one named
+// like these could not be told apart from them; Validate rejects it. The
+// allocation package holds the constants these mirror, and a test keeps the
+// two in step.
+var ReservedLimiterNames = []string{
+	"gpu-limiter",
+	"node-fit",
+	"pd-pair-borrows-whole",
+	"lender-cannot-reclaim",
+}
+
 // QuotaLimiterReservedNamespaceKey is the reserved key in the namespace-scoped
 // quotas map that matches any namespace not explicitly listed. A real namespace
 // named "default" cannot be configured directly via this key — list it in
@@ -772,7 +788,8 @@ type QuotaLimiterEntries struct {
 // is easy to locate.
 //
 // Validation rules (all from issue #1002):
-//   - Name is non-empty and unique across entries.
+//   - Name is non-empty and unique across entries, and not one of
+//     ReservedLimiterNames.
 //   - Type == "quota" (other limiter types may be added later).
 //   - Scope is one of the two QuotaScope values.
 //   - Per-type quota values are >= QuotaUnlimited (only -1 is allowed as negative).
@@ -798,6 +815,11 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		}
 		if prev, ok := seenNames[entry.Name]; ok {
 			errs = append(errs, fmt.Errorf("entry[%d]: duplicate limiter name %q (first seen at entry[%d])", i, entry.Name, prev))
+			continue
+		}
+		if slices.Contains(ReservedLimiterNames, entry.Name) {
+			errs = append(errs, fmt.Errorf("entry[%d]: limiter name %q is reserved: decisions held back by something other than a quota entry are reported under it (reserved: %s)",
+				i, entry.Name, strings.Join(ReservedLimiterNames, ", ")))
 			continue
 		}
 		seenNames[entry.Name] = i

@@ -7,8 +7,18 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// SR-M5: every name LimitedBy carries for something other than a quota entry
+// is reserved in the config, so no quota entry can be reported under it.
+var _ = Describe("attribution names a quota entry cannot take", func() {
+	It("reserves every non-entry LimitedBy value", func() {
+		Expect(config.ReservedLimiterNames).To(ConsistOf(
+			PhysicalLimiterName, NodeFitLimiterName, PairBorrowsWholeName, LenderCannotReclaimName))
+	})
+})
 
 var _ = Describe("bindingProvider", func() {
 	It("returns the provider with the tightest per-type availability", func() {

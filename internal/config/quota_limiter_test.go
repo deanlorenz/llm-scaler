@@ -318,6 +318,25 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 				{Name: "x", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
 				{Name: "x", Type: "quota", Scope: QuotaScopeNamespace, NamespaceQuotas: map[string]map[string]int{"a": {"H100": 1}}},
 			}}, "duplicate limiter name"),
+		// SR-M5: a quota entry named like the physical limiter, node fit or
+		// a borrowing rule would be reported under a name that means
+		// something else.
+		Entry("the physical limiter's reported name rejected",
+			&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
+				{Name: "gpu-limiter", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
+			}}, `limiter name "gpu-limiter" is reserved`),
+		Entry("node-fit rejected",
+			&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
+				{Name: "node-fit", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
+			}}, `limiter name "node-fit" is reserved`),
+		Entry("pd-pair-borrows-whole rejected",
+			&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
+				{Name: "pd-pair-borrows-whole", Type: "quota", Scope: QuotaScopeNamespace, NamespaceQuotas: map[string]map[string]int{"a": {"H100": 1}}},
+			}}, `limiter name "pd-pair-borrows-whole" is reserved`),
+		Entry("lender-cannot-reclaim rejected",
+			&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
+				{Name: "lender-cannot-reclaim", Type: "quota", Scope: QuotaScopeNamespace, NamespaceQuotas: map[string]map[string]int{"a": {"H100": 1}}},
+			}}, `limiter name "lender-cannot-reclaim" is reserved`),
 		Entry("wrong type rejected",
 			&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
 				{Name: "x", Type: "reservation", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},

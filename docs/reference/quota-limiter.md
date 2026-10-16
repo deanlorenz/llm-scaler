@@ -720,7 +720,9 @@ The nominal cap is unaffected by all of them.
 
 The policy entry is rejected for any of:
 
-- Empty or duplicate `name`.
+- Empty or duplicate `name`, or a `name` reserved for what a held-back
+  decision is reported under when it is not a quota entry: `gpu-limiter`,
+  `node-fit`, `pd-pair-borrows-whole`, `lender-cannot-reclaim`.
 - `type` other than `"quota"`.
 - `scope` outside `{cluster, namespace}`.
 - `namespaceQuotas` or `exclude` set on a cluster-scoped entry.
