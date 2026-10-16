@@ -60,10 +60,17 @@ func TestUtilizationShareAlertsShip(t *testing.T) {
 	}
 }
 
-// One cause pages once: a parked model with no wake signal is
-// WVAModelHasNoWakeSignal's, so the critical symptom alert leaves it out.
-func TestParkedWhileRefusedLeavesNoWakeSignalToItsOwnAlert(t *testing.T) {
-	a := findAlert(t, "WVAModelParkedWhileRequestsRefused")
-	assert.Equal(t, "critical", a.Severity)
-	assert.Regexp(t, `unless on \(exported_namespace, model_name\) \(max by \(exported_namespace, model_name\) \(wva_model_scaling_blocked\{reason="no-wake-signal"\}\) == 1\)$`, a.Expr)
+// One cause pages once, at critical: a parked model refusing requests pages
+// through WVAModelParkedWhileRequestsRefused whatever the cause, and the
+// no-wake-signal warning stays quiet while that condition holds.
+func TestNoWakeSignalQuietWhileParkedAndRefused(t *testing.T) {
+	parked := findAlert(t, "WVAModelParkedWhileRequestsRefused")
+	assert.Equal(t, "critical", parked.Severity)
+	assert.NotContains(t, parked.Expr, "no-wake-signal", "the critical page must not leave any cause out")
+	assert.NotContains(t, parked.Expr, "unless", "the critical page must not leave any cause out")
+
+	noWake := findAlert(t, "WVAModelHasNoWakeSignal")
+	assert.Equal(t, "warning", noWake.Severity)
+	assert.Equal(t, "("+`wva_model_scaling_blocked{reason="no-wake-signal"} == 1`+") unless on (exported_namespace, model_name) ("+parked.Expr+")", noWake.Expr,
+		"the warning must be quiet exactly while the critical alert's condition holds")
 }

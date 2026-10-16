@@ -49,16 +49,24 @@ tests:
 
   # 3. An optimizer block that does not validate falls back to today's
   #    optimizer: mode invalid fires after 10 minutes; a controller in shadow
-  #    mode (invalid at 0) does not.
+  #    mode (invalid at 0) does not. The series carry controller_instance, as
+  #    scraped ones do: two controllers in one namespace are told apart (east
+  #    is invalid, west is active), and two pods of one controller page once.
   - interval: 1m
     input_series:
-      - series: 'wva_utilization_share_mode{namespace="wva",mode="invalid",pod="wva-a"}'
+      - series: 'wva_utilization_share_mode{namespace="wva",controller_instance="east",mode="invalid",pod="wva-a"}'
         values: '1x20'
-      - series: 'wva_utilization_share_mode{namespace="wva",mode="active",pod="wva-a"}'
+      - series: 'wva_utilization_share_mode{namespace="wva",controller_instance="east",mode="invalid",pod="wva-b"}'
+        values: '1x20'
+      - series: 'wva_utilization_share_mode{namespace="wva",controller_instance="east",mode="active",pod="wva-a"}'
         values: '0x20'
-      - series: 'wva_utilization_share_mode{namespace="other",mode="invalid",pod="wva-c"}'
+      - series: 'wva_utilization_share_mode{namespace="wva",controller_instance="west",mode="invalid",pod="wva-w"}'
         values: '0x20'
-      - series: 'wva_utilization_share_mode{namespace="other",mode="shadow",pod="wva-c"}'
+      - series: 'wva_utilization_share_mode{namespace="wva",controller_instance="west",mode="active",pod="wva-w"}'
+        values: '1x20'
+      - series: 'wva_utilization_share_mode{namespace="other",controller_instance="east",mode="invalid",pod="wva-c"}'
+        values: '0x20'
+      - series: 'wva_utilization_share_mode{namespace="other",controller_instance="east",mode="shadow",pod="wva-c"}'
         values: '1x20'
     alert_rule_test:
       - eval_time: 9m
@@ -67,17 +75,24 @@ tests:
       - eval_time: 11m
         alertname: WVAUtilizationShareModeInvalid
         exp_alerts:
-          - exp_labels: {severity: warning, namespace: wva}
+          - exp_labels: {severity: warning, namespace: wva, controller_instance: east}
 
-  # 4. A parked model refusing requests pages critical, unless it has no wake
-  #    signal: that cause is WVAModelHasNoWakeSignal's, which fires for it, so
-  #    one cause pages once. m-quota is refused for another cause and pages.
+  # 4. A parked model refusing requests pages critical whatever the cause,
+  #    no wake signal included. WVAModelHasNoWakeSignal stays quiet while the
+  #    critical alert's condition holds, so one cause pages once, at critical:
+  #    before 5m nothing fires; from 5m to 10m and after, only the critical
+  #    alert does. m-quota is refused for another cause. m-idle has no wake
+  #    signal and no refused requests, so the warning pages for it at 10m.
   - interval: 1m
     input_series:
       - series: 'wva_model_replicas{exported_namespace="team-a",model_name="m-silent",pod="wva-a"}'
         values: '0x20'
       - series: 'wva_model_replicas{exported_namespace="team-a",model_name="m-quota",pod="wva-a"}'
         values: '0x20'
+      - series: 'wva_model_replicas{exported_namespace="team-a",model_name="m-idle",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m-idle",reason="no-wake-signal",pod="wva-a"}'
+        values: '1x20'
       - series: 'llm_d_epp_request_error_total{model_name="m-silent",error_code="ServiceUnavailable"}'
         values: '0+10x20'
       - series: 'llm_d_epp_request_error_total{model_name="m-quota",error_code="ServiceUnavailable"}'
@@ -87,11 +102,33 @@ tests:
       - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m-quota",reason="wake-no-capacity",pod="wva-a"}'
         values: '1x20'
     alert_rule_test:
+      - eval_time: 4m
+        alertname: WVAModelParkedWhileRequestsRefused
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: WVAModelParkedWhileRequestsRefused
+        exp_alerts:
+          - exp_labels: {severity: critical, exported_namespace: team-a, model_name: m-silent}
+          - exp_labels: {severity: critical, exported_namespace: team-a, model_name: m-quota}
+      - eval_time: 7m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m-idle, reason: no-wake-signal, pod: wva-a}
       - eval_time: 15m
         alertname: WVAModelParkedWhileRequestsRefused
         exp_alerts:
+          - exp_labels: {severity: critical, exported_namespace: team-a, model_name: m-silent}
           - exp_labels: {severity: critical, exported_namespace: team-a, model_name: m-quota}
       - eval_time: 15m
         alertname: WVAModelHasNoWakeSignal
         exp_alerts:
-          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m-silent, reason: no-wake-signal, pod: wva-a}
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m-idle, reason: no-wake-signal, pod: wva-a}
