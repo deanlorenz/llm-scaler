@@ -381,6 +381,17 @@ func (g *BorrowGovernor) backoffFor(level int) time.Duration {
 // consequence, not a second reclaim. Doubling for it held the model off its
 // cohort for 20 minutes after one reclaim, about 25 in all.
 func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.Time, preempted bool) {
+	g.markBackoffAfter(modelKey, cohorts, at, preempted, g.settings.PlacementTimeout)
+}
+
+// markBackoffAfter is markBackoff for a placement-timeout release whose
+// replicas waited timeout -- tripled while a scale-up is pending -- before it
+// fired. Such a release is the preemption's consequence while it comes within
+// the preemption's cooldown, or within that timeout of the preemption plus
+// one base placement timeout for the replacement pod to appear (N-m4): with
+// a 15m tripled timeout the release lands past a 10m cooldown, and compared
+// against the cooldown alone it doubled again.
+func (g *BorrowGovernor) markBackoffAfter(modelKey string, cohorts []string, at time.Time, preempted bool, timeout time.Duration) {
 	if len(cohorts) == 0 {
 		g.markModelCooldown(modelKey, at)
 		return
@@ -392,6 +403,13 @@ func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.
 			continue
 		}
 		if ok && !preempted && e.Preempted && at.Before(e.Until) {
+			continue
+		}
+		if ok && !preempted && e.Preempted && at.Before(e.LastAt.Add(timeout+g.settings.PlacementTimeout)) {
+			// The same event, landing after its cooldown ended: the release
+			// starts the cooldown it always does, at the level the
+			// preemption set, not one up.
+			g.backoff[k] = BackoffEntry{Until: at.Add(g.backoffFor(e.Level)), Level: e.Level, LastAt: at}
 			continue
 		}
 		level := 0
@@ -775,7 +793,7 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 				below = 0
 			}
 			heldPast[req.Namespace][typeKey] -= gpus
-			g.markBackoff(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false)
+			g.markBackoffAfter(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false, timeout)
 			break // one release per model per cycle: the counts above are now stale
 		}
 	}
