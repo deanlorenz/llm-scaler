@@ -114,9 +114,9 @@ falling model's whole scale-down window.
   unmanaged workloads stop pods, a donor's freed GPUs can be taken by a pod the
   scaling manager did not place (`release-taken`).
 - **A model runs on more than one accelerator type.** It is never planned; it
-  stays on today's optimizer.
+  stays on the default optimizer.
 - **A namespace a namespace quota excludes, with no cluster quota.** It is
-  never planned; it stays on today's optimizer. Add a `scope: cluster` quota
+  never planned; it stays on the default optimizer. Add a `scope: cluster` quota
   for its accelerator type to share it.
 
 ### What it needs

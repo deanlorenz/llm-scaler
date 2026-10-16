@@ -361,7 +361,7 @@ its own free quota and the whole cluster free.
 </details>
 
 A model whose variants run on more than one accelerator type, or whose analyzer
-result is not live this cycle, is left to today's optimizer for that cycle.
+result is not live this cycle, is left to the default optimizer for that cycle.
 
 **Start in shadow mode.** `shadow` defaults to `false`, so
 `optimizer: {type: utilizationShare}` on its own **acts**: it moves replicas
@@ -397,8 +397,8 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
 | `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
-| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
-| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
+| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on the default optimizer. |
+| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to the default optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
 | `stabilization` | see below | How fast GPUs move between models against how often they move back. |
 
 **Stabilization.** GPUs that move between models take minutes to become useful
@@ -465,7 +465,7 @@ clamped into it.
 A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
-where its weight would be weighed against other tenants'; there today's optimizer
+where its weight would be weighed against other tenants'; there the default optimizer
 keeps it.
 
 **Disabling one namespace:**
@@ -485,7 +485,7 @@ disables nothing, and the controller logs
 **A canary on a cluster quota.** `namespaces:` cannot narrow a cluster group;
 `clusterNamespaces:` does. With it set, the cluster group of each accelerator type
 plans only the models of the listed namespaces, sharing among them the quota's
-free GPUs plus what they hold. Every other model stays on today's optimizer, and
+free GPUs plus what they hold. Every other model stays on the default optimizer, and
 the GPUs it holds stay outside the group. Start with one or two namespaces whose
 owners agreed to it, then widen the list or remove it (empty plans every
 namespace):

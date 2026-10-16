@@ -431,7 +431,7 @@ Use the logs when a metric tells you *which* model is wrong and you want *why*.
 | `Utilization share: need history truncated; the roles left out count at their ceiling after a restart` | a group's entry was over its bound (128 roles, or its equal share of 900 KiB): the roles with the smallest stored peaks were left out; carries `group`, `droppedRoles`, `dropped` (the first ten). Logged once per change | Info |
 | `Utilization share: the need history ConfigMap was deleted; every model's need history is forgotten` | the ConfigMap was deleted after the controller had read or written it: the flush. Every model's peak is unknown again for a `flappingWindow` | Info |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
-| `Utilization share: not sharing models no quota bounds` | models of a namespace a namespace quota lists in `exclude`, with no finite `scope: cluster` quota for their accelerator type; today's optimizer keeps them. Carries `models` (`namespace/model: reason`). Logged once per change | Info |
+| `Utilization share: not sharing models no quota bounds` | models of a namespace a namespace quota lists in `exclude`, with no finite `scope: cluster` quota for their accelerator type; the default optimizer keeps them. Carries `models` (`namespace/model: reason`). Logged once per change | Info |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 
