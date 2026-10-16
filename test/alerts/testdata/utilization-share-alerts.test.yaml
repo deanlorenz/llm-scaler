@@ -1,0 +1,97 @@
+# promtool unit tests for the utilization-share alerts, and for the wake
+# alerts paging once per cause. hack/check-alert-rules.sh copies the shipped
+# PrometheusRule groups, annotations stripped, to rules.yaml beside this file
+# and runs promtool test rules on it.
+#
+# The series carry the labels they have once scraped: the model namespace as
+# exported_namespace, the controller namespace as namespace, and pod for the
+# controller pod.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # 1. marks-unreadable freezes a group until someone fixes it: one alert per
+  #    model after 10 minutes, the same model seen from two controller pods
+  #    included. A passing reason (quiet-period) never fires it.
+  - interval: 1m
+    input_series:
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m1",reason="marks-unreadable",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m1",reason="marks-unreadable",pod="wva-b"}'
+        values: '1x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m2",reason="quiet-period",pod="wva-a"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WVAUtilizationShareMarksUnreadable
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WVAUtilizationShareMarksUnreadable
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m1}
+
+  # 2. Floors that exceed the quota fire after 15 minutes, per model; a
+  #    reason that cleared after 5 minutes does not.
+  - interval: 1m
+    input_series:
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m1",reason="floors-exceed-quota",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m2",reason="floors-exceed-quota",pod="wva-a"}'
+        values: '1x5 stale'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WVAUtilizationShareFloorsExceedQuota
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: WVAUtilizationShareFloorsExceedQuota
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m1}
+
+  # 3. An optimizer block that does not validate falls back to today's
+  #    optimizer: mode invalid fires after 10 minutes; a controller in shadow
+  #    mode (invalid at 0) does not.
+  - interval: 1m
+    input_series:
+      - series: 'wva_utilization_share_mode{namespace="wva",mode="invalid",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_utilization_share_mode{namespace="wva",mode="active",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_utilization_share_mode{namespace="other",mode="invalid",pod="wva-c"}'
+        values: '0x20'
+      - series: 'wva_utilization_share_mode{namespace="other",mode="shadow",pod="wva-c"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WVAUtilizationShareModeInvalid
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WVAUtilizationShareModeInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: wva}
+
+  # 4. A parked model refusing requests pages critical, unless it has no wake
+  #    signal: that cause is WVAModelHasNoWakeSignal's, which fires for it, so
+  #    one cause pages once. m-quota is refused for another cause and pages.
+  - interval: 1m
+    input_series:
+      - series: 'wva_model_replicas{exported_namespace="team-a",model_name="m-silent",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_model_replicas{exported_namespace="team-a",model_name="m-quota",pod="wva-a"}'
+        values: '0x20'
+      - series: 'llm_d_epp_request_error_total{model_name="m-silent",error_code="ServiceUnavailable"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_error_total{model_name="m-quota",error_code="ServiceUnavailable"}'
+        values: '0+10x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m-silent",reason="no-wake-signal",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_model_scaling_blocked{exported_namespace="team-a",model_name="m-quota",reason="wake-no-capacity",pod="wva-a"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WVAModelParkedWhileRequestsRefused
+        exp_alerts:
+          - exp_labels: {severity: critical, exported_namespace: team-a, model_name: m-quota}
+      - eval_time: 15m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m-silent, reason: no-wake-signal, pod: wva-a}

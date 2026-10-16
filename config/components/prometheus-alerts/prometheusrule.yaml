@@ -119,6 +119,40 @@ spec:
 # taking the two alerts above with it. The reason is still on the metric and on
 # the operational dashboard, which is where a permanent condition belongs.
 
+    # The utilization-share optimizer's conditions that hold until someone
+    # changes something. Its passing states (quiet-period, swinging,
+    # transfer-limit, ...) clear by themselves and are not alerted on.
+    # test/alerts/testdata/utilization-share-alerts.test.yaml pins these.
+    - alert: WVAUtilizationShareMarksUnreadable
+      expr: max by (exported_namespace, model_name) (wva_model_scaling_blocked{reason="marks-unreadable"}) == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything"
+        summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} is frozen: the utilization-share optimizer cannot read its transfer marks"
+        description: "The controller cannot read the transfer marks on the donor pods of this model's utilization-share group, so it cannot start the group's ledger: every planned model of the group holds what it runs and none scales, up or down. It does not clear by itself. The Error log line 'Utilization share: could not read transfer marks; retrying next cycle' names the cause, typically a missing RBAC grant to list pods in one model's namespace."
+
+    - alert: WVAUtilizationShareFloorsExceedQuota
+      expr: max by (exported_namespace, model_name) (wva_model_scaling_blocked{reason="floors-exceed-quota"}) == 1
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything"
+        summary: "The minReplicaCount floors of {{ $labels.exported_namespace }}/{{ $labels.model_name }}'s utilization-share group add up to more than its quota"
+        description: "The configured floors (minReplicaCount) of the models sharing this quota add up to more GPUs than the quota holds, so the optimizer cannot honour all of them; every model of the group shows this reason. Lower a floor or raise the quota."
+
+    - alert: WVAUtilizationShareModeInvalid
+      expr: max by (namespace, controller_instance) (wva_utilization_share_mode{mode="invalid"}) == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything"
+        summary: "The utilization-share optimizer block does not validate; today's optimizer runs instead"
+        description: "The scaling policy's optimizer block failed validation, so the utilization-share optimizer is not running and the fleet is scaled by today's optimizer, silently. The log line 'Utilization share: invalid optimizer block; keeping today's optimizer' says why: a misspelled key, a value out of range, an empty clusterNamespaces entry, or no limiters: list (no budget to share)."
+
     # The SLO alerts. Notes for whoever edits them; the operator's runbook is
     # in troubleshooting.md.
     # - WVAModelSLOMissed is for the TPOT mean, which promises no share of
@@ -201,14 +235,14 @@ spec:
         description: "The model's policy has set a {{ $labels.objective }} target for 55 of the last 60 minutes and the model has replicas, but no window was judged in it, and not for lack of traffic: either the fleet was excluded for at least half of it, never holding still for a window plus its grace (wva_slo_excluded says why), or the router's series for the objective are missing (router not scraped, not in the model's namespace, or clients not streaming), or TPOT saw no requests while the router served streaming requests (clients do not send stream_options.include_usage, or the router does not publish its TPOT series). The runbook has a table of each case."
 
     - alert: WVAModelParkedWhileRequestsRefused
-      expr: (sum by (exported_namespace, model_name) (wva_model_replicas) == 0) and on (model_name) (sum by (model_name) (rate(llm_d_epp_request_error_total{error_code="ServiceUnavailable"}[5m])) > 0)
+      expr: ((sum by (exported_namespace, model_name) (wva_model_replicas) == 0) and on (model_name) (sum by (model_name) (rate(llm_d_epp_request_error_total{error_code="ServiceUnavailable"}[5m])) > 0)) unless on (exported_namespace, model_name) (max by (exported_namespace, model_name) (wva_model_scaling_blocked{reason="no-wake-signal"}) == 1)
       for: 5m
       labels:
         severity: critical
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-will-not-wake-from-zero"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} is at zero replicas while requests are being refused"
-        description: "Grouped by exported_namespace, not namespace: Prometheus renames a scraped `namespace` label to `exported_namespace` because the scrape job already carries one, so plain `namespace` here is the CONTROLLER's namespace and would name the wrong place. Nothing is serving this model and EPP is returning ServiceUnavailable for it, so traffic is being dropped and the autoscaler has not brought it back. This alerts on the SYMPTOM, so it fires whatever the cause: no wake signal (see WVAModelHasNoWakeSignal, which names that specific cause), an EPP that cannot be scraped, KEDA not delivering the activation, an admission or quota refusal on the scale-up, or a bug. Start with wva_model_scaling_blocked for this model — if a reason is present it is the likely cause; wake-no-capacity or wake-nominal-lent-out means a limiter had no room for the wake, and the log line 'Scale-from-zero: no variant woken for a model with pending requests' says what it was measured against. Note the join is on model_name alone because EPP's metrics carry no namespace, so two namespaces serving the same modelID cannot be told apart here; the namespace shown comes from the controller's side."
+        description: "Grouped by exported_namespace, not namespace: Prometheus renames a scraped `namespace` label to `exported_namespace` because the scrape job already carries one, so plain `namespace` here is the CONTROLLER's namespace and would name the wrong place. Nothing is serving this model and EPP is returning ServiceUnavailable for it, so traffic is being dropped and the autoscaler has not brought it back. This alerts on the SYMPTOM, so it fires whatever the cause but one: a model with no wake signal is left to WVAModelHasNoWakeSignal, which names that cause, so one cause pages once. Other causes: an EPP that cannot be scraped, KEDA not delivering the activation, an admission or quota refusal on the scale-up, or a bug. Start with wva_model_scaling_blocked for this model — if a reason is present it is the likely cause; wake-no-capacity or wake-nominal-lent-out means a limiter had no room for the wake, and the log line 'Scale-from-zero: no variant woken for a model with pending requests' says what it was measured against. Note the join is on model_name alone because EPP's metrics carry no namespace, so two namespaces serving the same modelID cannot be told apart here; the namespace shown comes from the controller's side."
 
     - alert: WVAScalerTargetsUndecided
       expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0

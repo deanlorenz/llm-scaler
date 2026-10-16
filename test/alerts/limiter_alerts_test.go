@@ -40,3 +40,30 @@ func TestNodeReadDenialPagesCriticalOnlyForAPhysicalLimiterAlone(t *testing.T) {
 			"a skipped provider leaves the other limiters bounding; it must not page as critical: %s", s)
 	}
 }
+
+// SR-M4: the utilization-share conditions that hold until someone changes
+// something page; each names its reason and its runbook, and none is critical
+// (the fleet still scales under today's optimizer or holds what it runs).
+func TestUtilizationShareAlertsShip(t *testing.T) {
+	for name, want := range map[string]struct{ metric, matcher, forDur string }{
+		"WVAUtilizationShareMarksUnreadable":   {"wva_model_scaling_blocked", `{reason="marks-unreadable"}`, "10m"},
+		"WVAUtilizationShareFloorsExceedQuota": {"wva_model_scaling_blocked", `{reason="floors-exceed-quota"}`, "15m"},
+		"WVAUtilizationShareModeInvalid":       {"wva_utilization_share_mode", `{mode="invalid"}`, "10m"},
+	} {
+		a := findAlert(t, name)
+		assert.Equal(t, []string{want.metric}, ExtractMetricNames(a.Expr), name)
+		assert.Contains(t, a.Expr, want.matcher, name)
+		assert.Contains(t, a.Expr, "max by (", "%s: two controller pods must not page twice", name)
+		assert.Equal(t, want.forDur, a.For, name)
+		assert.Equal(t, "warning", a.Severity, name)
+		assert.True(t, strings.HasSuffix(a.Runbook, "#the-optimizer-evaluates-but-never-moves-anything"), name)
+	}
+}
+
+// One cause pages once: a parked model with no wake signal is
+// WVAModelHasNoWakeSignal's, so the critical symptom alert leaves it out.
+func TestParkedWhileRefusedLeavesNoWakeSignalToItsOwnAlert(t *testing.T) {
+	a := findAlert(t, "WVAModelParkedWhileRequestsRefused")
+	assert.Equal(t, "critical", a.Severity)
+	assert.Regexp(t, `unless on \(exported_namespace, model_name\) \(max by \(exported_namespace, model_name\) \(wva_model_scaling_blocked\{reason="no-wake-signal"\}\) == 1\)$`, a.Expr)
+}

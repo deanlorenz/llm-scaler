@@ -1166,7 +1166,7 @@ Work down the list in order.
 
 1. **Is it selected at all?** Exactly one `wva_utilization_share_mode` series
    is `1`: `off`, `invalid`, `shadow` or `active`.
-   - For `invalid` or `off`, the log says why: `Utilization share: invalid
+   - For `invalid` (alert `WVAUtilizationShareModeInvalid`) or `off`, the log says why: `Utilization share: invalid
      optimizer block; keeping today's optimizer` (a misspelled key, a value out
      of range, an empty `clusterNamespaces` entry, or `needs a limiters: list`,
      no budget to share).
@@ -1259,8 +1259,9 @@ Work down the list in order.
    - While it lasts, every planned model shows blocked reason `quiet-period`,
      and the log line `Utilization share: ledger started` carries
      `planningFrom`.
-   - A freeze that does not end shows `marks-unreadable`: the controller cannot
-     read the transfer marks on the donors' pods. The Error line `Utilization
+   - A freeze that does not end shows `marks-unreadable` (alert
+     `WVAUtilizationShareMarksUnreadable`): the controller cannot read the
+     transfer marks on the donors' pods. The Error line `Utilization
      share: could not read transfer marks; retrying next cycle` says why,
      typically a missing RBAC grant to list pods in one model's namespace.
 

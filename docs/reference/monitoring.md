@@ -272,13 +272,15 @@ is set. Full list, with labels:
 | `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing. Every outcome is published at `0` while a group acts, so `increase()` counts the first one too |
 | `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
 
-Alerts worth having once it is configured. Set each `for:` to a few release
+Three alerts ship with the [alerting rules](prometheus.md#the-shipped-alerts):
+`WVAUtilizationShareModeInvalid` (the optimizer block is broken; today's
+optimizer runs instead), `WVAUtilizationShareMarksUnreadable` (a group frozen
+until someone fixes RBAC) and `WVAUtilizationShareFloorsExceedQuota`.
+
+More alerts worth having once it is configured. Set each `for:` to a few release
 times (`wva_utilization_share_effective_seconds{param="release-timeout"}` is one):
 
 ```promql
-# The optimizer block is broken; today's optimizer runs instead.
-wva_utilization_share_mode{mode="invalid"} == 1
-
 # You configured it, but the controller reports it off.
 wva_utilization_share_mode{mode="off"} == 1
 
@@ -294,8 +296,9 @@ histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
 0.8 * max by (accelerator_type, scope) (
   wva_utilization_share_effective_seconds{param="release-timeout"})
 
-# A model held back until someone changes something.
-wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
+# A model held back until someone changes something (floors-exceed-quota and
+# marks-unreadable ship as alerts).
+wva_model_scaling_blocked{reason="no-compatible-donor"} == 1
 
 # A role stuck below three quarters of its need while the optimizer acts.
 wva_utilization_share_headroom < -0.25
@@ -322,8 +325,9 @@ Notes on these alerts:
   out while no controller ran is not counted; its mark is removed, and the log
   line "removed a transfer mark older than the release timeout" names the pod.
 - **Held back:** alert with a `for:` of a few release timeouts.
-  `marks-unreadable` freezes every model of the group until the controller can
-  read its transfer marks again.
+  `marks-unreadable`, which freezes every model of the group until the
+  controller can read its transfer marks again, ships as
+  `WVAUtilizationShareMarksUnreadable`.
 - **Stuck short:** alert with a `for:` of about one reversal hold,
   `wva_utilization_share_effective_seconds{param="reversal-hold"}` (about 12
   minutes with a 300 s scale-down window); a transfer should have reached it by
