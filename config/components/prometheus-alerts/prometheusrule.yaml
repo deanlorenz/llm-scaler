@@ -386,7 +386,7 @@ spec:
     - alert: WVAKueueBorrowThrashing
       expr: |
         (
-          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h]))
           or
           sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h])) * 0
         )
@@ -394,7 +394,7 @@ spec:
         (
           sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))
           or
-          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h])) * 0
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h])) * 0
         )
         > 3.5
       for: 1m
@@ -403,4 +403,4 @@ spec:
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#replicas-dropped-under-kueue-borrowing"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
-        description: "Counts, over the last hour, the times the scaling manager gave borrowed capacity back (wva_borrow_releases_total: after a placement timeout) plus the times Kueue preempted it (wva_kueue_preempted_pods_total). Both count events: one P/D pair, or one LeaderWorkerSet group, lost together is one. With a lender that reclaims (reclaimWithinCohort Any), Kueue's preemptions are the usual cause. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."
+        description: "Counts, over the last hour, the times the scaling manager gave borrowed capacity back (wva_borrow_releases_total: after a placement timeout; cause kueue-gate, a replica Kueue held at its gate where no borrowing is counted, is not borrowed capacity and is left out) plus the times Kueue preempted it (wva_kueue_preempted_pods_total). Both count events: one P/D pair, or one LeaderWorkerSet group, lost together is one. With a lender that reclaims (reclaimWithinCohort Any), Kueue's preemptions are the usual cause. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."

@@ -153,7 +153,7 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 //
 // A reclaim entry recorded (growth into nominal Kueue preempts borrowers for)
 // is also queued, once, for the next steady-state pass to yield for
-// (TakeWakeReclaims): that pass lowers this controller's own borrowers in the
+// (PendingWakeReclaims): that pass lowers this controller's own borrowers in the
 // cohort, as it does for a reclaim it orders itself (yieldReclaimed).
 func (b *BorrowInFlight) RecordWake(draws []BorrowDraw, now time.Time) {
 	if b == nil {
@@ -178,22 +178,54 @@ func (b *BorrowInFlight) RecordWake(draws []BorrowDraw, now time.Time) {
 	}
 }
 
-// TakeWakeReclaims returns the wakes' reclaim entries no steady-state pass
-// has yielded for yet, ordered at most InFlightTTL before now, and forgets
-// them: each is yielded for in one pass only, however long its replica takes
-// to land (GreedyByScoreOptimizer.WakeReclaims). Nil when there are none.
-func (b *BorrowInFlight) TakeWakeReclaims(now time.Time) []BorrowDraw {
+// PendingWakeReclaims returns the wakes' reclaim entries no steady-state pass
+// has yielded for yet (GreedyByScoreOptimizer.WakeReclaims), ordered at most
+// InFlightTTL before now and still live: the record still holds the wake's
+// entry, in flight or lagging once its pods exist. One the record dropped --
+// the wake that ordered it is gone -- lowers nobody, and is forgotten. They
+// stay queued until a pass that yielded for them is reported
+// (YieldedWakeReclaims), so a cycle that ran no greedy pass, or did not get
+// to one, loses none. The queue is in memory: a restart forgets it. Nil when
+// there are none.
+func (b *BorrowInFlight) PendingWakeReclaims(now time.Time) []BorrowDraw {
 	if b == nil {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := slices.DeleteFunc(b.wakeReclaims, func(d BorrowDraw) bool { return now.Sub(d.OrderedAt) > InFlightTTL })
-	b.wakeReclaims = nil
-	if len(out) == 0 {
+	b.wakeReclaims = slices.DeleteFunc(b.wakeReclaims, func(d BorrowDraw) bool {
+		return now.Sub(d.OrderedAt) > InFlightTTL || !b.wakeLiveLocked(d)
+	})
+	if len(b.wakeReclaims) == 0 {
 		return nil
 	}
-	return out
+	return slices.Clone(b.wakeReclaims)
+}
+
+// wakeLiveLocked reports whether the record still holds the wake's entry d:
+// in flight, or lagging once its pods exist.
+func (b *BorrowInFlight) wakeLiveLocked(d BorrowDraw) bool {
+	k := keyOfDraw(d)
+	if e, ok := b.entries[k]; ok && e.Wake {
+		return true
+	}
+	return slices.ContainsFunc(b.lagging, func(l BorrowDraw) bool { return l.Wake && keyOfDraw(l) == k })
+}
+
+// YieldedWakeReclaims forgets the wakes' reclaim entries a pass has yielded
+// for (PendingWakeReclaims' answer handed to it): each is yielded for once,
+// however long its replica takes to land.
+func (b *BorrowInFlight) YieldedWakeReclaims(draws []BorrowDraw) {
+	if b == nil || len(draws) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.wakeReclaims = slices.DeleteFunc(b.wakeReclaims, func(d BorrowDraw) bool {
+		return slices.ContainsFunc(draws, func(y BorrowDraw) bool {
+			return keyOfDraw(y) == keyOfDraw(d) && y.OrderedAt.Equal(d.OrderedAt)
+		})
+	})
 }
 
 // WithoutVariants is u less the entries of ns's variants in own: a model's

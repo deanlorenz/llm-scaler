@@ -45,7 +45,7 @@ type BorrowInFlight struct {
 	blocked  map[string]bool
 	cycleAt  time.Time
 	// wakeReclaims is the wakes' reclaim entries (RecordWake) no steady-state
-	// pass has yielded for yet (TakeWakeReclaims).
+	// pass has yielded for yet (PendingWakeReclaims, YieldedWakeReclaims).
 	wakeReclaims []BorrowDraw
 }
 

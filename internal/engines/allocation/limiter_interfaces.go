@@ -159,6 +159,13 @@ type ResourceConstraints struct {
 	// namespaces, and releases a replica held there past the placement
 	// timeout (KueueNamespaces, uncountedHeldPast).
 	KueueBacked bool
+	// KueueCountsBorrowing is set on a KueueBacked entry configured to count
+	// cohort borrowing (countBorrowable not false), whether or not a
+	// namespace counts it this cycle. Of its namespaces only those whose
+	// queue is in no cohort (BorrowWithheld no-cohort) are governed as
+	// counting no borrowing: any other may be withheld for a while (a stale
+	// read, an eligibility check) while Kueue still admits it by borrowing.
+	KueueCountsBorrowing bool
 }
 
 // KueueReadReporter is an inventory that reports a Kueue source never read
@@ -171,6 +178,7 @@ type KueueReadReporter interface {
 // figures are read from Kueue (QuotaInventory).
 type KueueBackedInventory interface {
 	KueueBacked() bool
+	KueueCountsBorrowing() bool
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

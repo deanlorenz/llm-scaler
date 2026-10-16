@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
@@ -44,17 +45,34 @@ func placement(ctx context.Context, k8sClient client.Client, namespace string,
 	}
 	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
 	unplaced, since, pods, at = countUnplaced(list, group, now)
-	return unplaced, since, pods, at, countGated(list, group, at)
+	if len(at) == 0 {
+		return unplaced, since, pods, at, nil
+	}
+	var gatedPods []*corev1.Pod
+	for i := range list {
+		if kueue.PodGated(&list[i]) {
+			gatedPods = append(gatedPods, &list[i])
+		}
+	}
+	reserved, err := kueue.ReservedPods(ctx, kueue.WorkloadsVia(k8sClient), namespace, gatedPods)
+	if err != nil {
+		// Whether Kueue reserved them cannot be told: none is reported as
+		// waiting for quota, so none is released for it.
+		return unplaced, since, pods, at, nil
+	}
+	return unplaced, since, pods, at, countGated(list, group, at, reserved)
 }
 
 // countGated is the replicas of at (countUnplaced's) one of whose unplaced
-// pods is held at Kueue's admission gate, each at its time in at: per pod, or
-// on a LeaderWorkerSet per group. Nil when none.
-func countGated(list []corev1.Pod, group bool, at map[string]time.Time) map[string]time.Time {
+// pods is held at Kueue's admission gate waiting for quota, each at its time
+// in at: per pod, or on a LeaderWorkerSet per group. A gated pod whose
+// Workload Kueue already reserved quota for (reserved, kueue.ReservedPods)
+// waits on an admission check, not on quota, and is left out. Nil when none.
+func countGated(list []corev1.Pod, group bool, at map[string]time.Time, reserved map[types.UID]bool) map[string]time.Time {
 	var out map[string]time.Time
 	for i := range list {
 		p := &list[i]
-		if !kueue.PodGated(p) || p.DeletionTimestamp != nil || p.Spec.NodeName != "" {
+		if !kueue.PodGated(p) || reserved[p.UID] || p.DeletionTimestamp != nil || p.Spec.NodeName != "" {
 			continue
 		}
 		key := p.Name

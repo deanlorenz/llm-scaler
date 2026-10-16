@@ -101,10 +101,11 @@ type GreedyByScoreOptimizer struct {
 
 	// WakeReclaims, when set, is the scale-from-zero wakes' growth into
 	// nominal their queue lent out that no pass has yielded for yet
-	// (BorrowInFlight.TakeWakeReclaims): Kueue preempts borrowers to admit
+	// (BorrowInFlight.PendingWakeReclaims): Kueue preempts borrowers to admit
 	// it, so the pass lowers this controller's own borrowers in the cohort
-	// as it does for a reclaim it orders itself (yieldReclaimed). Each is
-	// handed to one pass only.
+	// as it does for a reclaim it orders itself (yieldReclaimed). The engine
+	// reports them yielded after the pass (YieldedWakeReclaims), so each
+	// lowers a borrower once.
 	WakeReclaims []BorrowDraw
 
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
@@ -112,6 +113,9 @@ type GreedyByScoreOptimizer struct {
 	// reclaims is what the last non-shadow pass grew into by Kueue's
 	// preemption of borrowers (ReclaimDraws).
 	reclaims []BorrowDraw
+	// wakeYielded is the wakes' reclaims the last non-shadow pass yielded
+	// for (WakeReclaimsYielded).
+	wakeYielded []BorrowDraw
 	// flavors is what the last non-shadow pass placed on Kueue flavors'
 	// nodes (PlacedFlavors).
 	flavors []flavorUse
@@ -131,6 +135,14 @@ func (o *GreedyByScoreOptimizer) BorrowDraws() []BorrowDraw {
 // borrowed GPUs again before a read shows them.
 func (o *GreedyByScoreOptimizer) ReclaimDraws() []BorrowDraw {
 	return o.reclaims
+}
+
+// WakeReclaimsYielded returns the wakes' reclaims (WakeReclaims) the last
+// non-shadow pass yielded for, for the engine to report to the record
+// (BorrowInFlight.YieldedWakeReclaims); nil when the pass did not reach the
+// yield.
+func (o *GreedyByScoreOptimizer) WakeReclaimsYielded() []BorrowDraw {
+	return o.wakeYielded
 }
 
 // spendOp is one debit a pass made: gpus from key of the cluster budget (ns
@@ -282,7 +294,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		bs.wakeReclaims = o.WakeReclaims
 	}
 	if !o.quiet {
-		o.draws, o.flavors, o.reclaims = nil, nil, nil
+		o.draws, o.flavors, o.reclaims, o.wakeYielded = nil, nil, nil, nil
 		defer func() {
 			o.draws = bs.drawsByVariant()
 			if bs != nil {
@@ -375,6 +387,9 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	// that model gives them back in the same pass (KU3).
 	if lowered := bs.yieldReclaimed(allDecisions, requests); len(lowered) > 0 && !o.quiet {
 		logger.Info(ReclaimYieldLogMessage, "replicasByVariant", lowered)
+	}
+	if !o.quiet && bs != nil {
+		o.wakeYielded = bs.wakeReclaims
 	}
 
 	// The warm pool's headroom, from what this pass left: every replica it

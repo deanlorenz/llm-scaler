@@ -284,7 +284,7 @@ func (e *Engine) borrowReleasedEvent(r allocation.BorrowRelease, acc scaletarget
 		e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,
 			fmt.Sprintf("Released replicas held at Kueue's admission gate: replicas lowered from %d to %d (cause %s). "+
 				"Kueue did not admit them within the placement timeout: their ClusterQueue has no room for them, "+
-				"and nothing is borrowed or reclaimed for them", r.From, r.To, r.Cause))
+				"and their namespace borrows nothing from its cohort", r.From, r.To, r.Cause))
 		return
 	}
 	e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,

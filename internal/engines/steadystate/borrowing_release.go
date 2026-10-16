@@ -78,16 +78,21 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 	return allocation.BlockCohorts(constraints, st.governor.BlockedCohorts(now))
 }
 
-// governGated runs the governor in a cycle that counts no borrowing and has
-// Kueue-backed namespaces (a countBorrowable: false entry, queues in no
-// cohort): it observes the cycle, so that releaseBorrowed releases a replica
-// held at Kueue's admission gate past the placement timeout there
-// (BorrowGovernor.gatedRelease) and keeps the releases in flight in force as
-// a borrowing cycle does. Nothing about borrowing is decided: no preemption
-// read, no cohort closed, and the cycle is not a borrowing one for what
-// on-call sees (publishBorrowSignals).
+// governGated readies, in a cycle that counts no borrowing, the release of
+// replicas held at Kueue's admission gate in the namespaces that count none
+// (allocation.UncountedKueueNamespaces: a countBorrowable: false entry, a
+// queue in no cohort): releaseBorrowed keeps the borrowing release state as
+// such a cycle always does (HoldReleases) and then asks the governor for
+// these alone (BorrowGovernor.GatedReleases). Nothing about borrowing is
+// observed or decided, and nothing is read from the API: the cluster
+// autoscaler does not act on a gated pod, so no scale-up stretches the
+// timeout. The cycle is not a borrowing one for what on-call sees
+// (publishBorrowSignals).
 func (e *Engine) governGated(ctx context.Context, constraints []*allocation.ResourceConstraints,
 	requests []allocation.ModelScalingRequest, now time.Time) {
+	if len(allocation.UncountedKueueNamespaces(constraints)) == 0 {
+		return
+	}
 	st := &e.borrowing
 	if st.governor == nil {
 		st.governor = allocation.NewBorrowGovernor(e.borrowSettings())
@@ -95,13 +100,7 @@ func (e *Engine) governGated(ctx context.Context, constraints []*allocation.Reso
 		st.governor.SetSettings(e.borrowSettings())
 	}
 	e.loadBorrowLedger(ctx)
-	st.gatedCycle = allocation.BorrowCycle{
-		Now: now, Constraints: constraints, Requests: requests,
-		ScaleUpPending: e.scaleUpPending(ctx, requests, now),
-		NoHole:         allocation.NoHoleOf(st.inFlight.Unreserved(now).InFlight),
-	}
-	st.governor.Observe(st.gatedCycle)
-	allocation.DefaultBorrowCooldowns.Publish(st.governor)
+	st.gatedCycle = allocation.BorrowCycle{Now: now, Constraints: constraints, Requests: requests}
 }
 
 // borrowBlocked is the greedy optimizer's per-variant borrowing block for this
@@ -174,31 +173,46 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		return
 	}
 	if st.cycle.Now.IsZero() {
+		st.governor.HoldReleases(now, requests, decisions)
 		if !st.gatedCycle.Now.IsZero() {
-			// Kueue-backed namespaces, none counting borrowing: their gated
-			// replicas past the placement timeout (governGated).
-			e.applyReleases(ctx, st.gatedCycle, decisions, scaleTargets)
-		} else {
-			st.governor.HoldReleases(now, requests, decisions)
+			// Namespaces that count no borrowing: their replicas held at
+			// Kueue's gate past the placement timeout (governGated).
+			initGatedSeries(st.gatedCycle)
+			e.applyReleases(ctx, st.governor.GatedReleases(st.gatedCycle, decisions), scaleTargets)
 		}
 		e.persistBorrowLedger(ctx)
 		return
 	}
 	initLossSeries(st.cycle)
-	e.applyReleases(ctx, st.cycle, decisions, scaleTargets)
+	initGatedSeries(st.cycle)
+	e.applyReleases(ctx, st.governor.Releases(st.cycle, decisions), scaleTargets)
 	e.persistBorrowLedger(ctx)
 }
 
-// applyReleases asks the governor for the cycle's releases, lowers decisions
-// by them, and logs, counts and records an Event for each.
-func (e *Engine) applyReleases(ctx context.Context, cycle allocation.BorrowCycle, decisions []domain.VariantDecision,
+// initGatedSeries creates, at 0, the release counter of cause kueue-gate for
+// every model in a namespace whose gated replicas the cycle may release
+// (allocation.UncountedKueueNamespaces), so its first release is an increase.
+func initGatedSeries(cycle allocation.BorrowCycle) {
+	uncounted := map[string]bool{}
+	for _, ns := range allocation.UncountedKueueNamespaces(cycle.Constraints) {
+		uncounted[ns] = true
+	}
+	for _, r := range cycle.Requests {
+		if uncounted[r.Namespace] {
+			metrics.InitBorrowReleaseSeries(r.Namespace, r.ModelID, string(allocation.ReleaseKueueGate))
+		}
+	}
+}
+
+// applyReleases logs, counts and records an Event for each of the cycle's
+// releases; the governor has lowered the decisions by them.
+func (e *Engine) applyReleases(ctx context.Context, releases []allocation.BorrowRelease,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor) {
-	st := &e.borrowing
 	logger := ctrl.LoggerFrom(ctx)
 	// One release per model and cycle, however many variants it lowers: a
 	// P/D pair is one loss, as a LeaderWorkerSet group is (R7).
 	counted := map[string]bool{}
-	for _, r := range st.governor.Releases(cycle, decisions) {
+	for _, r := range releases {
 		msg := "Releasing borrowed capacity"
 		if r.AtGate {
 			msg = "Releasing replicas held at Kueue's admission gate past the placement timeout; the queue has no room for them"

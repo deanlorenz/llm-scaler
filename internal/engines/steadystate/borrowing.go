@@ -48,8 +48,9 @@ type borrowingState struct {
 	// wakes' included, each its variant's to re-place
 	// (GreedyByScoreOptimizer.ReclaimCredit, NEW-1).
 	reclaimCredit []allocation.BorrowDraw
-	// wakeYield is the wakes' reclaims this cycle's pass yields for, taken
-	// from the record once (GreedyByScoreOptimizer.WakeReclaims).
+	// wakeYield is the wakes' reclaims this cycle's pass yields for
+	// (GreedyByScoreOptimizer.WakeReclaims), reported yielded after the pass
+	// (recordBorrowDraws).
 	wakeYield []allocation.BorrowDraw
 	// passFlavors is the Kueue flavor this cycle's pass placed each variant's
 	// replicas on (GreedyByScoreOptimizer.PlacedFlavors).
@@ -59,6 +60,9 @@ type borrowingState struct {
 	// namespaces whose pod list failed and was logged, until one succeeds.
 	gatedSeen      map[types.UID]gatedPod
 	gatedErrLogged map[string]bool
+	// reservedErrLogged is the namespaces whose Workload read for the gated
+	// pods failed and was logged, until one succeeds (reservedGated).
+	reservedErrLogged map[string]bool
 	// physicalSkipped is set while a declared physical limiter is missing from
 	// the cycle's constraints (notePhysicalSkipped): no new borrowing starts.
 	physicalSkipped bool
@@ -180,8 +184,9 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	constraints = allocation.DeductReclaimed(constraints, u.InFlight)
 	st.reclaimCredit = st.inFlight.Reclaims()
 	// A wake's reclaim takes borrowed GPUs from this controller's own
-	// borrowers as a pass's does: this pass yields for it, once.
-	st.wakeYield = st.inFlight.TakeWakeReclaims(now)
+	// borrowers as a pass's does: this cycle's greedy pass yields for it,
+	// and recordBorrowDraws reports it yielded once the pass has run.
+	st.wakeYield = st.inFlight.PendingWakeReclaims(now)
 	// A namespace whose gated pods could not be listed may hold any number of
 	// them: its cohorts borrow nothing new this cycle (G3).
 	unreadableCohorts := cohortsOf(constraints, unreadable)
@@ -281,6 +286,8 @@ func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisi
 		return nil
 	}
 	e.borrowing.passFlavors = g.PlacedFlavors()
+	// The wakes' reclaims the pass yielded for are yielded for once.
+	e.borrowing.inFlight.YieldedWakeReclaims(g.WakeReclaimsYielded())
 	targets := decidedTargets(decisions)
 	keep := func(in []allocation.BorrowDraw) []allocation.BorrowDraw {
 		var out []allocation.BorrowDraw
@@ -350,6 +357,38 @@ func observeVariants(requests []allocation.ModelScalingRequest) map[string]alloc
 		}
 	}
 	return out
+}
+
+// reservedGated is, of the GPU pods at Kueue's admission gate in ns, those
+// whose Workload Kueue has already reserved quota for (kueue.ReservedPods).
+// A failed Workload read is logged once per namespace until one succeeds, and
+// reads every gated pod as unreserved.
+func (e *Engine) reservedGated(ctx context.Context, ns string, pods []corev1.Pod) map[types.UID]bool {
+	var gated []*corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp == nil && kueue.PodGated(p) && resources.PodGPURequests(p) > 0 {
+			gated = append(gated, p)
+		}
+	}
+	if len(gated) == 0 {
+		return nil
+	}
+	st := &e.borrowing
+	if st.reservedErrLogged == nil {
+		st.reservedErrLogged = map[string]bool{}
+	}
+	reserved, err := kueue.ReservedPods(ctx, kueue.WorkloadsVia(e.client), ns, gated)
+	if err != nil {
+		if !st.reservedErrLogged[ns] {
+			st.reservedErrLogged[ns] = true
+			ctrl.LoggerFrom(ctx).Error(err, "Cannot read Kueue Workloads; every pod at Kueue's admission gate reads as waiting for quota",
+				"namespace", ns)
+		}
+		return nil
+	}
+	delete(st.reservedErrLogged, ns)
+	return reserved
 }
 
 // gatedPod is a managed pod seen at Kueue's admission gate.
@@ -425,6 +464,7 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 		}
 		delete(st.gatedErrLogged, ns)
 		listed[ns] = true
+		reserved := e.reservedGated(ctx, ns, pods.Items)
 		for i := range pods.Items {
 			p := &pods.Items[i]
 			if p.DeletionTimestamp != nil {
@@ -436,7 +476,10 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			}
 			present[p.UID] = true
 			acc := accelerator.ProductFromNodeSelector(p.Spec.NodeSelector)
-			if kueue.PodGated(p) {
+			// A gated pod whose Workload Kueue already reserved quota for
+			// (waiting on an admission check, a ProvisioningRequest) is in
+			// Kueue's reservation: it is counted as admitted, not gated.
+			if kueue.PodGated(p) && !reserved[p.UID] {
 				if gated[ns] == nil {
 					gated[ns] = map[string]int{}
 				}

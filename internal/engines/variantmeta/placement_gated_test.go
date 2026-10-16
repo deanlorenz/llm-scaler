@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
@@ -34,16 +35,20 @@ func TestCountGatedIsThePartOfUnplacedAtKueuesGate(t *testing.T) {
 		return p
 	}
 
-	list := []corev1.Pod{pod("a", "", 0, true), pod("b", "", 5*time.Minute, false), pod("c", "", 5*time.Second, false)}
+	// d is gated as long as b, but Kueue reserved its quota: it waits on an
+	// admission check (a ProvisioningRequest), not on quota.
+	list := []corev1.Pod{pod("a", "", 0, true), pod("b", "", 5*time.Minute, false), pod("c", "", 5*time.Second, false),
+		pod("d", "", 5*time.Minute, false)}
+	list[3].UID = "d-uid"
 	_, _, _, at := countUnplaced(list, false, now)
-	gated := countGated(list, false, at)
+	gated := countGated(list, false, at, map[types.UID]bool{"d-uid": true})
 	if len(gated) != 1 || !gated["b"].Equal(now.Add(-5*time.Minute)) {
-		t.Fatalf("gated = %v, want only b at its creation: a is admitted, c within the grace", gated)
+		t.Fatalf("gated = %v, want only b at its creation: a is admitted, c within the grace, d reserved", gated)
 	}
 
 	groups := []corev1.Pod{pod("g0-a", "0", 0, true), pod("g1-a", "1", 0, true), pod("g1-b", "1", 5*time.Minute, false)}
 	_, _, _, at = countUnplaced(groups, true, now)
-	gated = countGated(groups, true, at)
+	gated = countGated(groups, true, at, nil)
 	if len(gated) != 1 || !gated["1"].Equal(at["1"]) {
 		t.Fatalf("gated = %v, want group 1 alone, at its unplaced time %v", gated, at["1"])
 	}
