@@ -43,7 +43,7 @@ func lenderReleaseWorld(readAt time.Time) ([]*allocation.ResourceConstraints, []
 }
 
 func lenderDecisions(reqs []allocation.ModelScalingRequest) []domain.VariantDecision {
-	var out []domain.VariantDecision
+	out := make([]domain.VariantDecision, 0, len(reqs))
 	for _, r := range reqs {
 		for _, s := range r.VariantStates {
 			out = append(out, domain.VariantDecision{Namespace: r.Namespace, ModelID: r.ModelID, VariantName: s.VariantName,
