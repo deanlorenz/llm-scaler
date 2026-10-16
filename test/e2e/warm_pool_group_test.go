@@ -110,8 +110,8 @@ var _ = Describe("Warm pool - a unit that spans Pods", Label("full"), Label("war
 	}
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceControllerRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceControllerRestart)
 		return logs, err
 	}
 
@@ -126,10 +126,7 @@ var _ = Describe("Warm pool - a unit that spans Pods", Label("full"), Label("war
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		// A cluster without the CRD cannot build the object under test, and a
 		// spec that quietly passed there would be reporting on nothing.

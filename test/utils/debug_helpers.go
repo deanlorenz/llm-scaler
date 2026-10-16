@@ -17,23 +17,25 @@ import (
 
 // DumpControllerLogs fetches and prints the controller manager logs for debugging.
 // Call this in AfterEach or DeferCleanup to capture logs on test failure.
-func DumpControllerLogs(ctx context.Context, k8sClient *kubernetes.Clientset, controllerNamespace string, w io.Writer) {
+//
+// Only Pods of the ControllerDeploymentName Deployment are dumped (see
+// ControllerPods): the warm-pool and relay Pods in the same namespace carry the
+// controller's labels, and their logs used to be printed as the controller's.
+func DumpControllerLogs(ctx context.Context, k8sClient kubernetes.Interface, controllerNamespace string, w io.Writer) {
 	_, _ = fmt.Fprintf(w, "\n=== Controller Manager Logs ===\n")
 
-	pods, err := k8sClient.CoreV1().Pods(controllerNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=workload-variant-autoscaler",
-	})
+	pods, err := ControllerPods(ctx, k8sClient, controllerNamespace, ControllerDeploymentName)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "Failed to list controller pods: %v\n", err)
 		return
 	}
 
-	if len(pods.Items) == 0 {
+	if len(pods) == 0 {
 		_, _ = fmt.Fprintf(w, "No controller pods found in namespace %s\n", controllerNamespace)
 		return
 	}
 
-	for _, pod := range pods.Items {
+	for _, pod := range pods {
 		_, _ = fmt.Fprintf(w, "\n--- Logs from pod %s ---\n", pod.Name)
 		logs, err := k8sClient.CoreV1().Pods(controllerNamespace).GetLogs(pod.Name, &corev1.PodLogOptions{
 			TailLines: ptr.To(int64(200)),

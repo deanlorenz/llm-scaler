@@ -47,8 +47,8 @@ var _ = Describe("Warm pool - what the pool decides", Label("full"), Label("warm
 	)
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceControllerRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceControllerRestart)
 		return logs, err
 	}
 
@@ -114,7 +114,7 @@ var _ = Describe("Warm pool - what the pool decides", Label("full"), Label("warm
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{Namespace: cfg.WVANamespace, Name: "wva-controller-manager"}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		By("Finding a worker node to pin pool Pods to")
 		nodes, err := fixtures.SchedulableNodes(ctx, k8sClient)

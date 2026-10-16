@@ -143,15 +143,13 @@ var _ = BeforeSuite(func() {
 
 	By("Verifying WVA controller is running")
 	Eventually(func(g Gomega) {
-		pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "control-plane=controller-manager",
-		})
+		pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(pods.Items).NotTo(BeEmpty(), "WVA controller pod not found")
+		g.Expect(pods).NotTo(BeEmpty(), "WVA controller pod not found")
 
 		// Check at least one pod is running
 		runningPods := 0
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.Status.Phase == corev1.PodRunning {
 				runningPods++
 			}

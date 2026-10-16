@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 const secondaryControllerOverlayPathEnv = "WVA_E2E_SECONDARY_OVERLAY_PATH"
@@ -70,7 +71,7 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 			}
 
 			By("Installing secondary namespace-scoped controller via Kustomize")
-			primaryController, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+			primaryController, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, utils.ControllerDeploymentName, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred(), "Failed to read primary controller deployment image")
 			Expect(primaryController.Spec.Template.Spec.Containers).NotTo(BeEmpty(), "Primary controller deployment should contain containers")
 			imageRepo, imageTag := splitImage(primaryController.Spec.Template.Spec.Containers[0].Image)
@@ -115,7 +116,7 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 				"patches:",
 				"- target:",
 				"    kind: Deployment",
-				"    name: wva-controller-manager",
+				"    name: " + utils.ControllerDeploymentName,
 				"  patch: |",
 				`    - op: add`,
 				`      path: /spec/template/spec/containers/0/env/-`,
@@ -175,13 +176,11 @@ var _ = Describe("Multi-controller Tests - Dual namespace-scoped isolation", Lab
 
 			By("Waiting for secondary controller to be ready")
 			Eventually(func(g Gomega) {
-				pods, listErr := k8sClient.CoreV1().Pods(secondaryController).List(ctx, metav1.ListOptions{
-					LabelSelector: "control-plane=controller-manager",
-				})
+				pods, listErr := utils.ControllerPods(ctx, k8sClient, secondaryController, utils.ControllerDeploymentName)
 				g.Expect(listErr).NotTo(HaveOccurred())
-				g.Expect(pods.Items).NotTo(BeEmpty(), "Expected secondary controller pod")
+				g.Expect(pods).NotTo(BeEmpty(), "Expected secondary controller pod")
 				ready := 0
-				for _, pod := range pods.Items {
+				for _, pod := range pods {
 					if pod.Status.Phase != corev1.PodRunning {
 						continue
 					}
