@@ -377,17 +377,27 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// cluster group of that type is formed on, and is net of what the pass
 	// left (opts.Left). The namespace groups are bounded against each other,
 	// and against the cluster group, by splitClusterFree.
+	//
+	// EVERY namespace the namespace quota caps claims, whether or not a group
+	// formed for it this cycle: its models may grow into that headroom through
+	// today's optimizer just the same. A namespace disabled for sharing
+	// (NamespaceEnabled), or whose models span several accelerator types,
+	// forms no group, and left out of the claims its whole free quota was idle
+	// fill for the cluster group. Only a formed group knows its replica size,
+	// so only its claim is rounded to whole replicas.
 	claimed := map[string]int{}
-	for _, k := range keys {
-		if k.scope == "" {
-			continue
-		}
-		if nsFree, ok := freeOf(k); ok {
-			// a namespace group formed over a finite budget
-			if step := smallestReplicaGPUs(groups[k]); step > 0 {
-				nsFree -= nsFree % step
+	for _, ns := range slices.Sorted(maps.Keys(availableByNS)) {
+		for _, acc := range slices.Sorted(maps.Keys(availableByNS[ns])) {
+			nsFree, ok := freeOf(key{acc, ns})
+			if !ok {
+				continue
 			}
-			claimed[budgetKey(available, k.acc)] += nsFree
+			if g := groups[key{acc, ns}]; g != nil {
+				if step := smallestReplicaGPUs(g); step > 0 {
+					nsFree -= nsFree % step
+				}
+			}
+			claimed[budgetKey(available, acc)] += nsFree
 		}
 	}
 
@@ -417,7 +427,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
+		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
@@ -744,14 +754,27 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 //
 // A pool's accelerator is matched by identity, since the group carries the
 // budget's spelling and the pool its own.
-func poolCarve(unheld map[string]map[string]int, acc, scope string) int {
+//
+// A pool in a namespace the namespace quota caps carves at most that
+// namespace's free quota of the type (availableByNS): its growth is bounded by
+// no limiter, and uncapped, a pool wanting more than its tenant may hold
+// shrank every tenant's share of the cluster group. A namespace no namespace
+// quota caps, or with an unlimited quota of the type, is carved in full.
+func poolCarve(unheld, availableByNS map[string]map[string]int, acc, scope string) int {
+	carveOf := func(ns string, byType map[string]int) int {
+		want := max(0, byType[budgetKey(byType, acc)])
+		budget := availableByNS[ns]
+		if free, ok := budget[budgetKey(budget, acc)]; ok && free >= 0 && free <= MaxShareBudgetGPUs {
+			want = min(want, free)
+		}
+		return want
+	}
 	if scope != "" {
-		byType := unheld[scope]
-		return max(0, byType[budgetKey(byType, acc)])
+		return carveOf(scope, unheld[scope])
 	}
 	sum := 0
-	for _, byType := range unheld {
-		sum += max(0, byType[budgetKey(byType, acc)])
+	for ns, byType := range unheld {
+		sum += carveOf(ns, byType)
 	}
 	return sum
 }

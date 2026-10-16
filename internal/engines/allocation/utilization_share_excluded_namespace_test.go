@@ -2,11 +2,13 @@ package allocation
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // A namespace-scoped quota that excludes a namespace bounds that namespace not
@@ -191,6 +193,53 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			Expect(groups["team-a"].ClusterFree).To(BeNumerically("<=", clusterFree), "held=%d", c.held)
 			Expect(g.ClusterFree+groups["team-a"].ClusterFree+groups["team-b"].ClusterFree).
 				To(BeNumerically("<=", clusterFree), "held=%d", c.held)
+		}
+	})
+
+	// A tenant that forms no share group still grows into its own free quota
+	// through today's optimizer. Its claim was made only by a group formed
+	// this cycle, so a tenant disabled for sharing, or one whose model spans
+	// two accelerator types, left its headroom to the cluster group's idle
+	// fill: ns-x was budgeted 2+8 instead of 2+4.
+	It("protects the headroom of a tenant that forms no group", func() {
+		clusterQuota := config.QuotaLimiterConfig{
+			Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+			ClusterQuotas: map[string]int{"A100": 20},
+		}
+		cons := constraintsOf(map[string]map[string]int{
+			"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 2},
+		}, namespaceQuota, clusterQuota)
+		// team-b's model spans A100 and H100: a fixed consumer, in no group.
+		mixedEntry := withSatEntry(&satEntryFixture{
+			ModelID: "mb", Namespace: "team-b", TotalDemand: 1000,
+			VariantCapacities: []vcFixture{
+				{VariantName: "mb-v", AcceleratorName: "A100", Cost: 5, ReplicaCount: 2, PerReplicaCapacity: 1000},
+				{VariantName: "mb-h100", AcceleratorName: "H100", Cost: 5, ReplicaCount: 0, PerReplicaCapacity: 1000},
+			},
+		}, ModelScalingRequest{
+			ModelID: "mb", Namespace: "team-b",
+			VariantStates: []domain.VariantReplicaState{
+				{VariantName: "mb-v", CurrentReplicas: 2, GPUsPerReplica: 1, MinReplicas: ptrInt(1)},
+				{VariantName: "mb-h100", CurrentReplicas: 0, GPUsPerReplica: 1, MinReplicas: ptrInt(0)},
+			},
+		})
+		mixedEntry.CompositeSignal.ScaleUpThreshold = 0.8
+		for name, c := range map[string]struct {
+			reqs []ModelScalingRequest
+			opts ShareGroupOptions
+		}{
+			"team-b disabled for sharing": {fleet(2), ShareGroupOptions{ClusterIsQuota: true,
+				NamespaceEnabled: func(ns string) bool { return !strings.HasPrefix(ns, "team-b") }}},
+			"team-b on mixed accelerators": {[]ModelScalingRequest{
+				shareReq("ma", "team-a", 1000, 2), mixedEntry, shareReq("mx", "ns-x", 100, 2)},
+				ShareGroupOptions{ClusterIsQuota: true}},
+		} {
+			groups, _ := build(c.reqs, cons, c.opts)
+			Expect(groups).NotTo(HaveKey("team-b"), name)
+			Expect(groups).To(HaveKey(""), name)
+			// The cluster quota's free 20-6 = 14, less team-a's 6 and team-b's 4.
+			Expect(groups[""].Budget).To(Equal(2+4), name)
+			Expect(groups[""].ClusterFree).To(Equal(4), name)
 		}
 	})
 
