@@ -6,6 +6,8 @@ import (
 	"math"
 	"slices"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // Planner constants of docs/proposals/utilization-share-optimizer.md §8.4. They
@@ -103,6 +105,11 @@ type SharePlanInput struct {
 	// DomainKey is, per receiver role, the node label all its pods' holes must
 	// share (a LeaderWorkerSet's exclusive topology), or "".
 	DomainKey map[string]string
+	// Placements is, per receiver role, its pod templates' nodeSelector and
+	// required node affinity (domain.VariantReplicaState.Placements: one
+	// template, or the leader's then the workers'), judged per pod as the
+	// node view judges them (podTemplates). A role absent is not judged.
+	Placements map[string][]domain.PodPlacement
 	// WakeHeld and PhysicalFree are what the idle fill subtracts from the
 	// group's idle quota and caps it by (GPUs held for woken models, the
 	// cluster's free GPUs of the type; math.MaxInt when unbounded), so the
@@ -168,10 +175,22 @@ func (h ShareHeadroom) spareReplicas(r ShareRole) int {
 	return ShareHeadroomReplicas(r.Weight, h.Replicas)
 }
 
-// ShareNode is one node's free GPUs and labels.
+// ShareNode is one node's free GPUs and labels, and whether its topology
+// domain already holds a LeaderWorkerSet group: an exclusive-topology
+// receiver's group lands in no such domain, as the node view judges it
+// (NodeView.domainTaken).
 type ShareNode struct {
 	Free   int
 	Labels map[string]string
+	// Group is set when a LeaderWorkerSet group's pod is on the node
+	// (decision.NodeGPU.LWSGroup). A donor set that takes every such group
+	// of a domain frees it for the receiver's group.
+	Group bool
+	// Claimed is set when this cycle already placed an exclusive-topology
+	// group in the node's domain -- the optimizer's pass or an in-flight hold
+	// (NodeView.TakenDomains), or the share itself (ShareFitPods, a donor
+	// set) -- so no other group lands there.
+	Claimed bool
 }
 
 // SharePod is one donor pod: its name (namespace/name), node and GPUs.
@@ -183,6 +202,9 @@ type SharePod struct {
 // ShareUnit is what one donor replica frees when it goes: its pods.
 type ShareUnit struct {
 	Pods []SharePod
+	// Group is set for a LeaderWorkerSet group: once it goes, its pods'
+	// nodes hold no pod of it (ShareNode.Group).
+	Group bool
 }
 
 // GPUs is the unit's total.
@@ -1014,7 +1036,7 @@ func (p *sharePlanRun) fromIdle(rc string) {
 	g := max(grow.GPUs, 1)
 	pace := ShareFillPace(p.rawNeed(rc), p.work[rc])
 	for n := 0; n < pace && shareIdle(p.l, p.in, p.work) >= g && p.work[rc] < p.integ[rc]; n++ {
-		if p.idleNodes != nil && len(grow.PodGPUs) > 0 && !ShareFitPods(p.idleNodes, grow.PodGPUs, p.in.DomainKey[rc]) {
+		if p.idleNodes != nil && len(grow.PodGPUs) > 0 && !ShareFitPods(p.idleNodes, p.in.receiverFit(rc, grow)) {
 			return
 		}
 		p.work[rc] += g
@@ -1308,7 +1330,8 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 		view := in
 		view.Nodes = p.idleNodes
 		var left map[string]int
-		set, left, deferred = shareNodeSet(l, view, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, rule, now, tm)
+		var claimed string
+		set, left, claimed, deferred = shareNodeSet(l, view, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, rule, now, tm)
 		if len(set) > 0 {
 			for n, info := range p.idleNodes {
 				if used := info.Free - min(info.Free, left[n]); used > 0 {
@@ -1318,6 +1341,12 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 				}
 			}
 			withdrawNodeSet(p.idleNodes, in.DonorUnits, set, left)
+			// The receiver's group takes its domain in both pictures: no
+			// other group is planned or filled into it this cycle.
+			if claimed != "" {
+				claimDomain(p.idleNodes, in.DomainKey[rc], claimed)
+				claimDomain(in.Nodes, in.DomainKey[rc], claimed)
+			}
 		}
 	}
 	if deferred {
@@ -1549,25 +1578,32 @@ func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 // the same admission as shareDonorSet.
 func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
 	byKey map[string]ShareRole, lim shareLimits, cont map[string]float64, z func(string, int) float64,
-	isConfirmed func(string) bool, rule shareSetRule, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int, bool) {
+	isConfirmed func(string) bool, rule shareSetRule, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int, string, bool) {
 	grow, ok := in.Grow[rc]
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	// As in shareDonorSet: the exemption is decided per donor (canGive).
 	short := float64(work[rc]) < byKey[rc].Need
 	if (!short && l.ReceivingHeld(rc, now, tm)) || (!rule.free && moved[rc] >= ShareMaxReplicasPerCycle) {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	// Each domain is tried in turn: fixing it at the first placement would
-	// refuse receivers another domain fits.
-	key := in.DomainKey[rc]
-	for _, domain := range shareDomains(in.Nodes, key) {
-		in1 := shareNodesInDomain(in.Nodes, key, domain)
+	// refuse receivers another domain fits. A group (an exclusive topology,
+	// more than one pod) lands only in a domain holding no other group, as
+	// the node view places it: none this cycle claimed, and every group pod
+	// already there leaving with a donor replica the set takes.
+	fit := in.receiverFit(rc, grow)
+	key, exclusive := fit.domainKey()
+	for _, d := range shareDomains(in.Nodes, key) {
+		in1 := shareNodesInDomain(in.Nodes, key, d)
+		if exclusive && domainClaimed(in.Nodes, in1) {
+			continue
+		}
 		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey, keep: lim.keep,
 			now: now, tm: tm, taken: map[string]int{}, used: map[shareUnitRef]bool{}, rule: rule}
 		hole, ok := search.place(grow.PodGPUs, in1)
-		if !ok {
+		if !ok || (exclusive && !search.freesGroups(in1)) {
 			continue
 		}
 		if len(search.set) == 0 && shareIdle(l, in, work) >= max(grow.GPUs, 1) && !l.FillShort(rc) {
@@ -1576,7 +1612,7 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 			// fill left it short, for a reason only the fill sees. Not
 			// another domain, nor the node-blind search: either would shrink
 			// donors for GPUs nobody needed.
-			return nil, nil, true
+			return nil, nil, "", true
 		}
 		// The placement may need fewer donor replicas than the receiver's
 		// quota -- or none, where its pods fit free GPUs. Free GPUs place a
@@ -1586,21 +1622,27 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 			!admitShareSet(l, in, rc, search.taken, work, byKey, lim, cont, z, isConfirmed, rule) {
 			continue
 		}
-		return search.set, hole, false
+		claimed := ""
+		if exclusive {
+			claimed = d
+		}
+		return search.set, hole, claimed, false
 	}
-	return nil, nil, false
+	return nil, nil, "", false
 }
 
 // place puts every receiver pod, largest first, on one of nodes: into the
 // smallest hole that already fits, otherwise into a hole opened on the node
-// needing the fewest donor replicas, then leaving the smallest hole. It
-// returns the holes left on every node, and whether every pod was placed.
+// needing the fewest donor replicas, then leaving the smallest hole. Each pod
+// goes only to the nodes its template admits (sharePodNodes). It returns the
+// holes left on every node, and whether every pod was placed.
 func (s *shareNodeSearch) place(podGPUs []int, nodes []string) (map[string]int, bool) {
 	hole := map[string]int{}
 	for n, info := range s.in.Nodes {
 		hole[n] = info.Free
 	}
-	for _, p := range largestFirst(podGPUs) {
+	for _, pod := range sharePodNodes(s.in.Nodes, nodes, ShareReplicaFit{PodGPUs: podGPUs, Placements: s.in.Placements[s.rc]}) {
+		p, nodes := pod.gpus, pod.nodes
 		best := shareBestFit(hole, nodes, p)
 		if best == "" {
 			var units []shareUnitRef
@@ -1785,40 +1827,6 @@ func withdrawNodeSet(nodes map[string]ShareNode, units map[string][]ShareUnit, s
 	}
 }
 
-// ShareFitPods places one replica's pods, largest first, each into the node
-// with the smallest free count that holds it, and spends what it placed. A
-// receiver with an exclusive topology (domainKey) is placed in one domain,
-// each tried in turn; a node without the label is in none. It reports
-// whether every pod fitted, and spends nothing when not. It places exactly as
-// the node-aware set search does where no donor is needed.
-func ShareFitPods(nodes map[string]ShareNode, podGPUs []int, domainKey string) bool {
-	for _, domain := range shareDomains(nodes, domainKey) {
-		names := shareNodesInDomain(nodes, domainKey, domain)
-		free := map[string]int{}
-		for _, n := range names {
-			free[n] = nodes[n].Free
-		}
-		fits := true
-		for _, p := range largestFirst(podGPUs) {
-			best := shareBestFit(free, names, p)
-			if best == "" {
-				fits = false
-				break
-			}
-			free[best] -= p
-		}
-		if fits {
-			for n, f := range free {
-				info := nodes[n]
-				info.Free = f
-				nodes[n] = info
-			}
-			return true
-		}
-	}
-	return false
-}
-
 // shareDomains is the domains a receiver may be placed in, in order: every
 // value of key on the nodes, or the one domain "" -- all nodes -- when key is
 // "". A node without the label is in no domain.
@@ -1837,10 +1845,10 @@ func shareDomains(nodes map[string]ShareNode, key string) []string {
 }
 
 // shareNodesInDomain is the nodes of one domain, by name.
-func shareNodesInDomain(nodes map[string]ShareNode, key, domain string) []string {
+func shareNodesInDomain(nodes map[string]ShareNode, key, value string) []string {
 	var out []string
 	for _, n := range slices.Sorted(maps.Keys(nodes)) {
-		if key == "" || nodes[n].Labels[key] == domain {
+		if key == "" || nodes[n].Labels[key] == value {
 			out = append(out, n)
 		}
 	}

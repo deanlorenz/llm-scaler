@@ -463,24 +463,24 @@ var _ = Describe("ShareFitPods", func() {
 	}
 	It("places largest first into the smallest node that holds each, and spends it", func() {
 		n := nodes()
-		Expect(ShareFitPods(n, []int{2, 4}, "")).To(BeTrue())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{2, 4}})).To(BeTrue())
 		Expect(n["n1"].Free + n["n2"].Free + n["n3"].Free).To(Equal(2))
 		Expect(n["n1"].Free).To(BeZero(), "the 4-GPU pod takes the only node it fits")
 	})
 	It("spends nothing when a pod does not fit", func() {
 		n := nodes()
-		Expect(ShareFitPods(n, []int{4, 4}, "")).To(BeFalse())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{4, 4}})).To(BeFalse())
 		Expect(n).To(Equal(nodes()))
 	})
 	It("keeps a domain receiver in one domain, trying each", func() {
 		// r1 (n1: 4) cannot hold a 3 and a 2; r2 (n2: 3, n3: 2) can.
 		n := nodes()
 		n["n2"] = ShareNode{Free: 3, Labels: map[string]string{"rack": "r2"}}
-		Expect(ShareFitPods(n, []int{3, 2}, "rack")).To(BeTrue())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{3, 2}, DomainKey: "rack"})).To(BeTrue())
 		Expect(n["n1"].Free).To(Equal(4), "r1 is untouched")
 		Expect(n["n2"].Free + n["n3"].Free).To(BeZero())
-		Expect(ShareFitPods(nodes(), []int{4, 2}, "rack")).To(BeFalse(), "no single rack holds 4 and 2")
-		Expect(ShareFitPods(nodes(), []int{4, 2}, "")).To(BeTrue(), "without a domain, any nodes do (control)")
+		Expect(ShareFitPods(nodes(), ShareReplicaFit{PodGPUs: []int{4, 2}, DomainKey: "rack"})).To(BeFalse(), "no single rack holds 4 and 2")
+		Expect(ShareFitPods(nodes(), ShareReplicaFit{PodGPUs: []int{4, 2}})).To(BeTrue(), "without a domain, any nodes do (control)")
 	})
 })
 
@@ -508,7 +508,7 @@ var _ = Describe("Placement agrees between the planner and the fill", func() {
 			search := shareNodeSearch{in: SharePlanInput{Nodes: nodes}, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
 			hole, placed := search.place(pods, shareNodesInDomain(nodes, "", ""))
 			fit := maps.Clone(nodes)
-			Expect(ShareFitPods(fit, pods, "")).To(Equal(placed))
+			Expect(ShareFitPods(fit, ShareReplicaFit{PodGPUs: pods})).To(Equal(placed))
 			if placed {
 				for n := range nodes {
 					Expect(fit[n].Free).To(Equal(hole[n]), "node %s", n)
