@@ -1584,6 +1584,7 @@ func (e *Engine) optimizeV2(
 		g.BorrowBlocked = e.borrowBlocked()
 		g.BorrowBlockedIn = e.borrowBlockedIn()
 		g.BorrowCredit = e.borrowing.credit
+		g.ReclaimCredit = e.borrowing.reclaimCredit
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
 	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)

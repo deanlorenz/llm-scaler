@@ -256,6 +256,20 @@ func (b *BorrowInFlight) Entries() []BorrowDraw {
 	return slices.DeleteFunc(b.entriesLocked(), func(d BorrowDraw) bool { return d.Reclaim })
 }
 
+// Reclaims returns the growth by Kueue's reclaim still in flight
+// (BorrowDraw.Reclaim) -- ordered, its pods not created -- in a stable order,
+// a wake's among them: each its variant's to re-place, as Entries' draws are
+// (GreedyByScoreOptimizer.ReclaimCredit, NEW-1). The lagging ones are not
+// among them: their pods exist, and no pass re-places them.
+func (b *BorrowInFlight) Reclaims() []BorrowDraw {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.DeleteFunc(b.entriesLocked(), func(d BorrowDraw) bool { return !d.Reclaim })
+}
+
 func (b *BorrowInFlight) entriesLocked() []BorrowDraw {
 	keys := slices.SortedFunc(maps.Keys(b.entries), compareInFlightKeys)
 	out := make([]BorrowDraw, 0, len(keys))

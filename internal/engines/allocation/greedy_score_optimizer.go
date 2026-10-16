@@ -81,6 +81,18 @@ type GreedyByScoreOptimizer struct {
 	// refused by its own draw.
 	BorrowCredit []BorrowDraw
 
+	// ReclaimCredit, when set, is the growth by Kueue's reclaim still in
+	// flight (BorrowInFlight.Reclaims), the steady-state engine's and the
+	// wakes': DeductReclaimed took it off its namespace's LentOut so that no
+	// other decision counts the same borrowed GPUs again, and a variant's
+	// targets restart from its current replicas, so its own entry is
+	// re-placed on those GPUs rather than refused by them (NEW-1). Without
+	// it, a variant whose reclaimed replica's pods were not created yet was
+	// re-placed against a LentOut of 0, node fit refused it, Trim dropped the
+	// entry, and the next cycle ordered it again: 3/2/3, with Kueue
+	// preempting a borrower for nothing in between.
+	ReclaimCredit []BorrowDraw
+
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
 	// reclaims is what the last non-shadow pass grew into by Kueue's
@@ -233,6 +245,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		bs.blocked = o.BorrowBlocked
 		bs.blockedIn = o.BorrowBlockedIn
 		bs.setCredit(o.BorrowCredit)
+		bs.setReclaimCredit(o.ReclaimCredit)
 	}
 	if !o.quiet {
 		o.draws, o.flavors, o.reclaims = nil, nil, nil
@@ -484,7 +497,7 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	// The cluster bounds count, for a namespace growing into nominal its
 	// reclaiming queues lent out, the GPUs the borrowers hold there as free:
 	// Kueue preempts them to admit it (withLent).
-	effAvail := effectiveAvailable(bs.withLent(w.req.Namespace, available), sizing)
+	effAvail := effectiveAvailable(bs.withLent(w.req.Namespace, stateVariants(w.req), available), sizing)
 
 	// Unified path: fairShareRolePick behind the RolePickFn interface.
 	// α logic removed in commit 3.
@@ -712,11 +725,20 @@ func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS 
 		if reach := bs.reachFor(w.req.Namespace); reach != nil {
 			sizing = reach
 		}
-		if budgetTotal(effectiveAvailable(bs.withLent(w.req.Namespace, available), sizing)) > 0 {
+		if budgetTotal(effectiveAvailable(bs.withLent(w.req.Namespace, stateVariants(w.req), available), sizing)) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// stateVariants is the names of a request's variants, as its states list them.
+func stateVariants(req ModelScalingRequest) []string {
+	out := make([]string, 0, len(req.VariantStates))
+	for _, s := range req.VariantStates {
+		out = append(out, s.VariantName)
+	}
+	return out
 }
 
 // filterActive returns modelWork entries that still have remaining > 0.

@@ -44,6 +44,10 @@ type borrowingState struct {
 	// credit is this cycle's draws in flight on open cohorts, each its
 	// variant's to re-place (GreedyByScoreOptimizer.BorrowCredit).
 	credit []allocation.BorrowDraw
+	// reclaimCredit is this cycle's growth by Kueue's reclaim in flight, the
+	// wakes' included, each its variant's to re-place
+	// (GreedyByScoreOptimizer.ReclaimCredit, NEW-1).
+	reclaimCredit []allocation.BorrowDraw
 	// passFlavors is the Kueue flavor this cycle's pass placed each variant's
 	// replicas on (GreedyByScoreOptimizer.PlacedFlavors).
 	passFlavors map[string]*kueue.FlavorPlacement
@@ -128,7 +132,7 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
-	st.cycle, st.gated, st.cohortsByNS, st.credit = allocation.BorrowCycle{}, nil, nil, nil
+	st.cycle, st.gated, st.cohortsByNS, st.credit, st.reclaimCredit = allocation.BorrowCycle{}, nil, nil, nil, nil
 	if st.inFlight == nil {
 		st.inFlight = allocation.DefaultBorrowInFlight
 	}
@@ -148,8 +152,11 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	u.Gated, u.Admitted = gated, admitted
 	constraints = allocation.DeductUnreservedAt(constraints, u)
 	// What earlier cycles and wakes grew into by Kueue's reclaim is not
-	// reclaimable again until a read shows it (N1).
+	// reclaimable again until a read shows it (N1) -- except to the variant
+	// that grew: the pass re-places its replicas whose pods are not created
+	// yet on its own entry (reclaimCredit, NEW-1), a woken variant's too.
 	constraints = allocation.DeductReclaimed(constraints, u.InFlight)
+	st.reclaimCredit = st.inFlight.Reclaims()
 	// A namespace whose gated pods could not be listed may hold any number of
 	// them: its cohorts borrow nothing new this cycle (G3).
 	unreadableCohorts := cohortsOf(constraints, unreadable)

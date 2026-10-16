@@ -199,4 +199,38 @@ func TestReclaimHeldAcrossCycles(t *testing.T) {
 	}
 }
 
+// Review NEW-1: the SAME model across cycles, before its pods exist. b
+// borrows 8 of a's nominal and the one node is full; cycle 1 orders m's
+// replica without a hole, Kueue's to reclaim. Cycle 2 reads the same, m's
+// pods not created: its own entry came off a's LentOut (DeductReclaimed), and
+// the pass re-places it from current 0. Without the credit node fit refused
+// it, Trim dropped the entry and cycle 3 ordered it again -- 3/2/3, a borrower
+// preempted for nothing. With it m keeps its replica every cycle, and the
+// record holds the one 8-GPU entry, not two.
+func TestReclaimSameModelHeldAcrossCycles(t *testing.T) {
+	f := figuresOf(t, h100Queue("a", kueue.ReclaimAny, kueue.QueueResource{Nominal: 8}),
+		h100Queue("b", kueue.ReclaimNever, kueue.QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8}))
+	record := NewBorrowInFlight()
+	now := time.Now()
+	for cycle := 1; cycle <= 3; cycle++ {
+		physical := physicalH100(8)
+		physical.Pools["H100"] = ResourcePool{Limit: 8, Used: 8}
+		constraints := []*ResourceConstraints{physical, borrowQuota(f.CohortFree, nsBorrow{ns: "a", guaranteed: f.Guaranteed,
+			cap: 0, wn: f.WithinNominal, lentOut: f.LentOut, after: f.PreemptAfter})}
+		o := NewGreedyByScoreOptimizer()
+		o.Nodes = NewNodeView(map[string]decision.NodeGPU{"n1": h100Node(8, nil)})
+		o.ReclaimCredit = record.Reclaims()
+		ds := o.Optimize(context.Background(), []ModelScalingRequest{borrowModel("a", "m1", 8, 0, 1, nil)},
+			DeductReclaimed(constraints, record.Unreserved(now).InFlight))
+		if got := addedGPUs(ds)["m1"]; got != 8 {
+			t.Fatalf("cycle %d grew m1 by %d GPUs, want 8: its own reclaimed replica, pods not created yet", cycle, got)
+		}
+		record.Trim(map[string]int{"a/m1-v": decisionOf(t, ds, "m1").TargetReplicas})
+		record.RecordAt(o.ReclaimDraws(), now)
+		if rs := record.Reclaims(); len(rs) != 1 || rs[0].GPUs != 8 {
+			t.Fatalf("cycle %d: the record holds %+v, want the one 8-GPU reclaim", cycle, rs)
+		}
+	}
+}
+
 func intPtr(n int) *int { return &n }

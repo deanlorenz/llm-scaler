@@ -109,6 +109,58 @@ func TestABorrowedTargetDoesNotAlternate(t *testing.T) {
 	}
 }
 
+// Review NEW-1, through the engine: namespace a (a reclaiming queue, nominal
+// 24, 16 used) lent 8 that a peer borrows, and the one node is full. Model m
+// wants a third replica: Kueue preempts the peer for it, so it places without
+// a hole. Across three cycles before its pods exist it keeps target 3, and the
+// record holds the one 8-GPU reclaim: prepareBorrowing hands the variant its
+// own entry back (reclaimCredit) after DeductReclaimed took it off LentOut.
+func TestAReclaimedTargetDoesNotAlternate(t *testing.T) {
+	t.Cleanup(decision.DefaultHeadroom.Reset)
+	e := &Engine{Config: config.NewTestConfig()}
+	e.borrowing.inFlight = allocation.NewBorrowInFlight()
+	t0 := time.Unix(35_000, 0)
+	quota := func(now time.Time) []*allocation.ResourceConstraints {
+		c := recordQuota(0, now)
+		c[0].NamespacePools["a"]["H100"] = allocation.ResourcePool{Limit: 24, Used: 16}
+		c[0].NamespaceBorrow["a"]["H100"] = allocation.NamespaceBorrow{Cap: 0, WithinNominal: 24, LentOut: 8}
+		// The physical limiter: every GPU of the three nodes in use.
+		return append(c, &allocation.ResourceConstraints{ProviderName: allocation.PhysicalLimiterName,
+			Pools: map[string]allocation.ResourcePool{"H100": {Limit: 24, Used: 24}}})
+	}
+	got := make([]int, 0, 3)
+	desired := 2
+	for i := range 3 {
+		ctx, now := context.Background(), t0.Add(time.Duration(i)*30*time.Second)
+		requests := []allocation.ModelScalingRequest{recordRequest(2, desired)}
+		optimizer := allocation.NewGreedyByScoreOptimizer()
+		c := e.prepareBorrowing(ctx, quota(now), requests, nil, now)
+		optimizer.Nodes = allocation.NewNodeView(map[string]decision.NodeGPU{
+			"n1": {Accelerator: "H100", Capacity: 8, Used: 8}, "n2": {Accelerator: "H100", Capacity: 8, Used: 8},
+			"n3": {Accelerator: "H100", Capacity: 8, Used: 8}})
+		optimizer.BorrowCredit = e.borrowing.credit
+		optimizer.ReclaimCredit = e.borrowing.reclaimCredit
+		decisions := e.decideV2(ctx, optimizer, requests, c, nil)
+		e.recordBorrowDraws(optimizer, decisions, now)
+		target := -1
+		for _, d := range decisions {
+			if d.VariantName == "v" {
+				target = d.TargetReplicas
+			}
+		}
+		got = append(got, target)
+		desired = target
+	}
+	for i, n := range got {
+		if n != 3 {
+			t.Fatalf("targets over three cycles %v, want 3 each: cycle %d refused its own reclaimed replica", got, i+1)
+		}
+	}
+	if rs := e.borrowing.inFlight.Reclaims(); len(rs) != 1 || rs[0].GPUs != 8 {
+		t.Fatalf("the record holds %+v, want the one 8-GPU reclaim", rs)
+	}
+}
+
 // Review W9: a model the utilization share overrides this cycle keeps no draw
 // of the pass's in flight, and its scaling-decision line borrows nothing.
 func TestAShareOverrideClearsThePassDraw(t *testing.T) {

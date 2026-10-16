@@ -102,6 +102,12 @@ type borrowState struct {
 	// replicas, so the pass re-places those very replicas. They are the
 	// variant's to re-place, not another draw on the pool (A4).
 	credit map[string]map[string]int
+	// reclaimCredit is, per "namespace/variant" and accelerator, the GPUs of
+	// the variant's own growth by Kueue's reclaim still in flight
+	// (ReclaimCredit): DeductReclaimed took them off its namespace's LentOut,
+	// and the pass re-places those very replicas, so they are the variant's
+	// to re-place, not a second reclaim of the same borrowed GPUs (NEW-1).
+	reclaimCredit map[string]map[string]int
 	// flavors is every replica the pass placed on a Kueue flavor's nodes, in
 	// order (PlacedFlavors); rolled back with the placement.
 	flavors []flavorUse
@@ -276,6 +282,7 @@ type borrowSave struct {
 	draws      int
 	guaranteed map[string]int
 	credit     map[string]map[string]int
+	reclaimCr  map[string]map[string]int
 	flavors    int
 	reclaims   int
 }
@@ -427,6 +434,35 @@ func (bs *borrowState) setCredit(draws []BorrowDraw) {
 	}
 }
 
+// setReclaimCredit takes the variants' own growth by Kueue's reclaim in
+// flight as credit (NEW-1), per variant and the accelerator it was placed
+// for.
+func (bs *borrowState) setReclaimCredit(draws []BorrowDraw) {
+	if bs == nil || len(draws) == 0 {
+		return
+	}
+	bs.reclaimCredit = map[string]map[string]int{}
+	for _, d := range draws {
+		if !d.Reclaim || d.GPUs <= 0 {
+			continue
+		}
+		k := d.Namespace + "/" + d.Variant
+		if bs.reclaimCredit[k] == nil {
+			bs.reclaimCredit[k] = map[string]int{}
+		}
+		bs.reclaimCredit[k][d.Accelerator] += d.GPUs
+	}
+}
+
+// ownReclaim is what of variant v's own growth by reclaim in flight the pass
+// has not re-placed yet, on accelerator acc, and the key it is kept under.
+func (bs *borrowState) ownReclaim(v, acc string) (int, string) {
+	if k, ok := accelerator.FindKey(bs.reclaimCredit[v], acc); ok {
+		return bs.reclaimCredit[v][k], k
+	}
+	return 0, ""
+}
+
 // cloneCredit copies a credit map.
 func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
 	if m == nil {
@@ -440,7 +476,7 @@ func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
 }
 
 func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
-	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), flavors: len(bs.flavors), reclaims: len(bs.reclaims)}
+	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), reclaimCr: cloneCredit(bs.reclaimCredit), flavors: len(bs.flavors), reclaims: len(bs.reclaims)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
 		s.closed = append(s.closed, c.restrictedClosed)
@@ -462,6 +498,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	bs.nodes.restoreDebits(s.nodes)
 	bs.draws = bs.draws[:s.draws]
 	bs.credit = s.credit
+	bs.reclaimCredit = s.reclaimCr
 	bs.flavors = bs.flavors[:s.flavors]
 	bs.reclaims = bs.reclaims[:s.reclaims]
 	clear(guaranteed)
@@ -740,9 +777,13 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 				lent = bs.lent[p.namespace][k]
 			}
 		}
+		// The variant's own growth by reclaim still in flight is its to
+		// re-place (NEW-1): its pods are not created, so the pass sizes it
+		// again from its current replicas.
+		own, ownKey := bs.ownReclaim(p.namespace+"/"+variant, acc)
 		var share Reclaim
 		if lent != nil {
-			share = Reclaim{After: lent.after, GPUs: lent.lentOut}
+			share = Reclaim{After: lent.after, GPUs: lent.lentOut + own}
 		}
 		reclaim := share.exempt(g)
 		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
@@ -768,11 +809,21 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			// Kueue charges it to the cohort either way: from the free pool
 			// first, then from what it preempts.
 			took := share.take(g)
+			fromOwn := min(own, took.GPUs)
 			lent.after -= took.After
-			lent.lentOut -= took.GPUs
+			lent.lentOut -= took.GPUs - fromOwn
+			if fromOwn > 0 {
+				bs.reclaimCredit[p.namespace+"/"+variant][ownKey] -= fromOwn
+			}
 			bs.debitPool(p.namespace, acc, took.After+took.GPUs)
 			if took.GPUs > 0 {
-				bs.reclaims = append(bs.reclaims, bs.reclaimDraw(p.namespace, p.modelID, variant, acc, took.GPUs, target))
+				d := bs.reclaimDraw(p.namespace, p.modelID, variant, acc, took.GPUs, target)
+				// What it re-placed of its own entry is in the record already.
+				d.CreditGPUs = fromOwn
+				if fromOwn == took.GPUs {
+					d.CreditReplicas = 1
+				}
+				bs.reclaims = append(bs.reclaims, d)
 			}
 		}
 		return true, false

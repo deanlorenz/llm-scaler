@@ -224,10 +224,29 @@ func (bs *borrowState) lentLeft(ns string) map[string]int {
 // lent out and it has not grown into yet added to every bounded key covering
 // the type: the borrowers hold those GPUs now, and Kueue preempts them to
 // admit ns's growth, so the cluster bounds -- the physical limiter's free
-// GPUs, a cluster quota -- must not refuse it for their being in use. The
-// input when there is nothing to add.
-func (bs *borrowState) withLent(ns string, available map[string]int) map[string]int {
+// GPUs, a cluster quota -- must not refuse it for their being in use. What
+// the model's own variants grew into that way and have not re-placed yet
+// (reclaimCredit, NEW-1) is added too: DeductReclaimed took it off LentOut,
+// and it is still theirs to re-place. The input when there is nothing to add.
+func (bs *borrowState) withLent(ns string, variants []string, available map[string]int) map[string]int {
 	lent := bs.lentLeft(ns)
+	if bs != nil {
+		for _, v := range variants {
+			for t, n := range bs.reclaimCredit[ns+"/"+v] {
+				if n <= 0 {
+					continue
+				}
+				if lent == nil {
+					lent = map[string]int{}
+				}
+				if k, ok := accelerator.FindKey(lent, t); ok {
+					lent[k] += n
+				} else {
+					lent[t] = n
+				}
+			}
+		}
+	}
 	if len(lent) == 0 || available == nil {
 		return available
 	}
