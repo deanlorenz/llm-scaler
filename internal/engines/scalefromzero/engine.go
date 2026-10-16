@@ -186,6 +186,10 @@ type Engine struct {
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
 	layouts allocation.LayoutLog
+	// extraPools remembers, per model (modelGroup.key), the InferencePools
+	// its variants resolve to beyond the one used, as last logged
+	// (noteExtraPool), so the 100ms loop logs a change, not every tick.
+	extraPools sync.Map
 }
 
 // SetGPULimiter injects the limiter whose constraints bound a wake, so the
