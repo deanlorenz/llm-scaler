@@ -233,11 +233,22 @@ map — denies every type (see *Merge rules*, row 3).
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
 | `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. At namespace scope, `borrowingLimit`, `lendingLimit`, cohorts and queue status add **cohort borrowing** on top of this grant where it is safe (see *Cohort borrowing*). |
-| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
+| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of the ClusterQueue its LocalQueues point at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. LocalQueues on **several** GPU ClusterQueues are not summed (see *multi-queue namespace* below). |
 | `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
-The cluster-scope figure is the sum over **all** ClusterQueues. Six attribution
+The cluster-scope figure is the sum over **all** ClusterQueues. Seven attribution
 rules the table does not show:
+
+- **A namespace on several GPU ClusterQueues gets one queue's figure, not
+  their sum.** Say `serving` points at `cq-s` (16 GPUs) and `batch` at `cq-b`
+  (16 GPUs), both in one namespace. Kueue charges each replica to the one
+  queue its pod's `kueue.x-k8s.io/queue-name` names, so the namespace can
+  never hold 32 there. The scaling manager does not read which queue a
+  variant uses, so it caps the namespace at the **smallest single queue's
+  figure per accelerator type** (16 here). A type only one of the queues
+  grants keeps that queue's figure. The namespace borrows nothing; its reason
+  is `multi-queue-namespace`. To get each queue's full figure, give serving
+  its own namespace with one LocalQueue.
 
 - **A flavor without a product label is an untyped grant.** Kueue's quickstart
   `default-flavor`, or any single-GPU-type cluster. It is *not* named after the
@@ -377,6 +388,7 @@ quota, exactly as with `countBorrowable: false`.
 | Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; the reserved Workloads must request at least the GPUs their owners' running pods do, each Workload counted once and at the pod count Kueue admitted. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, as do GPUs asked for only through pod-level resources or DRA claims, and a pod whose owner the controller may not read. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit` | `no-gpu-bound` |
+| The namespace has LocalQueues on one GPU ClusterQueue only. On several, it is capped at the smallest single queue's figure, not at their sum (see *What is read*) | `multi-queue-namespace` |
 | The Kueue controller's version is readable from the image tag of `kueue-controller-manager` (not a digest-only image). `kueue.assumeTestedVersion: true` lifts this one reason | `kueue-version-unknown` |
 | The Kueue controller runs a [tested version](#supported-kueue-versions) | `kueue-version-untested` |
 | The ClusterQueue is in a cohort | `no-cohort` |
@@ -858,6 +870,38 @@ physical limiter's question.
 So a quota does **not** bound the cluster: it can hand out capacity unmanaged
 workloads already took. For both guarantees, compose a physical limiter and a
 quota limiter; each is fed the measure it asks about.
+
+**A figure read from Kueue is different.** Kueue admits against everything it
+has reserved in a ClusterQueue, a training job beside serving included. So each
+queue's Kueue figure (nominal, guaranteed, within nominal, borrowing reach) is
+first reduced by the queue's **non-managed charge**: what Kueue reserved in it
+minus the GPUs the scaling manager's variants hold there. The static caps are
+applied after that, and are not reduced. Example: a queue of 16 GPUs where an
+unmanaged training job holds 8 gives serving 8, not 16.
+
+- A namespace's managed GPUs count in its queue only when it has LocalQueues on
+  one GPU ClusterQueue. A multi-queue namespace's GPUs count in none of them,
+  so they are charged to every one (the cautious side).
+- Managed GPUs include replicas Kueue has not admitted yet. While one waits at
+  Kueue's admission gate, the queue's charge is low by at most that replica's
+  GPUs.
+- A variant Kueue does not manage at all (no `queue-name`) holds GPUs Kueue
+  never reserved. They are subtracted from the charge all the same, so beside
+  an unmanaged training job the charge reads low by up to what that variant
+  holds.
+- CPU and memory (co-resources) are charged from Kueue's own reservation,
+  managed or not: a replica within nominal must fit the queue's nominal of each
+  co-resource its GPU flavor's resource group covers, less everything reserved.
+  This holds with borrowing counted or not (`countBorrowable: false`, or a queue
+  in no cohort).
+- A cluster-scope entry is not charged this way: its Kueue figure is the sum
+  of all queues, charged only with the managed GPUs.
+
+When a model here grows into nominal its queue lent out, and the borrower that
+Kueue preempts for it is another model this scaling manager runs, that
+borrower's target is lowered by the same replicas in the same pass. Kueue does
+not say whose borrowing it takes, so the scaling manager assumes its own
+borrowers go first.
 
 A cluster-scope quota bounds the whole cluster, one cap per listed type. A
 namespace-scope quota bounds **only the namespaces it lists**, each by its own
