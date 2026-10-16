@@ -849,7 +849,7 @@ func (g *BorrowGovernor) noHoleRelease(c BorrowCycle, req ModelScalingRequest, s
 // (timeoutHeld) and returns its release records; guaranteed is the GPUs it
 // takes below the namespace's guaranteed figure, on the first record.
 func (g *BorrowGovernor) pinUnit(req ModelScalingRequest, unit map[string]int, states map[string]variantRef, guaranteed int) []BorrowRelease {
-	var out []BorrowRelease
+	out := make([]BorrowRelease, 0, len(unit))
 	for _, v := range slices.Sorted(maps.Keys(unit)) {
 		k := req.Namespace + "/" + v
 		s := states[k].state

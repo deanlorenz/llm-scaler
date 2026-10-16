@@ -9,12 +9,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 )
 
-// afterQuota is cohort "c" with free GPUs in its one chunk: namespace a, a
+// afterQuota is cohort "c" with 8 free GPUs in its one chunk: namespace a, a
 // reclaiming queue at nominal 16 using 8, whose PreemptAfter is 8 -- kept of
 // it as given, the rest covered by the pool -- and namespace b, which borrows
 // with no cap.
-func afterQuota(free, kept int) *ResourceConstraints {
-	c := borrowQuota(free,
+func afterQuota(kept int) *ResourceConstraints {
+	c := borrowQuota(8,
 		nsBorrow{ns: "a", guaranteed: 16, used: 8, cap: 0, wn: 16, after: 8},
 		nsBorrow{ns: "b", cap: config.QuotaUnlimited})
 	ab := c.NamespaceBorrow["a"]["H100"]
@@ -42,7 +42,7 @@ func TestKeptGrowthTakesNothingFromThePool(t *testing.T) {
 			o.Nodes = NewNodeView(map[string]decision.NodeGPU{"n1": h100Node(0, nil), "n2": h100Node(0, nil)})
 			ds := o.Optimize(context.Background(), []ModelScalingRequest{
 				borrowModel("a", "ma", 8, 1, 2, nil), borrowModel("b", "mb", 8, 0, 1, nil),
-			}, []*ResourceConstraints{physicalH100(64), afterQuota(8, tc.kept)})
+			}, []*ResourceConstraints{physicalH100(64), afterQuota(tc.kept)})
 			got := addedGPUs(ds)
 			if got["ma"] != 8 {
 				t.Fatalf("a grew %d, want 8", got["ma"])
@@ -54,9 +54,9 @@ func TestKeptGrowthTakesNothingFromThePool(t *testing.T) {
 	}
 
 	// The wake records no pool part for growth into what its queue keeps.
-	draws := WakeDraws([]*ResourceConstraints{afterQuota(8, 8)}, "a", "ma",
+	draws := WakeDraws([]*ResourceConstraints{afterQuota(8)}, "a", "ma",
 		[]WakeReplica{{Variant: "ma-v", Accelerator: "H100", GPUs: 8}}, nil, nil)
-	after := DeductUnreservedAt([]*ResourceConstraints{afterQuota(8, 8)}, Unreserved{InFlight: draws})
+	after := DeductUnreservedAt([]*ResourceConstraints{afterQuota(8)}, Unreserved{InFlight: draws})
 	if free := after[0].SharedPools[0].Free; free != 8 {
 		t.Fatalf("a wake into its kept 8 left the pool at %d, want 8 (entries %+v)", free, draws)
 	}
@@ -72,7 +72,7 @@ func TestPreemptAfterGrowthIsRecorded(t *testing.T) {
 	o := NewGreedyByScoreOptimizer()
 	o.Nodes = NewNodeView(map[string]decision.NodeGPU{"n1": h100Node(0, nil)})
 	ds := o.Optimize(context.Background(), []ModelScalingRequest{borrowModel("a", "ma", 8, 1, 2, nil)},
-		[]*ResourceConstraints{physicalH100(64), afterQuota(8, 0)})
+		[]*ResourceConstraints{physicalH100(64), afterQuota(0)})
 	if got := addedGPUs(ds)["ma"]; got != 8 {
 		t.Fatalf("a grew %d, want 8", got)
 	}
@@ -80,10 +80,10 @@ func TestPreemptAfterGrowthIsRecorded(t *testing.T) {
 	now := time.Now()
 	record.RecordAt(o.ReclaimDraws(), now)
 	u := record.Unreserved(now)
-	if free := DeductUnreservedAt([]*ResourceConstraints{afterQuota(8, 0)}, u)[0].SharedPools[0].Free; free != 0 {
+	if free := DeductUnreservedAt([]*ResourceConstraints{afterQuota(0)}, u)[0].SharedPools[0].Free; free != 0 {
 		t.Fatalf("the pool reads %d free for the next decision, want 0: a's growth took its 8 (record %+v)", free, u.InFlight)
 	}
-	if pa := DeductReclaimed([]*ResourceConstraints{afterQuota(8, 0)}, u.InFlight)[0].NamespaceBorrow["a"]["H100"].PreemptAfter; pa != 0 {
+	if pa := DeductReclaimed([]*ResourceConstraints{afterQuota(0)}, u.InFlight)[0].NamespaceBorrow["a"]["H100"].PreemptAfter; pa != 0 {
 		t.Fatalf("a's PreemptAfter reads %d for the next decision, want 0", pa)
 	}
 }
