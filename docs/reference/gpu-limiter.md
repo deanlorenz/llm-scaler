@@ -315,6 +315,11 @@ the scaling manager asks for must also fit a node:
   the rest of the cycle lowers the target. Five minutes is about how long
   placement takes; a pod still Pending after that waits for something else (a
   taint, an affinity, CPU or memory on the node), and the hole is released.
+  The holds survive a controller restart or a leader change. They are kept
+  in the `wva-controller-status` ConfigMap (`inFlightLedger`) and read back
+  on start, each with its original end time. This also covers a replica
+  whose pod is Unschedulable, and a LeaderWorkerSet group still waiting for
+  its workers.
 - A scale-from-zero wake is checked the same way. Within one decision tick a
   wake also takes its GPUs and its hole from the wakes after it.
 - A node the utilization share freed for a receiver whose pod is still
@@ -360,11 +365,18 @@ Limits:
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the
   family, though only one of its products may have budget left.
-- The utilization share sizes its moves with its own node picture: its holes
+- The utilization share sizes its moves with its own node picture. Its holes
   are net of what today's optimizer placed for other models and of the
-  in-flight holds, and it counts a node as node fit does (accelerator by
-  product or family, taints the receivers tolerate). It does not read the
-  templates' `nodeSelector` or node affinity.
+  in-flight holds. It counts a node as node fit does: accelerator by product
+  or family, taints the receivers tolerate, and each pod's `nodeSelector` and
+  node affinity (a LeaderWorkerSet's leader by its own template, its workers
+  by theirs). It places one exclusive-topology group per domain, as node fit
+  does. A domain whose only group is a donor group the share is taking
+  counts as free for a new group.
+- After a restart, a held replica counts its pods again only from the first
+  steady-state cycle. Until then, a hold whose pods landed in the meantime
+  still holds its hole. A wake decided in the moment before the controller
+  has read the holds back does not see them.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.
