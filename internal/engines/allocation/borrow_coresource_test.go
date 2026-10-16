@@ -67,6 +67,51 @@ func TestGuaranteedReplicaChecksCoResources(t *testing.T) {
 	}
 }
 
+// 186-4: the nominal-path co-resource check reaches only the namespaces that
+// carry nominal co-resource headroom. A quota entry counting no borrowing
+// bounds c (Kueue, 64 CPUs of headroom), k (Kueue, no co-resource) and s (a
+// static cap). Only c's models get a placer; k's and s's decisions are what
+// they are with no co-resource headroom anywhere, and rescale takes its
+// path without borrowing. Before, any co-resource headroom switched the whole
+// pass to the borrowing path, every namespace's models included.
+func TestNominalCoCheckLeavesOtherNamespacesAlone(t *testing.T) {
+	quota := func(withCo bool) *ResourceConstraints {
+		q := &ResourceConstraints{ProviderName: "namespace-quota", NamespaceScoped: true,
+			NamespacePools: map[string]map[string]ResourcePool{
+				"c": {"H100": {Limit: 16}}, "k": {"H100": {Limit: 16}}, "s": {"H100": {Limit: 8}}}}
+		if withCo {
+			q.NamespaceNominal = map[string]map[string]NominalFigures{"c": {"H100": {WithinNominal: 16, Guaranteed: 16,
+				CoHeadroom: map[string]int64{"cpu": 64000}}}}
+		}
+		return q
+	}
+	bs := newBorrowState([]*ResourceConstraints{physicalH100(64), quota(true)}, nil)
+	if bs == nil {
+		t.Fatal("no state: c's co-resource headroom is not checked")
+	}
+	for ns, want := range map[string]bool{"c": true, "k": false, "s": false} {
+		if got := bs.newModelPlacer(ns, "m", nil, nil, gpuLimitTracker{}) != nil; got != want {
+			t.Errorf("namespace %s: placer %t, want %t", ns, got, want)
+		}
+	}
+	reqs := func() []ModelScalingRequest {
+		k, s := borrowModel("k", "mk", 8, 0, 3, nil), borrowModel("s", "ms", 8, 0, 3, nil)
+		return []ModelScalingRequest{cpuModel("c", 3), k, s}
+	}
+	with := NewGreedyByScoreOptimizer().Optimize(context.Background(), reqs(), []*ResourceConstraints{physicalH100(64), quota(true)})
+	without := NewGreedyByScoreOptimizer().Optimize(context.Background(), reqs(), []*ResourceConstraints{physicalH100(64), quota(false)})
+	for _, id := range []string{"mk", "ms"} {
+		a, b := decisionOf(t, with, id), decisionOf(t, without, id)
+		if a.TargetReplicas != b.TargetReplicas || a.WasLimited != b.WasLimited || a.LimitedBy != b.LimitedBy {
+			t.Errorf("%s: target %d limited %t by %q beside c's co-resources, %d %t %q without them",
+				id, a.TargetReplicas, a.WasLimited, a.LimitedBy, b.TargetReplicas, b.WasLimited, b.LimitedBy)
+		}
+	}
+	if got := addedGPUs(with)["m"]; got != 16 {
+		t.Errorf("c grew %d GPUs, want 16: two 32-CPU replicas fit its 64 CPUs, a third does not", got)
+	}
+}
+
 // A namespace on two queues that both grant H100 (multi-queue-namespace)
 // takes the smaller queue's nominal figures, its CPU headroom included: a
 // replica is admitted through one queue, and each has 64 CPUs. One 48-CPU

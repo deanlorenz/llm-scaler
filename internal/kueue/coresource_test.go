@@ -77,6 +77,30 @@ func TestCoResourcesOfEveryGroupAreRead(t *testing.T) {
 	}
 }
 
+// 186-4: the co-resource headroom of growth within nominal (CoUnused). A queue
+// in a cohort may borrow its CPU, so its headroom is its reach: a queue of CPU
+// nominal 0 holding 32 CPUs, no borrowingLimit, is not bounded at 0; with a
+// borrowingLimit of 16 and nominal 64, 70 used leaves 10. A queue in no cohort
+// cannot borrow: nominal less reserved. Before, every queue read N - U, so the
+// CPU-nominal-0 queue that borrows its CPU was refused every replica.
+func TestCoUnusedReachesWhatTheCohortLends(t *testing.T) {
+	bl := int64(16000)
+	borrows := withCPU(member("a", QueueResource{Nominal: 8}), "h100", CoQuota{Nominal: 0, Reserved: 32000}, true)
+	if got, bounded := coUnused(borrows, "h100")["cpu"]; bounded {
+		t.Errorf("cpu nominal 0, borrowing CPU without a limit: headroom %d, want no bound", got)
+	}
+	limited := withCPU(member("a", QueueResource{Nominal: 8}), "h100",
+		CoQuota{Nominal: 64000, BorrowingLimit: &bl, Reserved: 70000}, true)
+	if got := coUnused(limited, "h100")["cpu"]; got != 10000 {
+		t.Errorf("cpu headroom %d, want 10000 milli (64 + 16 - 70)", got)
+	}
+	alone := limited
+	alone.Cohort = ""
+	if got := coUnused(alone, "h100")["cpu"]; got != 0 {
+		t.Errorf("no cohort: cpu headroom %d, want 0 (64 - 70, clamped)", got)
+	}
+}
+
 // K2b: a queue's reach of a co-resource stops at nominal plus borrowingLimit,
 // as Kueue's does: 64 CPUs nominal, 16 borrowable, 70 used leaves 10.
 func TestCoResourceReachStopsAtBorrowingLimit(t *testing.T) {

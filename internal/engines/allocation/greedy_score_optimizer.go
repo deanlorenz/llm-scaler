@@ -253,7 +253,11 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	start, startByNS := maps.Clone(available), cloneNamespaceBudgets(availableByNS)
 	// Cohort borrowing, when any constraint counts it: what each namespace may
 	// still draw past its guaranteed figure, the shared pools, the node view.
-	// Nil otherwise, and every path below is then exactly as before.
+	// Nil otherwise, and every path below is then exactly as before -- unless
+	// a Kueue-backed namespace carries nominal co-resource headroom: then the
+	// state holds that alone (counts false), only that namespace's models are
+	// placed by a placer that checks it, and rescale and every other model
+	// take the paths they take without borrowing.
 	bs := newBorrowState(constraints, o.Nodes)
 	if bs != nil {
 		bs.blocked = o.BorrowBlocked
@@ -282,7 +286,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	var rescaleDecisions []domain.VariantDecision
 	var handled map[string]bool
 	if o.Rescale.any() {
-		if bs == nil {
+		if bs == nil || !bs.counts {
 			rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS)
 		} else {
 			rescaleDecisions, handled = o.applyRescaleWithinNominal(ctx, requests, constraints, available, availableByNS, bs)

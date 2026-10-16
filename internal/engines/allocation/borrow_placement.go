@@ -100,12 +100,19 @@ type nsBorrowLeft struct {
 // borrowState is one optimizer pass's borrowing: what each namespace may still
 // draw, the shared pools, and the node view. Draws mutate it, so a pool is
 // spent once across every namespace in its cohort and a node hole once across
-// every model. Nil when no constraint counts borrowing.
+// every model. Nil when no constraint counts borrowing and no Kueue-backed
+// namespace carries nominal co-resource headroom (hasNominalCo).
 //
 // The methods the pass calls whether or not it borrows (reachFor,
 // newModelPlacer, drawsByVariant) accept a nil receiver and then answer "no
 // borrowing"; the others are reached only through a non-nil state.
 type borrowState struct {
+	// counts is whether some constraint counts borrowing (HasBorrowing).
+	// Without it the state exists only to fit growth within nominal to the
+	// co-resources of the namespaces whose constraints carry them (K2): only
+	// their models are placed by a placer, and every other path of the pass
+	// is as without borrowing.
+	counts bool
 	borrow map[string]map[string]*nsBorrowLeft
 	// ownFlavors is, per namespace and type, the flavors its own queues offer
 	// the type on (NamespaceBorrow and NominalFigures.Flavors): what
@@ -153,13 +160,18 @@ type borrowState struct {
 }
 
 // newBorrowState builds the pass's borrowing state, or nil when no constraint
-// counts borrowing. nodes is the cycle's node view, nil without a physical
-// limiter or a fresh node snapshot.
+// counts borrowing and none carries nominal co-resource headroom. nodes is
+// the cycle's node view, nil without a physical limiter or a fresh node
+// snapshot.
 func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrowState {
-	if !HasBorrowing(constraints) && !hasNominalCo(constraints) {
-		return nil
+	counts := HasBorrowing(constraints)
+	if !counts {
+		if !hasNominalCo(constraints) {
+			return nil
+		}
+		return newNominalCoState(constraints, nodes)
 	}
-	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{}, nodes: nodes}
+	bs := &borrowState{counts: true, borrow: map[string]map[string]*nsBorrowLeft{}, nodes: nodes}
 	bs.chunks, bs.cohorts = mergeSharedPools(constraints)
 	bs.ownFlavors = ownFlavorsOf(constraints)
 	bs.heldPast = namespaceHeldPast(constraints)
@@ -229,6 +241,36 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 	for ns := range bs.borrow {
 		if r, ok := reach[ns]; ok {
 			bs.reach[ns] = r
+		}
+	}
+	return bs
+}
+
+// newNominalCoState is the pass's state when nothing counts borrowing but some
+// namespace's constraints carry nominal co-resource headroom (K2 on the
+// nominal path): that headroom alone, per namespace and type, nothing to
+// reclaim, no flavor to apply. Only those namespaces' models get a placer
+// (newModelPlacer), which checks a replica's co-resources beside its GPUs.
+func newNominalCoState(constraints []*ResourceConstraints, nodes *NodeView) *borrowState {
+	bs := &borrowState{nodes: nodes, lent: map[string]map[string]*nsBorrowLeft{}}
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for ns, perType := range c.NamespaceNominal {
+			for accType, f := range perType {
+				if len(f.CoHeadroom) == 0 {
+					continue
+				}
+				if bs.lent[ns] == nil {
+					bs.lent[ns] = map[string]*nsBorrowLeft{}
+				}
+				if prev, seen := bs.lent[ns][accType]; seen {
+					prev.coHeadroom = tighterCo(prev.coHeadroom, f.CoHeadroom, true)
+					continue
+				}
+				bs.lent[ns][accType] = &nsBorrowLeft{coHeadroom: maps.Clone(f.CoHeadroom)}
+			}
 		}
 	}
 	return bs
@@ -575,10 +617,12 @@ type modelPlacer struct {
 }
 
 // newModelPlacer returns the placer for one model, or nil when the pass counts
-// no borrowing, which leaves allocation exactly as it was.
+// no borrowing, which leaves allocation exactly as it was -- except, then, for
+// a model whose namespace carries nominal co-resource headroom, whose
+// replicas the placer fits to it (newNominalCoState).
 func (bs *borrowState) newModelPlacer(namespace, modelID string, nsBudget map[string]int, targets map[string]int,
 	limited gpuLimitTracker) *modelPlacer {
-	if bs == nil {
+	if bs == nil || (!bs.counts && len(bs.lent[namespace]) == 0) {
 		return nil
 	}
 	_, borrows := bs.borrow[namespace]
