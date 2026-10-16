@@ -1037,6 +1037,9 @@ wva_render_manifests() {
             wva_append_kueue_reader_scope_patch "$tmp/kustomization.yaml" "$ns" "${WVA_WATCH_NS:-$ns}"
             wva_append_policy_namespace_reader_scope_patch "$tmp/kustomization.yaml" "$ns" \
                 "${WVA_WATCH_NS:-$ns}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$ns}")"
+            if wva_kueue_reader_unneeded; then
+                wva_append_kueue_reader_delete "$tmp/kustomization.yaml" "$ns"
+            fi
         fi
         if [ "${ENVIRONMENT:-}" != "openshift" ] && declare -F wva_append_metrics_reader_decision >/dev/null; then
             wva_append_metrics_reader_decision "$tmp/kustomization.yaml" "$ns" >/dev/null 2>&1

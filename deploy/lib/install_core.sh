@@ -305,6 +305,12 @@ wva_run_prereqs_phase() {
             # tenant's Workloads. Revoked when none does.
             pl_sync_kueue_borrow_read "$WVA_NS" wva-controller-manager \
                 "$WVA_KUEUE_BORROW_WANTED" "${WVA_KUEUE_BORROW_UNREAD:-}" || true
+            # Another controller granted the same read may borrow from the
+            # same cohort; each counts only its own borrowing in flight.
+            if [ "$WVA_KUEUE_BORROW_WANTED" = yes ]; then
+                pl_warn_shared_cohort_borrowers "$WVA_NS/wva-controller-manager ${WVA_WATCH_NS:-$WVA_NS}
+$(pl_kueue_borrowers_besides "$WVA_NS")"
+            fi
         fi
         WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
             deploy_wva_controller

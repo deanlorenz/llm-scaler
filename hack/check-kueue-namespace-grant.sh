@@ -40,7 +40,7 @@ for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_s
     }
 done
 
-EXPECT_CASES=57
+EXPECT_CASES=64
 RAN=0
 FAILED=0
 
@@ -94,6 +94,15 @@ stub_kubectl() {
                 'rolebindings  rbac.authorization.k8s.io/v1 true RoleBinding' \
                 'clusterroles  rbac.authorization.k8s.io/v1 false ClusterRole' \
                 'clusterrolebindings  rbac.authorization.k8s.io/v1 false ClusterRoleBinding'
+            ;;
+        "get namespace wva-policy -o name")
+            # Whether wva-policy exists: STUB_WELLKNOWN yes | no | FORBIDDEN,
+            # by default yes exactly when a policy is published there.
+            case "${STUB_WELLKNOWN:-$([ -n "${STUB_POLICY:-}" ] && echo yes || echo no)}" in
+                yes) echo namespace/wva-policy ;;
+                FORBIDDEN) echo 'Error from server (Forbidden): namespaces "wva-policy" is forbidden' >&2; return 1 ;;
+                *) echo 'Error from server (NotFound): namespaces "wva-policy" not found' >&2; return 1 ;;
+            esac
             ;;
         "get namespace "*)
             case "${STUB_LABEL:-}" in
@@ -185,10 +194,10 @@ check 'a label-named policy namespace with kueue is a source' \
     "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_LABEL=platform-policy "STUB_LABELLED_POLICY='$POLICY_WITH_KUEUE'")"
 check 'an unreadable policy is unknown: warned, not silently no source' \
     'WARNED get namespaces/wva-ctl' \
-    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy)"
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_WELLKNOWN=yes STUB_CM_FORBIDDEN=wva-policy)"
 check 'unknown source, read already granted -> quiet' \
     'OK get namespaces/wva-ctl' \
-    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy STUB_CANI=yes)"
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_WELLKNOWN=yes STUB_CM_FORBIDDEN=wva-policy STUB_CANI=yes)"
 
 # A warning kubectl prints on stderr while succeeding is not data. Merged into
 # the answer with 2>&1, it became the label ("Warning: ..."), and a `yes` that
@@ -398,8 +407,26 @@ check 'borrow read: a self-managed controller reading a borrowing cluster policy
     "$(run_borrow "STUB_POLICY='$POLICY_WITH_KUEUE'")"
 check 'borrow read: an admin-owned controller never reads wva-policy' 'no -' \
     "$(run_borrow WVA_WATCH_NS=tenant-a "STUB_POLICY='$POLICY_WITH_KUEUE'")"
-check 'borrow read: an unreadable policy is unknown, never no' 'unknown -' \
+check 'borrow read: an unreadable admin-owned policy is unknown, never no' 'unknown -' \
+    "$(run_borrow WVA_WATCH_NS=tenant-a STUB_CM_FORBIDDEN=wva-ctl)"
+# MT3: the tenant writes a self-managed controller's own ConfigMap. Once its
+# policy namespace resolves (wva-policy exists, or a label names one) the
+# controller reads limiters from there alone, and so does this decision; and
+# the tenant's own policy that cannot be read or parsed counts as no.
+check 'borrow read: wva-policy exists, so the tenant own borrowing policy does not decide' 'no -' \
+    "$(run_borrow STUB_WELLKNOWN=yes "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: a labelled policy namespace decides alone' 'no -' \
+    "$(run_borrow STUB_LABEL=team-policy "STUB_LABELLED_POLICY='scaleUpThreshold: 0.85'" "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: no policy namespace resolves, so the tenant own policy decides' 'yes -' \
+    "$(run_borrow STUB_WELLKNOWN=no "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: an unreadable tenant own policy counts as no' 'no -' \
     "$(run_borrow STUB_CM_FORBIDDEN=wva-ctl)"
+check 'borrow read: a tenant own policy that does not parse counts as no' 'no -' \
+    "$(run_borrow "STUB_OWN='limiters: ['")"
+check 'borrow read: an admin-owned policy that does not parse stays unknown' 'unknown -' \
+    "$(run_borrow WVA_WATCH_NS=tenant-a "STUB_OWN='limiters: ['")"
+check 'borrow read: wva-policy unreadable, so both are read and the own one still counts' 'yes -' \
+    "$(run_borrow STUB_WELLKNOWN=FORBIDDEN "STUB_OWN='$POLICY_WITH_KUEUE'")"
 check 'borrow read: the kept controllerNamespace is read' 'yes kueue-ops' \
     "$(run_borrow "STUB_OWN='$POLICY_KUEUE_OPS'")"
 check 'borrow read, tenant phase: not granted -> warned' \
