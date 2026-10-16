@@ -41,8 +41,10 @@ func TestTwoGroupsTheShareFillsCannotShareAnExclusiveRack(t *testing.T) {
 	}
 
 	plain := oneRack()
-	if !ShareFitPods(plain, ShareReplicaFit{PodGPUs: []int{8, 8}}) || !ShareFitPods(plain, ShareReplicaFit{PodGPUs: []int{8, 8}}) {
-		t.Fatal("control: two groups without a topology key do not fit 32 free GPUs")
+	for range 2 {
+		if !ShareFitPods(plain, ShareReplicaFit{PodGPUs: []int{8, 8}}) {
+			t.Fatal("control: two groups without a topology key do not fit 32 free GPUs")
+		}
 	}
 }
 
@@ -73,14 +75,14 @@ func TestTheShareDoesNotFillARackHoldingAGroup(t *testing.T) {
 // share plans.
 func TestTheNodeViewReportsTheDomainsItGaveAGroup(t *testing.T) {
 	v := NewNodeView(racks([]string{"a", "b"}))
-	v.setOwner("ns/m")
+	v.setOwner("ns/gang")
 	if !v.PlaceReplicas([]ReplicaShape{{Variant: "ns/m-v", Accelerator: famHBM3, PodGPUs: []int{8, 8}, GPUs: 16, DomainKey: "rack"}}, true) {
 		t.Fatal("setup: the group does not fit")
 	}
 	if got := v.TakenDomains(nil); len(got["rack"]) != 1 || got["rack"][0] != "a" {
 		t.Fatalf("taken domains %v, want rack a", got)
 	}
-	if got := v.TakenDomains(func(owner string) bool { return owner == "ns/m" }); len(got) != 0 {
+	if got := v.TakenDomains(func(owner string) bool { return owner == "ns/gang" }); len(got) != 0 {
 		t.Fatalf("taken domains %v for an excluded owner", got)
 	}
 }

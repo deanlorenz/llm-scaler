@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// heldVariant is the variant whose replica the restart tests hold.
+const heldVariant = "ns/m"
 
 // restarted is the ledger a new process holds once it read back what l
 // persisted at persistAt, as of now.
@@ -47,8 +51,8 @@ func eightGPUNodes(used map[string]int) map[string]decision.NodeGPU {
 func TestARestartKeepsAnUnschedulableReplicaNodeHeld(t *testing.T) {
 	t0 := time.Unix(100_000, 0)
 	nodes := eightGPUNodes(map[string]int{"n1": 8, "n2": 0}) // the replica placed on n1; n2 was its hole
-	shape := ReplicaShape{Variant: "ns/m", Accelerator: famHBM3, PodGPUs: []int{8}, GPUs: 8}
-	firstCycle := []InFlightAdmission{{Key: "ns/m", Shape: shape, Want: 2, PlacedNow: 1, ExistingOnly: true, Unplaced: true}}
+	shape := ReplicaShape{Variant: heldVariant, Accelerator: famHBM3, PodGPUs: []int{8}, GPUs: 8}
+	firstCycle := []InFlightAdmission{{Key: heldVariant, Shape: shape, Want: 2, PlacedNow: 1, ExistingOnly: true, Unplaced: true}}
 	wakeFits := func(l *InFlightLedger, at time.Time) bool {
 		v := newNodeViewAt(nodes, at)
 		l.holdOn(v, at)
@@ -56,7 +60,7 @@ func TestARestartKeepsAnUnschedulableReplicaNodeHeld(t *testing.T) {
 	}
 
 	before := NewInFlightLedger()
-	before.Admit("ns/m", shape, 2, 1, nil, t0)
+	before.Admit(heldVariant, shape, 2, 1, nil, t0)
 	if wakeFits(before, t0.Add(time.Minute)) {
 		t.Fatal("setup: the growth's hole is not held before the restart")
 	}
@@ -74,7 +78,7 @@ func TestARestartKeepsAnUnschedulableReplicaNodeHeld(t *testing.T) {
 		t.Fatal("after a restart, a wake took the node an Unschedulable replica holds")
 	}
 	// The restart kept the clock: the hold ends InFlightTTL after the growth.
-	if !after.Holds("ns/m", t0.Add(InFlightTTL-time.Second)) || after.Holds("ns/m", t0.Add(InFlightTTL)) {
+	if !after.Holds(heldVariant, t0.Add(InFlightTTL-time.Second)) || after.Holds(heldVariant, t0.Add(InFlightTTL)) {
 		t.Fatal("the restored hold does not end InFlightTTL after the growth was admitted")
 	}
 }
@@ -119,14 +123,14 @@ func TestARestartKeepsAHalfPlacedGroupsWorkerHeldInItsDomain(t *testing.T) {
 // figures this controller does not write restores nothing.
 func TestAnExpiredOrCorruptPersistedLedgerIsIgnored(t *testing.T) {
 	t0 := time.Unix(100_000, 0)
-	shape := ReplicaShape{Variant: "ns/m", Accelerator: famHBM3, GPUs: 8}
+	shape := ReplicaShape{Variant: heldVariant, Accelerator: famHBM3, GPUs: 8}
 	l := NewInFlightLedger()
-	l.Admit("ns/m", shape, 2, 1, nil, t0)
+	l.Admit(heldVariant, shape, 2, 1, nil, t0)
 
-	if r := restarted(t, l, t0, t0.Add(InFlightTTL)); r.Holds("ns/m", t0.Add(InFlightTTL)) || len(r.entries) != 0 {
+	if r := restarted(t, l, t0, t0.Add(InFlightTTL)); r.Holds(heldVariant, t0.Add(InFlightTTL)) || len(r.entries) != 0 {
 		t.Fatal("an entry whose hold ended while the controller was down was restored")
 	}
-	if r := restarted(t, l, t0, t0.Add(time.Minute)); !r.Holds("ns/m", t0.Add(time.Minute)) {
+	if r := restarted(t, l, t0, t0.Add(time.Minute)); !r.Holds(heldVariant, t0.Add(time.Minute)) {
 		t.Fatal("control: an entry within its hold was not restored")
 	}
 
@@ -168,7 +172,7 @@ func TestAnExpiredOrCorruptPersistedLedgerIsIgnored(t *testing.T) {
 	}
 	fresh := NewInFlightLedger()
 	fresh.RestoreInFlight(p, t0)
-	if fresh.Holds("ns/m", t0.Add(InFlightTTL)) {
+	if fresh.Holds(heldVariant, t0.Add(InFlightTTL)) {
 		t.Fatal("a restored hold outlasts its TTL from the restore")
 	}
 }
@@ -207,7 +211,7 @@ func TestThePersistedLedgerStaysBounded(t *testing.T) {
 	big := NewInFlightLedger()
 	tol := make([]corev1.Toleration, 40)
 	for i := range tol {
-		tol[i] = corev1.Toleration{Key: strings.Repeat("k", 60) + fmt.Sprint(i), Operator: corev1.TolerationOpExists}
+		tol[i] = corev1.Toleration{Key: strings.Repeat("k", 60) + strconv.Itoa(i), Operator: corev1.TolerationOpExists}
 	}
 	for i := range 200 {
 		big.Admit(fmt.Sprintf("ns/b%04d", i), ReplicaShape{Accelerator: famHBM3, GPUs: 8, Tolerations: tol}, 2, 1, nil, t0)
