@@ -362,6 +362,43 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}
 	})
 
+	// A claim rounded down to whole replicas leaves part of the namespace's
+	// free quota unclaimed. A warm pool there can grow into that remainder,
+	// so the cluster group carves it: team-a has 12 free, claims one 8-GPU
+	// replica, and its pool wanting 8 may still take the other 4.
+	It("carves the part of a claimed namespace's pool that rounding left unclaimed", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 16}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 20, Used: 8}},
+			}},
+		}
+		reqs := []ModelScalingRequest{node("ma", "team-a", 1), node("mx", "ns-x", 1)}
+		groups, _ := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true,
+			PoolUnheld: map[string]map[string]int{"team-a": {"A100": 8}}})
+		Expect(groups).To(HaveKey(""))
+		Expect(groups[""].PoolCarve).To(Equal(4))
+		Expect(groups["team-a"].PoolCarve).To(Equal(8))
+	})
+
+	// config.quotaBoundsNamespaceLocked counts a namespace a scope: namespace
+	// entry does not list (and no `default` covers) as bounded, so a
+	// namespace-scoped controller there gets no physicalGroups note. That holds
+	// only while such a namespace is in the quota's pools with nothing in
+	// them, and no physical group plans it.
+	It("plans no physical group for a namespace the namespace quota does not list", func() {
+		listed := config.QuotaLimiterConfig{
+			Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
+			NamespaceQuotas: map[string]map[string]int{"team-a": {"A100": 8}},
+		}
+		cons := constraintsOf(map[string]map[string]int{"team-a": {"A100": 2}, "team-z": {"A100": 2}}, listed)
+		Expect(cons[0].NamespacePools).To(HaveKeyWithValue("team-z", BeEmpty()))
+		inventory := &ResourceConstraints{Pools: map[string]ResourcePool{"A100": {Limit: 32, Used: 4}}}
+		groups, _ := build([]ModelScalingRequest{shareReq("mz", "team-z", 4000, 2)},
+			append(cons, inventory), ShareGroupOptions{PhysicalGroups: true})
+		Expect(groups).To(BeEmpty())
+	})
+
 	It("reports nothing unshared without a namespace quota", func() {
 		reqs := []ModelScalingRequest{shareReq("mx", "ns-x", 100, 2)}
 		for name, cons := range map[string][]*ResourceConstraints{
