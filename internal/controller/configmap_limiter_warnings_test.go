@@ -14,9 +14,11 @@ import (
 )
 
 // The limiter warnings describe the bound the cluster runs under, so they are
-// logged only for the ConfigMap the limiters are read from. A namespace-local
-// ConfigMap's limiters are ignored whole; a warning about them would describe
-// a bound nothing enforces.
+// logged only for the ConfigMap the limiters are read from: the global
+// ConfigMap, or the policy namespace's when one is set. A namespace-local
+// ConfigMap's limiters are ignored whole, and so are the global ConfigMap's
+// while a separate policy namespace is in force; a warning about them would
+// describe a bound nothing enforces.
 func TestLimiterWarningsOnlyWhereLimitersAreRead(t *testing.T) {
 	// A namespace in exclude that nothing bounds: no cluster quota, and no
 	// physical limiter.
@@ -45,13 +47,20 @@ func TestLimiterWarningsOnlyWhereLimitersAreRead(t *testing.T) {
 			name      string
 			namespace string
 			isGlobal  bool
+			separate  bool // a separate policy namespace is in force
+			policyNS  bool // the ConfigMap is the policy namespace's
 			want      bool
 		}{
-			{"the global ConfigMap", rejectsSystemNS, true, true},
-			{"a namespace-local ConfigMap", "team-a", false, false},
+			{"the global ConfigMap", rejectsSystemNS, true, false, false, true},
+			{"a namespace-local ConfigMap", "team-a", false, false, false, false},
+			{"the global ConfigMap beside a policy namespace", rejectsSystemNS, true, true, false, false},
+			{"the policy namespace's ConfigMap", rejectsPolicyNS, false, true, true, true},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				f := newRejectsFixture(t)
+				if c.separate {
+					f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
+				}
 				var logged strings.Builder
 				ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
 					logged.WriteString(args + "\n")
@@ -60,7 +69,13 @@ func TestLimiterWarningsOnlyWhereLimitersAreRead(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Namespace: c.namespace, Name: config.ScalingPolicyConfigMapName()},
 					Data:       map[string]string{config.GlobalDefaultsKey: policy.yaml},
 				}
-				if err := f.r.handleScalingPolicyConfigMap(ctx, cm, c.namespace, c.isGlobal); err != nil {
+				var err error
+				if c.policyNS {
+					err = f.r.handleClusterPolicyConfigMap(ctx, cm)
+				} else {
+					err = f.r.handleScalingPolicyConfigMap(ctx, cm, c.namespace, c.isGlobal)
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				out := logged.String()
