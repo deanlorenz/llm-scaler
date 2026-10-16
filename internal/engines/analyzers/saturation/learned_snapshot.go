@@ -334,7 +334,8 @@ type RestoredVariant struct {
 	// that did not happen.
 	Stored int
 	// BoundPriors is how many of the variant's lower bounds hold a previous
-	// figure when its entries are installed: a figure restored with its bound
+	// figure on the hardware it runs now when its entries are installed
+	// (boundPriorsLocked): a figure restored with its bound
 	// -- a window set aside before the export -- rather than from a window.
 	// It prices the variant (P2-prior) as a restored window would.
 	BoundPriors int
@@ -1220,9 +1221,9 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 }
 
 // boundPriorsLocked counts the variant's lower bounds holding a previous
-// figure on the hardware it runs now (priorKeyRuns, rec): a bound filed under
-// another accelerator or GPU count is never looked up, and counted, the
-// restart line said a figure priced a variant that had moved off it. Callers
+// figure on the hardware it runs now (priorKeyRuns, rec). A bound filed under
+// another accelerator or GPU count is never looked up; counting it made the
+// restart line say a figure priced a variant that had moved off it. Callers
 // hold a.mu.
 func (a *SaturationAnalyzer) boundPriorsLocked(namespace, modelID, variant string, rec *capacity.Record) int {
 	prefix := namespace + "|" + variant + "|" + modelID + "|"
