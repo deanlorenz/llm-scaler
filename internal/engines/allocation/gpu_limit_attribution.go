@@ -362,8 +362,11 @@ func jointClusterBound(constraints []*ResourceConstraints, accType string) (int,
 	if !bounds || joint >= alone {
 		return 0, nil
 	}
+	// The joint bound is then the finite sum over these products, so each
+	// has a finite tightest figure. A product listed twice marks the same
+	// bounds again.
 	binders := map[*ResourceConstraints]bool{}
-	for _, product := range distinctSpellings(familyProducts(allowlists, accType)) {
+	for _, product := range familyProducts(allowlists, accType) {
 		tightest := math.MaxInt
 		for _, c := range cluster {
 			if avail, bounds := clusterBound(c.Pools, product); bounds {
@@ -371,7 +374,7 @@ func jointClusterBound(constraints []*ResourceConstraints, accType string) (int,
 			}
 		}
 		for _, c := range cluster {
-			if avail, bounds := clusterBound(c.Pools, product); bounds && avail == tightest && tightest != math.MaxInt {
+			if avail, bounds := clusterBound(c.Pools, product); bounds && avail == tightest {
 				binders[c] = true
 			}
 		}
