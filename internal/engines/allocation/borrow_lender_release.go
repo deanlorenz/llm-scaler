@@ -88,12 +88,55 @@ type LenderRelease struct {
 	TimedOut bool `json:"timedOut,omitempty"`
 }
 
-// lenderTimeout is how long a lender release may stay in flight before it is
-// dropped and the lender may be released to again: the release actuation
-// window, or twice the expected release latency when that is longer (a
-// ScaledObject with a long scale-down window).
-func (g *BorrowGovernor) lenderTimeout() time.Duration {
-	return max(g.settings.ReleaseActuation, 2*g.settings.ReleaseLatency)
+// lenderTimeout is how long a release to a lender of cohort may stay in
+// flight before it is dropped and the lender may be released to again: the
+// release actuation window, or twice the cohort's expected release latency
+// when that is longer (a ScaledObject with a long scale-down window).
+func (g *BorrowGovernor) lenderTimeout(cohort string) time.Duration {
+	return max(g.settings.ReleaseActuation, 2*g.settings.ReleaseLatencies[cohort])
+}
+
+// MaxReleaseLatency caps a cohort's expected release latency
+// (BorrowSettings.ReleaseLatencies): a tenant's hour-long termination grace or
+// scale-down window must not hold a release in flight, or delay the
+// lender-waiting alert, for longer than this.
+const MaxReleaseLatency = 30 * time.Minute
+
+// LenderReleaseScope is, per cohort whose pool opts in to
+// releaseToNonReclaimingLenders (every entry reading it), the
+// "namespace/variant" keys a release to its lenders may lower: the variants of
+// the cohort's namespaces on a type the pool serves. Nil when none opts in.
+// A cohort's release latency is measured over these variants alone, and the
+// lender-waiting release counter is created for their models alone.
+func LenderReleaseScope(constraints []*ResourceConstraints, requests []ModelScalingRequest) map[string][]string {
+	chunks, cohorts := mergeSharedPools(constraints)
+	var out map[string][]string
+	for _, ch := range chunks {
+		if !ch.ReleaseToNonReclaiming {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		if _, ok := out[ch.Cohort]; !ok {
+			out[ch.Cohort] = []string{}
+		}
+		for _, req := range requests {
+			if !slices.Contains(cohorts[req.Namespace], ch.Cohort) {
+				continue
+			}
+			for _, st := range req.VariantStates {
+				k := req.Namespace + "/" + st.VariantName
+				if ch.serves(accOf(req, st.VariantName)) && !slices.Contains(out[ch.Cohort], k) {
+					out[ch.Cohort] = append(out[ch.Cohort], k)
+				}
+			}
+		}
+	}
+	for c := range out {
+		slices.Sort(out[c])
+	}
+	return out
 }
 
 // lenderPinned reports whether a lender release in flight lowers the
@@ -203,8 +246,8 @@ func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, reques
 		}
 		age := now.Sub(e.ReleasedAt)
 		switch {
-		case age <= g.lenderTimeout():
-		case e.TimedOut && (age > 2*g.lenderTimeout() || unitsLanded(e.Units, states)):
+		case age <= g.lenderTimeout(k.Cohort):
+		case e.TimedOut && (age > 2*g.lenderTimeout(k.Cohort) || unitsLanded(e.Units, states)):
 			g.dropLenderRelease(k)
 		case !e.TimedOut:
 			if half := halfLanded(e.Units, states); len(half) > 0 {

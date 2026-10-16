@@ -15,9 +15,9 @@
 #      join, and a model never judged raises WVAModelSLOUnjudged.
 #      kueue-alerts: the Kueue borrowing alerts fire per namespace, per quota
 #      entry and per controller instance as their runbooks say, the
-#      thrashing alert counts four losses, not three, and the lender-waiting
-#      alert adds a release's latency to the cooldown only while releases to
-#      lenders are on.
+#      thrashing alert counts four losses, not three, and not releases to a
+#      waiting lender, and the lender-waiting alert adds a release's latency
+#      to the cooldown only in the cohort it was measured for.
 #      learned-state-alerts: a snapshot that cannot be written raises
 #      WVALearnedStateSnapshotFailing, and one that recovers stops it.
 #      utilization-share-alerts: a frozen group, floors past the quota and an

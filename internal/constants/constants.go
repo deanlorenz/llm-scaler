@@ -203,6 +203,12 @@ const (
 	// K8SEventBorrowedCapacityReleased is recorded on a scale target when the
 	// scaling manager lowers it to give borrowed Kueue capacity back.
 	K8SEventBorrowedCapacityReleased = "BorrowedCapacityReleased"
+	// K8SEventLenderReleaseBlocked is a Warning recorded on the scale
+	// targets of the models borrowing in a cohort when a waiting lender Kueue
+	// does not reclaim for is handed nothing (releaseToNonReclaimingLenders):
+	// what this controller could give back would not admit it, or another
+	// borrower took what it gave.
+	K8SEventLenderReleaseBlocked = "LenderReleaseBlocked"
 
 	// Enforcer policy types.
 	EnforcerPolicyTypeScaleToZero     = "scale_to_zero"

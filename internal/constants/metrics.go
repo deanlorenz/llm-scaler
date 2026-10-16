@@ -1045,13 +1045,28 @@ const (
 	// the lender-waiting alert compares against. Absent otherwise.
 	WVAKueueBorrowCooldownSeconds = "wva_kueue_borrow_cooldown_seconds"
 
-	// WVAKueueBorrowReleaseLatencySeconds is a gauge: how long a release of
-	// borrowed capacity to a waiting lender takes to land -- the borrowing
-	// models' slowest KEDA scale-down window, plus the HPA sync, the KEDA poll
-	// and the termination grace -- while a quota entry sets
-	// kueue.releaseToNonReclaimingLenders. The lender-waiting alert adds it
-	// to the cooldown. Absent otherwise.
+	// WVAKueueBorrowReleaseLatencySeconds is a gauge, per cohort whose pool
+	// opts in to kueue.releaseToNonReclaimingLenders: how long a release of
+	// borrowed capacity to a waiting lender there takes to land -- the
+	// slowest KEDA scale-down window of the models a release may lower, plus
+	// the HPA sync, the KEDA poll and the termination grace, capped at 30
+	// minutes. The lender-waiting alert adds it to the cooldown for that
+	// cohort alone. Absent for every other cohort.
 	WVAKueueBorrowReleaseLatencySeconds = "wva_kueue_borrow_release_latency_seconds"
+
+	// WVAKueueLenderReleaseBlocked is a gauge, 1 per cohort, lender
+	// ClusterQueue and reason while a waiting lender Kueue does not reclaim
+	// for is handed nothing (kueue.releaseToNonReclaimingLenders): reason
+	// unservable (what this controller could hand back would not admit its
+	// next Workload) or taken-by-another-borrower (a release landed and
+	// another borrower took it). Absent otherwise.
+	WVAKueueLenderReleaseBlocked = "wva_kueue_lender_release_blocked"
+
+	// WVAKueueBorrowLedgerUnread is a gauge, 1 with a reason while the
+	// persisted borrowing release ledger cannot be read and some quota
+	// entry sets kueue.releaseToNonReclaimingLenders: no release to a lender
+	// is decided until it is. Reasons: forbidden, read-error, newer-version.
+	WVAKueueBorrowLedgerUnread = "wva_kueue_borrow_ledger_unread"
 
 	// WVAKueueBorrowedGPUs is a gauge: per cohort and flavor, the GPUs the
 	// namespaces this controller governs hold past their guaranteed figures,

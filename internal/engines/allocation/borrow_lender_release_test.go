@@ -522,7 +522,7 @@ func TestLenderReleaseLanding(t *testing.T) {
 		if b, ok := blockedOf(gov, "lender"); !ok || b.Reason != LenderTaken {
 			t.Errorf("report %+v, want the lender reported %s", gov.LenderReport(), LenderTaken)
 		}
-		later := w.readAt.Add(gov.lenderTimeout() + time.Hour)
+		later := w.readAt.Add(gov.lenderTimeout("c") + time.Hour)
 		w.readAt = later
 		if rel, _ := cycleOf(gov, later, w, govModel("x", 4, 8)); len(rel) != 0 {
 			t.Errorf("released %+v while the lender still waits for what another borrower took", rel)
@@ -544,14 +544,14 @@ func TestLenderReleaseLanding(t *testing.T) {
 		if _, ds := cycleOf(gov, t0, w, pd(2, 4)); lowered(ds)["p"] != 1 || lowered(ds)["d"] != 2 {
 			t.Fatalf("lowered %v, want one 1P:2D pair", lowered(ds))
 		}
-		late := t0.Add(gov.lenderTimeout() + time.Minute)
+		late := t0.Add(gov.lenderTimeout("c") + time.Minute)
 		w.readAt = late
 		w.borrowed = 48
 		_, ds := cycleOf(gov, late, w, pd(1, 4)) // prefill gone, decodes still scaling down
 		if lowered(ds)["d"] != 2 {
 			t.Errorf("lowered %v past the timeout, want the decodes still pinned at 2: no prefill without its decodes", lowered(ds))
 		}
-		gone := t0.Add(2*gov.lenderTimeout() + time.Minute)
+		gone := t0.Add(2*gov.lenderTimeout("c") + time.Minute)
 		w.readAt = gone
 		if _, ds := cycleOf(gov, gone, w, pd(1, 4)); lowered(ds)["d"] != 0 {
 			t.Errorf("lowered %v past twice the timeout, want the pins gone", lowered(ds))
@@ -735,7 +735,7 @@ func TestLenderReleaseInFlight(t *testing.T) {
 	t.Run("one that never lands times out", func(t *testing.T) {
 		gov := NewBorrowGovernor(settings)
 		cycleOf(gov, t0, w, govModel("x", 6, 8))
-		late := t0.Add(gov.lenderTimeout() + time.Minute)
+		late := t0.Add(gov.lenderTimeout("c") + time.Minute)
 		rel, _ := cycleOf(gov, late, w, govModel("x", 6, 8))
 		if len(rel) != 1 {
 			t.Errorf("past the release timeout released %+v, want a new release", rel)

@@ -909,6 +909,10 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		if kErr := entry.Kueue.validate(fmt.Sprintf("entry[%d] (%q)", i, entry.Name)); kErr != nil {
 			errs = append(errs, kErr)
 		}
+		if entry.Kueue != nil && entry.Kueue.ReleaseToNonReclaimingLenders && !entry.Kueue.Enabled {
+			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): kueue.releaseToNonReclaimingLenders is set but kueue.enabled "+
+				"is false; nothing is read from Kueue, so nothing is counted or handed back", i, entry.Name))
+		}
 
 		switch entry.Scope {
 		case QuotaScopeCluster:

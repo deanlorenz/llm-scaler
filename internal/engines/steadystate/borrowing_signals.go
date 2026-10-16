@@ -80,11 +80,25 @@ func (e *Engine) publishBorrowSignals(constraints []*allocation.ResourceConstrai
 	// force, published while some entry counts borrowing.
 	metrics.PublishKueueBorrowCooldown(e.borrowSettings().Cooldown.Seconds(),
 		e.Config != nil && e.Config.KueueCountsBorrowable())
-	// What the same alert adds to the cooldown while releases to waiting
-	// lenders are on: how long one takes to land. The last figure measured
-	// is kept through cycles that count no borrowing.
-	metrics.PublishKueueReleaseLatency(st.releaseLatency.Seconds(),
-		e.Config != nil && e.Config.KueueReleasesToNonReclaiming() && st.releaseLatency > 0)
+	// What the same alert adds to the cooldown, per cohort whose pool opts
+	// in to releaseToNonReclaimingLenders: how long a release there takes to
+	// land. The last figures measured are kept through cycles that count no
+	// borrowing; every other cohort's threshold stays the cooldown alone.
+	on := e.Config != nil && e.Config.KueueReleasesToNonReclaiming()
+	latencies := map[string]float64{}
+	for cohort, d := range st.releaseLatencies {
+		if on && d > 0 {
+			latencies[cohort] = d.Seconds()
+		}
+	}
+	metrics.PublishKueueReleaseLatency(latencies)
+	// No release to a lender is decided while the persisted ledger is
+	// unread: say why, while the option is on.
+	unread := ""
+	if on {
+		unread = st.ledgerUnread
+	}
+	metrics.PublishBorrowLedgerUnread(unread)
 	metrics.PublishKueueNeverRead(kueueNeverRead(constraints))
 }
 

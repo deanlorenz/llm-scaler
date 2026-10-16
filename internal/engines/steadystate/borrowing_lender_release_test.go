@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,6 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // lenderReleaseWorld is namespace "b" at guaranteed 16 holding 48 GPUs on
@@ -101,6 +103,78 @@ func TestALenderReleaseSurvivesANewLeaderTerm(t *testing.T) {
 	ds3 := lenderDecisions(reqs)
 	if rel := e2.borrowing.governor.Releases(e2.borrowing.cycle, ds3); len(rel) != 0 || ds3[0].TargetReplicas != 4 {
 		t.Errorf("the new term released %+v (target %d); want nothing new and the pin at 4", rel, ds3[0].TargetReplicas)
+	}
+}
+
+// PR #203 review SF2: a release's latency is measured per cohort whose pool
+// opts in, over the models a release there may lower, and capped; a tenant
+// elsewhere, or one an Any lender reclaims from, does not lengthen it.
+func TestReleaseLatencyIsPerCohortAndCapped(t *testing.T) {
+	now := time.Unix(50000, 0)
+	grace := func(name string, s int64) *appsv1.Deployment {
+		d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "b"}}
+		d.Spec.Template.Spec.TerminationGracePeriodSeconds = &s
+		return d
+	}
+	cs, reqs := lenderReleaseWorld(now)
+	// Cohort "d", not opted in, with a tenant whose pods take an hour to stop.
+	other := *cs[0]
+	other.NamespacePools = map[string]map[string]allocation.ResourcePool{"e": {"H100": {Limit: 0, Used: 8}}}
+	other.NamespaceBorrow = map[string]map[string]allocation.NamespaceBorrow{"e": {"H100": {Cap: config.QuotaUnlimited}}}
+	other.NamespaceCohorts = map[string][]string{"e": {"d"}}
+	other.SharedPools = []allocation.SharedPoolChunk{cs[0].SharedPools[0]}
+	other.SharedPools[0].Cohort, other.SharedPools[0].ReleaseToNonReclaiming = "d", false
+	cs = append(cs, &other)
+	reqs = append(reqs, allocation.ModelScalingRequest{ModelID: "y", Namespace: "e",
+		VariantStates: []domain.VariantReplicaState{{VariantName: "y-v", CurrentReplicas: 1, GPUsPerReplica: 8, AcceleratorName: "H100"}}})
+	// In cohort c, a variant on a type the pool does not serve: no release
+	// there lowers it.
+	reqs[0].VariantStates = append(reqs[0].VariantStates, domain.VariantReplicaState{VariantName: "z-v", CurrentReplicas: 1,
+		GPUsPerReplica: 8, AcceleratorName: "A100"})
+	targets := map[string]scaletarget.ScaleTargetAccessor{
+		"b/x-v": scaletarget.NewDeploymentAccessor(grace("x-v", 60)),
+		"b/z-v": scaletarget.NewDeploymentAccessor(grace("z-v", 3600)),
+		"e/y-v": scaletarget.NewDeploymentAccessor(grace("y-v", 3600)),
+	}
+	e := &Engine{Config: config.NewTestConfig()}
+	got := releaseLatencies(e, cs, reqs, targets)
+	// 300s window + 15s HPA sync + 30s poll + x's 60s grace.
+	if len(got) != 1 || got["c"] != 405*time.Second {
+		t.Errorf("latencies %v, want c alone at 405s: neither cohort d's tenant nor c's A100 variant counts", got)
+	}
+	targets["b/x-v"] = scaletarget.NewDeploymentAccessor(grace("x-v", 7200))
+	if got := releaseLatencies(e, cs, reqs, targets); got["c"] != allocation.MaxReleaseLatency {
+		t.Errorf("latency %v with a two-hour grace, want the cap %v", got["c"], allocation.MaxReleaseLatency)
+	}
+}
+
+// PR #203 review (GT minor): a ledger a newer build wrote is held unread --
+// no release to a lender starts -- and is not persisted over.
+func TestALedgerOfANewerVersionIsHeldUnread(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(50000, 0)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	newer := `{"version":2,"lenderReleases":[{"cohort":"c","lender":"lender","flavor":"h100","resource":"nvidia.com/gpu"}]}`
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: controllerstatus.ConfigMapName, Namespace: config.SystemNamespace()},
+		Data:       map[string]string{controllerstatus.KeyBorrowReleaseLedger: newer}}).Build()
+	cs, reqs := lenderReleaseWorld(now)
+	e := &Engine{Config: config.NewTestConfig(), client: c, Status: controllerstatus.New(c, c, config.SystemNamespace())}
+	e.borrowing.inFlight = allocation.NewBorrowInFlight()
+	e.governBorrowing(ctx, cs, reqs, nil, now)
+	if !e.borrowing.cycle.LedgerUnread || e.borrowing.ledgerUnread != ledgerNewerReason {
+		t.Fatalf("unread %t reason %q, want the newer ledger held unread", e.borrowing.cycle.LedgerUnread, e.borrowing.ledgerUnread)
+	}
+	ds := lenderDecisions(reqs)
+	e.releaseBorrowed(ctx, reqs, ds, nil, now)
+	if ds[0].TargetReplicas != 6 {
+		t.Errorf("x's target is %d, want 6: nothing is released while a newer build's ledger is unread", ds[0].TargetReplicas)
+	}
+	if raw := e.Status.Data()[controllerstatus.KeyBorrowReleaseLedger]; raw != "" {
+		t.Errorf("persisted %q over the newer build's ledger", raw)
 	}
 }
 

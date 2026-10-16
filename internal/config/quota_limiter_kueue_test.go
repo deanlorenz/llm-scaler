@@ -370,6 +370,20 @@ var _ = Describe("KueueQuotaSource", func() {
 			Expect(validate(&KueueQuotaSource{Enabled: true, ReleaseToNonReclaimingLenders: true})).To(Succeed())
 		})
 
+		// PR #203 review (SF minor): the option on an entry that reads no
+		// Kueue does nothing, and says so.
+		It("warns about releaseToNonReclaimingLenders on an entry with kueue.enabled false", func() {
+			warnings := func(k *KueueQuotaSource) []string {
+				e := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace, Kueue: k}}}
+				w, err := e.Validate()
+				Expect(err).NotTo(HaveOccurred())
+				return w
+			}
+			Expect(warnings(&KueueQuotaSource{ReleaseToNonReclaimingLenders: true})).To(ContainElement(
+				ContainSubstring("releaseToNonReclaimingLenders is set but kueue.enabled is false")))
+			Expect(warnings(&KueueQuotaSource{Enabled: true, ReleaseToNonReclaimingLenders: true})).To(BeEmpty())
+		})
+
 		It("rejects an empty resource name", func() {
 			err := validate(&KueueQuotaSource{Enabled: true, Resources: []string{"nvidia.com/gpu", " "}})
 			Expect(err).To(MatchError(ContainSubstring("kueue.resources[1]")))

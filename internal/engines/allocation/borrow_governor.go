@@ -58,12 +58,14 @@ type BorrowSettings struct {
 	// borrowing for the cooldown plus this drop the release state
 	// (HoldReleases).
 	ReleaseActuation time.Duration
-	// ReleaseLatency is how long a lowered target takes to free its GPUs:
-	// the borrowing models' KEDA scale-down window, the HPA sync, the KEDA
-	// poll and the termination grace (ReleaseBound). Zero when not known. A
-	// release to a waiting lender stays in flight up to twice this, or
-	// ReleaseActuation if longer (lenderTimeout).
-	ReleaseLatency time.Duration
+	// ReleaseLatencies is, per cohort whose pool opts in to
+	// releaseToNonReclaimingLenders, how long a lowered target of the models
+	// a release there may lower takes to free its GPUs: their KEDA scale-down
+	// window, the HPA sync, the KEDA poll and the termination grace
+	// (ReleaseBound), capped (MaxReleaseLatency). Absent when not known. A
+	// release to a waiting lender of that cohort stays in flight up to twice
+	// this, or ReleaseActuation if longer (lenderTimeout).
+	ReleaseLatencies map[string]time.Duration
 }
 
 // ReleaseBound is how long a lowered target takes to free its GPUs: the
@@ -875,7 +877,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 	// read to clear it on, it goes now. One not landed keeps its pins until
 	// it lands or times out.
 	for k, e := range g.lenderRel {
-		if unitsLanded(e.Units, states) || now.Sub(e.ReleasedAt) > g.lenderTimeout() {
+		if unitsLanded(e.Units, states) || now.Sub(e.ReleasedAt) > g.lenderTimeout(k.Cohort) {
 			g.dropLenderRelease(k)
 		}
 	}

@@ -264,15 +264,16 @@ func alertExpr(t *testing.T, name string) string {
 // lengthens borrowCooldown must not page early.
 func TestKueueLenderWaitingComparesAgainstTheCooldownGauge(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueLenderWaitingPastCooldown")
-	assert.ElementsMatch(t, []string{"wva_kueue_lender_waiting_seconds", "wva_kueue_borrow_cooldown_seconds",
-		"wva_kueue_borrow_release_latency_seconds"}, ExtractMetricNames(expr))
+	assert.ElementsMatch(t, []string{"wva_kueue_lender_waiting_seconds", "wva_kueue_lender_waiting_seconds",
+		"wva_kueue_borrow_cooldown_seconds", "wva_kueue_borrow_release_latency_seconds"}, ExtractMetricNames(expr))
 	assert.NotRegexp(t, `>\s*[0-9]+\s*$`, expr, "no hardcoded threshold")
-	assert.Contains(t, expr, "> on () group_left () (max (wva_kueue_borrow_cooldown_seconds)",
+	assert.Contains(t, expr, "> on () group_left () max (wva_kueue_borrow_cooldown_seconds)",
 		"one cooldown, matched against every lender series")
 	// PR-C: with releaseToNonReclaimingLenders a release lands only after the
-	// KEDA scale-down window; the threshold adds that latency, and is the
-	// cooldown alone where the latency gauge is absent.
-	assert.Contains(t, expr, "+ (max (wva_kueue_borrow_release_latency_seconds) or vector(0))")
+	// KEDA scale-down window; the latency is taken off the wait of the
+	// cohort it was measured for alone (PR #203 review SF2), and a cohort
+	// with no latency series keeps the cooldown alone.
+	assert.Contains(t, expr, "- on (cohort) group_left () max by (cohort) (wva_kueue_borrow_release_latency_seconds) or max by (cohort, cluster_queue) (wva_kueue_lender_waiting_seconds)")
 }
 
 // O1: drift above 0 for 15 minutes is a warning; an unknown controller version
@@ -328,8 +329,9 @@ func TestKueueNeverReadAlert(t *testing.T) {
 // resolution, which misses a reason that sets and clears between two samples.
 func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueBorrowThrashing")
-	assert.Contains(t, expr, `increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h])`,
-		"a replica Kueue held at its gate where no borrowing is counted is no borrowed capacity lost")
+	assert.Contains(t, expr, `increase(wva_borrow_releases_total{cause!~"kueue-gate|lender-waiting"}[1h])`,
+		"a replica Kueue held at its gate where no borrowing is counted is no borrowed capacity lost, "+
+			"and a release to a waiting lender is capacity handed back on purpose")
 	assert.Contains(t, expr, "by (exported_namespace, model_name)",
 		"group by the scraped model namespace, as the other per-model alerts do")
 	assert.Regexp(t, `>\s*3\.5\s*$`, expr, "3.5: increase() reads three losses as about 3.1")
@@ -345,7 +347,7 @@ func TestKueueBorrowThrashingCountsPreemptionsAlone(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueBorrowThrashing")
 	compact := regexp.MustCompile(`\s+`).ReplaceAllString(expr, " ")
 	const (
-		releases  = `sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h]))`
+		releases  = `sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total{cause!~"kueue-gate|lender-waiting"}[1h]))`
 		preempted = "sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))"
 	)
 	assert.Contains(t, compact, "( "+preempted+" or "+releases+" * 0 )",

@@ -8,6 +8,8 @@ package steadystate
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,6 +41,14 @@ const (
 	clusterAutoscaler      = "cluster-autoscaler"
 )
 
+// Why the persisted borrowing release ledger is unread
+// (wva_kueue_borrow_ledger_unread's reason).
+const (
+	ledgerForbiddenReason = "forbidden"
+	ledgerReadErrorReason = "read-error"
+	ledgerNewerReason     = "newer-version"
+)
+
 // borrowSettings are the governor's timings from the policy.
 func (e *Engine) borrowSettings() allocation.BorrowSettings {
 	s := allocation.DefaultBorrowSettings()
@@ -46,6 +57,9 @@ func (e *Engine) borrowSettings() allocation.BorrowSettings {
 	}
 	t := e.Config.KueueBorrowTimings()
 	s.PlacementTimeout, s.Cooldown, s.LenderDebounce = t.PlacementTimeout, t.Cooldown, t.LenderDebounce
+	// The release latencies last measured: a cycle that counts no borrowing
+	// keeps a release to a lender in flight as long as the last one that did.
+	s.ReleaseLatencies = maps.Clone(e.borrowing.releaseLatencies)
 	return s
 }
 
@@ -57,15 +71,11 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
+	// A release to a waiting lender lands after the scale-down of the models
+	// it lowers: its in-flight timeout and the lender-waiting alert scale
+	// with it, per cohort whose pool opts in.
+	st.releaseLatencies = releaseLatencies(e, constraints, requests, scaleTargets)
 	settings := e.borrowSettings()
-	st.releaseLatency = 0
-	if e.Config != nil && e.Config.KueueReleasesToNonReclaiming() {
-		// A release to a waiting lender lands after the borrowing models'
-		// scale-down: its in-flight timeout and the lender-waiting alert
-		// scale with it.
-		st.releaseLatency = releaseLatency(e, constraints, requests, scaleTargets)
-		settings.ReleaseLatency = st.releaseLatency
-	}
 	if st.governor == nil {
 		st.governor = allocation.NewBorrowGovernor(settings)
 	} else {
@@ -197,9 +207,10 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		e.persistBorrowLedger(ctx)
 		return
 	}
-	initLossSeries(st.cycle, e.Config != nil && e.Config.KueueReleasesToNonReclaiming())
+	initLossSeries(st.cycle)
 	initGatedSeries(st.cycle)
 	e.applyReleases(ctx, st.governor.Releases(st.cycle, decisions), scaleTargets)
+	e.reportLenders(ctx, requests, scaleTargets)
 	e.persistBorrowLedger(ctx)
 }
 
@@ -256,12 +267,16 @@ func (e *Engine) applyReleases(ctx context.Context, releases []allocation.Borrow
 
 // initLossSeries creates, at 0, the loss counters of every model in a
 // namespace the cycle counts borrowing for, so the first release or
-// preemption of each is an increase the thrashing alert sees; with
-// releaseToLenders, the lender-waiting release counter too.
-func initLossSeries(cycle allocation.BorrowCycle, releaseToLenders bool) {
-	causes := []string{string(allocation.ReleasePlacementTimeout)}
-	if releaseToLenders {
-		causes = append(causes, string(allocation.ReleaseLenderWaiting))
+// preemption of each is an increase the thrashing alert sees; and the
+// lender-waiting release counter of every model a release to a lender may
+// lower: one in a cohort whose pool opts in to releaseToNonReclaimingLenders
+// (allocation.LenderReleaseScope), not every model once any entry does.
+func initLossSeries(cycle allocation.BorrowCycle) {
+	lenderModels := map[string]bool{}
+	for _, variants := range allocation.LenderReleaseScope(cycle.Constraints, cycle.Requests) {
+		for _, v := range variants {
+			lenderModels[v] = true
+		}
 	}
 	borrowing := map[string]bool{}
 	for _, c := range cycle.Constraints {
@@ -273,9 +288,16 @@ func initLossSeries(cycle allocation.BorrowCycle, releaseToLenders bool) {
 		}
 	}
 	for _, r := range cycle.Requests {
-		if borrowing[r.Namespace] {
-			metrics.InitBorrowLossSeries(r.Namespace, r.ModelID, causes...)
+		if !borrowing[r.Namespace] {
+			continue
 		}
+		causes := []string{string(allocation.ReleasePlacementTimeout)}
+		if slices.ContainsFunc(r.VariantStates, func(s domain.VariantReplicaState) bool {
+			return lenderModels[r.Namespace+"/"+s.VariantName]
+		}) {
+			causes = append(causes, string(allocation.ReleaseLenderWaiting))
+		}
+		metrics.InitBorrowLossSeries(r.Namespace, r.ModelID, causes...)
 	}
 }
 
@@ -323,18 +345,35 @@ func (e *Engine) loadBorrowLedger(ctx context.Context) {
 	}
 	raw, found, err := controllerstatus.ReadKey(ctx, reader, config.SystemNamespace(), controllerstatus.KeyBorrowReleaseLedger)
 	if err != nil {
+		st.ledgerUnread = ledgerReadErrorReason
+		if apierrors.IsForbidden(err) {
+			st.ledgerUnread = ledgerForbiddenReason
+		}
 		if !st.ledgerErrLogged {
 			st.ledgerErrLogged = true
-			ctrl.LoggerFrom(ctx).Info("Cannot read the persisted borrowing release ledger yet; the cooldowns and placement-timeout holds it carries are not in force until it is read, and the read is tried again each cycle",
-				"error", err.Error())
+			ctrl.LoggerFrom(ctx).Info("Cannot read the persisted borrowing release ledger yet; the cooldowns and placement-timeout holds it carries are not in force until it is read, no release to a waiting lender is decided, and the read is tried again each cycle",
+				"error", err.Error(), "reason", st.ledgerUnread)
 		}
 		return
 	}
-	st.ledgerLoaded = true
 	if !found {
+		st.ledgerLoaded, st.ledgerUnread = true, ""
 		return
 	}
 	l, err := allocation.UnmarshalBorrowLedger(raw)
+	if errors.Is(err, allocation.ErrBorrowLedgerVersion) {
+		// A newer build wrote it: its releases to lenders may be in flight in
+		// a form this one cannot read. It stays unread -- no release to a
+		// lender starts -- and is not persisted over (a downgrade must not
+		// release a second time what the newer build released).
+		if st.ledgerUnread != ledgerNewerReason {
+			ctrl.LoggerFrom(ctx).Info("Warning: the persisted borrowing release ledger was written by a newer build; it is kept as it is, and no release to a waiting lender is decided while it stays",
+				"error", err.Error())
+		}
+		st.ledgerUnread = ledgerNewerReason
+		return
+	}
+	st.ledgerLoaded, st.ledgerUnread = true, ""
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "Discarding an unreadable borrowing release ledger")
 		return
@@ -351,6 +390,9 @@ func (e *Engine) loadBorrowLedger(ctx context.Context) {
 // persistBorrowLedger hands the ledger to the status publisher when changed.
 func (e *Engine) persistBorrowLedger(ctx context.Context) {
 	st := &e.borrowing
+	if st.ledgerUnread == ledgerNewerReason {
+		return // a newer build's ledger is not overwritten
+	}
 	raw, err := st.governor.MarshalLedger()
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "Cannot persist the borrowing release ledger; the last persisted one stays")

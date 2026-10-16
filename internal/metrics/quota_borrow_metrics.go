@@ -26,6 +26,8 @@ var (
 	kueueCooldown       *prometheus.GaugeVec
 	kueueReleaseLatency *prometheus.GaugeVec
 	kueueBorrowedGPUs   *prometheus.GaugeVec
+	lenderBlocked       *prometheus.GaugeVec
+	ledgerUnread        *prometheus.GaugeVec
 )
 
 // registerQuotaBorrowMetrics creates and registers the borrowing series.
@@ -103,11 +105,25 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 	}, withInstance())
 	kueueReleaseLatency = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowReleaseLatencySeconds,
-		Help: "How long a release of borrowed capacity to a waiting lender takes to land, in seconds: the " +
-			"borrowing models' slowest KEDA scale-down window plus the HPA sync, the KEDA poll and the " +
-			"termination grace. Published while a quota entry sets kueue.releaseToNonReclaimingLenders; " +
-			"the lender-waiting alert adds it to the cooldown.",
-	}, withInstance())
+		Help: "How long a release of borrowed capacity to a waiting lender of a cohort takes to land, in " +
+			"seconds: the slowest KEDA scale-down window of the models a release there may lower, plus the HPA " +
+			"sync, the KEDA poll and the termination grace, capped at 1800. Published per cohort whose pool " +
+			"opts in to kueue.releaseToNonReclaimingLenders; the lender-waiting alert adds it to the cooldown " +
+			"for that cohort alone.",
+	}, withInstance(constants.LabelCohort))
+	lenderBlocked = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: constants.WVAKueueLenderReleaseBlocked,
+		Help: "1 while a waiting lender Kueue does not reclaim for is handed nothing, with " +
+			"kueue.releaseToNonReclaimingLenders: reason unservable (what this controller could give back " +
+			"would not admit its next Workload) or taken-by-another-borrower (a release landed and another " +
+			"borrower took it).",
+	}, withInstance(constants.LabelCohort, constants.LabelClusterQueue, constants.LabelReason))
+	ledgerUnread = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: constants.WVAKueueBorrowLedgerUnread,
+		Help: "1 while the persisted borrowing release ledger cannot be read and a quota entry sets " +
+			"kueue.releaseToNonReclaimingLenders: no release to a lender is decided until it is. Reason " +
+			"forbidden, read-error or newer-version.",
+	}, withInstance(constants.LabelReason))
 	kueueBorrowedGPUs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowedGPUs,
 		Help: "GPUs the namespaces this controller governs hold past their guaranteed figures, per Kueue " +
@@ -117,6 +133,8 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 		constants.WVAKueueControllerVersionKnown:      kueueVersionKnown,
 		constants.WVAKueueBorrowCooldownSeconds:       kueueCooldown,
 		constants.WVAKueueBorrowReleaseLatencySeconds: kueueReleaseLatency,
+		constants.WVAKueueLenderReleaseBlocked:        lenderBlocked,
+		constants.WVAKueueBorrowLedgerUnread:          ledgerUnread,
 		constants.WVAKueueBorrowedGPUs:                kueueBorrowedGPUs,
 		constants.WVAKueueBorrowDriftGPUs:             kueueBorrowDrift,
 		constants.WVAKueueNeverRead:                   kueueNeverRead,
@@ -204,19 +222,55 @@ var (
 	kueueCooldownSeries       seriesSet
 	kueueReleaseLatencySeries seriesSet
 	kueueBorrowedGPUsSeries   seriesSet
+	lenderBlockedSeries       seriesSet
+	ledgerUnreadSeries        seriesSet
 )
 
 // PublishKueueReleaseLatency sets wva_kueue_borrow_release_latency_seconds
-// while some entry hands capacity back to waiting lenders, and removes it when
-// on is false.
-func PublishKueueReleaseLatency(seconds float64, on bool) {
+// to exactly the cohorts given, in seconds: those whose pool opts in to
+// releaseToNonReclaimingLenders. Every other cohort's series is removed.
+func PublishKueueReleaseLatency(byCohort map[string]float64) {
 	if kueueReleaseLatency == nil {
 		return
 	}
 	kueueReleaseLatencySeries.publish([]*prometheus.GaugeVec{kueueReleaseLatency},
 		func(set func(*prometheus.GaugeVec, prometheus.Labels, float64)) {
-			if on {
-				set(kueueReleaseLatency, prometheus.Labels{}, seconds)
+			for cohort, s := range byCohort {
+				set(kueueReleaseLatency, prometheus.Labels{constants.LabelCohort: cohort}, s)
+			}
+		})
+}
+
+// BlockedLender is one series of wva_kueue_lender_release_blocked.
+type BlockedLender struct {
+	Cohort, ClusterQueue, Reason string
+}
+
+// PublishLenderReleaseBlocked sets wva_kueue_lender_release_blocked to exactly
+// the lenders given.
+func PublishLenderReleaseBlocked(lenders []BlockedLender) {
+	if lenderBlocked == nil {
+		return
+	}
+	lenderBlockedSeries.publish([]*prometheus.GaugeVec{lenderBlocked},
+		func(set func(*prometheus.GaugeVec, prometheus.Labels, float64)) {
+			for _, l := range lenders {
+				set(lenderBlocked, prometheus.Labels{constants.LabelCohort: l.Cohort,
+					constants.LabelClusterQueue: l.ClusterQueue, constants.LabelReason: l.Reason}, 1)
+			}
+		})
+}
+
+// PublishBorrowLedgerUnread sets wva_kueue_borrow_ledger_unread to 1 with
+// reason, or removes it when reason is empty.
+func PublishBorrowLedgerUnread(reason string) {
+	if ledgerUnread == nil {
+		return
+	}
+	ledgerUnreadSeries.publish([]*prometheus.GaugeVec{ledgerUnread},
+		func(set func(*prometheus.GaugeVec, prometheus.Labels, float64)) {
+			if reason != "" {
+				set(ledgerUnread, prometheus.Labels{constants.LabelReason: reason}, 1)
 			}
 		})
 }
