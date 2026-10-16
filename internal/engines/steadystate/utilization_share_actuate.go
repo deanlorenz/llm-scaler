@@ -233,9 +233,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			if len(pending) > 0 && t.ReceiverVariant != "" {
 				k := variantKey(t.Receiver, t.ReceiverVariant)
 				st.desired[k] = max(st.desired[k]-1, 0)
-				l.HoldFill(t.Receiver, now.Add(tm.ReleaseTimeout))
+				hold := e.holdFillTimeout(tm)
+				l.HoldFill(t.Receiver, now.Add(hold))
 				logger.Info("Utilization share: the receiver's replica could not be placed; its raise is undone",
-					"id", t.ID, "receiver", t.Receiver, "variant", t.ReceiverVariant, "retryAfter", now.Add(tm.ReleaseTimeout))
+					"id", t.ID, "receiver", t.Receiver, "variant", t.ReceiverVariant, "retryAfter", now.Add(hold))
 			}
 		}
 		if end.Outcome == allocation.ShareOutcomeWrongPod {
@@ -732,11 +733,15 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	e.reportQuotaAloneAllocation(ctx, optimizer, requests, allocation.WithholdPromised(constraints, promised), decisions)
 	// The share plans on what the pass left for the models it does not plan,
 	// and plans its own models afresh: it overrides their targets, so what the
-	// pass ordered for them is not spent.
+	// pass ordered for them is not spent. What the pass left includes its
+	// borrowed placements, charged to their models on the same view.
 	if greedy {
 		e.utilizationShare.left = g.LastPass()
 	}
-	overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets)
+	// The share budgets guaranteed plus the borrowed GPUs a group holds now,
+	// and starts no new borrowing (B4): it reads the constraints without the
+	// borrowing figures.
+	overrides := e.evaluateUtilizationShare(ctx, requests, allocation.GuaranteedOnly(constraints), scaleTargets)
 	e.utilizationShare.left = nil
 	if len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
@@ -1071,4 +1076,17 @@ func shareStartedSets(started []allocation.ShareTransfer) [][]allocation.ShareTr
 		})
 	}
 	return out
+}
+
+// holdFillTimeout is how long a receiver whose replica could not be placed is
+// held (HoldFill). It shares one setting with the borrowing placement timeout
+// (the Kueue entry's placementTimeout) so the two cannot drift apart; unset,
+// it is the derived release timeout it always was.
+func (e *Engine) holdFillTimeout(tm allocation.ShareTimings) time.Duration {
+	if e.Config != nil {
+		if t := e.Config.KueueBorrowTimings(); t.PlacementTimeoutSet {
+			return t.PlacementTimeout
+		}
+	}
+	return tm.ReleaseTimeout
 }

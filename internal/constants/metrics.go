@@ -871,6 +871,144 @@ const (
 	ScalingBlockedDonorNotSteerable = "donor-not-steerable"
 )
 
+// Kueue cohort borrowing reasons (values for the `reason` label of
+// WVAModelScalingBlocked), decided by the steady-state engine each cycle
+// (the Kueue borrowing proposal, PR #161, Part C). They
+// answer "why did my model drop": Kueue preempted a replica, or a replica did
+// not place and the scaling manager released it. A model that dropped with
+// none of them present dropped because its demand fell.
+const (
+	// ScalingBlockedLenderReclaimed indicates Kueue preempted a pod of the
+	// model for a lender reclaiming its nominal quota. Present for the borrow
+	// cooldown after the preemption, while the model borrows nothing new.
+	ScalingBlockedLenderReclaimed = "lender-reclaimed"
+	// ScalingBlockedBorrowUnplaced indicates a variant of the model has
+	// replicas that did not place: it grows on no borrowed capacity, and its
+	// borrowed replicas still unplaced after the placement timeout are
+	// released.
+	ScalingBlockedBorrowUnplaced = "borrow-unplaced"
+	// ScalingBlockedNominalLentOut indicates the model was capped this cycle
+	// while part of its namespace's nominal quota is held by a peer its
+	// ClusterQueue cannot reclaim from (reclaimWithinCohort: Never), so its
+	// guaranteed figure sits below nominal.
+	ScalingBlockedNominalLentOut = "nominal-lent-out"
+)
+
+// ScalingBlockedReasonsBorrowing are decided by the steady-state engine from
+// cohort borrowing, every cycle; with no borrowing counted, none holds.
+var ScalingBlockedReasonsBorrowing = []string{
+	ScalingBlockedLenderReclaimed,
+	ScalingBlockedBorrowUnplaced,
+	ScalingBlockedNominalLentOut,
+}
+
+// ScalingBlockedReasonsWakeBorrowing is what the scale-from-zero loop decides
+// from cohort borrowing: a wake refused within nominal because the queue lent
+// nominal it cannot reclaim. It sets the reason every tick it refuses, and
+// clears only what it set.
+var ScalingBlockedReasonsWakeBorrowing = []string{
+	ScalingBlockedNominalLentOut,
+}
+
+// Kueue cohort borrowing metrics
+// (the Kueue borrowing proposal, PR #161, Part C). Every
+// other borrowing condition is a reason on WVAModelScalingBlocked.
+const (
+	// WVAQuotaLimitGPUs is a gauge: a namespace-scope quota entry's cap for one
+	// namespace and accelerator, by tier. tier="guaranteed" is the cap without
+	// borrowing; tier="borrowable" is what the namespace may draw past it now,
+	// were no other namespace to draw first -- min(its borrow cap, the free
+	// GPUs of its cohorts' shared pools serving the type) -- and 0 where
+	// borrowing is not counted. An unlimited guaranteed figure publishes no
+	// series. Labels: limiter_name, namespace, accelerator, tier.
+	WVAQuotaLimitGPUs = "wva_quota_limit_gpus"
+
+	// WVAQuotaBorrowWithheld is a gauge, 1 for the reason a namespace's
+	// borrowable figure is 0, for an entry that reads Kueue borrowing. Present
+	// only while that reason holds: a namespace that borrows, or whose reason
+	// changed, has its old series deleted. Labels: limiter_name, namespace,
+	// accelerator, reason.
+	WVAQuotaBorrowWithheld = "wva_quota_borrow_withheld"
+
+	// WVAKueueUnplacedPods is a gauge: per variant in a namespace that counts
+	// borrowing, the pods that have not placed for longer than the placement
+	// timeout (Unschedulable, or held at Kueue's admission gate). Absent
+	// otherwise. Labels: namespace, variant_name.
+	WVAKueueUnplacedPods = "wva_kueue_unplaced_pods"
+
+	// WVAKueuePreemptedPodsTotal is a counter of preempted Workloads of a
+	// model: Kueue preemptions (a Workload evicted with reason Preempted) in a
+	// namespace that counts borrowing, one per Workload, so a LeaderWorkerSet
+	// or pod group counts once. The name predates that and is kept for the
+	// alert and dashboards that read it. Labels: namespace, model_name.
+	WVAKueuePreemptedPodsTotal = "wva_kueue_preempted_pods_total"
+
+	// WVABorrowReleasesTotal is a counter of the variant targets the scaling
+	// manager lowered to give borrowed Kueue capacity back, one per release
+	// record (a P/D unit counts once per variant it lowers). The namespace is
+	// the model's, scraped as exported_namespace. Labels: namespace,
+	// model_name, cause (placement-timeout: a borrowed replica did not place
+	// in time).
+	WVABorrowReleasesTotal = "wva_borrow_releases_total"
+
+	// WVAKueueLenderWaitingSeconds is a gauge: how long a lender ClusterQueue
+	// has waited for capacity it lent (debounced), published only while some
+	// namespace this controller governs still borrows in the lender's cohort.
+	// Above the borrow cooldown it means Kueue has not taken back what the
+	// lender lent. Labels: cohort, cluster_queue.
+	WVAKueueLenderWaitingSeconds = "wva_kueue_lender_waiting_seconds"
+
+	// WVAKueueBorrowDriftGPUs is a gauge, the conformance check of the
+	// borrowing figures: per ClusterQueue in a cohort, the GPUs by which the
+	// borrowed figure computed from its reservation (usage past nominal, per
+	// flavor and GPU resource) differs from Kueue's own
+	// status.flavorsReservation[].borrowed, summed as absolute differences. 0
+	// while Kueue and the scaling manager agree. Labels: cluster_queue.
+	WVAKueueBorrowDriftGPUs = "wva_kueue_borrow_drift_gpus"
+
+	// WVAKueueNeverRead is a gauge, 1 for a quota entry that reads Kueue,
+	// leaves some accelerator type unlimited (-1) in its static caps, and has
+	// never read Kueue successfully since the controller started: nothing
+	// bounds that type. Absent otherwise. Labels: limiter_name.
+	WVAKueueNeverRead = "wva_kueue_never_read"
+
+	// WVAKueueControllerVersionKnown is a gauge, 1 when the Kueue controller's
+	// Deployment was read and its image names a version, 0 when not (a
+	// digest-only image, or a Deployment that cannot be read). Published on
+	// each Kueue read that checks the controller (a cluster with a cohort).
+	// While 0, borrowing is withheld (kueue-version-unknown) or frozen
+	// (kueue-controller-down). No labels beyond the controller instance.
+	WVAKueueControllerVersionKnown = "wva_kueue_controller_version_known"
+
+	// WVAKueueBorrowCooldownSeconds is a gauge: the borrowCooldown in force,
+	// in seconds, while a quota entry counts Kueue borrowing; the threshold
+	// the lender-waiting alert compares against. Absent otherwise.
+	WVAKueueBorrowCooldownSeconds = "wva_kueue_borrow_cooldown_seconds"
+
+	// WVAKueueBorrowedGPUs is a gauge: per cohort and flavor, the GPUs the
+	// namespaces this controller governs hold past their guaranteed figures,
+	// as the last cycle counted them. Absent where nothing is borrowed.
+	// Labels: cohort, flavor.
+	WVAKueueBorrowedGPUs = "wva_kueue_borrowed_gpus"
+
+	// LabelFlavor is a Kueue ResourceFlavor name.
+	LabelFlavor = "flavor"
+
+	// LabelTier is the tier of WVAQuotaLimitGPUs: guaranteed or borrowable.
+	LabelTier = "tier"
+	// LabelCause is why borrowed capacity was released, on
+	// WVABorrowReleasesTotal.
+	LabelCause = "cause"
+	// LabelCohort is a Kueue cohort name.
+	LabelCohort = "cohort"
+	// LabelClusterQueue is a Kueue ClusterQueue name.
+	LabelClusterQueue = "cluster_queue"
+
+	// QuotaTierGuaranteed and QuotaTierBorrowable are the values of LabelTier.
+	QuotaTierGuaranteed = "guaranteed"
+	QuotaTierBorrowable = "borrowable"
+)
+
 // Pod-mapping miss reasons (values for the `reason` label of WVAPodMappingMissTotal).
 const (
 	// PodMappingMissUnresolved indicates a scraped pod resolved to no managed scaler:

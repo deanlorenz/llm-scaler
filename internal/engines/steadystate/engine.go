@@ -99,6 +99,12 @@ type Engine struct {
 	// controller-status ConfigMap. Nil-safe: tests leave it unset.
 	Status *controllerstatus.Publisher
 
+	// Preemptions records Kueue's preemptions of managed pods from the
+	// manager's pod informer, between cycles. Nil: preemptions are read only
+	// by listing, once per cycle, which misses a pod and Workload that are gone
+	// within seconds.
+	Preemptions *PreemptionWatch
+
 	// ReplicaMetricsCollector is the collector for replica metrics using the source infrastructure
 	ReplicaMetricsCollector *collector.ReplicaMetricsCollector
 
@@ -224,6 +230,11 @@ type Engine struct {
 	// state: what it reported, and the transfer ledgers it acts on unless its
 	// policy is in shadow mode; see evaluateUtilizationShare.
 	utilizationShare utilizationShareState
+
+	// borrowing is the engine's cohort-borrowing state across cycles: growth
+	// ordered on borrowed capacity that Kueue has not reserved yet, and this
+	// cycle's node view (borrowing.go).
+	borrowing borrowingState
 
 	// learnedState is the learned-state snapshot store's between-cycle state
 	// (learned_state_store.go).
@@ -1310,7 +1321,7 @@ func (e *Engine) selectV2Optimizer(
 	// Published as wva_constraint_provider_skipped and logged when the set
 	// changes, so a bound that stopped applying is visible without a log line
 	// every cycle.
-	e.providerSkips.report(ctx, skipped)
+	e.providerSkips.report(ctx, append(skipped, allocation.NeverReadSkips(constraints)...))
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints
@@ -1565,13 +1576,24 @@ func (e *Engine) optimizeV2(
 
 	// Stage 2: Compute GPU constraints and call optimizer
 	optimizer, constraints := e.selectV2Optimizer(ctx, requests)
+	// Cohort borrowing: what Kueue has not reserved yet leaves the shared
+	// pools (borrowing.go). A no-op without borrowing.
+	// One clock reading for every borrowing step of the cycle.
+	borrowNow := time.Now()
+	constraints = e.prepareBorrowing(ctx, constraints, requests, variantScaleTargets, borrowNow)
 	// Scope-coupled rescale enablement (cluster + per-namespace) is resolved from
 	// config and handed to the GPU-aware optimizer for this cycle.
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
+		g.BorrowBlocked = e.borrowBlocked()
+		g.BorrowBlockedIn = e.borrowBlockedIn()
+		g.ReclaimBlocked = e.reclaimBlocked()
+		g.BorrowCredit = e.borrowing.credit
+		g.ReclaimCredit = e.borrowing.reclaimCredit
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
-	logScalingDecisions(ctx, requests, allDecisions)
+	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)
+	logScalingDecisions(ctx, requests, allDecisions, borrowedByModel(draws, constraints))
 
 	logger.Info("V2 optimizer produced decisions",
 		"optimizer", optimizer.Name(),
@@ -1590,8 +1612,20 @@ func (e *Engine) optimizeV2(
 		)
 	}
 
+	// Stage 3b: release borrowed capacity a waiting lender or an unplaced
+	// replica asks back, last, so nothing above raises it again
+	// (borrowing_release.go). A no-op without borrowing.
+	e.releaseBorrowed(ctx, requests, allDecisions, variantScaleTargets, borrowNow)
+	// A release lowers a target; what was in flight above it is not.
+	e.borrowing.inFlight.Trim(decidedTargets(allDecisions))
+	// What on-call sees: the budgets the cycle used, the borrowing reasons,
+	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
+	// so a cleared condition clears its series.
+	e.publishBorrowSignals(constraints, requests, allDecisions, borrowNow)
+
 	// The holes this cycle ordered replicas into stay held, from both
-	// engines, until the replicas' pods hold their nodes.
+	// engines, until the replicas' pods hold their nodes. After the release:
+	// a released replica holds no hole.
 	if e.cycleFitted {
 		e.admitInFlight(requests, allDecisions, e.cyclePlanned, variantScaleTargets, time.Now())
 	}

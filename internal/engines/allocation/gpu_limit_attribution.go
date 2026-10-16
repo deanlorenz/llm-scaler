@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
@@ -35,7 +36,44 @@ const (
 	// limitedByNodeFit: the pools had the GPUs, but no node held a whole
 	// replica (NodeView).
 	limitedByNodeFit
+	// limitedByPairWhole: a rule, not scarcity: a P/D pair borrows only
+	// whole, and its next pair would straddle guaranteed and borrowed
+	// capacity.
+	limitedByPairWhole
+	// limitedByLenderCannotReclaim: a rule, not scarcity: the GPUs the
+	// replica needed were there, lent only by LowerPriority lenders that do
+	// not outrank the model, which Kueue would never reclaim them from.
+	limitedByLenderCannotReclaim
 )
+
+// LenderCannotReclaimName is what LimitedBy carries when a borrowed replica
+// was refused because the only GPUs that would have held it are lent by
+// LowerPriority lenders that do not outrank its model (K1): Kueue could never
+// reclaim them for their lender. It is kueue.ReasonLenderCannotReclaim, the
+// namespace-level reason for the same rule.
+const LenderCannotReclaimName = string(kueue.ReasonLenderCannotReclaim)
+
+// markLenderCannotReclaim records that only lending Kueue could never reclaim
+// from variantName's model held the GPUs it needed.
+func (t gpuLimitTracker) markLenderCannotReclaim(variantName string) {
+	if t != nil {
+		t[variantName] = limitedByLenderCannotReclaim
+	}
+}
+
+// PairBorrowsWholeName is what LimitedBy carries when the rule that a P/D
+// pair borrows only whole (the Kueue borrowing proposal, B9) -- not a pool,
+// not node fit -- held a pair back: its next pair would have put one role on
+// guaranteed and the other on borrowed capacity, and the guaranteed remainder
+// could not be filled by one role alone.
+const PairBorrowsWholeName = "pd-pair-borrows-whole"
+
+// markPairWhole records that the pair-borrows-whole rule held variantName back.
+func (t gpuLimitTracker) markPairWhole(variantName string) {
+	if t != nil {
+		t[variantName] = limitedByPairWhole
+	}
+}
 
 // NodeFitLimiterName is what LimitedBy, the ResourceConstrained event and the
 // limiter_name label of wva_decisions_limited_total carry when node fit, not a
@@ -102,9 +140,18 @@ func applyGPULimitAttribution(
 			continue
 		}
 		d.WasLimited = true
-		if cause == limitedByNodeFit {
+		switch cause {
+		case limitedByNodeFit:
 			d.LimitedBy = NodeFitLimiterName
-		} else {
+		case limitedByPairWhole, limitedByLenderCannotReclaim:
+			// A rule held it back, not scarcity: no warm pool contends.
+			d.LimitedBy = PairBorrowsWholeName
+			if cause == limitedByLenderCannotReclaim {
+				d.LimitedBy = LenderCannotReclaimName
+			}
+			emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
+			continue
+		default:
 			d.LimitedBy = bindingProvider(constraints, d.Namespace, d.AcceleratorName)
 		}
 		emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
@@ -171,6 +218,10 @@ func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
 // constraints: each capped namespace's allowance and the closed cluster-scope
 // bound.
 func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	// The warm pool spends capacity within nominal only, never borrowed
+	// capacity (B7): a pool Pod on borrowed GPUs is the first thing a reclaim
+	// takes.
+	constraints = WithinNominal(constraints)
 	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
 		poolsVersionOf(constraints), now)
 }

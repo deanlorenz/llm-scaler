@@ -67,6 +67,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kubecache"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
@@ -177,6 +178,14 @@ func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error
 		return nil
 	}
 }
+
+// kueueWorkloadCache runs the cluster-wide Kueue Workload cache of a
+// namespace-scoped install on every replica, not only the leader: a cache
+// added to the manager would otherwise start only once leadership is won.
+type kueueWorkloadCache struct{ cache.Cache }
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable.
+func (kueueWorkloadCache) NeedLeaderElection() bool { return false }
 
 // registerMetricsSource adds src to reg under name.
 //
@@ -599,6 +608,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Kueue Workloads -- the borrowing managed check, the preemption check and
+	// the lender-waiting signal -- are read through an informer, indexed on
+	// owner UID. It starts on the first read, so a cluster without Kueue, or a
+	// policy that does not count borrowing, starts none and needs no watch on
+	// Workloads; until it syncs, reads go to the API server.
+	//
+	// The lender signal needs every namespace's Workloads, whatever the
+	// install's scope (D1): a lender waiting in another namespace must stop
+	// new borrowing. A namespace-scoped manager's cache holds its own
+	// namespace only, and a list from it would answer for that namespace
+	// alone, so such an install reads Workloads through a cache of its own,
+	// cluster-wide, holding Workloads only. Its read is granted by the
+	// admin-applied kueue-reader ClusterRole; without it the informer is never
+	// started (kueue.InformerWorkloads probes first) and the read reports
+	// Forbidden, which withholds borrowing as lenders-unreadable.
+	workloadCache := mgr.GetCache()
+	if watchNS != "" {
+		wc, err := cache.New(restConfig, cache.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper(),
+			DefaultTransform: kubecache.StripUnused})
+		if err != nil {
+			setupLog.Error(err, "unable to create the cluster-wide Kueue Workload cache")
+			os.Exit(1)
+		}
+		if err := mgr.Add(kueueWorkloadCache{wc}); err != nil {
+			setupLog.Error(err, "unable to add the cluster-wide Kueue Workload cache")
+			os.Exit(1)
+		}
+		workloadCache = wc
+	}
+	kueue.UseWorkloadSource(kueue.NewInformerWorkloads(workloadCache, mgr.GetClient()))
+
 	// Initialize metrics
 	setupLog.Info("Creating metrics emitter instance")
 	// Force initialization of metrics by creating a metrics emitter
@@ -814,6 +854,17 @@ func main() {
 		// this design exists to remove.
 		engine.Variants = registry.Default
 		engine.Status = controllerStatus
+		// Kueue's preemptions of managed pods, recorded from the pod informer
+		// the engine already reads pods through: a preempted pod and its
+		// Workload are gone within seconds, faster than a cycle's list.
+		preemptions := steadystate.NewPreemptionWatch(0)
+		if podInformer, err := mgr.GetCache().GetInformer(ctx, &corev1.Pod{}); err != nil {
+			setupLog.Error(err, "Cannot watch pods for Kueue preemptions; they are read by listing once per cycle only")
+		} else if _, err := podInformer.AddEventHandler(preemptions.Handler()); err != nil {
+			setupLog.Error(err, "Cannot watch pods for Kueue preemptions; they are read by listing once per cycle only")
+		} else {
+			engine.Preemptions = preemptions
+		}
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// The registry is also what tells the datastore which namespaces to load

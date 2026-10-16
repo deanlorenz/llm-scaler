@@ -72,6 +72,7 @@ var promQLKeywords = map[string]bool{
 	"accelerator_type": true, "accelerator_vendor": true, "accelerator_model": true,
 	"controller_instance": true, "deployment": true, "service": true, "le": true,
 	"objective": true, "statistic": true,
+	"cohort": true, "cluster_queue": true,
 }
 
 // ExtractMetricNames returns the metric names an expression references.

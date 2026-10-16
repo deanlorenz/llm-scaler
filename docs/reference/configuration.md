@@ -19,7 +19,9 @@ Every option `deploy/install.sh` reads. Each entry is read by something, and eve
 | `WVA_LIMITER` | `none`, `gpu-inventory`, `quota`, or a list such as `gpu-inventory,quota` — declares the limiters in the scaling-policy ConfigMap. Every limiter in the list bounds scaling. `gpu-inventory` needs node read, which `make setup-prereqs` grants. Unset on a re-run keeps the limiters already there; `none` removes them | unset (a fresh install has none) |
 | `WVA_QUOTAS` | Required when `WVA_LIMITER` names `quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
 | `WVA_QUOTA_SCOPE` | `namespace` (each managed namespace gets the budget) or `cluster` (one budget across all of them) | `namespace` |
-| `WVA_QUOTA_KUEUE` | With a quota limiter: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue nominal quota and `WVA_QUOTAS` applies. Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
+| `WVA_QUOTA_KUEUE` | With a quota limiter: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue grant and `WVA_QUOTAS` applies. At namespace scope the grant counts cohort borrowing where it is safe ([the guide](../guides/kueue-borrowing/)). Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
+| `WVA_QUOTA_KUEUE_BORROW` | With `WVA_QUOTA_KUEUE=true`, `false` writes `countBorrowable: false` on the quota entry: the Kueue cap stays at nominal and no cohort borrowing is counted. Ignored, with a warning, without `WVA_QUOTA_KUEUE=true`. `make enable-physical-limiter` reads it too. A re-run keeps the rest of the entry's `kueue:` block. It also decides the cluster-wide Kueue Workload read of a namespace-scoped install: `make setup-prereqs` and `make enable-physical-limiter` grant it only while a policy counts borrowing, and revoke it on `false` | `true` |
+| `KUEUE_NAMESPACE` | Where Kueue runs. The prereqs phase puts the Role that reads the Kueue controller's Deployment and leader Lease there; the uninstall finds it by label wherever it is. Unset, the `kueue.controllerNamespace` the policy keeps is used, so a re-run need not repeat it: `KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<ns> make setup-prereqs` | the entry's `kueue.controllerNamespace`, else `kueue-system` |
 | `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when it differs from the one it runs in. The workloads' owner then does not administer the controller, which is where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold) | the controller's own namespace |
 | `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: the install picks the half left to do, `wva` when the caller cannot create cluster-scoped objects or the admin half is already in place. `make setup-prereqs` is the `prereqs` phase; see [deploy/](../../deploy/) | auto |
 | `WVA_PROJECT` | Repository root the script installs from | `$PWD` |
@@ -530,6 +532,27 @@ What the NetworkPolicy does not cover:
   `hostNetwork` traffic through.
 - The client CA must be dedicated to KEDA: any certificate it signed is accepted.
   Pass `--external-scaler-client-san` to pin KEDA's identity.
+
+### Kueue borrowing timings
+
+Set on the quota entry's `kueue:` block in the scaling policy, beside
+`countBorrowable`. Each is a Go duration.
+
+| Key | What it does | Default |
+|---|---|---|
+| `placementTimeout` | A borrowed replica that stays unschedulable, or held at Kueue's admission gate, this long is released; a placed pod still loading its weights does not count. So is a queue's growth back into nominal it lent out that was placed without a node hole, timed from when it was ordered, and the model's cooldown (`borrowCooldown`) follows. The wait stretches up to three times while the cluster autoscaler reports `TriggeredScaleUp` on its pod. Also how long the utilization-share optimizer waits before it retries a receiver whose replica could not be placed. Unset, that wait is the timeout derived from the KEDA and pod settings, as before. | `5m` |
+| `borrowCooldown` | After a lender in a cohort waited for its capacity, nothing new is borrowed in the cohort for this long. After Kueue preempted one of a model's pods, or a borrowed unit of it was released at the placement timeout, the model borrows nothing new in that cohort for this long; a repeat during the backoff doubles it, up to four times (40m at the default), and one clean cooldown resets it. Published on `wva_kueue_borrow_cooldown_seconds`. | `10m` |
+| `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
+| `controllerNamespace` | Not a duration: the namespace of the `kueue-controller-manager` Deployment, whose image tag gives the Kueue version borrowing is checked against, and of its leader-election Lease, which tells whether Kueue runs (not renewed, or neither readable: borrowing freezes as `kueue-controller-down`). | `kueue-system` |
+| `assumeTestedVersion` | Not a duration: `true` counts a Kueue whose version cannot be read from its image tag as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down`. | `false` |
+| `borrowNamespaces` | A list of namespaces, not a duration: borrowing is counted only in these (a pilot); every other namespace is capped at nominal, withheld as `not-selected`. A re-run of the install or of `make enable-physical-limiter` keeps it, with the rest of the `kueue:` block ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)). | empty: all |
+
+The cooldowns and the placement-timeout releases still in flight are recorded
+under `borrowReleaseLedger` in the `wva-controller-status` ConfigMap, so a
+restart neither releases twice nor forgets a cooldown. The
+budget the controller used last cycle, per quota entry, namespace and
+accelerator, is under `limiterBudgets` in the same ConfigMap
+([what it holds](prometheus.md#kueue-borrowing-metrics)).
 
 ### Learned state across a restart
 

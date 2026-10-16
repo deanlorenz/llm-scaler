@@ -10,6 +10,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
 // A wake is judged against fresh constraints: the usage the cluster reports
@@ -23,8 +24,11 @@ import (
 // Across ticks, the in-flight ledger (allocation.DefaultInFlight) carries a
 // wake that was fitted to nodes: its node hole stays held, from both engines,
 // until its pods hold a node (scheduled, or nominated for one after a
-// preemption) or allocation.InFlightTTL passes. A wake's pool demand is not
-// carried across ticks: a quota counts it once the steady-state engine next
+// preemption) or allocation.InFlightTTL passes. What a wake takes of a Kueue
+// cohort's free pool, and what Kueue reclaims for it from borrowers, is held
+// in the shared borrow record (allocation.DefaultBorrowInFlight, N3) until
+// its pods exist, for both engines. Its other pool demand is not carried
+// across ticks: a quota counts it once the steady-state engine next
 // publishes what WVA's variants hold, and the physical pool once its pods
 // land. Under a physical limiter the held hole refuses the next wake anyway;
 // under a quota alone that window is the limit of the check.
@@ -43,20 +47,58 @@ type tickNodeView struct {
 func (e *Engine) beginTick() {
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
-	e.tickWakes = nil
+	e.tickWakes, e.tickReclaimed = nil, nil
 	e.tickNodes.built, e.tickNodes.view = false, nil
+}
+
+// debitReclaimed records what a wake took of its namespace's reclaimable
+// nominal. Caller holds wakeMu.
+func (e *Engine) debitReclaimed(namespace string, took map[string]allocation.Reclaim) {
+	if len(took) == 0 {
+		return
+	}
+	if e.tickReclaimed == nil {
+		e.tickReclaimed = map[string]map[string]allocation.Reclaim{}
+	}
+	if e.tickReclaimed[namespace] == nil {
+		e.tickReclaimed[namespace] = map[string]allocation.Reclaim{}
+	}
+	for t, n := range took {
+		prev := e.tickReclaimed[namespace][t]
+		e.tickReclaimed[namespace][t] = allocation.Reclaim{After: prev.After + n.After, Kept: prev.Kept + n.Kept, GPUs: prev.GPUs + n.GPUs}
+	}
+}
+
+// reclaimableLeft is reclaimable less what this tick's earlier wakes of
+// namespace took of it. Caller holds wakeMu.
+func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]allocation.Reclaim) map[string]allocation.Reclaim {
+	took := e.tickReclaimed[namespace]
+	if len(took) == 0 || len(reclaimable) == 0 {
+		return reclaimable
+	}
+	out := make(map[string]allocation.Reclaim, len(reclaimable))
+	for t, r := range reclaimable {
+		after := max(0, r.After-took[t].After)
+		out[t] = allocation.Reclaim{After: after, Kept: min(after, max(0, r.Kept-took[t].Kept)), GPUs: max(0, r.GPUs-took[t].GPUs)}
+	}
+	return out
 }
 
 // decideWake judges a model's wake and, when it selects a set, records what
 // the set takes, as one step: see the comment at the top of this file.
 func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage) (placement, []Candidate, SelectionOutcome) {
-	place := e.placementFor(ctx, group.namespace)
+	own := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		own[c.VariantName] = true
+	}
+	place := e.placementForModel(ctx, group.namespace, own)
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
 	if place.snapshotTakenAt.IsZero() && place.constraints != nil {
 		place.constraints = allocation.WithholdPromised(place.constraints, e.tickWakes)
 		place.nodes = e.tickNodeViewFor(ctx, place.constraints)
 	}
+	place.reclaimable = e.reclaimableLeft(group.namespace, place.reclaimable)
 	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, place)
 	if len(selected) > 0 {
 		e.recordWake(ctx, group, place, selected)
@@ -65,8 +107,9 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 }
 
 // admitInFlight holds each woken replica's node hole in the in-flight ledger
-// until its pods hold a node. Caller holds wakeMu.
-func (e *Engine) admitInFlight(namespace string, selected []Candidate) {
+// until its pods hold a node, on its queue's flavor when flavorOf names one.
+// Caller holds wakeMu.
+func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf func(string) *kueue.FlavorPlacement) {
 	now := time.Now()
 	for _, c := range selected {
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
@@ -77,8 +120,21 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate) {
 			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), cl, namespace, acc) }
 		}
 		key := namespace + "/" + c.VariantName
-		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c), 1, 0, placed, now)
+		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)
 	}
+}
+
+// wakeReplicas is one replica of each selected candidate whose accelerator is
+// resolved, in order, as allocation.WakeDraws reads them.
+func wakeReplicas(selected []Candidate) []allocation.WakeReplica {
+	out := make([]allocation.WakeReplica, 0, len(selected))
+	for _, c := range selected {
+		if !constants.IsAcceleratorResolved(c.Accelerator) {
+			continue
+		}
+		out = append(out, allocation.WakeReplica{Variant: c.VariantName, Accelerator: c.Accelerator, GPUs: c.GPUsPerReplica})
+	}
+	return out
 }
 
 // debitTick records a wake's demand against this tick's later wakes. Caller

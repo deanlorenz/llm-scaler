@@ -54,7 +54,75 @@ type GreedyByScoreOptimizer struct {
 	// pass consumes it: Optimize clears it when done, so a later pass does not
 	// place on the holes an earlier one already took (the engine sets a fresh
 	// one every cycle). What the pass left is kept in its headroom.
+	//
+	// A pass that counts cohort borrowing places through the same view: its
+	// placer (modelPlacer) fits every replica of a model, guaranteed or
+	// borrowed, and debits it once, charged to the model, so a hole one model
+	// takes is gone for every other, borrowing or not, and for the utilization
+	// share's idle fill after the pass.
 	Nodes *NodeView
+
+	// BorrowBlocked, when set, reports whether a variant may not grow on
+	// borrowed capacity this cycle (a placement hold, a model cooldown; see
+	// BorrowGovernor.BorrowBlocked). Its guaranteed growth is unaffected.
+	BorrowBlocked func(namespace, modelID, variant string) bool
+
+	// BorrowBlockedIn, when set, reports whether a model may not draw on one
+	// cohort's shared pools this cycle: its cooldown there, backed off after
+	// repeated preemptions or placement timeouts (BorrowGovernor.BorrowBlockedIn).
+	BorrowBlockedIn func(namespace, modelID, cohort string) bool
+
+	// ReclaimBlocked, when set, reports whether a model's growth into nominal
+	// lent out may not skip the node hole this cycle: its cooldown after a
+	// replica ordered without one never placed and was released
+	// (BorrowGovernor.CoolingDown, M3). Its growth then needs a real hole.
+	ReclaimBlocked func(namespace, modelID string) bool
+
+	// BorrowCredit, when set, is the borrowed draws still in flight
+	// (BorrowInFlight.Entries) on cohorts open this cycle: the pools were
+	// debited them, and a variant's targets restart from its current
+	// replicas, so its own draw is re-placed on its own GPUs rather than
+	// counted against it (A4). Without it the target of a variant whose pods
+	// are not created yet alternated, 3/2/3, one cycle on the pool, the next
+	// refused by its own draw.
+	BorrowCredit []BorrowDraw
+
+	// ReclaimCredit, when set, is the growth by Kueue's reclaim still in
+	// flight (BorrowInFlight.Reclaims), the steady-state engine's and the
+	// wakes': DeductReclaimed took it off its namespace's LentOut so that no
+	// other decision counts the same borrowed GPUs again, and a variant's
+	// targets restart from its current replicas, so its own entry is
+	// re-placed on those GPUs rather than refused by them (NEW-1). Without
+	// it, a variant whose reclaimed replica's pods were not created yet was
+	// re-placed against a LentOut of 0, node fit refused it, Trim dropped the
+	// entry, and the next cycle ordered it again: 3/2/3, with Kueue
+	// preempting a borrower for nothing in between.
+	ReclaimCredit []BorrowDraw
+
+	// draws is what the last non-shadow pass borrowed (BorrowDraws).
+	draws []BorrowDraw
+	// reclaims is what the last non-shadow pass grew into by Kueue's
+	// preemption of borrowers (ReclaimDraws).
+	reclaims []BorrowDraw
+	// flavors is what the last non-shadow pass placed on Kueue flavors'
+	// nodes (PlacedFlavors).
+	flavors []flavorUse
+}
+
+// BorrowDraws returns what the last Optimize pass drew from the cohorts'
+// shared pools, one entry per variant and chunk; nil when it borrowed nothing.
+// The engine keeps these as in flight until the pods exist.
+func (o *GreedyByScoreOptimizer) BorrowDraws() []BorrowDraw {
+	return o.draws
+}
+
+// ReclaimDraws returns the guaranteed replicas the last Optimize pass placed
+// on nominal Kueue reclaims from borrowers (BorrowDraw.Reclaim), one entry per
+// replica; nil when it placed none. The engine keeps them in flight, as it
+// does the draws, so neither a later cycle nor the wake spends the same
+// borrowed GPUs again before a read shows them.
+func (o *GreedyByScoreOptimizer) ReclaimDraws() []BorrowDraw {
+	return o.reclaims
 }
 
 // spendOp is one debit a pass made: gpus from key of the cluster budget (ns
@@ -175,6 +243,27 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	}
 	// The budgets as the pass found them, to replay its spends on (spends).
 	start, startByNS := maps.Clone(available), cloneNamespaceBudgets(availableByNS)
+	// Cohort borrowing, when any constraint counts it: what each namespace may
+	// still draw past its guaranteed figure, the shared pools, the node view.
+	// Nil otherwise, and every path below is then exactly as before.
+	bs := newBorrowState(constraints, o.Nodes)
+	if bs != nil {
+		bs.blocked = o.BorrowBlocked
+		bs.blockedIn = o.BorrowBlockedIn
+		bs.reclaimBlocked = o.ReclaimBlocked
+		bs.setCredit(o.BorrowCredit)
+		bs.setReclaimCredit(o.ReclaimCredit)
+	}
+	if !o.quiet {
+		o.draws, o.flavors, o.reclaims = nil, nil, nil
+		defer func() {
+			o.draws = bs.drawsByVariant()
+			if bs != nil {
+				o.flavors = bs.flavors
+				o.reclaims = bs.reclaims
+			}
+		}()
+	}
 
 	// Rescale pre-pass: for enabled, contended (type, budget-scope) groups, compute
 	// priority-weighted targets and produce reclaim/fill decisions, consuming free
@@ -185,7 +274,11 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	var rescaleDecisions []domain.VariantDecision
 	var handled map[string]bool
 	if o.Rescale.any() {
-		rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS)
+		if bs == nil {
+			rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS)
+		} else {
+			rescaleDecisions, handled = o.applyRescaleWithinNominal(ctx, requests, constraints, available, availableByNS, bs)
+		}
 	}
 
 	var scaleUpWork []*modelWork
@@ -213,7 +306,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		}
 	}
 
-	o.fairShareScaleUp(ctx, scaleUpWork, available, availableByNS)
+	o.fairShareScaleUp(ctx, scaleUpWork, available, availableByNS, bs)
 
 	allDecisions := make([]domain.VariantDecision, 0, len(scaleUpWork))
 
@@ -310,6 +403,7 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 	work []*modelWork,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
+	bs *borrowState,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -322,7 +416,7 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 		// Nothing left for any model still asking. Per model, because the
 		// cluster budget alone does not say: with no cluster bound in force it
 		// is nil (unbounded) and a namespace's allowance is what runs out.
-		if !anyBudgetLeft(active, available, availableByNS) {
+		if !anyBudgetLeft(active, available, availableByNS, bs) {
 			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
 			break
 		}
@@ -341,7 +435,7 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 			allocationMean = mean - (w.remaining / float64(len(active)))
 		}
 
-		allocated := o.allocateForModel(ctx, w, allocationMean, available, availableByNS)
+		allocated := o.allocateForModel(ctx, w, allocationMean, available, availableByNS, bs)
 
 		if !allocated {
 			w.remaining = -1
@@ -367,6 +461,7 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	mean float64,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
+	bs *borrowState,
 ) bool {
 	target := w.remaining - mean
 	if target <= 0 {
@@ -398,18 +493,39 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	// every model in this namespace; the reconcile below decrements it in place,
 	// so later same-namespace models correctly see the reduced remaining budget.
 	nsBudget := availableByNS[w.req.Namespace]
-	effAvail := effectiveAvailable(available, nsBudget)
+	// A namespace that borrows is sized against its reach -- guaranteed plus
+	// borrow cap -- and the placer decides, replica by replica, what of it the
+	// guaranteed budget, the shared pools and the nodes actually hold.
+	reach := bs.reachFor(w.req.Namespace)
+	sizing := nsBudget
+	if reach != nil {
+		sizing = reach
+	}
+	// The cluster bounds count, for a namespace growing into nominal its
+	// reclaiming queues lent out, the GPUs the borrowers hold there as free:
+	// Kueue preempts them to admit it (withLent).
+	effAvail := effectiveAvailable(bs.withLent(w.req.Namespace, stateVariants(w.req), available), sizing)
 
 	// Unified path: fairShareRolePick behind the RolePickFn interface.
 	// α logic removed in commit 3.
 	fit := nodeFit{nodes: o.Nodes, namespace: w.req.Namespace, limited: w.limited}
 	// Whatever this model places on the nodes is charged to it, so a later
 	// reader can take back the placements of a model whose target the
-	// utilization share overrides.
+	// utilization share overrides. The borrowing placer places on the same
+	// view, so its placements are charged to the model too.
 	defer o.Nodes.setOwner(o.Nodes.setOwner(modelKey(w.req)))
-	pick := fairShareRolePickOn(target, w.roles, w.limited, fit)
+	placer := bs.newModelPlacer(w.req.Namespace, w.req.ModelID, nsBudget, w.targets, w.limited)
+	pickFit := fit
+	if placer != nil {
+		// The placer fits the nodes itself, per replica: a borrowed one on
+		// its flavor's nodes, growth into lent-out nominal whether or not a
+		// hole shows; a replica it refuses for want of a node is marked as
+		// held back by node fit. The pick then sizes against the pools only.
+		pickFit.nodes = nil
+	}
+	pick := fairShareRolePickOn(target, w.roles, w.limited, pickFit)
 	spent := allocateForModelPairedOn(ctx, w.e, w.records, stateMap, effAvail,
-		w.targets, pick, ps, w.roles, fit)
+		w.targets, pick, ps, w.roles, fit, placer)
 
 	// Reconcile: apply what was spent to the cluster-wide budget and, where
 	// this namespace caps the type, to the namespace budget. What was spent, not
@@ -440,10 +556,16 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 		o.spend(modelKey(w.req), "", key, consumed)
 		// The namespace budget the same way: accType is its own key, and a
 		// family key the namespace also lists draws down with it. The
-		// unlimited sentinel (negative) is never drawn down.
+		// unlimited sentinel (negative) is never drawn down, and nothing goes
+		// below 0: for a borrowing namespace the guaranteed budget is spent
+		// first, and what went past it was borrowed, which the placer has
+		// already debited from the shared pools.
 		debitBudget(nsBudget, accType, consumed)
 		if nsBudget != nil {
 			o.spend(modelKey(w.req), w.req.Namespace, accType, consumed)
+		}
+		if reach != nil {
+			debitBudget(reach, accType, consumed)
 		}
 	}
 
@@ -600,15 +722,30 @@ func fairShareRolePickOn(target float64, roles []string, limited gpuLimitTracker
 
 // anyBudgetLeft reports whether some model in active could still be granted a
 // GPU: its effective budget (effectiveAvailable) is not empty. A model in a
-// namespace with an allowance is bounded by it; one without reads the cluster
-// budget, which is unbounded when nil.
-func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS map[string]map[string]int) bool {
+// namespace with an allowance is bounded by it -- by its reach when the
+// namespace borrows, since its guaranteed allowance may be spent while the
+// shared pools still hold GPUs; one without reads the cluster budget, which is
+// unbounded when nil.
+func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS map[string]map[string]int, bs *borrowState) bool {
 	for _, w := range active {
-		if budgetTotal(effectiveAvailable(available, availableByNS[w.req.Namespace])) > 0 {
+		sizing := availableByNS[w.req.Namespace]
+		if reach := bs.reachFor(w.req.Namespace); reach != nil {
+			sizing = reach
+		}
+		if budgetTotal(effectiveAvailable(bs.withLent(w.req.Namespace, stateVariants(w.req), available), sizing)) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// stateVariants is the names of a request's variants, as its states list them.
+func stateVariants(req ModelScalingRequest) []string {
+	out := make([]string, 0, len(req.VariantStates))
+	for _, s := range req.VariantStates {
+		out = append(out, s.VariantName)
+	}
+	return out
 }
 
 // filterActive returns modelWork entries that still have remaining > 0.

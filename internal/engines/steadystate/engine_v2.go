@@ -1585,11 +1585,15 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 }
 
 // logScalingDecisions emits one INFO "scaling-decision" line per model after
-// the optimizer has produced per-variant decisions.
+// the optimizer has produced per-variant decisions. borrowed, non-nil while
+// the cycle counts Kueue borrowing, is per "namespace/model" the GPUs the
+// decision draws from the cohorts' shared pools; every model's line then
+// carries it as "borrowed", 0 included.
 func logScalingDecisions(
 	ctx context.Context,
 	modelRequests []allocation.ModelScalingRequest,
 	decisions []domain.VariantDecision,
+	borrowed map[string]int,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -1657,11 +1661,15 @@ func logScalingDecisions(
 		if len(entries) == 0 {
 			continue
 		}
-		logger.Info("scaling-decision",
+		kv := []any{
 			"modelID", req.ModelID,
 			"namespace", req.Namespace,
 			"decisions", entries,
-		)
+		}
+		if borrowed != nil {
+			kv = append(kv, "borrowed", borrowed[req.Namespace+"/"+req.ModelID])
+		}
+		logger.Info("scaling-decision", kv...)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
@@ -81,6 +82,13 @@ const (
 	OutcomeNoDecodeCandidate SelectionOutcome = "no-decode-candidate"
 	// OutcomeNoCapacity means nothing could be placed within the GPU budget.
 	OutcomeNoCapacity SelectionOutcome = "no-capacity"
+	// OutcomeNominalLentOut is OutcomeNoCapacity in a namespace whose queue
+	// lent part of its nominal quota to a peer it cannot reclaim from (its
+	// reclaimWithinCohort Never): the wake was checked against its guaranteed
+	// figure plus the cohort's free pool, not its whole nominal, so it does not
+	// wake into a pod Kueue would gate (B10). The same reason as
+	// nominal-lent-out on wva_model_scaling_blocked.
+	OutcomeNominalLentOut SelectionOutcome = "nominal-lent-out"
 	// OutcomePrefillRequired means a decode variant would fit, but no prefill
 	// could be placed alongside it and the policy requires one.
 	OutcomePrefillRequired SelectionOutcome = "prefill-required"
@@ -112,6 +120,17 @@ type SelectionInput struct {
 	// fits by pools alone. A set fits only if each member's replica lands on a
 	// node: free GPUs as 4+4+8 hold one 8-GPU replica, not a P/D pair.
 	Nodes *allocation.NodeView
+	// Reclaimable is, per accelerator type, how the namespace's growth within
+	// its reclaiming queues' nominal splits (allocation.ReclaimableNominal),
+	// less what this tick's earlier wakes took of it: a replica no node holds
+	// still fits when Kueue admits it by preempting the borrowers filling
+	// those nodes (allocation.Reclaim).
+	Reclaimable map[string]allocation.Reclaim
+	// QueueFlavor is, per accelerator, the flavor Kueue admits the namespace's
+	// replicas on within its queues (allocation.QueueFlavorOf): node fit lands
+	// each pod only on nodes carrying its node labels, with its tolerations, as
+	// Kueue does. Nil, or nil for an accelerator, fits by the templates alone.
+	QueueFlavor func(accelerator string) *kueue.FlavorPlacement
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
 }
@@ -255,28 +274,35 @@ func fits(in SelectionInput, set []Candidate) bool {
 	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demand) {
 		return false
 	}
-	return in.Nodes.PlaceReplicas(replicaShapes(in.Namespace, set), false)
+	ok, _ := in.Nodes.PlaceReplicasReclaiming(replicaShapes(in.Namespace, set, in.QueueFlavor), false, in.Reclaimable)
+	return ok
 }
 
 // replicaShapes is one replica of each candidate of set as the node view fits
 // it. A candidate whose accelerator is unresolved is left out, as demandOf
 // leaves it out of the budget: its placement is unknown, and unknown does not
-// block.
-func replicaShapes(namespace string, set []Candidate) []allocation.ReplicaShape {
+// block. flavorOf is SelectionInput.QueueFlavor.
+func replicaShapes(namespace string, set []Candidate, flavorOf func(string) *kueue.FlavorPlacement) []allocation.ReplicaShape {
 	out := make([]allocation.ReplicaShape, 0, len(set))
 	for _, c := range set {
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
 			continue
 		}
-		out = append(out, shapeOf(namespace, c))
+		out = append(out, shapeOf(namespace, c, flavorOf))
 	}
 	return out
 }
 
-// shapeOf is one replica of c as the node view fits it.
-func shapeOf(namespace string, c Candidate) allocation.ReplicaShape {
-	return allocation.ReplicaShape{Variant: namespace + "/" + c.VariantName, Accelerator: c.Accelerator,
+// shapeOf is one replica of c as the node view fits it: on its queue's flavor
+// when flavorOf names one (W5), Kueue admitting every pod of a managed
+// namespace on it, within nominal too.
+func shapeOf(namespace string, c Candidate, flavorOf func(string) *kueue.FlavorPlacement) allocation.ReplicaShape {
+	s := allocation.ReplicaShape{Variant: namespace + "/" + c.VariantName, Accelerator: c.Accelerator,
 		PodGPUs: c.PodGPUs, GPUs: max(c.GPUsPerReplica, 1), Tolerations: c.Tolerations, DomainKey: c.DomainKey}
+	if flavorOf != nil {
+		s.Flavor = flavorOf(c.Accelerator)
+	}
+	return s
 }
 
 // demandOf sums one replica of each candidate, keyed by accelerator type. Two

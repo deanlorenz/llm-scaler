@@ -13,6 +13,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
 // NodeView is one cycle's per-node picture of free GPUs, consumed in order: the
@@ -35,7 +37,11 @@ import (
 // the pod's template (ReplicaShape.Tolerations). A pod is placed best-fit, in
 // the smallest hole that holds it; the pods of a replica with a topology key
 // (ReplicaShape.DomainKey: an exclusive-topology LeaderWorkerSet) are placed
-// in one domain, the nodes sharing one value of that label.
+// in one domain, the nodes sharing one value of that label. A replica the
+// Kueue borrowing placer orders is judged further (ReplicaShape.Placements and
+// Flavor; eligibleFit, borrow_node_fit.go): its pod templates' nodeSelector
+// and required node affinity, and on borrowed capacity its flavor's node
+// labels and tolerations, against the same view and debits.
 //
 // A NodeView is not safe for concurrent use: one optimizer pass, or one wake
 // decision, owns it.
@@ -197,21 +203,32 @@ type ReplicaShape struct {
 	// DomainKey is the node label every pod of the replica must share a value
 	// of (an exclusive-topology LeaderWorkerSet), "" for none.
 	DomainKey string
+	// Placements is each pod template's nodeSelector and required node
+	// affinity; nil leaves them unjudged. Set for the replicas the Kueue
+	// borrowing placer orders, and for their holes in the in-flight ledger.
+	Placements []domain.PodPlacement
+	// Flavor is the Kueue flavor a borrowed replica is admitted on: its pods
+	// land only on nodes carrying every node label it names, and carry its
+	// tolerations beside the template's. Nil for a replica not borrowed.
+	Flavor *kueue.FlavorPlacement
 }
 
 // replicaFit is one replica as the view places it: its pods' GPUs, the
-// accelerator, the tolerations and the topology key.
+// accelerator, the tolerations and the topology key, and for a replica the
+// borrowing placer orders its templates' placement and its flavor's.
 type replicaFit struct {
 	acc         string
 	pods        []int
 	tolerations []corev1.Toleration
 	domain      string
+	templates   []domain.PodPlacement
+	flavor      *kueue.FlavorPlacement
 }
 
 // fitOf is s as the view places it (replicaPods for its pods).
 func (v *NodeView) fitOf(s ReplicaShape) replicaFit {
 	return replicaFit{acc: s.Accelerator, pods: v.replicaPods(s.Variant, s.Accelerator, s.PodGPUs, s.GPUs),
-		tolerations: s.Tolerations, domain: s.DomainKey}
+		tolerations: s.Tolerations, domain: s.DomainKey, templates: s.Placements, flavor: s.Flavor}
 }
 
 // PlaceReplicas reports whether every replica fits the nodes together, each on
@@ -511,7 +528,7 @@ func (v *NodeView) place(r replicaFit) bool {
 	if len(pods) > 1 {
 		pods = largestFirst(pods)
 	}
-	eligible := v.eligible(r.acc, r.tolerations, false)
+	eligible := v.eligibleFit(r)
 	domains := []string{""}
 	if r.domain != "" && len(pods) > 1 {
 		domains = v.domainsOf(eligible, r.domain)
@@ -585,7 +602,7 @@ func (v *NodeView) fits(r replicaFit, n int) int {
 			return n
 		}
 		count := 0
-		for _, i := range v.eligible(r.acc, r.tolerations, false) {
+		for _, i := range v.eligibleFit(r) {
 			count += v.free(i) / need
 			if count >= n {
 				return n

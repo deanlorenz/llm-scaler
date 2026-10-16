@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	poolutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/pool"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -235,10 +236,34 @@ type placement struct {
 	// nodes is the tick's per-node picture when the physical limiter bounds
 	// this wake (fresh constraints only; see decideWake), nil otherwise.
 	nodes *allocation.NodeView
+	// nominalLentOut is set when the namespace's queue lent nominal it cannot
+	// reclaim: its within-nominal figure, which the wake is checked against,
+	// is below its nominal.
+	nominalLentOut bool
+	// reclaimable is, per type, how the namespace's growth within its
+	// reclaiming queues' nominal splits (allocation.ReclaimableNominal): a
+	// wake replica Kueue admits by preempting borrowers needs no node hole.
+	// decideWake takes off what this tick's earlier wakes used.
+	reclaimable map[string]allocation.Reclaim
+	// queueFlavor is SelectionInput.QueueFlavor, read from the constraints
+	// before the wake's within-nominal view drops their borrowing figures.
+	queueFlavor func(accelerator string) *kueue.FlavorPlacement
+	// raw is this tick's constraints before the wake's within-nominal view
+	// drops their borrowing figures: what the wake records of the pools it
+	// takes is read from them (allocation.WakeDraws). Nil off this tick's
+	// constraints.
+	raw []*allocation.ResourceConstraints
 }
 
 // placementFor computes the placement basis for namespace; see gpuConstraints.
 func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
+	return e.placementForModel(ctx, namespace, nil)
+}
+
+// placementForModel is placementFor for a wake of the variants in own: what
+// the shared record holds for them -- their own wake, recorded on an earlier
+// tick while their pods do not exist yet -- does not count against them.
+func (e *Engine) placementForModel(ctx context.Context, namespace string, own map[string]bool) placement {
 	providers := allocation.ConstraintProvidersFrom(e.currentGPULimiter())
 	if len(providers) == 0 {
 		e.reportUnchecked(ctx, namespace, "no constraint provider is configured")
@@ -282,6 +307,44 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// score (section 6.3 of that proposal) is not built; a wake waits for idle
 	// GPUs instead.
 	constraints = allocation.WithholdPromised(constraints, decision.LatestSharePromised(now))
+	// A wake spends capacity within nominal only, never borrowed capacity: a
+	// model woken onto borrowed GPUs can be preempted before it serves (B7).
+	// Within nominal, not guaranteed -- an idle queue on Kueue's default
+	// (Never) has a guaranteed figure of 0, and must still wake.
+	//
+	// Within nominal is min(nominal, guaranteed + the cohort's free pool): a
+	// queue that cannot reclaim the nominal it lent does not count it, so the
+	// wake does not create a pod Kueue would hold at its gate. A refusal then
+	// says why (OutcomeNominalLentOut).
+	//
+	// The pool a queue that cannot reclaim reaches through is the one the
+	// steady-state engine borrows from: what it drew and Kueue has not
+	// reserved yet, the pods at Kueue's gate and those it admitted since the
+	// read, and the cohorts closed to new borrowing (a lender waits) come
+	// off it first, from the process-wide record (A1, W7). A namespace read
+	// and not counted is held to its queues' within-nominal figure too.
+	p.nominalLentOut = allocation.NominalLentOutAny(constraints, namespace)
+	// Nominal a reclaiming queue of the namespace lent out and peers borrow
+	// is its to take back: Kueue preempts the borrowers whose pods fill those
+	// GPUs and nodes to admit the wake, so neither the cluster bounds nor the
+	// node view refuse it for their being in use (W1) -- only that part, and
+	// only once the cohort's free pool no longer covers the growth (N1), less
+	// what earlier cycles and wakes already grew into that way.
+	record := allocation.DefaultBorrowInFlight
+	unreserved := record.Unreserved(now).WithoutVariants(namespace, own)
+	p.raw = constraints
+	p.reclaimable = allocation.ReclaimableNominal(allocation.DeductReclaimed(constraints, unreserved.InFlight), namespace)
+	// Kueue admits the wake's pods on the queue's flavor, within nominal too:
+	// the node fit lands them only where it does (W5), as the steady placer
+	// fits a guaranteed replica.
+	p.queueFlavor = allocation.QueueFlavorOf(constraints, namespace)
+	// The whole reclaimable is credited, not what this tick's earlier wakes
+	// left of it (reclaimableLeft, which the node fit uses): decideWake
+	// withholds those wakes' whole demand from the same bounds, which nets
+	// the part of the credit they used. Crediting only what is left counted
+	// it twice (TestSecondWakeInATickSharesTheLentOutCreditOnce).
+	constraints = allocation.CreditReclaimable(
+		allocation.WithinNominalNow(constraints, unreserved, record.Blocked(now)), p.reclaimable)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints
 	return p

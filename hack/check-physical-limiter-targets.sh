@@ -34,7 +34,7 @@ for lib in common.sh limiter_policy.sh physical_limiter.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
-unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE \
+unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_QUOTA_KUEUE_BORROW WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE \
     WVA_LIMITER_TARGETS WVA_CONTROLLER_SA WVA_CONTROLLER_IMAGE_REPOS WVA_IMAGE_REPO
 WVA_NS="wva-system"
 WVA_POLICY_NS="wva-policy"
@@ -112,6 +112,9 @@ case "$1" in
     # The Namespace rule of every ClusterRole: its resourceNames, or * for none.
     printf '%s\n' "$doc" | yq -N e 'select(.kind == "ClusterRole") | .metadata.name + " " + ([.rules[] | select(.resources[] == "namespaces") | ((.resourceNames // ["*"]) | join(","))] | join(";"))' - \
       | sed 's/^/NSRULE /' >> "$KGRANTS"
+    # The revoke label of every namespaced Role and RoleBinding, or - for none.
+    printf '%s\n' "$doc" | yq -N e 'select(.kind == "Role" or .kind == "RoleBinding") | .kind + " " + .metadata.name + " " + .metadata.namespace + " " + (.metadata.labels["llm-d.ai/wva-kueue-controller-reader"] // "-")' - \
+      | sed 's/^/RBLABEL /' >> "$KGRANTS"
     exit 0 ;;
   get)
     case "$2" in
@@ -561,6 +564,122 @@ else
 fi
 rm -f "$DEPLOYS/wva-foo.json" "$DEPLOYS"/clusterrole-*.yaml
 
+# WVA_QUOTA_KUEUE_BORROW=false reaches the published policy as
+# countBorrowable: false; unset, the field is not written. The patch payload is
+# pretty-printed JSON over several lines, so the call is read up to the next one.
+wva_policy_patch() { sed -n '/CALL.patch configmap wva-scaling-policy-config -n wva-policy/,/^CALL.auth/p' "$CALLS"; }
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_QUOTA_KUEUE_BORROW=false failed: $(tail -15 "$WORK/out")"
+elif ! wva_policy_patch | grep -q 'countBorrowable: false'; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false did not reach the cluster policy: $(wva_policy_patch | head -12)"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW=false writes countBorrowable: false into the cluster policy"
+fi
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a Kueue quota failed: $(tail -15 "$WORK/out")"
+elif ! grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS"; then
+    fail "enable wrote no cluster policy: $(tail -15 "$WORK/out")"
+elif ! wva_policy_patch | grep -q 'kueue'; then
+    fail "the cluster policy carries no kueue block, so the absence below proves nothing: $(wva_policy_patch | head -12)"
+elif wva_policy_patch | grep -q 'countBorrowable'; then
+    fail "an unset WVA_QUOTA_KUEUE_BORROW wrote countBorrowable: $(wva_policy_patch | head -12)"
+else
+    ok "an unset WVA_QUOTA_KUEUE_BORROW leaves countBorrowable out of the cluster policy"
+fi
+# S3: the Role and RoleBinding in the Kueue namespace carry the install suffix
+# as a label, so the uninstall finds them wherever KUEUE_NAMESPACE put them.
+case_begin
+want_label="$(wva_ns_suffix tenant-a)"
+if ! grep -q "^RBLABEL Role wva-kueue-controller-reader-$want_label kueue-system $want_label\$" "$GRANTS"; then
+    fail "the Kueue-namespace Role of tenant-a carries no install-suffix label: $(grep RBLABEL "$GRANTS" | head -6)"
+elif ! grep -q "^RBLABEL RoleBinding wva-kueue-controller-reader-$want_label kueue-system $want_label\$" "$GRANTS"; then
+    fail "the Kueue-namespace RoleBinding of tenant-a carries no install-suffix label: $(grep RBLABEL "$GRANTS" | head -6)"
+else
+    ok "the Kueue controller read is labelled with the install suffix"
+fi
+
+# R2-1: the cluster-wide Workload and LocalQueue read reaches every tenant, so
+# enable grants it only to a controller whose published policy counts cohort
+# borrowing, and revokes it from one whose policy no longer does.
+borrow_granted() { grep -q "^GRANT ClusterRoleBinding wva-kueue-borrow-reader-rolebinding-$(wva_ns_suffix "${1%%/*}") $1\$" "$GRANTS"; }
+borrow_revoked() { grep -qF "CALL[delete clusterrolebinding wva-kueue-borrow-reader-rolebinding-$(wva_ns_suffix "$1") --ignore-not-found]" "$CALLS"; }
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a Kueue quota failed: $(tail -15 "$WORK/out")"
+elif ! borrow_granted tenant-g/wva-controller-manager || ! borrow_granted tenant-a/wva-controller-manager; then
+    fail "a policy counting borrowing did not get its controllers the borrowing read: $(grep 'borrow' "$GRANTS" | head -4)"
+elif borrow_revoked tenant-g; then
+    fail "enable revoked the borrowing read of a controller whose policy counts borrowing"
+else
+    ok "a quota counting borrowing grants its controllers the cluster-wide Workload read"
+fi
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_QUOTA_KUEUE_BORROW=false failed: $(tail -15 "$WORK/out")"
+elif grep -q 'wva-kueue-borrow-reader' "$GRANTS"; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false still granted the borrowing read: $(grep 'borrow' "$GRANTS" | head -4)"
+elif ! borrow_revoked tenant-g || ! borrow_revoked tenant-a; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false did not revoke the borrowing read: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW=false revokes the borrowing read and grants none"
+fi
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTAS=H200=8
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a quota without Kueue failed: $(tail -15 "$WORK/out")"
+elif grep -q 'wva-kueue-borrow-reader' "$GRANTS" || ! borrow_revoked tenant-g; then
+    fail "a quota without Kueue left or granted the borrowing read: $(grep 'borrow' "$GRANTS" "$CALLS" | head -4)"
+else
+    ok "a quota without Kueue revokes the borrowing read"
+fi
+# A kept countBorrowable: false (WVA_QUOTA_KUEUE_BORROW not given) counts as
+# false, and a kept controllerNamespace places the Kueue controller read
+# (R2-6): tenant-g reads wva-policy, tenant-a its own plain policy.
+case_begin
+printf 'limiters:\n- name: kq\n  type: quota\n  scope: cluster\n  quotas:\n    H200: -1\n  kueue:\n    enabled: true\n    countBorrowable: false\n    controllerNamespace: kueue-ops\n' > "$DEPLOYS/wva-policy.policy"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1
+rm -f "$DEPLOYS/wva-policy.policy"
+want_g="$(wva_ns_suffix tenant-g)"
+if [ "$RC" -ne 0 ]; then
+    fail "enable over a kept countBorrowable: false failed: $(tail -15 "$WORK/out")"
+elif borrow_granted tenant-g/wva-controller-manager || ! borrow_revoked tenant-g; then
+    fail "a kept countBorrowable: false still left tenant-g the borrowing read: $(grep 'borrow' "$GRANTS" | head -4)"
+elif ! borrow_granted tenant-a/wva-controller-manager; then
+    fail "tenant-a, whose own policy counts borrowing, lost the borrowing read: $(grep 'borrow' "$GRANTS" | head -4)"
+elif ! grep -q "^RBLABEL Role wva-kueue-controller-reader-$want_g kueue-ops $want_g\$" "$GRANTS"; then
+    fail "the Kueue controller read of tenant-g is not in the kept controllerNamespace kueue-ops: $(grep RBLABEL "$GRANTS" | head -4)"
+else
+    ok "a kept countBorrowable: false revokes the borrowing read; a kept controllerNamespace places the controller read"
+fi
+case_begin
+run_enable
+if grep -q 'wva-kueue-borrow-reader' "$GRANTS" "$CALLS"; then
+    fail "enabling the physical limiter touched the borrowing read: $(grep 'borrow' "$GRANTS" "$CALLS" | head -4)"
+else
+    ok "enabling the physical limiter leaves the borrowing read alone"
+fi
+# WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE: there is no Kueue block to put
+# it on, so the published policy carries neither, and the command says so.
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=8
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_QUOTA_KUEUE_BORROW but no WVA_QUOTA_KUEUE failed: $(tail -15 "$WORK/out")"
+elif ! grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS"; then
+    fail "enable wrote no cluster policy, so the absence below proves nothing: $(tail -15 "$WORK/out")"
+elif wva_policy_patch | grep -q 'kueue\|countBorrowable'; then
+    fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE wrote a Kueue field: $(wva_policy_patch | head -12)"
+elif ! grep -q 'WVA_QUOTA_KUEUE_BORROW=false is set, but WVA_QUOTA_KUEUE is not true.*IGNORED' "$WORK/out"; then
+    fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE was ignored silently: $(tail -6 "$WORK/out")"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE is ignored by enable, with a warning"
+fi
+
 # A namespace-scoped controller does not watch a policy namespace outside the
 # one it manages, so it sees the new policy only after a restart -- which
 # enable must do, after the write. A cluster-scoped one reloads live.
@@ -624,6 +743,13 @@ elif grep -q 'bounded by nothing' "$WORK/out"; then
 else
     ok "disable says the quota still bounds, not that nothing does"
 fi
+# The quota stays, so the Kueue controller read it may need stays too.
+case_begin
+if grep -q 'CALL\[delete role,rolebinding\|CALL\[delete clusterrole' "$CALLS"; then
+    fail "disabling the physical limiter revoked a Kueue read the quota may still need: $(grep 'CALL\[delete' "$CALLS" | head -2)"
+else
+    ok "disabling only the physical limiter keeps the Kueue controller read"
+fi
 
 # The documented undo of a QUOTA run without WVA_LIMITER_TYPE=quota: the policy
 # holds only a quota, so there is no physical limiter to remove. It used to
@@ -656,6 +782,25 @@ elif ! grep -q 'Removed the quota limiter from wva-policy/wva-scaling-policy-con
     fail "disable WVA_LIMITER_TYPE=quota did not report the removal: $(tail -6 "$WORK/out")"
 else
     ok "disable WVA_LIMITER_TYPE=quota removes a quota-only policy's entry"
+fi
+# S4: the quota gone, the Kueue controller read it needed goes too, by label --
+# for tenant-g, the controller that reads wva-policy, and not for tenant-a,
+# whose own policy this did not touch.
+case_begin
+if ! grep -qF "CALL[delete role,rolebinding -A -l llm-d.ai/wva-kueue-controller-reader=$(wva_ns_suffix tenant-g) --ignore-not-found]" "$CALLS"; then
+    fail "disable WVA_LIMITER_TYPE=quota left the Kueue controller read of tenant-g: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+elif grep -qF "reader=$(wva_ns_suffix tenant-a)" "$CALLS"; then
+    fail "disable WVA_LIMITER_TYPE=quota revoked tenant-a, whose policy it did not clear: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+else
+    ok "disable WVA_LIMITER_TYPE=quota revokes the Kueue controller read by its label, only where the quota went"
+fi
+case_begin
+if ! borrow_revoked tenant-g; then
+    fail "disable WVA_LIMITER_TYPE=quota left the borrowing read of tenant-g: $(grep 'CALL\[delete' "$CALLS" | head -4)"
+elif borrow_revoked tenant-a; then
+    fail "disable WVA_LIMITER_TYPE=quota revoked the borrowing read of tenant-a, whose policy it did not clear"
+else
+    ok "disable WVA_LIMITER_TYPE=quota revokes the borrowing read where the quota went"
 fi
 
 # WVA_LIMITER_TYPE=all removes every limiter whatever its kind: the uninstall
@@ -839,7 +984,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=47
+CASES_EXPECTED=59
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

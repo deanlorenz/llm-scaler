@@ -189,3 +189,154 @@ spec:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#scaledobject-ready-false-or-targets-unknown"
         summary: "{{ $value }} ScaledObject(s) in {{ $labels.exported_namespace }} have had no usable scaling decision for 10 minutes"
         description: "Grouped by exported_namespace, not namespace: the gauge carries the ScaledObject's namespace, which Prometheus renames to exported_namespace because the scrape job already has a namespace label (the controller's). The KEDA external scaler is answering these ScaledObjects with the target's current replica count because no engine has a usable decision for them, so their replica counts are frozen: they neither scale up under load nor down when idle. For a cycle or two after a controller restart or leader change this is expected; ten minutes is not. wva_scaler_undecided_answers_total says why: reason not-managed, or no-decision that never stops, means the model is never planned, usually a trigger metadata value that does not parse; stale means its decision stopped being republished, so read that model's scaling-decision lines. The controller log line 'external scaler has no decision for this target' names each ScaledObject."
+
+    # Kueue cohort borrowing. Only a namespace-scope Kueue quota entry that
+    # counts borrowing publishes these series. wva_quota_borrow_withheld
+    # carries the model namespace as namespace, which the scrape renames to
+    # exported_namespace. test/alerts/testdata/kueue-alerts.test.yaml
+    # evaluates them.
+    #
+    # Stale, in two rules so one failed Kueue read pages once, not once per
+    # namespace: a failed read freezes every namespace of the entry, which
+    # may be hundreds. WVAKueueReaderStale is per entry, while two or more of
+    # its namespaces are stale; WVAKueueReaderStaleNamespace is per namespace,
+    # only while it is the entry's only stale one.
+    - alert: WVAKueueReaderStale
+      expr: count by (limiter_name) (max by (limiter_name, exported_namespace) (wva_quota_borrow_withheld{reason="stale"}) == 1) >= 2
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueuereaderstale"
+        summary: "Kueue borrowing in {{ $value }} namespaces of quota entry {{ $labels.limiter_name }} has been frozen as stale for 5 minutes"
+        description: "Borrowing for these namespaces is frozen at the last figures: nothing new is borrowed and nothing is given back. The entry's last Kueue read failed, or is older than twice the refresh interval. The controller log line 'external quota source unreadable' names the read that failed; usually RBAC or a missing CRD. List the namespaces with: wva_quota_borrow_withheld{reason=\"stale\"}. To hand capacity back by hand meanwhile, lower the borrowing model's maxReplicaCount on its ScaledObject, or set countBorrowable: false on the quota entry, which caps every namespace of the entry at its nominal quota."
+    - alert: WVAKueueReaderStaleNamespace
+      expr: (max by (limiter_name, exported_namespace) (wva_quota_borrow_withheld{reason="stale"}) == 1) and on (limiter_name) (count by (limiter_name) (max by (limiter_name, exported_namespace) (wva_quota_borrow_withheld{reason="stale"}) == 1) == 1)
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueuereaderstale"
+        summary: "Kueue borrowing in {{ $labels.exported_namespace }} has been frozen as stale for 5 minutes (quota entry {{ $labels.limiter_name }}, its only stale namespace)"
+        description: "Borrowing for this namespace is frozen at the last figures: nothing new is borrowed and nothing is given back. It is the entry's only stale namespace, so either the entry covers this namespace alone and its last Kueue read failed or is older than twice the refresh interval, or this namespace's ResourceQuota read is failing. At the default refresh interval (30s) a failing ResourceQuota read turns into resourcequota-unreadable after five intervals, before this alert fires; it reaches 5 minutes only with a refresh interval above one minute. The controller log line 'external quota source unreadable' names the read that failed; usually RBAC or a missing CRD. To hand capacity back by hand meanwhile, lower the borrowing model's maxReplicaCount on its ScaledObject, or set countBorrowable: false on the quota entry, which caps the namespace at its nominal quota."
+
+    # Kueue reachable, its controller not running: kueue-controller-down.
+    # The version gauge below cannot show it: with assumeTestedVersion it
+    # reads 1 whatever the Deployment answers.
+    - alert: WVAKueueControllerDown
+      expr: max by (limiter_name) (wva_quota_borrow_withheld{reason="kueue-controller-down"}) == 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueuecontrollerdown"
+        summary: "Quota entry {{ $labels.limiter_name }}: no running Kueue controller is seen; Kueue borrowing is frozen"
+        description: "The scaling manager sees no Kueue leader: the leader-election Lease was not renewed within twice its duration (with no Lease, the kueue-controller-manager Deployment has no ready replica), or the controller cannot read the Deployment or the Lease at all (not found, or Forbidden). Borrowing is frozen: nothing new is borrowed, nothing is given back, nothing borrowed is taken away. Check that Kueue runs (kubectl get deploy kueue-controller-manager -n <kueue namespace>). If it does, check the controller may read the Deployment and the Lease c1f6bfd2.kueue.x-k8s.io there: a namespace-scoped install needs a cluster admin to run KUEUE_NAMESPACE=<kueue namespace> make setup-prereqs. Kueue elsewhere than kueue-system needs kueue.controllerNamespace on the entry. A Kueue built with another leader-election ID reads as down too."
+
+    - alert: WVAKueueLenderWaitingPastCooldown
+      expr: max by (cohort, cluster_queue) (wva_kueue_lender_waiting_seconds) > on () group_left () max (wva_kueue_borrow_cooldown_seconds)
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueuelenderwaitingpastcooldown"
+        summary: "ClusterQueue {{ $labels.cluster_queue }} has waited longer than the borrow cooldown for capacity it lent in cohort {{ $labels.cohort }}"
+        description: "A lender has waited longer than the configured borrow cooldown (wva_kueue_borrow_cooldown_seconds) while a namespace this controller governs still borrows in its cohort, and Kueue has not preempted for it. The scaling manager counts as borrowable only what Kueue would reclaim for its lender (reclaimWithinCohort Any, or LowerPriority above the borrowing model's priority) and stops new borrowing in the cohort while a lender waits; it never hands borrowed replicas back itself. A wait this long usually means the lender's pending Workload does not outrank the borrowers' (LowerPriority), or the capacity it waits for is held by a borrower this controller does not govern. Check the lender's pending Workload and Kueue's preemption events (kubectl describe workload). To free capacity by hand, lower the borrowing model's maxReplicaCount on its ScaledObject, or set countBorrowable: false on the quota entry."
+
+    # A static -1 cap leaves a type to Kueue alone. Until the first Kueue read
+    # succeeds (RBAC missing, CRDs absent, Kueue down at start) nothing bounds
+    # that type. Never-read is not fail-closed: the other limiters still bound,
+    # and Kueue still gates pods past its quota, so the cost is churn of gated
+    # pods, not GPUs over-allocated. This alert says so.
+    - alert: WVAKueueNeverRead
+      expr: max by (limiter_name) (wva_kueue_never_read) == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-kueue-backed-quota-was-never-read"
+        summary: "Quota entry {{ $labels.limiter_name }} reads Kueue but has never read it; a -1 cap leaves its types unbounded"
+        description: "The quota entry has kueue.enabled, leaves at least one accelerator type unlimited (-1) in its static caps so that Kueue supplies the figure, and no Kueue read has succeeded since the controller started. Until one does, nothing bounds that type: the scaling manager applies the static entry alone. Check the controller log for 'external quota source unreadable and never read', that the Kueue CRDs are installed, and that the controller may list ClusterQueues, LocalQueues and ResourceFlavors (kubectl auth can-i list clusterqueues.kueue.x-k8s.io --as=system:serviceaccount:<controller-namespace>:<controller-serviceaccount>). To bound the type meanwhile, replace -1 with a number in the entry."
+
+    # The conformance check of the borrowing figures: per ClusterQueue, the
+    # borrowed GPUs computed here against Kueue's own figure.
+    - alert: WVAKueueBorrowDrift
+      expr: max by (cluster_queue) (wva_kueue_borrow_drift_gpus) > 0
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueueborrowdrift"
+        summary: "ClusterQueue {{ $labels.cluster_queue }}: the borrowed GPUs computed differ from Kueue's by {{ $value }} for 15 minutes"
+        description: "For this ClusterQueue, the borrowed GPUs the scaling manager computes (usage past nominal) differ from Kueue's status.flavorsReservation borrowed figure. Borrowing still runs, on figures from a model of Kueue's accounting that no longer matches this cohort, so borrowable may be too high or too low. Brief drift while Kueue admits or preempts is normal; 15 minutes is not. Usual causes: a Kueue feature borrowing does not detect (waitForPodsReady with blockAdmission), or a Kueue release whose accounting changed. If it persists, set countBorrowable: false on the quota entry."
+
+    # wva_kueue_controller_version_known is 1 when the version is read, or
+    # when kueue.assumeTestedVersion is set; published only while some entry
+    # counts borrowing, so an opted-out cluster never pages. It is also 0 when
+    # the Deployment cannot be read, which WVAKueueControllerDown already
+    # pages for (kueue-controller-down): the unless keeps one page for one
+    # fault, per controller instance.
+    - alert: WVAKueueVersionUnknown
+      expr: (max by (controller_instance) (wva_kueue_controller_version_known) == 0) unless on (controller_instance) (max by (controller_instance) (wva_quota_borrow_withheld{reason="kueue-controller-down"}) == 1)
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueueversionunknown"
+        summary: "The scaling manager cannot tell which Kueue release runs; Kueue borrowing is not counted"
+        description: "The Kueue controller's Deployment was read and its image names no version (a digest-only reference), or the Deployment could not be read at all. With an image that names no version, borrowing is withheld as kueue-version-unknown: if Kueue runs a tested release, set kueue.assumeTestedVersion: true on the entry, which clears this alert. A Deployment that cannot be read freezes borrowing as kueue-controller-down, which WVAKueueControllerDown reports, so this alert stays quiet while that one's condition holds; assumeTestedVersion does not lift it: a namespace-scoped install needs a cluster admin to run KUEUE_NAMESPACE=<kueue namespace> make setup-prereqs, and Kueue elsewhere than kueue-system needs kueue.controllerNamespace."
+
+    # Informational: a Kueue release outside the tested range. The nominal
+    # quota still bounds; only borrowing is withheld, until Kueue is upgraded
+    # or downgraded to a tested release.
+    - alert: WVAKueueVersionUntested
+      expr: max by (limiter_name) (wva_quota_borrow_withheld{reason="kueue-version-untested"}) == 1
+      for: 30m
+      labels:
+        severity: info
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#wvakueueversionuntested"
+        summary: "Quota entry {{ $labels.limiter_name }}: Kueue runs a release borrowing is not tested on; borrowing is withheld"
+        description: "The Kueue controller runs a release outside the tested range, so the fields and rules borrowing relies on are not known to hold, and borrowing is withheld (kueue-version-untested). Every namespace stays at its nominal quota; nothing is evicted. Run a tested Kueue release (the supported versions table in the quota limiter reference) to count borrowing again."
+
+    - alert: WVAKueuePodsUnplaced
+      expr: max by (exported_namespace, variant_name) (wva_kueue_unplaced_pods) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#replicas-dropped-under-kueue-borrowing"
+        summary: "{{ $value }} pod(s) of {{ $labels.exported_namespace }}/{{ $labels.variant_name }} unplaced past the placement timeout"
+        description: "Grouped by exported_namespace: the series carries the model's namespace. These pods have been Unschedulable, or held at Kueue's admission gate, for longer than the placement timeout (default 5 minutes), and stayed so for 5 more minutes. Borrowed replicas are released at the timeout, so what stays is usually within guaranteed quota: no node fits the pod, Kueue has not admitted it, or the cluster autoscaler is still adding a node. Check 'kubectl describe pod' for the scheduling message and the Workload's admission status."
+
+    # Two counters, because the two ways of losing borrowed capacity are counted
+    # apart: the scaling manager's own releases (wva_borrow_releases_total) and
+    # Kueue's preemptions (wva_kueue_preempted_pods_total). Both count loss
+    # EVENTS of a model -- a P/D pair or a LeaderWorkerSet group is one -- and
+    # both are created at 0 on the first cycle that counts borrowing for the
+    # model, so the first loss of each kind is an increase. Each side is
+    # "(A or B * 0)", so a model with only one kind of loss -- a counter that
+    # stopped being published after a restart -- still sums to a value.
+    # 3.5, not 3: increase() extrapolates to the edges of the hour, so three
+    # losses read as about 3.1, and "> 3" paged on three.
+    - alert: WVAKueueBorrowThrashing
+      expr: |
+        (
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))
+          or
+          sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h])) * 0
+        )
+        + on (exported_namespace, model_name)
+        (
+          sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))
+          or
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h])) * 0
+        )
+        > 3.5
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#replicas-dropped-under-kueue-borrowing"
+        summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
+        description: "Counts, over the last hour, the times the scaling manager gave borrowed capacity back (wva_borrow_releases_total: after a placement timeout) plus the times Kueue preempted it (wva_kueue_preempted_pods_total). Both count events: one P/D pair, or one LeaderWorkerSet group, lost together is one. With a lender that reclaims (reclaimWithinCohort Any), Kueue's preemptions are the usual cause. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."

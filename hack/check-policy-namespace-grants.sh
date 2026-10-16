@@ -408,7 +408,45 @@ else
     fail "install_core.sh grants the policy read (line $grant_at) after deploy_wva_controller (line $deploy_at): with INSTALL_PHASE=all the first pod can start before its RoleBinding exists"
 fi
 
-CASES_EXPECTED=19
+# M-m4: enable-physical-limiter decided the cluster-wide Workload read from the
+# policy namespace alone, while the admin phase ORs the controller's own
+# ConfigMap in (wva_kueue_borrow_wanted). A cluster quota without borrowing,
+# over a controller whose own policy counts it, revoked the read the admin
+# phase had granted. pl_published_kueue reads the same candidates now: the
+# policy namespace as composed, then the controller's own, as is.
+case_begin
+borrow_wanted() {   # borrow_wanted <policy in wva-policy> <own policy> [own ConfigMap error]
+    (
+        BW_CLUSTER="$1" BW_OWN="$2" BW_OWN_ERR="${3:-}"
+        kubectl() {
+            case "$*" in
+                "get configmap wva-scaling-policy-config -n wva-policy "*) printf '%s\n' "$BW_CLUSTER" ;;
+                "get configmap wva-scaling-policy-config -n tenant-a "*)
+                    if [ -n "$BW_OWN_ERR" ]; then echo "$BW_OWN_ERR" >&2; return 1; fi
+                    if [ -z "$BW_OWN" ]; then echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; return 1; fi
+                    printf '%s\n' "$BW_OWN" ;;
+                *) return 0 ;;
+            esac
+        }
+        WVA_QUOTAS='H200=8' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false
+        pl_published_kueue wva-policy quota tenant-a
+        printf '%s' "$PL_BORROW_WANTED"
+    ) 2>/dev/null
+}
+OWN_BORROWS='limiters:
+- name: own-quota
+  type: quota
+  kueue:
+    enabled: true'
+got="$(borrow_wanted 'scaleUpThreshold: 0.85' "$OWN_BORROWS")"
+[ "$got" = yes ] || fail "a cluster quota without borrowing over a controller whose own policy counts it gave '$got', not yes: the read the admin phase granted is revoked"
+got="$(borrow_wanted 'scaleUpThreshold: 0.85' '')"
+[ "$got" = no ] || fail "control: no own policy, a cluster quota without borrowing gave '$got', not no"
+got="$(borrow_wanted 'scaleUpThreshold: 0.85' '' 'Error from server (Forbidden): configmaps is forbidden')"
+[ "$got" = unknown ] || fail "an own policy that cannot be read gave '$got', not unknown: a guess revokes the read"
+ok "enable-physical-limiter ORs the controller's own policy into the borrowing read, as the admin phase does"
+
+CASES_EXPECTED=20
 case_begin
 if [ "$CASES" -ne "$((CASES_EXPECTED + 1))" ]; then
     fail "$((CASES - 1)) cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."

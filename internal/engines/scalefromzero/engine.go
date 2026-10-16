@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -176,6 +177,12 @@ type Engine struct {
 	wakeMu    sync.Mutex
 	tickWakes map[string]map[string]int
 	tickNodes tickNodeView
+	// tickReclaimed is, per namespace and type, the lent-out nominal this
+	// tick's wakes grew into without a node hole (placement.reclaimable).
+	tickReclaimed map[string]map[string]allocation.Reclaim
+	// lentOutBlocked is the models (modelGroup.key) this loop set
+	// nominal-lent-out on wva_model_scaling_blocked for (reportLentOutBlocked).
+	lentOutBlocked sync.Map
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
 	layouts allocation.LayoutLog
@@ -522,7 +529,7 @@ func (e *Engine) processInactiveModel(
 			"metric", pending.Labels, "value", pending.Value)
 	}
 
-	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
+	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
 	constraints := place.constraints
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
@@ -548,7 +555,7 @@ func (e *Engine) processInactiveModel(
 				"modelID", group.modelID,
 				"reason", string(outcome),
 			}
-			if outcome == OutcomeNoCapacity {
+			if outcome == OutcomeNoCapacity || outcome == OutcomeNominalLentOut {
 				// The one reason that cannot be diagnosed from the verdict alone: it
 				// says a set did not fit, not what it was measured against nor what
 				// it asked for. Both halves are needed — a budget of zero and a
@@ -583,6 +590,40 @@ func (e *Engine) processInactiveModel(
 		e.publishActivation(ctx, scaleTargets, va, pool, 1, outcome)
 	}
 	return nil
+}
+
+// wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a
+// namespace whose queue lent nominal it cannot reclaim is nominal-lent-out
+// (B10), the same reason wva_model_scaling_blocked then carries for the model.
+func (e *Engine) wakeVerdict(ctx context.Context, group modelGroup, candidates []Candidate,
+	covered coverage) (placement, []Candidate, SelectionOutcome) {
+	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
+	if len(selected) == 0 && outcome == OutcomeNoCapacity && place.nominalLentOut {
+		// The budget it missed is within nominal, short of nominal because a
+		// peer holds what the queue lent and need not give it back (B10).
+		outcome = OutcomeNominalLentOut
+	}
+	e.reportLentOutBlocked(group, len(selected) == 0 && outcome == OutcomeNominalLentOut)
+	return place, selected, outcome
+}
+
+// reportLentOutBlocked sets nominal-lent-out on wva_model_scaling_blocked for a
+// model at zero whose wake it refuses, every tick it is refused, and clears
+// only what it set once the model wakes or is refused for another reason:
+// the steady-state engine sets the same reason for a capped serving model,
+// and its series is not this loop's to delete.
+func (e *Engine) reportLentOutBlocked(group modelGroup, on bool) {
+	key := group.key()
+	if on {
+		e.lentOutBlocked.Store(key, true)
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, []string{constants.ScalingBlockedNominalLentOut})
+		return
+	}
+	if _, set := e.lentOutBlocked.LoadAndDelete(key); set {
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, nil)
+	}
 }
 
 // publishActivation records the wake for one selected variant: it publishes the
@@ -714,6 +755,7 @@ func observeCompletedWakes(
 // provider unavailable, no young snapshot -- it is counted and logged, one per
 // wake, so an uncapped wake is never silent.
 func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placement, selected []Candidate) {
+	prior := maps.Clone(e.tickWakes[group.namespace])
 	if !place.snapshotTakenAt.IsZero() {
 		e.debitSnapshot(group.namespace, place.snapshotTakenAt, demandOf(selected))
 	} else if place.constraints != nil {
@@ -728,8 +770,20 @@ func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placeme
 	// in use -- the transfer, not the ledger, holds that hole); and a wake
 	// checked against a remembered snapshot, or not at all, which has no node
 	// view (decideWake builds one for this tick's constraints only).
-	if place.nodes.PlaceReplicas(replicaShapes(group.namespace, selected), true) && place.nodes != nil {
-		e.admitInFlight(group.namespace, selected)
+	// A wake into lent-out nominal places without a hole (fits); what it took
+	// of the namespace's reclaimable nominal is gone for this tick's next wake.
+	placed, took := place.nodes.PlaceReplicasReclaiming(replicaShapes(group.namespace, selected, place.queueFlavor), true, place.reclaimable)
+	if placed && place.nodes != nil {
+		e.admitInFlight(group.namespace, selected, place.queueFlavor)
+	}
+	e.debitReclaimed(group.namespace, took)
+	// What the wake takes of its cohort's free pool, and what Kueue reclaims
+	// for it from borrowers, is in no Kueue read until its pods are admitted:
+	// the shared record holds it, so the steady-state engine does not borrow
+	// the same GPUs meanwhile, nor a later wake reclaim them again (N3).
+	if placed && place.snapshotTakenAt.IsZero() && place.raw != nil {
+		allocation.DefaultBorrowInFlight.RecordWake(allocation.WakeDraws(place.raw, group.namespace, group.modelID,
+			wakeReplicas(selected), prior, place.reclaimable), time.Now())
 	}
 	if place.unchecked {
 		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
@@ -752,6 +806,8 @@ func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates
 		Constraints:    place.constraints,
 		Admitted:       place.admitted,
 		Nodes:          place.nodes,
+		Reclaimable:    place.reclaimable,
+		QueueFlavor:    place.queueFlavor,
 		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {

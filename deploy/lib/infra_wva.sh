@@ -1675,7 +1675,10 @@ wva_reconcile_prometheus_scheme() {
             # One call, no status for a caller to forget: policy_declared_limiters
             # composes in THIS shell, so a refusal ends the install rather than
             # handing back an empty string to patch over the policy.
-            policy_declared_limiters "$limiter_set" "$current_default"
+            # The apply above reset the policy, so the Kueue pilot settings of
+            # the quota entry this replaces (borrowNamespaces, countBorrowable)
+            # are kept from the limiters read before it (policy_with_limiters).
+            LIMITERS_KEEP_FROM="${WVA_LIVE_LIMITERS:-}" policy_declared_limiters "$limiter_set" "$current_default"
             updated_default="$POLICY_DECLARED"
             kubectl patch configmap "$policy_cm" -n "$WVA_NS" --type=merge \
                 -p "$(jq -n --arg d "$updated_default" '{data:{"default":$d}}')"

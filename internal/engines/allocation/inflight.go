@@ -107,6 +107,12 @@ func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow i
 	case want > e.want:
 		e.expires = now.Add(InFlightTTL)
 	}
+	if shape.Flavor == nil && e.shape.Flavor != nil && want <= e.want {
+		// The replicas admitted on a borrowed flavor's nodes are the same
+		// ones once the borrowed draw resolves (their pods exist, gated by
+		// Kueue and still holding no node): their holes stay on that flavor.
+		shape.Flavor, shape.Placements = e.shape.Flavor, e.shape.Placements
+	}
 	e.shape, e.want, e.placed = shape, want, placed
 	e.base = max(e.base, placedNow)
 }

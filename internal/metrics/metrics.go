@@ -971,6 +971,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registerSLOMetrics(registry); err != nil {
 		return err
 	}
+	if err := registerQuotaBorrowMetrics(registry); err != nil {
+		return err
+	}
 
 	return nil
 }
