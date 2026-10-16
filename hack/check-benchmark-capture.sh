@@ -877,26 +877,35 @@ if (
     command -v capture_stop >/dev/null || exit 9
     # Found, not hardcoded: readable, not signalable, and not 0 or 1 -- those are
     # refused earlier now, for the process-group reason.
-    other=""
+    #
+    # The OLDEST such process, not the first /proc lists. The first is whatever
+    # sorts lowest as a string, and on WSL that is often the root-owned Relay of
+    # another wsl.exe session: it exits when that command does, and a target that
+    # exits during the stop's 5 s confirmation loop is "not running" -- a correct
+    # exit 0 that this case read as the defect.
+    other="" st=""
     for p in $(ls /proc 2>/dev/null); do
         case "$p" in
             ''|*[!0-9]*|0|1) continue ;;
         esac
         [ -r "/proc/$p/stat" ] || continue
         kill -0 "$p" 2>/dev/null && continue
-        other="$p"
-        break
+        s="$(_capture_starttime "$p")" || continue
+        [ -n "$s" ] || continue
+        if [ -z "$other" ] || [ "$s" -lt "$st" ]; then other="$p"; st="$s"; fi
     done
     # No such process means the premise is absent, not that the property holds.
     [ -n "$other" ] || exit 9
-    st="$(_capture_starttime "$other")" || exit 9
-    [ -n "$st" ] || exit 9
     OV="$WORK/unsignalable.json"
     printf 'namespace=v-ns context=x started=now pid=%s starttime=%s cmd=x\n' \
         "$other" "$st" > "$OV.owner"
     echo "$other" > "$OV.pid"
-    # It must NOT report success, and must keep the record.
-    capture_stop "$OV" "$OV.pid" >/dev/null 2>&1 && exit 1
+    # It must NOT report success, and must keep the record. Say which process it
+    # was and whether it outlived the stop, so a failure here is readable.
+    if capture_stop "$OV" "$OV.pid" >/dev/null 2>&1; then
+        echo "  target pid $other ($(cat "/proc/$other/comm" 2>/dev/null || echo 'gone before the stop returned'))" >&2
+        exit 1
+    fi
     [ -s "$OV.owner" ]
 ); then
     ok "a live capture we may not signal is refused, not reported stopped"

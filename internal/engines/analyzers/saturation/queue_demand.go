@@ -88,7 +88,7 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 	// pressure) sees the held figure too.
 	for i := range variants {
 		vc := &variants[i]
-		if canonicalRole(vc.Role) != role {
+		if domain.CanonicalRole(vc.Role) != role {
 			continue
 		}
 		// Through aggregation, not by hand: rc.TotalAnticipatedSupply is the
@@ -173,7 +173,7 @@ func waitingQueueDemand(rm domain.ReplicaMetrics, role string) int64 {
 	}
 
 	tokensPerRequest := rm.AvgInputTokens
-	if canonicalRole(role) != domain.RolePrefill {
+	if domain.CanonicalRole(role) != domain.RolePrefill {
 		tokensPerRequest += rm.AvgOutputTokens
 	}
 	// Compute in float64 and validate before converting, so one check covers

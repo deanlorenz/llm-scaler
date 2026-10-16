@@ -153,7 +153,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 
 - **[How the scaling manager fits together](concepts/architecture.md)**: the parts, one decision cycle, what gets installed. Start here
 - **[The steady-state engine](concepts/steady-state-engine.md)** — what it measures, and how a measurement becomes a replica count
-- **[GPU capacity accounting](concepts/gpu-capacity-accounting.md)** — what the GPU budget means, and three ways it over-states free capacity
+- **[GPU capacity accounting](concepts/gpu-capacity-accounting.md)** — what each limiter bounds, how they combine, node fit, Kueue borrowing, and where the figures can still be wrong
 - **[Modeling and optimization](concepts/modeling-and-optimization.md)** — what is modelled, what is not, and how per-variant demands become replica counts
 - **[llm-d autoscaling](https://llm-d.ai/docs/architecture/advanced/autoscaling)** — upstream's page, describing the autoscaler this project forked from; kept for context, not as a description of this one
 

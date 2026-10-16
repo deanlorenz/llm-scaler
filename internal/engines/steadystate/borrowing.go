@@ -48,6 +48,10 @@ type borrowingState struct {
 	// wakes' included, each its variant's to re-place
 	// (GreedyByScoreOptimizer.ReclaimCredit, NEW-1).
 	reclaimCredit []allocation.BorrowDraw
+	// wakeYield is the wakes' reclaims this cycle's pass yields for
+	// (GreedyByScoreOptimizer.WakeReclaims), reported yielded after the pass
+	// (recordBorrowDraws).
+	wakeYield []allocation.BorrowDraw
 	// passFlavors is the Kueue flavor this cycle's pass placed each variant's
 	// replicas on (GreedyByScoreOptimizer.PlacedFlavors).
 	passFlavors map[string]*kueue.FlavorPlacement
@@ -56,6 +60,9 @@ type borrowingState struct {
 	// namespaces whose pod list failed and was logged, until one succeeds.
 	gatedSeen      map[types.UID]gatedPod
 	gatedErrLogged map[string]bool
+	// reservedErrLogged is the namespaces whose Workload read for the gated
+	// pods failed and was logged, until one succeeds (reservedGated).
+	reservedErrLogged map[string]bool
 	// physicalSkipped is set while a declared physical limiter is missing from
 	// the cycle's constraints (notePhysicalSkipped): no new borrowing starts.
 	physicalSkipped bool
@@ -103,6 +110,10 @@ type borrowingState struct {
 	// cycle is this cycle's input to the governor, kept for the releases
 	// after the optimizer; zero when the cycle borrows nothing.
 	cycle allocation.BorrowCycle
+	// gatedCycle is the governor's input in a cycle that counts no borrowing
+	// and has Kueue-backed namespaces (governGated): only their replicas held
+	// at Kueue's admission gate are released. Zero otherwise.
+	gatedCycle allocation.BorrowCycle
 	// gated is this cycle's GPUs of managed pods at Kueue's admission gate,
 	// per namespace and accelerator (gatedGPUs), for what on-call sees.
 	gated map[string]map[string]int
@@ -127,19 +138,34 @@ type borrowingState struct {
 // that resolved, takes what is in flight and what managed pods hold at Kueue's
 // admission gate out of the shared pools. Without borrowing in the
 // constraints it returns them as they are, exactly as before borrowing was
-// counted.
+// counted; the pods at Kueue's gate are still listed and recorded, for the
+// quota charge.
 func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation.ResourceConstraints,
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
 	st.cycle, st.gated, st.cohortsByNS, st.credit, st.reclaimCredit = allocation.BorrowCycle{}, nil, nil, nil, nil
+	st.gatedCycle, st.wakeYield = allocation.BorrowCycle{}, nil
 	if st.inFlight == nil {
 		st.inFlight = allocation.DefaultBorrowInFlight
 	}
 	st.inFlight.ObserveAt(observeVariants(requests), now)
 	if !allocation.HasBorrowing(constraints) {
-		st.inFlight.SetCycle(nil, nil, nil, now)
+		// The pods at Kueue's admission gate are listed in every Kueue-backed
+		// namespace all the same: the quota charge reads them from the record
+		// (KU1), so a replica Kueue keeps gated does not cancel what Kueue
+		// reserved for others.
+		var gated map[string]map[string]int
+		var admitted []allocation.AdmittedGPUs
+		kueueBacked := len(allocation.KueueNamespaces(constraints)) > 0
+		if kueueBacked {
+			gated, admitted, _ = e.gatedGPUs(ctx, constraints, now)
+		}
+		st.inFlight.SetCycle(gated, admitted, nil, now)
 		e.idlePreemptions(ctx, requests, scaleTargets, now)
+		if kueueBacked {
+			e.governGated(ctx, constraints, requests, now)
+		}
 		return constraints
 	}
 	physical := e.Config != nil && e.Config.HasPhysicalLimiter()
@@ -157,6 +183,10 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	// yet on its own entry (reclaimCredit, NEW-1), a woken variant's too.
 	constraints = allocation.DeductReclaimed(constraints, u.InFlight)
 	st.reclaimCredit = st.inFlight.Reclaims()
+	// A wake's reclaim takes borrowed GPUs from this controller's own
+	// borrowers as a pass's does: this cycle's greedy pass yields for it,
+	// and recordBorrowDraws reports it yielded once the pass has run.
+	st.wakeYield = st.inFlight.PendingWakeReclaims(now)
 	// A namespace whose gated pods could not be listed may hold any number of
 	// them: its cohorts borrow nothing new this cycle (G3).
 	unreadableCohorts := cohortsOf(constraints, unreadable)
@@ -256,6 +286,8 @@ func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisi
 		return nil
 	}
 	e.borrowing.passFlavors = g.PlacedFlavors()
+	// The wakes' reclaims the pass yielded for are yielded for once.
+	e.borrowing.inFlight.YieldedWakeReclaims(g.WakeReclaimsYielded())
 	targets := decidedTargets(decisions)
 	keep := func(in []allocation.BorrowDraw) []allocation.BorrowDraw {
 		var out []allocation.BorrowDraw
@@ -327,6 +359,38 @@ func observeVariants(requests []allocation.ModelScalingRequest) map[string]alloc
 	return out
 }
 
+// reservedGated is, of the GPU pods at Kueue's admission gate in ns, those
+// whose Workload Kueue has already reserved quota for (kueue.ReservedPods).
+// A failed Workload read is logged once per namespace until one succeeds, and
+// reads every gated pod as unreserved.
+func (e *Engine) reservedGated(ctx context.Context, ns string, pods []corev1.Pod) map[types.UID]bool {
+	var gated []*corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp == nil && kueue.PodGated(p) && resources.PodGPURequests(p) > 0 {
+			gated = append(gated, p)
+		}
+	}
+	if len(gated) == 0 {
+		return nil
+	}
+	st := &e.borrowing
+	if st.reservedErrLogged == nil {
+		st.reservedErrLogged = map[string]bool{}
+	}
+	reserved, err := kueue.ReservedPods(ctx, kueue.WorkloadsVia(e.client), ns, gated)
+	if err != nil {
+		if !st.reservedErrLogged[ns] {
+			st.reservedErrLogged[ns] = true
+			ctrl.LoggerFrom(ctx).Error(err, "Cannot read Kueue Workloads; every pod at Kueue's admission gate reads as waiting for quota",
+				"namespace", ns)
+		}
+		return nil
+	}
+	delete(st.reservedErrLogged, ns)
+	return reserved
+}
+
 // gatedPod is a managed pod seen at Kueue's admission gate.
 type gatedPod struct {
 	namespace, accelerator string
@@ -336,11 +400,14 @@ type gatedPod struct {
 	admittedAt time.Time
 }
 
-// gatedGPUs is, per namespace some borrowing constraint maps to a cohort, the
-// GPUs of pods held at Kueue's admission gate, per the accelerator their node
-// selector names ("" when none). They hold no reservation yet, so the cohort's
-// free pool still counts what Kueue is about to admit them onto. Read from the
-// manager's cached pod informer: one list per such namespace, no API call.
+// gatedGPUs is, per namespace some borrowing constraint maps to a cohort, and
+// per namespace a Kueue-backed constraint carries figures for
+// (allocation.KueueNamespaces), the GPUs of pods held at Kueue's admission
+// gate, per the accelerator their node selector names ("" when none). They
+// hold no reservation yet, so the cohort's free pool still counts what Kueue
+// is about to admit them onto, and the queue's charge does not count them as
+// reserved (KU1). Read from the manager's cached pod informer: one list per
+// such namespace, no API call.
 //
 // admitted is the pods seen gated and past the gate since: Kueue reserved them,
 // but a read taken before then does not show it, so they stay deducted from a
@@ -362,13 +429,21 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 		st.gatedErrLogged = map[string]bool{}
 	}
 	namespaces := map[string]bool{}
+	inCohort := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		for ns := range c.NamespaceCohorts {
 			namespaces[ns] = true
+			inCohort[ns] = true
 		}
+	}
+	// Every Kueue-backed namespace, borrowing counted or not: its charge
+	// reads its gated pods (KU1), and the placement timeout releases one
+	// gated for good (uncountedHeldPast).
+	for _, ns := range allocation.KueueNamespaces(constraints) {
+		namespaces[ns] = true
 	}
 	gated = map[string]map[string]int{}
 	listed := map[string]bool{}
@@ -379,13 +454,17 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			unreadable = append(unreadable, ns)
 			if !st.gatedErrLogged[ns] {
 				st.gatedErrLogged[ns] = true
-				ctrl.LoggerFrom(ctx).Error(err, "Cannot list the pods at Kueue's admission gate; nothing new is borrowed in the namespace's cohorts until a list succeeds",
-					"namespace", ns)
+				msg := "Cannot list the pods at Kueue's admission gate; nothing new is borrowed in the namespace's cohorts until a list succeeds"
+				if !inCohort[ns] {
+					msg = "Cannot list the pods at Kueue's admission gate; the namespace's quota charge counts them as admitted until a list succeeds"
+				}
+				ctrl.LoggerFrom(ctx).Error(err, msg, "namespace", ns)
 			}
 			continue
 		}
 		delete(st.gatedErrLogged, ns)
 		listed[ns] = true
+		reserved := e.reservedGated(ctx, ns, pods.Items)
 		for i := range pods.Items {
 			p := &pods.Items[i]
 			if p.DeletionTimestamp != nil {
@@ -397,7 +476,10 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			}
 			present[p.UID] = true
 			acc := accelerator.ProductFromNodeSelector(p.Spec.NodeSelector)
-			if kueue.PodGated(p) {
+			// A gated pod whose Workload Kueue already reserved quota for
+			// (waiting on an admission check, a ProvisioningRequest) is in
+			// Kueue's reservation: it is counted as admitted, not gated.
+			if kueue.PodGated(p) && !reserved[p.UID] {
 				if gated[ns] == nil {
 					gated[ns] = map[string]int{}
 				}

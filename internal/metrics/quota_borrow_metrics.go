@@ -413,6 +413,20 @@ func InitBorrowLossSeries(namespace, modelName string, causes ...string) {
 	}
 }
 
+// InitBorrowReleaseSeries creates, at 0, a model's release counter of one
+// cause alone, for a model whose releases are not losses of borrowed capacity
+// (cause kueue-gate): no preemption counter is created for it.
+func InitBorrowReleaseSeries(namespace, modelName, cause string) {
+	if borrowReleases == nil {
+		return
+	}
+	l := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelName, constants.LabelCause: cause}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	borrowReleases.With(l).Add(0)
+}
+
 // CountBorrowRelease counts one release of borrowed capacity by a model.
 func CountBorrowRelease(namespace, modelID, cause string) {
 	if borrowReleases == nil {

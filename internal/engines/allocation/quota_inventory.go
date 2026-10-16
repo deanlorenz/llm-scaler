@@ -130,6 +130,23 @@ func (q *QuotaInventory) KueueNeverRead() bool {
 	return q.neverRead
 }
 
+// KueueBacked reports whether the entry is namespace-scoped and reads its
+// figures from Kueue, counting borrowing or not.
+func (q *QuotaInventory) KueueBacked() bool {
+	return q.source != nil && q.static.Scope == config.QuotaScopeNamespace && q.static.KueueEnabled()
+}
+
+// KueueCountsBorrowing reports whether the entry is configured to count
+// cohort borrowing (EnableBorrowing with countBorrowable on), whether or not
+// a namespace counts it now.
+func (q *QuotaInventory) KueueCountsBorrowing() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.countsBorrowing()
+}
+
+var _ KueueBackedInventory = (*QuotaInventory)(nil)
+
 // BorrowEligibility evaluates the engine-side B1 conditions per namespace
 // (kueue.Eligibility in production).
 type BorrowEligibility interface {

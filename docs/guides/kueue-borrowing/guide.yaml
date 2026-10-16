@@ -2,10 +2,7 @@ name: kueue-borrowing
 
 prerequisites:
   kueue:
-    note: >-
-      Kueue runs, and its image carries a version tag. <kueue-ns> is where Kueue runs,
-      kueue-system by default. List the ClusterQueues with their cohort and preemption
-      settings (v1beta1 calls the cohort field spec.cohort).
+    note: Kueue runs and its image carries a version tag; then each ClusterQueue's cohort and preemption.
     run: |
       kubectl get deploy kueue-controller-manager -n <kueue-ns> \
         -o jsonpath='{.status.readyReplicas} ready, image {.spec.template.spec.containers[*].image}{"\n"}'
@@ -21,11 +18,7 @@ prerequisites:
       kubectl auth can-i get leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> --as="$SA"
       kubectl auth can-i list resourcequotas -n <namespace> --as="$SA"
   grant:
-    note: >-
-      (cluster admin) Any no above: re-run the admin phase with the limiter the install
-      declares. It grants the cluster-wide Workload read only because that limiter counts
-      borrowing, and the Role in the Kueue namespace. KUEUE_NAMESPACE puts that Role where
-      Kueue runs; unset, the entry's kueue.controllerNamespace does.
+    note: (cluster admin) Any no above. Re-run the admin phase with the limiter the install declares.
     run: |
       KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs \
         WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
@@ -70,10 +63,7 @@ prerequisites:
 
 deploy:
   enable:
-    note: >-
-      Namespace owner. A GPU bound plus a Kueue-backed quota; -1 lets Kueue set the
-      figure. Borrowing is counted by default. With a GPU ResourceQuota as the bound
-      instead, use WVA_LIMITER=quota.
+    note: Namespace owner. A GPU bound plus a Kueue-backed quota; -1 lets Kueue set the figure.
     run: |
       make deploy-wva NAMESPACE=<namespace> \
         WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
@@ -89,7 +79,7 @@ verify:
     note: The effective caps, then the borrowing figures. Both are logged when they change.
     run: |
       kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
-        | grep -E 'quota entry bounded by external caps|Kueue borrowing applied|external quota source' | tail -5
+        | grep -E 'quota entry bounded by external caps|Kueue borrowing applied|borrowing frozen at the last figures|external quota source' | tail -5
   budgets:
     note: >-
       Per namespace and accelerator: guaranteed, borrowable, used, and the reason

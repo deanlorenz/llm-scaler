@@ -42,8 +42,10 @@ What it does:
 - **Grants first, then publishes.** Declaring the limiter before the grants
   would stop every install that cannot read Nodes.
 - **Publishes where each controller reads policy**: `wva-policy` (or the
-  namespace a `wva.llmd.ai/policy-namespace` label names) for a controller in
-  the namespace it manages; its own ConfigMap for an out-of-reach controller.
+  namespace a `wva.llmd.ai/policy-namespace` label names) for a controller
+  that runs in the namespace it manages; its own ConfigMap for an
+  out-of-reach controller, one that runs in an admin-owned namespace apart
+  from the models it manages (`WVA_WATCH_NS`).
 - **Restarts namespace-scoped controllers** whose policy lives outside the
   namespace they manage, on every run, because they read it once at startup.
   Cluster-scoped controllers reload it live.
@@ -63,7 +65,7 @@ kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
 
 <!-- guide:verify.source start -->
 ```bash
-# Print the policy namespace, limiter and acceptance each controller reports. Expect a line such as `wva-policy inventory/gpu-inventory true`, or `wva-policy inventory+quota/gpu-inventory,tenant-quota true` when a quota is declared beside it: the limiter types joined by +, then every entry's name.
+# Print each controller's policy namespace, limiter and whether it accepted the policy.
 for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
     -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
   echo "== $ns"
@@ -75,6 +77,10 @@ for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-aut
 done
 ```
 <!-- guide:verify.source end -->
+
+Expect a line such as `wva-policy inventory/gpu-inventory true`. With a quota
+declared beside it, the limiter reads `inventory+quota/gpu-inventory,install-quota`:
+the limiter types joined by `+`, then every entry's name.
 
 Trust this over what the enable command printed. If a controller has no
 `wva-controller-status`, its startup log answers instead:
@@ -88,7 +94,7 @@ Trust this over what the enable command printed. If a controller has no
 
 <!-- guide:verify.budget start -->
 ```bash
-# Show the published limiter, then whether the controller built it.
+# Show the published limiter, then what the controller built from it.
 POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> \
   -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
 kubectl get configmap wva-scaling-policy-config -n "${POLICY_NS:-wva-policy}" \
@@ -98,17 +104,19 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
 ```
 <!-- guide:verify.budget end -->
 
-`GPU limiter constructed` means the controller accepted the policy.
-`Invalid saturation scaling` means it rejected it. A rejected entry costs the
-whole default policy and leaves **no** limiter, while the ConfigMap still looks
-healthy. Run this for each controller; one whose `policyNamespace` is its own
-reads the ConfigMap there.
+`GPU limiter constructed` is printed at every start, with no limiter too. Read
+its `limiterTypes`: `inventory`, `quota` or `inventory+quota` means bounded,
+`none` means not. `Invalid saturation scaling` means the controller rejected
+the policy. A rejected entry costs the whole default policy and leaves **no**
+limiter, while the ConfigMap still looks healthy. The status line above says
+the same with `policyAccepted` and `limiter`. Run this for each controller; one
+whose `policyNamespace` is its own reads the ConfigMap there.
 
 ## Cleanup
 
 <!-- guide:cleanup.disable start -->
 ```bash
-# Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again. WVA_LIMITER_TYPE=quota removes a quota instead, and WVA_LIMITER_TYPE=all every limiter (use it when uninstalling: it exits 0 even where nothing is declared).
+# Remove the physical limiter. A quota in the same policy stays.
 make disable-limiter
 # a quota instead:
 # make disable-limiter WVA_LIMITER_TYPE=quota
@@ -116,6 +124,10 @@ make disable-limiter
 # make disable-limiter WVA_LIMITER_TYPE=all
 ```
 <!-- guide:cleanup.disable end -->
+
+With no limiter left, scaling is unbounded again. `WVA_LIMITER_TYPE=quota`
+removes a quota instead. `WVA_LIMITER_TYPE=all` removes every limiter; use it
+when uninstalling, since it exits 0 even where nothing is declared.
 
 ## What it does and does not bound
 
@@ -142,6 +154,8 @@ make disable-limiter
 | `WVA_QUOTAS` | none (**required** by `quota`) | `'H200=8 A100=4'` |
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
 | `WVA_QUOTA_KUEUE` | `false` | `true` |
+| `WVA_QUOTA_KUEUE_BORROW` | `true` (with `WVA_QUOTA_KUEUE=true`) | `false` |
+| `KUEUE_NAMESPACE` | the entry's `kueue.controllerNamespace`, else `kueue-system` | `kueue` |
 | `WVA_LIMITER_TARGETS` | every labelled controller that passes the checks below | `team-a team-b` |
 | `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
 | `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager`, plus the repository of `IMG` when it differs | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
@@ -157,9 +171,17 @@ Take the numbers from Kueue instead (experimental, see [bound tenants by the
 quotas Kueue already holds](../../well-lit-paths/kueue-bounded-quotas/)):
 
 ```bash
-# Each namespace gets the smaller of Kueue's grant and WVA_QUOTAS; -1 lets Kueue decide
+# Bound by real GPUs first, then add the Kueue quota beside it
+make enable-physical-limiter
 make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=-1' WVA_QUOTA_KUEUE=true
 ```
+
+Each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`; `-1` lets
+Kueue decide. Cohort borrowing is counted by default, and it needs something
+that checks the borrowed GPUs exist: the `gpu-inventory` limiter, or a GPU
+`ResourceQuota` in the namespace. Without either, borrowing is withheld as
+`no-gpu-bound` and each namespace stays at its nominal quota. Pass
+`WVA_QUOTA_KUEUE_BORROW=false` to cap at nominal on purpose.
 
 Name exactly the admin-owned namespaces to grant:
 
@@ -241,12 +263,19 @@ own policy, which that install's owner can then edit.
 - `WVA_QUOTA_SCOPE=namespace` (the default) gives each managed namespace the
   budget. `cluster` caps the sum, **within one controller**. With N admin-owned
   controllers the cluster permits N times the number, in either scope.
-- `WVA_QUOTA_KUEUE=true` also grants each target controller the Kueue read:
-  ClusterQueues, ResourceFlavors, and `get` on the namespace it manages, by
-  name. A cluster-scoped controller the installer made already reads every
-  Namespace. The command warns only when a controller that looks cluster-scoped
-  lacks that read, or when it cannot tell (it may not impersonate the
-  controller).
+- `WVA_QUOTA_KUEUE=true` also grants each target controller the Kueue reads:
+  - ClusterQueues, Cohorts and ResourceFlavors, and `get` on the namespace it
+    manages, by name. A cluster-scoped controller the installer made already
+    reads every Namespace. The command warns only when a controller that looks
+    cluster-scoped lacks that read, or when it cannot tell (it may not
+    impersonate the controller).
+  - A Role in the Kueue namespace (`KUEUE_NAMESPACE`) to read the
+    `kueue-controller-manager` Deployment and its leader Lease, so the
+    controller can tell Kueue runs.
+  - While the published policy counts borrowing (the default): Kueue
+    Workloads and LocalQueues in **every** namespace, pod templates included.
+    `WVA_QUOTA_KUEUE_BORROW=false` revokes it on the next run. What that read
+    exposes is in [the security model](../../reference/security-model.md#kueue-borrowing).
 
 ### Why `GPU budgets available` is not the check
 

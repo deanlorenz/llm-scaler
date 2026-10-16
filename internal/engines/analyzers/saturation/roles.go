@@ -28,7 +28,7 @@ func rolesFromStates(states []domain.VariantReplicaState) map[string]string {
 // the workload's real output length and service time: every role but prefill.
 // A variant with no recorded role is domain.RoleBoth, which generates.
 func generatesOutput(rm domain.ReplicaMetrics, rolesByVariant map[string]string) bool {
-	return canonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill
+	return domain.CanonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill
 }
 
 // stableAccelerator returns the accelerator to key history under, preferring the
@@ -89,15 +89,6 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 	return accelerator
 }
 
-// canonicalRole normalizes an empty variant role to domain.RoleBoth, matching
-// aggregation.AggregateByRole.
-func canonicalRole(role string) string {
-	if role == "" {
-		return domain.RoleBoth
-	}
-	return role
-}
-
 // roleSaturated reports whether any replica of the given role is full and
 // queued this cycle: its local queue at or over the threshold, as computeK2
 // admits a P1-obs reading on, AND its resident KV at or over its k1 (the
@@ -115,7 +106,7 @@ func canonicalRole(role string) string {
 // learning and hold prefill's demand for as long as the Pod sat unready.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
 	for _, rm := range metrics {
-		if !rm.Ready || canonicalRole(rolesByVariant[rm.VariantName]) != role {
+		if !rm.Ready || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
 		if rm.QueueLength >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
@@ -158,7 +149,7 @@ func busiestQueueLoadByVariant(metrics []domain.ReplicaMetrics, rolesByVariant m
 			continue
 		}
 		v := rm.VariantName
-		switch canonicalRole(role) {
+		switch domain.CanonicalRole(role) {
 		case domain.RolePrefill:
 			continue
 		case domain.RoleDecode:

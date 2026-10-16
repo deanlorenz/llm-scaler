@@ -2,8 +2,11 @@
 
 If Kueue already decides your GPU quotas, the scaling manager can read them
 instead of keeping a second copy. It caps each namespace and accelerator type
-at **the smaller of Kueue's grant and its own static cap**, so it never asks
-KEDA for a replica Kueue would hold pending. Where it is safe, the grant
+at **the smaller of Kueue's grant and its own static cap**, so it rarely asks
+KEDA for a replica Kueue would hold pending. Kueue's grant is first charged
+with what other work Kueue admitted on the same ClusterQueue holds (a
+cluster-scope entry is the exception; see
+[When not to take it](#when-not-to-take-it)). Where it is safe, the grant
 includes what the namespace's ClusterQueue can **borrow** from its cohort, only
 from lenders Kueue would reclaim for, and Kueue takes borrowed replicas back
 when a lender needs them.
@@ -17,8 +20,8 @@ What backs it: [Evidence](#evidence).
 - One source of truth for tenant GPU numbers: change the ClusterQueue, and the
   scaling manager follows within one `refreshInterval` (30s) plus one
   [optimize cycle](../../reference/cycle-log.md).
-- No replica ordered that Kueue would hold at its admission gate, so no
-  Pending pod a scale-up counted on.
+- Few replicas ordered that Kueue would hold at its admission gate, so few
+  Pending pods a scale-up counted on; the cases that remain are listed below.
 - With borrowing: a model grows into GPUs its cohort leaves idle (batch quota
   between jobs, say), and gives them back when Kueue reclaims them.
 
@@ -42,24 +45,33 @@ What backs it: [Evidence](#evidence).
   templates included ([security model](../../reference/security-model.md#kueue-borrowing)).
 
 Failures are visible. A failed read freezes borrowing at the last figures
-(`wva_quota_borrow_withheld{reason="stale"}`, alert `WVAKueueReaderStale`).
+(`wva_quota_borrow_withheld{reason="stale"}`, alert `WVAKueueReaderStale`, or
+`WVAKueueReaderStaleNamespace` when only one namespace's read fails).
 An entry never read shows as `wva_kueue_never_read` (alert `WVAKueueNeverRead`):
 its finite caps still bound, and a type at `-1` is bounded by the other
 limiters.
 
 ## When not to take it
 
+- **A cluster-scope Kueue entry over queues that also run other GPU work**
+  (training, batch), and no `gpu-inventory` limiter is declared. A
+  cluster-scope figure is charged only with the scaling manager's own models,
+  so it orders replicas Kueue then holds at its gate. Use namespace-scope
+  entries, which are charged with the other work, or add `gpu-inventory`
+  ([details](../../reference/quota-limiter.md#what-a-quota-is-charged)).
 - **Several namespaces share one ClusterQueue and the shared total must
-  hold.** Each namespace is capped at the queue's full grant, and guaranteed
-  is per ClusterQueue: a shared queue is a ceiling per namespace, not a
+  hold.** Each namespace gets the queue's grant less what the others hold,
+  but all of them see the same free GPUs. Two that grow in one cycle can
+  together order past the queue, and Kueue holds the excess at its gate.
+  Guaranteed is per ClusterQueue too: a shared queue is a ceiling, not a
   partition. Give each tenant its own ClusterQueue
-  ([details](../../reference/quota-limiter.md#what-is-read)).
+  ([details](../../reference/quota-limiter.md#what-a-quota-is-charged)).
 - **Tenants can create LocalQueues on a queue that admits any namespace**, and
   your static cap is `-1`. They would get that queue's grant
   ([details](../../reference/quota-limiter.md#what-is-read)).
 - **The controller must stay bounded when Kueue cannot be read**, with `-1`
   caps only. Until the first read succeeds, an entry that leaves a type at
-  `-1` is skipped, and only the other limiters bound. Use a finite static
+  `-1` binds nothing on that type, and only the other limiters bound it. Use a finite static
   cap, which Kueue can only tighten.
 - **A model must never lose a replica**, and its queue lends to or borrows
   from a cohort. Give it the quota as nominal, or set `countBorrowable: false`.

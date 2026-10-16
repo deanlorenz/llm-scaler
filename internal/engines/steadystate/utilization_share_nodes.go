@@ -12,9 +12,11 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -27,8 +29,11 @@ import (
 // each node of the group's accelerator with its free GPUs and labels, from the
 // usage refresher's last snapshot; per donor role, the replicas it could give
 // and where their pods run; per receiver role, the exclusive-topology label its
-// holes must share. All nil when no fresh node snapshot exists, and the
-// planner then never combines pods on a node.
+// holes must share and its pod templates' placement. The nodes, and the units,
+// are nil when no fresh node snapshot exists, and the planner then never
+// combines pods on a node. A node a LeaderWorkerSet group's pod is on, or
+// in a domain this cycle's pass or the in-flight ledger gave a group, is
+// marked so a new group lands in no such domain (allocation.ShareNode).
 //
 // A Deployment donor offers each Ready, unmarked pod as a replica, and offers
 // nothing when any of its pods is not Ready: the ReplicaSet removes a not-Ready
@@ -37,20 +42,26 @@ import (
 func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allocation.ShareGroup,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, reserved int,
 	marked func(*corev1.Pod) bool, now time.Time) (
-	map[string]allocation.ShareNode, map[string][]allocation.ShareUnit, map[string]string) {
+	map[string]allocation.ShareNode, map[string][]allocation.ShareUnit, map[string]string, map[string][]domain.PodPlacement) {
 	// Domains are known without node information, and a receiver with one
-	// is then never funded by the node-blind search.
+	// is then never funded by the node-blind search. Each receiver's pod
+	// templates are judged per pod, leader and workers apart, as the node
+	// view judges them.
 	domains := map[string]string{}
+	placements := map[string][]domain.PodPlacement{}
 	for role, grow := range g.Grow {
 		if acc := accessor(role, grow.Name); acc != nil {
 			if key := scaletarget.ExclusiveTopology(acc); key != "" {
 				domains[role] = key
 			}
+			if p := variantmeta.PodPlacements(acc); len(p) > 0 {
+				placements[role] = p
+			}
 		}
 	}
 	snap := e.shareNodes(now)
 	if snap == nil || e.client == nil {
-		return nil, nil, domains
+		return nil, nil, domains, placements
 	}
 	// Net of what today's optimizer placed this cycle for the models the
 	// share does not plan, and of the in-flight ledger's holes: those nodes
@@ -67,8 +78,11 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	}
 	nodes := shareFreeNodesAfter(snap, g.AcceleratorType, reserved, st.left.NodeDebits(st.planned), tolerations...)
 	if len(nodes) == 0 {
-		return nil, nil, domains
+		return nil, nil, domains, placements
 	}
+	// A domain where the pass placed, or the in-flight ledger holds, an
+	// exclusive-topology group holds no other group: the node view's rule.
+	allocation.ClaimShareDomains(nodes, st.left.TakenDomains(st.planned))
 	units := map[string][]allocation.ShareUnit{}
 	for role, give := range g.Give {
 		acc := accessor(role, give.Name)
@@ -86,7 +100,7 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 			units[role] = u
 		}
 	}
-	return nodes, units, domains
+	return nodes, units, domains, placements
 }
 
 // shareNodes is the fresh per-node GPU picture, or nil.
@@ -191,6 +205,9 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 	}
 	if lws {
 		u := allocation.ShareUnit{}
+		if hash := pods[0].Labels[lwsv1.GroupUniqueHashLabelKey]; hash != "" {
+			u.Group = pods[0].Namespace + "/" + hash
+		}
 		for _, p := range pods {
 			u.Pods = append(u.Pods, toPod(p))
 		}
@@ -229,7 +246,7 @@ func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, r
 	nodes := map[string]allocation.ShareNode{}
 	for name, n := range snap {
 		if !slices.ContainsFunc(tolerations, func(t []corev1.Toleration) bool { return !allocation.NodeAdmits(n, accelerator, t) }) {
-			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels}
+			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels, Groups: n.LWSGroups}
 		}
 	}
 	// The reserved GPUs are taken in one piece from the freest node, then the
@@ -259,6 +276,7 @@ func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, r
 // shareFit is the node picture the idle fill places into: the nodes' free
 // GPUs, nil without node information, and each receiver's topology domain.
 type shareFit struct {
-	nodes   map[string]allocation.ShareNode
-	domains map[string]string
+	nodes      map[string]allocation.ShareNode
+	domains    map[string]string
+	placements map[string][]domain.PodPlacement
 }

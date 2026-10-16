@@ -114,6 +114,10 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 	if r, ok := l.inventory.(KueueReadReporter); ok {
 		rc.KueueNeverRead = r.KueueNeverRead()
 	}
+	if k, ok := l.inventory.(KueueBackedInventory); ok {
+		rc.KueueBacked = k.KueueBacked()
+		rc.KueueCountsBorrowing = rc.KueueBacked && k.KueueCountsBorrowing()
+	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
 	// active namespaces, expose them via NamespacePools and derive the cluster

@@ -2,7 +2,7 @@
 
 **Status:** stage 1 (shadow) and stage 2 (actuation, donor sets included) built; what stage 2 does not yet do is listed in §13. Stage 3 (a short window for urgent transfers) is design.
 **Created:** 2026-10-05
-**Last Updated:** 2026-10-08
+**Last Updated:** 2026-10-16
 
 ## Summary
 
@@ -2023,6 +2023,15 @@ A full quota has a consequence that must be designed for, not discovered:
   policy. Otherwise such a group keeps today's path (`GreedyByScore`). A
   namespace quota bounded *additionally* by the physical pool (`fillable`) is a
   quota group.
+- **An excluded namespace shares only under a finite cluster bound** (built in
+  [#168](https://github.com/ev-shindin/llm-scaling-manager/pull/168)). A
+  namespace a namespace quota lists in `exclude` is not bounded by that quota,
+  so the quota's sum is no budget for it. Its models join the cluster group
+  only when a finite `scope: cluster` quota covers their accelerator type, or
+  a `gpu-inventory` limiter does with `physicalGroups: true`. A cluster quota
+  of `-1` counts as none. Otherwise they keep today's path, logged once as
+  `Utilization share: not sharing models no quota bounds`. Exclusions match by
+  namespace name.
 
 ## 8. Configuration and who owns it
 

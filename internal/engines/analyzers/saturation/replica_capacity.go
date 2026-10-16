@@ -213,7 +213,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// used -- its capacity is about resident KV, which the shape's KVreq
 	// already discounts on its own path.
 	keyInput := shapeKeyInput
-	if canonicalRole(role) == domain.RolePrefill {
+	if domain.CanonicalRole(role) == domain.RolePrefill {
 		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
 	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
@@ -895,7 +895,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	borrow := func(own int64) (k2Borrow, bool) {
 		return a.borrowedK2WithKv(historyKey, modelID, own, engineParams, kvCeiling, serving, !borrowDisabled)
 	}
-	isPrefill := canonicalRole(role) == domain.RolePrefill
+	isPrefill := domain.CanonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
 			if b, ok := borrow(min(k1, k2Derived)); ok {

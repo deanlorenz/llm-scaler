@@ -94,12 +94,12 @@ attainment. It returns an ordinary `(D, P)` per role. For decode: demand in
 output tokens/s, and per variant the tokens/s one replica sustains **at the
 fill where its mean ITL equals the TPOT target**. The **composite analyzer**
 ([appendix](#appendix-the-composite-rules)) takes, per ScaledObject, the max
-of each eligible analyzer's `N = D ÷ P`, with saturation as the fallback. A
-tier chooses a mode:
+of each eligible analyzer's `N = D ÷ P`. A tier chooses a mode:
 
 - **Guard.** Both analyzers vote, and the SLO can only add replicas.
-- **Sizer.** Saturation is explicitly disabled; the SLO decides, and saturation
-  is the per-variant fallback.
+- **Sizer.** Saturation is explicitly disabled; the SLO decides. A role the
+  SLO cannot price holds where it is: an unlisted saturation supplies units
+  and variants, never a size.
 
 There is no new actuation path. Until the composite lands, the analyzer only
 observes (built).
@@ -201,7 +201,7 @@ ships. With `mode: enforce`, the `analyzers:` list picks the mode:
 | `analyzers:` (with `mode: enforce`) | Mode | What decides |
 | --- | --- | --- |
 | `saturation` + `slo` | guard | per SO, the larger of the two replica counts |
-| `saturation {enabled: false}` + `slo` | sizer | the SLO; saturation where the SLO has no signal for that SO |
+| `saturation {enabled: false}` + `slo` | sizer | the SLO; a role the SLO cannot size holds where it is |
 
 Without `mode: enforce`, any list that includes `slo` is observe.
 
@@ -238,7 +238,7 @@ attainment are too much code for `saturation/`
 | `P_v` | `min(itl.Sequences(k_v, C_v, KVreq), maxNumSeqs_v) ÷ ITL_v(k_v)`: the token rate at `k_v` with the engine's batch cap. When the cap binds, the cache never fills past `maxNumSeqs·KVreq ÷ C`, so the ITL is read there (built). `C_v` and `maxNumSeqs_v` come from the capacity store |
 | unknown `O` | No demand, and every generating SO no-data (built): an output length nobody has reported is undefined, not a demand of zero |
 | `k_v` | `clamp(k_tpot_v, 0.15, 0.80)`, the clamp `pricingK` uses (built) |
-| prefill SOs | **Unmodeled until step 2b.** No `RoleDemand[prefill]`, so the SO is undefined and saturation decides prefill (`C1` guard, `C2` sizer). Prefill pods' TPOT is meaningless anyway (the P/D sidecar sends `max_tokens=1`) |
+| prefill SOs | **Unmodeled until step 2b.** No `RoleDemand[prefill]`, so the SO is undefined: saturation decides prefill in guard mode (`C1`), and prefill holds in sizer mode, so sizer on P/D waits for step 2b. Prefill pods' TPOT is meaningless anyway (the P/D sidecar sends `max_tokens=1`) |
 
 ### Its own lines
 
@@ -263,19 +263,20 @@ saturation's, not shared. `O` scales both `D` and `P`, so it largely cancels in
 1. **The branch landed**, with the three fixes the engine-structure review
    found (the #82 quota-charge regression; the saturation fallback skipping
    the per-SO `Reason` filter; that guard tested on the real
-   `buildComposite`). **`HeldRoleDemand` cannot be copied verbatim**: the
-   composite must record the winning contributor per SO, and carry the hold
-   only when saturation won every SO of that role.
+   `buildComposite`). `HeldRoleDemand` is handled per role (built, #167): kept
+   in saturation's frame, raised to the most demanding other analyzer's need,
+   and dropped where another analyzer's frame decides the role.
 2. **Saturation disabled only by an explicit `enabled: false`** (above).
 3. **`shadow: true`** (above), also left out of `maxScore`, or a shadowed
    `score` still moves cross-model priority.
-4. **Warm-pool pressure and supply from the composite**, not from saturation's
-   result. Supply is in saturation's units: scale it by `P_com ÷ P_sat`
-   whenever `N_com > 0`.
-5. **Never erase supply on zero demand.** When `D_sat[role] ≤ 0`, the composite
-   takes its saturation-PRC fallback instead of `P_com = 0`.
+4. **Warm-pool pressure from the composite** (built, #167), not from
+   saturation's result. The composite keeps saturation's PRC, so supply is the
+   same in both; only demand differs.
+5. **Size a role saturation sees as idle** (built, #167). The composite
+   expresses a need as demand at saturation's PRC, `N_com × P_sat`, which is
+   defined when `D_sat[role] = 0`.
 6. **Hysteresis on the deciding source** (bound 6): per-SO memory of the last
-   `P_com` and decision path, which `buildComposite` does not keep.
+   composite demand and decision path, which `buildComposite` does not keep.
 7. **The SLO count is a floor for utilization-share.** In guard mode the
    [utilization-share](utilization-share-optimizer.md) pass must not hand away
    capacity below the SLO's count.
@@ -675,13 +676,16 @@ relies on. The design is on the
 ```
 N_i(SO)      = D_i[role(SO)] ÷ P_i(SO)                each eligible analyzer, in its own units, no threshold
 N_com(SO)    = max over contributors of N_i(SO)        undefined skipped; P ≤ 0 or Reason no-data/error is undefined
-               saturation contributes unless disabled; it is the fallback (C2) only when disabled and nothing else voted
-P_com(SO)    = D_sat[role] ÷ N_com(SO)                 back in saturation's units, by definition
-RC, SC       = applyUniversalThreshold on P_com, with the model-level scaleUp / scaleDown
+               saturation contributes when listed; unlisted, a role nothing sized holds
+frame(role)  = saturation's or the others', whichever has the lower Σ_SO replicas(SO) ÷ N(SO)
+saturation's: D_com = D_sat[role], P_com = P_sat
+the others':  D_com = max over SO of N_others(SO) × P_sat(SO);  P_com(SO) = D_com ÷ N_others(SO)
+RC, SC       = applyUniversalThreshold on D_com, with the model-level scaleUp / scaleDown
 ```
 
 With saturation eligible, the max lets the SLO only tighten (guard); with it
 disabled, the result may come out below saturation alone (sizer). An SO the
-SLO cannot price lands on `C2-sat-fallback` (sizer) or `C1-single` (guard). A
-defined `N_slo = 0` falls back to saturation's own PRC, the right answer for an
-idle variant; `D_sat = 0` is [item 5](#what-the-composite-needs-before-phase-1).
+SLO cannot price lands on `C1-single` (guard) or `C4-no-signal`, and its role
+holds (sizer). A
+defined `N_slo = 0` contributes zero demand, the right answer for an idle
+variant; `D_sat = 0` is [item 5](#what-the-composite-needs-before-phase-1).

@@ -459,6 +459,18 @@ func (p *PassLeft) NodeDebits(exclude map[string]bool) map[string]int {
 	return p.h.nodes.DebitsExcept(func(owner string) bool { return owner == PromisedOwner || exclude[owner] })
 }
 
+// TakenDomains is, per topology label key, the domains the pass's node view
+// gave an exclusive-topology group -- the in-flight ledger's holds and the
+// other models' placements -- for every owner other than the models in
+// exclude (namespace/modelID): the utilization share places no group there
+// (ClaimShareDomains). Nil when the pass had no node view.
+func (p *PassLeft) TakenDomains(exclude map[string]bool) map[string][]string {
+	if p == nil {
+		return nil
+	}
+	return p.h.nodes.TakenDomains(func(owner string) bool { return exclude[owner] })
+}
+
 // publish records h as the warm pool's headroom: each capped namespace's
 // allowance bounded by the cluster budget (as namespaceHeadroom bounds it),
 // the cluster budget, and the nodes' holes.

@@ -7,6 +7,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 var _ = Describe("Node-aware donor sets (§6.5)", func() {
@@ -463,24 +465,24 @@ var _ = Describe("ShareFitPods", func() {
 	}
 	It("places largest first into the smallest node that holds each, and spends it", func() {
 		n := nodes()
-		Expect(ShareFitPods(n, []int{2, 4}, "")).To(BeTrue())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{2, 4}})).To(BeTrue())
 		Expect(n["n1"].Free + n["n2"].Free + n["n3"].Free).To(Equal(2))
 		Expect(n["n1"].Free).To(BeZero(), "the 4-GPU pod takes the only node it fits")
 	})
 	It("spends nothing when a pod does not fit", func() {
 		n := nodes()
-		Expect(ShareFitPods(n, []int{4, 4}, "")).To(BeFalse())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{4, 4}})).To(BeFalse())
 		Expect(n).To(Equal(nodes()))
 	})
 	It("keeps a domain receiver in one domain, trying each", func() {
 		// r1 (n1: 4) cannot hold a 3 and a 2; r2 (n2: 3, n3: 2) can.
 		n := nodes()
 		n["n2"] = ShareNode{Free: 3, Labels: map[string]string{"rack": "r2"}}
-		Expect(ShareFitPods(n, []int{3, 2}, "rack")).To(BeTrue())
+		Expect(ShareFitPods(n, ShareReplicaFit{PodGPUs: []int{3, 2}, DomainKey: "rack"})).To(BeTrue())
 		Expect(n["n1"].Free).To(Equal(4), "r1 is untouched")
 		Expect(n["n2"].Free + n["n3"].Free).To(BeZero())
-		Expect(ShareFitPods(nodes(), []int{4, 2}, "rack")).To(BeFalse(), "no single rack holds 4 and 2")
-		Expect(ShareFitPods(nodes(), []int{4, 2}, "")).To(BeTrue(), "without a domain, any nodes do (control)")
+		Expect(ShareFitPods(nodes(), ShareReplicaFit{PodGPUs: []int{4, 2}, DomainKey: "rack"})).To(BeFalse(), "no single rack holds 4 and 2")
+		Expect(ShareFitPods(nodes(), ShareReplicaFit{PodGPUs: []int{4, 2}})).To(BeTrue(), "without a domain, any nodes do (control)")
 	})
 })
 
@@ -498,25 +500,73 @@ var _ = Describe("Fill-blocked reasons", func() {
 var _ = Describe("Placement agrees between the planner and the fill", func() {
 	// Where no donor is needed, the planner's node search and the idle fill
 	// place a replica the same way: or the fill would refuse what the planner
-	// left to it, or the reverse.
+	// left to it, or the reverse. Domains, groups, claims and templates
+	// included: the search walks shareDomains, the fill NodeView.domainsOf.
+	type node struct {
+		free    int
+		labels  map[string]string
+		groups  []string
+		claimed []string
+	}
 	DescribeTable("the same holes are left",
-		func(free map[string]int, pods []int) {
+		func(in map[string]node, fit ShareReplicaFit) {
 			nodes := map[string]ShareNode{}
-			for n, f := range free {
-				nodes[n] = ShareNode{Free: f}
+			for n, x := range in {
+				nodes[n] = ShareNode{Free: x.free, Labels: x.labels, Groups: x.groups, Claimed: x.claimed}
 			}
-			search := shareNodeSearch{in: SharePlanInput{Nodes: nodes}, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
-			hole, placed := search.place(pods, shareNodesInDomain(nodes, "", ""))
-			fit := maps.Clone(nodes)
-			Expect(ShareFitPods(fit, pods, "")).To(Equal(placed))
+			// The domain walk of shareNodeSet, with no donor to take.
+			var hole map[string]int
+			placed := false
+			key, exclusive := fit.domainKey()
+			for _, d := range shareDomains(nodes, key) {
+				in1 := shareNodesInDomain(nodes, key, d)
+				if exclusive && domainClaimed(nodes, in1, key) {
+					continue
+				}
+				search := shareNodeSearch{in: SharePlanInput{Nodes: nodes, Placements: map[string][]domain.PodPlacement{"B": fit.Placements}},
+					rc: "B", taken: map[string]int{}, used: map[shareUnitRef]bool{}}
+				h, ok := search.place(fit.PodGPUs, in1)
+				if ok && (!exclusive || search.freesGroups(in1)) {
+					hole, placed = h, true
+					break
+				}
+			}
+			got := maps.Clone(nodes)
+			Expect(ShareFitPods(got, fit)).To(Equal(placed))
 			if placed {
 				for n := range nodes {
-					Expect(fit[n].Free).To(Equal(hole[n]), "node %s", n)
+					Expect(got[n].Free).To(Equal(hole[n]), "node %s", n)
 				}
 			}
 		},
-		Entry("best fit across nodes", map[string]int{"n1": 4, "n2": 6, "n3": 8}, []int{4, 6}),
-		Entry("a tie broken by name", map[string]int{"a": 4, "b": 4}, []int{4}),
-		Entry("does not fit", map[string]int{"n1": 3, "n2": 3}, []int{4}),
+		Entry("best fit across nodes", map[string]node{"n1": {free: 4}, "n2": {free: 6}, "n3": {free: 8}},
+			ShareReplicaFit{PodGPUs: []int{4, 6}}),
+		Entry("a tie broken by name", map[string]node{"a": {free: 4}, "b": {free: 4}}, ShareReplicaFit{PodGPUs: []int{4}}),
+		Entry("does not fit", map[string]node{"n1": {free: 3}, "n2": {free: 3}}, ShareReplicaFit{PodGPUs: []int{4}}),
+		Entry("the first rack in label order that holds the group",
+			map[string]node{
+				"a1": {free: 8, labels: map[string]string{"rack": "r2"}}, "a2": {free: 8, labels: map[string]string{"rack": "r2"}},
+				"b1": {free: 8, labels: map[string]string{"rack": "r1"}}, "b2": {free: 4, labels: map[string]string{"rack": "r1"}},
+				"c1": {free: 8, labels: map[string]string{"rack": "r3"}}, "c2": {free: 8, labels: map[string]string{"rack": "r3"}},
+			}, ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "rack"}),
+		Entry("a rack holding a group, and one claimed, are skipped",
+			map[string]node{
+				"a1": {free: 8, labels: map[string]string{"rack": "r1"}, groups: []string{"ns/z-0"}}, "a2": {free: 8, labels: map[string]string{"rack": "r1"}},
+				"b1": {free: 8, labels: map[string]string{"rack": "r2"}, claimed: []string{"rack"}}, "b2": {free: 8, labels: map[string]string{"rack": "r2"}, claimed: []string{"rack"}},
+				"c1": {free: 8, labels: map[string]string{"rack": "r3"}}, "c2": {free: 8, labels: map[string]string{"rack": "r3"}},
+			}, ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "rack"}),
+		Entry("a claim on another key does not count",
+			map[string]node{
+				"a1": {free: 8, labels: map[string]string{"rack": "r1", "zone": "z1"}, claimed: []string{"zone"}},
+				"a2": {free: 8, labels: map[string]string{"rack": "r1", "zone": "z1"}, claimed: []string{"zone"}},
+			}, ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "rack"}),
+		Entry("leader and workers by their own templates",
+			map[string]node{"n0": {free: 8}, "n1": {free: 8, labels: map[string]string{"pool": "a"}}, "n2": {free: 8, labels: map[string]string{"pool": "b"}}},
+			ShareReplicaFit{PodGPUs: []int{8, 8}, Placements: []domain.PodPlacement{
+				{NodeSelector: map[string]string{"pool": "a"}}, {NodeSelector: map[string]string{"pool": "b"}}}}),
+		Entry("no node admits the workers' template",
+			map[string]node{"n1": {free: 8, labels: map[string]string{"pool": "a"}}, "n2": {free: 8, labels: map[string]string{"pool": "a"}}},
+			ShareReplicaFit{PodGPUs: []int{8, 8}, Placements: []domain.PodPlacement{
+				{NodeSelector: map[string]string{"pool": "a"}}, {NodeSelector: map[string]string{"pool": "b"}}}}),
 	)
 })

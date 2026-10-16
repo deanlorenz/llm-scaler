@@ -676,6 +676,10 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 	stateMap := buildStateMap(req.VariantStates)
 	var out []shareRoleInput
 	for _, role := range modelRolesOnType(records, acc) {
+		hold := sig.Holds[role]
+		if hold.NoScaleUp {
+			return nil, "role " + role + " has no listed analyzer that can size it"
+		}
 		demand := sig.Result.TotalDemand
 		if role != domain.RoleBoth {
 			rc, ok := sig.RoleCapacities[role]
@@ -696,6 +700,12 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				demand = max(demand-raised, 0)
 			}
 		}
+		// Another analyzer that sizes the role keeps what it needs at the
+		// threshold the share sizes to: as demand, so the role is held no
+		// deeper than its own analyzer would hold it and a shortfall is still
+		// shared by weight. As a floor at the release target it held more
+		// than saturation alone, even when the other analyzer agreed.
+		demand = max(demand, sig.OtherFrameDemand(role, sig.ScaleUpThreshold))
 		vs := variantsForRole(variantsOnType(records, acc), role)
 		busy := 0.0
 		for _, v := range vs {
@@ -734,6 +744,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				break
 			}
 		}
+		if hold.NoScaleDown {
+			floor = max(floor, roleCurrentGPUs(records, stateMap, acc, role))
+		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{
 			ShareRole: ShareRole{
@@ -746,7 +759,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				ReplicaGPUs: max(g, 1),
 			},
 			role:             role,
-			held:             held,
+			held:             held || hold.NoScaleDown,
 			startSeconds:     sig.Result.RoleStartSeconds[role],
 			busiestQueueLoad: busy,
 		})

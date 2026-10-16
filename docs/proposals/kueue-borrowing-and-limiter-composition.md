@@ -6,14 +6,18 @@
 - **Decision:** first make every declared limiter bound every decision, and,
   under the physical limiter, make a replica fit a node (Part A). Then count
   borrowable cohort capacity where that is safe (Part B).
-- **Shape:** Part A ships as
+- **Shape:** Part A shipped as
   [#164](https://github.com/ev-shindin/llm-scaling-manager/pull/164)
-  (`feat/limiters-compose`). Part B and its observability ship as PR-B
+  (`feat/limiters-compose`). Part B and its observability shipped as PR-B,
+  [#180](https://github.com/ev-shindin/llm-scaling-manager/pull/180)
   (`feat/kueue-borrowing`). Counting capacity of lenders that Kueue does not
   reclaim for is a later, opt-in PR-C ([Appendix](#appendix-pr-c)).
-- **Opt-out:** `countBorrowable: false` on the quota entry gives exactly
-  today's Kueue cap. Part A still applies.
-- **Status:** proposed, revision 11.
+- **Opt-out:** `countBorrowable: false` on the quota entry gives the Kueue cap
+  without borrowing. Part A still applies.
+- **Status:** built: Part A (#164) and Part B (#180), from revision 11. PR-C
+  is open. The operator pages are
+  [the quota limiter](../reference/quota-limiter.md#cohort-borrowing) and
+  [the GPU limiter](../reference/gpu-limiter.md).
 
 Borrowing is experimental but on by default. Where a condition does not hold,
 borrowing is either **withheld** (borrowable 0, capped at nominal as with
@@ -237,9 +241,10 @@ there are none yet). A freeze never shrinks a running model.
 - **A stale Lease** much older than the Deployment's last rollout (leader
   election turned off) falls back to the Deployment's ready replicas.
 - **A failed Kueue read.** A Kueue-backed quota entry with a last good read
-  freezes at that read (`stale`). An entry never read is skipped as an
-  unobserved provider (A4), with `wva_kueue_never_read`; PR-B updates #164's
-  troubleshooting row for `unobserved` to say so.
+  freezes at that read (`stale`). An entry never read is kept, bounding with
+  its finite static caps; its `-1` types bind nothing until a read succeeds.
+  It is reported with `wva_kueue_never_read`, and not listed on
+  `wva_constraint_provider_skipped` (A4).
 
 ### B2. What is read
 
@@ -317,7 +322,7 @@ reach_Q    = min(N_Q + B_Q, max(U_Q, G_Q) + cohortFree)
   borrowed: a model woken onto borrowed GPUs can be preempted before it
   serves. Not guaranteed alone either: under Kueue's default `Never`, an idle
   queue's guaranteed is 0. A wake blocked because nominal is lent to a peer
-  that need not give it back reports `nominal-lent-out` instead of waking into
+  that need not give it back reports `wake-nominal-lent-out` instead of waking into
   a gated pod. A model whose within-nominal capacity is used cannot wake, even
   with idle lenders. This holds for namespaces read but not counted too. The
   wake deducts borrowing in flight, gated GPUs, GPUs admitted but not yet
@@ -397,6 +402,8 @@ pages. Rolling back with `countBorrowable: false` evicts nothing: a lowered cap
 only stops growth.
 
 ## Shipping
+
+Built as planned: #164 merged Part A and #180 merged PR-B. PR-C is open.
 
 - **#164** carries Part A. No Kueue code. It enforces from its release.
 - **PR-B** is based on #164 and carries Part B and Observability, one commit
