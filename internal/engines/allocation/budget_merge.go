@@ -458,7 +458,11 @@ func clusterBudgetFor(available map[string]int, name string) (int, bool) {
 // A family some holder lists only through products is bounded by the
 // products that fit under every holder and every cluster bound
 // (closedFamilyBudget), not by the holders' sum alone: the cluster figure for
-// the family may come from products the namespace may not use.
+// the family may come from products the namespace may not use. So is a family
+// every holder lists when a holder also lists a product of it and some cluster
+// bound lists the family only through products: an allowance of {H100: -1,
+// NVIDIA-H100-SXM5-80GB: 0} under a cluster quota of {NVIDIA-H100-80GB-HBM3:
+// 8, NVIDIA-H100-SXM5-80GB: 24} may use 8 H100s, the HBM3 ones, not 32.
 func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...string) map[string]map[string]int {
 	holders := namespaceHolders(constraints)
 	if len(holders) == 0 {
@@ -496,6 +500,10 @@ func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...s
 				} else {
 					inner[name] = tighterBudget(inner[name], budget)
 				}
+			}
+			if accelerator.ClosesFamily(cluster, name) && accelerator.ListsProduct(pools, name) {
+				// The joint bound reads every holder's own figure too.
+				inner[name] = closedFamilyBudget(slices.Concat(pools, cluster), name)
 			}
 		}
 		clampProducts(inner)

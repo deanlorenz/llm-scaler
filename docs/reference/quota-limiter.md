@@ -1048,6 +1048,12 @@ closed-allowlist semantics:
     through those products. With `{NVIDIA-H100-SXM5-80GB: -1}` under the
     cluster quota above, a workload that names the bare `H100` gets nothing:
     the cluster quota allows no SXM5.
+  - A namespace that lists the family and denies a product of it may use the
+    family only through its other products. With `{H100: -1,
+    NVIDIA-H100-SXM5-80GB: 0}` under a cluster quota of
+    `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-SXM5-80GB: 24}`, a workload that
+    names the bare `H100` gets 8, the HBM3 GPUs. A wake from zero is checked
+    the same way.
   - A namespace that lists the family shares each product with a namespace
     that lists the product. The cluster quota reserves nothing for either:
     with team-a at `{H100: -1}` and team-b at `{NVIDIA-H100-80GB-HBM3: 8}`,
@@ -1056,6 +1062,8 @@ closed-allowlist semantics:
     them, product by product. `{NVIDIA-H100-80GB-HBM3: 16,
     NVIDIA-H100-PCIE-80GB: 8}` beside `{NVIDIA-H100-80GB-HBM3: 8,
     NVIDIA-H100-PCIE-80GB: 16}` allows 8 of each product: 16 H100s, not 24.
+    When that joint bound holds a decision back, `LimitedBy` names the quotas
+    that are tightest on some product, not a limiter that allows more alone.
   - The `gpu-inventory` limiter counts GPUs by family (`H100`), so none of the
     product rules above change what it allows.
   - Several roles or wakes on products of one family must fit the family's

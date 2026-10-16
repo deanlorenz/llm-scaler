@@ -156,6 +156,19 @@ func ClosesFamily[V any](allowlists []map[string]V, name string) bool {
 	})
 }
 
+// ListsProduct reports whether one of the allowlists lists a product of the
+// family called name.
+func ListsProduct[V any](allowlists []map[string]V, name string) bool {
+	return slices.ContainsFunc(allowlists, func(a map[string]V) bool {
+		for key := range a {
+			if IsProductOf(key, name) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // UnlistedProduct returns a product name under family that no real accelerator
 // reports, and whether family has one. Every product an allowlist does not list
 // is read alike (AllowlistBound falls back to the family key for each), so this
