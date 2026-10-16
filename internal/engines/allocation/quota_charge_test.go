@@ -139,9 +139,10 @@ func multiQueueSnapshot(ns string, rows ...config.ExternalBorrow) config.Externa
 	}
 }
 
-// queueRow is one queue's row of nominal n GPUs of acc, reserved r, in no
+// queueRow is one queue's row of nominal 16 GPUs of acc, reserved r, in no
 // cohort; withheld as multi-queue-namespace when ambiguous.
-func queueRow(queue, acc string, n, r int, ambiguous bool) config.ExternalBorrow {
+func queueRow(queue, acc string, r int, ambiguous bool) config.ExternalBorrow {
+	const n = 16
 	row := config.ExternalBorrow{Queue: queue, Flavor: queue + "-flavor", Resource: "nvidia.com/gpu", Accelerator: acc,
 		Nominal: n, Guaranteed: n, WithinNominal: n, BorrowCap: config.QuotaUnlimited, Reason: string(kueue.ReasonNoCohort),
 		Reserved: r}
@@ -166,9 +167,9 @@ func TestMultiQueueNamespaceChargedPerType(t *testing.T) {
 		snap config.ExternalQuotas
 	}{
 		{"one queue per type", multiQueueSnapshot("serving",
-			queueRow("cq-h", "H100", 16, 8, false), queueRow("cq-a", "A100", 16, 0, false))},
+			queueRow("cq-h", "H100", 8, false), queueRow("cq-a", "A100", 0, false))},
 		{"two queues grant H100", multiQueueSnapshot("serving",
-			queueRow("cq-1", "H100", 16, 0, true), queueRow("cq-2", "H100", 16, 8, true))},
+			queueRow("cq-1", "H100", 0, true), queueRow("cq-2", "H100", 8, true))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,

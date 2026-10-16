@@ -117,7 +117,7 @@ func TestNominalCoCheckLeavesOtherNamespacesAlone(t *testing.T) {
 // replica is admitted through one queue, and each has 64 CPUs. One 48-CPU
 // replica, not two. Before, the CPU headroom of the two queues was summed (128).
 func TestMultiQueueNominalCoFollowsMinRule(t *testing.T) {
-	rows := []config.ExternalBorrow{queueRow("cq-1", "H100", 16, 0, true), queueRow("cq-2", "H100", 16, 0, true)}
+	rows := []config.ExternalBorrow{queueRow("cq-1", "H100", 0, true), queueRow("cq-2", "H100", 0, true)}
 	for i := range rows {
 		rows[i].CoUnused = map[string]int64{"cpu": 64000}
 	}
