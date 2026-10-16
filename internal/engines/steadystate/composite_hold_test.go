@@ -259,4 +259,10 @@ func TestCompositeKeepsSaturationsHoldWhenAnotherFramePrices(t *testing.T) {
 
 	unlisted := buildComposite(ctx, named, []allocation.NamedAnalyzerResult{thr}, 0.85, 0.7)
 	assert.False(t, unlisted.Holds[domain.RolePrefill].NoScaleDown, "an unlisted saturation does not hold")
+
+	stale := sat
+	stale.Live = false
+	named = []allocation.NamedAnalyzerResult{stale, thr}
+	notEligible := buildComposite(ctx, named, named, 0.85, 0.7)
+	assert.False(t, notEligible.Holds[domain.RolePrefill].NoScaleDown, "a saturation that is not eligible blocks nothing")
 }

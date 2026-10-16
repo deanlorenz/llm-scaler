@@ -615,9 +615,13 @@ func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.Na
 // shed: 10 prefill GPUs went to 5 under contention. Scale-down needs every
 // analyzer to agree, and saturation's hold is its refusal; growth is
 // unaffected. Saturation alone never drops its hold, so it decides as before.
+// A saturation that is listed but not eligible this cycle (stale, or no
+// reading) blocks nothing, as allocation.Eligible promises.
 func keepSaturationHolds(nr *allocation.NamedAnalyzerResult, sat allocation.NamedAnalyzerResult,
 	eligible []allocation.NamedAnalyzerResult) {
-	if !slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool { return e.Name == sat.Name }) {
+	if !slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool {
+		return e.Name == sat.Name && allocation.Eligible(e)
+	}) {
 		return
 	}
 	for role := range sat.Result.HeldRoleDemand {
