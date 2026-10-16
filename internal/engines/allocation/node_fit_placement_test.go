@@ -44,10 +44,10 @@ func TestPinnedPairNeedsANodeOfEachRole(t *testing.T) {
 	DefaultInFlight.Reset()
 	t.Cleanup(DefaultInFlight.Reset)
 	for _, tc := range []struct {
-		name          string
-		prefill       []int
-		decode        []int
-		wantP, wantD  int
+		name         string
+		prefill      []int
+		decode       []int
+		wantP, wantD int
 	}{
 		{"only prefill nodes free: no pair", []int{8, 8}, []int{0}, 1, 1},
 		{"control: a node of each role free: one pair", []int{8, 0}, []int{8}, 2, 2},

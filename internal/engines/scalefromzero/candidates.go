@@ -129,7 +129,7 @@ func (e *Engine) buildCandidates(
 			Tolerations:     scaletarget.PodTolerations(scaleTarget),
 			DomainKey:       scaletarget.ExclusiveTopology(scaleTarget),
 			Placements:      variantmeta.PodPlacements(scaleTarget),
-			Cost:           resolveVariantCost(ctx, va),
+			Cost:            resolveVariantCost(ctx, va),
 			target:          scaleTarget,
 		})
 	}

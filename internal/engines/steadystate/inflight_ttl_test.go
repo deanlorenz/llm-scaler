@@ -44,7 +44,7 @@ limiters:
 	flavor := &kueue.FlavorPlacement{NodeLabels: map[string]string{"pool": "borrowed"}}
 	e.borrowing.passFlavors = map[string]*kueue.FlavorPlacement{"ns/m-v": flavor}
 	now := time.Now()
-	reqs := []allocation.ModelScalingRequest{growingA100("ns", "m", 8), growingA100("ns", "n", 8)}
+	reqs := []allocation.ModelScalingRequest{growingA100("ns", "m", 8), growingA100("ns", "n", 16)}
 	decisions := []domain.VariantDecision{
 		{VariantName: "m-v", Namespace: "ns", AcceleratorName: "A100", TargetReplicas: 2},
 		{VariantName: "n-v", Namespace: "ns", AcceleratorName: "A100", TargetReplicas: 2},
