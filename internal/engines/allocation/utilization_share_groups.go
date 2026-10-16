@@ -608,6 +608,12 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				demand = max(demand-raised, 0)
 			}
 		}
+		// Another analyzer that sizes the role keeps what it needs at the
+		// threshold the share sizes to: as demand, so the role is held no
+		// deeper than its own analyzer would hold it and a shortfall is still
+		// shared by weight. As a floor at the release target it held more
+		// than saturation alone, even when the other analyzer agreed.
+		demand = max(demand, sig.OtherFrameDemand(role, sig.ScaleUpThreshold))
 		vs := variantsForRole(variantsOnType(records, acc), role)
 		busy := 0.0
 		for _, v := range vs {
@@ -646,11 +652,8 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				break
 			}
 		}
-		// Under a scale-down hold the role keeps what it has; under a release
-		// bound it gives no more than the bound allows. Read here because the
-		// share sizes from demand and never reads the spare the bound caps.
-		if f, ok := releaseFloorGPUs(sig, records, stateMap, acc, role); ok {
-			floor = max(floor, f)
+		if hold.NoScaleDown {
+			floor = max(floor, roleCurrentGPUs(records, stateMap, acc, role))
 		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{

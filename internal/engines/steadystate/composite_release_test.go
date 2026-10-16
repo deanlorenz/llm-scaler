@@ -114,10 +114,14 @@ func TestCompositePublishesTheReleaseBound(t *testing.T) {
 	assert.Nil(t, composite.Holds)
 	assert.InDelta(t, 200-80/0.7, composite.SpareCapacity, 1e-9, "the spare is bounded at the boundary")
 	assert.InDelta(t, 200-80/0.7375, composite.ReleaseBound[domain.RoleBoth], 1e-9, "the release at the release target")
+	of := composite.OtherFrames[domain.RoleBoth]
+	assert.Len(t, of.Frames, 1, "one other frame sizes the model")
+	assert.InDelta(t, composite.ReleaseBound[domain.RoleBoth], of.Releasable(0.7375), 1e-9, "the bound is the frames' releasable")
 
 	alone := buildComposite(context.Background(), named[:1], named[:1], 0.85, 0.7)
 	assert.Nil(t, alone.Holds)
 	assert.Nil(t, alone.ReleaseBound)
+	assert.Nil(t, alone.OtherFrames)
 }
 
 // TestCostAwareReleasesWithinEveryFramesReleaseTarget: the release is bounded

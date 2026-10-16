@@ -69,6 +69,12 @@ func TestRescaleKeepsAHeldRole(t *testing.T) {
 
 	down := map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}}
 	assert.Equal(t, 4, rescaleTargets(pdRescaleRequest(down), 8, 0)["p"])
+
+	// The held role keeps its GPUs in the split too: decode gets what is left
+	// of the target. Split as if prefill would shrink to its share, decode
+	// was given 7 of 8 and, with 3 GPUs free, the model grew to 11.
+	got := rescaleTargets(pdRescaleRequest(down), 8, 3)
+	assert.Equal(t, 8, got["p"]+got["d"], "the model stays at its target: %v", got)
 }
 
 // TestRescaleFreezesAModelWithAPinnedRole: a role held both ways freezes the
@@ -223,19 +229,30 @@ func TestRescaleGivesTheLeftoverToARoleWithNoCut(t *testing.T) {
 	}
 }
 
-// TestRescaleReclaimsNoMoreThanTheReleaseBound: a role is reclaimed only as
-// far as the composite's release bound allows, and the water-fill reserves
-// what it keeps. With a bound worth 150 at 100 per GPU, prefill sheds at most
-// one of its four GPUs, not the three its demand share would.
-func TestRescaleReclaimsNoMoreThanTheReleaseBound(t *testing.T) {
+// TestRescaleSizesOnAnotherFramesDemand: another analyzer that sizes a role
+// raises its demand, at the full utilization rescale sizes to, instead of
+// flooring it. Prefill holds four GPUs at 100 each with demand 100; a frame
+// reading demand 300 of the same supply keeps three of them, so prefill's
+// demand is three GPUs and the model's water-fill cap grows by two. A
+// frame that agrees changes nothing.
+func TestRescaleSizesOnAnotherFramesDemand(t *testing.T) {
+	frame := func(demand float64) map[string]OtherFrames {
+		return map[string]OtherFrames{domain.RolePrefill: {Supply: 400, Frames: []FrameReading{{Supply: 400, Demand: demand, Ratio: 1}}}}
+	}
 	req := pdRescaleRequest(nil)
-	assert.Equal(t, 1, rescaleTargets(req, 8, 0)["p"], "setup: unbounded, prefill goes to its share")
-
-	req.CompositeSignal.ReleaseBound = map[string]float64{domain.RolePrefill: 150}
-	assert.GreaterOrEqual(t, rescaleTargets(req, 8, 0)["p"], 3)
-
 	in, _ := rescaleInputsForGroup([]ModelScalingRequest{req}, "A100", 16)
-	assert.Equal(t, 3, in[0].FloorGPUs, "the water-fill keeps the 3 the bound leaves prefill")
+	alone := in[0]
+
+	req.CompositeSignal.OtherFrames = frame(100)
+	in, _ = rescaleInputsForGroup([]ModelScalingRequest{req}, "A100", 16)
+	assert.Equal(t, alone, in[0], "an agreeing frame changes nothing")
+
+	req.CompositeSignal.OtherFrames = frame(300)
+	assert.Equal(t, 3, roleDemandGPUs(req.CompositeSignal, buildVariantRecords(req, req.CompositeSignal.Result),
+		buildStateMap(req.VariantStates), "A100", domain.RolePrefill))
+	in, _ = rescaleInputsForGroup([]ModelScalingRequest{req}, "A100", 16)
+	assert.Equal(t, alone.CapGPUs+2, in[0].CapGPUs)
+	assert.Equal(t, alone.FloorGPUs, in[0].FloorGPUs, "as demand, not as a floor")
 
 	held := pdRescaleRequest(map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}})
 	in, _ = rescaleInputsForGroup([]ModelScalingRequest{held}, "A100", 16)

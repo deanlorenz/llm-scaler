@@ -383,12 +383,11 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
-		// What the composite lets the role release: none under a scale-down
-		// hold, what the release bound allows otherwise. Reserved in the
-		// split, so the other roles are cut to what is left rather than to a
-		// share computed as if this one would shrink.
-		if f, ok := releaseFloorGPUs(satNamed, records, stateMap, accType, role); ok {
-			floorByRole[role] = max(floorByRole[role], f)
+		// A role that may not shrink keeps what it has in the split, so the
+		// other roles are cut to what is left rather than to a share computed
+		// as if this one would shrink.
+		if satNamed.Holds[role].NoScaleDown {
+			floorByRole[role] = max(floorByRole[role], curByRole[role])
 		}
 	}
 	pinned := pinnedModel(satNamed)
@@ -686,19 +685,18 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			}
 		}
 
-		// A role the composite lets release less than its share (a scale-down
-		// hold, or a release bound) keeps that in the water-fill too: weighed
-		// as if it would shrink, the model was given a target it never
+		// A role that may not shrink keeps what it has in the water-fill too:
+		// weighed as if it would shrink, the model was given a target it never
 		// reached, and the GPUs it kept were missing from the others'.
-		releaseFloor := 0
+		heldFloor := 0
 		for _, role := range modelRolesOnType(records, accType) {
 			rf := roleFloorGPUs(records, stateMap, accType, role)
-			if f, ok := releaseFloorGPUs(satNamed, records, stateMap, accType, role); ok {
-				rf = max(rf, f)
+			if satNamed.Holds[role].NoScaleDown {
+				rf = max(rf, roleCurrentGPUs(records, stateMap, accType, role))
 			}
-			releaseFloor += rf
+			heldFloor += rf
 		}
-		floorGPUs = max(floorGPUs, releaseFloor)
+		floorGPUs = max(floorGPUs, heldFloor)
 
 		demandGPUs := modelDemandGPUs(satNamed, records, stateMap, accType)
 		capGPUs := demandGPUs
@@ -758,7 +756,9 @@ func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stat
 // model-level TotalDemand; a P/D role uses its RoleCapacities demand (via
 // demandForRoleOrModel).
 func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
-	demand := demandForRoleOrModel(satNamed, role)
+	// Rescale sizes at full utilization (whole replicas of the demand), so
+	// another analyzer keeps what it needs there.
+	demand := max(demandForRoleOrModel(satNamed, role), satNamed.OtherFrameDemand(role, 1))
 	best, bestGPUs, ok := bestVariantForRole(records, stateMap, accType, role)
 	if !ok {
 		return 0
@@ -879,35 +879,6 @@ func ceilToReplica(gpus, g int) int {
 		return gpus
 	}
 	return (gpus + g - 1) / g * g
-}
-
-// releaseFloorGPUs is the fewest GPUs role may keep on accType this cycle by
-// what the composite allows it to release: all it has under a NoScaleDown
-// hold, and otherwise all it has less the GPUs ReleaseBound lets go, priced
-// at the role's densest running replica (the most capacity per GPU), so no
-// choice of replicas sheds more than the bound. ok is false when neither
-// applies.
-func releaseFloorGPUs(nr NamedAnalyzerResult, records []variantRecord,
-	stateMap map[string]domain.VariantReplicaState, accType, role string) (int, bool) {
-	current := roleCurrentGPUs(records, stateMap, accType, role)
-	if nr.Holds[role].NoScaleDown {
-		return current, true
-	}
-	bound, ok := nr.ReleaseBound[role]
-	if !ok {
-		return 0, false
-	}
-	var perGPU float64
-	for _, vc := range variantsForRole(variantsOnType(records, accType), role) {
-		g := gpusPerReplicaFromState(stateMap, vc.VariantName)
-		if stateMap[vc.VariantName].CurrentReplicas > 0 && vc.PerReplicaCapacity > 0 && g > 0 {
-			perGPU = max(perGPU, vc.PerReplicaCapacity/float64(g))
-		}
-	}
-	if !(perGPU > 0) || !(bound > 0) {
-		return current, true
-	}
-	return max(current-int(math.Floor(bound/perGPU)), 0), true
 }
 
 // distributeGPUsByWeight splits total GPUs across roles: each role is first reserved

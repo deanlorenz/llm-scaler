@@ -146,6 +146,13 @@ func (e NamedAnalyzerResult) ReleaseTargetUtilization() float64 {
 	return e.releaseTargetUtilization()
 }
 
+// OtherFrameDemand is role's demand, in its own units, by the analyzers
+// other than the one it is priced in, for an optimizer sizing at
+// utilization u (OtherFrames.Demand); 0 when no other analyzer sizes it.
+func (e NamedAnalyzerResult) OtherFrameDemand(role string, u float64) float64 {
+	return e.OtherFrames[role].Demand(u)
+}
+
 // releasableFor is supply minus the supply the role would need to sit at the
 // release target. Zero when the target is unusable or demand is unknown, which
 // leaves the caller on RoleSpare and therefore on the old behaviour.

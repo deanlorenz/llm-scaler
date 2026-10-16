@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"math"
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -41,13 +42,31 @@ func TestShareGroupsHonourCompositeHolds(t *testing.T) {
 		t.Fatal("no scale-down: the role must give nothing")
 	}
 
-	// A release bound worth 2 of its GPUs (1000 each) floors it at 3, not at
-	// what it holds: it may give the part every frame can spare.
-	bounded := shareReq("A", "ns", 800, 5)
-	bounded.CompositeSignal.ReleaseBound = map[string]float64{domain.RoleBoth: 2500}
-	groups := BuildShareGroups([]ModelScalingRequest{bounded}, full, ShareGroupOptions{ClusterIsQuota: true})
-	if len(groups) != 1 || len(groups[0].Roles) != 1 || groups[0].Roles[0].Floor != 3 {
-		t.Fatalf("release bound: groups %+v, want one role with floor 3", groups)
+	// Another analyzer reads the role as demand, at the share's threshold,
+	// never as a floor: one that agrees (demand 800 of the same 5000)
+	// leaves need and floor as saturation alone set them. One reading 2400
+	// of 4000 can spare 1000 at the share's 0.8, so the role keeps 4000
+	// (need 4 GPUs) -- 4.25 if read at full utilization -- and can still
+	// give.
+	framed := func(supply, demand float64) ShareRole {
+		t.Helper()
+		req := shareReq("A", "ns", 800, 5)
+		req.CompositeSignal.OtherFrames = map[string]OtherFrames{domain.RoleBoth: {
+			Supply: 5000, Frames: []FrameReading{{Supply: supply, Demand: demand, Ratio: 1}}}}
+		groups := BuildShareGroups([]ModelScalingRequest{req}, full, ShareGroupOptions{ClusterIsQuota: true})
+		if len(groups) != 1 || len(groups[0].Roles) != 1 {
+			t.Fatalf("other frame %v: groups %+v, want one role", demand, groups)
+		}
+		if _, ok := groups[0].Give["ns/A/both"]; !ok {
+			t.Fatalf("other frame %v: the role must still be able to give", demand)
+		}
+		return groups[0].Roles[0]
+	}
+	if r := framed(5000, 800); r != free.Roles[0] {
+		t.Fatalf("agreeing frame: role %+v, want %+v as saturation alone", r, free.Roles[0])
+	}
+	if r := framed(4000, 2400); math.Abs(r.Need-4) > 1e-9 || r.Floor != 1 {
+		t.Fatalf("tighter frame: role %+v, want need 4 and floor 1", r)
 	}
 
 	both := build(&RoleHold{NoScaleUp: true, NoScaleDown: true})

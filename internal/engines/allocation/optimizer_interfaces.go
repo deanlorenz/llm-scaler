@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"context"
+	"math"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -88,12 +89,66 @@ type NamedAnalyzerResult struct {
 
 	// ReleaseBound is, for each role another analyzer's frame also sizes
 	// (domain.RoleBoth on an aggregated model), the most capacity it may hand
-	// back this cycle, in its own units, so that the release is safe in every
-	// frame. initRoleState caps RoleReleasable at it, so the release budget,
-	// the larger of RoleSpare and RoleReleasable, honours it; the share
-	// optimizer and rescale read it as a GPU floor (releaseFloorGPUs). nil when
-	// only saturation sizes the model.
+	// back this cycle, in its own units, with every frame left at or below the
+	// release target: OtherFrames[role].Releasable at it. initRoleState caps
+	// RoleReleasable at it, so the release budget, the larger of RoleSpare and
+	// RoleReleasable, honours it. nil when only saturation sizes the model.
 	ReleaseBound map[string]float64
+
+	// OtherFrames is, for the same roles, what the analyzers other than the
+	// one the role is priced in read of it. The share optimizer and rescale
+	// size from demand, at their own utilization, so they read it through
+	// OtherFrameDemand: as demand, not as a floor, it holds a role no deeper
+	// than its own analyzer would and still shares a shortfall by weight.
+	OtherFrames map[string]OtherFrames
+}
+
+// FrameReading is one analyzer's reading of a role in its own frame: Supply,
+// what its PRCs make of the running replicas; Demand; and Ratio, the most of
+// its capacity one unit of the chosen frame's capacity is worth over those
+// replicas, so shedding X of the chosen frame's capacity sheds at most
+// X x Ratio of this one's.
+type FrameReading struct {
+	Supply, Demand, Ratio float64
+}
+
+// OtherFrames is a role's supply in the frame it is priced in, Supply, and
+// the readings of the other analyzers that size it, Frames.
+type OtherFrames struct {
+	Supply float64
+	Frames []FrameReading
+}
+
+// Releasable is the most of the chosen frame's capacity the role can shed
+// with every other frame left at or below utilization u: for each frame its
+// supply above D / u, over its ratio. +Inf when no frame constrains it, and
+// 0 when one already sits above u.
+func (o OtherFrames) Releasable(u float64) float64 {
+	out := math.Inf(1)
+	if !(u > 0) {
+		return out
+	}
+	for _, f := range o.Frames {
+		// !(x >= 0) also skips a NaN, which max and min would carry on.
+		if !(f.Ratio > 0) || !(f.Supply >= 0) || !(f.Demand >= 0) {
+			continue
+		}
+		out = min(out, max(f.Supply-f.Demand/u, 0)/f.Ratio)
+	}
+	return out
+}
+
+// Demand is the demand, in the chosen frame's units, that an optimizer
+// sizing at utilization u reads as keeping what every other frame needs:
+// u x (Supply - Releasable(u)). It is never above u x Supply, so another
+// frame can stop a release but never grows the role -- growth follows the
+// chosen frame alone -- and 0 when no frame constrains it.
+func (o OtherFrames) Demand(u float64) float64 {
+	rel := o.Releasable(u)
+	if math.IsInf(rel, 1) || !(o.Supply > 0) {
+		return 0
+	}
+	return u * max(o.Supply-rel, 0)
 }
 
 // RoleHold is what the composite forbids one role this cycle.
