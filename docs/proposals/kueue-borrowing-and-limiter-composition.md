@@ -13,7 +13,7 @@
   reclaim for is a later, opt-in PR-C ([Appendix](#appendix-pr-c)).
 - **Opt-out:** `countBorrowable: false` on the quota entry gives exactly
   today's Kueue cap. Part A still applies.
-- **Status:** proposed, revision 10.
+- **Status:** proposed, revision 11.
 
 Borrowing is experimental but on by default. Where a condition does not hold,
 borrowing is either **withheld** (borrowable 0, capped at nominal as with
@@ -36,7 +36,8 @@ This also covers the in-repo part of upstream
 - **cohortFree**: the cohort's free pool, what reclaiming lenders lend minus
   what members use beyond what they keep ([B3](#b3-how-much-a-queue-can-reach)).
 - **Borrow cap**: how far past guaranteed a namespace may go.
-- **Flavor**: a Kueue ResourceFlavor.
+- **Flavor**: a Kueue ResourceFlavor. A namespace's own flavors are those
+  where its queue has nominal quota.
 - **Closed limiter**: one whose list of GPU types is complete, so a type it
   omits is denied. Physical inventory and a cluster-scope quota are closed; a
   namespace-scope quota is closed for its own namespaces.
@@ -253,7 +254,7 @@ All read-only; a cohort name with no Cohort object is a flat cohort.
 | ClusterQueue flavors offering each resource (not `whenCanBorrow`: Kueue v0.20 defaults it to `MayStopSearch` everywhere) | `flavor-unpinned` |
 | ClusterQueue `spec.admissionChecks`, `status.fairSharing`, `status.effectiveQuotas` | withheld reasons |
 | ResourceFlavor `nodeLabels`, `tolerations`, `topologyName` | node fit per flavor, pinning, `topology-aware` |
-| Workloads and LocalQueues, cluster-wide (informer); Finished Workloads ignored | managed check, priority, lender requests per flavor, gated demand, preemption |
+| Workloads and LocalQueues, cluster-wide (informer) only for an entry that counts borrowing; Finished Workloads ignored | managed check, priority, lender requests per flavor, gated demand, preemption |
 | Namespace `ResourceQuota` `hard`, `used` | GPU bound and ceiling; with several, the tightest |
 | Deployment `kueue-controller-manager` image, ready replicas, last rollout; its leader Lease | version; liveness |
 
@@ -280,14 +281,19 @@ reach_Q    = min(N_Q + B_Q, max(U_Q, G_Q) + cohortFree)
   indefinitely. `LowerPriority` reclaims for a model only when the lender,
   judged by its lowest-priority unfinished GPU Workload, strictly outranks the
   model's own class priority; a template with no class takes its namespace's
-  highest. So such a lender's capacity is offered per model. Once an
-  outranked model draws from a cohort's pool on a flavor, that pool's
-  restricted part closes for the rest of the pass.
-- **Guaranteed.** A queue that can reclaim keeps `N_Q`; its growth needs a
-  node hole and debits cohortFree up to `PreemptAfter`, the point beyond which
-  Kueue would have to preempt. Past it, growth skips the node hole only for
-  whole replicas covered by peers' actual borrowing (Kueue's `borrowed`),
-  held in the shared record until a read shows them. A queue that cannot
+  highest. So such a lender's capacity is offered per model. A pool's
+  restricted part stays closed, across cycles, while the cohort holds counted
+  borrowing (in flight, or Kueue's `borrowed`) by a model the lender does not
+  outrank.
+- **Guaranteed.** A queue that can reclaim keeps `N_Q`; growth up to
+  `PreemptAfter`, the point beyond which Kueue would have to preempt, needs a
+  node hole. The part the queue keeps unused is never debited from cohortFree,
+  only the rest; the growth is recorded in the shared record. A whole replica that lies past
+  `PreemptAfter` (nothing of it left), covered by peers' actual borrowing
+  (Kueue's `borrowed`), skips the node hole. Kueue preempts by priority, not
+  by node, so the reclaim may free no whole node: every replica placed without
+  a hole is under `placementTimeout`, and if it never schedules it is released,
+  backed off and reported `borrow-unplaced`. A queue that cannot
   reclaim has `min(N_Q, max(U_Q, G_Q))`, qualified as `nominal-lent-out` (not
   a withheld reason). Guaranteed is per ClusterQueue.
 - **Co-resources.** Every resource group covering a requested resource is
@@ -331,8 +337,8 @@ Kueue admits on quota, not placement. A borrowed replica is spent only if its
 pods fit the node view on its flavor's nodes. A variant with unplaced pods gets
 no new borrowed growth until they place.
 
-A borrowed unit whose pods stay **unscheduled or Kueue-gated** past the
-placement timeout is released, and the model's cooldown starts. Pulling an
+A borrowed unit, or a replica placed without a node hole (B3), whose pods stay
+**unscheduled or Kueue-gated** past the placement timeout is released, and the model's cooldown starts. Pulling an
 image or loading weights does not count: a scheduled pod is placed. A cluster
 autoscaler `TriggeredScaleUp` pauses the clock, for at most three timeouts.
 
