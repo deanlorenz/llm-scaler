@@ -746,8 +746,9 @@ so TTFT suffers after every upgrade or leader change until the fleet has
 saturated once more. With it on, the acting controller writes what it learned
 to the ConfigMap `wva-learned-state` at most once a minute, and the next
 controller reads it on its first cycle. The startup line `learned-state horizons`
-shows `snapshot` as `true` when it is on -- its metrics read 0 both when it is
-off and when it works, so that line is where to confirm it.
+shows `snapshot` as `true` when it is on. Its error counters read 0 both when
+it is off and when it works; `wva_learned_state_snapshot_bytes` above 0 on the
+leader confirms it is writing.
 If that read fails it is retried every minute; until it succeeds, for at
 most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
 strength and none is started or moved, so none started in that time

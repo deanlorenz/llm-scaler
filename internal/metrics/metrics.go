@@ -357,7 +357,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	})
 	learnedStateBudget = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: constants.WVALearnedStateSnapshotBudgetBytes,
-		Help: "The bound, in bytes, the learned-state snapshot document last written had to fit: 700 KiB, less what other versions' documents take of the ConfigMap.",
+		Help: "The bound, in bytes, the learned-state snapshot document last written had to fit: the smaller of 700 KiB and 900 KiB less what other versions' documents take of the ConfigMap. 0 until the first write.",
 	})
 	learnedStateDropped = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: constants.WVALearnedStateSnapshotDroppedEntries,

@@ -488,7 +488,7 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_snapshot_bytes`, `wva_learned_state_snapshot_budget_bytes`, `wva_learned_state_snapshot_dropped_entries`
 - **Type**: Gauge
-- **Description**: The size of the learned-state snapshot document last written, the bound it had to fit (700 KiB, less what other versions' documents take of the ConfigMap), and how many entries that write left out to fit it, least recently used first. Set on each successful write; absent until the first.
+- **Description**: The size of the learned-state snapshot document last written, the bound it had to fit (the smaller of 700 KiB and 900 KiB less what other versions' documents take of the ConfigMap), and how many entries that write left out to fit it, least recently used first. Set on each successful write; they read 0 until the first, and on a replica that is not the leader. A `wva_learned_state_snapshot_bytes` above 0 on the leader confirms the store is writing.
 - **Use Case**: A fleet of a few hundred variants can reach the bound. Each write then leaves out the windows of the variants idle longest, which a restart prices at derived or k1 until they saturate again:
   ```promql
   max(wva_learned_state_snapshot_dropped_entries) > 0
