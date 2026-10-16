@@ -2804,6 +2804,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# already on disk, or that watches a cluster nobody named, parses perfectly
 	@# -- and both have cost data here.
 	@bash hack/check-benchmark-capture.sh
+	@echo "Checking the benchmark scripts read the controller's own log..."
+	@# Executes them against a stub kubectl. Warm-pool Pods share the label
+	@# they selected the controller by, so a pool Pod's log was read as the
+	@# controller's -- and the selector parses perfectly.
+	@bash hack/check-benchmark-controller-pod.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name

@@ -46,6 +46,9 @@ except ImportError:
     print("ERROR: PyYAML required. pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from controller_pods import controller_log_selector  # noqa: E402
+
 
 # The caller field is matched loosely on the FILE name only. Pinning the package
 # path is what silently broke this: the decision log moved from saturation/ to
@@ -236,12 +239,22 @@ def main():
         # now plus a small buffer to ensure we capture the harness-start tick.
         now = datetime.now(timezone.utc)
         since_seconds = int((now - start).total_seconds()) + 90
-        logs = subprocess.run(
-            ["kubectl", "logs", "-n", args.namespace,
-             "-l", "app.kubernetes.io/name=workload-variant-autoscaler",
-             f"--since={since_seconds}s", "--tail=200000"],
-            capture_output=True, text=True,
-        ).stdout
+        # The controller's Pods by ownership, not by label: warm-pool Pods
+        # share app.kubernetes.io/name, and their logs used to be read as the
+        # controller's. No Pod leaves the logs empty, as a failed kubectl
+        # always has here, and the Thanos fallback below takes over.
+        try:
+            selector = controller_log_selector(args.namespace)
+        except RuntimeError as e:
+            print(f"WARNING: {e}", file=sys.stderr)
+            selector = None
+        logs = ""
+        if selector is not None:
+            logs = subprocess.run(
+                ["kubectl", "logs", "-n", args.namespace, "-l", selector,
+                 f"--since={since_seconds}s", "--tail=200000"],
+                capture_output=True, text=True,
+            ).stdout
 
     samples_by_ts = {}
 
