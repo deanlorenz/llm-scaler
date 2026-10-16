@@ -195,9 +195,19 @@ func spendCo(b *nsBorrowLeft, c *SharedPoolChunk, requests map[string]int64) {
 // headroom and, unless the queue reclaims what it lent (reclaim: Kueue
 // preempts borrowers of it), one of its cohorts' chunks serving acc --
 // pool plus what the namespace keeps -- which it is debited. b nil (the
-// namespace counts no borrowing) checks nothing.
+// namespace counts no borrowing) checks its queues' nominal co-resource
+// headroom only (NominalFigures.CoHeadroom), when the constraints carry one.
 func (bs *borrowState) coGuaranteed(ns, acc string, b *nsBorrowLeft, requests map[string]int64, reclaim bool) bool {
 	if b == nil {
+		k, ok := accelerator.FindKey(bs.lent[ns], acc)
+		if !ok || len(bs.lent[ns][k].coHeadroom) == 0 {
+			return true
+		}
+		nominal := bs.lent[ns][k]
+		if !coWithin(nominal.coHeadroom, requests) {
+			return false
+		}
+		spendCo(nominal, nil, requests)
 		return true
 	}
 	if !coWithin(b.coHeadroom, requests) {
@@ -289,6 +299,25 @@ func (c SharedPoolChunk) serves(acc string) bool {
 func HasBorrowing(constraints []*ResourceConstraints) bool {
 	return slices.ContainsFunc(constraints, func(c *ResourceConstraints) bool {
 		return c != nil && c.NamespaceBorrow != nil
+	})
+}
+
+// hasNominalCo reports whether some constraint carries a namespace's nominal
+// co-resource headroom (NominalFigures.CoHeadroom): the pass then fits growth
+// within nominal to it, borrowing counted or not (K2).
+func hasNominalCo(constraints []*ResourceConstraints) bool {
+	return slices.ContainsFunc(constraints, func(c *ResourceConstraints) bool {
+		if c == nil {
+			return false
+		}
+		for _, perType := range c.NamespaceNominal {
+			for _, f := range perType {
+				if len(f.CoHeadroom) > 0 {
+					return true
+				}
+			}
+		}
+		return false
 	})
 }
 

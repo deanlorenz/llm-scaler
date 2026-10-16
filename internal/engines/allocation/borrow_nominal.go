@@ -47,6 +47,12 @@ type NominalFigures struct {
 	// Flavors are the flavors its own queues offer the type on, sorted
 	// (NamespaceBorrow.Flavors).
 	Flavors []string
+	// CoHeadroom is, per co-resource its queues' GPU flavor's resource group
+	// covers, what their nominal quota of it leaves after everything Kueue
+	// reserved (ExternalBorrow.CoUnused), in milli-units: a replica grown
+	// within nominal must fit it as well as its GPUs (K2). Nil when no group
+	// covers one.
+	CoHeadroom map[string]int64
 }
 
 // uncountedNominal is, per namespace the read granted borrowing rows for and
@@ -70,19 +76,44 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 		}
 		for accType := range entry.NamespaceQuotas[ns] {
 			nominal, f := 0, NominalFigures{}
-			for _, r := range rowsOfType(rows, accType) {
-				nominal += r.Nominal
-				f.WithinNominal += r.WithinNominal
-				f.Guaranteed += r.Guaranteed
-				if r.Counted() {
-					f.LentOut += r.LentOut
-					f.PreemptAfter += r.PreemptAfter
-					f.PreemptKept += r.PreemptKept
+			// Per queue; a type several of the namespace's queues grant
+			// (multi-queue-namespace) takes the smallest queue's figures,
+			// as its pool does (chargeFigure): a replica is admitted
+			// through one of them, which is not read (KU2).
+			for i, rs := range rowsByQueue(rowsOfType(rows, accType)) {
+				qNominal, q := 0, NominalFigures{}
+				for _, r := range rs {
+					// Charged with the queue's non-managed charge, as the
+					// namespace's pool is (KU1).
+					qNominal += max(0, r.Nominal-r.Charge)
+					q.WithinNominal += max(0, r.WithinNominal-r.Charge)
+					q.Guaranteed += max(0, r.Guaranteed-r.Charge)
+					if r.Counted() {
+						q.LentOut += r.LentOut
+						q.PreemptAfter += r.PreemptAfter
+						q.PreemptKept += r.PreemptKept
+					}
 				}
+				co := sumCo(rs, func(r config.ExternalBorrow) map[string]int64 { return r.CoUnused }, true)
+				if i == 0 {
+					q.CoHeadroom = co
+					nominal, f = qNominal, q
+					continue
+				}
+				nominal = min(nominal, qNominal)
+				f.WithinNominal, f.Guaranteed = min(f.WithinNominal, q.WithinNominal), min(f.Guaranteed, q.Guaranteed)
+				f.LentOut, f.PreemptAfter, f.PreemptKept = min(f.LentOut, q.LentOut), min(f.PreemptAfter, q.PreemptAfter),
+					min(f.PreemptKept, q.PreemptKept)
+				f.CoHeadroom = tighterCo(f.CoHeadroom, co, true)
 			}
 			f.Flavors = rowFlavors(rowsOfType(rows, accType))
 			f.NominalLentOut = max(0, nominal-f.WithinNominal)
-			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
+			if !q.countsBorrowing() {
+				// Not counting borrowing, the entry caps at nominal: only the
+				// co-resources are carried (K2 on the nominal path).
+				f = NominalFigures{WithinNominal: nominal, Guaranteed: nominal, Flavors: f.Flavors, CoHeadroom: f.CoHeadroom}
+			}
+			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed && len(f.CoHeadroom) == 0 {
 				continue // nominal, whatever the pool holds: nothing to carry
 			}
 			if out[ns] == nil {
@@ -107,6 +138,23 @@ func rowsOfType(rows []config.ExternalBorrow, accType string) []config.ExternalB
 		matched = slices.DeleteFunc(slices.Clone(rows), func(r config.ExternalBorrow) bool { return r.Accelerator != "" })
 	}
 	return matched
+}
+
+// rowsByQueue is rows grouped by ClusterQueue, in the order they name them.
+func rowsByQueue(rows []config.ExternalBorrow) [][]config.ExternalBorrow {
+	var names []string
+	by := map[string][]config.ExternalBorrow{}
+	for _, r := range rows {
+		if _, seen := by[r.Queue]; !seen {
+			names = append(names, r.Queue)
+		}
+		by[r.Queue] = append(by[r.Queue], r)
+	}
+	out := make([][]config.ExternalBorrow, 0, len(names))
+	for _, n := range names {
+		out = append(out, by[n])
+	}
+	return out
 }
 
 // rowFlavors is the flavors rows name with a nominal quota, sorted, each once;

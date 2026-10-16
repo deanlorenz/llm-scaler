@@ -559,6 +559,22 @@ type ExternalBorrow struct {
 	// does not use.
 	CoHeadroom map[string]int64 `json:"coHeadroom,omitempty"`
 	CoKept     map[string]int64 `json:"coKept,omitempty"`
+	// Reserved is what the source has charged the queue on this flavor and
+	// resource, whoever holds it: every workload it admitted, managed or not.
+	// A quota entry charges the queue's figures with the part its own variants
+	// do not hold (the non-managed charge).
+	Reserved int `json:"reserved,omitempty"`
+	// CoUnused is, per co-resource, what the queue's nominal quota of it
+	// leaves after everything reserved, in milli-units: the co-resource
+	// headroom of growth within nominal.
+	CoUnused map[string]int64 `json:"coUnused,omitempty"`
+	// Charge is the queue's non-managed charge on this flavor and resource,
+	// as the row's namespace sees it: Reserved less what that namespace's
+	// managed variants hold in the queue. Negative only for a type several of
+	// the namespace's queues grant, where its GPUs are counted in each. Set by
+	// the quota entry, not the source; the row's Nominal, Guaranteed and
+	// WithinNominal are Kueue's, before it.
+	Charge int `json:"charge,omitempty"`
 }
 
 // Counted reports whether the row's borrowing is counted: no reason, or only

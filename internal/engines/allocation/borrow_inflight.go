@@ -335,6 +335,22 @@ func (b *BorrowInFlight) Unreserved(now time.Time) Unreserved {
 	return u
 }
 
+// GatedGPUs is the GPUs of managed pods the last borrowing cycle read at
+// Kueue's admission gate, per namespace and accelerator ("" when the pod names
+// none), when that cycle is younger than InFlightTTL; nil otherwise. It is the
+// GatedSource a Kueue-backed quota charges its figures with (KU1).
+func (b *BorrowInFlight) GatedGPUs(now time.Time) map[string]map[string]int {
+	gated := b.Unreserved(now).Gated
+	if gated == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(gated))
+	for ns, perAcc := range gated {
+		out[ns] = maps.Clone(perAcc)
+	}
+	return out
+}
+
 // Blocked is the cohorts the last borrowing cycle closed to new borrowing,
 // when it is younger than InFlightTTL; nil otherwise.
 func (b *BorrowInFlight) Blocked(now time.Time) map[string]bool {

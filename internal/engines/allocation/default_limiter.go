@@ -86,6 +86,11 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		// reads (the borrowing eligibility check) need cover no other.
 		m.SetManagedNamespaces(slices.Collect(maps.Keys(usageByNamespace)))
 	}
+	if m, ok := l.inventory.(ManagedUsageSetter); ok && usageByNamespace != nil {
+		// What the managed variants hold, which a Kueue figure is charged
+		// against: the rest of what Kueue reserved is not theirs (KU1).
+		m.SetManagedUsage(usageByNamespace)
+	}
 	if err := l.inventory.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh inventory: %w", err)
 	}

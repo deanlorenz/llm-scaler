@@ -344,6 +344,7 @@ model cannot grow while others hold GPUs.
 | `wva_available_gpus` | GPUs the `gpu-inventory` limiter sees per accelerator type |
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
+| A Kueue-backed namespace stops below its ClusterQueue's `nominalQuota`; a non-zero `charge` on its rows in the `Kueue borrowing applied` log line | other workloads Kueue admitted in the queue (a training job, another namespace on a shared queue) hold that much of it, and the figure is charged with it. Expected: Kueue would hold more replicas pending. See [What a quota is charged](quota-limiter.md#what-a-quota-is-charged) |
 | `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
 | `Physical limiter: replicas are not fitted to nodes this cycle` | the physical limiter bounds scaling but no node snapshot younger than 2 minutes exists, so replicas are fitted to the pool only, as before node fit; `reason` says why. Usually the GPU usage observation is failing (the same cause skips the provider soon after). `Physical limiter: replicas are fitted to nodes again` ends it. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
@@ -392,14 +393,15 @@ See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
 **Symptom**: a model on a Kueue quota that counts borrowing went from, say, 6
 to 4 replicas, and nobody lowered it.
 
-There are three causes. Check them in this order; the first that matches is
+There are four causes. Check them in this order; the first that matches is
 the answer.
 
 | cause | how to tell |
 | --- | --- |
 | 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
 | 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places |
-| 3. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
+| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. Expected; the borrower borrows again when the cohort has free GPUs |
+| 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
 
 Commands, in the same order:
 
@@ -525,6 +527,7 @@ is frozen at its guaranteed figure instead, until it scales down.
 | `not-kueue-managed` | a GPU pod in the namespace is not backed by a Workload with quota reserved, owned by a kind a Kueue integration manages; or the controller may not read the pod's owner | find it: `kubectl get workloads.kueue.x-k8s.io -n <ns>` against `kubectl get pods -n <ns>`. Put the workload behind a LocalQueue (`kueue.x-k8s.io/queue-name`), or move it out of the namespace. For a Forbidden owner read, re-run the admin phase |
 | `resourcequota-unreadable` | the namespace's ResourceQuotas cannot be read: Forbidden, or failing for five refresh intervals | `kubectl auth can-i list resourcequotas -n <ns> --as=<controller SA>`; re-run the admin phase |
 | `no-gpu-bound` | nothing checks that borrowed GPUs exist: no `gpu-inventory` limiter, and no GPU `ResourceQuota` at most nominal plus `borrowingLimit` | declare one ([prerequisites](../guides/kueue-borrowing/#prerequisites)) |
+| `multi-queue-namespace` | more than one of the namespace's GPU ClusterQueues grants this accelerator type (a flavor without a product label grants every type). The controller does not read which one a variant uses, so the type is capped at the smallest single queue's figure, not at their sum. A type one queue grants is not affected | `kubectl get localqueues -n <ns>` lists them. Move serving to a namespace with one LocalQueue, or point every GPU LocalQueue of the namespace at one ClusterQueue |
 | `kueue-version-unknown` | the `kueue-controller-manager` Deployment was read, but its image carries no version tag (a digest-only image, say) | check the image: `kubectl get deploy kueue-controller-manager -n <kueue-ns> -o jsonpath='{.spec.template.spec.containers[*].image}'`. If it runs a [tested version](quota-limiter.md#supported-kueue-versions), set `kueue.assumeTestedVersion: true` on the entry |
 | `kueue-version-untested` | Kueue runs a release outside the tested range | run a [tested version](quota-limiter.md#supported-kueue-versions); the nominal cap applies meanwhile |
 | `no-cohort` | the namespace's ClusterQueue is in no cohort, so there is nothing to borrow from | set `spec.cohortName` on the ClusterQueue, if borrowing is wanted |
