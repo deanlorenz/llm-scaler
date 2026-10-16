@@ -127,16 +127,17 @@ us_quota_keys() {
 #   namespace  every planned namespace has its own budget
 #   none       no group at all, so nothing is shared
 #
-# With a quota entry, only quota entries count: the controller builds no
-# gpu-inventory limiter beside one, and ignores physicalGroups. A namespace
-# that a namespace-scoped entry covers -- listed, or by `default`, or not at
-# all, which is a zero budget -- gets its own group. So the cluster group holds
-# every namespace when there is no namespace-scoped entry, and otherwise only
-# the namespaces excluded from EVERY namespace-scoped entry
-# (us_excluded_namespaces) -- and those only when a `scope: cluster` quota
-# entry bounds them. Without one, an excluded namespace is in no group at all:
-# the sum of the namespace quotas is not a budget for a namespace they do not
-# cap (the controller logs it as unshared and keeps today's optimizer for it).
+# A namespace that a namespace-scoped entry covers -- listed, or by `default`,
+# or not at all, which is a zero budget -- gets its own group. So with a quota
+# entry the cluster group holds every namespace when there is no
+# namespace-scoped entry, and otherwise only the namespaces excluded from EVERY
+# namespace-scoped entry (us_excluded_namespaces). Those share it only under a
+# cluster bound that is shared: a `scope: cluster` quota entry, or a
+# gpu-inventory limiter beside the quota with physicalGroups: true. Otherwise
+# an excluded namespace is in no group at all: the sum of the namespace quotas
+# is not a budget for a namespace they do not cap (with no finite bound the
+# controller logs it as unshared, and the default optimizer keeps it). Which
+# accelerator types a bound gives a number is not read here.
 # Without a quota, the inventory forms a cluster group only with
 # physicalGroups: true, and no limiter forms none.
 us_budget_scope() {
@@ -156,7 +157,12 @@ us_budget_scope() {
     out="$(printf '%s\n' "$p" | us_excluded_namespaces)" || return 1
     if [ -z "$out" ]; then echo namespace; return 0; fi
     out="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota" and .scope == "cluster")] | length')" || return 1
-    if [ "$out" = 0 ]; then echo namespace; else echo cluster; fi
+    if [ "$out" != 0 ]; then echo cluster; return 0; fi
+    if [ "$kind" = inventory+quota ]; then
+        out="$(printf '%s\n' "$p" | yq -r '.optimizer.utilizationShare.physicalGroups == true')" || return 1
+        if [ "$out" = true ]; then echo cluster; return 0; fi
+    fi
+    echo namespace
 }
 
 # us_excluded_namespaces -- the namespaces excluded from every namespace-scoped
@@ -621,7 +627,8 @@ verb_shadow() {
 # Which namespaces share the budget, from the policy (us_budget_scope): none
 # when every planned namespace has its own budget or no group forms; under
 # namespace-scoped quotas, only the namespaces excluded from all of them, and
-# only when a cluster-scoped quota bounds them; otherwise every namespace.
+# only under a cluster-scoped quota or a gpu-inventory limiter with
+# physicalGroups: true; otherwise every namespace.
 # clusterNamespaces, when the block lists some, narrows either. A cluster budget is split per accelerator, which this script
 # cannot see, so the warning says "if". A list it cannot read is said, not
 # taken for none.
@@ -629,7 +636,7 @@ warn_ungranted_namespaces() {
     local list ns only excluded odd
     case "$(printf '%s\n' "$POLICY" | us_budget_scope)" in
         namespace)
-            info "every planned namespace has its own quota, and one the quota excludes is shared only under a cluster-scoped quota, so no other namespace shares this budget"
+            info "every planned namespace has its own quota, and one the quota excludes is shared only under a cluster-scoped quota or physicalGroups, so no other namespace shares this budget"
             return 0 ;;
         none)
             info "this limiter forms no shared group, so no other namespace shares this budget"
