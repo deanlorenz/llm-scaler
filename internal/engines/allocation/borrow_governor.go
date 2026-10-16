@@ -40,6 +40,12 @@ type ReleaseCause string
 // place with it.
 const ReleasePlacementTimeout ReleaseCause = "placement-timeout"
 
+// ReleaseKueueGate is the release cause of a replica Kueue held at its
+// admission gate, waiting for quota, past the placement timeout in a
+// namespace that counts no borrowing (gatedRelease). Nothing was borrowed:
+// it starts no cooldown, and the borrow-thrashing alert does not count it.
+const ReleaseKueueGate ReleaseCause = "kueue-gate"
+
 // BorrowSettings are the governor's timings.
 type BorrowSettings struct {
 	PlacementTimeout time.Duration
@@ -107,6 +113,10 @@ type BorrowRelease struct {
 	// the GPUs it takes below the namespace's guaranteed figure: the smallest
 	// serviceable unit is larger than what the namespace borrows. 0 otherwise.
 	GuaranteedGPUs int
+	// AtGate marks a release of replicas held at Kueue's admission gate in a
+	// namespace that counts no borrowing (gatedRelease): nothing was
+	// borrowed, the queue has no room for them.
+	AtGate bool
 }
 
 // BorrowCycle is what the governor is told about one cycle.
@@ -154,6 +164,14 @@ type BorrowGovernor struct {
 	// GPUs past its guaranteed figure, as Observe saw it: the earliest a pod
 	// of it can have been unplaced as a borrowed one (observePast).
 	pastSince map[string]time.Time
+	// uncountedSince is pastSince for the Kueue-backed namespaces that count
+	// no borrowing: since when each has held GPUs past its Kueue figure
+	// (uncountedHeldPast), for the release of a replica gated there
+	// (gatedRelease).
+	uncountedSince map[string]time.Time
+	// gatedPins is the timeoutHeld keys a release of replicas held at Kueue's
+	// gate pinned (gatedRelease), kept through HoldReleases' idle window.
+	gatedPins map[string]bool
 	// rawWaiting is the cohorts where, in the last fresh read, some lender
 	// waits: new borrowing stops there at the first sighting (B2, B6). The
 	// debounce (waiting) applies only to the alert and the cohort cooldown.
@@ -180,7 +198,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		settings: s, watches: map[LenderKey]*lenderWatch{},
 		cohortCooldown: map[string]time.Time{}, modelCooldown: map[string]time.Time{},
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
-		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{},
+		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{}, uncountedSince: map[string]time.Time{}, gatedPins: map[string]bool{},
 		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{}, noHole: map[string]NoHoleReplicas{},
 		noHoleRestored: map[string]bool{},
 	}
@@ -562,6 +580,7 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 	for k, r := range g.timeoutHeld {
 		if s, ok := states[k]; !ok || heldOf(s.state) <= r.to {
 			delete(g.timeoutHeld, k)
+			delete(g.gatedPins, k)
 		}
 	}
 	g.observePast(c)
@@ -618,23 +637,34 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 // persisted, and a zero clock would let a pod unplaced for an hour, say
 // within guaranteed before the restart, time out at once. Starting it at the
 // restart costs at most one placement timeout more.
+//
+// The Kueue-backed namespaces that count no borrowing are tracked the same
+// way, apart (uncountedSince): since when each has held GPUs past its Kueue
+// figure (uncountedHeldPast).
 func (g *BorrowGovernor) observePast(c BorrowCycle) {
+	trackPast(g.pastSince, namespaceHeldPast(c.Constraints), c.Now)
+	trackPast(g.uncountedSince, uncountedHeldPast(c.Constraints), c.Now)
+}
+
+// trackPast keeps since, per "namespace/type", the first time held showed
+// GPUs past the figure, and forgets a key once it no longer does.
+func trackPast(since map[string]time.Time, held map[string]map[string]int, now time.Time) {
 	past := map[string]bool{}
-	for ns, perType := range namespaceHeldPast(c.Constraints) {
+	for ns, perType := range held {
 		for t, n := range perType {
 			if n <= 0 {
 				continue
 			}
 			k := ns + "/" + t
 			past[k] = true
-			if _, ok := g.pastSince[k]; !ok {
-				g.pastSince[k] = c.Now
+			if _, ok := since[k]; !ok {
+				since[k] = now
 			}
 		}
 	}
-	for k := range g.pastSince {
+	for k := range since {
 		if !past[k] {
-			delete(g.pastSince, k)
+			delete(since, k)
 		}
 	}
 }
@@ -702,7 +732,7 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 	for i := range decisions {
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
-	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints))
+	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints), uncountedHeldPast(c.Constraints))
 	g.applyPins(decisions, byVariant)
 	return out
 }
@@ -736,20 +766,32 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 	if g.idleSince.IsZero() || g.idleSince.After(now) {
 		g.idleSince = now // unset, or a restored stamp from the future
 	}
+	states := indexStates(requests)
 	if now.Sub(g.idleSince) > g.settings.Cooldown+g.settings.ReleaseActuation {
 		clear(g.watches)
 		clear(g.rawWaiting)
-		clear(g.timeoutHeld)
+		// A pin of a replica held at Kueue's gate (GatedReleases) is no
+		// borrowing state: it stays while its variant is read and has not
+		// landed.
+		for k, r := range g.timeoutHeld {
+			if s, ok := states[k]; g.gatedPins[k] && ok && heldOf(s.state) > r.to {
+				continue
+			}
+			delete(g.timeoutHeld, k)
+			delete(g.gatedPins, k)
+		}
 		clear(g.pastSince)
 		clear(g.noHole)
 		clear(g.noHoleRestored)
 		g.started = false
-		return
+		if len(g.timeoutHeld) == 0 {
+			return
+		}
 	}
-	states := indexStates(requests)
 	for k, r := range g.timeoutHeld {
 		if s, ok := states[k]; ok && heldOf(s.state) <= r.to {
 			delete(g.timeoutHeld, k)
+			delete(g.gatedPins, k)
 		}
 	}
 	byVariant := map[string]int{}
@@ -784,7 +826,31 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 // newest unplaced pod became so, and the group counts once however many of
 // its pods are unplaced. The release takes as many replicas as are past the
 // timeout.
-func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
+//
+// A Kueue-backed namespace that counts no borrowing has its replicas held at
+// Kueue's admission gate released the same way (gatedRelease), past its Kueue
+// figure (uncounted) rather than its guaranteed one.
+func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast, uncounted map[string]map[string]int) []BorrowRelease {
+	return g.eachUnplaced(c, func(req ModelScalingRequest, st domain.VariantReplicaState, timeout time.Duration) []BorrowRelease {
+		rel := g.borrowedRelease(c, req, st, states, heldPast, g.pastSince, timeout)
+		if rel == nil {
+			rel = g.gatedRelease(c, req, st, states, uncounted)
+		}
+		if rel == nil {
+			rel = g.noHoleRelease(c, req, st, states, timeout)
+		}
+		return rel
+	})
+}
+
+// eachUnplaced runs release over every variant with unplaced replicas, at
+// most one release per model per cycle, skipping a model with a release in
+// flight. timeout is the placement timeout, tripled while a cluster-autoscaler
+// scale-up is pending on the variant's pods. A release past the placement
+// timeout starts the model's backoff; one of replicas held at Kueue's gate
+// (ReleaseKueueGate) does not: nothing was borrowed.
+func (g *BorrowGovernor) eachUnplaced(c BorrowCycle,
+	release func(req ModelScalingRequest, st domain.VariantReplicaState, timeout time.Duration) []BorrowRelease) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
 		// A release in flight for any variant of the model makes its counts
@@ -805,15 +871,14 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			if c.ScaleUpPending[req.Namespace+"/"+st.VariantName] {
 				timeout *= 3
 			}
-			rel := g.borrowedRelease(c, req, st, states, heldPast, timeout)
-			if rel == nil {
-				rel = g.noHoleRelease(c, req, st, states, timeout)
-			}
+			rel := release(req, st, timeout)
 			if rel == nil {
 				continue
 			}
 			out = append(out, rel...)
-			g.markBackoffAfter(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false, timeout)
+			if rel[0].Cause != ReleaseKueueGate {
+				g.markBackoffAfter(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false, timeout)
+			}
 			break // one release per model per cycle: the counts above are now stale
 		}
 	}
@@ -822,14 +887,15 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 
 // borrowedRelease is the release of st's unplaced replicas the namespace holds
 // past its guaranteed figure, past timeout (timeoutReleases); nil when none.
-// What it releases is taken off heldPast.
+// What it releases is taken off heldPast. since is, per "namespace/type",
+// since when the namespace has held past the figure (pastSince).
 func (g *BorrowGovernor) borrowedRelease(c BorrowCycle, req ModelScalingRequest, st domain.VariantReplicaState,
-	states map[string]variantRef, heldPast map[string]map[string]int, timeout time.Duration) []BorrowRelease {
+	states map[string]variantRef, heldPast map[string]map[string]int, since map[string]time.Time, timeout time.Duration) []BorrowRelease {
 	typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
 	if !ok {
 		return nil
 	}
-	expired := expiredUnplaced(st, g.pastSince[req.Namespace+"/"+typeKey], timeout, c.Now)
+	expired := expiredUnplaced(st, since[req.Namespace+"/"+typeKey], timeout, c.Now)
 	if expired == 0 {
 		return nil
 	}
@@ -845,6 +911,62 @@ func (g *BorrowGovernor) borrowedRelease(c BorrowCycle, req ModelScalingRequest,
 	}
 	heldPast[req.Namespace][typeKey] -= gpus
 	return g.pinUnit(req, unit, states, max(0, gpus-borrowed))
+}
+
+// gatedRelease is the release of st's replicas held at Kueue's admission gate
+// waiting for quota (VariantReplicaState.GatedAt) in a namespace of
+// UncountedKueueNamespaces, past the placement timeout, when the namespace
+// holds GPUs past its Kueue figure (uncounted, from uncountedHeldPast): Kueue
+// admits nothing past that figure from the cohort, so short of preempting
+// lower-priority work in the queue itself the replica waits gated for good.
+// borrowedRelease's rules over the gated replicas alone: an Unschedulable
+// replica Kueue admitted is not the queue's to give back. The timeout is
+// never stretched: the cluster autoscaler does not act on a gated pod. Cause
+// ReleaseKueueGate. Nil when none expired, or the namespace is within its
+// figure.
+func (g *BorrowGovernor) gatedRelease(c BorrowCycle, req ModelScalingRequest, st domain.VariantReplicaState,
+	states map[string]variantRef, uncounted map[string]map[string]int) []BorrowRelease {
+	if len(st.GatedAt) == 0 || len(uncounted[req.Namespace]) == 0 {
+		return nil
+	}
+	gated := st
+	gated.UnplacedAt, gated.UnplacedReplicas = st.GatedAt, len(st.GatedAt)
+	out := g.borrowedRelease(c, req, gated, states, uncounted, g.uncountedSince, g.settings.PlacementTimeout)
+	for i := range out {
+		out[i].AtGate, out[i].Cause, out[i].GuaranteedGPUs = true, ReleaseKueueGate, 0
+		g.gatedPins[req.Namespace+"/"+out[i].Variant] = true
+	}
+	return out
+}
+
+// GatedReleases is the release half of a cycle that counts no borrowing and
+// has namespaces of UncountedKueueNamespaces (c.Constraints): their replicas
+// held at Kueue's gate past the placement timeout (gatedRelease). Unlike
+// Observe and Releases it touches no borrowing state -- lender watches,
+// cooldowns, the placement hold, the no-hole net, idleSince -- so an entry
+// that counts borrowing and is withheld for a cycle keeps it; call it after
+// HoldReleases. Its pins are kept in force on decisions, and kept through
+// HoldReleases' idle window while their variant is still read.
+func (g *BorrowGovernor) GatedReleases(c BorrowCycle, decisions []domain.VariantDecision) []BorrowRelease {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for k := range g.gatedPins {
+		if _, held := g.timeoutHeld[k]; !held {
+			delete(g.gatedPins, k) // landed
+		}
+	}
+	uncounted := uncountedHeldPast(c.Constraints)
+	trackPast(g.uncountedSince, uncounted, c.Now)
+	states := indexStates(c.Requests)
+	out := g.eachUnplaced(c, func(req ModelScalingRequest, st domain.VariantReplicaState, _ time.Duration) []BorrowRelease {
+		return g.gatedRelease(c, req, st, states, uncounted)
+	})
+	byVariant := map[string]int{}
+	for i := range decisions {
+		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
+	}
+	g.applyPins(decisions, byVariant)
+	return out
 }
 
 // noHoleRelease is the safety net under the node-hole exemption (M3): st's

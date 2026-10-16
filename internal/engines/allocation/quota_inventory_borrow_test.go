@@ -120,7 +120,12 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 			got := constraintsOf(b)
 			Expect(got.NamespaceBorrow).To(BeNil())
 			Expect(got.BorrowWithheld).To(HaveKeyWithValue("team-a", Not(BeEmpty())), "the reason is reported")
-			got.BorrowWithheld = nil // reported only, never decided on
+			got.BorrowWithheld = nil // reported, and read only for the gate release (UncountedKueueNamespaces)
+			// The entry still counts borrowing where it can: a withheld
+			// namespace is left to the borrowing rules, not released at
+			// Kueue's gate against its nominal.
+			Expect(got.KueueCountsBorrowing).To(BeTrue())
+			got.KueueCountsBorrowing = false
 			// The queue's own nominal figures, not borrowing: what it lent out
 			// and can reclaim, what it reaches within nominal (W1, W7).
 			got.NamespaceNominal = nil

@@ -108,6 +108,22 @@ var _ = Describe("the units of the borrowing loss counters", func() {
 		Expect(counter(constants.WVAKueuePreemptedPodsTotal)).To(Equal(map[string]float64{"a,m": 0}))
 	})
 
+	// Review #199 (5): a model whose replicas may be released at Kueue's gate
+	// in a cycle that counts no borrowing has its kueue-gate release counter
+	// at 0 from that cycle, so its first release is an increase. No
+	// preemption counter: nothing is borrowed. Before, the counters were
+	// created only on cycles that count borrowing.
+	It("creates the kueue-gate release counter at 0 on a cycle that counts no borrowing", func() {
+		e := &Engine{Config: config.NewTestConfig(), Recorder: record.NewFakeRecorder(10)}
+		reqs := pd(time.Time{})
+		gatedOnly := []*allocation.ResourceConstraints{{ProviderName: "kq", NamespaceScoped: true, KueueBacked: true,
+			NamespacePools: map[string]map[string]allocation.ResourcePool{"a": {"H100": {Limit: 32, Used: 32}}}}}
+		e.prepareBorrowing(ctx, gatedOnly, reqs, targets, t0)
+		e.releaseBorrowed(ctx, reqs, decisions(), targets, t0)
+		Expect(counter(constants.WVABorrowReleasesTotal)).To(Equal(map[string]float64{"a,m": 0}))
+		Expect(counter(constants.WVAKueuePreemptedPodsTotal)).To(BeEmpty())
+	})
+
 	It("counts a P/D pair released in one cycle as one release", func() {
 		e := &Engine{Config: config.NewTestConfig(), Recorder: record.NewFakeRecorder(10)}
 		now := t0.Add(6 * time.Minute)

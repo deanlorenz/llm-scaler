@@ -145,6 +145,9 @@ type borrowState struct {
 	// reclaims is every guaranteed replica the pass grew into nominal Kueue
 	// reclaims from borrowers (ReclaimDraws); rolled back with the placement.
 	reclaims []BorrowDraw
+	// wakeReclaims is the wakes' reclaims this pass yields for
+	// (GreedyByScoreOptimizer.WakeReclaims); never rolled back.
+	wakeReclaims []BorrowDraw
 	// blocked reports a variant that may not borrow this pass; nil blocks none.
 	blocked func(namespace, modelID, variant string) bool
 	// blockedIn reports a model that may not draw on one cohort's pools this

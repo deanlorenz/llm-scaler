@@ -141,11 +141,15 @@ tests:
   #    extrapolates to the end of the hour and reads the first three losses
   #    as about 3.03: at 79m "> 3" paged on three, "> 3.5" does not; after the
   #    fourth it fires. Model p is only ever preempted (59.2m to 66.7m) and
-  #    has no release series: four preemptions still fire.
+  #    has no release series: four preemptions still fire. Model g, where no
+  #    borrowing is counted, has five replicas released at Kueue's gate
+  #    (cause kueue-gate): no borrowed capacity lost, so it never fires.
   - interval: 50s
     input_series:
       - series: 'wva_borrow_releases_total{exported_namespace="a",model_name="m",cause="placement-timeout",pod="wva-a"}'
         values: '0x80 1x6 2x60'
+      - series: 'wva_borrow_releases_total{exported_namespace="a",model_name="g",cause="kueue-gate",pod="wva-a"}'
+        values: '0x70 1x2 2x2 3x2 4x2 5x80'
       - series: 'wva_kueue_preempted_pods_total{exported_namespace="a",model_name="m",pod="wva-a"}'
         values: '0x90 1x7 2x60'
       - series: 'wva_kueue_preempted_pods_total{exported_namespace="a",model_name="p",pod="wva-a"}'

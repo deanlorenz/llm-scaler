@@ -202,8 +202,42 @@ nominated. The warm pool reads whole units per node from
 for a LeaderWorkerSet by group index, a group counting from its newest
 unplaced pod. Unplaced means `PodScheduled=False` with reason `Unschedulable`,
 or the Kueue gate held longer than a fixed 30 s. The timeout and the share
-optimizer's `HoldFill` share one setting when `placementTimeout` is set; unset,
-`HoldFill` keeps its derived wait.
+optimizer's `HoldFill` share one setting when `placementTimeout` is set;
+unset, `HoldFill` keeps its derived wait. `VariantMetadata.GatedAt` is the
+part of `UnplacedAt` held at the gate waiting for quota
+(`variantmeta.countGated`): a gated pod whose Workload is `QuotaReserved`
+(`kueue.ReservedPods`) waits on an admission check and is left out.
+
+**Gated replicas outside borrowing.** A namespace-scope Kueue entry sets
+`ResourceConstraints.KueueBacked` (and `KueueCountsBorrowing` when it is
+configured to count). The engine lists the gated pods of every namespace such
+an entry carries (`allocation.KueueNamespaces`), borrowing counted or not,
+leaves out the reserved ones (`reservedGated`), and records the rest with
+`BorrowInFlight.SetCycle`, so the KU1 charge (`admittedUsage`) sees them
+everywhere. `allocation.UncountedKueueNamespaces` is the namespaces released
+at the gate: an entry's that counts no borrowing, or a counting entry's whose
+queue is in no cohort (`BorrowWithheld` `no-cohort`). A borrowing cycle
+releases them in `timeoutReleases` (`gatedRelease` after `borrowedRelease`). A
+cycle that counts no borrowing keeps `HoldReleases` and then calls
+`BorrowGovernor.GatedReleases` (`governGated`, its own `gatedCycle`), which
+touches no borrowing state and reads no Events. `gatedRelease` runs
+`borrowedRelease` over `GatedAt` alone, clocked by `uncountedSince`, never
+stretched, with cause `kueue-gate` and no backoff; its pins (`gatedPins`)
+outlast `HoldReleases`' idle window while unlanded. Counted namespaces keep
+`pastSince` and `UnplacedAt` as before
+(`TestGatedReplicaOutsideBorrowingIsChargedAndReleased`).
+
+**A wake's reclaim yields.** `BorrowInFlight.RecordWake` queues each reclaim
+entry. A steady-state cycle that counts borrowing reads the queue
+(`PendingWakeReclaims`: at most `InFlightTTL` old, and only while the record
+still holds the wake's entry) and hands it to the pass as
+`GreedyByScoreOptimizer.WakeReclaims`. `yieldReclaimed` counts those beside the
+pass's own reclaims, so the rules are one
+(`TestWakeReclaimLowersOwnBorrowerOnce`). After the pass, `recordBorrowDraws`
+reports what the pass yielded for (`WakeReclaimsYielded`,
+`YieldedWakeReclaims`), so a reclaim is yielded for once and a cycle without
+a greedy pass loses none. The queue is in memory and does not survive a
+restart.
 
 **Cluster-autoscaler wait.** A `TriggeredScaleUp` Event pauses the clock only
 when its `involvedObject.uid` matches the pod's UID; equal timestamps with a

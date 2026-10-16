@@ -44,6 +44,9 @@ type BorrowInFlight struct {
 	admitted []AdmittedGPUs
 	blocked  map[string]bool
 	cycleAt  time.Time
+	// wakeReclaims is the wakes' reclaim entries (RecordWake) no steady-state
+	// pass has yielded for yet (PendingWakeReclaims, YieldedWakeReclaims).
+	wakeReclaims []BorrowDraw
 }
 
 // DefaultBorrowInFlight is the process-wide record both engines share.
@@ -107,6 +110,7 @@ func (b *BorrowInFlight) Reset() {
 	defer b.mu.Unlock()
 	clear(b.entries)
 	b.lagging, b.gated, b.admitted, b.blocked, b.cycleAt = nil, nil, nil, nil, time.Time{}
+	b.wakeReclaims = nil
 }
 
 // Record adds a pass's draws, ordered now. A variant that borrows again from
@@ -295,9 +299,10 @@ func (b *BorrowInFlight) entriesLocked() []BorrowDraw {
 	return out
 }
 
-// SetCycle records a borrowing cycle's gated and admitted pods and the
-// cohorts closed to new borrowing, for the wake (Unreserved, Blocked). A
-// cycle that counts no borrowing records nothing.
+// SetCycle records a cycle's gated and admitted pods and the cohorts closed
+// to new borrowing, for the wake (Unreserved, Blocked) and the quota charge
+// (GatedGPUs). A cycle that counts no borrowing records the gated and
+// admitted pods of its Kueue-backed namespaces alone, or nothing.
 func (b *BorrowInFlight) SetCycle(gated map[string]map[string]int, admitted []AdmittedGPUs, blocked map[string]bool, now time.Time) {
 	if b == nil {
 		return
@@ -335,9 +340,10 @@ func (b *BorrowInFlight) Unreserved(now time.Time) Unreserved {
 	return u
 }
 
-// GatedGPUs is the GPUs of managed pods the last borrowing cycle read at
-// Kueue's admission gate, per namespace and accelerator ("" when the pod names
-// none), when that cycle is younger than InFlightTTL; nil otherwise. It is the
+// GatedGPUs is the GPUs of managed pods the last cycle read at Kueue's
+// admission gate, per namespace and accelerator ("" when the pod names none),
+// in every Kueue-backed namespace whether or not it counts borrowing, when
+// that cycle is younger than InFlightTTL; nil otherwise. It is the
 // GatedSource a Kueue-backed quota charges its figures with (KU1).
 func (b *BorrowInFlight) GatedGPUs(now time.Time) map[string]map[string]int {
 	gated := b.Unreserved(now).Gated

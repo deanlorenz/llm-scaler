@@ -120,6 +120,12 @@ type VariantMetadata struct {
 	UnplacedSince    time.Time
 	UnplacedPods     []string
 	UnplacedAt       map[string]time.Time
+	// GatedAt is the part of UnplacedAt held at Kueue's admission gate: per
+	// replica (pod name, or LeaderWorkerSet group index) one of whose
+	// unplaced pods is gated, when it became unplaced. Kueue has not admitted
+	// it; the placement timeout releases it in a namespace that counts no
+	// borrowing, where nothing else will.
+	GatedAt map[string]time.Time
 }
 
 // ToReplicaState projects the metadata onto the VariantReplicaState the analyzers
@@ -152,6 +158,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		UnplacedSince:    m.UnplacedSince,
 		UnplacedPods:     m.UnplacedPods,
 		UnplacedAt:       m.UnplacedAt,
+		GatedAt:          m.GatedAt,
 		GPUsPerReplica:   m.GPUsPerReplica,
 		Role:             m.Role,
 		AcceleratorName:  m.AcceleratorName,
