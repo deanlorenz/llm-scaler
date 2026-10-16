@@ -38,8 +38,13 @@ type NamespaceBorrow struct {
 	// PreemptAfter is the guaranteed growth Kueue admits before it preempts
 	// for the namespace: what its reclaiming queues keep unused plus the part
 	// of their unused nominal the cohort's free pool covers. It needs a node
-	// hole like any replica, and debits the shared pool.
+	// hole like any replica, and debits the shared pool -- all but its
+	// PreemptKept part.
 	PreemptAfter int
+	// PreemptKept is the part of PreemptAfter the namespace's reclaiming
+	// queues keep unused: no cohort pool holds it, so growth into it debits
+	// none (M-m1). Taken first.
+	PreemptKept int
 	// NominalLentOut is the part of the namespace's nominal quota it cannot
 	// reach: a queue that cannot reclaim lent it to a peer, so its guaranteed
 	// figure is below nominal (kueue.ReasonNominalLentOut). Reported, not

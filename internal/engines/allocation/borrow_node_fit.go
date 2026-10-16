@@ -97,11 +97,11 @@ func (v *NodeView) PlaceReplicasReclaiming(reps []ReplicaShape, commit bool, rec
 			return false, nil
 		}
 		t := left[k].take(g)
-		left[k] = Reclaim{After: left[k].After - t.After, GPUs: left[k].GPUs - t.GPUs}
+		left[k] = left[k].sub(t)
 		if took == nil {
 			took = map[string]Reclaim{}
 		}
-		took[k] = Reclaim{After: took[k].After + t.After, GPUs: took[k].GPUs + t.GPUs}
+		took[k] = took[k].add(t)
 	}
 	if commit {
 		v.adopt(trial)

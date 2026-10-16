@@ -311,6 +311,9 @@ type QueueFigures struct {
 	// That growth is admitted without preemption, so it needs a node hole like
 	// any other; it debits the cohort's free pool (B3). 0 otherwise.
 	PreemptAfter int
+	// PreemptKept is the part of PreemptAfter the queue keeps unused,
+	// max(0, G - U): no cohort pool holds it, so growth into it debits none.
+	PreemptKept int
 	// CohortFree is the cohort's free pool for this key; 0 when withheld.
 	CohortFree int
 	// KueueBorrowed is Kueue's own borrowed figure, a cross-check.
@@ -491,7 +494,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				f.CohortFree = cohortFree(members[q.Cohort], key)
 				f.Guaranteed, f.Borrowable = reach(q, r, f.CohortFree)
 				f.WithinNominal = withinNominal(q, r, f.CohortFree)
-				f.LentOut, f.PreemptAfter = reclaimable(q, r, f.CohortFree, peersBorrowed(members[q.Cohort], q.Name, key))
+				f.LentOut, f.PreemptAfter, f.PreemptKept = reclaimable(q, r, f.CohortFree, peersBorrowed(members[q.Cohort], q.Name, key))
 				f.CoHeadroom, f.CoKept = coReach(q, key.Flavor)
 				if f.Guaranteed < r.Nominal {
 					f.GuaranteedReason = ReasonNominalLentOut
@@ -768,15 +771,17 @@ func withinNominal(q QueueState, r QueueResource, free int) int {
 // and only as far as they borrow (lentOut): the GPUs a node hole is not
 // needed for, since a borrower's pods hold them now. Unused nominal nobody
 // borrows is not lent out: growth into it needs a node like any other, and
-// Kueue preempts nothing for it. Both 0 for a queue that cannot reclaim.
-func reclaimable(q QueueState, r QueueResource, free, borrowed int) (lentOut, after int) {
+// Kueue preempts nothing for it. keptPart is the part of after the queue keeps
+// unused, which no cohort pool holds. All 0 for a queue that cannot reclaim.
+func reclaimable(q QueueState, r QueueResource, free, borrowed int) (lentOut, after, keptPart int) {
 	if !q.CanReclaim() {
-		return 0, 0
+		return 0, 0, 0
 	}
 	_, kept := r.lent()
 	unused := max(0, r.Nominal-max(r.Reserved, kept))
 	fromPool := min(unused, free)
-	return min(borrowed, unused-fromPool), max(0, kept-r.Reserved) + fromPool
+	keptPart = max(0, kept-r.Reserved)
+	return min(borrowed, unused-fromPool), keptPart + fromPool, keptPart
 }
 
 // peersBorrowed is what the cohort's members other than self borrow of key,

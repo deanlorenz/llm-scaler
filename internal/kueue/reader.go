@@ -540,6 +540,7 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					WithinNominal:  f.WithinNominal,
 					LentOut:        f.LentOut,
 					PreemptAfter:   f.PreemptAfter,
+					PreemptKept:    f.PreemptKept,
 					SourceBorrowed: f.KueueBorrowed,
 					Reason:         string(reason),
 					PinRequired:    f.PinRequired,

@@ -39,13 +39,22 @@ type BorrowDraw struct {
 	// on the variant's own draw still in flight (GreedyByScoreOptimizer.
 	// BorrowCredit): borrowed this pass, already in the record.
 	CreditGPUs, CreditReplicas int
-	// Reclaim marks growth within nominal that Kueue admits by preempting
-	// borrowers (Reclaim.GPUs), not a draw on the pool: held in flight so
-	// that no later decision -- the next cycle, a wake -- counts the same
-	// borrowed GPUs as reclaimable again (DeductReclaimed). Cohort, Flavor
-	// and Resource name the chunk whose read shows it once it lands; empty
-	// when the namespace's cohorts have none serving the accelerator.
-	Reclaim bool
+	// Reclaim marks growth within a reclaiming queue's nominal (Reclaim): GPUs
+	// is what Kueue admits by preempting borrowers (Reclaim.GPUs), After what
+	// it admits before (Reclaim.After), Kept the part of After the queues keep
+	// unused. Held in flight so that no later decision -- the next cycle, a
+	// wake -- counts the same borrowed GPUs as reclaimable again, nor the same
+	// PreemptAfter (DeductReclaimed), and the pool part of After, After less
+	// Kept, comes off the pool (DeductUnreservedAt). Cohort, Flavor and
+	// Resource name the chunk whose read shows it once it lands, and its pool
+	// part comes off; empty when the namespace's cohorts have none serving
+	// the accelerator.
+	Reclaim     bool
+	After, Kept int
+	// CreditAfter and CreditKept are, on a Reclaim entry, the part of After
+	// and Kept re-placed on the variant's own entry in flight, as CreditGPUs
+	// is of GPUs.
+	CreditAfter, CreditKept int
 	// Accelerator is the type a Reclaim entry was placed for.
 	Accelerator string
 	// NoHole marks a Reclaim entry whose replica was ordered without a node
@@ -64,6 +73,11 @@ type BorrowDraw struct {
 	Wake bool
 }
 
+// reclaimOf is a Reclaim entry's growth as a Reclaim.
+func (d BorrowDraw) reclaimOf() Reclaim {
+	return Reclaim{After: d.After, Kept: d.Kept, GPUs: d.GPUs}
+}
+
 // nsBorrowLeft is what one namespace may still borrow of one accelerator type
 // in this pass.
 type nsBorrowLeft struct {
@@ -73,8 +87,9 @@ type nsBorrowLeft struct {
 	// after and lentOut are the namespace's Reclaim still to grow into:
 	// guaranteed growth Kueue admits before it preempts for it, then what it
 	// reclaims from borrowers (NamespaceBorrow.PreemptAfter and LentOut).
-	// Growth into either debits the pool.
-	after, lentOut int
+	// Growth into either debits the pool, all but after's kept part (kept,
+	// NamespaceBorrow.PreemptKept, M-m1).
+	after, kept, lentOut int
 	// priority is NamespaceBorrow.HighestPriority, the higher of two entries'.
 	priority *int32
 	// coHeadroom and coKept are NamespaceBorrow.CoHeadroom and CoKept still
@@ -116,7 +131,7 @@ type borrowState struct {
 	// (ReclaimCredit): DeductReclaimed took them off its namespace's LentOut,
 	// and the pass re-places those very replicas, so they are the variant's
 	// to re-place, not a second reclaim of the same borrowed GPUs (NEW-1).
-	reclaimCredit map[string]map[string]int
+	reclaimCredit map[string]map[string]Reclaim
 	// flavors is every replica the pass placed on a Kueue flavor's nodes, in
 	// order (PlacedFlavors); rolled back with the placement.
 	flavors []flavorUse
@@ -158,7 +173,8 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				}
 				prev, seen := bs.borrow[ns][accType]
 				if !seen {
-					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, after: b.PreemptAfter, lentOut: b.LentOut, priority: b.HighestPriority,
+					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, after: b.PreemptAfter, kept: min(b.PreemptKept, b.PreemptAfter),
+						lentOut: b.LentOut, priority: b.HighestPriority,
 						coHeadroom: maps.Clone(b.CoHeadroom), coKept: maps.Clone(b.CoKept)}
 					continue
 				}
@@ -171,6 +187,7 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				// later (N-m1).
 				prev.lentOut = min(prev.lentOut, b.LentOut)
 				prev.after = max(prev.after, b.PreemptAfter)
+				prev.kept = min(prev.kept, b.PreemptKept)
 				if b.HighestPriority != nil && (prev.priority == nil || *b.HighestPriority > *prev.priority) {
 					prev.priority = b.HighestPriority
 				}
@@ -193,9 +210,10 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				if prev, seen := bs.lent[ns][accType]; seen {
 					prev.lentOut = min(prev.lentOut, f.LentOut)
 					prev.after = max(prev.after, f.PreemptAfter)
+					prev.kept = min(prev.kept, f.PreemptKept)
 					continue
 				}
-				bs.lent[ns][accType] = &nsBorrowLeft{after: f.PreemptAfter, lentOut: f.LentOut}
+				bs.lent[ns][accType] = &nsBorrowLeft{after: f.PreemptAfter, kept: min(f.PreemptKept, f.PreemptAfter), lentOut: f.LentOut}
 			}
 		}
 	}
@@ -246,13 +264,15 @@ func (bs *borrowState) debitPool(ns, acc string, n int) {
 	}
 }
 
-// reclaimDraw is the in-flight entry of one guaranteed replica of gpus GPUs
-// that Kueue admits by preempting borrowers (BorrowDraw.Reclaim), named after
-// the first of the namespace's cohort chunks serving acc, whose read shows the
-// replica once it lands.
-func (bs *borrowState) reclaimDraw(ns, modelID, variant, acc string, gpus, target int) BorrowDraw {
-	d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: variant, GPUs: gpus, Replicas: 1, Target: target,
-		Reclaim: true, Accelerator: acc}
+// reclaimDraw is the in-flight entry of one guaranteed replica grown into its
+// namespace's Reclaim (BorrowDraw.Reclaim): took.GPUs Kueue admits by
+// preempting borrowers, took.After it admits before -- its Kept part from what
+// the queues keep, the rest from the cohort's free pool. Named after the
+// first of the namespace's cohort chunks serving acc, whose read shows the
+// replica once it lands, and the chunk its pool part comes off.
+func (bs *borrowState) reclaimDraw(ns, modelID, variant, acc string, took Reclaim, target int) BorrowDraw {
+	d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: variant, GPUs: took.GPUs, After: took.After, Kept: took.Kept,
+		Replicas: 1, Target: target, Reclaim: true, Accelerator: acc}
 	if cs := bs.cohortChunks(ns, acc); len(cs) > 0 {
 		d.Cohort, d.Flavor, d.Resource = cs[0].Cohort, cs[0].Flavor, cs[0].Resource
 	}
@@ -294,7 +314,7 @@ type borrowSave struct {
 	draws      int
 	guaranteed map[string]int
 	credit     map[string]map[string]int
-	reclaimCr  map[string]map[string]int
+	reclaimCr  map[string]map[string]Reclaim
 	flavors    int
 	reclaims   int
 }
@@ -453,34 +473,34 @@ func (bs *borrowState) setReclaimCredit(draws []BorrowDraw) {
 	if bs == nil || len(draws) == 0 {
 		return
 	}
-	bs.reclaimCredit = map[string]map[string]int{}
+	bs.reclaimCredit = map[string]map[string]Reclaim{}
 	for _, d := range draws {
-		if !d.Reclaim || d.GPUs <= 0 {
+		if !d.Reclaim || (d.GPUs <= 0 && d.After <= 0) {
 			continue
 		}
 		k := d.Namespace + "/" + d.Variant
 		if bs.reclaimCredit[k] == nil {
-			bs.reclaimCredit[k] = map[string]int{}
+			bs.reclaimCredit[k] = map[string]Reclaim{}
 		}
-		bs.reclaimCredit[k][d.Accelerator] += d.GPUs
+		bs.reclaimCredit[k][d.Accelerator] = bs.reclaimCredit[k][d.Accelerator].add(d.reclaimOf())
 	}
 }
 
 // ownReclaim is what of variant v's own growth by reclaim in flight the pass
 // has not re-placed yet, on accelerator acc, and the key it is kept under.
-func (bs *borrowState) ownReclaim(v, acc string) (int, string) {
+func (bs *borrowState) ownReclaim(v, acc string) (Reclaim, string) {
 	if k, ok := accelerator.FindKey(bs.reclaimCredit[v], acc); ok {
 		return bs.reclaimCredit[v][k], k
 	}
-	return 0, ""
+	return Reclaim{}, ""
 }
 
 // cloneCredit copies a credit map.
-func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
+func cloneCredit[V any](m map[string]map[string]V) map[string]map[string]V {
 	if m == nil {
 		return nil
 	}
-	out := make(map[string]map[string]int, len(m))
+	out := make(map[string]map[string]V, len(m))
 	for k, v := range m {
 		out[k] = maps.Clone(v)
 	}
@@ -795,7 +815,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		own, ownKey := bs.ownReclaim(p.namespace+"/"+variant, acc)
 		var share Reclaim
 		if lent != nil {
-			share = Reclaim{After: lent.after, GPUs: lent.lentOut + own}
+			share = Reclaim{After: lent.after, Kept: lent.kept, GPUs: lent.lentOut}.add(own)
 		}
 		reclaim := share.exempt(g)
 		if reclaim && bs.reclaimBlocked != nil && bs.reclaimBlocked(p.namespace, p.modelID) {
@@ -824,21 +844,29 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			p.guaranteed[key] = left - g
 		}
 		if lent != nil {
-			// Kueue charges it to the cohort either way: from the free pool
-			// first, then from what it preempts.
+			// Kueue charges it to the cohort either way: from what the
+			// queues keep first, which no pool holds (M-m1), then from the
+			// free pool, then from what it preempts.
 			took := share.take(g)
-			fromOwn := min(own, took.GPUs)
-			lent.after -= took.After
-			lent.lentOut -= took.GPUs - fromOwn
-			if fromOwn > 0 {
-				bs.reclaimCredit[p.namespace+"/"+variant][ownKey] -= fromOwn
+			fromOwn := took.atMost(own)
+			fresh := took.sub(fromOwn)
+			lent.after -= fresh.After
+			lent.kept = max(0, lent.kept-fresh.Kept)
+			lent.lentOut -= fresh.GPUs
+			if fromOwn != (Reclaim{}) {
+				bs.reclaimCredit[p.namespace+"/"+variant][ownKey] = own.sub(fromOwn)
 			}
-			bs.debitPool(p.namespace, acc, took.After+took.GPUs)
-			if took.GPUs > 0 {
-				d := bs.reclaimDraw(p.namespace, p.modelID, variant, acc, took.GPUs, target)
+			// The pool part of its own entry came off the pool before the
+			// pass (DeductUnreservedAt).
+			bs.debitPool(p.namespace, acc, took.pool()-fromOwn.pool()+took.GPUs)
+			if took.After > 0 || took.GPUs > 0 {
+				// Held in the shared record, so the wake and the next cycle
+				// see what of the pool and of LentOut it took (DeductReclaimed,
+				// DeductUnreservedAt).
+				d := bs.reclaimDraw(p.namespace, p.modelID, variant, acc, took, target)
 				// What it re-placed of its own entry is in the record already.
-				d.CreditGPUs = fromOwn
-				if fromOwn == took.GPUs {
+				d.CreditGPUs, d.CreditAfter, d.CreditKept = fromOwn.GPUs, fromOwn.After, fromOwn.Kept
+				if fromOwn == took {
 					d.CreditReplicas = 1
 				}
 				d.NoHole = !onNode

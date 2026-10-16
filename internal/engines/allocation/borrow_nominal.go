@@ -32,6 +32,9 @@ type NominalFigures struct {
 	// its reclaiming queues keep unused plus what the cohort's free pool
 	// covers. It needs a node hole.
 	PreemptAfter int
+	// PreemptKept is the part of PreemptAfter its queues keep unused, which
+	// no pool holds.
+	PreemptKept int
 	// WithinNominal is what it can reach without borrowing (B7).
 	WithinNominal int
 	// Guaranteed is what it reaches whatever the cohort's free pool holds:
@@ -74,6 +77,7 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 				if r.Counted() {
 					f.LentOut += r.LentOut
 					f.PreemptAfter += r.PreemptAfter
+					f.PreemptKept += r.PreemptKept
 				}
 			}
 			f.Flavors = rowFlavors(rowsOfType(rows, accType))
@@ -143,10 +147,35 @@ func (q *QuotaInventory) NamespaceNominal(activeNamespaces []string) map[string]
 // queues' nominal splits (kueue.QueueFigures): After is the growth Kueue
 // admits before it preempts for it, which needs a node hole; GPUs is what it
 // then reclaims from borrowers, which does not. A replica places without a
-// hole only when nothing of After is left and GPUs covers it whole.
+// hole only when nothing of After is left and GPUs covers it whole. Kept is
+// the part of After the queues keep unused, taken first: no cohort pool holds
+// it, so growth into it debits none (M-m1); the rest of After comes out of
+// the cohort's free pool.
 type Reclaim struct {
 	After int
+	Kept  int
 	GPUs  int
+}
+
+// pool is the part of After the cohort's free pool covers.
+func (r Reclaim) pool() int {
+	return max(0, r.After-max(0, r.Kept))
+}
+
+// sub is r less o, each figure clamped at 0, Kept at most After.
+func (r Reclaim) sub(o Reclaim) Reclaim {
+	after := max(0, r.After-o.After)
+	return Reclaim{After: after, Kept: min(after, max(0, r.Kept-o.Kept)), GPUs: max(0, r.GPUs-o.GPUs)}
+}
+
+// add is r plus o.
+func (r Reclaim) add(o Reclaim) Reclaim {
+	return Reclaim{After: r.After + o.After, Kept: r.Kept + o.Kept, GPUs: r.GPUs + o.GPUs}
+}
+
+// atMost is r with each figure at most o's.
+func (r Reclaim) atMost(o Reclaim) Reclaim {
+	return Reclaim{After: min(r.After, o.After), Kept: min(r.Kept, o.Kept), GPUs: min(r.GPUs, o.GPUs)}
 }
 
 // exempt reports whether a replica of g GPUs grown next is Kueue's to
@@ -161,26 +190,26 @@ func (r Reclaim) exempt(g int) bool {
 	return r.After <= 0 && r.GPUs >= g
 }
 
-// take is what a replica of g GPUs grown next consumes: After first, then
-// GPUs, each clamped at 0.
+// take is what a replica of g GPUs grown next consumes: After first -- its
+// Kept part first within it -- then GPUs, each clamped at 0.
 func (r Reclaim) take(g int) Reclaim {
 	after := min(g, max(0, r.After))
-	return Reclaim{After: after, GPUs: min(g-after, max(0, r.GPUs))}
+	return Reclaim{After: after, Kept: min(after, max(0, r.Kept)), GPUs: min(g-after, max(0, r.GPUs))}
 }
 
 // reclaimFor is ns's Reclaim of the type acc, as constraints read it: from
 // NamespaceBorrow where the namespace is counted, else from NamespaceNominal.
 // Two entries reading one queue give the cautious figure: the smaller GPUs,
-// the larger After.
+// the larger After, the smaller Kept.
 func reclaimFor(constraints []*ResourceConstraints, ns, acc string) Reclaim {
 	var got Reclaim
 	seen := false
-	take := func(lentOut, after int) {
+	take := func(lentOut, after, kept int) {
 		if !seen {
-			got, seen = Reclaim{After: after, GPUs: lentOut}, true
+			got, seen = Reclaim{After: after, Kept: min(kept, after), GPUs: lentOut}, true
 			return
 		}
-		got.GPUs, got.After = min(got.GPUs, lentOut), max(got.After, after)
+		got.GPUs, got.After, got.Kept = min(got.GPUs, lentOut), max(got.After, after), min(got.Kept, kept)
 	}
 	for _, c := range constraints {
 		if c == nil {
@@ -188,10 +217,10 @@ func reclaimFor(constraints []*ResourceConstraints, ns, acc string) Reclaim {
 		}
 		if k, ok := accelerator.FindKey(c.NamespaceBorrow[ns], acc); ok {
 			b := c.NamespaceBorrow[ns][k]
-			take(b.LentOut, b.PreemptAfter)
+			take(b.LentOut, b.PreemptAfter, b.PreemptKept)
 		} else if k, ok := accelerator.FindKey(c.NamespaceNominal[ns], acc); ok {
 			f := c.NamespaceNominal[ns][k]
-			take(f.LentOut, f.PreemptAfter)
+			take(f.LentOut, f.PreemptAfter, f.PreemptKept)
 		}
 	}
 	return got
@@ -232,7 +261,8 @@ func (bs *borrowState) withLent(ns string, variants []string, available map[stri
 	lent := bs.lentLeft(ns)
 	if bs != nil {
 		for _, v := range variants {
-			for t, n := range bs.reclaimCredit[ns+"/"+v] {
+			for t, r := range bs.reclaimCredit[ns+"/"+v] {
+				n := r.GPUs
 				if n <= 0 {
 					continue
 				}

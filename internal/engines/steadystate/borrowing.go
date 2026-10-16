@@ -263,17 +263,11 @@ func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisi
 			if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] {
 				continue
 			}
-			if t, ok := targets[d.Namespace+"/"+d.Variant]; ok && t < d.Target {
-				cut := d.Target - t
-				if cut >= d.Replicas {
+			if t, ok := targets[d.Namespace+"/"+d.Variant]; ok {
+				var left bool
+				if d, left = d.TrimmedTo(t); !left {
 					continue
 				}
-				per := (d.GPUs + d.Replicas - 1) / d.Replicas
-				d.Replicas -= cut
-				d.GPUs = min(d.GPUs, d.Replicas*per)
-				d.CreditReplicas = min(d.CreditReplicas, d.Replicas)
-				d.CreditGPUs = min(d.CreditGPUs, d.GPUs)
-				d.Target = t
 			}
 			out = append(out, d)
 		}

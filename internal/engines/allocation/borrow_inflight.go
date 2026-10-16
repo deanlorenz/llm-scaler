@@ -127,17 +127,20 @@ func (b *BorrowInFlight) RecordAt(draws []BorrowDraw, now time.Time) {
 		d.OrderedAt, d.ResolvedAt = now, time.Time{}
 		// What was re-placed on the variant's own draw is already here.
 		d.GPUs, d.Replicas = d.GPUs-d.CreditGPUs, d.Replicas-d.CreditReplicas
-		d.CreditGPUs, d.CreditReplicas = 0, 0
+		d.After, d.Kept = d.After-d.CreditAfter, max(0, d.Kept-d.CreditKept)
+		d.CreditGPUs, d.CreditReplicas, d.CreditAfter, d.CreditKept = 0, 0, 0, 0
 		prev, ok := b.entries[k]
 		if ok {
 			d.GPUs += prev.GPUs
+			d.After += prev.After
+			d.Kept += prev.Kept
 			d.Replicas += prev.Replicas
 			d.Target = max(d.Target, prev.Target)
 			d.OrderedAt = prev.OrderedAt
 			d.ClosesRestricted = d.ClosesRestricted || prev.ClosesRestricted
 			d.NoHole = d.NoHole || prev.NoHole
 		}
-		if d.GPUs <= 0 || d.Replicas <= 0 {
+		if (d.GPUs <= 0 && d.After <= 0) || d.Replicas <= 0 {
 			continue
 		}
 		b.entries[k] = d
@@ -187,22 +190,50 @@ func (b *BorrowInFlight) ObserveAt(observed map[string]VariantObservation, now t
 			continue
 		}
 		// Replicas that now exist are no longer in flight; they lag.
-		per := ceilDiv(d.GPUs, d.Replicas)
+		still := d.replicasOf(missing)
 		resolved := d
 		resolved.Replicas = d.Replicas - missing
-		resolved.GPUs = d.GPUs - min(d.GPUs, missing*per)
+		resolved.GPUs, resolved.After = d.GPUs-still.GPUs, d.After-still.After
+		resolved.Kept = min(resolved.After, max(0, d.Kept-still.Kept))
 		resolved.ResolvedAt = now
-		if resolved.GPUs > 0 {
+		if resolved.GPUs > 0 || resolved.After > 0 {
 			b.lagging = append(b.lagging, resolved)
 		}
 		if missing == 0 {
 			delete(b.entries, k)
 			continue
 		}
-		d.GPUs = min(d.GPUs, missing*per)
-		d.Replicas = missing
-		b.entries[k] = d
+		b.entries[k] = still
 	}
+}
+
+// replicasOf is d cut to n of its replicas, each figure shared per replica,
+// rounded up, its credits clamped to what is left.
+func (d BorrowDraw) replicasOf(n int) BorrowDraw {
+	part := func(v int) int { return min(v, n*ceilDiv(v, d.Replicas)) }
+	out := d
+	out.Replicas = n
+	out.GPUs, out.After = part(d.GPUs), part(d.After)
+	out.Kept = min(out.After, part(d.Kept))
+	out.CreditReplicas = min(d.CreditReplicas, n)
+	out.CreditGPUs, out.CreditAfter, out.CreditKept = min(d.CreditGPUs, out.GPUs), min(d.CreditAfter, out.After), min(d.CreditKept, out.Kept)
+	return out
+}
+
+// TrimmedTo is d cut to target: the replicas it ordered above target are not
+// in flight, each figure and credit shared per replica (replicasOf). Reports
+// false when nothing is left.
+func (d BorrowDraw) TrimmedTo(target int) (BorrowDraw, bool) {
+	cut := d.Target - target
+	if cut <= 0 {
+		return d, true
+	}
+	if cut >= d.Replicas {
+		return d, false
+	}
+	d = d.replicasOf(d.Replicas - cut)
+	d.Target = target
+	return d, true
 }
 
 // Trim lowers the draws to the targets the engine decided this cycle, keyed
@@ -221,29 +252,12 @@ func (b *BorrowInFlight) Trim(targets map[string]int) {
 		if !ok || d.Wake {
 			continue // a wake's target is its own, not this engine's
 		}
-		if d, keep := trimDraw(d, t); keep {
+		if d, keep := d.TrimmedTo(t); keep {
 			b.entries[k] = d
 		} else {
 			delete(b.entries, k)
 		}
 	}
-}
-
-// trimDraw cuts d to target: the replicas it ordered above target are not in
-// flight. Reports false when nothing is left.
-func trimDraw(d BorrowDraw, target int) (BorrowDraw, bool) {
-	cut := d.Target - target
-	if cut <= 0 {
-		return d, true
-	}
-	if cut >= d.Replicas {
-		return d, false
-	}
-	per := ceilDiv(d.GPUs, d.Replicas)
-	d.Replicas -= cut
-	d.GPUs = min(d.GPUs, d.Replicas*per)
-	d.Target = target
-	return d, true
 }
 
 // Entries returns the draws still in flight -- ordered, their pods not
@@ -374,9 +388,23 @@ func DeductUnreservedAt(constraints []*ResourceConstraints, u Unreserved) []*Res
 	if !HasBorrowing(constraints) || (len(u.InFlight) == 0 && len(u.Gated) == 0 && len(u.Admitted) == 0 && !anyPending(constraints)) {
 		return constraints
 	}
-	// Growth by Kueue's reclaim draws on no pool (DeductReclaimed).
-	inFlight := lagCoveredByGated(slices.DeleteFunc(slices.Clone(u.InFlight), func(d BorrowDraw) bool { return d.Reclaim }),
-		u.Gated, u.Admitted)
+	// Growth within a reclaiming queue's nominal draws on the pool only for
+	// the part of its PreemptAfter the pool covers -- not what the queues
+	// keep, not what Kueue reclaims from borrowers (DeductReclaimed) -- and
+	// that part is held like a draw on its chunk, so a wake or a queue that
+	// cannot reclaim does not reach the same GPUs through the pool meanwhile.
+	draws := make([]BorrowDraw, 0, len(u.InFlight))
+	for _, d := range u.InFlight {
+		if d.Reclaim {
+			pool := d.reclaimOf().pool()
+			if pool <= 0 {
+				continue
+			}
+			d.GPUs, d.Reclaim, d.ClosesRestricted = pool, false, false
+		}
+		draws = append(draws, d)
+	}
+	inFlight := lagCoveredByGated(draws, u.Gated, u.Admitted)
 	out := make([]*ResourceConstraints, 0, len(constraints))
 	for _, c := range constraints {
 		if c == nil || c.NamespaceBorrow == nil || len(c.SharedPools) == 0 {
@@ -506,11 +534,14 @@ func drawAccelerator(d BorrowDraw) string {
 // the Reclaim entries of inFlight, in flight, or lagging until a read of
 // their chunk after they resolved (W3). Without one, the GPUs peers borrow
 // stay reclaimable to the next cycle and the next wake, which would order
-// replicas for the same borrowed GPUs again (N1). Every figure clamps at 0.
+// replicas for the same borrowed GPUs again (N1). PreemptAfter and PreemptKept
+// lose the entries' After and Kept the same way: growth Kueue admitted before
+// preempting is not there to admit again. Every figure clamps at 0, Kept at
+// most After.
 func DeductReclaimed(constraints []*ResourceConstraints, inFlight []BorrowDraw) []*ResourceConstraints {
 	var reclaims []BorrowDraw
 	for _, d := range inFlight {
-		if d.Reclaim && d.GPUs > 0 {
+		if d.Reclaim && (d.GPUs > 0 || d.After > 0) {
 			reclaims = append(reclaims, d)
 		}
 	}
@@ -535,14 +566,16 @@ func DeductReclaimed(constraints []*ResourceConstraints, inFlight []BorrowDraw) 
 			if k, ok := accelerator.FindKey(cc.NamespaceBorrow[d.Namespace], d.Accelerator); ok {
 				perType := maps.Clone(cc.NamespaceBorrow[d.Namespace])
 				b := perType[k]
-				b.LentOut = max(0, b.LentOut-d.GPUs)
+				left := Reclaim{After: b.PreemptAfter, Kept: b.PreemptKept, GPUs: b.LentOut}.sub(d.reclaimOf())
+				b.LentOut, b.PreemptAfter, b.PreemptKept = left.GPUs, left.After, left.Kept
 				perType[k] = b
 				cc.NamespaceBorrow[d.Namespace] = perType
 			}
 			if k, ok := accelerator.FindKey(cc.NamespaceNominal[d.Namespace], d.Accelerator); ok {
 				perType := maps.Clone(cc.NamespaceNominal[d.Namespace])
 				f := perType[k]
-				f.LentOut = max(0, f.LentOut-d.GPUs)
+				left := Reclaim{After: f.PreemptAfter, Kept: f.PreemptKept, GPUs: f.LentOut}.sub(d.reclaimOf())
+				f.LentOut, f.PreemptAfter, f.PreemptKept = left.GPUs, left.After, left.Kept
 				perType[k] = f
 				cc.NamespaceNominal[d.Namespace] = perType
 			}

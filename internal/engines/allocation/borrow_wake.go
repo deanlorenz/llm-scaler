@@ -16,11 +16,13 @@ type WakeReplica struct {
 
 // WakeDraws is what a wake of ns's replicas takes that the next Kueue read
 // does not show yet (N3), as in-flight entries for the shared record: the
-// cohort's free pool it grows through -- past a queue's guaranteed figure, or
-// into a reclaiming queue's nominal the pool covers (Reclaim.After) -- as
-// draws on its cohort's chunks, and what Kueue reclaims for it from
-// borrowers (Reclaim.GPUs) as Reclaim entries. Without them the steady-state
-// engine, in the same window, borrows the very GPUs the wake took.
+// cohort's free pool it grows through past a queue's guaranteed figure, as
+// draws on its cohort's chunks; and its growth into a reclaiming queue's
+// nominal as Reclaim entries -- what Kueue admits before preempting
+// (Reclaim.After, whose pool part comes off the pool and whose kept part
+// takes nothing from it, M-m1) and what it reclaims from borrowers
+// (Reclaim.GPUs). Without them the steady-state engine, in the same window,
+// borrows the very GPUs the wake took.
 //
 // constraints are the wake's own, before WithinNominal drops the borrowing
 // figures; prior is, per accelerator, what the tick's earlier wakes of ns
@@ -28,7 +30,7 @@ type WakeReplica struct {
 // (ReclaimableNominal less the tick's earlier wakes). The replicas grow ns in
 // order, as PlaceReplicasReclaiming takes them. A draw's GPUs are capped at
 // the chunks' free figure: what is not free Kueue does not admit. Nil when
-// ns grows within what it keeps.
+// ns grows within its guaranteed figure on a queue that cannot reclaim.
 func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []WakeReplica, prior map[string]int,
 	reclaim map[string]Reclaim) []BorrowDraw {
 	type typeState struct {
@@ -82,7 +84,8 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 			}
 			break
 		}
-		s.reclaim = Reclaim{After: reclaimFor(constraints, ns, acc).After}
+		fresh := reclaimFor(constraints, ns, acc)
+		s.reclaim = Reclaim{After: fresh.After, Kept: fresh.Kept}
 		if k, ok := accelerator.FindKey(reclaim, acc); ok {
 			s.reclaim.GPUs = reclaim[k].GPUs
 		}
@@ -111,9 +114,11 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 		// that did find a hole places, and the watch never fires.
 		noHole := past == 0 && s.reclaim.exempt(g)
 		took := s.reclaim.take(g - past)
-		s.reclaim.After -= took.After
-		s.reclaim.GPUs -= took.GPUs
-		pool := past + took.After
+		s.reclaim = s.reclaim.sub(took)
+		// Past guaranteed, through the pool as a draw; within it, the pool
+		// part of After goes in the Reclaim entry below, and the kept part
+		// takes nothing from the pool (M-m1).
+		pool := past
 		for i := range s.chunks {
 			if pool <= 0 {
 				break
@@ -129,9 +134,9 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 			out = append(out, BorrowDraw{Namespace: ns, ModelID: modelID, Variant: r.Variant, Cohort: ch.Cohort,
 				Flavor: ch.Flavor, Resource: ch.Resource, GPUs: n, Replicas: 1, Target: 1, Placement: &placement, Wake: true})
 		}
-		if took.GPUs > 0 {
-			d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: r.Variant, GPUs: took.GPUs, Replicas: 1, Target: 1,
-				Reclaim: true, Accelerator: r.Accelerator, Wake: true, NoHole: noHole}
+		if took.GPUs > 0 || took.After > 0 {
+			d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: r.Variant, GPUs: took.GPUs, After: took.After, Kept: took.Kept,
+				Replicas: 1, Target: 1, Reclaim: true, Accelerator: r.Accelerator, Wake: true, NoHole: noHole}
 			if len(s.chunks) > 0 {
 				d.Cohort, d.Flavor, d.Resource = s.chunks[0].Cohort, s.chunks[0].Flavor, s.chunks[0].Resource
 			}

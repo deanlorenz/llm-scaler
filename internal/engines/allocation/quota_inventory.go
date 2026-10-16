@@ -809,6 +809,7 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 		if r.Counted() {
 			b.LentOut += r.LentOut
 			b.PreemptAfter += r.PreemptAfter
+			b.PreemptKept += r.PreemptKept
 		}
 		if r.Reason == config.BorrowReasonNominalLentOut && r.Nominal > r.Guaranteed {
 			b.NominalLentOut += r.Nominal - r.Guaranteed

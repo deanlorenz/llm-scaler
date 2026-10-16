@@ -499,6 +499,9 @@ type ExternalBorrow struct {
 	// preempt for it: what it keeps unused plus what the cohort's free pool
 	// covers. Growth into it needs a node hole and debits the pool.
 	PreemptAfter int `json:"preemptAfter,omitempty"`
+	// PreemptKept is the part of PreemptAfter the queue keeps unused, which
+	// no cohort pool holds: growth into it takes nothing from the pool.
+	PreemptKept int `json:"preemptKept,omitempty"`
 	// SourceBorrowed is the source's own figure of what the queue borrows now,
 	// logged as a cross-check.
 	SourceBorrowed int    `json:"kueueBorrowed"`
@@ -530,6 +533,7 @@ const BorrowReasonNominalLentOut = "nominal-lent-out"
 // and within-nominal figures fall back to nominal, as when borrowing is off.
 func (b ExternalBorrow) Withheld(reason string) ExternalBorrow {
 	b.Guaranteed, b.WithinNominal, b.Borrowable, b.LentOut, b.PreemptAfter, b.Reason = b.Nominal, b.Nominal, 0, 0, 0, reason
+	b.PreemptKept = 0
 	return b
 }
 

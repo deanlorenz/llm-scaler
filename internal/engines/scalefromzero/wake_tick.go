@@ -65,7 +65,7 @@ func (e *Engine) debitReclaimed(namespace string, took map[string]allocation.Rec
 	}
 	for t, n := range took {
 		prev := e.tickReclaimed[namespace][t]
-		e.tickReclaimed[namespace][t] = allocation.Reclaim{After: prev.After + n.After, GPUs: prev.GPUs + n.GPUs}
+		e.tickReclaimed[namespace][t] = allocation.Reclaim{After: prev.After + n.After, Kept: prev.Kept + n.Kept, GPUs: prev.GPUs + n.GPUs}
 	}
 }
 
@@ -78,7 +78,8 @@ func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]alloca
 	}
 	out := make(map[string]allocation.Reclaim, len(reclaimable))
 	for t, r := range reclaimable {
-		out[t] = allocation.Reclaim{After: max(0, r.After-took[t].After), GPUs: max(0, r.GPUs-took[t].GPUs)}
+		after := max(0, r.After-took[t].After)
+		out[t] = allocation.Reclaim{After: after, Kept: min(after, max(0, r.Kept-took[t].Kept)), GPUs: max(0, r.GPUs-took[t].GPUs)}
 	}
 	return out
 }
