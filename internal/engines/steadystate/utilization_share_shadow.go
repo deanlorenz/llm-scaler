@@ -546,7 +546,8 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 
 // reportUnshared logs, once per change, the models planned in no group because
 // no budget bounds them -- a namespace a namespace quota excludes, with no
-// cluster quota. Today's optimizer keeps them.
+// finite cluster bound for its accelerator type. The default optimizer keeps
+// them.
 func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []string) {
 	slices.Sort(models)
 	joined := strings.Join(models, ",")
@@ -555,7 +556,7 @@ func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []str
 	}
 	st.lastUnshared = joined
 	if joined != "" {
-		logger.Info("Utilization share: not sharing models no quota bounds; today's optimizer keeps them",
+		logger.Info("Utilization share: not sharing models no quota bounds; the default optimizer keeps them",
 			"models", models)
 	}
 }
