@@ -1320,8 +1320,9 @@ func (e *Engine) selectV2Optimizer(
 		})
 	// Published as wva_constraint_provider_skipped and logged when the set
 	// changes, so a bound that stopped applying is visible without a log line
-	// every cycle.
-	e.providerSkips.report(ctx, append(skipped, allocation.NeverReadSkips(constraints)...))
+	// every cycle. A Kueue entry never read is not among them: it is in the
+	// decision, its finite caps bound, and wva_kueue_never_read reports it.
+	e.providerSkips.report(ctx, skipped)
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints

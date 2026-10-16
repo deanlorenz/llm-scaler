@@ -334,11 +334,10 @@ an error from a Kueue outage would *lift* the declared cap. Instead:
 - with none — Kueue not installed, RBAC missing, first read failing — the
   error is logged every cycle until a read succeeds. A Forbidden or a missing
   CRD is reported as such, never folded into "Kueue grants nothing". An entry
-  that leaves a type at `-1` is then skipped as an unobserved provider
-  (`wva_constraint_provider_skipped{reason="unobserved"}`, plus
-  `wva_kueue_never_read` and the alert `WVAKueueNeverRead`): the other
-  limiters still bound, and Kueue still gates pods past its quota. Otherwise
-  the **static entry alone** applies.
+  that leaves a type at `-1` reports `wva_kueue_never_read` (alert
+  `WVAKueueNeverRead`): its finite caps still bound, a `-1` type is bounded
+  only by the other limiters, and Kueue still gates pods past its quota.
+  Otherwise the **static entry alone** applies.
 
 With borrowing counted, a failed read after a good one is published too: the
 reason `stale` on `wva_quota_borrow_withheld`, and the alert

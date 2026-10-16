@@ -249,10 +249,12 @@ on `wva_quota_borrow_withheld{reason="kueue-controller-down"}`, per
 `controller_instance`, keeps a Deployment that cannot be read (0 and down) to
 one page, `WVAKueueControllerDown`.
 
-**Never-read.** An entry with a static `-1` and no successful Kueue read is an
-unobserved provider: `wva_constraint_provider_skipped{reason="unobserved"}`,
-plus `wva_kueue_never_read`. It is not fail-closed: the other limiters bound,
-and Kueue gates the pods.
+**Never-read.** An entry with a static `-1` and no successful Kueue read
+stays in the decision with its finite caps, and reports
+`wva_kueue_never_read` (`ResourceConstraints.KueueNeverRead`). It is not a
+skipped provider, so `wva_constraint_provider_skipped` stays clear and one
+cause pages once. It is not fail-closed: the `-1` types are bounded by the
+other limiters, and Kueue gates the pods.
 
 **Two entries over one pool.** When two Kueue entries govern one cohort and
 only one sets `borrowNamespaces`, the controller logs the warning
