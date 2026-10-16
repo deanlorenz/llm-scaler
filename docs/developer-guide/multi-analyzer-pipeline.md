@@ -418,7 +418,15 @@ it, the PRC of each variant another analyzer decided, and the holds:
   place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
   variant's own pod size), and what that leaves goes to the roles cut most
   (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
-  model's two roles on 8-GPU pods, neither a pod, and stayed free.
+  model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
+  share exceeds what its `maxReplicas` allow, and what a role at its maximum
+  cannot hold re-splits over the others, each up to the larger of its demand
+  and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
+  maximum took its share and decode was reclaimed to pay for it. Reclaims are
+  whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
+  role's own cut first, then what is left from the role cut most, never below
+  a role's floor and never more than the cut. Cut 4 GPUs from each of two
+  roles on 8-GPU pods, each role alone shed nothing.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply is still
