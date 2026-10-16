@@ -490,9 +490,9 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.
 - **Labels**: `operation`: `read` or `write`. Both are published at 0 from startup.
-- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`):
+- **Use Case**: A rising `write` count is typically Forbidden -- the Role `wva-learned-state-role` or its binding is missing: the snapshot is still read and restored (the manager Role reads it, in every install mode), but nothing learned since is kept, and the next restart restores it as it was when writing stopped. A rising `read` count is an API server or network error, or an edited or removed `wva-manager-role` in the controller's namespace; it blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`). The shipped alert `WVALearnedStateSnapshotFailing` fires on either:
   ```promql
-  increase(wva_learned_state_snapshot_errors_total{operation="read"}[15m]) > 0
+  sum by (namespace, operation) (increase(wva_learned_state_snapshot_errors_total[15m])) > 0
   ```
 
 ### Metrics collection observability
@@ -1824,6 +1824,7 @@ notifications link to it.
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
+| `WVALearnedStateSnapshotFailing` | warning | 15m | the learned-state snapshot has failed to read or write for 15 minutes (`operation` says which). A write failure is logged once, so this is the lasting signal; the next restart restores the snapshot as it was when writing stopped | `write`: an admin re-runs `NAMESPACE=<ns> make setup-prereqs` to restore `wva-learned-state-role` and its binding; `read`: check the API server and `wva-manager-role` | [T: restart](troubleshooting.md#capacity-priced-high-after-a-restart) |
 | `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is declared alone and the controller may not list nodes. **No variant scales up.** Beside a quota, `WVAConstraintProviderSkipped` fires instead | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped. Fires whatever the cause, a missing wake signal (`no-wake-signal`) included | read `wva_model_scaling_blocked` for the model first; `wake-no-capacity` means a limiter had no room for the wake | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake. Quiet while the model is parked and EPP refuses its requests: `WVAModelParkedWhileRequestsRefused` pages for that at critical, so one cause pages once | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |

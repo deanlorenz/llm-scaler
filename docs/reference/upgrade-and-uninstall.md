@@ -831,7 +831,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the install's ClusterRoles and ClusterRoleBindings | suffixed per install, so other installs keep theirs. Cluster-scoped: a namespace owner gets Forbidden on these, and the uninstall says which are left for a cluster admin |
 | the controller's Role and RoleBinding in a namespace it managed from outside (`WVA_WATCH_NS`) | |
 | RoleBinding `wva-pod-writer-<suffix>` in every workload namespace, and Role `wva-pod-writer` where no other controller's binding uses it | made by `deploy/warmpool.sh create`, utilization-share activate, and the upgrade to this release |
-| `wva-utilization-share-history` and `wva-controller-status` | written by the controller, not rendered, so deleted by name |
+| `wva-utilization-share-history`, `wva-controller-status` and `wva-learned-state` | written by the controller, not rendered, so deleted by name. An uninstall and reinstall therefore starts learned state cold; upgrade in place to keep it |
 | the ScaledObjects **this installer created** | KEDA restores each workload to its pre-autoscaling replica count as they go. Keep them with `UNDEPLOY_SCALEDOBJECTS=false` |
 
 ### What it leaves

@@ -344,7 +344,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: constants.WVALearnedStateSnapshotErrorsTotal,
-			Help: "Failed reads and writes of the learned-state snapshot ConfigMap (LEARNED_STATE_SNAPSHOT), by operation. A failed read of the ConfigMap -- typically Forbidden -- blocks every write until a read succeeds; a snapshot that was read but cannot be parsed is counted as a read error too, and is replaced by the next write.",
+			Help: "Failed reads and writes of the learned-state snapshot ConfigMap (LEARNED_STATE_SNAPSHOT), by operation. A failed write is typically Forbidden -- the wva-learned-state-role or its binding missing -- and keeps nothing learned since for the next restart. A failed read is an API error, or a snapshot that cannot be parsed (counted once, then replaced); it blocks every write until a read succeeds.",
 		},
 		[]string{constants.LabelOperation},
 	)

@@ -40,6 +40,16 @@ spec:
         summary: "llm-scaling-manager metrics collection failing for {{ $labels.query_type }}"
         description: "Metrics collection query_type '{{ $labels.query_type }}' failing with reason '{{ $labels.reason }}' at {{ $value | printf \"%.2f\" }}/sec (>5/min threshold) sustained for 5+ minutes. Scaling decisions may be based on stale data. Verify Prometheus/metrics endpoint connectivity."
 
+    - alert: WVALearnedStateSnapshotFailing
+      expr: sum by (namespace, operation) (increase(wva_learned_state_snapshot_errors_total[15m])) > 0
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#capacity-priced-high-after-a-restart"
+        summary: "llm-scaling-manager in {{ $labels.namespace }} cannot {{ $labels.operation }} its learned-state snapshot"
+        description: "The learned-state snapshot (LEARNED_STATE_SNAPSHOT) has failed to {{ $labels.operation }} for 15 minutes. The controller logs the failure once, so this counter is the lasting signal. write: typically Forbidden -- the Role wva-learned-state-role or its binding is missing; the snapshot is still read, but nothing learned since is kept, and the next restart restores it as it was when writing stopped. Have an admin re-run 'NAMESPACE=<ns> make setup-prereqs'. read: an API server or network error, or an edited wva-manager-role; nothing is written until a read succeeds."
+
     - alert: WVAPolicyNamespaceUnverified
       expr: max by (namespace) (wva_policy_namespace_unverified) == 1
       for: 10m

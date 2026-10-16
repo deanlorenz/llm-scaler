@@ -336,6 +336,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
 		"borrowTickGap", satV2.BorrowTickGap(),
+		// Whether the snapshot is on: its counters read 0 both when it is off
+		// and when it works, so this line is where an operator confirms it.
+		"snapshot", cfg.LearnedStateSnapshotEnabled(),
 		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_VARIANT_TIMEOUT, LEARNED_STATE_BUCKET_RETENTION to change them")
 	// A replaced horizon has to say so, because the line above cannot. After
 	// flooring it prints the default, which is byte-identical to what an
