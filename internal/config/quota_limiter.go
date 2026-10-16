@@ -539,6 +539,10 @@ type ExternalLender struct {
 	// Priority is the lowest priority of its unfinished GPU Workloads, pending
 	// or reserved; nil when none was read.
 	Priority *int32 `json:"priority,omitempty"`
+	// PendingGPUs is what its pending Workloads that fit its unused nominal
+	// ask of this key, at most that unused nominal: what a release to it
+	// (releaseToNonReclaimingLenders) is bounded by.
+	PendingGPUs int `json:"pendingGPUs,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU

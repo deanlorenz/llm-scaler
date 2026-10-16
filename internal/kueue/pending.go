@@ -415,6 +415,27 @@ func lenderPendingOn(q QueueState, key ResourceKey, nodeLabels map[string]string
 	return gpus
 }
 
+// lenderWaitsFor is what q's pending Workloads that lenderPendingOn counts --
+// each fits q's unused nominal of key, its node selection allows the flavor,
+// its co-resources fit -- ask of key in all, at most that unused nominal: the
+// most a release to q as a waiting lender can serve.
+func lenderWaitsFor(q QueueState, key ResourceKey, nodeLabels map[string]string) int {
+	r, ok := q.Resources[key]
+	if !ok {
+		return 0
+	}
+	unused := int64(max(0, r.Nominal-r.Reserved))
+	var sum int64
+	for _, w := range q.PendingWorkloads {
+		n := w.GPUs[key.Resource]
+		if n <= 0 || n > unused || !w.allowsFlavor(nodeLabels) || !fitsCoResources(q, key.Flavor, w) {
+			continue
+		}
+		sum += n
+	}
+	return clampQuota(min(sum, unused))
+}
+
 // pendingOn is what q's pending Workloads request of key's GPU resource in
 // all, counting only those whose node selection allows a flavor pinned to
 // nodeLabels (unknown counts every one).

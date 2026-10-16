@@ -116,7 +116,7 @@ var _ = Describe("ComputeBorrowing", func() {
 			b := ComputeBorrowing(topology(lender, member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
 			Expect(b.Pools).To(HaveLen(1))
 			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true,
-				Reclaim: ReclaimLowerPriority, Unused: 5, Priority: priorityOf(7)}))
+				Reclaim: ReclaimLowerPriority, Unused: 5, Priority: priorityOf(7), PendingGPUs: 2}))
 		})
 
 		It("Never: what the queue already uses is guaranteed", func() {
@@ -238,7 +238,7 @@ var _ = Describe("ComputeBorrowing", func() {
 		Expect(b.Pools).To(HaveLen(1))
 		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{
 			{Queue: "a", Reclaim: ReclaimNever},
-			{Queue: "lender", Waiting: true, Reclaim: ReclaimAny, Unused: 5},
+			{Queue: "lender", Waiting: true, Reclaim: ReclaimAny, Unused: 5, PendingGPUs: 2},
 		}))
 	})
 

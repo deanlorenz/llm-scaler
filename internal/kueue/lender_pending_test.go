@@ -30,6 +30,18 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		Entry("the largest Workload that fits is what it waits for", lender(pendingGPU(2, 0), pendingGPU(5, 0), pendingGPU(9, 0)), 5),
 	)
 
+	// PR-C: a release to a waiting lender is bounded by everything it waits
+	// for that fits, not the largest Workload alone, and never past its
+	// unused nominal.
+	DescribeTable("what a release to it can serve",
+		func(q QueueState, want int) {
+			Expect(lenderWaitsFor(q, gpuKey, nil)).To(Equal(want))
+		},
+		Entry("CPU and other resources ask nothing", lender(cpu, amd), 0),
+		Entry("each Workload that fits counts, one too large does not", lender(pendingGPU(2, 0), pendingGPU(1, 0), pendingGPU(9, 0)), 3),
+		Entry("never past the unused nominal", lender(pendingGPU(3, 0), pendingGPU(4, 0)), 5),
+	)
+
 	p := func(n int32) *int32 { return &n }
 	lenderOf := func(qs ...QueueState) LenderState {
 		b := ComputeBorrowing(topology(qs...), false)
@@ -49,7 +61,7 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		l.LenderPriority = p(50)
 		got := lenderOf(l, borrower)
 		Expect(got).To(Equal(LenderState{Queue: "lender", Waiting: true, Reclaim: ReclaimLowerPriority,
-			Unused: 5, Priority: p(50)}))
+			Unused: 5, Priority: p(50), PendingGPUs: 2}), "the 9-GPU Workload does not fit the 5 unused")
 	})
 
 	It("carries no priority when none of its Workloads was read", func() {

@@ -536,6 +536,8 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		}
 		o := &prev.Lenders[i]
 		o.Waiting = o.Waiting || l.Waiting
+		// What a release hands it: the smaller figure, releasing less.
+		o.PendingGPUs = min(o.PendingGPUs, l.PendingGPUs)
 	}
 	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
 	// Restricted GPUs: the cautious side is the larger figure and the lower

@@ -535,7 +535,7 @@ func externalLenders(ls []LenderState) []config.ExternalLender {
 	out := make([]config.ExternalLender, 0, len(ls))
 	for _, l := range ls {
 		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting,
-			Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority})
+			Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority, PendingGPUs: l.PendingGPUs})
 	}
 	return out
 }

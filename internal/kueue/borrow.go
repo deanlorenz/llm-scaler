@@ -393,6 +393,11 @@ type LenderState struct {
 	// reclaims for it from a borrowed Workload of lower priority. Nil when
 	// none was read.
 	Priority *int32
+	// PendingGPUs is what its pending Workloads that each fit its unused
+	// nominal (lenderPendingOn's rule) ask of this key in all, at most that
+	// unused nominal: what it waits for, and what a release to it is bounded
+	// by (kueue.releaseToNonReclaimingLenders). 0 for an inactive queue.
+	PendingGPUs int
 }
 
 // Borrowing is the result of ComputeBorrowing.
@@ -554,8 +559,12 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				if waiting {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
-				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
-					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority})
+				ls := LenderState{Queue: q.Name, Waiting: waiting,
+					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority}
+				if !q.Inactive {
+					ls.PendingGPUs = lenderWaitsFor(q, key, t.Flavors[key.Flavor].NodeLabels)
+				}
+				p.Lenders = append(p.Lenders, ls)
 			}
 			if unknownBorrower {
 				p.BorrowerPriority = nil // held at a priority not read: the cautious side

@@ -132,6 +132,10 @@ type borrowingState struct {
 	// splitWarned is the borrow-namespaces-split warning last logged, so it
 	// is logged once per change (B13).
 	splitWarned string
+	// releaseLatency is how long a release to a waiting lender takes to land
+	// this cycle (releaseLatency), 0 unless some entry sets
+	// releaseToNonReclaimingLenders.
+	releaseLatency time.Duration
 }
 
 // prepareBorrowing readies one cycle's borrowing: it drops the in-flight draws

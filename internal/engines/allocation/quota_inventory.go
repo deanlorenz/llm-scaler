@@ -651,7 +651,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOption
 		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
 		for _, l := range p.Lenders {
 			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting,
-				Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority})
+				Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority, PendingGPUs: l.PendingGPUs})
 		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: pools.free[poolKey(p)],

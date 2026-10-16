@@ -27,10 +27,12 @@ import (
 // a pure function of what it is told plus its own state, so the rules can be
 // tested without a cluster.
 //
-// A lender that waits is never handed capacity back here: only capacity Kueue
-// reclaims for its lender is counted (lenderReclaims), so Kueue's preemption
-// gives it back. The governor stops new borrowing in the lender's cohort while
-// it waits.
+// By default a lender that waits is never handed capacity back here: only
+// capacity Kueue reclaims for its lender is counted (reclaimablePools), so
+// Kueue's preemption gives it back. The governor stops new borrowing in the
+// lender's cohort while it waits. With kueue.releaseToNonReclaimingLenders
+// (PR-C) a lender Kueue does not reclaim for is counted too, and handed back
+// what it waits for (borrow_lender_release.go).
 
 // ReleaseCause says why borrowed capacity was released.
 type ReleaseCause string
@@ -56,6 +58,27 @@ type BorrowSettings struct {
 	// borrowing for the cooldown plus this drop the release state
 	// (HoldReleases).
 	ReleaseActuation time.Duration
+	// ReleaseLatency is how long a lowered target takes to free its GPUs:
+	// the borrowing models' KEDA scale-down window, the HPA sync, the KEDA
+	// poll and the termination grace (ReleaseBound). Zero when not known. A
+	// release to a waiting lender stays in flight up to twice this, or
+	// ReleaseActuation if longer (lenderTimeout).
+	ReleaseLatency time.Duration
+}
+
+// ReleaseBound is how long a lowered target takes to free its GPUs: the
+// scale-down window, the HPA sync, the KEDA poll and the termination grace,
+// each at the cluster's default when unset (nil). The utilization share's
+// release bound, for a single model.
+func ReleaseBound(window, polling, grace *time.Duration) time.Duration {
+	pick := func(v *time.Duration, def time.Duration) time.Duration {
+		if v != nil && *v >= 0 {
+			return *v
+		}
+		return def
+	}
+	return pick(window, hpaDefaultScaleDownWindow) + hpaSyncPeriod + pick(polling, kedaDefaultPolling) +
+		pick(grace, k8sDefaultTerminationGrace)
 }
 
 // DefaultBorrowSettings are the proposal's defaults.
@@ -88,6 +111,10 @@ func (k LenderKey) flavorKey() string { return k.Cohort + "/" + k.Flavor + "/" +
 // stopped counting borrowing, so a restart does not restart the window after
 // which the release state is dropped.
 type BorrowLedger struct {
+	// Version is the ledger format (BorrowLedgerVersion). Written only beside
+	// LenderReleases, so a controller that never releases to a lender writes
+	// what it always did; a ledger without one is of version 1.
+	Version        int                  `json:"version,omitempty"`
 	CohortCooldown map[string]time.Time `json:"cohortCooldown,omitempty"`
 	ModelCooldown  map[string]time.Time `json:"modelCooldown,omitempty"`
 	TimeoutHeld    map[string]int       `json:"timeoutHeld,omitempty"`
@@ -100,6 +127,10 @@ type BorrowLedger struct {
 	// marked them does not survive a restart, and without them a replica
 	// Kueue never placed within guaranteed waited Pending for good (AR2).
 	NoHole map[string]NoHoleReplicas `json:"noHole,omitempty"`
+	// LenderReleases are the releases to waiting lenders still in flight
+	// (releaseToNonReclaimingLenders): a restart, or a new leader, must not
+	// release a second time to a lender the first has not reached.
+	LenderReleases []LenderRelease `json:"lenderReleases,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -117,6 +148,9 @@ type BorrowRelease struct {
 	// namespace that counts no borrowing (gatedRelease): nothing was
 	// borrowed, the queue has no room for them.
 	AtGate bool
+	// Lender is the waiting lender a release of cause ReleaseLenderWaiting
+	// hands capacity back to; zero otherwise.
+	Lender LenderKey
 }
 
 // BorrowCycle is what the governor is told about one cycle.
@@ -136,6 +170,14 @@ type BorrowCycle struct {
 	// node hole that the shared record holds in flight or lagging (NoHoleOf):
 	// kept under the placement timeout like borrowed ones (M3).
 	NoHole map[string]NoHoleReplicas
+	// Gated is, per namespace and accelerator, the GPUs of managed pods held
+	// at Kueue's admission gate: they hold no reservation, so they are no
+	// borrowed capacity a release could hand back.
+	Gated map[string]map[string]int
+	// LedgerUnread is set while the persisted ledger has not been read back:
+	// a release to a lender from before the restart may be in flight, so no
+	// new one is decided.
+	LedgerUnread bool
 }
 
 type lenderWatch struct {
@@ -186,7 +228,10 @@ type BorrowGovernor struct {
 	// noHoleRestored is the noHole entries Restore loaded that no cycle has
 	// had the variant's state for yet (observeNoHole).
 	noHoleRestored map[string]bool
-	started        bool
+	// lenderRel is the releases to waiting lenders in flight, one per lender
+	// (borrow_lender_release.go).
+	lenderRel map[LenderKey]*LenderRelease
+	started   bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
@@ -200,7 +245,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
 		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{}, uncountedSince: map[string]time.Time{}, gatedPins: map[string]bool{},
 		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{}, noHole: map[string]NoHoleReplicas{},
-		noHoleRestored: map[string]bool{},
+		noHoleRestored: map[string]bool{}, lenderRel: map[LenderKey]*LenderRelease{},
 	}
 }
 
@@ -262,6 +307,7 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) int {
 			g.noHoleRestored[k] = true
 		}
 	}
+	g.restoreLenderReleases(l.LenderReleases, &dropped)
 	if l.IdleSince != nil && g.idleSince.IsZero() && !g.started {
 		g.idleSince = *l.IdleSince
 	}
@@ -331,6 +377,9 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 		h.Since = h.Since.UTC()
 		out.NoHole[k] = h
 	}
+	if out.LenderReleases = g.persistLenderReleases(); out.LenderReleases != nil {
+		out.Version = BorrowLedgerVersion
+	}
 	return out
 }
 
@@ -360,7 +409,9 @@ func (g *BorrowGovernor) MarshalLedger() (string, error) {
 }
 
 // UnmarshalBorrowLedger parses a persisted ledger. Fields it does not know are
-// ignored, so a ledger another build wrote loads what this one keeps.
+// ignored, so a ledger another build wrote loads what this one keeps; one of
+// a newer format version (or a negative one) returns ErrBorrowLedgerVersion
+// and nothing.
 func UnmarshalBorrowLedger(s string) (BorrowLedger, error) {
 	var l BorrowLedger
 	if s == "" {
@@ -368,6 +419,9 @@ func UnmarshalBorrowLedger(s string) (BorrowLedger, error) {
 	}
 	if err := json.Unmarshal([]byte(s), &l); err != nil {
 		return BorrowLedger{}, fmt.Errorf("borrow release ledger: %w", err)
+	}
+	if l.Version < 0 || l.Version > BorrowLedgerVersion {
+		return BorrowLedger{}, fmt.Errorf("%w %d (this build reads up to %d)", ErrBorrowLedgerVersion, l.Version, BorrowLedgerVersion)
 	}
 	return l, nil
 }
@@ -627,6 +681,15 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 			delete(g.watches, k)
 		}
 	}
+	// A release to a lender whose pool is gone from a cycle that read nothing
+	// stale reaches no one: it goes, or it would pin its variants until it
+	// timed out.
+	for k := range g.lenderRel {
+		if _, ok := listed[k.flavorKey()]; !ok && !anyStale {
+			delete(g.lenderRel, k)
+		}
+	}
+	g.observeLenderReleases(chunks, states, c.Now)
 	g.started = true
 }
 
@@ -720,10 +783,12 @@ func (g *BorrowGovernor) waiting(key LenderKey, now time.Time) bool {
 	return w != nil && w.reads >= 2 && now.Sub(w.since) >= g.settings.LenderDebounce
 }
 
-// Releases decides this cycle's placement-timeout releases after the
-// optimizer, lowers the decisions' targets accordingly, and keeps every
-// release still in flight in force -- over the analyzer's demand floor and
-// hold, which would otherwise raise the target again next cycle.
+// Releases decides this cycle's releases after the optimizer -- the
+// placement-timeout ones, then, where the entry opts in, those to waiting
+// lenders Kueue does not reclaim for -- lowers the decisions' targets
+// accordingly, and keeps every release still in flight in force -- over the
+// analyzer's demand floor and hold, which would otherwise raise the target
+// again next cycle.
 func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecision) []BorrowRelease {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -733,7 +798,10 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
 	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints), uncountedHeldPast(c.Constraints))
+	// The placement-timeout pins first: what they lower is already lowered
+	// when the lender release counts what is left to give (borrowedLeft).
 	g.applyPins(decisions, byVariant)
+	out = append(out, g.lenderReleases(c, states, decisions)...)
 	return out
 }
 
@@ -742,6 +810,7 @@ func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant
 	for k, r := range g.timeoutHeld {
 		lowerTo(decisions, byVariant, k, r.to, "borrow-unplaced")
 	}
+	g.applyLenderPins(decisions, byVariant)
 }
 
 // HoldReleases keeps the releases in flight in force in a cycle that counts
@@ -783,6 +852,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.pastSince)
 		clear(g.noHole)
 		clear(g.noHoleRestored)
+		clear(g.lenderRel)
 		g.started = false
 		if len(g.timeoutHeld) == 0 {
 			return
@@ -794,13 +864,19 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 			delete(g.gatedPins, k)
 		}
 	}
+	// A release to a lender that has landed pins nothing more; with no fresh
+	// read to clear it on, it goes now. One not landed keeps its pins until
+	// it lands or times out.
+	for k, e := range g.lenderRel {
+		if unitsLanded(e.Units, states) || now.Sub(e.ReleasedAt) > g.lenderTimeout() {
+			delete(g.lenderRel, k)
+		}
+	}
 	byVariant := map[string]int{}
 	for i := range decisions {
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
-	for k, r := range g.timeoutHeld {
-		lowerTo(decisions, byVariant, k, r.to, "borrow-unplaced")
-	}
+	g.applyPins(decisions, byVariant)
 }
 
 // timeoutReleases releases borrowed units unplaced past the placement timeout
@@ -856,11 +932,8 @@ func (g *BorrowGovernor) eachUnplaced(c BorrowCycle,
 		// A release in flight for any variant of the model makes its counts
 		// stale until it lands: a partner released for an unplaced replica
 		// (partnerUnit) must not be released again, nor the pair, while it
-		// terminates.
-		if slices.ContainsFunc(req.VariantStates, func(st domain.VariantReplicaState) bool {
-			_, sticky := g.timeoutHeld[req.Namespace+"/"+st.VariantName]
-			return sticky
-		}) {
+		// terminates. A release to a lender is one too.
+		if g.modelPinned(req) {
 			continue
 		}
 		for _, st := range req.VariantStates {

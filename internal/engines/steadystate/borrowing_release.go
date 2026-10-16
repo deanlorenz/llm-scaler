@@ -57,10 +57,19 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
+	settings := e.borrowSettings()
+	st.releaseLatency = 0
+	if e.Config != nil && e.Config.KueueReleasesToNonReclaiming() {
+		// A release to a waiting lender lands after the borrowing models'
+		// scale-down: its in-flight timeout and the lender-waiting alert
+		// scale with it.
+		st.releaseLatency = releaseLatency(e, constraints, requests, scaleTargets)
+		settings.ReleaseLatency = st.releaseLatency
+	}
 	if st.governor == nil {
-		st.governor = allocation.NewBorrowGovernor(e.borrowSettings())
+		st.governor = allocation.NewBorrowGovernor(settings)
 	} else {
-		st.governor.SetSettings(e.borrowSettings())
+		st.governor.SetSettings(settings)
 	}
 	e.loadBorrowLedger(ctx)
 	unknown := e.observePreemptions(ctx, constraints, requests, scaleTargets, now)
@@ -70,6 +79,11 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 		// Replicas ordered without a node hole, the wakes' included: under
 		// the placement timeout like borrowed ones (M3).
 		NoHole: allocation.NoHoleOf(st.inFlight.Unreserved(now).InFlight),
+		// Gated pods hold no reservation: nothing of theirs is handed back.
+		Gated: st.gated,
+		// A release to a lender from before a restart may be in flight
+		// until the persisted ledger is read.
+		LedgerUnread: !st.ledgerLoaded,
 	}
 	st.governor.Observe(st.cycle)
 	// The wake reads the model cooldowns before it orders a replica without a
@@ -217,9 +231,12 @@ func (e *Engine) applyReleases(ctx context.Context, releases []allocation.Borrow
 		if r.AtGate {
 			msg = "Releasing replicas held at Kueue's admission gate past the placement timeout; the queue has no room for them"
 		}
-		logger.Info(msg,
-			"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
-			"from", r.From, "to", r.To, "cause", string(r.Cause))
+		kv := []any{"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
+			"from", r.From, "to", r.To, "cause", string(r.Cause)}
+		if r.Cause == allocation.ReleaseLenderWaiting {
+			kv = append(kv, "lenderClusterQueue", r.Lender.Lender, "cohort", r.Lender.Cohort, "flavor", r.Lender.Flavor)
+		}
+		logger.Info(msg, kv...)
 		if r.GuaranteedGPUs > 0 && !r.AtGate {
 			logger.Info("A borrowed-capacity release goes below the namespace's guaranteed figure: "+
 				"the smallest unit that keeps the model serviceable is larger than what it borrows",
@@ -259,7 +276,7 @@ func initLossSeries(cycle allocation.BorrowCycle) {
 
 // restoreHeldReleases is for a process whose first cycles count no borrowing:
 // once the persisted ledger has been read, it keeps a governor only when that
-// ledger pins something (a placement-timeout hold), so
+// ledger pins something (a placement-timeout hold, or a release to a lender), so
 // those pins, and the window after which they are dropped, survive a restart.
 // Otherwise it leaves no governor and the ledger unloaded, for the first cycle
 // that counts borrowing to load. A read that failed is tried again next cycle.
@@ -276,7 +293,7 @@ func (e *Engine) restoreHeldReleases(ctx context.Context) bool {
 		return false
 	}
 	st.holdChecked = true
-	if l := st.governor.Ledger(); len(l.TimeoutHeld) > 0 {
+	if l := st.governor.Ledger(); len(l.TimeoutHeld) > 0 || len(l.LenderReleases) > 0 {
 		allocation.DefaultBorrowCooldowns.Publish(st.governor)
 		return true
 	}
