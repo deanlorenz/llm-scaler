@@ -108,7 +108,10 @@ type learnedStateStoreState struct {
 	lastWrite     time.Time
 	lastWriteDone time.Time
 	lastDigest    string
-	lastErr       string
+	// lastReadErr and lastWriteErr are the last failure of each operation,
+	// "" when it last worked (reportLearnedStateErr).
+	lastReadErr  string
+	lastWriteErr string
 }
 
 // learnedStater is the part of the saturation analyzer the store needs,
@@ -139,26 +142,37 @@ func learnedStateIdentity() string {
 	return host
 }
 
-// reportLearnedStateErr logs a store failure at Error once per change of the
-// error, and its recovery once.
-func (e *Engine) reportLearnedStateErr(logger logr.Logger, err error, msg string) {
+// reportLearnedStateErr logs a failure of one store operation (op, read or
+// write) at Error once per change of its error, and its recovery once.
+//
+// Per operation: every write is preceded by a read, and the read may work
+// where the write does not -- the manager Role reads ConfigMaps, only the
+// learned-state Role writes this one. Kept in one slot, each minute's read
+// cleared the write's error, so a store that could not be written logged
+// "works again" and the same Forbidden every minute, which read as a store
+// recovering, not as one that never would.
+func (e *Engine) reportLearnedStateErr(logger logr.Logger, op string, err error, msg string) {
 	st := &e.learnedState
+	last, recovered := &st.lastReadErr, "Learned state: the snapshot can be read again"
+	if op == metrics.LearnedStateOpWrite {
+		last, recovered = &st.lastWriteErr, "Learned state: the snapshot can be written again"
+	}
 	text := ""
 	if err != nil {
 		text = err.Error()
 	}
-	if text == st.lastErr {
+	if text == *last {
 		return
 	}
-	prev := st.lastErr
-	st.lastErr = text
+	prev := *last
+	*last = text
 	kv := []any{"configMap", learnedStateConfigMap, "namespace", config.SystemNamespace()}
 	if err != nil {
 		logger.Error(err, msg, kv...)
 		return
 	}
 	if prev != "" {
-		logger.Info("Learned state: the snapshot store works again", kv...)
+		logger.Info(recovered, kv...)
 	}
 }
 
@@ -203,10 +217,10 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	cm, err := e.readLearnedState(ctx)
 	if err != nil {
 		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
-		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot; nothing restored, and nothing will be written until a read succeeds")
+		e.reportLearnedStateErr(logger, metrics.LearnedStateOpRead, err, "Learned state: could not read the snapshot; nothing restored, and nothing will be written until a read succeeds")
 		return
 	}
-	e.reportLearnedStateErr(logger, nil, "")
+	e.reportLearnedStateErr(logger, metrics.LearnedStateOpRead, nil, "")
 	st.restored = true
 	// Released before this cycle's analysis, which runs after the restore
 	// below.
@@ -280,11 +294,11 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	cm, err := e.readLearnedState(ctx)
 	if err != nil {
 		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
-		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot to update it; not written")
+		e.reportLearnedStateErr(logger, metrics.LearnedStateOpRead, err, "Learned state: could not read the snapshot to update it; not written")
 		return
 	}
 	// A read that works is the store working, whether or not a write follows.
-	e.reportLearnedStateErr(logger, nil, "")
+	e.reportLearnedStateErr(logger, metrics.LearnedStateOpRead, nil, "")
 	if cm == nil && st.seen {
 		// The operator deleted it. Written back from memory, the deletion
 		// would undo nothing.
@@ -311,7 +325,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	raw, dropped, err := encodeLearnedState(state, now, budget)
 	if err != nil {
 		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpWrite)
-		e.reportLearnedStateErr(logger, err, "Learned state: the snapshot does not fit its bound beside the other versions' documents; not written")
+		e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, err, "Learned state: the snapshot does not fit its bound beside the other versions' documents; not written")
 		return
 	}
 	if cm == nil {
@@ -340,10 +354,10 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 			return
 		}
 		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpWrite)
-		e.reportLearnedStateErr(logger, err, "Learned state: could not write the snapshot")
+		e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, err, "Learned state: could not write the snapshot")
 		return
 	}
-	e.reportLearnedStateErr(logger, nil, "")
+	e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, nil, "")
 	st.seen, st.lastDigest, st.lastWriteDone = true, digest, now
 	if dropped > 0 {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",

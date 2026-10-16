@@ -814,6 +814,10 @@ failed reads and writes, and the log says why (logger `learned-state`):
     be read completely, and no k2 window was recent enough, on the hardware
     it runs now, to keep` -- the unread-configuration case with nothing to
     keep, for the same reasons. Nothing to do; the variant learns again;
+  - `learned state not restored: ... and the snapshot held no k2 window of
+    the variant's own to keep` (either case) -- the variant never measured a
+    k2 of its own before the restart: it had borrowed one, or had not
+    saturated. Nothing was lost. Nothing to do;
   - `learned state not restored: the variant's engine configuration could not
     be read completely, and the snapshot recorded no engine arguments to check
     its windows against` -- an unread configuration and a snapshot from a
@@ -826,15 +830,24 @@ failed reads and writes, and the log says why (logger `learned-state`):
   Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
   `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
-  will be written until a read succeeds` -- typically Forbidden: the Role
-  `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
-  `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
-  the stored state is not overwritten meanwhile. For the first 10 minutes
+  will be written until a read succeeds` -- the read failed; the error says
+  why. Not a missing `wva-learned-state-role`: the manager Role already
+  reads ConfigMaps in the controller's namespace. Look for an API server or
+  network error, or a manager Role narrowed by hand. Retried every minute;
+  the stored state is not overwritten meanwhile, and `Learned state: the
+  snapshot can be read again` marks recovery. For the first 10 minutes
   lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
   starts; after that they start as usual, and a read that succeeds later
   keeps those over the stored ones -- a borrow the snapshot had as spent
-  runs its hold and relaxation again. Fix the Role within 10 minutes to
+  runs its hold and relaxation again. Fix the cause within 10 minutes to
   avoid it.
+- `Learned state: could not write the snapshot` -- typically Forbidden: the
+  Role `wva-learned-state-role` or its binding is missing. The snapshot is
+  still read and restored, but nothing learned since is kept for the next
+  restart. Ask an admin to re-run
+  `NAMESPACE=<controller-namespace> make setup-prereqs`. Logged once, not
+  every minute; `Learned state: the snapshot can be written again` marks
+  recovery.
 - `Learned state: snapshot not restored` -- the document names no writer, or
   a controller in another namespace wrote it (a ConfigMap copied by hand).
 - `Learned state: the snapshot was over its size bound` -- the least recently

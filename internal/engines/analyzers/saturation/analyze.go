@@ -68,8 +68,12 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		case r.Outcome == RestoredWhole || r.Outcome == RestoredArgs || r.Priors > 0:
 		case r.Throughput > 0:
 			msg = "learned state restored as a hold-only service rate: no k2 window was recent enough, on the hardware the variant runs now, to keep, and the old saturated throughput holds the demand floor, hold-only, until the new arguments measure their own"
+		case r.Outcome == RestoredIncomplete && r.Stored == 0:
+			msg = "learned state not restored: the variant's engine configuration could not be read completely, and the snapshot held no k2 window of the variant's own to keep"
 		case r.Outcome == RestoredIncomplete:
 			msg = "learned state not restored: the variant's engine configuration could not be read completely, and no k2 window was recent enough, on the hardware it runs now, to keep"
+		case r.Stored == 0:
+			msg = "learned state not restored: the variant's engine configuration changed, and the snapshot held no k2 window of the variant's own to keep as a lower-only figure"
 		default:
 			msg = "learned state not restored: the variant's engine configuration changed, and no k2 window was recent enough, on the hardware it runs now, to keep as a lower-only figure"
 		}
@@ -78,7 +82,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		a.restoreOutcomes[r.Outcome]++
 		a.mu.Unlock()
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "outcome", r.Outcome,
-			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput)
+			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput, "stored", r.Stored)
 	}
 
 	c := a.newCycle(ctx, input, satConfig)

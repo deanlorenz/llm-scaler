@@ -328,6 +328,10 @@ type RestoredVariant struct {
 	// NoArgs is a RestoredIncomplete whose document recorded no arguments for
 	// the variant: no window could be checked, and none was installed.
 	NoArgs bool
+	// Stored is how many k2 windows the document held for the variant: with
+	// none, nothing could have been kept, and "none recent enough" would send
+	// an operator looking for an age or a hardware move that did not happen.
+	Stored int
 	// Entries is how many entries were installed, or rejected.
 	Entries int
 }
@@ -1017,7 +1021,7 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
-	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size()}
+	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size(), Stored: len(p.state.K2)}
 	switch {
 	case whole:
 		out.Outcome, out.Installed = RestoredWhole, true

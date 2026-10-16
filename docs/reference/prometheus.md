@@ -490,7 +490,7 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.
 - **Labels**: `operation`: `read` or `write`. Both are published at 0 from startup.
-- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`):
+- **Use Case**: A rising `write` count is typically Forbidden -- the Role `wva-learned-state-role` or its binding is missing: the snapshot is still read and restored, but nothing learned since is kept for the next restart. A rising `read` count is rarer -- the manager Role already reads ConfigMaps, so look for an API server error -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory. One exception: a snapshot that was read but cannot be parsed also counts as a `read` error, once, and is replaced by the next write (the log says `it will be replaced`):
   ```promql
   increase(wva_learned_state_snapshot_errors_total{operation="read"}[15m]) > 0
   ```
