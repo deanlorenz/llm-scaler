@@ -906,9 +906,14 @@ unmanaged training job holds 8 gives serving 8, not 16.
   - A gated pod whose Workload Kueue has already reserved quota for
     (`QuotaReserved`, waiting on an admission check such as a
     ProvisioningRequest) is part of what Kueue reserved: it is counted as
-    admitted, and never released for waiting at the gate. A LeaderWorkerSet
-    is matched by the set: while one of its groups is reserved, its gated
-    pods all read as reserved.
+    admitted, and never released for waiting at the gate.
+  - A LeaderWorkerSet's pods are matched to its Workloads per set, not per
+    group. While one group is reserved, the set's other gated pods read as
+    reserved too: they are neither released nor charged as unreserved. This
+    errs safe, and Kueue still gates the extra pods.
+  - When the Workloads cannot be read, every gated pod reads as unreserved,
+    so the charge reads low by the reservations of gated pods until a read
+    succeeds. The failure is logged once per namespace.
   - Where no borrowing is counted, a replica Kueue still holds at its gate,
     waiting for quota, after `placementTimeout` is released all the same,
     when the namespace holds more than its Kueue figure. Kueue reclaims
