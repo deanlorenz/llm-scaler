@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -105,7 +106,7 @@ func (e *Engine) runV2AnalysisOnly(
 		return nil, fmt.Errorf("V2 saturation analysis failed: %w", err)
 	}
 
-	// Analysis results are logged by the caller (runAnalyzersAndScore) after the
+	// Analysis results are logged by the caller (runAnalyzers) after the
 	// applyUniversalThreshold post-step, so the single Info line can include the
 	// real RequiredCapacity/SpareCapacity. They are left zero here, so logging
 	// them at this point would always report 0 and be misleading.
@@ -119,18 +120,17 @@ func (e *Engine) runV2AnalysisOnly(
 // TODO: make configurable if needed.
 const analyzerLivenessStaleCycles = 3
 
-// runAnalyzersAndScore runs the V2 saturation analyzer plus every other
-// registered, enabled analyzer, builds a NamedAnalyzerResult for each, runs
-// liveness tracking and metrics for all, then returns the full slice.
-// collectV2ModelRequest picks namedResults[0] (saturation, always first) as
-// the single CompositeSignal handed to the optimizer.
+// runAnalyzers runs the V2 saturation analyzer plus every other registered,
+// enabled analyzer, builds a NamedAnalyzerResult for each, runs liveness
+// tracking and logs each, and returns the full slice. It records no metrics:
+// the caller does, once.
 //
 // Saturation always runs; every other registered analyzer runs only if
 // config.AnalyzerEnabled. The capacity-build step (buildNamedResult) runs
 // once per analyzer. Saturation is the keeper of per-variant metadata
 // (Cost, AcceleratorName, Role) until a future pre-analysis-extraction PR
 // separates that concern.
-func (e *Engine) runAnalyzersAndScore(
+func (e *Engine) runAnalyzers(
 	ctx context.Context,
 	modelID, namespace string,
 	replicaMetrics []domain.ReplicaMetrics,
@@ -157,13 +157,9 @@ func (e *Engine) runAnalyzersAndScore(
 	}
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 
-	// Build AnalyzerInput once; shared by all non-saturation analyzers.
-	// Note: &config has had saturation's per-entry threshold overrides applied
-	// (the loop above). Non-saturation analyzers therefore receive the
-	// saturation-adjusted config rather than the original. This is harmless
-	// on this branch (their results are discarded), and the clean fix —
-	// engine applies thresholds universally after each analyzer runs —
-	// is tracked on multi-analyzer-threshold (PR #1228).
+	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
+	// reports demand and capacity only: the engine applies the thresholds
+	// after it runs (buildNamedResult).
 	input := domain.AnalyzerInput{
 		ModelID:        modelID,
 		Namespace:      namespace,
@@ -185,11 +181,6 @@ func (e *Engine) runAnalyzersAndScore(
 	// that measures per-replica capacity; it is deliberately absent from every
 	// supply total above.
 	publishWarmPoolSupply(namespace, namedResults[0])
-	// How hard each variant is being pushed, for the retained pool's switching
-	// decision. Published from saturation's result and with saturation's own
-	// scale-up threshold, so the pool never switches for a variant the optimizer
-	// considers comfortable, nor sits still for one it is already growing.
-	publishVariantPressure(namespace, namedResults[0], satUp)
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
 			continue
@@ -206,7 +197,6 @@ func (e *Engine) runAnalyzersAndScore(
 	}
 
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
-	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
 
 	for _, nr := range namedResults {
 		logAnalyzerResult(ctx, modelID, namespace, nr)
@@ -743,6 +733,49 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	}
 }
 
+// livenessThreshold is how long an analyzer stays live after its last
+// informative result: analyzerLivenessStaleCycles optimization intervals.
+//
+// Config is nil in unit tests that construct a minimal Engine directly
+// (bypassing NewEngine, which panics on a nil Config in production). A present
+// Config returning a non-positive interval falls back to the same 30s default —
+// a zero/negative interval would otherwise zero the threshold and latch every
+// analyzer non-live, blocking all scale-down.
+func (e *Engine) livenessThreshold() time.Duration {
+	interval := 30 * time.Second
+	if e.Config != nil && e.Config.OptimizationInterval() > 0 {
+		interval = e.Config.OptimizationInterval()
+	}
+	return analyzerLivenessStaleCycles * interval
+}
+
+// listedInGrace returns an entry with no Result, and Live set, for each
+// analyzer the policy lists -- saturation and slo aside -- that returned
+// nothing this cycle while its last informative result is still inside the
+// staleness window. A failed run leaves no entry behind, so without this the
+// composite could not tell an analyzer inside its grace from one never listed.
+func (e *Engine) listedInGrace(namespace, modelID string, policy config.ScalingPolicy,
+	ran []allocation.NamedAnalyzerResult) []allocation.NamedAnalyzerResult {
+	perAnalyzer := e.lastGoodAnalysis[utils.GetNamespacedKey(namespace, modelID)]
+	threshold, now := e.livenessThreshold(), time.Now()
+	var out []allocation.NamedAnalyzerResult
+	for _, a := range policy.Analyzers {
+		name := a.EffectiveType()
+		named := func(nr allocation.NamedAnalyzerResult) bool { return nr.Name == name }
+		switch {
+		case name == domain.SaturationAnalyzerName || name == domain.SLOAnalyzerName,
+			!policy.AnalyzerEnabled(name),
+			slices.ContainsFunc(ran, named),
+			slices.ContainsFunc(out, named):
+			continue
+		}
+		if lastGood, ok := perAnalyzer[name]; ok && now.Sub(lastGood) <= threshold {
+			out = append(out, allocation.NamedAnalyzerResult{Name: name, Live: true})
+		}
+	}
+	return out
+}
+
 // updateLivenessAndSetLive refreshes e.lastGoodAnalysis for this model with
 // every informative result's AnalyzedAt (or the current time, as a fail-safe,
 // when an informative result carries a zero-valued AnalyzedAt), then sets
@@ -764,17 +797,8 @@ func (e *Engine) updateLivenessAndSetLive(
 	}
 	perAnalyzer := e.lastGoodAnalysis[modelKey]
 
-	// Config is nil in unit tests that construct a minimal Engine directly
-	// (bypassing NewEngine, which panics on a nil Config in production). A present
-	// Config returning a non-positive interval falls back to the same 30s default —
-	// a zero/negative interval would otherwise zero the threshold below and latch
-	// every analyzer non-live, blocking all scale-down.
-	interval := 30 * time.Second
-	if e.Config != nil && e.Config.OptimizationInterval() > 0 {
-		interval = e.Config.OptimizationInterval()
-	}
 	now := time.Now()
-	threshold := analyzerLivenessStaleCycles * interval
+	threshold := e.livenessThreshold()
 
 	for i := range namedResults {
 		nr := &namedResults[i]
@@ -1124,13 +1148,23 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 	}
 }
 
+// measuredThisCycle reports whether the request carries a result this cycle,
+// so its replica counts are charged to a quota. A result with no usable signal
+// still counts: its replicas hold their GPUs whatever the analyzers made of
+// them, and charging them nothing published headroom the warm pool then grew
+// into (TestASteadyFleetStillPublishesHeadroom). A request with no result at
+// all was not measured, and is not charged.
+func measuredThisCycle(req allocation.ModelScalingRequest) bool {
+	return req.CompositeSignal.Result != nil
+}
+
 // computeCurrentGPUUsage sums the GPUs WVA's own variants hold, per accelerator
 // type, across this cycle's population. This is the ManagedUsage view: the only
 // consumption an operator-declared quota may be charged for.
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
-		if !hasSaturationResult(req) {
+		if !measuredThisCycle(req) {
 			continue
 		}
 		gpuUsageByType(req, usage)
@@ -1151,19 +1185,12 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 			perType = make(map[string]int)
 			usage[req.Namespace] = perType
 		}
-		if !hasSaturationResult(req) {
+		if !measuredThisCycle(req) {
 			continue
 		}
 		gpuUsageByType(req, perType)
 	}
 	return usage
-}
-
-// hasSaturationResult reports whether the request carries a saturation analyzer
-// result. A request without one was not measured this cycle, so its replica
-// counts are not evidence of anything and must not be charged to a quota.
-func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	return req.CompositeSignal.Name == domain.SaturationAnalyzerName && req.CompositeSignal.Result != nil
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any
@@ -1217,7 +1244,7 @@ func (e *Engine) collectV2ModelRequest(
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
 ) (*allocation.ModelScalingRequest, error) {
-	namedResults, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
+	namedResults, err := e.runAnalyzers(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
 		return nil, fmt.Errorf("collecting V2 model request for %s/%s: %w", namespace, modelID, err)
@@ -1232,13 +1259,38 @@ func (e *Engine) collectV2ModelRequest(
 		}
 	}
 
-	// namedResults[0] is always the saturation entry — it is built first and
-	// unconditionally. The optimizer only needs sat's signal; all other entries
-	// are engine-internal (liveness, metrics) and not forwarded.
+	// The optimizer's input is the composite of every analyzer that ran,
+	// never saturation's own entry, even when it runs alone (buildComposite).
+	// Saturation contributes only when the policy lists it; it is the
+	// composite's identity and unit either way. The slo analyzer never
+	// contributes: it only observes, so its series are published and its
+	// result sizes nothing. The thresholds are saturation's own, a
+	// per-analyzer override included: the composite's demand is saturation's,
+	// and the warm pool's pressure reads the same pair.
+	eligibleAnalyzers := excludeByName(namedResults, domain.SLOAnalyzerName)
+	if !config.SaturationListed() {
+		eligibleAnalyzers = excludeByName(eligibleAnalyzers, domain.SaturationAnalyzerName)
+	}
+	eligibleAnalyzers = append(eligibleAnalyzers, e.listedInGrace(namespace, modelID, config, namedResults)...)
+	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+	// How hard each variant is being pushed, for the retained pool's switching
+	// decision. Published from the composite, the result the optimizer acts on,
+	// with saturation's scale-up threshold, so the pool never switches for a
+	// variant the optimizer considers comfortable, nor sits still for one it is
+	// already growing.
+	publishVariantPressure(namespace, composite, satUp)
+
+	// One record per cycle, the composite included: two calls each evicted
+	// what the other had published, and each variant's engine configuration
+	// with it.
+	e.recordAnalyzerMetrics(namespace, modelID, append(slices.Clone(namedResults), composite))
+	logAnalyzerResult(ctx, modelID, namespace, composite)
+
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
 		Namespace:       namespace,
-		CompositeSignal: namedResults[0],
+		CompositeSignal: composite,
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,
@@ -1246,6 +1298,13 @@ func (e *Engine) collectV2ModelRequest(
 		Weight:          config.Weight,
 		Disaggregated:   disaggregated,
 	}, nil
+}
+
+// excludeByName returns a copy of results without the entries named name.
+func excludeByName(results []allocation.NamedAnalyzerResult, name string) []allocation.NamedAnalyzerResult {
+	return slices.DeleteFunc(slices.Clone(results), func(nr allocation.NamedAnalyzerResult) bool {
+		return nr.Name == name
+	})
 }
 
 // metadataByVariant indexes discovery metadata by variant name for the capacity
@@ -1550,6 +1609,17 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		"modelID", modelID,
 		"namespace", namespace,
 		"analyzer", nr.Name,
+		// live surfaces whether THIS analyzer currently contributes to the
+		// composite aggregation and the scale-down veto
+		// (allocation.Eligible) -- without it, "why didn't the
+		// composite pick up this analyzer's signal" or "why is this
+		// analyzer's non-live result still showing real numbers here" is
+		// undiagnosable from the log: a stale analyzer's Result/RC/SC are
+		// still real values (this line has no Live guard, deliberately, so
+		// a reader can see exactly what a non-live analyzer WOULD have
+		// contributed), and only this field says whether it currently
+		// counts. Emitted for every entry, live or not, informative or not.
+		"live", nr.Live,
 		"supply", nr.TotalSupply,
 		"demand", nr.Result.TotalDemand,
 		"util", nr.Utilization,
@@ -1804,9 +1874,11 @@ func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult,
 		// carrying its load raises it rather than hiding it -- which is what
 		// makes this the right number for deciding whether the pool should be
 		// serving this model instead of another.
+		// A role the composite holds against growth is not being grown, however
+		// hard it is pushed.
 		decision.PublishPressure(namespace, vc.VariantName, decision.Pressure{
 			SpareFraction: 1 - vc.Utilization,
-			NeedsScaleUp:  vc.Utilization > scaleUp,
+			NeedsScaleUp:  vc.Utilization > scaleUp && !nr.Holds[domain.RoleOfVC(vc)].NoScaleUp,
 			At:            now,
 		})
 	}

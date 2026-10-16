@@ -1055,6 +1055,16 @@ func (c ScalingPolicy) AnalyzerEnabled(analyzerName string) bool {
 	return false // absent → opt-in: does not participate
 }
 
+// SaturationListed reports whether saturation sizes the model: its entry in
+// c.Analyzers is enabled, or c.Analyzers is empty. A policy with no analyzers
+// section runs saturation alone; ApplyEntryDefaults writes that entry for a
+// V2-shaped policy, and an entry that is not V2-shaped keeps the empty list.
+// A list that names other analyzers and leaves saturation out, or disables
+// it, does not.
+func (c ScalingPolicy) SaturationListed() bool {
+	return len(c.Analyzers) == 0 || c.AnalyzerEnabled("saturation")
+}
+
 // ShapeChangeHold returns how long a fleet-shape change withholds release
 // before the backstop expires it, and whether the hold is enabled at all.
 //

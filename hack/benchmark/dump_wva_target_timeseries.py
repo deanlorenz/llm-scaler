@@ -295,7 +295,17 @@ def main():
                 d = json.loads(m.group("json"))
             except (ValueError, json.JSONDecodeError):
                 continue
+            # One line per analyzer, each in its own units. CompositeSignal is
+            # what the optimizer acted on; saturation stands in for it on a
+            # controller that does not log one. Any other analyzer (slo,
+            # throughput) would overwrite the sample with figures in its units.
+            analyzer = d.get("analyzer", "saturation")
+            if analyzer not in ("CompositeSignal", "saturation"):
+                continue
             b = bucket(ts_dt)
+            if analyzer == "saturation" and b.get("_analysisFrom") == "CompositeSignal":
+                continue
+            b["_analysisFrom"] = analyzer
             for short, long in ANALYSIS_KEYS.items():
                 if short in d:
                     b[long] = d[short]

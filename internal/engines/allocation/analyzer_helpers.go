@@ -138,6 +138,21 @@ func (e NamedAnalyzerResult) releaseTargetUtilization() float64 {
 	return e.ScaleDownBoundary
 }
 
+// ReleaseTargetUtilization is the utilization a release sheds down to: a
+// quarter of the way from the scale-down boundary to the scale-up threshold,
+// or the boundary when the band is unusable. The composite bounds every
+// frame's release at it.
+func (e NamedAnalyzerResult) ReleaseTargetUtilization() float64 {
+	return e.releaseTargetUtilization()
+}
+
+// OtherFrameDemand is role's demand, in its own units, by the analyzers
+// other than the one it is priced in, for an optimizer sizing at
+// utilization u (OtherFrames.Demand); 0 when no other analyzer sizes it.
+func (e NamedAnalyzerResult) OtherFrameDemand(role string, u float64) float64 {
+	return e.OtherFrames[role].Demand(u)
+}
+
 // releasableFor is supply minus the supply the role would need to sit at the
 // release target. Zero when the target is unusable or demand is unknown, which
 // leaves the caller on RoleSpare and therefore on the old behaviour.
@@ -219,6 +234,9 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 			// means "computed, and it is nothing", which it must honour.
 			if rc.TotalSupply > 0 {
 				e.RoleReleasable[role] = releasableFor(rc.TotalSupply, rc.TotalDemand, target)
+				if b, ok := e.ReleaseBound[role]; ok {
+					e.RoleReleasable[role] = min(e.RoleReleasable[role], b)
+				}
 			}
 			roleSet[role] = struct{}{}
 		}
@@ -235,6 +253,9 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 		if e.Result != nil && e.TotalSupply > 0 {
 			e.RoleReleasable[domain.RoleBoth] = releasableFor(
 				e.TotalSupply, e.Result.TotalDemand, e.releaseTargetUtilization())
+			if b, ok := e.ReleaseBound[domain.RoleBoth]; ok {
+				e.RoleReleasable[domain.RoleBoth] = min(e.RoleReleasable[domain.RoleBoth], b)
+			}
 		}
 		roleSet[domain.RoleBoth] = struct{}{}
 	}
@@ -263,16 +284,13 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 type RolePairedState map[string]float64
 
 // roleBottleneckReplicas returns ceil(state[role] / PRC[v]) for the single
-// entry. Returns 0 if the entry has no result or PRC ≤ 0.
+// entry, via replicasForDemand, the one shared rounding rule. Returns 0 if
+// the entry has no result or PRC ≤ 0.
 func roleBottleneckReplicas(e NamedAnalyzerResult, state RolePairedState, role, v string) int {
 	if e.Result == nil {
 		return 0
 	}
-	prc := prcForVariant(e.Result, v)
-	if prc <= 0 {
-		return 0
-	}
-	return int(math.Ceil(state[role] / prc))
+	return replicasForDemand(state[role], prcForVariant(e.Result, v))
 }
 
 // roleAggRemaining returns the remaining demand for role from the picker state.
@@ -345,11 +363,7 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if rel, ok := e.RoleReleasable[role]; ok && rel > budget {
 		budget = rel
 	}
-	n := int(math.Floor(budget / prc))
-	if n < 0 {
-		return 0
-	}
-	return n
+	return safeReplicasForSpare(budget, prc)
 }
 
 // applyDeallocationForRole charges n replicas of variant v against this role's

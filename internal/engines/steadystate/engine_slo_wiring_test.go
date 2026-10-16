@@ -446,9 +446,11 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
 	run := func(namespace string, policy config.ScalingPolicy, states []domain.VariantReplicaState) {
 		t.Helper()
-		if _, err := e.runAnalyzersAndScore(context.Background(), "m", namespace, nil, policy, states, nil, nil, nil, nil, 0); err != nil {
+		results, err := e.runAnalyzers(context.Background(), "m", namespace, nil, policy, states, nil, nil, nil, nil, 0)
+		if err != nil {
 			t.Fatal(err)
 		}
+		e.recordAnalyzerMetrics(namespace, "m", results)
 	}
 	targets := &config.SLOPolicy{TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 3 * time.Second}}}
 	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, SLO: targets}

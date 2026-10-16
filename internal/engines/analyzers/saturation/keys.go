@@ -61,13 +61,13 @@ func (a *SaturationAnalyzer) throughputKey(
 	// for it, because output length is not work a prefill replica does. See
 	// prefillOutputBucket.
 	outBucket := classifyOutputLength(avgOutput)
-	if canonicalRole(role) == domain.RolePrefill {
+	if domain.CanonicalRole(role) == domain.RolePrefill {
 		outBucket = prefillOutputBucket
 	}
 	return fmt.Sprintf("%s|%s|%s|%s|%d|%s|i%s|%s|q%g",
 		namespace, variantName,
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
-		gpuCount, canonicalRole(role), classifyInputLength(avgInput),
+		gpuCount, domain.CanonicalRole(role), classifyInputLength(avgInput),
 		outBucket, queueThreshold)
 }
 
@@ -115,5 +115,5 @@ func (a *SaturationAnalyzer) historyKey(
 	return fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|q%g",
 		namespace, variantName,
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
-		gpuCount, canonicalRole(role), classifyOutputLength(avgOutput), queueThreshold)
+		gpuCount, domain.CanonicalRole(role), classifyOutputLength(avgOutput), queueThreshold)
 }

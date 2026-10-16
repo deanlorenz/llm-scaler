@@ -49,7 +49,7 @@ var _ = Describe("external analyzer runtime registry", func() {
 	}
 
 	run := func(e *Engine, cfg config.ScalingPolicy) []allocation.NamedAnalyzerResult {
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 		Expect(err).NotTo(HaveOccurred())
 		return results
 	}

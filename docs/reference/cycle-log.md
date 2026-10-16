@@ -1,8 +1,10 @@
 # llm-scaling-manager Cycle Log
 
-Each reconcile cycle, the saturation engine writes two INFO lines per model,
-and a third, `throughput-demand-floor`, on a cycle where the throughput floor
-changes a role's demand. They show what the analyzer and optimizer computed,
+Each reconcile cycle, the saturation engine writes these INFO lines per model:
+one `analyzer-result` for each analyzer that ran, one for the composite the
+optimizer acted on, and one `scaling-decision`; a `throughput-demand-floor`
+line on a cycle where the throughput floor changes a role's demand; and a
+`composite holds a role` line for each held role. They show what the analyzer and optimizer computed,
 with no debug logging needed.
 
 The log uses zap's development **console** format, not JSON: timestamp, level,
@@ -29,7 +31,7 @@ post-step. The values are what the optimizer receives.
 
 ```text
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
-  "analyzer": "saturation", "supply": 2362173, "demand": 2240000, "util": 0.95, "rc": 273121,
+  "analyzer": "saturation", "live": true, "supply": 2362173, "demand": 2240000, "util": 0.95, "rc": 273121,
   "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
   "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"P3-k2","observed":1},
                {"name":"v2","prc":403391,"role":"both","reason":"P1-obs","observed":3}]}
@@ -43,6 +45,7 @@ capacity the optimizer branches on.
 | `modelID` | the scaling manager model ID (unique within a namespace) |
 | `namespace` | Kubernetes namespace |
 | `analyzer` | Analyzer name, e.g. `"saturation"`, `"throughput"` |
+| `live` | Whether the analyzer produced a good reading within its staleness window. It counts toward the composite only when the policy lists it, and `slo` never counts. `false` does not mean the other fields on this line are missing or stale-looking — they are this analyzer's real numbers |
 | `supply` | Total token supply across ready replicas (readyCount × perReplicaCapacity) |
 | `demand` | Total token demand. For saturation V2 it is the sum of three terms: resident KV tokens; a role-aware projection of requests waiting in each replica's engine queue; and a model-level, prefix-cache-discounted projection of requests still queued in llm-d flow control (`SchedulerQueue`, not attributed to any variant). See [scaling-policy-config.md](scaling-policy.md) |
 | `util` | `demand / supply`; > 1.0 means the model is over capacity |
@@ -60,6 +63,42 @@ capacity the optimizer branches on.
 An analyzer that computes no per-variant capacity writes an empty `variants`
 array. With several analyzers enabled there are several `analyzer-result` lines,
 each with the same `modelID`/`namespace` and its own `analyzer`.
+
+#### The composite row
+
+One additional `analyzer-result` line appears every cycle with
+`"analyzer": "CompositeSignal"` — the single reduced signal the optimizer
+actually consumes, never saturation's raw result even when saturation is the
+only analyzer enabled. It is emitted through the exact same log line as any
+analyzer, not a separate line shape, so every field above means the same
+thing here.
+
+```text
+2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
+  "analyzer": "CompositeSignal", "live": true, "supply": 2362173, "demand": 2688000, "util": 1.14,
+  "rc": 800180, "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
+  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"C0-agree","observed":1},
+               {"name":"v2","prc":403391,"role":"both","reason":"C1-single","observed":3}]}
+```
+
+`demand` is in **saturation's units** always, so the numbers here are directly
+comparable to saturation's own `analyzer-result` line above. When another
+analyzer asks for more replicas than saturation, the composite raises `demand`
+to what that many replicas are worth at saturation's `prc`, so on this line
+`demand` is a target, not a
+measurement. Above, another analyzer needs 2.33 `primary` replicas, which at
+1152000 each is 2688000 against saturation's measured 2240000. This is the
+same cycle as the saturation line: `supply` is the same one `primary` at
+1152000 plus three `v2` at 403391, and the higher `demand` turns saturation's
+`rc` of 273121 into 800180. `prc` is saturation's here because each role has one
+variant. Where a role has variants on two accelerators and another analyzer
+decides them, each gets the `prc` at which `demand` needs exactly the replicas
+that analyzer asked of it, so its `prc` can differ from saturation's.
+
+`variants[].reason` on the composite row is **not** an analyzer's capacity
+provenance (`P0-store`, `T1-ols`, ...) — it is the composite's own decision
+path (see the table below), naming how that variant's aggregated replica
+count was reached, not how any one analyzer measured its own capacity.
 
 ### `scaling-decision`
 
@@ -171,6 +210,33 @@ The throughput analyzer uses:
 
 Other analyzers may set their own values or leave `reason` empty.
 
+The **composite row's** `reason` values are a different vocabulary — the
+decision path that produced that variant's aggregated replica count, not any
+analyzer's own capacity provenance:
+
+| Reason | Meaning |
+|---|---|
+| `C0-agree` | more than one analyzer produced a usable signal for this variant; the aggregate is the max across them |
+| `C1-single` | exactly one analyzer produced a usable signal for this variant |
+| `C4-no-signal` | no listed analyzer had a usable signal for this variant. With saturation listed, the variant is sized on saturation's measured capacity as before; with saturation unlisted, its role holds where it is |
+
+`C4-no-signal` on every variant reports the model as `no-composite-signal`.
+Its replicas are still charged to a GPU quota, since they hold their GPUs
+either way.
+
+A role the composite holds logs one line a cycle:
+
+```text
+INFO  composite holds a role  {"modelID": "my-model", "namespace": "default", "role": "decode",
+  "noScaleUp": false, "noScaleDown": true}
+```
+
+`noScaleUp` and `noScaleDown` both true: no listed analyzer can size the role.
+`noScaleUp` alone, on a P/D model: the other role is held, so this one does not
+grow either. `noScaleDown` alone: a listed analyzer is inside its staleness
+grace (up to three cycles) with no reading, and the role waits for it before
+shrinking.
+
 ---
 
 ## Grep patterns
@@ -187,6 +253,9 @@ $LOGS | grep analyzer-result | grep '"analyzer": "saturation"'
 # Scale-up decisions only
 $LOGS | grep scaling-decision | grep '"action":"scale-up"'
 
+# The composite signal only (what the optimizer actually consumed)
+$LOGS | grep analyzer-result | grep '"analyzer": "CompositeSignal"'
+
 # Full cycle for one model (both lines)
 $LOGS | grep -E 'analyzer-result|scaling-decision' | grep '"modelID": "my-model"'
 ```
@@ -202,7 +271,10 @@ In one reconcile cycle, for one model:
 
 1. One `analyzer-result` line per enabled analyzer (saturation first, then the
    others in registration order).
-2. One `scaling-decision` line, after the optimizer has processed every model in
+2. One more `analyzer-result` line for the composite
+   (`"analyzer": "CompositeSignal"`). It is built from all of them, so it is
+   always last.
+3. One `scaling-decision` line, after the optimizer has processed every model in
    the cycle.
 
 The two are not adjacent in the log: other models' lines can fall between them.

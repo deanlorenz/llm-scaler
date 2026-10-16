@@ -40,7 +40,7 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 	kPrice := pricingK(c.cfg)
 	for i := range variants {
 		name := variants[i].VariantName
-		sig := &domain.ServiceRateSignal{Role: canonicalRole(c.rolesByVariant[name])}
+		sig := &domain.ServiceRateSignal{Role: domain.CanonicalRole(c.rolesByVariant[name])}
 		serving := variants[i].ObservedReplicas > 0
 		// Present for every serving variant that keeps a window, zero
 		// included. A window holding nothing is the commonest reason a decode

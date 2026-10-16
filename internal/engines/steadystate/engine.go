@@ -65,7 +65,7 @@ import (
 )
 
 // analyzerEntry binds a registered analyzer to its name. The engine stores
-// these in registration order so runAnalyzersAndScore iterates analyzers
+// these in registration order so runAnalyzers iterates analyzers
 // deterministically.
 type analyzerEntry struct {
 	name     string
@@ -263,11 +263,10 @@ type Engine struct {
 	analyzers []analyzerEntry
 
 	// analyzersSnapshot is the frozen, registration-ordered view that
-	// runAnalyzersAndScore iterates. Built from analyzers in StartOptimizeLoop
-	// before the goroutine launches. Saturation always runs and drives scaling
-	// decisions; other registered analyzers are invoked but their results are
-	// not consumed yet — combine and per-analyzer threshold logic lands in
-	// follow-up PRs.
+	// runAnalyzers iterates. Built from analyzers in StartOptimizeLoop
+	// before the goroutine launches. Saturation always runs; every other
+	// registered analyzer runs when the policy lists it, and the composite
+	// combines what they return (buildComposite).
 	analyzersSnapshot []analyzerEntry
 
 	// started transitions to true in StartOptimizeLoop. Late RegisterAnalyzer
@@ -407,8 +406,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			// policy lists it under analyzers:, and its router queries run only
 			// for such a model, so registering it costs nothing elsewhere, and
 			// enabling it needs no restart. Its result is
-			// published and, like every non-saturation result, not yet consumed
-			// (docs/proposals/slo-tiers.md, phase 0).
+			// published and, unlike the other listed analyzers, never sizes a
+			// model: the composite leaves it out (docs/proposals/slo-tiers.md,
+			// phase 0).
 			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
@@ -638,7 +638,7 @@ func toExternalDefinition(label string, def config.ExternalAnalyzerDef) (externa
 // It runs until the context is cancelled.
 //
 // Before launching the goroutine, the registered analyzers are snapshotted
-// to a frozen slice that runAnalyzersAndScore iterates. The started flag is
+// to a frozen slice that runAnalyzers iterates. The started flag is
 // flipped so subsequent RegisterAnalyzer calls return an error. The snapshot is the
 // natural place to invoke any future per-analyzer Init(ctx) hook.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
@@ -1498,10 +1498,12 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 		if data == nil {
 			logger.V(logging.DEBUG).Info("Skipping model: no metrics available", "modelID", modelID)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 
@@ -1513,8 +1515,11 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, data.scaleTargets)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
+
+		reportSignalReason(namespace, modelID, req)
 
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
@@ -2590,4 +2595,17 @@ func publishServing(namespace string, metrics []domain.ReplicaMetrics) {
 	for variant, pods := range byVariant {
 		decision.PublishServing(namespace, variant, len(pods), now)
 	}
+}
+
+// reportSignalReason sets the no-composite-signal reason when req's composite
+// defines no replica need for any variant, and clears it otherwise. A nil req
+// (this cycle built no composite for the model) clears it, so the reason never
+// outlives the cycle that found it. With no signal the optimizer sizes on
+// saturation's own capacity.
+func reportSignalReason(namespace, modelID string, req *allocation.ModelScalingRequest) {
+	var reasons []string
+	if req != nil && !allocation.CompositeHasSignal(req.CompositeSignal) {
+		reasons = []string{constants.ScalingBlockedNoCompositeSignal}
+	}
+	metrics.SetModelScalingBlockedReasons(namespace, modelID, constants.ScalingBlockedReasonsSignal, reasons)
 }

@@ -301,16 +301,12 @@ func buildDecisionsWithOptimizer(
 		// For P/D-disaggregated models use the variant's per-role capacity; otherwise
 		// fall back to the model-level totals.
 		decision.Utilization = vc.Utilization
-		reqCap, spareCap := satNamed.RequiredCapacity, satNamed.SpareCapacity
 		role := state.Role
 		if role == "" {
 			role = domain.RoleBoth
 		}
-		if rc, ok := satNamed.RoleCapacities[role]; ok {
-			reqCap, spareCap = rc.RequiredCapacity, rc.SpareCapacity
-		}
-		decision.RequiredCapacity = reqCap
-		decision.SpareCapacity = spareCap
+		// The role's capacities when it has them, else the model-level ones.
+		decision.RequiredCapacity, decision.SpareCapacity = requiredSpareForRoleOrModel(satNamed, role)
 		// The demand that PRICED the target, so a later stage re-pricing a
 		// different replica count uses the same figure: model-level (or per-role
 		// for a disaggregated model), which carries the scheduler-queue estimate
