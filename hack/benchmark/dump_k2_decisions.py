@@ -73,6 +73,9 @@ except ImportError:
     print("ERROR: PyYAML required. pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from controller_pods import controller_log_selector  # noqa: E402
+
 # Tab-delimited zap console encoding: ts, level, caller, message, json-fields.
 # Matched on message name only (not file:line) — see dump_wva_target_timeseries.py
 # for why pinning the caller path is the wrong thing to do here. The message
@@ -443,8 +446,14 @@ def fetch_logs(namespace, since_seconds, results_dir=None):
             print(f"{captured} exists but is empty — falling back to live kubectl logs.",
                   file=sys.stderr)
 
-    cmd = ["kubectl", "logs", "-n", namespace,
-           "-l", "app.kubernetes.io/name=workload-variant-autoscaler",
+    # The controller's Pods by ownership, not by label: warm-pool Pods share
+    # app.kubernetes.io/name, and their logs used to be read as the controller's.
+    try:
+        selector = controller_log_selector(namespace)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    cmd = ["kubectl", "logs", "-n", namespace, "-l", selector,
            f"--since={since_seconds}s", "--tail=200000"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

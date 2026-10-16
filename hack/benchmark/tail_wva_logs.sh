@@ -43,6 +43,8 @@ esac
 # capture helper. They used to be duplicated per script and had begun to drift.
 # shellcheck source=hack/benchmark/capture_lib.sh
 . "$(dirname "$0")/capture_lib.sh"
+# Finds the controller's Pods by ownership; that file says why labels cannot.
+CONTROLLER_PODS="$(dirname "$0")/controller_pods.py"
 
 capture_parse_args "$@" || exit 2
 set -- ${CAPTURE_POSITIONAL[@]+"${CAPTURE_POSITIONAL[@]}"}
@@ -84,13 +86,24 @@ case "$CMD" in
     # pods match during a rollout) isn't worth breaking the parser for.
     (
       while [ ! -f "$OUT.stop" ]; do
+        # The controller's own Pods, by ownership. app.kubernetes.io/name also
+        # selects warm-pool Pods, whose logs then landed here as the
+        # controller's. Resolved again on every reconnect, so a restarted
+        # controller is followed. The selector names every controller Pod, so
+        # both Pods of a rollout still are. No Pod yet: try again, as before.
+        selector="$(capture_kube get pods -n "$NS" -l control-plane=controller-manager -o json \
+          | python3 "$CONTROLLER_PODS")"
+        if [ -z "$selector" ]; then
+          sleep 1
+          continue
+        fi
         since_ts="$(tail -n1 "$OUT" 2>/dev/null | cut -f1)"
         if [ -n "$since_ts" ]; then
-          capture_kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+          capture_kube logs -n "$NS" -l "$selector" \
             -f --since-time="$since_ts" --tail=-1 --max-log-requests=10 \
             >> "$OUT" 2>> "$OUT.stderr"
         else
-          capture_kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+          capture_kube logs -n "$NS" -l "$selector" \
             -f --since=1s --tail=-1 --max-log-requests=10 \
             >> "$OUT" 2>> "$OUT.stderr"
         fi
