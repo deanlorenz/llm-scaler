@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 // K8sWithGpuOperator implements CapacityDiscovery for Kubernetes clusters with GPU Operator
@@ -281,7 +282,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover node GPU types: %w", err)
 	}
-	byType, byNamespace, _, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, _, _, err := d.usageWalk(ctx, nodeGPUType)
 	return byType, byNamespace, err
 }
 
@@ -296,7 +297,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 		return nil, nil, nil, fmt.Errorf("failed to discover GPU nodes: %w", err)
 	}
 	nodeGPUType := nodeGPUTypesOf(nodes)
-	byType, byNamespace, byNode, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, byNode, groups, err := d.usageWalk(ctx, nodeGPUType)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -309,22 +310,26 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
 			Taints:        nodes[name].Taints,
+			LWSGroup:      groups[name],
 		}
 	}
 	return byType, byNamespace, out, nil
 }
 
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
-// pods occupying GPU nodes, per accelerator type, per namespace and per node.
-func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
+// pods occupying GPU nodes, per accelerator type, per namespace and per node;
+// and the GPU nodes a LeaderWorkerSet group's pod occupies, GPUs or not
+// (decision.NodeGPU.LWSGroup).
+func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, map[string]bool, error) {
 	pods, err := d.listPods(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
+	groups := make(map[string]bool)
 
 	for _, pod := range pods {
 		node := occupiedNode(&pod)
@@ -339,6 +344,9 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 		if !ok {
 			// Node doesn't have GPUs, skip
 			continue
+		}
+		if _, ok := pod.Labels[lwsv1.GroupUniqueHashLabelKey]; ok {
+			groups[node] = true
 		}
 
 		gpuCount := resources.PodGPURequests(&pod)
@@ -355,7 +363,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 		perType[gpuType] += gpuCount
 	}
 
-	return usageByType, usageByNamespace, usageByNode, nil
+	return usageByType, usageByNamespace, usageByNode, groups, nil
 }
 
 // occupiedNode is the node whose GPUs pod holds or is about to: the node it is

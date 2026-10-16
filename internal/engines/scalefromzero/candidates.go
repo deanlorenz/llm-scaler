@@ -128,6 +128,7 @@ func (e *Engine) buildCandidates(
 			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
 			Tolerations:     scaletarget.PodTolerations(scaleTarget),
 			DomainKey:       scaletarget.ExclusiveTopology(scaleTarget),
+			Placements:      variantmeta.PodPlacements(scaleTarget),
 			Cost:            resolveVariantCost(ctx, va),
 			target:          scaleTarget,
 		})

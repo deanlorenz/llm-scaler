@@ -310,13 +310,25 @@ func (b *BorrowInFlight) SetCycle(gated map[string]map[string]int, admitted []Ad
 // Unreserved is everything the record holds that a Kueue read may not show
 // yet: the draws in flight and lagging, and, when the last borrowing cycle is
 // younger than InFlightTTL, its gated and admitted pods.
+//
+// A draw ordered, or a lagging one resolved, InFlightTTL ago or more is left
+// out even while no ObserveAt has dropped it: only the steady-state engine
+// settles the record, and a cycle that observes nothing -- an idle fleet, a
+// woken model not in its requests yet -- left a wake's draw counted against
+// every later wake and borrow for as long as it ran so.
 func (b *BorrowInFlight) Unreserved(now time.Time) Unreserved {
 	if b == nil {
 		return Unreserved{}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	u := Unreserved{InFlight: append(b.entriesLocked(), b.lagging...)}
+	live := slices.DeleteFunc(b.entriesLocked(), func(d BorrowDraw) bool { return now.Sub(d.OrderedAt) > InFlightTTL })
+	for _, d := range b.lagging {
+		if now.Sub(d.ResolvedAt) <= InFlightTTL {
+			live = append(live, d)
+		}
+	}
+	u := Unreserved{InFlight: live}
 	if now.Sub(b.cycleAt) <= InFlightTTL {
 		u.Gated, u.Admitted = b.gated, slices.Clone(b.admitted)
 	}
