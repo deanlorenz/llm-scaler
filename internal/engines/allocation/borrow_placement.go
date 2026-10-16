@@ -148,7 +148,10 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				prev.coKept = tighterCo(prev.coKept, b.CoKept, false)
 				// Two Kueue-backed entries hold the namespace: the tighter cap.
 				prev.cap = tighterBudget(prev.cap, drawable)
-				prev.lentOut = max(prev.lentOut, b.LentOut)
+				// Two entries reading one queue: the cautious Reclaim, as
+				// reclaimFor and bs.lent take it -- fewer GPUs reclaimed, and
+				// later (N-m1).
+				prev.lentOut = min(prev.lentOut, b.LentOut)
 				prev.after = max(prev.after, b.PreemptAfter)
 				if b.HighestPriority != nil && (prev.priority == nil || *b.HighestPriority > *prev.priority) {
 					prev.priority = b.HighestPriority
