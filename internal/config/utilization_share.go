@@ -550,7 +550,11 @@ func (c *Config) UtilizationShare() (settings UtilizationShare, selected bool, e
 
 // quotaBoundsNamespaceLocked reports whether a quota entry in force bounds
 // namespace: a scope: cluster quota, or a scope: namespace quota that does not
-// exclude it. Caller holds c.mu.
+// exclude it. A namespace such an entry does not list, with no `default` key,
+// is bounded too, at nothing: QuotaForNamespace gives it an empty map, the
+// limiter puts it in NamespacePools with no pool, and a physical group never
+// plans it (BuildShareGroups treats it as namespace-scoped). So physicalGroups
+// has no effect there and there is nothing to note. Caller holds c.mu.
 func (c *Config) quotaBoundsNamespaceLocked(namespace string) bool {
 	return slices.ContainsFunc(c.effectiveLimitersLocked(), func(l QuotaLimiterConfig) bool {
 		if l.Type != string(LimiterTypeQuota) {
