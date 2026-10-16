@@ -218,8 +218,9 @@ type ReplicaShape struct {
 	// DomainKey is the node label every pod of the replica must share a value
 	// of (an exclusive-topology LeaderWorkerSet), "" for none.
 	DomainKey string
-	// Placements is each pod template's nodeSelector and required node
-	// affinity (domain.VariantReplicaState.Placements); nil leaves them
+	// Placements is the pod templates' nodeSelector and required node
+	// affinity (domain.VariantReplicaState.Placements): one entry for every
+	// pod, or the leader's then the workers' (podTemplates); nil leaves them
 	// unjudged. Set on every path that fits a replica: the steady-state pass,
 	// the borrowing placer, a wake, and their holes in the in-flight ledger.
 	Placements []domain.PodPlacement
@@ -537,7 +538,8 @@ func (v *NodeView) largest(acc string) int {
 	return most
 }
 
-// place fits one replica's pods onto the nodes they are eligible for, largest
+// place fits one replica's pods onto the nodes they are eligible for (podFits:
+// a LeaderWorkerSet's leader by its template, its workers by theirs), largest
 // pod first, each best-fit -- into the smallest hole that holds it, the first
 // such node in name order on a tie -- and debits them.
 // With a topology key and more than one pod, every pod lands in one domain:
@@ -548,29 +550,24 @@ func (v *NodeView) place(r replicaFit) bool {
 	if v == nil {
 		return true
 	}
-	pods := make([]int, 0, len(r.pods))
-	for _, p := range r.pods {
-		if p > 0 {
-			pods = append(pods, p)
-		}
-	}
+	pods := v.podFits(r)
 	if len(pods) == 0 {
 		return true
 	}
-	if len(pods) > 1 {
-		pods = largestFirst(pods)
-	}
-	eligible := v.eligibleFit(r)
 	domains := []string{""}
 	exclusive := r.domain != "" && len(pods) > 1
 	if exclusive {
+		var eligible []int
+		for _, p := range pods {
+			eligible = append(eligible, p.nodes...)
+		}
 		domains = v.domainsOf(eligible, r.domain)
 	}
 	for _, d := range domains {
 		if exclusive && v.domainTaken(r.domain, d) {
 			continue // a domain holds one group (WN1)
 		}
-		taken, ok := v.bestFit(eligible, pods, r.domain, d)
+		taken, ok := v.bestFit(pods, r.domain, d)
 		if !ok {
 			continue
 		}
@@ -644,14 +641,16 @@ func (v *NodeView) slotOf(name string) (int, bool) {
 	return i, ok
 }
 
-// bestFit places pods, in order, each into the smallest hole among eligible
-// (only nodes whose label key is domain, when domain is set) that holds it,
-// and returns the GPUs taken per node, or false when some pod fits nowhere.
-func (v *NodeView) bestFit(eligible, pods []int, key, domain string) (map[int]int, bool) {
+// bestFit places pods, in order, each into the smallest hole among the nodes
+// it may land on (only nodes whose label key is domain, when domain is set)
+// that holds it, and returns the GPUs taken per node, or false when some pod
+// fits nowhere.
+func (v *NodeView) bestFit(pods []podFit, key, domain string) (map[int]int, bool) {
 	var taken map[int]int
-	for _, need := range pods {
+	for _, p := range pods {
+		need := p.gpus
 		best, bestFree := -1, 0
-		for _, i := range eligible {
+		for _, i := range p.nodes {
 			if domain != "" && v.slots[i].labels[key] != domain {
 				continue
 			}
@@ -700,7 +699,7 @@ func (v *NodeView) fits(r replicaFit, n int) int {
 			return n
 		}
 		count := 0
-		for _, i := range v.eligibleFit(r) {
+		for _, i := range v.eligibleFor(r, podTemplates(r, 0)) {
 			count += v.free(i) / need
 			if count >= n {
 				return n

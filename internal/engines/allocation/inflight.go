@@ -413,7 +413,14 @@ func (v *NodeView) holdPartial(r replicaFit, p domain.PartialReplica, unseen boo
 			key = r.domain
 		}
 	}
-	taken, ok := v.bestFit(v.eligibleFit(r), largestFirst(rest), key, d)
+	// Which of r's pods the rest are is not known: they are fitted where any
+	// pod of r may land (eligibleFit).
+	nodes := v.eligibleFit(r)
+	pods := make([]podFit, 0, len(rest))
+	for _, g := range largestFirst(rest) {
+		pods = append(pods, podFit{gpus: g, nodes: nodes})
+	}
+	taken, ok := v.bestFit(pods, key, d)
 	if !ok {
 		return
 	}

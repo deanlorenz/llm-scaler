@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"cmp"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -12,18 +13,68 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// eligibleFit is, in order, the nodes a pod of r may land on. A replica with
-// no templates and no flavor is the view's own rule (eligible: accelerator,
-// schedulable, taints its template tolerates). A replica with templates (any
-// path, WN3) is judged further: every node must satisfy each pod
-// template's nodeSelector and required node affinity, which the scheduler
+// podFit is one pod of a replica as the view places it: its GPUs and, in
+// order, the nodes it may land on.
+type podFit struct {
+	gpus  int
+	nodes []int
+}
+
+// podFits is r's pods that take GPUs, largest first (the leader first on a
+// tie), each with the nodes it may land on (eligibleFor, by podTemplates).
+func (v *NodeView) podFits(r replicaFit) []podFit {
+	var out []podFit
+	for i, g := range r.pods {
+		if g > 0 {
+			out = append(out, podFit{gpus: g, nodes: v.eligibleFor(r, podTemplates(r, i))})
+		}
+	}
+	slices.SortStableFunc(out, func(a, b podFit) int { return cmp.Compare(b.gpus, a.gpus) })
+	return out
+}
+
+// podTemplates is the templates pod i of r (r.pods, leader first) is judged
+// by. One template places every pod. Two are a LeaderWorkerSet whose leader
+// template places differently from its workers' (variantmeta.podPlacements):
+// pod 0 is judged by the leader's and the rest by the workers', when r.pods is
+// that layout. Where the pods cannot be told apart -- the replica placed as
+// one pod, its layout unknown -- no template is judged: requiring both of every
+// pod refused a gang whose leader and workers are pinned to different pools
+// (review 187-2).
+func podTemplates(r replicaFit, i int) []domain.PodPlacement {
+	switch {
+	case len(r.templates) <= 1:
+		return r.templates
+	case len(r.templates) == 2 && len(r.pods) > 1:
+		if i == 0 {
+			return r.templates[:1]
+		}
+		return r.templates[1:]
+	}
+	return nil
+}
+
+// eligibleFit is, in order, the nodes any pod of r may land on when which pod
+// it is cannot be told: r's template when it has one, else none (podTemplates).
+func (v *NodeView) eligibleFit(r replicaFit) []int {
+	if len(r.templates) > 1 {
+		return v.eligibleFor(r, nil)
+	}
+	return v.eligibleFor(r, r.templates)
+}
+
+// eligibleFor is, in order, the nodes a pod of r judged by templates may land
+// on. A pod with no templates and no flavor is the view's own rule (eligible:
+// accelerator, schedulable, taints its template tolerates). A pod with
+// templates (any path, WN3) is judged further: every node must satisfy each of
+// templates' nodeSelector and required node affinity, which the scheduler
 // enforces whatever flavor Kueue adds; and on borrowed capacity (r.flavor set,
 // the flavor Kueue admits it on) only the flavor's nodes count, those carrying
 // every node label it names, with its tolerations added to the template's (the
 // pod carries both). Computed once per cycle and key: the result is shared by
 // clones, like eligible's.
-func (v *NodeView) eligibleFit(r replicaFit) []int {
-	if len(r.templates) == 0 && r.flavor == nil {
+func (v *NodeView) eligibleFor(r replicaFit, templates []domain.PodPlacement) []int {
+	if len(templates) == 0 && r.flavor == nil {
 		return v.eligible(r.acc, r.tolerations, false)
 	}
 	tolerations := r.tolerations
@@ -40,7 +91,7 @@ func (v *NodeView) eligibleFit(r replicaFit) []int {
 		Tolerations []corev1.Toleration
 		Templates   []domain.PodPlacement
 		Labels      map[string]string
-	}{r.acc, tolerations, r.templates, labels})
+	}{r.acc, tolerations, templates, labels})
 	// A NUL prefix keeps these keys apart from eligible's accelerator keys.
 	key := "\x00fit\x00" + string(raw)
 	if err == nil {
@@ -53,7 +104,7 @@ func (v *NodeView) eligibleFit(r replicaFit) []int {
 	}
 	var nodes []int
 	for _, i := range base {
-		if admitsPlacement(&v.slots[i], r.templates, labels) {
+		if admitsPlacement(&v.slots[i], templates, labels) {
 			nodes = append(nodes, i)
 		}
 	}

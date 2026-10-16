@@ -340,8 +340,11 @@ Limits:
   the replica's accelerator, is schedulable (not cordoned, Ready, not being
   removed by an autoscaler), its taints are tolerated, and its labels match
   the pod templates' `nodeSelector` and required node affinity. That holds for
-  growth, wakes and in-flight holds alike. A LeaderWorkerSet's workers are
-  judged by its leader's tolerations.
+  growth, wakes and in-flight holds alike. A LeaderWorkerSet's leader pod is
+  judged by the leader template's `nodeSelector` and affinity, its workers by
+  the worker template's. When the pod layout is unknown, so the leader cannot
+  be told from a worker, neither template's is judged. A LeaderWorkerSet's
+  workers are judged by its leader's tolerations.
 - A replica whose pod layout is unknown and larger than any node (a
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the

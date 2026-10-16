@@ -126,9 +126,15 @@ sparse debits; `adopt` commits a clone's debits.
   from the `leaderworkerset.sigs.k8s.io/group-key` label; LWS's exclusive
   anti-affinity matches any pod carrying it).
   `ReplicaShape.Placements` (the templates' nodeSelector and required node
-  affinity) narrows the nodes further (`eligibleFit`) on every path: the
+  affinity) narrows the nodes further (`eligibleFor`) on every path: the
   greedy pass (`nodeFit.replica`), the borrowing placer, a wake (`shapeOf`)
-  and the ledger's holes (`steadystate.admitInFlight`).
+  and the ledger's holes (`steadystate.admitInFlight`). Each pod is judged
+  on its own (`podFits`, `podTemplates`): with two entries
+  (`variantmeta.podPlacements`: leader, then workers, an unconstrained one as
+  a zero `PodPlacement`) pod 0 is judged by the first and the rest by the
+  second. A replica placed as one pod (layout unknown) and the rest of a
+  partial group (`holdPartial`) cannot be mapped, and are judged by neither
+  (`eligibleFit`).
   `VariantReplicaState.Tolerations`/`TopologyKey`/`Placements` and
   `Candidate.Tolerations`/`DomainKey`/`Placements` (`variantmeta.PodPlacements`)
   carry them from the scale target, which discovery already reads.

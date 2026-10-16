@@ -10,31 +10,52 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
-// podPlacements is the node placement of each distinct pod template of one
-// replica, leader first (domain.VariantMetadata.Placements): a LeaderWorkerSet
-// whose worker template differs from its leader's carries both. Nil when no
-// template constrains its nodes.
+// podPlacements is the node placement of one replica's pods
+// (domain.VariantMetadata.Placements): one entry when every pod is placed
+// alike, or two, the leader's then the workers', for a LeaderWorkerSet whose
+// leader template places differently from its worker template -- an
+// unconstrained one then as a zero PodPlacement, so each entry stays its
+// template's. Nil when no template constrains its nodes.
 func podPlacements(acc scaletarget.ScaleTargetAccessor) []domain.PodPlacement {
 	if acc == nil {
 		return nil
 	}
-	var out []domain.PodPlacement
-	leader, worker := acc.GetLeaderPodTemplateSpec(), acc.GetWorkerPodTemplateSpec()
-	if leader != nil {
-		if p := domain.PlacementOf(&leader.Spec); p != nil {
-			out = append(out, *p)
+	of := func(t *corev1.PodTemplateSpec) *domain.PodPlacement {
+		if t == nil {
+			return nil
 		}
+		return domain.PlacementOf(&t.Spec)
 	}
-	if worker != nil && worker != leader {
-		if p := domain.PlacementOf(&worker.Spec); p != nil && !containsPlacement(out, *p) {
-			out = append(out, *p)
+	leader, worker := acc.GetLeaderPodTemplateSpec(), acc.GetWorkerPodTemplateSpec()
+	lp, wp := of(leader), of(worker)
+	switch {
+	case leader == nil || worker == nil || worker == leader:
+		// One template places every pod.
+		if lp == nil {
+			lp = wp
 		}
+		if lp == nil {
+			return nil
+		}
+		return []domain.PodPlacement{*lp}
+	case reflect.DeepEqual(lp, wp):
+		if lp == nil {
+			return nil
+		}
+		return []domain.PodPlacement{*lp}
+	}
+	out := make([]domain.PodPlacement, 2)
+	if lp != nil {
+		out[0] = *lp
+	}
+	if wp != nil {
+		out[1] = *wp
 	}
 	return out
 }
 
-// PodPlacements is the node placement of each distinct pod template of one
-// replica of acc, leader first; nil when no template constrains its nodes.
+// PodPlacements is the node placement of one replica's pods of acc, as
+// podPlacements has it; nil when no template constrains its nodes.
 // The scale-from-zero engine fits a wake with it (WN3).
 func PodPlacements(acc scaletarget.ScaleTargetAccessor) []domain.PodPlacement {
 	return podPlacements(acc)
@@ -82,13 +103,4 @@ func priorityClass(acc scaletarget.ScaleTargetAccessor) string {
 		return kueue.TemplatePriorityClass(t)
 	}
 	return kueue.TemplatePriorityClass(acc.GetWorkerPodTemplateSpec())
-}
-
-func containsPlacement(ps []domain.PodPlacement, p domain.PodPlacement) bool {
-	for _, q := range ps {
-		if reflect.DeepEqual(q, p) {
-			return true
-		}
-	}
-	return false
 }
