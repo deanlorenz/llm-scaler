@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // InFlightTTL is how long a replica admitted onto a node hole holds that hole
@@ -14,7 +16,9 @@ import (
 // Pending longer than this is not waiting for the hole it was admitted to --
 // it is unschedulable for another reason (a taint, an affinity, CPU or memory
 // on the node), or the hole went to someone else -- and holding the hole
-// longer would only keep it from a replica that could use it.
+// longer would only keep it from a replica that could use it. A replica on a
+// Kueue flavor is held at least as long as the borrowing governor waits for
+// it to place (InFlightAdmission.TTL, the placement timeout).
 const InFlightTTL = 5 * time.Minute
 
 // InFlightOwner is the owner the in-flight ledger's holes are charged to on a
@@ -48,7 +52,18 @@ const InFlightOwner = "in-flight"
 type InFlightLedger struct {
 	mu      sync.Mutex
 	entries map[string]*inFlightEntry
+	// sighted is, per variant key a committed admission named in this
+	// process (InFlightAdmission.ExistingOnly), when it last did. The ledger
+	// is not persisted, so after a restart no variant is sighted yet. A key
+	// not named for sightedFor is dropped (Commit): a deleted variant does
+	// not stay, and every cycle names the variants it decides.
+	sighted map[string]time.Time
 }
+
+// sightedFor is how long a variant stays sighted with no committed admission
+// naming it. Past it, the next admission is a first sighting again, and may
+// start a hold bounded by its TTL, as after a restart.
+const sightedFor = 2 * InFlightTTL
 
 // inFlightEntry is one variant's replicas in flight.
 type inFlightEntry struct {
@@ -63,9 +78,65 @@ type inFlightEntry struct {
 	// nothing, until the variant reaches want or wants more, so an
 	// unschedulable replica is not admitted again every cycle.
 	expires time.Time
+	// ttl is how long a rise of want holds (InFlightAdmission.TTL).
+	ttl time.Duration
 	// placed counts the variant's replicas holding a node, ok false when it
 	// cannot tell.
-	placed func() (int, bool)
+	placed func() (Placed, bool)
+	// partial is the replicas part of whose pods hold a node, as last
+	// counted, each placed pod with when it was first seen.
+	partial []partialSeen
+}
+
+// partialSeen is one partial replica as last counted, and per placed pod
+// (PlacedGPUs) when it was first seen placed.
+type partialSeen struct {
+	domain.PartialReplica
+	at []time.Time
+}
+
+// mergePartial is cur, the partial replicas counted now, each placed pod
+// keeping when it was first seen in old -- matched by node and GPUs -- and a
+// pod not in old seen now. A replica one more of whose pods placed thus has
+// only that pod newer than an earlier snapshot.
+func mergePartial(old []partialSeen, cur []domain.PartialReplica, now time.Time) []partialSeen {
+	if len(cur) == 0 {
+		return nil
+	}
+	used := make([]bool, len(old))
+	out := make([]partialSeen, 0, len(cur))
+	for _, c := range cur {
+		s := partialSeen{PartialReplica: c, at: make([]time.Time, len(c.PlacedGPUs))}
+		var gpus []int
+		var at []time.Time
+		for i := range old {
+			if !used[i] && old[i].Node == c.Node {
+				used[i] = true
+				gpus, at = slices.Clone(old[i].PlacedGPUs), slices.Clone(old[i].at)
+				break
+			}
+		}
+		for j, g := range c.PlacedGPUs {
+			s.at[j] = now
+			if k := slices.Index(gpus, g); k >= 0 {
+				s.at[j] = at[k]
+				gpus, at = slices.Delete(gpus, k, k+1), slices.Delete(at, k, k+1)
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// Placed is what a variant's pods hold, as an in-flight entry counts them
+// (InFlightLedger.Admit): Whole, the replicas every pod of which holds a node
+// (scheduled to it, or nominated for it); Partial, each replica -- a
+// LeaderWorkerSet group -- some but not all of whose pods do. The ledger
+// holds a partial replica's other pods in the topology domain its placed
+// pods are in (WN2).
+type Placed struct {
+	Whole   int
+	Partial []domain.PartialReplica
 }
 
 // placedAt is a placed count and when it was first observed.
@@ -76,7 +147,7 @@ type placedAt struct {
 
 // NewInFlightLedger returns an empty ledger.
 func NewInFlightLedger() *InFlightLedger {
-	return &InFlightLedger{entries: map[string]*inFlightEntry{}}
+	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}}
 }
 
 // DefaultInFlight is the process-wide ledger both engines share.
@@ -88,31 +159,154 @@ var DefaultInFlight = NewInFlightLedger()
 // than placedNow ends the entry. A want higher than the entry's admits more
 // replicas and starts InFlightTTL afresh; an equal or lower want keeps the
 // clock, so a replica Pending for good is not held again every cycle.
-func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow int, placed func() (int, bool), now time.Time) {
+func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow int, placed func() (Placed, bool), now time.Time) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.admitLocked(InFlightAdmission{Key: key, Shape: shape, Want: want, PlacedNow: placedNow, Placed: placed}, now, true)
+}
+
+// InFlightAdmission is one variant's admission to the ledger, as Admit takes
+// it.
+type InFlightAdmission struct {
+	Key       string
+	Shape     ReplicaShape
+	Want      int
+	PlacedNow int
+	Placed    func() (Placed, bool)
+	// TTL is how long the replicas a rise of Want admits are held, at least
+	// InFlightTTL: the steady-state engine holds a replica on a Kueue flavor
+	// for the borrowing placement timeout when that is longer, since the
+	// governor waits that long before it releases the replica.
+	TTL time.Duration
+	// ExistingOnly marks a target that does not grow the variant: it updates
+	// the growth still in flight and starts no hold of its own -- when the
+	// variant has a replica that cannot place (Unplaced), or once this
+	// process has sighted the variant. On the first sighting, with every
+	// replica placeable, it starts a hold as growth does: the ledger is not
+	// persisted, and after a restart the replica a Pending pod was ordered
+	// for before it is growth no entry remembers. Without that hold a wake
+	// took the node the Pending pod was about to land on.
+	ExistingOnly bool
+	// Unplaced is set when the variant has a replica that cannot place: a
+	// pod Unschedulable, or held at Kueue's admission gate past a cycle --
+	// a preempted borrower's replacement. A hole would only keep that
+	// replica's node from a peer that can use it.
+	Unplaced bool
+}
+
+// InFlightMark is the entries a provisional admission (Provisional)
+// replaced, per variant key; nil for a variant that had none.
+type InFlightMark map[string]*inFlightEntry
+
+// Provisional admits adms at once and returns what they replaced, for
+// Commit. The steady-state engine admits its pass's placements so right
+// after the optimizer, before the rest of its cycle -- the utilization share,
+// scale-to-zero, the borrowing releases -- may lower them: a wake in that
+// window saw the nodes the pass chose free and took one (WN5).
+func (l *InFlightLedger) Provisional(adms []InFlightAdmission, now time.Time) InFlightMark {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	mark := InFlightMark{}
+	for _, a := range adms {
+		if _, seen := mark[a.Key]; seen {
+			continue
+		}
+		var prev *inFlightEntry
+		if e, ok := l.entries[a.Key]; ok {
+			c := *e
+			c.seen = slices.Clone(e.seen)
+			prev = &c
+		}
+		mark[a.Key] = prev
+	}
+	for _, a := range adms {
+		// Not a sighting: Commit sets the entry back and admits again.
+		l.admitLocked(a, now, false)
+	}
+	return mark
+}
+
+// Commit replaces a provisional admission with the cycle's final one, as one
+// step: every variant mark covers is set back to its entry before, then adms
+// are admitted. A target the cycle lowered after the pass thus holds what
+// the lower target asks, on the clock it had before -- a replica the pass
+// asked again and a release took back does not restart its hold. A nil mark
+// only admits.
+//
+// A wake that admits a variant mark covers between Provisional and Commit
+// is set back with the rest: its admission is discarded, and the cycle's
+// final admission for the variant, made from the states read before the
+// wake, stands. For a variant the cycle kept at zero that ends the wake's
+// hold: the woken replica's node is free to other decisions until its pod
+// lands, and no later cycle holds it again (ExistingOnly). The end-of-cycle
+// admission always replaced an earlier one this way for the variants the
+// cycle decided; it is left so because a wake and a pass rarely decide one
+// variant within one cycle.
+func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, prev := range mark {
+		if prev == nil {
+			delete(l.entries, k)
+			continue
+		}
+		l.entries[k] = prev
+	}
+	maps.DeleteFunc(l.sighted, func(_ string, at time.Time) bool { return now.Sub(at) > sightedFor })
+	for _, a := range adms {
+		l.admitLocked(a, now, true)
+	}
+}
+
+// admitLocked is Admit under the lock. sight records the variant as sighted
+// (InFlightAdmission.ExistingOnly); a provisional admission does not.
+func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight bool) {
+	key, shape, want, placedNow, placed := a.Key, a.Shape, a.Want, a.PlacedNow, a.Placed
+	_, sighted := l.sighted[key]
+	if sight {
+		l.sighted[key] = now
+	}
 	if want <= placedNow {
 		delete(l.entries, key)
 		return
 	}
+	ttl := max(a.TTL, InFlightTTL)
 	e, ok := l.entries[key]
 	switch {
+	case !ok && a.ExistingOnly && (a.Unplaced || sighted):
+		return
 	case !ok:
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
-			expires: now.Add(InFlightTTL), placed: placed}
+			expires: now.Add(ttl), ttl: ttl, placed: placed}
 		return
-	case want > e.want:
-		e.expires = now.Add(InFlightTTL)
 	}
 	if shape.Flavor == nil && e.shape.Flavor != nil && want <= e.want {
 		// The replicas admitted on a borrowed flavor's nodes are the same
 		// ones once the borrowed draw resolves (their pods exist, gated by
-		// Kueue and still holding no node): their holes stay on that flavor.
+		// Kueue and still holding no node): their holes stay on that flavor,
+		// for as long as it holds them.
 		shape.Flavor, shape.Placements = e.shape.Flavor, e.shape.Placements
+		ttl = max(ttl, e.ttl)
 	}
+	switch {
+	case want > e.want:
+		e.expires = now.Add(ttl)
+	case ttl != e.ttl:
+		// Same replicas, another TTL: the hold ends ttl after it started. An
+		// entry that left its flavor holds for InFlightTTL, not the flavor's
+		// placement timeout.
+		e.expires = e.expires.Add(ttl - e.ttl)
+	}
+	e.ttl = ttl
 	e.shape, e.want, e.placed = shape, want, placed
 	e.base = max(e.base, placedNow)
 }
@@ -146,6 +340,7 @@ func (l *InFlightLedger) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	clear(l.entries)
+	clear(l.sighted)
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has
@@ -155,14 +350,14 @@ func (l *InFlightLedger) Reset() {
 func (l *InFlightLedger) settle(now time.Time) {
 	l.mu.Lock()
 	keys := slices.Sorted(maps.Keys(l.entries))
-	counts := make(map[string]func() (int, bool), len(keys))
+	counts := make(map[string]func() (Placed, bool), len(keys))
 	for _, k := range keys {
 		if e := l.entries[k]; e.placed != nil {
 			counts[k] = e.placed
 		}
 	}
 	l.mu.Unlock()
-	observed := map[string]int{}
+	observed := map[string]Placed{}
 	for _, k := range keys {
 		if f := counts[k]; f != nil {
 			if n, ok := f(); ok {
@@ -177,14 +372,15 @@ func (l *InFlightLedger) settle(now time.Time) {
 		if !ok {
 			continue
 		}
-		if now.Sub(e.expires) > InFlightTTL {
+		if now.Sub(e.expires) > max(e.ttl, InFlightTTL) {
 			delete(l.entries, k)
 			continue
 		}
-		n, ok := observed[k]
+		p, ok := observed[k]
 		if !ok {
 			continue
 		}
+		n := p.Whole
 		if n >= e.want {
 			delete(l.entries, k)
 			continue
@@ -192,6 +388,7 @@ func (l *InFlightLedger) settle(now time.Time) {
 		if last := e.base; n > last && (len(e.seen) == 0 || n > e.seen[len(e.seen)-1].n) {
 			e.seen = append(e.seen, placedAt{n: n, at: now})
 		}
+		e.partial = mergePartial(e.partial, p.Partial, now)
 	}
 }
 
@@ -223,11 +420,77 @@ func (l *InFlightLedger) holdOn(v *NodeView, now time.Time) {
 		r := v.fitOf(e.shape)
 		// Each held replica is charged to its own owner, numbered from the
 		// variant's first replica, so ReleaseUncreated can take back the
-		// holes of the replicas whose pods do not exist yet.
+		// holes of the replicas whose pods do not exist yet. A replica part
+		// of whose pods hold a node comes first: its pods exist, and only
+		// the rest are held, where its placed pods are (holdPartial).
 		for n := placed + 1; n <= e.want; n++ {
 			v.setOwner(inFlightReplicaOwner(k, n))
+			if i := n - placed - 1; i < len(e.partial) {
+				v.holdPartial(r, e.partial[i])
+				continue
+			}
 			v.place(r)
 		}
+	}
+}
+
+// holdPartial holds, for one replica part of whose pods hold a node (p), the
+// pods that hold none yet -- r's pods less the placed ones' GPUs -- best-fit
+// in the topology domain of the node p's placed pods hold (r.domain; the
+// group's own domain, so it is not refused as taken), or anywhere r may land
+// when r has no topology key or the node is not in the view. Held whole, the
+// replica found no hole once its leader held one node, and the node its
+// workers need was free to anyone (WN2). A placed pod first seen after the
+// view's snapshot was taken is not in it: its GPUs are held on its node too,
+// as far as it has them free. One the snapshot shows is not charged again.
+// Nothing is held when the rest fit nowhere.
+func (v *NodeView) holdPartial(r replicaFit, p partialSeen) {
+	if v == nil || len(r.pods) == 0 {
+		return
+	}
+	rest := slices.Clone(r.pods)
+	for _, g := range p.PlacedGPUs {
+		if i := slices.Index(rest, g); i >= 0 {
+			rest = slices.Delete(rest, i, i+1)
+		}
+	}
+	rest = slices.DeleteFunc(rest, func(g int) bool { return g <= 0 })
+	node, known := v.slotOf(p.Node)
+	if known {
+		for j, g := range p.PlacedGPUs {
+			if !p.at[j].After(v.takenAt) {
+				continue
+			}
+			if f := v.free(node); f > 0 && g > 0 {
+				v.charge(node, min(g, f))
+			}
+		}
+	}
+	if len(rest) == 0 {
+		return
+	}
+	key, d := "", ""
+	if known && r.domain != "" {
+		if d = v.slots[node].labels[r.domain]; d != "" {
+			key = r.domain
+		}
+	}
+	// Which of r's pods the rest are is not known: they are fitted where any
+	// pod of r may land (eligibleFit).
+	nodes := v.eligibleFit(r)
+	pods := make([]podFit, 0, len(rest))
+	for _, g := range largestFirst(rest) {
+		pods = append(pods, podFit{gpus: g, nodes: nodes})
+	}
+	taken, ok := v.bestFit(pods, key, d)
+	if !ok {
+		return
+	}
+	for _, i := range slices.Sorted(maps.Keys(taken)) {
+		v.charge(i, taken[i])
+	}
+	if d != "" {
+		v.takeDomain(domainID(key, d))
 	}
 }
 
@@ -272,4 +535,5 @@ func (l *InFlightLedger) ReleaseUncreated(v *NodeView, created map[string]int) {
 		}
 		delete(v.owned, owner)
 	}
+	maps.DeleteFunc(v.domains, func(_, owner string) bool { return release[owner] })
 }

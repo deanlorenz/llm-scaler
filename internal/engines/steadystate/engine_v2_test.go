@@ -397,7 +397,7 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 			},
 		}
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(results).NotTo(BeEmpty())
 		Expect(ta.callCount).To(Equal(1))
@@ -433,7 +433,7 @@ var _ = Describe("runAnalyzersAndScore disabled-analyzer gate", func() {
 			},
 		}
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(namedByName(results)).To(HaveKey(domain.SaturationAnalyzerName), "only saturation entry — disabled spy must not appear")
 		Expect(spy.callCount).To(Equal(0), "Analyze must not be called for a disabled analyzer")

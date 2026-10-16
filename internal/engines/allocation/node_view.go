@@ -29,19 +29,22 @@ import (
 // nothing is fitted: every method accepts a nil receiver, every placement then
 // succeeds, and the copies are nil.
 //
-// It counts GPUs only. CPU or memory exhaustion on a node is not seen, nor
-// node affinity beyond the accelerator: a node is a candidate for a pod when
-// it carries the pod's accelerator, is schedulable
-// (decision.NodeGPU.Unschedulable: cordoned, not Ready, or tainted for
-// removal), and every NoSchedule or NoExecute taint it carries is tolerated by
-// the pod's template (ReplicaShape.Tolerations). A pod is placed best-fit, in
-// the smallest hole that holds it; the pods of a replica with a topology key
+// It counts GPUs only. CPU or memory exhaustion on a node is not seen: a node
+// is a candidate for a pod when it carries the pod's accelerator, is
+// schedulable (decision.NodeGPU.Unschedulable: cordoned, not Ready, or
+// tainted for removal), every NoSchedule or NoExecute taint it carries is
+// tolerated by the pod's template (ReplicaShape.Tolerations), and its labels
+// satisfy the templates' nodeSelector and required node affinity
+// (ReplicaShape.Placements; eligibleFit, borrow_node_fit.go) -- on every
+// path: the pass, a wake, and the in-flight ledger's holes. On borrowed
+// capacity the flavor's node labels and tolerations count too
+// (ReplicaShape.Flavor). A pod is placed best-fit, in the smallest hole that
+// holds it; the pods of a replica with a topology key
 // (ReplicaShape.DomainKey: an exclusive-topology LeaderWorkerSet) are placed
-// in one domain, the nodes sharing one value of that label. A replica the
-// Kueue borrowing placer orders is judged further (ReplicaShape.Placements and
-// Flavor; eligibleFit, borrow_node_fit.go): its pod templates' nodeSelector
-// and required node affinity, and on borrowed capacity its flavor's node
-// labels and tolerations, against the same view and debits.
+// in one domain, the nodes sharing one value of that label, and a domain
+// holds one such replica: none lands in a domain where a LeaderWorkerSet
+// group's pod is (decision.NodeGPU.LWSGroup) or where this view placed
+// another (domains).
 //
 // A NodeView is not safe for concurrent use: one optimizer pass, or one wake
 // decision, owns it.
@@ -76,6 +79,10 @@ type NodeView struct {
 	takenAt time.Time
 	// layouts is where an unknown pod layout is logged once per variant.
 	layouts *LayoutLog
+	// domains is the topology domains (domainID) this view placed an
+	// exclusive-topology replica in, each with the owner it was charged to:
+	// a domain holds one group (WN1). A clone copies it.
+	domains map[string]string
 }
 
 // nodeSlot is what the view reads of one node.
@@ -91,6 +98,9 @@ type nodeSlot struct {
 	// labels is the snapshot's own label map, read for a topology domain and
 	// never written (decision.NodeGPUStore.Read).
 	labels map[string]string
+	// group is set when a LeaderWorkerSet group's pod is on the node
+	// (decision.NodeGPU.LWSGroup).
+	group bool
 }
 
 // eligibleCache is the nodes, in order, eligible for one accelerator and set of
@@ -100,6 +110,11 @@ type eligibleCache struct {
 	mu      sync.Mutex
 	nodes   map[string][]int
 	largest map[string]int
+	// grouped is, per topology label key, the values of it whose nodes a
+	// LeaderWorkerSet group's pod is on (groupedDomains).
+	grouped map[string]map[string]bool
+	// index is each node's position by name (slotOf).
+	index map[string]int
 }
 
 // LayoutLog remembers the variants whose unknown pod layout a node view has
@@ -130,11 +145,11 @@ func newNodeViewAt(snap map[string]decision.NodeGPU, takenAt time.Time) *NodeVie
 	}
 	v := &NodeView{slots: make([]nodeSlot, 0, len(snap)), debit: map[int]int{},
 		elig: &eligibleCache{nodes: map[string][]int{}, largest: map[string]int{}}, owned: map[string]map[int]int{},
-		takenAt: takenAt, layouts: &LayoutLog{}}
+		takenAt: takenAt, layouts: &LayoutLog{}, domains: map[string]string{}}
 	for _, name := range slices.Sorted(maps.Keys(snap)) {
 		n := snap[name]
 		v.slots = append(v.slots, nodeSlot{name: name, accelerator: n.Accelerator, capacity: n.Capacity, used: n.Used,
-			unschedulable: n.Unschedulable, taints: n.Taints, labels: n.Labels})
+			unschedulable: n.Unschedulable, taints: n.Taints, labels: n.Labels, group: n.LWSGroup})
 	}
 	return v
 }
@@ -203,9 +218,11 @@ type ReplicaShape struct {
 	// DomainKey is the node label every pod of the replica must share a value
 	// of (an exclusive-topology LeaderWorkerSet), "" for none.
 	DomainKey string
-	// Placements is each pod template's nodeSelector and required node
-	// affinity; nil leaves them unjudged. Set for the replicas the Kueue
-	// borrowing placer orders, and for their holes in the in-flight ledger.
+	// Placements is the pod templates' nodeSelector and required node
+	// affinity (domain.VariantReplicaState.Placements): one entry for every
+	// pod, or the leader's then the workers' (podTemplates); nil leaves them
+	// unjudged. Set on every path that fits a replica: the steady-state pass,
+	// the borrowing placer, a wake, and their holes in the in-flight ledger.
 	Placements []domain.PodPlacement
 	// Flavor is the Kueue flavor a borrowed replica is admitted on: its pods
 	// land only on nodes carrying every node label it names, and carry its
@@ -259,11 +276,19 @@ func (v *NodeView) Clone() *NodeView {
 		return nil
 	}
 	return &NodeView{slots: v.slots, debit: maps.Clone(v.debit), elig: v.elig,
-		takenAt: v.takenAt, layouts: v.layouts}
+		takenAt: v.takenAt, layouts: v.layouts, domains: maps.Clone(v.domains)}
 }
 
 // adopt takes another view's debits: the commit of a tentative placement made
-// on a Clone of v. What the clone added is charged to v's owner.
+// on a Clone of v. What the clone added -- its debits and the topology domains
+// it took -- is charged to v's owner as of the adopt, not as of the Clone: a
+// caller may set the owner after cloning, just before it adopts (rescale), and
+// a clone records no owner of its own. The domains are charged with the
+// debits, so without and ReleaseUncreated take both back together. c must be a
+// Clone of v from which v has released nothing since (without,
+// ReleaseUncreated): a domain v gave back in between would be taken again
+// here, under the adopting owner. Every caller adopts the clone it has just
+// placed on.
 func (v *NodeView) adopt(c *NodeView) {
 	if v == nil || c == nil {
 		return
@@ -276,6 +301,11 @@ func (v *NodeView) adopt(c *NodeView) {
 		}
 	}
 	v.debit = c.debit
+	for id := range c.domains {
+		if _, ok := v.domains[id]; !ok {
+			v.takeDomain(id)
+		}
+	}
 }
 
 // charge debits g GPUs of node i, charged to the view's owner.
@@ -342,6 +372,7 @@ func (v *NodeView) without(exclude func(owner string) bool) *NodeView {
 			}
 		}
 	}
+	maps.DeleteFunc(c.domains, func(_, owner string) bool { return exclude(owner) })
 	return c
 }
 
@@ -487,6 +518,16 @@ func eligibleNode(n *nodeSlot, acc string, tolerations []corev1.Toleration, anyT
 	return true
 }
 
+// NodeAdmits reports whether a pod of accelerator acc whose template carries
+// tolerations may land on n, by the node view's own rule (eligibleNode): n is
+// schedulable, carries acc (accelerator.SameName), and every taint it
+// carries is tolerated. The utilization share's node picture uses it, so the
+// share and the view agree on which nodes a pod may use.
+func NodeAdmits(n decision.NodeGPU, acc string, tolerations []corev1.Toleration) bool {
+	return eligibleNode(&nodeSlot{accelerator: n.Accelerator, unschedulable: n.Unschedulable, taints: n.Taints},
+		acc, tolerations, false)
+}
+
 // largest is the capacity of the largest node acc is eligible for, whatever
 // its taints: how large a replica one node could hold.
 func (v *NodeView) largest(acc string) int {
@@ -505,7 +546,8 @@ func (v *NodeView) largest(acc string) int {
 	return most
 }
 
-// place fits one replica's pods onto the nodes they are eligible for, largest
+// place fits one replica's pods onto the nodes they are eligible for (podFits:
+// a LeaderWorkerSet's leader by its template, its workers by theirs), largest
 // pod first, each best-fit -- into the smallest hole that holds it, the first
 // such node in name order on a tie -- and debits them.
 // With a topology key and more than one pod, every pod lands in one domain:
@@ -516,44 +558,107 @@ func (v *NodeView) place(r replicaFit) bool {
 	if v == nil {
 		return true
 	}
-	pods := make([]int, 0, len(r.pods))
-	for _, p := range r.pods {
-		if p > 0 {
-			pods = append(pods, p)
-		}
-	}
+	pods := v.podFits(r)
 	if len(pods) == 0 {
 		return true
 	}
-	if len(pods) > 1 {
-		pods = largestFirst(pods)
-	}
-	eligible := v.eligibleFit(r)
 	domains := []string{""}
-	if r.domain != "" && len(pods) > 1 {
+	exclusive := r.domain != "" && len(pods) > 1
+	if exclusive {
+		var eligible []int
+		for _, p := range pods {
+			eligible = append(eligible, p.nodes...)
+		}
 		domains = v.domainsOf(eligible, r.domain)
 	}
 	for _, d := range domains {
-		taken, ok := v.bestFit(eligible, pods, r.domain, d)
+		if exclusive && v.domainTaken(r.domain, d) {
+			continue // a domain holds one group (WN1)
+		}
+		taken, ok := v.bestFit(pods, r.domain, d)
 		if !ok {
 			continue
 		}
 		for _, i := range slices.Sorted(maps.Keys(taken)) {
 			v.charge(i, taken[i])
 		}
+		if exclusive {
+			v.takeDomain(domainID(r.domain, d))
+		}
 		return true
 	}
 	return false
 }
 
-// bestFit places pods, in order, each into the smallest hole among eligible
-// (only nodes whose label key is domain, when domain is set) that holds it,
-// and returns the GPUs taken per node, or false when some pod fits nowhere.
-func (v *NodeView) bestFit(eligible, pods []int, key, domain string) (map[int]int, bool) {
+// domainID names value d of topology label key in NodeView.domains.
+func domainID(key, d string) string { return key + "\x00" + d }
+
+// takeDomain charges topology domain id to the view's owner.
+func (v *NodeView) takeDomain(id string) {
+	if v.domains == nil {
+		v.domains = map[string]string{}
+	}
+	v.domains[id] = v.owner
+}
+
+// domainTaken reports whether value d of topology label key already holds a
+// group: this view placed an exclusive-topology replica in it, or a
+// LeaderWorkerSet group's pod is on one of its nodes. LeaderWorkerSet's
+// exclusive placement is a pod anti-affinity against every other group's
+// pods in the domain, so either refuses a new group there.
+func (v *NodeView) domainTaken(key, d string) bool {
+	if _, ok := v.domains[domainID(key, d)]; ok {
+		return true
+	}
+	return v.groupedDomains(key)[d]
+}
+
+// groupedDomains is the values of label key whose nodes a LeaderWorkerSet
+// group's pod is on, computed once per view and key and shared by clones.
+func (v *NodeView) groupedDomains(key string) map[string]bool {
+	v.elig.mu.Lock()
+	defer v.elig.mu.Unlock()
+	if g, ok := v.elig.grouped[key]; ok {
+		return g
+	}
+	g := map[string]bool{}
+	for i := range v.slots {
+		if n := &v.slots[i]; n.group && n.labels[key] != "" {
+			g[n.labels[key]] = true
+		}
+	}
+	if v.elig.grouped == nil {
+		v.elig.grouped = map[string]map[string]bool{}
+	}
+	v.elig.grouped[key] = g
+	return g
+}
+
+// slotOf is the index of the node named name, false when the snapshot has
+// none.
+func (v *NodeView) slotOf(name string) (int, bool) {
+	v.elig.mu.Lock()
+	defer v.elig.mu.Unlock()
+	if v.elig.index == nil {
+		v.elig.index = make(map[string]int, len(v.slots))
+		for i := range v.slots {
+			v.elig.index[v.slots[i].name] = i
+		}
+	}
+	i, ok := v.elig.index[name]
+	return i, ok
+}
+
+// bestFit places pods, in order, each into the smallest hole among the nodes
+// it may land on (only nodes whose label key is domain, when domain is set)
+// that holds it, and returns the GPUs taken per node, or false when some pod
+// fits nowhere.
+func (v *NodeView) bestFit(pods []podFit, key, domain string) (map[int]int, bool) {
 	var taken map[int]int
-	for _, need := range pods {
+	for _, p := range pods {
+		need := p.gpus
 		best, bestFree := -1, 0
-		for _, i := range eligible {
+		for _, i := range p.nodes {
 			if domain != "" && v.slots[i].labels[key] != domain {
 				continue
 			}
@@ -602,7 +707,7 @@ func (v *NodeView) fits(r replicaFit, n int) int {
 			return n
 		}
 		count := 0
-		for _, i := range v.eligibleFit(r) {
+		for _, i := range v.eligibleFor(r, podTemplates(r, 0)) {
 			count += v.free(i) / need
 			if count >= n {
 				return n

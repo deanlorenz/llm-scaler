@@ -108,11 +108,15 @@ limiters:
         H100: 2    # per-namespace fallback for unlisted namespaces
 ```
 
+Declared alone, this example logs a `WARNING`: nothing bounds the excluded
+namespaces. A `gpu-inventory` limiter or a `scope: cluster` quota beside it
+bounds them. If they run no models, you can ignore the warning.
+
 > ⚠️ **Reserved key collision.** `default` in `namespaceQuotas` is the fallback
-> for unlisted namespaces, so the Kubernetes namespace named `default` cannot be
-> given a quota by listing it. Either list it in `exclude` to bypass this
-> limiter, or use a strict allowlist (no `default` key), so every unlisted
-> namespace, `default` included, is denied.
+> for unlisted namespaces. So you cannot give the namespace called `default` its
+> own quota. Prefer a strict allowlist with no `default` key: every unlisted
+> namespace is then denied. If you exclude `default` instead, only the
+> cluster bounds limit it.
 
 ### Special values
 
@@ -130,13 +134,20 @@ value is rejected at startup (see Validation).
 When the allocator evaluates a request for namespace `N` and type `T` in
 `namespace` scope:
 
-1. If `N` appears in `exclude`, the limiter **passes through** — the request is
-   returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply. The utilization-share optimizer does not share an excluded
-   namespace unless a finite `scope: cluster` quota also covers its
-   accelerator type: this quota does not bound it, so there is no budget to
-   share
-   ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+1. If `N` appears in `exclude`, this limiter does not apply to `N` and records
+   no usage for it. Other limiters still apply.
+   - Only the cluster bounds limit `N`: a `gpu-inventory` limiter and any
+     `scope: cluster` quota. The tenants' quota does not: `N` does not use it,
+     and a full tenant quota does not stop `N`.
+   - A `scope: cluster` quota is a closed allowlist for `N`, as for everyone.
+     A type it lists with a number bounds `N` at that number. A type it lists
+     as `-1` does not bound `N`. A type it does not list is denied.
+   - With no cluster bound, the scaling manager does not limit `N`. Without a
+     `gpu-inventory` limiter, free GPUs are not checked: if the cluster is
+     full, new pods stay `Pending`.
+   - The controller logs a `WARNING` when `N` has no GPU limit on some type,
+     and when an `exclude` entry is not a valid namespace name (it never
+     matches). See [Validation](#validation).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace
@@ -151,6 +162,37 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 The fall-through to `default` is therefore at the **namespace** granularity, not
 per `(namespace, type)`: it applies only when `N` is wholly unlisted.
+
+> ⚠️ **An excluded namespace can use GPUs your tenants expect.** Without a
+> cluster bound it has no limit, and the scaling manager reserves nothing for
+> the tenants. If tenants must keep their GPUs, use a Kubernetes
+> `ResourceQuota` or Kueue: those are the real boundary.
+
+<details>
+<summary>Details: how an excluded namespace is sized</summary>
+
+- The tenants and `N` share the cluster bounds. Nothing is reserved for a
+  tenant. Models take turns by how much they still need. With
+  `enableRescale: true` on the `default` entry, `N` is sized before the
+  tenants when GPUs run short. So `N` can take the whole cluster quota, even
+  while a tenant is below its cap and wants more.
+- If a cluster bound is in force, a model in `N` whose pods name no GPU type
+  does not scale up, though a wake from zero can still start it. Give its pods
+  an accelerator selector. A `scope: cluster` quota that lists `unknown` is
+  the exception: it bounds such a model at that number, and `-1` does not
+  bound it.
+- The utilization-share optimizer shares `N` only when a finite cluster bound
+  covers its accelerator type
+  ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+
+This holds for every decision: scaling up, rescale, and waking from zero. The
+limiter a decision names as `LimitedBy` reads the same bounds. GPU names match
+by family and product, as everywhere else: a workload on `a100` or
+`NVIDIA-A100-SXM4-80GB` spends a cluster quota's `A100`. A namespace that one
+namespace quota excludes and another holds is bounded by the second, as a
+tenant of it.
+
+</details>
 
 ### Kueue as a quota source
 
@@ -191,11 +233,28 @@ map — denies every type (see *Merge rules*, row 3).
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
 | `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. At namespace scope, `borrowingLimit`, `lendingLimit`, cohorts and queue status add **cohort borrowing** on top of this grant where it is safe (see *Cohort borrowing*). |
-| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
+| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of the ClusterQueue its LocalQueues point at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. LocalQueues on **several** GPU ClusterQueues are not summed (see *multi-queue namespace* below). |
 | `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
-The cluster-scope figure is the sum over **all** ClusterQueues. Six attribution
+The cluster-scope figure is the sum over **all** ClusterQueues. Seven attribution
 rules the table does not show:
+
+- **A namespace on several GPU ClusterQueues gets one queue's figure, not
+  their sum.** This is decided per accelerator type.
+  - A type that **one** of the queues grants keeps that queue's figure and
+    borrows as usual. Say `cq-h` grants 16 H100 and `cq-a` 16 A100: the
+    namespace gets 16 of each.
+  - A type that **several** of the queues grant is ambiguous. So is any type
+    when one of the queues has a flavor without a product label. Say
+    `serving` points at `cq-s` (16 H100) and `batch` at `cq-b` (16 H100).
+    Kueue charges each replica to the one queue its pod's
+    `kueue.x-k8s.io/queue-name` names, so the namespace never holds 32 H100
+    there. The scaling manager does not read which queue a variant uses. It
+    caps the type at the **smallest single queue's figure** (16 here), and
+    the type borrows nothing; its reason is `multi-queue-namespace`.
+
+  To get each queue's full figure, give serving its own namespace with one
+  LocalQueue.
 
 - **A flavor without a product label is an untyped grant.** Kueue's quickstart
   `default-flavor`, or any single-GPU-type cluster. It is *not* named after the
@@ -292,11 +351,10 @@ an error from a Kueue outage would *lift* the declared cap. Instead:
 - with none — Kueue not installed, RBAC missing, first read failing — the
   error is logged every cycle until a read succeeds. A Forbidden or a missing
   CRD is reported as such, never folded into "Kueue grants nothing". An entry
-  that leaves a type at `-1` is then skipped as an unobserved provider
-  (`wva_constraint_provider_skipped{reason="unobserved"}`, plus
-  `wva_kueue_never_read` and the alert `WVAKueueNeverRead`): the other
-  limiters still bound, and Kueue still gates pods past its quota. Otherwise
-  the **static entry alone** applies.
+  that leaves a type at `-1` reports `wva_kueue_never_read` (alert
+  `WVAKueueNeverRead`): its finite caps still bound, a `-1` type is bounded
+  only by the other limiters, and Kueue still gates pods past its quota.
+  Otherwise the **static entry alone** applies.
 
 With borrowing counted, a failed read after a good one is published too: the
 reason `stale` on `wva_quota_borrow_withheld`, and the alert
@@ -336,6 +394,7 @@ quota, exactly as with `countBorrowable: false`.
 | Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; the reserved Workloads must request at least the GPUs their owners' running pods do, each Workload counted once and at the pod count Kueue admitted. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, as do GPUs asked for only through pod-level resources or DRA claims, and a pod whose owner the controller may not read. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit` | `no-gpu-bound` |
+| Only one of the namespace's GPU ClusterQueues grants the accelerator type, and none of them has a flavor without a product label. Otherwise the type is capped at the smallest single queue's figure, not at their sum (see *What is read*) | `multi-queue-namespace` |
 | The Kueue controller's version is readable from the image tag of `kueue-controller-manager` (not a digest-only image). `kueue.assumeTestedVersion: true` lifts this one reason | `kueue-version-unknown` |
 | The Kueue controller runs a [tested version](#supported-kueue-versions) | `kueue-version-untested` |
 | The ClusterQueue is in a cohort | `no-cohort` |
@@ -483,8 +542,8 @@ entries of all but one: two that borrow at once can count the same free GPU.
   never borrowed capacity, and not guaranteed alone either (under Kueue's
   default `Never`, an idle queue's guaranteed is 0). A wake blocked because
   the queue's nominal is lent to a peer that need not give it back reports
-  `nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking into a
-  gated pod.
+  `wake-nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking
+  into a gated pod.
 - **The utilization-share optimizer** keeps borrowed GPUs a group already
   holds, as no debt, and starts no new borrowing.
 
@@ -687,11 +746,102 @@ The policy entry is rejected for any of:
 - Negative quota values other than `-1`.
 - A quota value above 1,048,576.
 - Empty accelerator type or namespace key.
+
+Reserved names: `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and
+`lender-cannot-reclaim` are what a held-back decision is reported under when
+no quota entry held it. A quota entry with one of them is still accepted in
+this release, with a warning: the log line `WARNING: Quota limiter entry has a
+reserved name`, a count in `wva_errors_total` under that `error_type`, and the
+`limiterWarnings` key of the controller status. A later release rejects it.
+Rename the entry ([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
 - In a `kueue:` block, an empty resource name or a `refreshInterval` that is not
   a positive duration; a `kueue:` block on a `gpu-inventory` entry.
 
 A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
 **warning**: `exclude` wins, and the ConfigMap is still accepted.
+
+The controller logs these warnings as Info-level lines that start with
+`WARNING:`. They come from the ConfigMap the limiters are read from, at
+startup and whenever it changes. The ConfigMap is still accepted. The
+`entry[N]` index counts quota entries only. Use the quoted name to find the
+entry.
+
+- A namespace in both `exclude` and `namespaceQuotas`:
+
+  ```text
+  WARNING: entry[0] ("tenants"): namespace "team-a" is in both exclude and namespaceQuotas; the quota entry will be ignored (exclude wins)
+  ```
+
+- An `exclude` entry that can never match a namespace:
+
+  ```text
+  WARNING: entry[0] ("tenants"): exclude entry "NS-X" is not a valid namespace name (check for spaces or capitals); it never matches a namespace
+  ```
+
+- An excluded namespace with no limit at all: no `scope: cluster` quota, no
+  `gpu-inventory` limiter, and no other namespace quota holds it:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit: no scope: cluster quota and no gpu-inventory limiter are declared, so the scaling manager does not bound them
+  ```
+
+- An excluded namespace with no limit on some types:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit on [H100 (bare name), other H100 products]: no gpu-inventory limiter and no scope: cluster quota gives those accelerator types a number (-1 is unlimited)
+  ```
+
+- An excluded namespace that another namespace quota holds with `-1`:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit on [A100]: the namespace quotas that hold them ("others") set those accelerator types to -1 (unlimited), and no gpu-inventory limiter and no scope: cluster quota gives them a number
+  ```
+
+How to read the type list:
+
+- `H100`: every H100 product, and a workload that names only `H100`.
+- `H100 (bare name)`: only a workload whose selector names `H100` itself.
+- `other H100 products`: the H100 products that no quota lists.
+- `unknown`: a workload that names no GPU type.
+
+To fix one, give the named types a number in a `scope: cluster` quota, or
+declare a `gpu-inventory` limiter.
+
+<details>
+<summary>Details: which types the warnings check, and what they do not report</summary>
+
+The warnings read the configuration the way the planner reads it, with the
+same name matching. They check these types: every accelerator name any quota
+entry lists, the family of each (`H100` for `NVIDIA-H100-80GB-HBM3`), one
+stand-in for the products of each family that no entry lists, and `unknown`.
+Any other type is outside every family a quota lists, so it is denied.
+
+- A family key bounds the products a quota does not list. With
+  `{H100: -1, NVIDIA-H100-PCIE-80GB: 4}`, only the PCIe product has a number.
+  The other H100 products fall back to `H100: -1`.
+- A family that a quota lists only through products is bounded by their sum,
+  and is unlimited when one of them is `-1`.
+- A type a `scope: cluster` quota does not list is denied, so it is not
+  named. `unknown` is the exception: a cluster quota that does not list it
+  does not bound it. So `unknown` is named when a cluster quota lists it as
+  `-1` and none gives it a number.
+- A `gpu-inventory` limiter gives every named type a number. With one
+  declared, only `unknown` can be named.
+- A namespace another namespace quota holds is bounded by that quota's caps
+  for it, through its own entry or `default`. It is named only for types every
+  such quota sets to `-1`.
+
+Not reported:
+
+- anything, while a `scope: cluster` quota reads Kueue: its numbers come from
+  Kueue at runtime;
+- a namespace held by a namespace quota that reads Kueue;
+- an `exclude` entry that is not a valid namespace name, beyond the warning
+  above: it never matches a namespace;
+- a `gpu-inventory` limiter the controller may not use because it cannot list
+  nodes: the warnings read the configuration only.
+
+</details>
 
 ### Reload lifecycle
 
@@ -727,6 +877,72 @@ So a quota does **not** bound the cluster: it can hand out capacity unmanaged
 workloads already took. For both guarantees, compose a physical limiter and a
 quota limiter; each is fed the measure it asks about.
 
+**A figure read from Kueue is different.** Kueue admits against everything it
+has reserved in a ClusterQueue, a training job beside serving included. So each
+queue's Kueue figure (nominal, guaranteed, within nominal, borrowing reach) is
+first reduced by the queue's **non-managed charge**: what Kueue reserved in it
+minus the GPUs that namespace's variants hold there. The static caps are
+applied after that, and are not reduced. Example: a queue of 16 GPUs where an
+unmanaged training job holds 8 gives serving 8, not 16.
+
+- The charge is per namespace. Two namespaces on one ClusterQueue each see
+  the other's GPUs as charged. A queue of 16 where `ns2` holds all 16 gives
+  `ns1` nothing.
+- A namespace on several GPU ClusterQueues (see *What is read*): a type one
+  queue grants counts in that queue. For an ambiguous type the namespace gets
+  the headroom of its fullest queue: the smallest of each queue's figure less
+  what Kueue reserved in it. Two queues of 16 H100, the namespace holding 8 in
+  one of them, leave it 8 more.
+- A replica waiting at Kueue's admission gate is not part of what Kueue
+  reserved, so it does not lower the charge. Serving that holds 8 admitted and
+  8 gated GPUs beside a training job's 8 is held at 8. It is then 8 past its
+  figure, and the [placement timeout](../guides/kueue-borrowing/) releases the
+  gated replica.
+  - The gated pods are the ones the **previous** cycle listed: the quota is
+    read before the cycle lists its pods. A replica gated since the last
+    cycle is charged one cycle late.
+  - **Limit:** gated pods are listed, and gated replicas released, only where
+    borrowing is counted: a namespace in a cohort, with `countBorrowable` not
+    `false`. Elsewhere (`countBorrowable: false`, or a queue in no cohort) a
+    gated replica still lowers the charge by its GPUs, and nothing releases
+    it. Kueue keeps it pending; it goes when demand lowers the target, or by
+    hand: `kubectl get pods -n <ns>` shows it with the
+    `kueue.x-k8s.io/admission` scheduling gate.
+- A variant Kueue does not manage at all (no `queue-name`) holds GPUs Kueue
+  never reserved. They are subtracted from the charge all the same, so beside
+  an unmanaged training job the charge reads low by up to what that variant
+  holds.
+- CPU and memory (co-resources) are charged from Kueue's own reservation,
+  managed or not. A replica within nominal must fit each co-resource its GPU
+  flavor's resource group covers: for a queue in no cohort, its nominal less
+  everything reserved; for a queue in a cohort, its nominal plus
+  `borrowingLimit` less everything reserved, and no bound where
+  `borrowingLimit` is unset (a queue of CPU nominal 0 may borrow its CPU). On
+  this path the cohort's free CPU is not checked.
+- The co-resource check holds with borrowing counted or not
+  (`countBorrowable: false`, or a queue in no cohort). **Changed behaviour:**
+  where no borrowing is counted, only the models of a namespace with such a
+  co-resource figure are checked this way. Every other namespace, and
+  rescale, is sized exactly as without Kueue borrowing.
+- A cluster-scope entry is not charged this way: its Kueue figure is the sum
+  of all queues, charged only with the managed GPUs.
+
+When a model here grows into nominal its queue lent out, and the borrower that
+Kueue preempts for it is another model this scaling manager runs, that
+borrower's target is lowered in the same pass. Kueue does not say whose
+borrowing it takes, so the scaling manager assumes its own borrowers go first.
+
+- Only new growth counts. A replica the pass orders again while the first
+  order is still in flight was yielded for once already.
+- A borrower gives back whole units: one replica, or a whole P/D pair at the
+  model's prefill:decode ratio. No variant goes below its `minReplicas`. A
+  pair that would give back more than one replica past what is reclaimed
+  (3P:4D for 8 GPUs) is not given; that model keeps its target.
+- The lowered decision carries a `kueue-reclaim` step. It is not a limited
+  decision: `wva_decisions_limited_total` does not count it, and no
+  `ResourceConstrained` event is raised for it. Find it with
+  `grep 'Kueue reclaim: a model of this controller grows'` in the log.
+
 A cluster-scope quota bounds the whole cluster, one cap per listed type. A
 namespace-scope quota bounds **only the namespaces it lists**, each by its own
 caps; a namespace it does not cover is not charged against it. `-1` is
@@ -748,7 +964,8 @@ closed-allowlist semantics:
   that type: the physical limiter or a cluster-scope quota, and nothing when
   there are none. An **excluded** namespace is not covered by the quota at
   all: it too is bounded only by the cluster bounds, never by the sum of the
-  other tenants' caps.
+  other tenants' caps. Every GPU a tenant or an excluded namespace takes is
+  charged to the cluster bounds, so they share them.
 - Budgets follow the GPU **family and product** names. A family key such as
   `H100` bounds the sum of its products (`NVIDIA-H100-80GB-HBM3`, ...), and a
   GPU spent under one spelling is spent under the other.
@@ -760,6 +977,30 @@ closed-allowlist semantics:
     `NVIDIA-H100-PCIE-80GB`.
   - A workload whose accelerator is the bare family (`H100`) is bounded by the
     family's total across the products it may use, and spends from that total.
+  - A namespace that lists a family, such as `H100`, may use what the cluster
+    quota allows that family. If the cluster quota lists only products of it,
+    that is their sum. With a cluster quota of
+    `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8}`:
+    - `{H100: -1}` may use 16, at most 8 of each product.
+    - `{H100: 12}` may use 12. One 8-GPU node of each product does not fit.
+    - `NVIDIA-H100-SXM5-80GB` is denied: the cluster quota does not list it.
+    - `{A100: -1}` is denied: the cluster quota lists no A100 product.
+
+    The bound is the same in every cycle, whatever GPU names the workloads use.
+  - A namespace that lists only products of a family may use the family only
+    through those products. With `{NVIDIA-H100-SXM5-80GB: -1}` under the
+    cluster quota above, a workload that names the bare `H100` gets nothing:
+    the cluster quota allows no SXM5.
+  - A namespace that lists the family shares each product with a namespace
+    that lists the product. The cluster quota reserves nothing for either:
+    with team-a at `{H100: -1}` and team-b at `{NVIDIA-H100-80GB-HBM3: 8}`,
+    team-a may take the HBM3 GPUs that team-b's cap counts on.
+  - With several `scope: cluster` quotas, a family gets what fits under all of
+    them, product by product. `{NVIDIA-H100-80GB-HBM3: 16,
+    NVIDIA-H100-PCIE-80GB: 8}` beside `{NVIDIA-H100-80GB-HBM3: 8,
+    NVIDIA-H100-PCIE-80GB: 16}` allows 8 of each product: 16 H100s, not 24.
+  - The `gpu-inventory` limiter counts GPUs by family (`H100`), so none of the
+    product rules above change what it allows.
   - Several roles or wakes on products of one family must fit the family's
     figure **together**: a decode on `NVIDIA-H100-80GB-HBM3` (8) and a prefill on
     `NVIDIA-H100-PCIE-80GB` (8) do not fit an H100 cap of 12 left.
@@ -815,8 +1056,8 @@ not inputs to it. Two properties follow from that:
 > namespaces on the same type, and give every type a finite cluster-scope cap.
 > The utilization-share optimizer shares an excluded namespace only when a
 > finite cluster bound covers its GPU type: a `scope: cluster` quota, or a
-> `gpu-inventory` limiter with `physicalGroups: true` (see #169 for today's
-> optimizer).
+> `gpu-inventory` limiter with `physicalGroups: true`. Otherwise its models
+> stay on the default optimizer.
 
 When a model is capped below its fair-share slot it takes only up to its quota;
 the unused remainder is **released to subsequent rounds**, where the
@@ -896,7 +1137,9 @@ is named `gpu-inventory`: `inventory+quota/gpu-inventory,tenant-quota`.
 
 One physical limiter is built. A second `gpu-inventory` (or `inventory`) entry
 is ignored and logged (`Ignoring physical (gpu-inventory) limiters entries after
-the first`); it does not reject the policy.
+the first`); it does not reject the policy. The line is logged at startup, and
+for the ConfigMap the limiters are read from. A namespace-local ConfigMap's
+limiters are ignored whole, so it logs none.
 
 Edits apply without a restart: both engines rebuild the limiters when the list
 changes. A limiter that cannot be consulted in a cycle is skipped and the others

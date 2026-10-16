@@ -338,20 +338,18 @@ func TestPodScrapingFromController(ctx context.Context, config PodScrapingTestCo
 	}
 	g.Expect(testPod).NotTo(gom.BeNil(), "Should have at least one ready pod with IP")
 
-	controllerPods, err := config.K8sClient.CoreV1().Pods(config.controllerNS()).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=workload-variant-autoscaler",
-	})
-	if err == nil && len(controllerPods.Items) > 0 {
-		controllerPod := controllerPods.Items[0]
-		g.Expect(testPod.Status.PodIP).NotTo(gom.BeEmpty(), "EPP pod should have IP address")
-		g.Expect(controllerPod.Status.PodIP).NotTo(gom.BeEmpty(), "Controller pod should have IP address")
-		_, _ = fmt.Fprintf(ginkgo.GinkgoWriter, "Verified: EPP pod %s has IP %s, accessible from controller pod %s\n",
-			testPod.Name, testPod.Status.PodIP, controllerPod.Name)
-	} else {
-		g.Expect(testPod.Status.PodIP).NotTo(gom.BeEmpty(), "EPP pod should have IP address")
-		_, _ = fmt.Fprintf(ginkgo.GinkgoWriter, "Verified: EPP pod %s has IP %s, ready for scraping from inside cluster\n",
-			testPod.Name, testPod.Status.PodIP)
-	}
+	// The controller runs in controllerNS on every install this test runs on
+	// (kind only, see the Skip above). Not finding it is a failure, not a
+	// reason to drop the controller-side checks.
+	controllerPods, err := ControllerPods(ctx, config.K8sClient, config.controllerNS(), ControllerDeploymentName)
+	g.Expect(err).NotTo(gom.HaveOccurred(), "Should be able to list controller pods")
+	g.Expect(controllerPods).NotTo(gom.BeEmpty(), "Should find a Pod of Deployment %s in %s",
+		ControllerDeploymentName, config.controllerNS())
+	controllerPod := controllerPods[0]
+	g.Expect(testPod.Status.PodIP).NotTo(gom.BeEmpty(), "EPP pod should have IP address")
+	g.Expect(controllerPod.Status.PodIP).NotTo(gom.BeEmpty(), "Controller pod should have IP address")
+	_, _ = fmt.Fprintf(ginkgo.GinkgoWriter, "Verified: EPP pod %s has IP %s, accessible from controller pod %s\n",
+		testPod.Name, testPod.Status.PodIP, controllerPod.Name)
 }
 
 // TestInClusterScraping verifies that metrics can actually be scraped from EPP pods when running inside the cluster.

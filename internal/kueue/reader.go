@@ -264,8 +264,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			continue
 		}
 		seen[ns][cqName] = true
-		caps, ok := perQueue[cqName]
-		if !ok {
+		if _, ok := perQueue[cqName]; !ok {
 			// A dangling reference, or a queue that declares no GPU resource at
 			// all (a CPU batch queue). Neither says anything about GPUs, so the
 			// namespace is left ungoverned here and the static entry decides.
@@ -307,8 +306,10 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		if !admitted {
 			continue
 		}
-		byNamespace[ns] = addCaps(byNamespace[ns], caps)
 		nsQueues[ns] = append(nsQueues[ns], cqName)
+	}
+	for ns, names := range nsQueues {
+		byNamespace[ns] = namespaceCaps(names, perQueue)
 	}
 	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
 	// A transient failure is the stale freeze, not an unknown hierarchy: the
@@ -458,19 +459,72 @@ func (r *Reader) borrowCaps(queues []unstructured.Unstructured, flavorType map[s
 	guaranteed = make(map[string]config.ExternalCaps, len(nominal))
 	within = make(map[string]config.ExternalCaps, len(nominal))
 	for ns := range nominal {
-		var g, w config.ExternalCaps
 		names := nsQueues[ns]
 		if len(names) == 0 {
 			// Governed but granted nothing (a withheld grant): the same nothing.
-			g, w = nominal[ns], nominal[ns]
+			guaranteed[ns], within[ns] = nominal[ns], nominal[ns]
+			continue
 		}
-		for _, name := range names {
-			g = addCaps(g, byQueueG[name])
-			w = addCaps(w, byQueueW[name])
-		}
-		guaranteed[ns], within[ns] = g, w
+		guaranteed[ns], within[ns] = namespaceCaps(names, byQueueG), namespaceCaps(names, byQueueW)
 	}
 	return guaranteed, within, nil
+}
+
+// namespaceCaps is a namespace's grant from the GPU-declaring queues it has
+// LocalQueues on: one queue's grant as is; for several, the smallest single
+// queue's figure per accelerator type (minCaps), never their sum. Which queue
+// a variant's replica is admitted through is not read, and Kueue charges the
+// replica to that one queue only (KU2, multi-queue-namespace).
+func namespaceCaps(names []string, byQueue map[string]config.ExternalCaps) config.ExternalCaps {
+	var out config.ExternalCaps
+	for i, name := range names {
+		if i == 0 {
+			out = addCaps(config.ExternalCaps{}, byQueue[name])
+			continue
+		}
+		out = minCaps(out, byQueue[name])
+	}
+	return out
+}
+
+// minCaps is, per accelerator type, the smaller of two grants: a type one of
+// them does not name takes that one's untyped grant, and is left to the other
+// alone when that one has none (it grants nothing of the type). The untyped
+// grant is the smaller of the two where both have one.
+func minCaps(a, b config.ExternalCaps) config.ExternalCaps {
+	grant := func(c config.ExternalCaps, accType string) (int, bool) {
+		if k, ok := accelerator.FindKey(c.ByType, accType); ok {
+			return c.ByType[k], true
+		}
+		return c.Untyped, c.HasUntyped
+	}
+	out := config.ExternalCaps{}
+	for _, from := range []config.ExternalCaps{a, b} {
+		for accType := range from.ByType {
+			if _, done := accelerator.FindKey(out.ByType, accType); done {
+				continue
+			}
+			ga, okA := grant(a, accType)
+			gb, okB := grant(b, accType)
+			n := ga
+			switch {
+			case okA && okB:
+				n = min(ga, gb)
+			case okB:
+				n = gb
+			}
+			out.ByType = addTyped(out.ByType, accType, n)
+		}
+	}
+	switch {
+	case a.HasUntyped && b.HasUntyped:
+		out.Untyped, out.HasUntyped = min(a.Untyped, b.Untyped), true
+	case a.HasUntyped:
+		out.Untyped, out.HasUntyped = a.Untyped, true
+	case b.HasUntyped:
+		out.Untyped, out.HasUntyped = b.Untyped, true
+	}
+	return out
 }
 
 // externalLenders converts a pool's lenders for the config snapshot.
@@ -533,7 +587,7 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 				if reason == "" {
 					reason = f.GuaranteedReason
 				}
-				rows = append(rows, config.ExternalBorrow{
+				row := config.ExternalBorrow{
 					Queue:          name,
 					Cohort:         t.Queues[name].Cohort,
 					Flavor:         f.Flavor,
@@ -552,12 +606,47 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					PinRequired:    f.PinRequired,
 					CoHeadroom:     maps.Clone(f.CoHeadroom),
 					CoKept:         maps.Clone(f.CoKept),
-				})
+					Reserved:       t.Queues[name].Resources[f.ResourceKey].Reserved,
+					CoUnused:       coUnused(t.Queues[name], f.Flavor),
+				}
+				if ambiguousType(row.Accelerator, names, b, flavorType) {
+					// KU2: more than one of the namespace's queues grants
+					// this type, and which one a replica is admitted
+					// through is not read, so none of their borrowing of
+					// it is counted. A type one queue alone grants
+					// borrows as usual.
+					row = row.Withheld(PrecedenceOf(row.Reason, string(ReasonMultiQueueNamespace)))
+				}
+				rows = append(rows, row)
 			}
 		}
 		out[ns] = rows
 	}
 	return out
+}
+
+// ambiguousType reports whether more than one of a namespace's GPU queues
+// (names) grants a replica of accelerator acc: a flavor naming that
+// accelerator, or an untyped one, which admits any type. An untyped row (acc
+// "") of a namespace on several GPU queues is ambiguous: what it grants is not
+// known per type. A namespace on one queue is never ambiguous.
+func ambiguousType(acc string, names []string, b Borrowing, flavorType map[string]string) bool {
+	if len(names) < 2 {
+		return false
+	}
+	if acc == "" {
+		return true
+	}
+	granting := 0
+	for _, name := range names {
+		if slices.ContainsFunc(b.Queues[name], func(f QueueFigures) bool {
+			t := flavorType[f.Flavor]
+			return t == "" || accelerator.SameName(t, acc)
+		}) {
+			granting++
+		}
+	}
+	return granting > 1
 }
 
 // cohorts lists the Cohort objects. A failed list never reports "no Cohort

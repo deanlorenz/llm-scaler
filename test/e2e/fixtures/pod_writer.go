@@ -10,6 +10,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // PodWriterRole is the Role that lets the controller patch pods in one
@@ -48,7 +50,7 @@ func GrantPodWrites(ctx context.Context, client kubernetes.Interface, namespace,
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: PodWriterRole},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
-			Name:      "wva-controller-manager",
+			Name:      utils.ControllerServiceAccountName,
 			Namespace: controllerNamespace,
 		}},
 	}

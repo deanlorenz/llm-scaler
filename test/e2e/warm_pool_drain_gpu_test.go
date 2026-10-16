@@ -92,7 +92,7 @@ var _ = Describe("Warm pool - a returned Pod finishes what it was writing", Labe
 				"Set USE_SIMULATOR=false on a GPU cluster")
 		}
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{Namespace: cfg.WVANamespace, Name: "wva-controller-manager"}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		By("Applying the NetworkPolicy the pool ships with, so the driver is the admitted path")
 		policyName, err := fixtures.ApplyWarmPoolNetworkPolicy(ctx, k8sClient, cfg.LLMDNamespace)

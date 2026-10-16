@@ -241,8 +241,14 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		o.pass, o.spends = nil, nil
 	}
 	declared := declaredAccelerators(requests)
-	available := mergeConstraints(constraints, declared...)
-	availableByNS := mergeNamespaceConstraints(constraints, declared...)
+	// The cluster budget holds every key a namespace allowance lists, so the
+	// bound on each is the same whatever names the workloads declare; the warm
+	// pool's cluster figure leaves those keys out (passHeadroom.clusterKeys).
+	// The namespace budgets hold the cluster's products, so the warm pool
+	// reads each product a namespace may use at its own figure.
+	available := mergeWithAllowanceKeys(constraints, declared...)
+	clusterKeys := slices.Collect(maps.Keys(mergeConstraints(constraints, declared...)))
+	availableByNS := mergeNamespaceConstraints(constraints, slices.Concat(declared, clusterProducts(constraints))...)
 	if len(constraints) == 0 {
 		// No constraints at all is not "no cluster bound": this optimizer denies
 		// rather than guesses. The engine never runs it so -- with no provider
@@ -253,7 +259,11 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	start, startByNS := maps.Clone(available), cloneNamespaceBudgets(availableByNS)
 	// Cohort borrowing, when any constraint counts it: what each namespace may
 	// still draw past its guaranteed figure, the shared pools, the node view.
-	// Nil otherwise, and every path below is then exactly as before.
+	// Nil otherwise, and every path below is then exactly as before -- unless
+	// a Kueue-backed namespace carries nominal co-resource headroom: then the
+	// state holds that alone (counts false), only that namespace's models are
+	// placed by a placer that checks it, and rescale and every other model
+	// take the paths they take without borrowing.
 	bs := newBorrowState(constraints, o.Nodes)
 	if bs != nil {
 		bs.blocked = o.BorrowBlocked
@@ -282,7 +292,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	var rescaleDecisions []domain.VariantDecision
 	var handled map[string]bool
 	if o.Rescale.any() {
-		if bs == nil {
+		if bs == nil || !bs.counts {
 			rescaleDecisions, handled = o.applyRescale(ctx, requests, constraints, available, availableByNS)
 		} else {
 			rescaleDecisions, handled = o.applyRescaleWithinNominal(ctx, requests, constraints, available, availableByNS, bs)
@@ -352,12 +362,18 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	}
 
 	allDecisions = append(allDecisions, rescaleDecisions...)
+	// A reclaim the pass ordered takes borrowed GPUs a managed model holds:
+	// that model gives them back in the same pass (KU3).
+	if lowered := bs.yieldReclaimed(allDecisions, requests); len(lowered) > 0 && !o.quiet {
+		logger.Info(ReclaimYieldLogMessage, "replicasByVariant", lowered)
+	}
 
 	// The warm pool's headroom, from what this pass left: every replica it
 	// ordered is debited, from the budgets and from the nodes.
 	if !o.quiet && len(constraints) > 0 {
 		o.pass = &passHeadroom{available: available, byNamespace: availableByNS, nodes: o.Nodes,
-			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends}
+			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends,
+			clusterKeys: clusterKeys}
 		o.pass.publish(time.Now())
 	}
 	return allDecisions
@@ -426,6 +442,10 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 		// is nil (unbounded) and a namespace's allowance is what runs out.
 		if !anyBudgetLeft(active, available, availableByNS, bs) {
 			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
+			// The models still asking never reach their pick, which is what
+			// marks a variant the budget locked out: mark them here, or the
+			// model the last GPUs did not reach is held back in silence.
+			markBudgetExhausted(active)
 			break
 		}
 
@@ -745,6 +765,42 @@ func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS 
 		}
 	}
 	return false
+}
+
+// markBudgetExhausted marks, for each model in active, every variant that would
+// have grown had any budget been left: a variant serving a role that still has
+// demand, short of its own MaxReplicas ceiling. The pick marks these itself
+// when it runs (fairShareRolePickOn's gpuBlocked); the fair-share loop stops
+// before it runs once no model has budget left, so the models still asking
+// must be marked here. A variant an earlier cut already marked keeps that
+// cause. applyGPULimitAttribution then names the binding limiter
+// (bindingProvider).
+func markBudgetExhausted(active []*modelWork) {
+	for _, w := range active {
+		if w.e == nil {
+			continue
+		}
+		_, ps := initRoleState(w.e)
+		stateMap := buildStateMap(w.req.VariantStates)
+		for _, role := range w.roles {
+			if ps[role] <= 0 {
+				continue
+			}
+			for _, vc := range variantsForRole(w.records, role) {
+				if vc.PerReplicaCapacity <= 0 {
+					continue
+				}
+				if _, marked := w.limited[vc.VariantName]; marked {
+					continue
+				}
+				st := stateMap[vc.VariantName]
+				if st.MaxReplicas != nil && *st.MaxReplicas > 0 && w.targets[vc.VariantName] >= *st.MaxReplicas {
+					continue
+				}
+				w.limited.mark(vc.VariantName)
+			}
+		}
+	}
 }
 
 // stateVariants is the names of a request's variants, as its states list them.

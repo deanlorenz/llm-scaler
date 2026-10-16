@@ -377,17 +377,52 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// cluster group of that type is formed on, and is net of what the pass
 	// left (opts.Left). The namespace groups are bounded against each other,
 	// and against the cluster group, by splitClusterFree.
+	//
+	// EVERY namespace the namespace quota caps claims, whether or not a group
+	// formed for it this cycle: its models may grow into that headroom through
+	// today's optimizer just the same. A namespace disabled for sharing
+	// (NamespaceEnabled), or whose models span several accelerator types,
+	// forms no group, and left out of the claims its whole free quota was idle
+	// fill for the cluster group. A claim is rounded to whole replicas of the
+	// smallest replica the namespace can place on the type: its group's, else
+	// its models' (claimSteps) -- a namespace that formed no group still has
+	// models -- else the cluster group's of that type, the best guess for a
+	// namespace with no model yet. With no replica size known anywhere it is
+	// not rounded.
+	//
+	// A claim covers the namespace's free quota in whole replicas, its warm
+	// pools' headroom included, so the cluster group carves a claimed
+	// namespace's pools only up to what rounding left unclaimed (poolCarve,
+	// unclaimed), and the pools of namespaces that made no claim whole.
 	claimed := map[string]int{}
-	for _, k := range keys {
-		if k.scope == "" {
-			continue
-		}
-		if nsFree, ok := freeOf(k); ok {
-			// a namespace group formed over a finite budget
-			if step := smallestReplicaGPUs(groups[k]); step > 0 {
-				nsFree -= nsFree % step
+	unclaimed := map[string]map[string]int{}
+	steps := claimSteps(requests, availableByNS)
+	for _, ns := range slices.Sorted(maps.Keys(availableByNS)) {
+		for _, acc := range slices.Sorted(maps.Keys(availableByNS[ns])) {
+			nsFree, ok := freeOf(key{acc, ns})
+			if !ok {
+				continue
 			}
-			claimed[budgetKey(available, k.acc)] += nsFree
+			step := 0
+			if g := groups[key{acc, ns}]; g != nil {
+				step = smallestReplicaGPUs(g)
+			}
+			if step <= 0 {
+				step = steps[ns][acc]
+			}
+			if g := groups[key{budgetKey(available, acc), ""}]; step <= 0 && g != nil {
+				step = smallestReplicaGPUs(g)
+			}
+			rest := 0
+			if step > 0 {
+				rest = nsFree % step
+				nsFree -= rest
+			}
+			claimed[budgetKey(available, acc)] += nsFree
+			if unclaimed[ns] == nil {
+				unclaimed[ns] = map[string]int{}
+			}
+			unclaimed[ns][acc] = rest
 		}
 	}
 
@@ -417,7 +452,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
+		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, unclaimed, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
@@ -425,6 +460,33 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		out = append(out, *g)
 	}
 	splitClusterFree(out, available)
+	return out
+}
+
+// claimSteps is, per namespace in availableByNS and per its budget key, the
+// fewest GPUs one replica of any of the namespace's models' variants on that
+// type takes: whole replicas of it are what the namespace can place there,
+// whether or not its models formed a share group. Absent when no model of the
+// namespace has a variant on the type.
+func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[string]int) map[string]map[string]int {
+	out := map[string]map[string]int{}
+	for _, req := range requests {
+		budgets, ok := availableByNS[req.Namespace]
+		if !ok {
+			continue
+		}
+		stateMap := buildStateMap(req.VariantStates)
+		for _, vc := range recordsForRequest(req) {
+			k := budgetKey(budgets, vc.AcceleratorName)
+			gpus := gpusPerReplicaFromState(stateMap, vc.VariantName)
+			if out[req.Namespace] == nil {
+				out[req.Namespace] = map[string]int{}
+			}
+			if cur := out[req.Namespace][k]; cur == 0 || gpus < cur {
+				out[req.Namespace][k] = gpus
+			}
+		}
+	}
 	return out
 }
 
@@ -584,6 +646,10 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 	stateMap := buildStateMap(req.VariantStates)
 	var out []shareRoleInput
 	for _, role := range modelRolesOnType(records, acc) {
+		hold := sig.Holds[role]
+		if hold.NoScaleUp {
+			return nil, "role " + role + " has no listed analyzer that can size it"
+		}
 		demand := sig.Result.TotalDemand
 		if role != domain.RoleBoth {
 			rc, ok := sig.RoleCapacities[role]
@@ -604,6 +670,12 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				demand = max(demand-raised, 0)
 			}
 		}
+		// Another analyzer that sizes the role keeps what it needs at the
+		// threshold the share sizes to: as demand, so the role is held no
+		// deeper than its own analyzer would hold it and a shortfall is still
+		// shared by weight. As a floor at the release target it held more
+		// than saturation alone, even when the other analyzer agreed.
+		demand = max(demand, sig.OtherFrameDemand(role, sig.ScaleUpThreshold))
 		vs := variantsForRole(variantsOnType(records, acc), role)
 		busy := 0.0
 		for _, v := range vs {
@@ -642,6 +714,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				break
 			}
 		}
+		if hold.NoScaleDown {
+			floor = max(floor, roleCurrentGPUs(records, stateMap, acc, role))
+		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{
 			ShareRole: ShareRole{
@@ -654,7 +729,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				ReplicaGPUs: max(g, 1),
 			},
 			role:             role,
-			held:             held,
+			held:             held || hold.NoScaleDown,
 			startSeconds:     sig.Result.RoleStartSeconds[role],
 			busiestQueueLoad: busy,
 		})
@@ -744,14 +819,39 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 //
 // A pool's accelerator is matched by identity, since the group carries the
 // budget's spelling and the pool its own.
-func poolCarve(unheld map[string]map[string]int, acc, scope string) int {
+//
+// A pool in a namespace the namespace quota caps carves at most that
+// namespace's free quota of the type (availableByNS): its growth is bounded by
+// no limiter, and uncapped, a pool wanting more than its tenant may hold
+// shrank every tenant's share of the cluster group. A namespace no namespace
+// quota caps, or with an unlimited quota of the type, is carved in full.
+//
+// In the cluster group, a namespace that claimed its free quota of the type
+// (unclaimed holds it, keyed by namespace and that namespace's budget key,
+// with what rounding the claim to whole replicas left out) carves at most
+// that remainder: the claim already took the rest of the pool's headroom out
+// of the cluster budget, and carving it again counted it twice.
+func poolCarve(unheld, availableByNS, unclaimed map[string]map[string]int, acc, scope string) int {
+	carveOf := func(ns string, byType map[string]int) int {
+		want := max(0, byType[budgetKey(byType, acc)])
+		budget := availableByNS[ns]
+		if free, ok := budget[budgetKey(budget, acc)]; ok && free >= 0 && free <= MaxShareBudgetGPUs {
+			want = min(want, free)
+		}
+		return want
+	}
 	if scope != "" {
-		byType := unheld[scope]
-		return max(0, byType[budgetKey(byType, acc)])
+		return carveOf(scope, unheld[scope])
 	}
 	sum := 0
-	for _, byType := range unheld {
-		sum += max(0, byType[budgetKey(byType, acc)])
+	for ns, byType := range unheld {
+		carve := carveOf(ns, byType)
+		if budget, capped := availableByNS[ns]; capped {
+			if rest, ok := unclaimed[ns][budgetKey(budget, acc)]; ok {
+				carve = min(carve, rest)
+			}
+		}
+		sum += carve
 	}
 	return sum
 }

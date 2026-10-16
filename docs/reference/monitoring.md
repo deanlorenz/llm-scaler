@@ -202,14 +202,17 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 | --- | --- |
 | `wva_node_access_denied` | `1` = a GPU limiter is declared alone but nodes are unreadable. Every variant gets no budget and **will not scale up**. Beside a quota it stays `0`; see the next row. |
 | `wva_constraint_provider_skipped` | `1` = a declared limiter is left out of decisions (by `provider` and `reason`); the others still bound. The opposite failure: scaling may go past what it would allow. |
-| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota can leave it flat: compare what the quota allows with what the model holds. |
+| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota raises it too, for the model the last GPUs did not reach. |
 | `wva_variant_at_max_replicas` | `1` = the variant sits on its own `maxReplicaCount`. With utilization still above the scale-up threshold, raise `maxReplicaCount`; more GPUs will not help. |
 | `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |
 | `wva_unattributed_gpus` | GPUs in use that could not be charged to a pool — usually a workload whose accelerator did not resolve |
 
 **Is the decision itself sane?** Compare `wva_desired_replicas` with
-`wva_current_replicas`; `wva_saturation_utilization`, `wva_analyzer_demand` and
-`wva_analyzer_target` show what drove it.
+`wva_current_replicas`; `wva_saturation_utilization`,
+`wva_analyzer_demand{analyzer_name="CompositeSignal"}` and
+`wva_analyzer_target{analyzer_name="CompositeSignal"}` show what drove it.
+Each analyzer's own reading is under its own `analyzer_name`; never sum across
+it.
 
 - A desired count that never becomes current is an actuation problem (KEDA, the
   HPA or the workload), not a decision problem.
@@ -272,13 +275,15 @@ is set. Full list, with labels:
 | `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing. Every outcome is published at `0` while a group acts, so `increase()` counts the first one too |
 | `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
 
-Alerts worth having once it is configured. Set each `for:` to a few release
+Three alerts ship with the [alerting rules](prometheus.md#the-shipped-alerts):
+`WVAUtilizationShareModeInvalid` (the optimizer block is broken; today's
+optimizer runs instead), `WVAUtilizationShareMarksUnreadable` (a group frozen
+until someone fixes RBAC) and `WVAUtilizationShareFloorsExceedQuota`.
+
+More alerts worth having once it is configured. Set each `for:` to a few release
 times (`wva_utilization_share_effective_seconds{param="release-timeout"}` is one):
 
 ```promql
-# The optimizer block is broken; today's optimizer runs instead.
-wva_utilization_share_mode{mode="invalid"} == 1
-
 # You configured it, but the controller reports it off.
 wva_utilization_share_mode{mode="off"} == 1
 
@@ -294,8 +299,9 @@ histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
 0.8 * max by (accelerator_type, scope) (
   wva_utilization_share_effective_seconds{param="release-timeout"})
 
-# A model held back until someone changes something.
-wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
+# A model held back until someone changes something (floors-exceed-quota and
+# marks-unreadable ship as alerts).
+wva_model_scaling_blocked{reason="no-compatible-donor"} == 1
 
 # A role stuck below three quarters of its need while the optimizer acts.
 wva_utilization_share_headroom < -0.25
@@ -322,8 +328,9 @@ Notes on these alerts:
   out while no controller ran is not counted; its mark is removed, and the log
   line "removed a transfer mark older than the release timeout" names the pod.
 - **Held back:** alert with a `for:` of a few release timeouts.
-  `marks-unreadable` freezes every model of the group until the controller can
-  read its transfer marks again.
+  `marks-unreadable`, which freezes every model of the group until the
+  controller can read its transfer marks again, ships as
+  `WVAUtilizationShareMarksUnreadable`.
 - **Stuck short:** alert with a `for:` of about one reversal hold,
   `wva_utilization_share_effective_seconds{param="reversal-hold"}` (about 12
   minutes with a 300 s scale-down window); a transfer should have reached it by
@@ -391,7 +398,7 @@ Every reason the controller emits:
 | `ScaledUp` | Normal | ScaledObject | the controller decided to add replicas; the message is the decision reason | none |
 | `ScaledDown` | Normal | ScaledObject | the controller decided to remove replicas | none |
 | `ScaledToZero` | Normal | ScaledObject | the controller decided to park the model at zero | none; if unexpected, check the model's `scaleToZero` policy |
-| `ResourceConstrained` | Warning | ScaledObject | a limiter (GPU inventory or quota) capped the decision below what demand asked for | add GPUs or raise the quota, or accept it. A fully spent quota can record nothing: see [GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
+| `ResourceConstrained` | Warning | ScaledObject | a limiter (GPU inventory or quota) capped the decision below what demand asked for | add GPUs or raise the quota, or accept it. A fully spent quota records it too, for the model the last GPUs did not reach: see [GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `MetricsUnavailable` | Warning | ScaledObject | the model's metrics went from available to unavailable; recorded on that transition only | [Metrics health](metrics.md#the-metricsunavailable-event) |
 | `OptimizationFailed` | Warning | ScaledObject | the controller could not publish the replica metric KEDA reads (`Failed to emit metrics for external autoscalers`) | read the controller log for the error |
 | `UnattributedReadyPods` | Warning | ScaledObject | the scale target has Ready pods, but none of their metrics were attributed to it | check the pods' ownerReferences reach the scale target; on FMA, scrape the launcher pods ([FMA launcher pods](operations.md#fma-launcher-pods)) |
@@ -433,7 +440,7 @@ Use the logs when a metric tells you *which* model is wrong and you want *why*.
 | `Utilization share: need history truncated; the roles left out count at their ceiling after a restart` | a group's entry was over its bound (128 roles, or its equal share of 900 KiB): the roles with the smallest stored peaks were left out; carries `group`, `droppedRoles`, `dropped` (the first ten). Logged once per change | Info |
 | `Utilization share: the need history ConfigMap was deleted; every model's need history is forgotten` | the ConfigMap was deleted after the controller had read or written it: the flush. Every model's peak is unknown again for a `flappingWindow` | Info |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
-| `Utilization share: not sharing models no quota bounds` | models of a namespace a namespace quota lists in `exclude`, with no finite `scope: cluster` quota for their accelerator type; today's optimizer keeps them. Carries `models` (`namespace/model: reason`). Logged once per change | Info |
+| `Utilization share: not sharing models no quota bounds` | models of a namespace a namespace quota lists in `exclude`, when nothing finite bounds their accelerator type: no finite `scope: cluster` quota and no `gpu-inventory` limiter. The line ends `the default optimizer keeps them`. Carries `models` (`namespace/model: reason`). Logged once per change | Info |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 

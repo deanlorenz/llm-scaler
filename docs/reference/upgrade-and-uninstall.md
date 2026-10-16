@@ -302,6 +302,23 @@ What changes without a config change:
   and unbounded when there are none.
 - **A namespace allowance that is unlimited (`-1`) for every type now scales**
   when nothing else bounds the cluster. It never did.
+- **A namespace that lists a GPU family now gets GPUs when the cluster quota
+  lists only products of it** (bug fix). A namespace at `{H100: -1}` under a
+  cluster quota of `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8}` was
+  often held at 0, and its warm pool always was. It now gets up to 8 of each
+  product, in every cycle. Its warm pool reads each product at that product's
+  figure. Clusters whose cluster quota lists the family itself, or that have
+  no cluster quota, are not affected.
+- **A family is bounded by what fits under every cluster quota, product by
+  product** (bug fix). This gives fewer GPUs to one setup only: two or more
+  `scope: cluster` quotas that list products of one family in different
+  numbers. `{NVIDIA-H100-80GB-HBM3: 16, NVIDIA-H100-PCIE-80GB: 8}` beside
+  `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 16}` allowed 24 H100s; only
+  16 fit under both, and 16 is the bound now. A workload that names the bare
+  family, in a namespace that lists only products of it, likewise gets only
+  what the cluster allows on those products: `{NVIDIA-H100-SXM5-80GB: -1}`
+  under a cluster quota with no SXM5 now gets 0, where it could get the
+  cluster's other H100s.
 - **Two utilization-share namespace groups on one GPU type split the free
   cluster GPUs** rather than each counting all of them.
 - **A limiter that cannot be consulted in a cycle is skipped; the others still
@@ -392,6 +409,17 @@ Installer:
 
 #### Other changes that need an action
 
+- **A namespace-scoped controller ignores `utilizationShare.physicalGroups`.**
+  Only a cluster-scoped controller plans physical groups. Under a quota the
+  setting changed nothing before and changes nothing now. Under `gpu-inventory`
+  alone, a namespace-scoped controller now plans no group: it logs a warning
+  and sets `utilizationShareNote` in `wva-controller-status`. The optimizer
+  mode is unchanged. Check every tenant controller that reads a shared policy:
+  ```bash
+  kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data.utilizationShareNote}{"\n"}'
+  ```
+  If it prints a note, give the namespace a quota, or remove `physicalGroups`
+  from the shared policy.
 - **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
   now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
   `wva-controller-manager-token` is deleted. Only the admin phase does both.
@@ -424,6 +452,42 @@ Installer:
   # was: wva_learned_state_restores_total{outcome="rejected"}
   sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
   ```
+- **Rename a quota entry named `gpu-limiter`, `node-fit`,
+  `pd-pair-borrows-whole` or `lender-cannot-reclaim`.** These names are now
+  reserved for what a held-back decision is reported under when no quota
+  entry held it. In this release such an entry still loads and applies, with
+  a warning: the log line `WARNING: Quota limiter entry has a reserved name`
+  and the `limiterWarnings` key of the controller status. A later release
+  rejects it, and a rejected `default` entry stops the controller at start.
+  Check before upgrading. `limiterWarnings` is written only by the new
+  controller, so read the policy itself: the controller's own
+  `wva-scaling-policy-config`, and the one in `wva-policy` if that namespace
+  governs the install. Each line prints how many entry names it read before
+  the reserved ones, so a policy that was not read is not taken for a pass:
+  ```bash
+  for ns in <controller namespace> wva-policy; do
+    if ! entry=$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}'); then
+      echo "$ns: not read"; continue
+    fi
+    names=$(printf '%s\n' "$entry" | grep -E '^[[:space:]-]*name:' | sed -E 's/.*name:[[:space:]]*"?([^"[:space:]]*)"?.*/\1/')
+    reserved=$(printf '%s\n' "$names" | grep -xE 'gpu-limiter|node-fit|pd-pair-borrows-whole|lender-cannot-reclaim')
+    echo "$ns: $(printf '%s' "$names" | grep -c .) entry names read, $(printf '%s' "$reserved" | grep -c .) reserved"
+    printf '%s\n' "$reserved"
+  done
+  ```
+  `wva-policy: not read` is expected when no policy namespace exists. Only a
+  `quota` entry needs renaming; a `gpu-inventory` entry may keep any name.
+  Renaming an entry renames its `limiter_name` series and the name in its
+  Events: update any alert or query that selects it.
+- **A parked model refused a wake has new reasons on
+  `wva_model_scaling_blocked`.** `wake-no-capacity` when no serving set fits
+  the GPU budget or the nodes, and `wake-nominal-lent-out` when the
+  ClusterQueue lent its nominal to a peer it cannot reclaim from. A parked
+  model used to show `nominal-lent-out` for the second;
+  `nominal-lent-out` now marks only a capped serving model. Point any selector
+  on `reason="nominal-lent-out"` meant for parked models at
+  `reason="wake-nominal-lent-out"`
+  ([reasons](prometheus.md#wva_model_scaling_blocked)).
 - **Before rolling the controller back to an earlier release, remove the
   `llm-d.ai/forget-learned-state` annotation** from every scale target that
   carries it. The earlier release rewrites the learned-state snapshot without
@@ -614,6 +678,25 @@ ConfigMap, and work through this list.
    lease. Raise the patch to 40, or remove it. A patch left at 10 is no worse
    than before; it only loses the faster failover
    ([details](operations.md#stopping-and-leader-handover)).
+
+5. **Analyzers listed beside or instead of `saturation` now size the model.**
+   Before, only saturation sized it and the others were published and ignored.
+   Read every `analyzers:` list in every scaling-policy ConfigMap, per-model
+   and tier entries included ([details](scaling-policy.md#multi-analyzer-registration)):
+   - beside `saturation`, the model is sized to the larger need;
+   - without `saturation`, the others size it alone, and a role none of them
+     can size holds where it is. A list of `slo` alone holds the model.
+
+   The `Effective scaling policy` line does not show the list, so the check
+   below cannot catch this. After the upgrade:
+   - a held model reports `wva_model_scaling_blocked{reason="no-composite-signal"} == 1`
+     or logs `composite holds a role`;
+   - a model another analyzer now sizes above saturation shows a composite
+     demand above saturation's:
+     `wva_analyzer_demand{analyzer_name="CompositeSignal"} > on (exported_namespace, model_name, role) wva_analyzer_demand{analyzer_name="saturation"}`.
+
+   Dashboards and alerts on `wva_analyzer_*` must filter on `analyzer_name`:
+   the series gain `analyzer_name="CompositeSignal"`.
 
 After the upgrade, compare the controller's `Effective scaling policy` log
 lines with the ones you saved in `before.txt`:

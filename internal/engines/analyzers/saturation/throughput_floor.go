@@ -371,7 +371,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 ) float64 {
 	roleOf := make(map[string]string, len(variants))
 	for _, vc := range variants {
-		roleOf[vc.VariantName] = canonicalRole(vc.Role)
+		roleOf[vc.VariantName] = domain.CanonicalRole(vc.Role)
 	}
 	// Per role: the requests waiting in the engines' own queues, and the
 	// residency charge on them. Own replicas only -- a bridge's queue is

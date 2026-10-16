@@ -32,7 +32,7 @@ func TestPrecedenceFollowsTheB1Table(t *testing.T) {
 		}
 	}
 	order := ReasonOrder()
-	if len(order) != 27 || order[0] != ReasonNotSelected || order[len(order)-1] != ReasonPreemptionsUnreadable {
+	if len(order) != 28 || order[0] != ReasonNotSelected || order[len(order)-1] != ReasonPreemptionsUnreadable {
 		t.Errorf("table order = %v", order)
 	}
 	for i := 1; i < len(order); i++ {

@@ -89,6 +89,11 @@ type BorrowLedger struct {
 	// Backoff is the per (model, cohort) cooldowns, keyed
 	// "namespace/model@cohort" (B12).
 	Backoff map[string]BackoffEntry `json:"backoff,omitempty"`
+	// NoHole is, per "namespace/variant", the replicas ordered without a
+	// node hole the safety net still watches (M3): the shared record that
+	// marked them does not survive a restart, and without them a replica
+	// Kueue never placed within guaranteed waited Pending for good (AR2).
+	NoHole map[string]NoHoleReplicas `json:"noHole,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -159,8 +164,11 @@ type BorrowGovernor struct {
 	backoff map[string]BackoffEntry
 	// noHole is, per "namespace/variant", the replicas ordered without a node
 	// hole the governor still watches (observeNoHole, noHoleRelease).
-	noHole  map[string]NoHoleReplicas
-	started bool
+	noHole map[string]NoHoleReplicas
+	// noHoleRestored is the noHole entries Restore loaded that no cycle has
+	// had the variant's state for yet (observeNoHole).
+	noHoleRestored map[string]bool
+	started        bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
@@ -174,6 +182,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
 		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{},
 		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{}, noHole: map[string]NoHoleReplicas{},
+		noHoleRestored: map[string]bool{},
 	}
 }
 
@@ -222,6 +231,17 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) int {
 		if _, held := g.backoff[k]; !held && strings.Contains(k, "@") && !e.Until.IsZero() &&
 			e.Level >= 0 && e.Level <= maxBackoffLevel {
 			g.backoff[k] = e
+		}
+	}
+	for _, k := range boundedKeys(l.NoHole, &dropped) {
+		h := l.NoHole[k]
+		if h.Replicas > maxLedgerReplicas {
+			dropped++
+			continue
+		}
+		if _, held := g.noHole[k]; !held && strings.Contains(k, "/") && h.Replicas > 0 && h.GPUs >= 0 && !h.Since.IsZero() {
+			g.noHole[k] = h
+			g.noHoleRestored[k] = true
 		}
 	}
 	if l.IdleSince != nil && g.idleSince.IsZero() && !g.started {
@@ -282,6 +302,16 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 			out.Backoff[k] = BackoffEntry{Until: until.UTC(), Level: e.Level, LastAt: e.LastAt.Truncate(time.Second).UTC(),
 				Preempted: e.Preempted}
 		}
+	}
+	for k, h := range g.noHole {
+		if h.Replicas <= 0 || h.Since.IsZero() {
+			continue
+		}
+		if out.NoHole == nil {
+			out.NoHole = map[string]NoHoleReplicas{}
+		}
+		h.Since = h.Since.UTC()
+		out.NoHole[k] = h
 	}
 	return out
 }
@@ -712,6 +742,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.timeoutHeld)
 		clear(g.pastSince)
 		clear(g.noHole)
+		clear(g.noHoleRestored)
 		g.started = false
 		return
 	}
@@ -869,8 +900,9 @@ func (g *BorrowGovernor) pinUnit(req ModelScalingRequest, unit map[string]int, s
 // hold (BorrowDraw.NoHole): how many, their GPUs, and since when: the
 // earliest order (BorrowDraw.OrderedAt), or when the governor first saw them.
 type NoHoleReplicas struct {
-	Replicas, GPUs int
-	Since          time.Time
+	Replicas int       `json:"replicas"`
+	GPUs     int       `json:"gpus"`
+	Since    time.Time `json:"since"`
 }
 
 // NoHoleOf is, per "namespace/variant", the replicas the entries ordered
@@ -903,12 +935,23 @@ func NoHoleOf(entries []BorrowDraw) map[string]NoHoleReplicas {
 // frees. An entry is stamped when first seen (Since: the order, or now) and
 // keeps that stamp; replicas unplaced since before it are not its own, so
 // they neither keep it nor run its clock (noHoleRelease).
+//
+// An entry restored from the ledger is kept through cycles without its
+// variant's state -- the first cycles after a restart may not have read
+// the variant yet -- until a cycle has it, for at most three placement
+// timeouts from its stamp: the longest the net waits (AR2).
 func (g *BorrowGovernor) observeNoHole(c BorrowCycle, states map[string]variantRef) {
 	for k, h := range g.noHole {
 		if _, recorded := c.NoHole[k]; recorded {
+			delete(g.noHoleRestored, k)
 			continue
 		}
-		if s, ok := states[k]; !ok || h.Replicas <= 0 || !unplacedSince(s.state, h.Since) {
+		s, ok := states[k]
+		if !ok && g.noHoleRestored[k] && c.Now.Sub(h.Since) <= 3*g.settings.PlacementTimeout {
+			continue
+		}
+		delete(g.noHoleRestored, k)
+		if !ok || h.Replicas <= 0 || !unplacedSince(s.state, h.Since) {
 			delete(g.noHole, k)
 		}
 	}

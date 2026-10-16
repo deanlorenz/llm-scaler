@@ -27,8 +27,11 @@ import (
 // utilization-share optimizer, so a standing condition is reported once per
 // change rather than once per cycle.
 type utilizationShareState struct {
-	lastConfigErr  string
-	lastIgnored    string
+	lastConfigErr string
+	lastIgnored   string
+	// lastNote is the optimizer's last note (config.UtilizationShare.Note):
+	// reported once per change.
+	lastNote       string
 	lastWeightErrs map[string]string
 	// lastUnmatched are the disabled namespaces the last cycle found no
 	// namespace quota for, comma-joined: reported once per change.
@@ -160,6 +163,12 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			logger.Info("Utilization share: the optimizer block is valid again")
 		}
 		st.lastConfigErr = errText
+	}
+	if us.Note != st.lastNote {
+		if us.Note != "" {
+			logger.Info("WARNING: "+us.Note, "watchNamespace", e.Config.WatchNamespace())
+		}
+		st.lastNote = us.Note
 	}
 	if ignored := strings.Join(e.Config.IgnoredOptimizerNamespaces(), ","); ignored != st.lastIgnored {
 		if ignored != "" {
@@ -546,7 +555,8 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 
 // reportUnshared logs, once per change, the models planned in no group because
 // no budget bounds them -- a namespace a namespace quota excludes, with no
-// cluster quota. Today's optimizer keeps them.
+// finite cluster bound for its accelerator type. The default optimizer keeps
+// them.
 func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []string) {
 	slices.Sort(models)
 	joined := strings.Join(models, ",")
@@ -555,7 +565,7 @@ func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []str
 	}
 	st.lastUnshared = joined
 	if joined != "" {
-		logger.Info("Utilization share: not sharing models no quota bounds; today's optimizer keeps them",
+		logger.Info("Utilization share: not sharing models no quota bounds; the default optimizer keeps them",
 			"models", models)
 	}
 }
@@ -606,6 +616,7 @@ func (e *Engine) observeUtilizationShareMode(ctx context.Context) {
 	mode, err := e.Config.UtilizationShareMode()
 	metrics.SetUtilizationShareMode(mode)
 	e.Status.SetUtilizationShare(mode, err)
+	e.Status.SetUtilizationShareNote(e.Config.UtilizationShareNote())
 	if mode != constants.UtilizationShareModeActive {
 		e.dropShareActuation(ctx, ctrl.LoggerFrom(ctx).WithName("utilization-share"))
 	}

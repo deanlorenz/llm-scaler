@@ -13,19 +13,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 var _ = Describe("KEDA Smoke Tests - Infrastructure Readiness", Label("smoke", "full"), func() {
 	Context("Basic infrastructure validation", func() {
 		It("should have WVA controller running and ready", func() {
 			Eventually(func(g Gomega) {
-				pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-					LabelSelector: "control-plane=controller-manager",
-				})
+				pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(pods.Items).NotTo(BeEmpty(), "WVA controller pod should exist")
+				g.Expect(pods).NotTo(BeEmpty(), "WVA controller pod should exist")
 				readyPods := 0
-				for _, pod := range pods.Items {
+				for _, pod := range pods {
 					if pod.Status.Phase == corev1.PodRunning {
 						for _, condition := range pod.Status.Conditions {
 							if condition.Type == "Ready" && condition.Status == "True" {

@@ -197,7 +197,8 @@ prefill is best-effort. That follows the llm-d router: with no prefill endpoint
 it sends the request to a decode endpoint, which runs both stages itself. The
 router already skips disaggregation for short prompts and high prefix-cache hits,
 so decode-only is a normal mode, not a failure. If prefill cannot be placed (no
-free GPUs on its accelerator, or a namespace quota excludes it), waking decode
+free GPUs on its accelerator, or its namespace quota does not allow that
+accelerator), waking decode
 alone still serves the queued request; refusing would trade a slower model for no
 model.
 
@@ -348,22 +349,21 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
-**An excluded namespace needs a cluster quota.** To share the models of a
+**An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
 quota is a finite bound too: with `physicalGroups: true` they are shared over
-it. Without a finite bound, their models stay on today's
-optimizer, and the controller logs them once:
+it. Without a finite bound, their models stay on the default optimizer, and
+the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.
 
 <details>
 <summary>Details: why, and what the cluster group gets</summary>
 
-The namespace quota does not bound an excluded namespace. The only budget left
-would be the other tenants' free quota, which does not count what the excluded
-namespace holds.
+The namespace quota does not bound an excluded namespace. Without a finite
+cluster bound there is no budget to share.
 
 With a `scope: cluster` quota, the excluded namespace's models form the cluster
 group. Every GPU a tenant's own group fills is also charged to the cluster
@@ -383,7 +383,7 @@ its own free quota and the whole cluster free.
 </details>
 
 A model whose variants run on more than one accelerator type, or whose analyzer
-result is not live this cycle, is left to today's optimizer for that cycle.
+result is not live this cycle, is left to the default optimizer for that cycle.
 
 **Start in shadow mode.** `shadow` defaults to `false`, so
 `optimizer: {type: utilizationShare}` on its own **acts**: it moves replicas
@@ -417,10 +417,10 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `reserveGPUs` | `0` | GPUs held out of the shared budget so a scale-from-zero wake can start at once instead of waiting for a transfer. |
 | `maxHeadroomReplicas` | `1` | Applies only while the quota is **contended**: when it cannot hold every model at its peak need over the last `stabilization.flappingWindow` at the same time (each model's peak need, or its `minReplicaCount` if higher, rounded up to whole replicas, summed, is more than the quota). A peak counts only once two readings in a row reach it, so one glitched reading does not cap the group for a window. While no model's peak is known -- a new group, or every model after a controller restart that finds no usable stored history, until a `flappingWindow` of history exists -- each counts at its `maxReplicas` (the whole quota without one), so the cap is on until a full window of history shows the peaks fit. The demand history is stored in the ConfigMap `wva-utilization-share-history` in the controller's namespace and read back after a restart or a leader change, so a restart costs a window of capped headroom only when that history is missing, cannot be read, or ends more than ten minutes before the restart (see **After a restart or a leader change** below). A model that joins a group whose peaks are known counts at what it holds until its own window fills, and a model absent for longer than a `flappingWindow` starts its history again. `wva_utilization_share_headroom_capped` shows whether the cap is on. While the peaks fit, the whole spare is spread by weight and nothing is given back: in simulation, capping a quota with room for every peak made whole-node models lose 6 to 43% of their demand to giving replicas back and cold-starting them again, against none with the spare spread. While they fit, a model already at its need takes no headroom from a donor that it would leave below the donor's own peak over the last `flappingWindow` (counted as `donor-peak` in `wva_utilization_share_withheld_total`): such a move, from a donor that may drain for minutes, lands after the receiver's burst and just before the donor's own. While contended: how many replicas of headroom the quota's spare GPUs give a model of weight 1 above its need (or above its `minReplicaCount`, if that is higher). A model of weight `w` gets `w` times as many, rounded up: with the default classes, `best-effort` 1, `standard` 1, `important` 2, `critical` 4. Each role of a P/D model counts separately. An integer from `0` to `10000`. The rest of the spare stays unassigned, so a model whose demand rises takes it at once instead of waiting for another model's pods to finish their requests and release their GPUs. `0` gives no headroom; a value as large as the models' `maxReplicas` spreads the whole spare by weight (the behaviour before this key existed). While contended, a model that has held more than its need plus its headroom for `stabilization.consecutiveCyclesBeforeMove` cycles in a row (two by default) starts giving all of the extra back to the quota in one cycle, but only while no model that can grow is short of its need and only while it would stay calm (see `stabilization.returnSpareWhenLoadAtMost`). The release that follows still waits the model's scale-down window, as a scale-down does, and is called off while it waits if the model's demand comes back. A return always goes to the unassigned GPUs. A model that turns short while a return is still releasing waits for the returned GPUs that will free whole replicas of it, rather than draining other models for GPUs already on their way (`awaiting-return`), and the idle fill raises it once they are released; only returned pods its pods fit count (two 4-GPU pods do not make room for one 8-GPU pod), and a return whose pod shape is not known -- one rebuilt from its pod marks after a restart -- counts for nothing. It never goes below its need (the higher of its current and average need while it swings) plus its headroom, its `minReplicaCount` or its last replica, and never below what the other models' peaks leave of the quota in whole replicas: a model that bursts alone keeps its spare, and GPUs are returned only when another model's recent peak could use them. Weight buys more headroom replicas, not protection: a model's headroom is still taken for another model's need. While another model bursts for longer than a transfer takes to land, a model whose demand swings faster than that (up and down at least twice, by a quarter of its peak or more) is capped on its average need rather than its current one: capped on its crest, it took the spare GPUs that the longer burst then had to wait a release for. |
 | `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
-| `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
+| `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. Cluster-scoped controllers only. A namespace-scoped controller ignores it: where a quota bounds its namespace it changes nothing, and under `gpu-inventory` alone the optimizer runs without it, logs a warning and sets `utilizationShareNote` in `wva-controller-status`. The mode is not `invalid`. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
-| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
-| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
+| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on the default optimizer. |
+| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to the default optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
 | `stabilization` | see below | How fast GPUs move between models against how often they move back. |
 
 **Stabilization.** GPUs that move between models take minutes to become useful
@@ -487,7 +487,7 @@ clamped into it.
 A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
-where its weight would be weighed against other tenants'; there today's optimizer
+where its weight would be weighed against other tenants'; there the default optimizer
 keeps it.
 
 **Disabling one namespace:**
@@ -507,7 +507,7 @@ disables nothing, and the controller logs
 **A canary on a cluster quota.** `namespaces:` cannot narrow a cluster group;
 `clusterNamespaces:` does. With it set, the cluster group of each accelerator type
 plans only the models of the listed namespaces, sharing among them the quota's
-free GPUs plus what they hold. Every other model stays on today's optimizer, and
+free GPUs plus what they hold. Every other model stays on the default optimizer, and
 the GPUs it holds stay outside the group. Start with one or two namespaces whose
 owners agreed to it, then widen the list or remove it (empty plans every
 namespace):
@@ -1362,7 +1362,11 @@ One thing about turning it on **can** change scaling: a tier that lists
    `Scaling policy not found` for a tier name with no entry, and the model
    then runs on `default`. Saturation's `parameters:` and `score`,
    `queueLengthThreshold`, the scale-to-zero settings and the hold are not in
-   that line: compare those in the ConfigMap.
+   that line: compare those in the ConfigMap. Nor is the `analyzers:` list:
+   confirm the tier still lists `saturation`. A list of `slo` without
+   `saturation` holds the model where it is; check that
+   `wva_model_scaling_blocked{model_name="<model>", reason="no-composite-signal"}`
+   is absent and the log has no `no listed analyzer can size this model` line.
 
 **See the result**
 
@@ -1452,8 +1456,8 @@ got over a whole run, score their own per-request records.
   by nothing; the analyzer without targets has nothing to aim at. Either half
   alone is logged once as `SLO policy is half-configured`, and is not an error.
 - **Keep `saturation` in the list.** The list replaces the inherited one, and
-  saturation is what sizes the fleet; it runs even if left out, but loses its
-  `parameters:` and `score`.
+  saturation is what sizes the fleet. Left out, it still runs but sizes
+  nothing, and since `slo` only observes, the model would hold where it is.
 - **The block is replaced whole by an override**, not merged per objective: a
   per-model entry that sets only `ttft` has no `tpot`.
 - **A model gets the tier through its variants** (each names one in its
@@ -1578,12 +1582,29 @@ type. The built-in `slo` analyzer is registered by the engine itself, and the
 name is reserved. Each cycle the engine iterates every registered analyzer in
 registration order and invokes its `Analyze` method.
 
-> **Scope note.** Saturation drives every scaling decision on its own.
-> Non-saturation analyzers are registered and invoked, but their results
-> are **not yet consumed** — combine semantics and per-analyzer score
-> consumption land in a follow-up PR (`multi-analyzer-optimizer`). The
-> hooks below are wired so that follow-up can hang its behavior off them
-> without further engine changes.
+> **How listed analyzers combine.** Every analyzer the policy lists sizes
+> each variant: its demand divided by its per-replica capacity gives the
+> replicas it needs. The model is sized to the largest of those needs, so
+> scale-up follows the analyzer asking for most, and scale-down waits until
+> every listed analyzer agrees. Demand stays in saturation's units:
+> saturation runs for every model, listed or not, and when it is not listed
+> it only supplies the units and the variants. A policy with no `analyzers`
+> section lists saturation alone. `slo` never sizes anything: it only
+> observes.
+>
+> - **Nothing listed can size a role.** With saturation unlisted, the role
+>   holds where it is: no scale-up, no scale-down. On a P/D model the other
+>   role does not grow either. When that is every variant, the model reports
+>   `no-composite-signal` ([Prometheus](prometheus.md#wva_model_scaling_blocked));
+>   when it is one role, only the log says so (`composite holds a role`).
+> - **A listed analyzer misses a cycle.** For up to three cycles after its
+>   last good reading (45s at the default 15s `GLOBAL_OPT_INTERVAL`), the roles it covers
+>   do not scale down, so one missed scrape from the analyzer asking for
+>   most replicas does not shrink the fleet. Scale-up still follows the
+>   others. Saturation's own grace works as it always has.
+>
+> The decision is the `CompositeSignal` analyzer in `wva_analyzer_*` and in
+> the cycle log, and each held role logs `composite holds a role`.
 
 ### Registering Analyzers
 
@@ -1628,15 +1649,43 @@ When `analyzers:` is omitted **and** `analyzerName: "saturation"` is set, the li
 defaults to `[{name: "saturation", score: 1.0}]`. When both are omitted the
 token-based analyzer still runs (see [Analyzer Selection](#analyzer-selection));
 the list is simply left empty, which also leaves the scaling band to be defaulted
-post-merge.
+post-merge. Either way saturation alone sizes the model.
+
+> **Upgrading a policy that lists `throughput` or an external analyzer.** Each
+> listed analyzer now sizes the model, where before only saturation did and the
+> others were published and ignored. Check these policies before you upgrade:
+>
+> - **Any `analyzers:` list without `saturation`**, including a per-model or
+>   tier override that replaces the list. Saturation no longer sizes the
+>   model. If nothing else in the list can size it, which is the case for a
+>   list of `slo` alone, the model holds where it is. Add `saturation` to
+>   every such list before you upgrade, unless you mean the others to size
+>   the model alone.
+> - **Saturation and another analyzer listed.** The model is sized to the
+>   larger need, so the fleet grows when the other analyzer asks for more
+>   than saturation, and shrinks only when both agree.
+> - **Only the other analyzer listed.** It sizes the model alone. A role it
+>   cannot size (for example prefill, when it reports decode only) holds
+>   where it is: no scale-up, no scale-down. On a P/D model the other role
+>   then does not grow either, since decode grown against a frozen prefill
+>   is capacity prefill cannot feed. Add `saturation` to the list to keep
+>   saturation sizing the model.
+> - **`slo` listed beside `saturation`.** No change: `slo` only observes.
+> - **Dashboards and alerts on `wva_analyzer_*`.** These series gain
+>   `analyzer_name="CompositeSignal"`. A panel or alert that sums across
+>   `analyzer_name` now counts demand at least twice; filter it on
+>   `analyzer_name`.
+>
+> To keep the old behaviour, list `saturation`, and remove the other entries
+> or set `enabled: false` on them.
 
 ### AnalyzerScoreConfig Fields
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
 | `name` | string | Analyzer name (must match a `RegisterAnalyzer` call) | required |
-| `enabled` | bool | Reserved — placeholder for future combine logic | `true` |
-| `score` | float64 | Reserved — placeholder for future combine logic | `1.0` |
+| `enabled` | bool | `false` keeps the entry but stops the analyzer running and sizing the model; on `saturation` it makes saturation unlisted (it still runs, for units and variants, and sizes nothing) | `true` |
+| `score` | float64 | Weight in the cross-model fair share under a GPU limiter: the combined decision takes the largest score among the analyzers that sized the model this cycle (saturation's when none did). It does not change one model's replica count | `1.0` |
 | `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleUpThreshold` |
 | `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleDownBoundary` |
 
@@ -1779,22 +1828,26 @@ The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` fo
 
 **P/D disaggregation.** The same formula and the same `(scaleUp, scaleDown)` values are applied to every `RoleCapacity` entry. Threshold configuration is common regardless of role — there are no per-role overrides. The optimizer receives fully calibrated per-role RC/SC and uses them for P/D replica allocation.
 
-**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer. An opt-out flag for analyzers with non-universal calibration math is deferred to a follow-up.
+**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer. Saturation's pair also sets the band of the combined decision, whose demand is in saturation's units. An opt-out flag for analyzers with non-universal calibration math is deferred to a follow-up.
 
 ### Saturation Always Runs
 
-The saturation analyzer executes on every cycle regardless of any future
-`enabled` flag — its `VariantCapacities` carry `Cost` and `AcceleratorName`
-required by the optimizer for variant selection and GPU accounting. On
-this branch saturation's `RequiredCapacity` and `SpareCapacity` are the
-only signals the optimizer consumes.
+The saturation analyzer executes on every cycle, listed or not, and
+`enabled: false` does not stop it: its `VariantCapacities` carry the variants,
+`Cost` and `AcceleratorName` the optimizer needs for variant selection and GPU
+accounting, and its demand is the unit every analyzer's need is converted into.
+The optimizer consumes one combined decision (`CompositeSignal`): the largest
+need among the listed analyzers, saturation included only when listed. `slo`
+never contributes to it.
 
 ### Resilience
 
 Each registered non-saturation analyzer runs in isolation: errors are
 logged and discarded, and panics are recovered. A faulty plugin analyzer
-cannot take down the optimize goroutine or block saturation from driving
-the scaling decision.
+cannot take down the optimize goroutine. While its last good reading is inside
+the staleness window, the roles it covers do not scale down, so a run that
+fails once does not shrink the fleet; after that it stops counting, and the
+other listed analyzers size the model without it.
 
 ## Best Practices: Coordinating with InferenceScheduler (End Point Picker)
 

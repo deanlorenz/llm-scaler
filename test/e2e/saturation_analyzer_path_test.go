@@ -144,15 +144,13 @@ func buildSaturationConfigYAMLWithModel(
 
 // scalingPolicyConfigMapName resolves the active saturation ConfigMap name from controller runtime env.
 func scalingPolicyConfigMapName() string {
-	// Match the controller's runtime config map name; discover by label first
-	// since the deployment name can vary across overlays.
-	deps, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
-	if err != nil || len(deps.Items) == 0 {
+	// Match the controller's runtime config map name. The Deployment's name is
+	// the same in every overlay (namePrefix wva-, no suffix), so read it by name.
+	dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, testutils.ControllerDeploymentName, metav1.GetOptions{})
+	if err != nil {
 		return config.ScalingPolicyConfigMapName()
 	}
-	return saturationConfigMapNameFromDeployment(&deps.Items[0])
+	return saturationConfigMapNameFromDeployment(dep)
 }
 
 // saturationConfigMapNameFromDeployment extracts SATURATION_CONFIG_MAP_NAME from manager container env.
@@ -174,13 +172,12 @@ func saturationConfigMapNameFromDeployment(dep *appsv1.Deployment) string {
 // controller-manager logs show the model being processed on the V2 path. V2 is
 // the sole analysis path since the V1 analyzer was removed, so there is no mode
 // to select — the helper asserts the model is being processed at all.
-// It uses testutils.PodLogsLabelSelectorContain for log collection.
+// It uses testutils.ControllerLogsContain for log collection.
 func expectAnalyzerPathLog(modelID string) {
 	GinkgoHelper()
-	const controllerManagerLabel = "control-plane=controller-manager"
 	const pattern = "Processing model (V2)"
 	Eventually(func(g Gomega) {
-		ok, logs, logErr := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace, controllerManagerLabel, pattern, 120)
+		ok, logs, logErr := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace, testutils.ControllerDeploymentName, pattern, 120)
 		g.Expect(logErr).NotTo(HaveOccurred())
 		g.Expect(ok && strings.Contains(logs, modelID)).To(BeTrue())
 	}, time.Duration(cfg.EventuallyLongSec)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())

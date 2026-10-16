@@ -815,6 +815,16 @@ func (c *Config) EffectiveLimiterSummary() string {
 	return types.String() + "/" + strings.Join(names, ",")
 }
 
+// EffectiveLimiterWarnings returns the warnings about the limiters in force
+// that still apply as written: a quota entry named one of
+// ReservedLimiterNames (ReservedLimiterNameWarnings). Empty when none.
+// Thread-safe.
+func (c *Config) EffectiveLimiterWarnings() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ReservedLimiterNameWarnings(c.effectiveLimitersLocked())
+}
+
 // EffectiveQuotaEntries returns the quota entries the quota limiter should
 // enforce, taken from the inline quota entries on the global saturation "default"
 // entry (each deep-copied). Empty when none are declared. Reads the live config,
@@ -852,6 +862,23 @@ func (c *Config) HasClusterQuota() bool {
 		return l.Type == string(LimiterTypeQuota) && l.Scope == QuotaScopeCluster
 	})
 }
+
+// ClusterQuotaPerController reports whether this controller manages one
+// namespace and enforces a quota entry of scope: cluster. Such a quota is
+// charged what THIS controller's variants hold, so N namespace-scoped
+// controllers reading one shared cluster quota of Q may together hold N x Q:
+// the cap is per controller, not per cluster. Callers log
+// ClusterQuotaPerControllerMessage and publish it. Thread-safe.
+func (c *Config) ClusterQuotaPerController() bool {
+	return c.WatchNamespace() != "" && c.HasClusterQuota()
+}
+
+// ClusterQuotaPerControllerMessage is the warning for ClusterQuotaPerController.
+const ClusterQuotaPerControllerMessage = "This namespace-scoped controller enforces a scope: cluster quota. " +
+	"It is charged only what its own variants hold, so the quota caps this controller, not the cluster. " +
+	"If it is the only controller reading this policy, that is the same cap. " +
+	"If other namespace-scoped controllers read it, each may spend all of it: bound tenants with a " +
+	"scope: namespace quota, or run one cluster-scoped controller for a cluster-wide cap."
 
 // KueueCountsBorrowable reports whether some quota entry counts Kueue
 // borrowing. Thread-safe.

@@ -711,6 +711,35 @@ func coReach(q QueueState, gpuFlavor string) (headroom, kept map[string]int64) {
 	return headroom, kept
 }
 
+// coUnused is, per co-resource a replica of q on GPU flavor gpuFlavor is
+// charged, how far q's usage of it may still grow after everything Kueue has
+// reserved in q, managed or not, in milli-units: the co-resource headroom of
+// growth within nominal, borrowing of GPUs counted or not. A queue in no
+// cohort has max(0, N - U). A queue in a cohort may borrow the co-resource
+// from it, so its headroom is coReach's: N plus borrowingLimit less U, and no
+// bound where borrowingLimit is unset (a queue of CPU nominal 0 that borrows
+// its CPU is not refused). Nil when q covers no co-resource on that flavor,
+// or bounds none.
+func coUnused(q QueueState, gpuFlavor string) map[string]int64 {
+	if q.Cohort != "" {
+		headroom, _ := coReach(q, gpuFlavor)
+		return headroom
+	}
+	var out map[string]int64
+	for res := range q.CoFlavors {
+		f := q.coFlavor(res, gpuFlavor)
+		c, ok := q.CoResources[ResourceKey{Flavor: f, Resource: res}]
+		if f == "" || !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]int64{}
+		}
+		out[res] = max(0, c.Nominal-c.Reserved)
+	}
+	return out
+}
+
 // cohortFree is max(0, Σ L_m − Σ max(0, U_m − G_m)) over every member that
 // declares key, inactive ones included. Kueue's cache accumulates every
 // ClusterQueue into its cohort, and the scheduling snapshot clones the cohort's

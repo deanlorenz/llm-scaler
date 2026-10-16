@@ -114,10 +114,11 @@ falling model's whole scale-down window.
   unmanaged workloads stop pods, a donor's freed GPUs can be taken by a pod the
   scaling manager did not place (`release-taken`).
 - **A model runs on more than one accelerator type.** It is never planned; it
-  stays on today's optimizer.
-- **A namespace a namespace quota excludes, with no cluster quota.** It is
-  never planned; it stays on today's optimizer. Add a `scope: cluster` quota
-  for its accelerator type to share it.
+  stays on the default optimizer.
+- **A namespace a namespace quota excludes, with no finite cluster bound.** It
+  is never planned and stays on the default optimizer. Add a `scope: cluster`
+  quota for its accelerator type, or set `physicalGroups: true` beside a
+  `gpu-inventory` limiter.
 
 ### What it needs
 
@@ -125,7 +126,7 @@ falling model's whole scale-down window.
   resolve. Either a quota ([cap what each tenant may take](../tenant-gpu-quotas/),
   or numbers read from [Kueue](../kueue-bounded-quotas/)), or the physical GPU
   inventory from [bound-by-gpus](../bound-by-gpus/) with `physicalGroups: true`
-  in the block. The quota's key must be the accelerator name the controller
+  in the block, on a cluster-scoped controller only. The quota's key must be the accelerator name the controller
   logs (for example `H200` on one cluster, `NVIDIA-H200` on another). Only the
   quota has been measured. Under the physical limiter the budget is every GPU
   of a type on the cluster

@@ -374,22 +374,40 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	curByRole := make(map[string]int, len(roles))
 	demByRole := make(map[string]int, len(roles))
 	floorByRole := make(map[string]int, len(roles))
+	// A role the composite holds both ways freezes the model here, as the
+	// share optimizer freezes it: its demand is a figure the policy does not
+	// size on, and shrinking or growing the other roles around it strands one
+	// role's output. Taking its GPUs out of the budget instead put the whole
+	// cut of a contended model on decode.
 	for _, role := range roles {
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
+		// A role that may not shrink keeps what it has in the split, so the
+		// other roles are cut to what is left rather than to a share computed
+		// as if this one would shrink.
+		if satNamed.Holds[role].NoScaleDown {
+			floorByRole[role] = max(floorByRole[role], curByRole[role])
+		}
 	}
-	tgtByRole := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
+	pinned := pinnedModel(satNamed)
+	tgtByRole := curByRole
+	if !pinned {
+		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
+		roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
+	}
 
 	limited := make(gpuLimitTracker)
 	// grown is what each role's fill added, per variant, in the order added.
 	grown := map[string][]roleGrowth{}
 	for _, role := range roles {
 		rt, rc := tgtByRole[role], curByRole[role]
+		hold := satNamed.Holds[role]
 		switch {
-		case rt < rc:
+		case rt < rc && !hold.NoScaleDown:
+			// rt is at or above the release floor reserved in the split.
 			reclaimRole(ctx, req.CompositeSignal, records, role, stateMap, targets, rc-rt)
-		case rt > rc:
+		case rt > rc && !hold.NoScaleUp:
 			want := rt - rc
 			// The role's rescale target needs more GPUs than this cycle can
 			// free (reclaims only free capacity for the NEXT cycle), so the
@@ -667,6 +685,19 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			}
 		}
 
+		// A role that may not shrink keeps what it has in the water-fill too:
+		// weighed as if it would shrink, the model was given a target it never
+		// reached, and the GPUs it kept were missing from the others'.
+		heldFloor := 0
+		for _, role := range modelRolesOnType(records, accType) {
+			rf := roleFloorGPUs(records, stateMap, accType, role)
+			if satNamed.Holds[role].NoScaleDown {
+				rf = max(rf, roleCurrentGPUs(records, stateMap, accType, role))
+			}
+			heldFloor += rf
+		}
+		floorGPUs = max(floorGPUs, heldFloor)
+
 		demandGPUs := modelDemandGPUs(satNamed, records, stateMap, accType)
 		capGPUs := demandGPUs
 		if maxBounded {
@@ -675,6 +706,17 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			capGPUs = min(capGPUs, budget) // unbounded max: cap at the group budget
 		}
 		capGPUs = max(capGPUs, floorGPUs)
+		// A model with a role held both ways is frozen by rescaleModelDecisions,
+		// so it holds exactly what it has: the water-fill gives it that and
+		// shares the rest. Weighed on its demand, it was set a share it never
+		// took, and the GPUs sat idle while another model stayed short.
+		if pinnedModel(satNamed) {
+			cur := 0
+			for _, role := range modelRolesOnType(records, accType) {
+				cur += roleCurrentGPUs(records, stateMap, accType, role)
+			}
+			floorGPUs, capGPUs, demandGPUs = cur, cur, cur
+		}
 
 		inputs = append(inputs, rescaleInput{
 			ID:        modelKey(req),
@@ -686,6 +728,17 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		sumDemandGPUs += demandGPUs
 	}
 	return inputs, sumDemandGPUs
+}
+
+// pinnedModel reports whether the composite holds any of the model's roles
+// both ways, which freezes the model's rescale.
+func pinnedModel(nr NamedAnalyzerResult) bool {
+	for _, h := range nr.Holds {
+		if h.NoScaleUp && h.NoScaleDown {
+			return true
+		}
+	}
+	return false
 }
 
 // modelDemandGPUs is the model's demand-in-GPUs summed across its roles on accType
@@ -700,23 +753,17 @@ func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stat
 
 // roleDemandGPUs converts a role's token demand to a GPU count via the role's most
 // cost-efficient variant's per-replica capacity. The synthetic "both" role uses the
-// model-level TotalDemand; a P/D role uses its RoleCapacities demand.
+// model-level TotalDemand; a P/D role uses its RoleCapacities demand (via
+// demandForRoleOrModel).
 func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
-	demand := satNamed.Result.TotalDemand
-	if role != domain.RoleBoth {
-		if rc, ok := satNamed.RoleCapacities[role]; ok {
-			demand = rc.TotalDemand
-		}
-	}
+	// Rescale sizes at full utilization (whole replicas of the demand), so
+	// another analyzer keeps what it needs there.
+	demand := max(demandForRoleOrModel(satNamed, role), satNamed.OtherFrameDemand(role, 1))
 	best, bestGPUs, ok := bestVariantForRole(records, stateMap, accType, role)
 	if !ok {
 		return 0
 	}
-	replicas := int(math.Ceil(demand / best.PerReplicaCapacity))
-	if replicas < 0 {
-		replicas = 0
-	}
-	return replicas * bestGPUs
+	return replicasForDemand(demand, best.PerReplicaCapacity) * bestGPUs
 }
 
 // bestVariantForRole returns a role's most cost-efficient variant on accType
@@ -769,6 +816,69 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 		}
 	}
 	return total
+}
+
+// roundFillsToReplicas lowers each growing role's share in tgt, up from cur,
+// to what fillRole can actually place as whole replicas from targets (cost
+// order, maxReplicas, every variant's own replica size), and spends the GPUs
+// that left on whole replicas of the roles cut most. The GPU split ignores
+// replica size, so with 8-GPU pods a model given 8 more GPUs split them +1
+// and +7 between its roles, neither a replica, and the GPUs sat free every
+// cycle. A role takes from the leftover no more than its demand dem still
+// asks for, or its own cut rounded up to one replica: the leftover also
+// holds what a role at its maxReplicas could not place, and given to the
+// other role that was pods beyond its demand. It fills a copy of targets;
+// the real fill follows tgt.
+func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	roles []string, tgt, cur, dem, targets map[string]int) {
+	trial := maps.Clone(targets)
+	cut := make(map[string]int, len(roles))
+	leftover := 0
+	for _, role := range roles {
+		want := tgt[role] - cur[role]
+		if want <= 0 {
+			continue
+		}
+		placed := fillRole(records, role, stateMap, trial, want)
+		cut[role] = want - placed
+		tgt[role] -= cut[role]
+		leftover += cut[role]
+	}
+	order := slices.Clone(roles)
+	slices.SortStableFunc(order, func(a, b string) int { return cmp.Compare(cut[b], cut[a]) })
+	for _, role := range order {
+		// A role whose share landed on whole pods (no cut) still takes what
+		// its demand asks for: the leftover is also what a role at its
+		// maxReplicas could not place.
+		if leftover <= 0 {
+			break
+		}
+		limit := max(dem[role]-tgt[role], ceilToReplica(cut[role], roleReplicaStepGPUs(records, role, stateMap)))
+		extra := fillRole(records, role, stateMap, trial, min(leftover, limit))
+		tgt[role] += extra
+		leftover -= extra
+	}
+}
+
+// roleReplicaStepGPUs is the fewest GPUs one replica of any of role's
+// fillable variants takes, or 0 when none is.
+func roleReplicaStepGPUs(variants []variantRecord, role string, stateMap map[string]domain.VariantReplicaState) int {
+	least := 0
+	for _, vc := range variantsForRole(variants, role) {
+		if g := gpusPerReplicaFromState(stateMap, vc.VariantName); vc.PerReplicaCapacity > 0 && g > 0 && (least == 0 || g < least) {
+			least = g
+		}
+	}
+	return least
+}
+
+// ceilToReplica rounds gpus up to a whole number of g-GPU replicas; g <= 0
+// leaves it as is.
+func ceilToReplica(gpus, g int) int {
+	if g <= 0 {
+		return gpus
+	}
+	return (gpus + g - 1) / g * g
 }
 
 // distributeGPUsByWeight splits total GPUs across roles: each role is first reserved

@@ -22,6 +22,11 @@ type NodeGPU struct {
 	// that already make it Unschedulable: a GPU pool's own taint, which only
 	// the pods it exists for tolerate.
 	Taints []corev1.Taint
+	// LWSGroup is set when a pod of a LeaderWorkerSet group (one carrying
+	// the group-key label) holds the node or is nominated for it. A group of
+	// an exclusive-topology LeaderWorkerSet lands in no topology domain
+	// holding a pod of another group: its pods' anti-affinity refuses it.
+	LWSGroup bool
 }
 
 // Free is the node's GPUs no scheduled pod requests.

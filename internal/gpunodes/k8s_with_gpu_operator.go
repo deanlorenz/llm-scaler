@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 // K8sWithGpuOperator implements CapacityDiscovery for Kubernetes clusters with GPU Operator
@@ -35,6 +36,9 @@ type K8sWithGpuOperator struct {
 	// (podsDeniedNone, podsDeniedInfo or podsDeniedError), so it is logged when
 	// it starts or changes rather than on every refresh.
 	podsDenied atomic.Int32
+	// onPodAccessDenied, when set, is told every value wva_pod_access_denied
+	// is set to. See WithPodAccessDeniedHook.
+	onPodAccessDenied func(denied bool)
 }
 
 // How a Forbidden cluster-wide pod list was last reported.
@@ -78,6 +82,15 @@ func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator 
 // wva_pod_access_denied stays 0.
 func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
 	d.physicalLimiterInForce = inForce
+	return d
+}
+
+// WithPodAccessDeniedHook makes every change of wva_pod_access_denied also
+// call hook with the new value, and returns d. The controller publishes it in
+// its status ConfigMap (controllerstatus.KeyPodListDenied), beside the gauge
+// and the error logged once when the denial starts.
+func (d *K8sWithGpuOperator) WithPodAccessDeniedHook(hook func(denied bool)) *K8sWithGpuOperator {
+	d.onPodAccessDenied = hook
 	return d
 }
 
@@ -281,7 +294,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover node GPU types: %w", err)
 	}
-	byType, byNamespace, _, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, _, _, err := d.usageWalk(ctx, nodeGPUType)
 	return byType, byNamespace, err
 }
 
@@ -296,7 +309,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 		return nil, nil, nil, fmt.Errorf("failed to discover GPU nodes: %w", err)
 	}
 	nodeGPUType := nodeGPUTypesOf(nodes)
-	byType, byNamespace, byNode, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, byNode, groups, err := d.usageWalk(ctx, nodeGPUType)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -309,22 +322,26 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
 			Taints:        nodes[name].Taints,
+			LWSGroup:      groups[name],
 		}
 	}
 	return byType, byNamespace, out, nil
 }
 
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
-// pods occupying GPU nodes, per accelerator type, per namespace and per node.
-func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
+// pods occupying GPU nodes, per accelerator type, per namespace and per node;
+// and the GPU nodes a LeaderWorkerSet group's pod occupies, GPUs or not
+// (decision.NodeGPU.LWSGroup).
+func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, map[string]bool, error) {
 	pods, err := d.listPods(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
+	groups := make(map[string]bool)
 
 	for _, pod := range pods {
 		node := occupiedNode(&pod)
@@ -339,6 +356,9 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 		if !ok {
 			// Node doesn't have GPUs, skip
 			continue
+		}
+		if _, ok := pod.Labels[lwsv1.GroupUniqueHashLabelKey]; ok {
+			groups[node] = true
 		}
 
 		gpuCount := resources.PodGPURequests(&pod)
@@ -355,7 +375,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 		perType[gpuType] += gpuCount
 	}
 
-	return usageByType, usageByNamespace, usageByNode, nil
+	return usageByType, usageByNamespace, usageByNode, groups, nil
 }
 
 // occupiedNode is the node whose GPUs pod holds or is about to: the node it is
@@ -386,7 +406,7 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 	if d.podReader != nil {
 		pods, err := listAllPods(ctx, d.podReader)
 		if err == nil {
-			metrics.SetPodAccessDenied(false)
+			d.setPodAccessDenied(false)
 			d.podsDenied.Store(podsDeniedNone)
 			return pods, nil
 		}
@@ -409,15 +429,24 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 // else would clear the gauge then, and without clearing the remembered level,
 // a physical limiter turned off and on again would not log the denial again.
 func (d *K8sWithGpuOperator) ResetPodAccessDenied() {
-	metrics.SetPodAccessDenied(false)
+	d.setPodAccessDenied(false)
 	d.podsDenied.Store(podsDeniedNone)
+}
+
+// setPodAccessDenied sets wva_pod_access_denied and tells the hook
+// WithPodAccessDeniedHook installed, if any.
+func (d *K8sWithGpuOperator) setPodAccessDenied(denied bool) {
+	metrics.SetPodAccessDenied(denied)
+	if d.onPodAccessDenied != nil {
+		d.onPodAccessDenied(denied)
+	}
 }
 
 // reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
 // while a physical limiter is in force, and as information otherwise.
 func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	physical := d.physicalLimiterInForce == nil || d.physicalLimiterInForce()
-	metrics.SetPodAccessDenied(physical)
+	d.setPodAccessDenied(physical)
 	level := podsDeniedInfo
 	if physical {
 		level = podsDeniedError
@@ -428,8 +457,9 @@ func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	logger := log.FromContext(ctx)
 	if physical {
 		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
-			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
-			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
+			"this controller's own namespace. If other namespaces run GPU pods on the same nodes, their GPUs "+
+			"read as FREE and the physical limiter can admit scale-ups onto full nodes; if none do, nothing is "+
+			"miscounted. Grant list on pods cluster-wide, "+
 			"or drop gpu-inventory from the limiters and bound with a quota limiter alone: a quota "+
 			"beside gpu-inventory leaves the physical limiter reading this count.",
 			"metric", constants.WVAPodAccessDenied)

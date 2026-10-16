@@ -104,7 +104,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 
 	roleOf := make(map[string]string, len(c.rolesByVariant))
 	for variant, role := range c.rolesByVariant {
-		roleOf[variant] = canonicalRole(role)
+		roleOf[variant] = domain.CanonicalRole(role)
 	}
 
 	return &domain.AnalyzerResult{
@@ -397,7 +397,7 @@ func (c *cycle) fitLines() {
 		c.a.noteReplicaStart(variantKey,
 			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
 
-		if canonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
+		if domain.CanonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
 			continue
 		}
 		// Fit this variant's OWN readings first, into its own window, keyed
@@ -467,7 +467,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		}
 		gpuCount := c.gpusByVariant[rm.VariantName]
 		role := c.rolesByVariant[rm.VariantName]
-		downstreamSaturated := c.decodeSaturated && canonicalRole(role) == domain.RolePrefill
+		downstreamSaturated := c.decodeSaturated && domain.CanonicalRole(role) == domain.RolePrefill
 		// Priced, then reported on. noteLineMismatch says when the observed
 		// generation-token rate disagrees with the line, and does not act on
 		// it: see its comment for the run that decided that.
@@ -495,7 +495,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// started pricing prefill from decode's physics with nothing to say
 		// so. Stated here instead, beside the call it governs.
 		var derived derivedMu
-		if canonicalRole(role) == domain.RoleDecode {
+		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
@@ -625,7 +625,7 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	// Track active roles for queue demand attribution.
 	activeRoles := make(map[string]bool)
 	for _, vc := range variantCapacities {
-		activeRoles[canonicalRole(vc.Role)] = true
+		activeRoles[domain.CanonicalRole(vc.Role)] = true
 	}
 
 	// Add scheduler queue demand (requests queued upstream in llm-d flow control).

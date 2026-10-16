@@ -12,7 +12,50 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
+
+// ReservedLimiterNames are the names that what held a decision back is
+// reported under -- the limiter_name label of wva_decisions_limited_total,
+// the ResourceConstrained Event and limitedBy in the scaling-decision line --
+// when it is not a quota entry: the physical limiter (whatever its entry is
+// named, it is reported as gpu-limiter), node fit, and the two Kueue
+// borrowing rules. A quota entry is reported under its own name, so one named
+// like these could not be told apart from them. The allocation package holds
+// the constants these mirror, and a test keeps the two in step.
+//
+// In this release such an entry is accepted with a warning
+// (ReservedLimiterNameWarnings, and Validate's warnings): rejecting it would
+// drop the "default" entry with every limiter in it, and a controller
+// starting on such a ConfigMap would refuse to start, stalling an upgrade. A
+// later release rejects it.
+var ReservedLimiterNames = []string{
+	"gpu-limiter",
+	"node-fit",
+	"pd-pair-borrows-whole",
+	"lender-cannot-reclaim",
+}
+
+// reservedNameWarning is the warning for a quota entry, at where, named name,
+// one of ReservedLimiterNames.
+func reservedNameWarning(where, name string) string {
+	return fmt.Sprintf("%s: quota entry name %q is reserved: decisions held back by something other than a quota entry "+
+		"are reported under it (reserved: %s). The entry applies as written in this release and is rejected in a later "+
+		"one; rename it", where, name, strings.Join(ReservedLimiterNames, ", "))
+}
+
+// ReservedLimiterNameWarnings returns one warning for each quota entry of a
+// limiters: list named one of ReservedLimiterNames, naming it by its index
+// in the list. Empty when none is.
+func ReservedLimiterNameWarnings(limiters []QuotaLimiterConfig) []string {
+	var out []string
+	for i, l := range limiters {
+		if l.Type == string(LimiterTypeQuota) && slices.Contains(ReservedLimiterNames, l.Name) {
+			out = append(out, reservedNameWarning(fmt.Sprintf("limiters[%d]", i), l.Name))
+		}
+	}
+	return out
+}
 
 // QuotaLimiterReservedNamespaceKey is the reserved key in the namespace-scoped
 // quotas map that matches any namespace not explicitly listed. A real namespace
@@ -516,6 +559,22 @@ type ExternalBorrow struct {
 	// does not use.
 	CoHeadroom map[string]int64 `json:"coHeadroom,omitempty"`
 	CoKept     map[string]int64 `json:"coKept,omitempty"`
+	// Reserved is what the source has charged the queue on this flavor and
+	// resource, whoever holds it: every workload it admitted, managed or not.
+	// A quota entry charges the queue's figures with the part its own variants
+	// do not hold (the non-managed charge).
+	Reserved int `json:"reserved,omitempty"`
+	// CoUnused is, per co-resource, what the queue's nominal quota of it
+	// leaves after everything reserved, in milli-units: the co-resource
+	// headroom of growth within nominal.
+	CoUnused map[string]int64 `json:"coUnused,omitempty"`
+	// Charge is the queue's non-managed charge on this flavor and resource,
+	// as the row's namespace sees it: Reserved less what that namespace's
+	// managed variants hold in the queue. Negative only for a type several of
+	// the namespace's queues grant, where its GPUs are counted in each. Set by
+	// the quota entry, not the source; the row's Nominal, Guaranteed and
+	// WithinNominal are Kueue's, before it.
+	Charge int `json:"charge,omitempty"`
 }
 
 // Counted reports whether the row's borrowing is counted: no reason, or only
@@ -771,7 +830,8 @@ type QuotaLimiterEntries struct {
 // is easy to locate.
 //
 // Validation rules (all from issue #1002):
-//   - Name is non-empty and unique across entries.
+//   - Name is non-empty and unique across entries. One of
+//     ReservedLimiterNames is a warning, not an error, in this release.
 //   - Type == "quota" (other limiter types may be added later).
 //   - Scope is one of the two QuotaScope values.
 //   - Per-type quota values are >= QuotaUnlimited (only -1 is allowed as negative).
@@ -798,6 +858,11 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		if prev, ok := seenNames[entry.Name]; ok {
 			errs = append(errs, fmt.Errorf("entry[%d]: duplicate limiter name %q (first seen at entry[%d])", i, entry.Name, prev))
 			continue
+		}
+		if slices.Contains(ReservedLimiterNames, entry.Name) {
+			// A warning, not an error, for this release: see
+			// ReservedLimiterNames.
+			warnings = append(warnings, reservedNameWarning(fmt.Sprintf("entry[%d]", i), entry.Name))
 		}
 		seenNames[entry.Name] = i
 
@@ -826,8 +891,12 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 				errs = append(errs, fmt.Errorf("entry[%d] (%q): quotas is invalid for namespace scope; use namespaceQuotas", i, entry.Name))
 			}
 			for _, ns := range entry.Exclude {
-				if strings.TrimSpace(ns) == "" {
+				switch {
+				case strings.TrimSpace(ns) == "":
 					errs = append(errs, fmt.Errorf("entry[%d] (%q): exclude contains an empty namespace name", i, entry.Name))
+				case len(validation.IsDNS1123Label(ns)) > 0:
+					warnings = append(warnings,
+						fmt.Sprintf("entry[%d] (%q): exclude entry %q is not a valid namespace name (check for spaces or capitals); it never matches a namespace", i, entry.Name, ns))
 				}
 			}
 			for ns, perType := range entry.NamespaceQuotas {
@@ -850,6 +919,271 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		}
 	}
 	return warnings, errors.Join(errs...)
+}
+
+// unboundedExcludeWarnings warns about the namespaces a namespace-scoped entry
+// excludes that have no GPU limit on some accelerator type. physical is
+// whether a physical (gpu-inventory) limiter is declared beside these entries,
+// which the caller knows (ScalingPolicy.LimiterWarnings): it gives every named
+// type a number, but not a workload that names no type ("unknown").
+//
+// It reads the configuration as the planner reads the limiters built from it,
+// through the same lookup (accelerator.AllowlistBound and
+// accelerator.ClusterAllowlistBound), so a type it names is one the planner
+// leaves unbounded (see excludeBounds.unbounded):
+//
+//   - A namespace no other namespace-scoped entry holds is bounded only by the
+//     cluster-wide bounds: the scope: cluster entries, each a closed
+//     allowlist, and the physical limiter.
+//   - A namespace another namespace-scoped entry holds (does not exclude) is
+//     bounded by that entry's caps for it too (QuotaForNamespace), a closed
+//     allowlist: it has no limit on a type only when every such entry sets the
+//     type to -1.
+//
+// The types checked are finite: every accelerator name an entry lists, the
+// family of each, one product of each family that no entry lists (they all
+// read alike; see accelerator.UnlistedProduct), and "unknown". Every other
+// type falls outside the families a closed allowlist lists, so it is denied.
+//
+// Not reported: anything, when a scope: cluster entry reads Kueue, and a
+// namespace an entry that reads Kueue holds. Their numbers come from Kueue at
+// runtime, so they cannot be checked here. Nor an exclude entry that is not a
+// valid namespace name: it never matches a namespace, and Validate says so.
+func (e *QuotaLimiterEntries) unboundedExcludeWarnings(physical bool) []string {
+	b := excludeBounds{physical: physical}
+	for _, entry := range e.Limiters {
+		if entry.Scope != QuotaScopeCluster {
+			continue
+		}
+		if entry.KueueEnabled() {
+			return nil
+		}
+		b.cluster = append(b.cluster, entry.ClusterQuotas)
+	}
+	checked := e.checkedTypes()
+	var warnings []string
+	for i, entry := range e.Limiters {
+		if entry.Scope != QuotaScopeNamespace {
+			continue
+		}
+		// One warning per reason, naming every namespace it holds for.
+		type reason struct{ holders, types string }
+		var order []reason
+		byReason := map[reason][]string{}
+		for _, ns := range entry.Exclude {
+			if len(validation.IsDNS1123Label(ns)) > 0 {
+				continue
+			}
+			caps, holders, kueue := e.holders(ns)
+			if kueue {
+				continue
+			}
+			r := reason{holders: strings.Join(holders, ", ")}
+			if len(caps) > 0 || b.inForce() {
+				types := describeTypes(checked, func(name string) bool { return b.unbounded(name, caps) })
+				if len(types) == 0 {
+					continue
+				}
+				r.types = strings.Join(types, ", ")
+			}
+			if _, ok := byReason[r]; !ok {
+				order = append(order, r)
+			}
+			if !slices.Contains(byReason[r], ns) {
+				byReason[r] = append(byReason[r], ns)
+			}
+		}
+		for _, r := range order {
+			namespaces := byReason[r]
+			switch {
+			case r.types == "":
+				warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit: "+
+					"no scope: cluster quota and no gpu-inventory limiter are declared, so the scaling manager does not bound them",
+					i, entry.Name, namespaces))
+			case r.holders == "":
+				warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit on [%s]: "+
+					"no gpu-inventory limiter and no scope: cluster quota gives those accelerator types a number (-1 is unlimited)",
+					i, entry.Name, namespaces, r.types))
+			default:
+				warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit on [%s]: "+
+					"the namespace quotas that hold them (%s) set those accelerator types to -1 (unlimited), "+
+					"and no gpu-inventory limiter and no scope: cluster quota gives them a number",
+					i, entry.Name, namespaces, r.types, r.holders))
+			}
+		}
+	}
+	return warnings
+}
+
+// holders returns the caps each namespace-scoped entry that does not exclude
+// ns holds it to (QuotaForNamespace), those entries' quoted names, and whether
+// one of them reads Kueue, whose caps come from Kueue at runtime.
+func (e *QuotaLimiterEntries) holders(ns string) (caps []map[string]int, names []string, kueue bool) {
+	for _, other := range e.Limiters {
+		quotas, excluded := other.QuotaForNamespace(ns)
+		if other.Scope != QuotaScopeNamespace || excluded {
+			continue
+		}
+		if other.KueueEnabled() {
+			kueue = true
+		}
+		caps = append(caps, quotas)
+		names = append(names, fmt.Sprintf("%q", other.Name))
+	}
+	return caps, names, kueue
+}
+
+// checkedTypes is the finite set of accelerator names unboundedExcludeWarnings
+// checks: every name an entry lists, the family of each, one product of each
+// family that no entry lists, and "unknown". Sorted, and spellings that differ
+// only in case are one name.
+func (e *QuotaLimiterEntries) checkedTypes() []string {
+	var listed []string
+	for _, entry := range e.Limiters {
+		listed = slices.AppendSeq(listed, maps.Keys(entry.ClusterQuotas))
+		for _, perType := range entry.NamespaceQuotas {
+			listed = slices.AppendSeq(listed, maps.Keys(perType))
+		}
+	}
+	names := []string{constants.DefaultAcceleratorName}
+	for _, name := range listed {
+		names = append(names, name)
+		if name == constants.DefaultAcceleratorName {
+			continue
+		}
+		family := accelerator.Family(name)
+		names = append(names, family)
+		if product, ok := accelerator.UnlistedProduct(family); ok {
+			names = append(names, product)
+		}
+	}
+	slices.Sort(names)
+	var out []string
+	for _, n := range names {
+		if !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, n) }) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// describeTypes names the checked types that are unbounded, for a warning. A
+// family whose every checked name is unbounded is named once, by its family
+// name ("H100"). Otherwise each unbounded name is listed: a product by its
+// name, the family name itself as "H100 (bare name)" (a workload whose
+// selector names only the family), and the product standing for the ones no
+// entry lists as "other H100 products".
+func describeTypes(checked []string, unbounded func(string) bool) []string {
+	var families []string
+	members := map[string][]string{}
+	for _, name := range checked {
+		f := strings.ToLower(accelerator.Family(name))
+		if _, ok := members[f]; !ok {
+			families = append(families, f)
+		}
+		members[f] = append(members[f], name)
+	}
+	var out []string
+	for _, f := range families {
+		var hit []string
+		for _, name := range members[f] {
+			if unbounded(name) {
+				hit = append(hit, name)
+			}
+		}
+		if len(hit) == 0 {
+			continue
+		}
+		if len(hit) == len(members[f]) {
+			out = append(out, accelerator.Family(hit[0]))
+			continue
+		}
+		for _, name := range hit {
+			family := accelerator.Family(name)
+			if product, ok := accelerator.UnlistedProduct(family); ok && name == product {
+				name = "other " + family + " products"
+			} else if accelerator.IsFamily(name) {
+				name += " (bare name)"
+			}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// excludeBounds is the cluster-wide bounds a namespace the namespace quotas
+// exclude is planned under, read from the configuration.
+type excludeBounds struct {
+	// cluster is the caps of each scope: cluster entry.
+	cluster []map[string]int
+	// physical is whether a physical (gpu-inventory) limiter is declared.
+	physical bool
+}
+
+// inForce reports whether any cluster-wide bound is declared. Without one a
+// namespace no namespace quota holds has no limit on any type.
+func (b excludeBounds) inForce() bool {
+	return b.physical || len(b.cluster) > 0
+}
+
+// quotaBound reads a quota value as an allowlist bound: -1 is unlimited.
+func quotaBound(v int) accelerator.Bound {
+	return accelerator.Bound{Free: v, Unlimited: v == QuotaUnlimited}
+}
+
+// finite reports whether a cluster-wide bound gives the accelerator called
+// name a number: the scope: cluster quotas together, read by
+// accelerator.ClusterAllowlistsBound (a type one does not list is 0, except
+// "unknown", and a family is bounded by the products that fit under all of
+// them), or the physical limiter, which bounds every type a workload names
+// and not "unknown".
+func (b excludeBounds) finite(name string) bool {
+	if b.physical && name != constants.DefaultAcceleratorName {
+		return true
+	}
+	_, unlimited, bounds := accelerator.ClusterAllowlistsBound(b.cluster, name, quotaBound)
+	return bounds && !unlimited
+}
+
+// unbounded reports whether a workload naming name, in a namespace the
+// namespace quotas excluding it leave to caps (one per entry that holds it; none
+// when no entry does), has no GPU limit. The caller has checked that some
+// bound is in force.
+//
+// A namespace no entry holds is unbounded on a type no cluster-wide bound gives
+// a number. "unknown" counts on its own only when a cluster quota lists it:
+// otherwise a workload naming no type may land on any listed pool, and is
+// unbounded exactly when one of those types is, which is named instead.
+//
+// A namespace an entry holds is a closed allowlist there: it is unbounded on a
+// type only when every holder lists it as -1, and no cluster-wide bound gives
+// it a number.
+func (b excludeBounds) unbounded(name string, caps []map[string]int) bool {
+	if b.finite(name) {
+		return false
+	}
+	if len(caps) == 0 {
+		if name != constants.DefaultAcceleratorName {
+			return true
+		}
+		return slices.ContainsFunc(b.cluster, func(quotas map[string]int) bool {
+			_, _, bounds := accelerator.ClusterAllowlistBound(quotas, name, quotaBound)
+			return bounds
+		})
+	}
+	if accelerator.ClosesFamily(caps, name) {
+		// A family one holder lists only through products: the products that
+		// fit under every holder and every cluster quota, as the planner reads
+		// it (mergeNamespaceConstraints).
+		_, unlimited, _ := accelerator.ClusterAllowlistsBound(slices.Concat(caps, b.cluster), name, quotaBound)
+		return unlimited
+	}
+	for _, c := range caps {
+		if _, unlimited, listed := accelerator.AllowlistBound(c, name, quotaBound); !listed || !unlimited {
+			return false
+		}
+	}
+	return true
 }
 
 // validateTypeQuotaMap checks per-accelerator-type entries: type name

@@ -83,6 +83,14 @@ type QuotaInventory struct {
 	// Refresh (SetManagedNamespaces): only they are evaluated for borrowing.
 	// nil, never set, evaluates every namespace Kueue grants borrowing in.
 	managedNS map[string]bool
+	// managedUsage is what the managed variants hold per namespace and type,
+	// set before each Refresh (SetManagedUsage): the Kueue figures are charged
+	// against it (chargeNonManaged). nil, never set, charges nothing.
+	managedUsage map[string]map[string]int
+	// gated is where the managed pods at Kueue's admission gate are read
+	// (SetGatedSource): their GPUs are not taken off a queue's charge. Nil
+	// reads none.
+	gated GatedSource
 	// neverRead is set while the entry reads Kueue, leaves some type
 	// unlimited in its static caps, and has never read Kueue successfully:
 	// that type is unbounded (KueueNeverRead).
@@ -289,6 +297,16 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 				"snapshotAge", time.Since(ext.ObservedAt).Round(time.Second).String())
 		}
 	}
+	// The snapshot as read, for the change log; ext from here on carries each
+	// queue's non-managed charge, taken before the static entry bounds it (KU1).
+	raw := ext
+	q.mu.RLock()
+	admitted := q.managedUsage
+	if q.gated != nil {
+		admitted = admittedUsage(q.managedUsage, q.gated.GatedGPUs(time.Now()))
+	}
+	ext = chargeNonManaged(ext, admitted)
+	q.mu.RUnlock()
 	effective := q.static
 	if !ext.ObservedAt.IsZero() {
 		effective = q.static.BoundBy(ext)
@@ -327,7 +345,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		Read bool // never-read and read-but-empty must not fingerprint alike
 		N    map[string]config.ExternalCaps
 		C    config.ExternalCaps
-	}{!ext.ObservedAt.IsZero(), ext.Namespace, ext.Cluster})
+	}{!raw.ObservedAt.IsZero(), raw.Namespace, raw.Cluster})
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -341,7 +359,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 				msg = "external quota source grants no GPUs; the static quota entry applies as written"
 			}
 			logger.Info(msg,
-				"externalNamespaceQuotas", ext.Namespace, "externalClusterQuotas", ext.Cluster,
+				"externalNamespaceQuotas", raw.Namespace, "externalClusterQuotas", raw.Cluster,
 				"effectiveNamespaceQuotas", effective.NamespaceQuotas, "effectiveClusterQuotas", effective.ClusterQuotas)
 			if unapplied := q.static.UnappliedUntyped(ext); len(unapplied) > 0 {
 				// A real grant the limiter cannot budget under: the source could
@@ -383,7 +401,9 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	}
 	q.withheld = q.withheldReasons(ext, view, frozenWhy)
 	q.nominal = nil
-	if frozenWhy == "" && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+	// Read for every Kueue-backed namespace entry: one that counts no
+	// borrowing still carries its queues' co-resources (uncountedNominal).
+	if frozenWhy == "" && q.static.Scope == config.QuotaScopeNamespace && q.source != nil && !ext.ObservedAt.IsZero() {
 		q.nominal = q.uncountedNominal(ext, view, effective)
 	}
 	q.logBorrowing(logger, ext, view, frozenWhy)
@@ -796,15 +816,21 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 	if guaranteed < 0 {
 		return b, true
 	}
-	reach, unlimited := 0, false
+	var queues []string
+	queueReach, queueUnlimited := map[string]int{}, map[string]bool{}
 	for _, r := range matched {
+		if !slices.Contains(queues, r.Queue) {
+			queues = append(queues, r.Queue)
+		}
+		// Each queue's reach less its non-managed charge (KU1): what Kueue
+		// has reserved for other workloads is not the variants' to reach.
 		switch {
 		case !r.Counted():
-			reach += r.Nominal
+			queueReach[r.Queue] += max(0, r.Nominal-r.Charge)
 		case r.BorrowCap < 0:
-			unlimited = true
+			queueUnlimited[r.Queue] = true
 		default:
-			reach += r.Nominal + r.BorrowCap
+			queueReach[r.Queue] += max(0, r.Nominal+r.BorrowCap-r.Charge)
 		}
 		if r.Counted() {
 			b.LentOut += r.LentOut
@@ -813,6 +839,19 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 		}
 		if r.Reason == config.BorrowReasonNominalLentOut && r.Nominal > r.Guaranteed {
 			b.NominalLentOut += r.Nominal - r.Guaranteed
+		}
+	}
+	// One queue's reach; for a type several of the namespace's queues grant
+	// (multi-queue-namespace), the smallest queue's: a replica is admitted
+	// through one of them, which is not read (KU2).
+	reach, unlimited := 0, true
+	for _, name := range queues {
+		switch {
+		case queueUnlimited[name]:
+		case unlimited:
+			reach, unlimited = queueReach[name], false
+		default:
+			reach = min(reach, queueReach[name])
 		}
 	}
 	bound := func(c int) {

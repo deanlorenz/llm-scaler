@@ -43,6 +43,11 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 // ResetUnusableFields is counted under, once per field per ConfigMap read.
 const ignoredFieldErrorType = "Ignored unusable saturation scaling config field"
 
+// reservedLimiterNameErrorType is the error_type a quota entry named one of
+// config.ReservedLimiterNames is counted under, once per entry per ConfigMap
+// read, and starts its log line. The entry still applies.
+const reservedLimiterNameErrorType = "Quota limiter entry has a reserved name"
+
 // parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
 // by key, why each entry that was dropped was dropped: a YAML error, or a
 // Normalize or Validate failure. An entry that parsed is never in it. A key the
@@ -99,11 +104,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
 				"the GPU limiter is selected only from the \"default\" entry", "key", key)
 		}
-		// A second physical entry is accepted (rejecting it would drop the whole
-		// policy) but only one physical limiter is built; say which were ignored.
-		if dups := satConfig.IgnoredPhysicalLimiters(); key == config.GlobalDefaultsKey && len(dups) > 0 {
-			logger.Info(config.IgnoredPhysicalLimitersMessage, "key", key, "ignoredIndexes", dups)
-		}
 		// optimizer: sits beside limiters: and is read from the same place only.
 		if key != config.GlobalDefaultsKey && satConfig.Optimizer != nil {
 			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+
@@ -128,6 +128,37 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		count++
 	}
 	return configs, count, rejected, ignored
+}
+
+// warnAboutLimiters logs the findings about the limiters of policy, the
+// "default" entry the cluster's limiters are read from. The caller calls it
+// only for that entry: limiters anywhere else are ignored whole, and a
+// warning about them would describe a bound nothing enforces.
+//
+// "WARNING:" rather than a level, because logr has none between Info and
+// Error: V-levels only go more verbose. Same convention as cmd/main.go.
+func warnAboutLimiters(logger logr.Logger, policy config.ScalingPolicy) {
+	key := config.GlobalDefaultsKey
+	// A second physical entry is accepted (rejecting it would drop the whole
+	// policy) but only one physical limiter is built; say which were ignored.
+	if dups := policy.IgnoredPhysicalLimiters(); len(dups) > 0 {
+		logger.Info(config.IgnoredPhysicalLimitersMessage, "key", key, "ignoredIndexes", dups)
+	}
+	// Quota findings that do not reject the config, such as a namespace in
+	// exclude that nothing bounds. Logged once per config change.
+	for _, w := range policy.LimiterWarnings() {
+		logger.Info("WARNING: "+w, "key", key)
+	}
+	// A quota entry with a reserved name is accepted in this release
+	// (config.ReservedLimiterNames): rejecting it would drop the default
+	// entry, and at startup stop the controller mid-upgrade. Warned on
+	// every read, counted, and listed in the controller status
+	// (limiterWarnings) while it is in force.
+	for _, w := range config.ReservedLimiterNameWarnings(policy.Limiters) {
+		logger.Info("WARNING: "+reservedLimiterNameErrorType+"; it applies in this release, rename it before a later one rejects it",
+			"key", key, "warning", w)
+		metrics.RecordError(constants.ComponentController, reservedLimiterNameErrorType)
+	}
 }
 
 // maxIgnoredFieldsReported is how many ignored fields of one ConfigMap are
