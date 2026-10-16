@@ -40,7 +40,7 @@ for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_s
     }
 done
 
-EXPECT_CASES=67
+EXPECT_CASES=71
 RAN=0
 FAILED=0
 
@@ -390,6 +390,21 @@ run_borrow() {
         printf '%s %s' "$WVA_KUEUE_BORROW_WANTED" "${WVA_KUEUE_KEPT_NS:--}"
     )
 }
+# run_borrow_notes: the info lines wva_kueue_borrow_wanted prints, one per line.
+run_borrow_notes() {
+    (
+        log_info() { printf '%s\n' "$*"; }
+        log_success() { :; }
+        log_warning() { :; }
+        log_error() { echo REFUSED; exit 1; }
+        kubectl() { stub_kubectl "$@"; }
+        WVA_NS=wva-ctl WVA_WATCH_NS='' WVA_SCOPE=namespace
+        WVA_LIMITER='' WVA_QUOTA_KUEUE=false WVA_QUOTA_KUEUE_BORROW='' STUB_POLICY=''
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_kueue_borrow_wanted
+    )
+}
 # run_borrow_warnings: the warnings wva_kueue_borrow_wanted prints, one per line.
 run_borrow_warnings() {
     (
@@ -405,7 +420,7 @@ run_borrow_warnings() {
         wva_kueue_borrow_wanted
     )
 }
-check 'borrow read: no policy and no limiter -> not granted' 'no -' "$(run_borrow)"
+check 'borrow read: no policy namespace and no limiter -> left as it is' 'unknown -' "$(run_borrow)"
 check 'borrow read: WVA_LIMITER=quota with Kueue -> granted' 'yes -' \
     "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true)"
 check 'borrow read: WVA_QUOTA_KUEUE_BORROW=false -> revoked' 'no -' \
@@ -436,8 +451,17 @@ check 'borrow read: a labelled policy namespace decides alone' 'no -' \
 # ConfigMap. The tenant writes it, so it never grants the read of every
 # tenant's Workloads alone: only this run's explicit WVA_LIMITER and
 # WVA_QUOTA_KUEUE do. The tenant-phase check still warns that the read is missing.
-check 'borrow read: no policy namespace resolves, the tenant own borrowing policy alone grants nothing' 'no -' \
+check 'borrow read: no policy namespace resolves, the tenant own borrowing policy alone grants nothing' 'unknown -' \
     "$(run_borrow STUB_WELLKNOWN=no "STUB_OWN='$POLICY_WITH_KUEUE'")"
+# A read an earlier run granted on the admin's explicit settings survives a
+# plain re-run (no WVA_LIMITER): unknown leaves it, and says why. Only explicit
+# settings revoke it.
+check 'borrow read: a grant from an explicit run survives a plain re-run' 'unknown -' \
+    "$(run_borrow STUB_WELLKNOWN=no "STUB_OWN='$POLICY_NO_BORROW'")"
+check 'borrow read: a plain re-run says the read is left as it is' '1' \
+    "$(run_borrow_notes STUB_WELLKNOWN=no | grep -c 'Workload read of wva-ctl is left as it is')"
+check 'borrow read: explicit settings with WVA_QUOTA_KUEUE_BORROW=false revoke it' 'no -' \
+    "$(run_borrow STUB_WELLKNOWN=no WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false "STUB_OWN='$POLICY_WITH_KUEUE'")"
 check 'borrow read: no policy namespace resolves, the admin explicit WVA_LIMITER and WVA_QUOTA_KUEUE grant' 'yes -' \
     "$(run_borrow STUB_WELLKNOWN=no WVA_LIMITER=quota WVA_QUOTA_KUEUE=true "STUB_OWN='$POLICY_WITH_KUEUE'")"
 check 'borrow read: the tenant own borrowing policy is warned about, naming the admin settings' '1' \
@@ -445,10 +469,12 @@ check 'borrow read: the tenant own borrowing policy is warned about, naming the 
 check 'borrow read, tenant phase: a tenant own borrowing policy without the read is warned' \
     'WARNED list workloads.kueue.x-k8s.io' \
     "$(run_check CHECK_FN=wva_check_kueue_borrow_read WVA_LIMITER='' WVA_QUOTA_KUEUE=false "STUB_OWN='$POLICY_WITH_KUEUE'")"
-check 'borrow read: an unreadable tenant own policy counts as no' 'no -' \
+check 'borrow read: an unreadable tenant own policy counts as no under explicit settings' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true STUB_CM_FORBIDDEN=wva-ctl)"
+check 'borrow read: an unreadable tenant own policy on a plain run is left as it is' 'unknown -' \
     "$(run_borrow STUB_CM_FORBIDDEN=wva-ctl)"
-check 'borrow read: a tenant own policy that does not parse counts as no' 'no -' \
-    "$(run_borrow "STUB_OWN='limiters: ['")"
+check 'borrow read: a tenant own policy that does not parse counts as no under explicit settings' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true "STUB_OWN='limiters: ['")"
 check 'borrow read: an admin-owned policy that does not parse stays unknown' 'unknown -' \
     "$(run_borrow WVA_WATCH_NS=tenant-a "STUB_OWN='limiters: ['")"
 check 'borrow read: wva-policy unreadable, both are read and the tenant own one grants nothing' 'unknown -' \
