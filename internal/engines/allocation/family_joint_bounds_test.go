@@ -124,6 +124,11 @@ func TestBareFamilyInANamespaceThatDeniesAProduct(t *testing.T) {
 			map[string]int{"H100": 16, famHBM3: 0}, 0,
 		},
 		{
+			"8 of the family, but no SXM5; the cluster has 16 HBM3 and 24 SXM5",
+			[]*ResourceConstraints{jbClusterQuota(t, "cq0", map[string]int{famHBM3: 16, famSXM5: 24}, nil)},
+			map[string]int{"H100": 8, famSXM5: 0}, 8,
+		},
+		{
 			"the family, and SXM5 at 8, which the cluster does not list",
 			[]*ResourceConstraints{jbClusterQuota(t, "cq0", map[string]int{famHBM3: 8, famPCIe: 8}, nil)},
 			map[string]int{"H100": -1, famSXM5: 8}, 16,
