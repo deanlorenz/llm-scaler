@@ -181,7 +181,8 @@ type Engine struct {
 	// tick's wakes grew into without a node hole (placement.reclaimable).
 	tickReclaimed map[string]map[string]allocation.Reclaim
 	// wakeBlocked is the models (modelGroup.key) this loop set a refused-wake
-	// reason on wva_model_scaling_blocked for (reportWakeBlocked).
+	// reason on wva_model_scaling_blocked for (reportWakeBlocked), each as
+	// the modelGroup it was set for, so pruneRefusals can clear it.
 	wakeBlocked sync.Map
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
@@ -329,8 +330,9 @@ func (e *Engine) optimize(ctx context.Context) error {
 	logger.V(logging.DEBUG).Info("Grouped inactive variants by model", "models", len(groups))
 
 	// Keep the refusal bookkeeping to the models still under consideration; it
-	// would otherwise grow for the life of the process.
-	e.pruneRefusals(groups)
+	// would otherwise grow for the life of the process. A wake reason of a
+	// model that left them, or that serves again, is cleared here.
+	e.pruneRefusals(groups, coverage)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, e.maxConcurrency)
@@ -639,7 +641,7 @@ func wakeBlockedReason(outcome SelectionOutcome) string {
 func (e *Engine) reportWakeBlocked(group modelGroup, reason string) {
 	key := group.key()
 	if reason != "" {
-		e.wakeBlocked.Store(key, reason)
+		e.wakeBlocked.Store(key, modelGroup{namespace: group.namespace, modelID: group.modelID})
 		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
 			constants.ScalingBlockedReasonsWakeCapacity, []string{reason})
 		return
