@@ -17,8 +17,9 @@ import (
 const ControllerDeploymentName = "wva-controller-manager"
 
 // ControllerServiceAccountName is the controller's ServiceAccount:
-// config/base/manager's controller-manager with the same wva- prefix. It equals the Deployment's name
-// because both come from the same base name, not because one is the other.
+// config/base/manager's controller-manager with the same wva- prefix. It
+// equals the Deployment's name because both come from the same base name,
+// not because one is the other.
 const ControllerServiceAccountName = "wva-controller-manager"
 
 // controllerLabelSelector narrows the list before ownership is checked. It
