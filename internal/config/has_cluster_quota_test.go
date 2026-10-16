@@ -21,13 +21,13 @@ var _ = Describe("Config.HasClusterQuota", func() {
 		return c
 	}
 
-	// The limiter mode is quota for a namespace-scoped entry alone, which is
-	// how the utilization-share optimizer used to read "the cluster group is
+	// The limiter set holds a quota for a namespace-scoped entry alone, which
+	// is how the utilization-share optimizer used to read "the cluster group is
 	// bounded by a quota" -- and planned a namespace that entry excludes over
 	// the other tenants' free quota.
-	It("is false for a namespace-scoped quota alone, though the limiter mode is quota", func() {
+	It("is false for a namespace-scoped quota alone, though a quota limiter is declared", func() {
 		c := with(namespaceQuota)
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes().HasQuota()).To(BeTrue())
 		Expect(c.HasClusterQuota()).To(BeFalse())
 	})
 

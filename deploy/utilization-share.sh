@@ -69,13 +69,15 @@ us_doc_count() {
     yq -r 'document_index' | sort -u | grep -c . || true
 }
 
-# us_limiter_kind -- quota, inventory or none: the budget the optimizer would
-# share. A list holding both is a quota: the controller then builds only the
-# quota limiter. A list holding a type the controller does not know is none:
-# its validation rejects the whole policy and it runs with no limiter
-# (internal/config/saturation_scaling.go), so there is no budget to share.
+# us_limiter_kind -- the limiter set the policy declares: none, quota,
+# inventory, or inventory+quota when it declares both. Every declared limiter
+# is built and a decision must fit all of them, so a list holding both is
+# BOTH, not a quota (it was until the limiters composed). A list holding a
+# type the controller does not know is none: its validation rejects the whole
+# policy and it runs with no limiter (internal/config/saturation_scaling.go),
+# so there is no budget to share.
 us_limiter_kind() {
-    local types t
+    local types t physical=0 quota=0
     types="$(yq -r '[.limiters[]?.type] | join(" ")')" || return 1
     for t in $types; do
         case "$t" in
@@ -83,9 +85,31 @@ us_limiter_kind() {
             *) echo none; return 0 ;;
         esac
     done
-    case " $types " in
-        *" quota "*) echo quota ;;
-        *" gpu-inventory "*|*" inventory "*) echo inventory ;;
+    case " $types " in *" gpu-inventory "*|*" inventory "*) physical=1 ;; esac
+    case " $types " in *" quota "*) quota=1 ;; esac
+    case "$physical$quota" in
+        11) echo inventory+quota ;;
+        01) echo quota ;;
+        10) echo inventory ;;
+        *) echo none ;;
+    esac
+}
+
+# us_share_cluster_budget -- what the share optimizer takes as the cluster-wide
+# budget: quota, physical or none, the controller's Config.HasClusterQuota.
+# Only a cluster-scope quota is a cluster budget, alone or beside the physical
+# limiter; namespace-scope quotas bound their namespaces. Beside the physical
+# limiter, the cluster figure is then the GPUs that exist; with namespace-scope
+# quotas alone there is none, and a namespace they exclude is not shared.
+us_share_cluster_budget() {
+    local p kind cluster
+    p="$(cat)"
+    kind="$(printf '%s\n' "$p" | us_limiter_kind)" || return 1
+    cluster="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota" and .scope == "cluster")] | length')" || return 1
+    case "$kind" in
+        quota) if [ "$cluster" -gt 0 ]; then echo quota; else echo none; fi ;;
+        inventory+quota) if [ "$cluster" -gt 0 ]; then echo quota; else echo physical; fi ;;
+        inventory) echo physical ;;
         *) echo none ;;
     esac
 }
@@ -221,6 +245,12 @@ block_state() {
 limiter_kind() {
     local s
     s="$(printf '%s\n' "$POLICY" | us_limiter_kind)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
+    printf '%s' "$s"
+}
+
+share_cluster_budget() {
+    local s
+    s="$(printf '%s\n' "$POLICY" | us_share_cluster_budget)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     printf '%s' "$s"
 }
 
@@ -505,6 +535,15 @@ verb_check() {
     state="$(block_state)"
     case "$kind" in
         quota) ok "limiter: quota; the optimizer shares each quota group" ;;
+        inventory+quota)
+            # Both bound every decision. Which one is the share's CLUSTER budget
+            # is the controller's rule (HasClusterQuota), said here so the
+            # numbers status prints can be read.
+            if [ "$(share_cluster_budget)" = quota ]; then
+                ok "limiters: gpu-inventory and quota, both in force; the share's cluster budget is the cluster-scope quota, and the GPUs that exist bound it too"
+            else
+                ok "limiters: gpu-inventory and quota, both in force; the share's cluster budget is the GPUs that exist, and each namespace-scope quota bounds its namespace"
+            fi ;;
         inventory)
             if [ "${state#* }" = physical ]; then
                 ok "limiter: gpu-inventory, and the block plans physical groups"
@@ -536,7 +575,7 @@ verb_check() {
     else
         ok "no AcceleratorNotResolved events"
     fi
-    if [ "$kind" = quota ] && [ -n "$accels" ]; then
+    if { [ "$kind" = quota ] || [ "$kind" = inventory+quota ]; } && [ -n "$accels" ]; then
         keys="$(printf '%s\n' "$POLICY" | us_quota_keys)" || die "could not parse the quota entries"
         for a in $accels; do
             grep -qxF -- "$a" <<<"$keys" \

@@ -96,7 +96,7 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 				Expect(groups["team-b"].Budget).To(Equal(6), "held=%d: team-b's free 4 + its 2", held)
 				// Nothing bounds a namespace group's fill but its own budget:
 				// the tenants' summed quota is not the cluster's free GPUs.
-				Expect(groups["team-a"].PhysicalFree).To(BeNumerically(">", 1<<30))
+				Expect(groups["team-a"].ClusterFree).To(BeNumerically(">", 1<<30))
 			}
 		}
 	})
@@ -181,14 +181,16 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			Expect(g.Roles[0].Key).To(Equal("ns-x/mx/both"))
 			Expect(g.Budget).To(Equal(c.budget), "held=%d", c.held)
 			Expect(g.Budget-g.Committed["ns-x/mx/both"]).To(Equal(c.idle), "held=%d", c.held)
-			Expect(g.PhysicalFree).To(Equal(c.idle), "held=%d: what the tenants leave of the cluster free", c.held)
-			// The tenants keep their own budgets, bounded by the whole
-			// cluster free.
+			Expect(g.ClusterFree).To(Equal(c.idle), "held=%d: what the tenants leave of the cluster free", c.held)
+			// The tenants keep their own budgets; their fills share the
+			// cluster free with the cluster group's (splitClusterFree), so
+			// the three together never fill more than it holds.
 			clusterFree := max(0, 20-4-c.held)
 			Expect(groups["team-a"].Budget).To(Equal(8))
-			Expect(groups["team-a"].PhysicalFree).To(Equal(clusterFree), "held=%d", c.held)
 			Expect(groups["team-b"].Budget).To(Equal(6))
-			Expect(groups["team-b"].PhysicalFree).To(Equal(clusterFree), "held=%d", c.held)
+			Expect(groups["team-a"].ClusterFree).To(BeNumerically("<=", clusterFree), "held=%d", c.held)
+			Expect(g.ClusterFree+groups["team-a"].ClusterFree+groups["team-b"].ClusterFree).
+				To(BeNumerically("<=", clusterFree), "held=%d", c.held)
 		}
 	})
 
@@ -219,7 +221,7 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 				for _, n := range g.Committed {
 					committed += n
 				}
-				idle[scope] = max(0, min(g.Budget-committed, g.PhysicalFree))
+				idle[scope] = max(0, min(g.Budget-committed, g.ClusterFree))
 				total += idle[scope]
 			}
 			Expect(total).To(BeNumerically("<=", clusterFree), "limit=%d: idle by group %v", limit, idle)
@@ -231,7 +233,9 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 
 	It("never budgets the cluster group below what it holds when the tenants claim more than is free", func() {
 		// Whole 8-GPU nodes: the tenants may claim 16 + 8, the cluster has 8
-		// free. The cluster group keeps its 16 GPUs, and fills nothing.
+		// free. The cluster group keeps its 16 GPUs, and fills nothing. The
+		// one free node goes to one tenant whole (splitClusterFree), not half
+		// to each, where neither half places a replica.
 		cons := []*ResourceConstraints{
 			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
 			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
@@ -243,9 +247,9 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		groups, _ := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
 		Expect(groups).To(HaveKey(""))
 		Expect(groups[""].Budget).To(Equal(16))
-		Expect(groups[""].PhysicalFree).To(Equal(0))
-		Expect(groups["team-a"].PhysicalFree).To(Equal(8))
-		Expect(groups["team-b"].PhysicalFree).To(Equal(8))
+		Expect(groups[""].ClusterFree).To(Equal(0))
+		Expect(groups["team-a"].ClusterFree).To(Equal(8))
+		Expect(groups["team-b"].ClusterFree).To(Equal(0))
 	})
 
 	// A tenant claims its free quota in whole replicas only. With 8-GPU
@@ -256,7 +260,9 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		for _, c := range []struct {
 			teamALimit, clusterIdle, teamIdle int
 		}{
-			{teamALimit: 12, clusterIdle: 8, teamIdle: 4}, // 4 free: no whole replica, claims 0
+			// 4 free: no whole replica, claims 0, and fills none of the
+			// cluster free (splitClusterFree), which it could not place.
+			{teamALimit: 12, clusterIdle: 8, teamIdle: 0},
 			{teamALimit: 16, clusterIdle: 0, teamIdle: 8}, // 8 free: one replica, claims 8
 		} {
 			cons := []*ResourceConstraints{
@@ -274,7 +280,7 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 				for _, n := range g.Committed {
 					committed += n
 				}
-				idle[scope] = max(0, min(g.Budget-committed, g.PhysicalFree))
+				idle[scope] = max(0, min(g.Budget-committed, g.ClusterFree))
 			}
 			Expect(idle).To(Equal(map[string]int{"": c.clusterIdle, "team-a": c.teamIdle}),
 				"team-a limit %d", c.teamALimit)

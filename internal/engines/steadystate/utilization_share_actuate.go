@@ -233,9 +233,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			if len(pending) > 0 && t.ReceiverVariant != "" {
 				k := variantKey(t.Receiver, t.ReceiverVariant)
 				st.desired[k] = max(st.desired[k]-1, 0)
-				l.HoldFill(t.Receiver, now.Add(tm.ReleaseTimeout))
+				hold := e.holdFillTimeout(tm)
+				l.HoldFill(t.Receiver, now.Add(hold))
 				logger.Info("Utilization share: the receiver's replica could not be placed; its raise is undone",
-					"id", t.ID, "receiver", t.Receiver, "variant", t.ReceiverVariant, "retryAfter", now.Add(tm.ReleaseTimeout))
+					"id", t.ID, "receiver", t.Receiver, "variant", t.ReceiverVariant, "retryAfter", now.Add(hold))
 			}
 		}
 		if end.Outcome == allocation.ShareOutcomeWrongPod {
@@ -307,7 +308,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
-		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
+		WakeHeld: l.WakeHeld(now), PhysicalFree: g.ClusterFree,
 		Headroom: allocation.ShareHeadroom{Capped: true, Replicas: us.MaxHeadroomReplicas, ReturnLoad: us.Stabilization.ReturnSpareLoad},
 		Origins:  g.Origins,
 	}, now, tm)
@@ -498,7 +499,7 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	for _, c := range committed {
 		idle -= c
 	}
-	idle = min(idle, g.PhysicalFree)
+	idle = min(idle, g.ClusterFree)
 	integer := map[string]int{}
 	for _, v := range ev.Roles {
 		integer[v.Key] = v.Integer
@@ -721,19 +722,81 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// 8-GPU pod is lost to the first other pod that lands on it, and the
 	// receiver's own pod is not even queued until its target is raised.
 	promised := decision.LatestSharePromised(e.utilizationShare.clock())
+	g, greedy := optimizer.(*allocation.GreedyByScoreOptimizer)
+	e.cycleFitted = greedy && g.Nodes != nil
+	if greedy {
+		// The same promises held on the nodes: a node freed for a receiver
+		// whose pod is still Pending looks free in the snapshot.
+		allocation.ReservePromised(g.Nodes, promised)
+	}
 	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
-	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
+	e.reportQuotaAloneAllocation(ctx, optimizer, requests, allocation.WithholdPromised(constraints, promised), decisions)
+	// The share plans on what the pass left for the models it does not plan,
+	// and plans its own models afresh: it overrides their targets, so what the
+	// pass ordered for them is not spent. What the pass left includes its
+	// borrowed placements, charged to their models on the same view.
+	if greedy {
+		e.utilizationShare.left = g.LastPass()
+	}
+	// The share budgets guaranteed plus the borrowed GPUs a group holds now,
+	// and starts no new borrowing (B4): it reads the constraints without the
+	// borrowing figures.
+	overrides := e.evaluateUtilizationShare(ctx, requests, allocation.GuaranteedOnly(constraints), scaleTargets)
+	e.utilizationShare.left = nil
+	if len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share: set planned targets", "variants", applied)
 	}
 	// Republish the warm pool's headroom with this pass's promises withheld,
 	// so a transfer that started filling this cycle is not open to the pool
-	// until the next one (section 6.3).
+	// until the next one (section 6.3). From what the optimizer's pass left,
+	// which already withheld the promises made before it, less what it
+	// ordered for the models the share plans: their targets are the share's,
+	// and its fills are among the promises.
+	e.cyclePlanned = plannedByOverrides(requests, overrides)
 	if len(constraints) > 0 {
 		now := e.utilizationShare.clock()
-		allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
+		latest := decision.LatestSharePromised(now)
+		if !greedy || !g.RepublishHeadroom(e.cyclePlanned, newlyPromised(promised, latest), now) {
+			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, latest), now)
+		}
 	}
 	return decisions
+}
+
+// plannedByOverrides is the models (namespace/modelID) the utilization share
+// set a target for this cycle: those a variant of which it overrides.
+func plannedByOverrides(requests []allocation.ModelScalingRequest, overrides map[string]utilizationShareOverride) map[string]bool {
+	if len(overrides) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, req := range requests {
+		for _, vs := range req.VariantStates {
+			if _, ok := overrides[utils.GetNamespacedKey(req.Namespace, vs.VariantName)]; ok {
+				out[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
+// newlyPromised is what latest promises beyond before, per scope and
+// accelerator: the promises made since before was read.
+func newlyPromised(before, latest map[string]map[string]int) map[string]map[string]int {
+	out := map[string]map[string]int{}
+	for scope, perType := range latest {
+		for acc, g := range perType {
+			if d := g - before[scope][acc]; d > 0 {
+				if out[scope] == nil {
+					out[scope] = map[string]int{}
+				}
+				out[scope][acc] = d
+			}
+		}
+	}
+	return out
 }
 
 // shareDebtNow is the reserve debt the ledger's committed allocation carries
@@ -1013,4 +1076,17 @@ func shareStartedSets(started []allocation.ShareTransfer) [][]allocation.ShareTr
 		})
 	}
 	return out
+}
+
+// holdFillTimeout is how long a receiver whose replica could not be placed is
+// held (HoldFill). It shares one setting with the borrowing placement timeout
+// (the Kueue entry's placementTimeout) so the two cannot drift apart; unset,
+// it is the derived release timeout it always was.
+func (e *Engine) holdFillTimeout(tm allocation.ShareTimings) time.Duration {
+	if e.Config != nil {
+		if t := e.Config.KueueBorrowTimings(); t.PlacementTimeoutSet {
+			return t.PlacementTimeout
+		}
+	}
+	return tm.ReleaseTimeout
 }

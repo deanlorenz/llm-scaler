@@ -32,8 +32,10 @@ type stateSpy struct {
 	state    saturation.LearnedState
 	restored []saturation.LearnedState
 	forgot   int
-	// installed and rejected are what TakeRestoreOutcomes reports next.
-	installed, rejected int
+	// outcomes is what TakeRestoreOutcomes reports next.
+	outcomes map[string]int
+	// held is every HoldLowerBounds call, in order.
+	held []bool
 }
 
 func (s *stateSpy) ExportLearnedState() saturation.LearnedState { return s.state }
@@ -41,11 +43,12 @@ func (s *stateSpy) RestoreLearnedState(st saturation.LearnedState) saturation.Re
 	s.restored = append(s.restored, st)
 	return saturation.RestoreReport{}
 }
-func (s *stateSpy) ForgetLearnedState() { s.forgot++ }
-func (s *stateSpy) TakeRestoreOutcomes() (installed, rejected int) {
-	installed, rejected = s.installed, s.rejected
-	s.installed, s.rejected = 0, 0
-	return installed, rejected
+func (s *stateSpy) ForgetLearnedState()       { s.forgot++ }
+func (s *stateSpy) HoldLowerBounds(held bool) { s.held = append(s.held, held) }
+func (s *stateSpy) TakeRestoreOutcomes() map[string]int {
+	out := s.outcomes
+	s.outcomes = nil
+	return out
 }
 
 func sampleState(k2 float64) saturation.LearnedState {
@@ -391,12 +394,12 @@ func TestRestoreOutcomesAndReadErrorsAreCounted(t *testing.T) {
 	e.metricsEmitter = metrics.NewMetricsEmitter()
 	e.restoreLearnedState(ctx, now)
 	e.writeLearnedState(ctx, now)
-	spy.installed, spy.rejected = 2, 1
+	spy.outcomes = map[string]int{"whole": 2, "prior": 1}
 	e.writeLearnedState(ctx, now.Add(time.Second)) // inside the write interval
 	assert.Equal(t, 2.0, counterValue(t, registry, constants.WVALearnedStateRestoresTotal,
-		constants.LabelOutcome, metrics.LearnedStateRestoreInstalled))
+		constants.LabelOutcome, "whole"))
 	assert.Equal(t, 1.0, counterValue(t, registry, constants.WVALearnedStateRestoresTotal,
-		constants.LabelOutcome, metrics.LearnedStateRestoreRejected))
+		constants.LabelOutcome, "prior"))
 
 	forbidden := interceptor.NewClient(base, interceptor.Funcs{
 		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {

@@ -64,6 +64,16 @@ type Record struct {
 	PriorLiveAt time.Time
 	// EngineParams are the parsed deployment params for k2 derivation.
 	EngineParams *EngineParams
+	// RollingOut is whether the scale target reported a rollout in progress
+	// (scaletarget.RollingOut) when LoadFromScaleTarget last read it.
+	// While it does, the pods reporting may be a mix of the old engine and
+	// the new, and a reading may be an old pod's under arguments the record
+	// no longer names. It is read afresh every cycle and remembers nothing:
+	// a controller restart, a leader failover, a forget or an undo in
+	// mid-rollout reads it exactly as any other cycle does. An image-only
+	// rollout is one too -- which pods are old cannot be told from here
+	// either, and its readings are only held back until it ends.
+	RollingOut bool
 	// LearnedFrom is LearnedFromLive for a record written from live metrics,
 	// "deployment" for one derived from a scale target's args (LWS included).
 	// Update does not set it; the writer does.
@@ -110,6 +120,12 @@ func (s *Store) Update(namespace, modelID, variantName string, record Record) {
 	defer s.mu.Unlock()
 	record.LearnedAt = time.Now()
 	s.records[storeKey(namespace, modelID, variantName)] = &record
+}
+
+// InRollout reports a rollout in progress: until it completes, a reading may
+// be an old pod's (RollingOut).
+func (r *Record) InRollout() bool {
+	return r != nil && r.RollingOut
 }
 
 // Get returns the stored capacity record for a specific variant, or nil
@@ -224,15 +240,19 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	var priorLiveAt time.Time
 	existing, ok := s.records[key]
 	sameHW := ok && sameHardware(existing, accelerator, gpuCount)
+	// Every rollout the scale target reports, read afresh each cycle (see
+	// Record.RollingOut).
+	rolling := scaletarget.RollingOut(scaleTarget)
 	if ok && existing.LearnedFrom == LearnedFromLive {
 		if existing.EngineParams == nil {
 			return
 		}
 		if sameHW && sameArguments(*existing.EngineParams, params) {
-			if existing.EngineParams.Image != params.Image {
+			if existing.EngineParams.Image != params.Image || existing.RollingOut != rolling {
 				// A copy: Get hands out the store's own record.
 				swapped := *existing
 				swapped.EngineParams = &params
+				swapped.RollingOut = rolling
 				s.records[key] = &swapped
 			}
 			return
@@ -264,6 +284,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		EngineParams:      &params,
 		PriorLiveCapacity: priorLive,
 		PriorLiveAt:       priorLiveAt,
+		RollingOut:        rolling,
 		LearnedFrom:       "deployment", // same for deployment and LWS
 		LearnedAt:         time.Now(),
 	}
@@ -291,6 +312,18 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	}
 
 	s.records[key] = record
+}
+
+// Delete removes one variant's record, and reports whether there was one. It
+// is for an operator's request to forget what a variant has learned: the next
+// LoadFromScaleTarget files a fresh record from the scale target.
+func (s *Store) Delete(namespace, modelID, variantName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey(namespace, modelID, variantName)
+	_, ok := s.records[key]
+	delete(s.records, key)
+	return ok
 }
 
 // EvictStale removes capacity records that have not been updated within the

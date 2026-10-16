@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // DefaultLimiter exposes an Inventory's resource availability as hard
@@ -62,9 +64,10 @@ func (l *DefaultLimiter) UsageBasis() UsageBasis {
 // a quota but zero current usage must still appear here (with an empty inner
 // map) for its caps to be materialized and enforced.
 //
-// Remaining gap (tracked by the limiter chain, sub-issue #1003): composing a
-// physical-inventory limiter with a quota limiter as min(physical, quota) within
-// a single ComputeConstraints. See docs/reference/quota-limiter.md.
+// A physical-inventory limiter and quota limiters compose as separate
+// DefaultLimiters grouped in a CompositeLimiter, not inside one
+// ComputeConstraints: each is fed its own usage basis, and the optimizer
+// intersects their constraints. See docs/reference/quota-limiter.md.
 func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map[string]int, usageByNamespace map[string]map[string]int) (*ResourceConstraints, error) {
 	// Step 1: Refresh inventory to get latest limits from the cluster
 	//
@@ -78,6 +81,11 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 	//
 	// Remaining gap: a node that is cordoned or NotReady still contributes its
 	// GPUs to Limit.
+	if m, ok := l.inventory.(ManagedNamespacesSetter); ok && usageByNamespace != nil {
+		// The active namespaces are those with managed variants: per-namespace
+		// reads (the borrowing eligibility check) need cover no other.
+		m.SetManagedNamespaces(slices.Collect(maps.Keys(usageByNamespace)))
+	}
 	if err := l.inventory.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh inventory: %w", err)
 	}
@@ -91,11 +99,15 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 
 	// Step 3: Expose per-type availability
 	rc := &ResourceConstraints{
-		ProviderName: l.name,
-		Pools:        l.inventory.GetResourcePools(),
-		TotalLimit:   l.inventory.TotalLimit(),
-		TotalUsed:    l.inventory.TotalUsed(),
-		TotalAvail:   l.inventory.TotalAvailable(),
+		ProviderName:    l.name,
+		Pools:           l.inventory.GetResourcePools(),
+		TotalLimit:      l.inventory.TotalLimit(),
+		TotalUsed:       l.inventory.TotalUsed(),
+		TotalAvail:      l.inventory.TotalAvailable(),
+		NamespaceScoped: namespaceScopedOf(l.inventory),
+	}
+	if r, ok := l.inventory.(KueueReadReporter); ok {
+		rc.KueueNeverRead = r.KueueNeverRead()
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
@@ -113,15 +125,66 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		activeNamespaces := slices.Collect(maps.Keys(usageByNamespace))
 		nsPools := nai.NamespaceResourcePools(activeNamespaces)
 		// A namespace-scoped inventory answers with a map, empty when none of
-		// the active namespaces is capped; a cluster-scoped one with nil.
-		rc.NamespaceScoped = nsPools != nil
+		// the active namespaces is capped; a cluster-scoped one with nil. An
+		// inventory that declares its scope (NamespaceScopedInventory) is
+		// read as it declares, whichever answer it gives here.
+		rc.NamespaceScoped = rc.NamespaceScoped || nsPools != nil
 		if len(nsPools) > 0 {
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)
+			// The aggregate is reported, never merged as a cluster bound: each
+			// namespace it holds is bounded by its own allowlist, and one it
+			// excludes bypasses it.
+			rc.NamespaceScoped = true
+			if bi, ok := l.inventory.(BorrowingInventory); ok {
+				addBorrowing(rc, bi, activeNamespaces)
+			}
 		}
 	}
 	return rc, nil
+}
+
+// addBorrowing carries the cohort borrowing an inventory counts onto rc. The
+// namespace pools stay at the guaranteed figure; the reported aggregate becomes
+// the reach (guaranteed plus cap). Like every namespace-scope aggregate it is
+// never merged as a cluster bound: the borrowing namespaces are bounded by their
+// own pools, their caps and the shared pools.
+func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespaces []string) {
+	rc.BorrowWithheld = bi.BorrowWithheld(activeNamespaces)
+	if p, ok := bi.(interface{ BorrowNamespacesSet() bool }); ok {
+		rc.BorrowNamespacesSet = p.BorrowNamespacesSet()
+	}
+	if p, ok := bi.(interface {
+		NamespaceNominal([]string) map[string]map[string]NominalFigures
+	}); ok {
+		rc.NamespaceNominal = p.NamespaceNominal(activeNamespaces)
+	}
+	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
+	if len(byNS) == 0 {
+		return
+	}
+	rc.NamespaceBorrow, rc.SharedPools, rc.NamespaceCohorts = byNS, pools, cohorts
+	reach := reachPools(rc.NamespacePools, byNS)
+	rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(aggregateNamespacePools(reach))
+	rc.Pools = reachAggregate(reach)
+}
+
+// reachAggregate is aggregateNamespacePools for a borrowing provider's reach,
+// except that a type some namespace may reach without a bound of this
+// provider's (an unset borrowingLimit, bounded only by the shared pool) is the
+// unlimited sentinel rather than left to the other namespaces' sum: that sum
+// would cap the unbounded namespace at the GPUs the bounded ones may reach.
+func reachAggregate(nsPools map[string]map[string]ResourcePool) map[string]ResourcePool {
+	agg := aggregateNamespacePools(nsPools)
+	for _, perType := range nsPools {
+		for accType, pool := range perType {
+			if pool.Limit < 0 {
+				agg[accType] = ResourcePool{Limit: config.QuotaUnlimited}
+			}
+		}
+	}
+	return agg
 }
 
 // aggregateNamespacePools sums per-(namespace, type) pools into a per-type

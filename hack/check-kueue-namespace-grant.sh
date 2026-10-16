@@ -21,22 +21,26 @@ command -v yq >/dev/null 2>&1 || { printf 'FATAL: yq is required.\n' >&2; exit 1
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh prereqs.sh; do
+for lib in common.sh limiter_policy.sh prereqs.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
+unset WVA_QUOTA_KUEUE_BORROW KUEUE_NAMESPACE
 # shellcheck source=/dev/null
 source "$WORK/common.sh"
 # shellcheck source=/dev/null
+source "$WORK/limiter_policy.sh"
+# shellcheck source=/dev/null
 source "$WORK/prereqs.sh"
-for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permissions; do
+for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_source_configured check_permissions \
+          wva_kueue_borrow_wanted wva_check_kueue_borrow_read; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=25
+EXPECT_CASES=57
 RAN=0
 FAILED=0
 
@@ -113,7 +117,7 @@ stub_kubectl() {
     esac
 }
 
-# run_check [VAR=value...] runs wva_check_kueue_namespace_read and echoes
+# run_check [VAR=value...] runs wva_check_kueue_namespace_read (or CHECK_FN) and echoes
 # REFUSED, WARNED or OK, then the can-i question asked ("-" for none).
 #   STUB_CANI      yes | no | unknown (impersonation denied)
 #   STUB_POLICY    the cluster policy default entry in wva-policy ("" = none)
@@ -134,7 +138,7 @@ run_check() {
         WVA_LIMITER=quota WVA_QUOTA_KUEUE=true STUB_CANI=no STUB_POLICY=''
         local kv
         for kv in "$@"; do eval "$kv"; done
-        wva_check_kueue_namespace_read
+        "${CHECK_FN:-wva_check_kueue_namespace_read}"
     )
     local verdict asked
     verdict="$(head -1 "$WORK/out")"
@@ -267,6 +271,143 @@ check 'unrendered fallback, INSTALL_PHASE=wva: only the tenant kinds asked, not 
 check 'unrendered fallback, INSTALL_PHASE=all: the admin kinds still asked, a denial refuses' \
     'configmaps deployments rolebindings roles secrets serviceaccounts services REFUSED' \
     "$(run_perm all RENDER_FIXTURE= "STUB_DENY_CREATE='$ADMIN_KINDS_DENIED'")"
+# WVA_LIMITER is a list: one naming quota beside gpu-inventory still reads Kueue.
+check 'a list naming quota with Kueue is a configured source' \
+    'REFUSED get namespaces/wva-ctl' "$(run_check WVA_LIMITER=gpu-inventory,quota)"
+
+# The physical limiter needs node read, which only the admin setup phase grants.
+# Composed with a quota, a controller that cannot list nodes is refused with
+# that remedy, rather than installed into NotReady.
+# run_node_check [VAR=value...] echoes REFUSED, WARNED or OK for
+# wva_check_limiter_node_read over the set wva_limiter_set resolves.
+run_node_check() {
+    : > "$WORK/out"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { echo "WARNED" >> "$WORK/out"; }
+        log_error() { echo "REFUSED" >> "$WORK/out"; printf '%s\n' "$1" > "$WORK/refusal"; exit 1; }
+        kubectl() {
+            case "${STUB_CANI:-no}" in
+                yes) echo yes; return 0 ;;
+                no) echo no; return 1 ;;
+                *) echo 'Error from server (Forbidden): cannot impersonate'; return 1 ;;
+            esac
+        }
+        WVA_SCOPE=cluster WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CANI=no
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_check_limiter_node_read "$(wva_limiter_set)" "system:serviceaccount:wva-ctl:wva-controller-manager"
+    )
+    printf '%s' "$(head -1 "$WORK/out")"
+    [ -s "$WORK/out" ] || printf 'OK'
+}
+check 'gpu-inventory,quota without node read -> refused' \
+    'REFUSED' "$(run_node_check WVA_LIMITER=gpu-inventory,quota)"
+check 'the node-read refusal names make setup-prereqs' '1' \
+    "$(run_node_check WVA_LIMITER=gpu-inventory,quota >/dev/null; grep -c 'make setup-prereqs' "$WORK/refusal")"
+check 'a Kueue quota alone adds no physical limiter: only a warning' \
+    'WARNED' "$(run_node_check WVA_LIMITER=quota WVA_QUOTA_KUEUE=true)"
+check 'gpu-inventory,quota with node read -> proceeds' \
+    'OK' "$(run_node_check WVA_LIMITER=gpu-inventory,quota STUB_CANI=yes)"
+check 'a named composed set without node read says the physical limiter would be skipped' '1' \
+    "$(run_node_check WVA_LIMITER=gpu-inventory,quota >/dev/null; grep -c 'SKIPS the physical limiter' "$WORK/refusal")"
+
+# WVA_LIMITER unset keeps the LIVE policy's limiters, so the node read is
+# checked against them (check_permissions passes the live set). An upgrade
+# over a live gpu-inventory,quota policy without node read used to read
+# "no limiter is configured"; it is warned, with the remedy, not refused.
+run_live_node_check() {
+    : > "$WORK/out"; : > "$WORK/warning"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { echo "WARNED" >> "$WORK/out"; printf '%s\n' "$1" >> "$WORK/warning"; }
+        log_error() { echo "REFUSED" >> "$WORK/out"; exit 1; }
+        kubectl() { echo no; return 1; }
+        WVA_NS=wva-ctl WVA_SCOPE=cluster
+        wva_check_limiter_node_read "$1" "system:serviceaccount:wva-ctl:wva-controller-manager" live
+    )
+    printf '%s' "$(head -1 "$WORK/out")"
+    [ -s "$WORK/out" ] || printf 'OK'
+}
+check 'a live gpu-inventory,quota policy without node read -> warned, not refused' \
+    'WARNED' "$(run_live_node_check 'gpu-inventory quota')"
+check 'the live warning names make setup-prereqs and the physical skip' '2' \
+    "$(run_live_node_check 'gpu-inventory quota' >/dev/null; grep -c 'setup-prereqs\|SKIPS the physical limiter' "$WORK/warning")"
+# The Cohort list (borrowing). Missing it only stops borrowing from being
+# counted, so it warns and never refuses.
+check 'cohort list denied -> warned, not refused' \
+    'WARNED list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read)"
+check 'cohort list granted -> proceeds' \
+    'OK list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read STUB_CANI=yes)"
+check 'cohort list unverifiable -> warned' \
+    'WARNED list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read STUB_CANI=unknown)"
+check 'cohort list: INSTALL_PHASE=all asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read INSTALL_PHASE=all)"
+check 'cohort list: no Kueue source asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read WVA_LIMITER=none WVA_QUOTA_KUEUE=false)"
+check 'cohort list: an unreadable policy asks nothing (the namespace check warns)' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy)"
+
+# R2-1: the admin phase grants the cluster-wide Workload read only when a policy
+# of this install counts cohort borrowing (wva_kueue_borrow_wanted), and the
+# Kueue controller read goes to the namespace a kept controllerNamespace names
+# (R2-6). run_borrow echoes the decision and that namespace (- for none).
+POLICY_NO_BORROW='limiters:
+- name: q
+  type: quota
+  kueue:
+    enabled: true
+    countBorrowable: false'
+POLICY_KUEUE_OPS='limiters:
+- name: q
+  type: quota
+  kueue:
+    enabled: true
+    controllerNamespace: kueue-ops'
+run_borrow() {
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { :; }
+        log_error() { echo REFUSED; exit 1; }
+        kubectl() { stub_kubectl "$@"; }
+        WVA_NS=wva-ctl WVA_WATCH_NS='' WVA_SCOPE=namespace
+        WVA_LIMITER='' WVA_QUOTA_KUEUE=false WVA_QUOTA_KUEUE_BORROW='' STUB_POLICY=''
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_kueue_borrow_wanted
+        printf '%s %s' "$WVA_KUEUE_BORROW_WANTED" "${WVA_KUEUE_KEPT_NS:--}"
+    )
+}
+check 'borrow read: no policy and no limiter -> not granted' 'no -' "$(run_borrow)"
+check 'borrow read: WVA_LIMITER=quota with Kueue -> granted' 'yes -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true)"
+check 'borrow read: WVA_QUOTA_KUEUE_BORROW=false -> revoked' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false)"
+check 'borrow read: WVA_LIMITER=none over a live borrowing policy -> revoked' 'no -' \
+    "$(run_borrow WVA_LIMITER=none "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: a kept countBorrowable: false stays false' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true "STUB_OWN='$POLICY_NO_BORROW'")"
+check 'borrow read: WVA_QUOTA_KUEUE_BORROW=true overrides the kept false' 'yes -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=true "STUB_OWN='$POLICY_NO_BORROW'")"
+check 'borrow read: WVA_LIMITER unset keeps a live borrowing policy' 'yes -' \
+    "$(run_borrow "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: a self-managed controller reading a borrowing cluster policy' 'yes -' \
+    "$(run_borrow "STUB_POLICY='$POLICY_WITH_KUEUE'")"
+check 'borrow read: an admin-owned controller never reads wva-policy' 'no -' \
+    "$(run_borrow WVA_WATCH_NS=tenant-a "STUB_POLICY='$POLICY_WITH_KUEUE'")"
+check 'borrow read: an unreadable policy is unknown, never no' 'unknown -' \
+    "$(run_borrow STUB_CM_FORBIDDEN=wva-ctl)"
+check 'borrow read: the kept controllerNamespace is read' 'yes kueue-ops' \
+    "$(run_borrow "STUB_OWN='$POLICY_KUEUE_OPS'")"
+check 'borrow read, tenant phase: not granted -> warned' \
+    'WARNED list workloads.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_borrow_read)"
+check 'borrow read, tenant phase: granted -> proceeds' \
+    'OK list workloads.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_borrow_read STUB_CANI=yes)"
+check 'borrow read, tenant phase: WVA_QUOTA_KUEUE_BORROW=false asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_borrow_read WVA_QUOTA_KUEUE_BORROW=false)"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.
@@ -276,6 +417,19 @@ tenant_line="$(printf '%s\n' "$body" | grep -n 'if wva_scope_is_tenant; then' | 
 check 'check_permissions calls it' 'yes' "$([ -n "$call_line" ] && echo yes || echo no)"
 check 'before the tenant early-return' 'yes' \
     "$([ -n "$call_line" ] && [ -n "$tenant_line" ] && [ "$call_line" -lt "$tenant_line" ] && echo yes || echo no)"
+cohort_line="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*wva_check_kueue_cohort_read$' | head -1 | cut -d: -f1)"
+check 'check_permissions calls the cohort check before the tenant early-return' 'yes' \
+    "$([ -n "$cohort_line" ] && [ -n "$tenant_line" ] && [ "$cohort_line" -lt "$tenant_line" ] && echo yes || echo no)"
+borrow_line="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*wva_check_kueue_borrow_read$' | head -1 | cut -d: -f1)"
+check 'check_permissions calls the borrow-read check before the tenant early-return' 'yes' \
+    "$([ -n "$borrow_line" ] && [ -n "$tenant_line" ] && [ "$borrow_line" -lt "$tenant_line" ] && echo yes || echo no)"
+# And the admin phase acts on it: wva_run_prereqs_phase syncs the grant from
+# the decision, and passes the kept controllerNamespace to the controller read.
+prereqs_body="$(tr -d '\r' < "$ROOT/deploy/lib/install_core.sh" | sed -n '/^wva_run_prereqs_phase() {/,/^}/p')"
+check 'the prereqs phase syncs the borrowing read from wva_kueue_borrow_wanted' '2' \
+    "$(printf '%s\n' "$prereqs_body" | grep -c '^[[:space:]]*wva_kueue_borrow_wanted$\|pl_sync_kueue_borrow_read "$WVA_NS"')"
+check 'the prereqs phase grants the Kueue controller read in the kept namespace' '1' \
+    "$(printf '%s\n' "$prereqs_body" | grep -c 'pl_grant_kueue_controller_read "$WVA_NS" wva-controller-manager "$WVA_KUEUE_KEPT_NS"')"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d Kueue namespace-grant assertion(s) failed.\n' "$FAILED" >&2

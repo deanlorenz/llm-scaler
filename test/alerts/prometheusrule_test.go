@@ -3,6 +3,7 @@ package alerts
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -122,6 +123,11 @@ func TestExtractMetricNamesIgnoresLabelMatcherContents(t *testing.T) {
 			want: []string{"wva_slo_observed_seconds", "wva_slo_target_seconds"},
 		},
 		{
+			name: "a subquery's resolution is not a metric name",
+			expr: `count_over_time((wva_model_scaling_blocked unless wva_model_scaling_blocked offset 1m)[1h:1m]) > 3`,
+			want: []string{"wva_model_scaling_blocked", "wva_model_scaling_blocked"},
+		},
+		{
 			name: "multiple metrics are all found",
 			expr: `wva_current_replicas == 0 and on() wva_desired_replicas > 0`,
 			want: []string{"wva_current_replicas", "wva_desired_replicas"},
@@ -237,4 +243,113 @@ func TestHeadingAnchorsMatchGitHub(t *testing.T) {
 		assert.True(t, got[want], "missing anchor %q in %v", want, got)
 	}
 	assert.False(t, got["not-a-heading"], "a line inside a code fence is not a heading")
+}
+
+// alertExpr returns the expression of the named alert, failing if it is absent.
+func alertExpr(t *testing.T, name string) string {
+	t.Helper()
+	for _, group := range loadRule(t).Spec.Groups {
+		for _, r := range group.Rules {
+			if r.Alert == name {
+				return r.Expr
+			}
+		}
+	}
+	require.Failf(t, "alert not found", "no alert %q in the PrometheusRule", name)
+	return ""
+}
+
+// O1: the lender alert compares against the cooldown in force, published as
+// wva_kueue_borrow_cooldown_seconds, not a hardcoded default: a policy that
+// lengthens borrowCooldown must not page early.
+func TestKueueLenderWaitingComparesAgainstTheCooldownGauge(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueLenderWaitingPastCooldown")
+	assert.ElementsMatch(t, []string{"wva_kueue_lender_waiting_seconds", "wva_kueue_borrow_cooldown_seconds"}, ExtractMetricNames(expr))
+	assert.NotRegexp(t, `>\s*[0-9]+\s*$`, expr, "no hardcoded threshold")
+	assert.Contains(t, expr, "> on () group_left () max (wva_kueue_borrow_cooldown_seconds)",
+		"one cooldown, matched against every lender series")
+}
+
+// O1: drift above 0 for 15 minutes is a warning; an unknown controller version
+// warns too. Each points at its own runbook anchor. The version alert also
+// reads the withheld gauge, to stay quiet while WVAKueueControllerDown fires
+// (TestKueueVersionUnknownIsQuietWhileControllerDown).
+func TestKueueDriftAndVersionAlerts(t *testing.T) {
+	want := map[string]struct {
+		metric, forDur, anchor string
+	}{
+		"WVAKueueBorrowDrift":    {"wva_kueue_borrow_drift_gpus", "15m", "#wvakueueborrowdrift"},
+		"WVAKueueVersionUnknown": {"wva_kueue_controller_version_known", "10m", "#wvakueueversionunknown"},
+	}
+	// The metric each alert is about comes first; the version alert names
+	// the withheld gauge after it, in its unless.
+	found := 0
+	for _, group := range loadRule(t).Spec.Groups {
+		for _, r := range group.Rules {
+			w, ok := want[r.Alert]
+			if !ok {
+				continue
+			}
+			found++
+			assert.Equal(t, w.metric, ExtractMetricNames(r.Expr)[0], r.Alert)
+			assert.Equal(t, w.forDur, r.For, r.Alert)
+			assert.Equal(t, "warning", r.Labels["severity"], r.Alert)
+			assert.True(t, strings.HasSuffix(r.Annotations["runbook_url"], w.anchor), r.Alert)
+		}
+	}
+	assert.Equal(t, len(want), found, "every new alert is defined")
+	assert.Regexp(t, `>\s*0\s*$`, alertExpr(t, "WVAKueueBorrowDrift"))
+	assert.Contains(t, alertExpr(t, "WVAKueueVersionUnknown"), "(wva_kueue_controller_version_known) == 0)")
+}
+
+// A Kueue-backed quota entry whose -1 caps were never bounded by a read must
+// page: nothing bounds those types until then.
+func TestKueueNeverReadAlert(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueNeverRead")
+	assert.Equal(t, []string{"wva_kueue_never_read"}, ExtractMetricNames(expr))
+	assert.Contains(t, expr, "by (limiter_name)")
+	for _, group := range loadRule(t).Spec.Groups {
+		for _, r := range group.Rules {
+			if r.Alert == "WVAKueueNeverRead" {
+				assert.Equal(t, "10m", r.For)
+				assert.Equal(t, "warning", r.Labels["severity"])
+			}
+		}
+	}
+}
+
+// The thrashing alert counts releases per model over an hour. Its first form
+// counted starts of a wva_model_scaling_blocked reason at one-minute
+// resolution, which misses a reason that sets and clears between two samples.
+func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueBorrowThrashing")
+	assert.Contains(t, expr, "increase(wva_borrow_releases_total[1h])")
+	assert.Contains(t, expr, "by (exported_namespace, model_name)",
+		"group by the scraped model namespace, as the other per-model alerts do")
+	assert.Regexp(t, `>\s*3\.5\s*$`, expr, "3.5: increase() reads three losses as about 3.1")
+}
+
+// Kueue's preemptions are not releases: they are counted on
+// wva_kueue_preempted_pods_total. With an Any lender -- the recommended setup --
+// they are how borrowed capacity is lost, so an alert reading only the release
+// counter could never fire there. The model that is only preempted has no
+// release series at all, so each side must fall back to the other's "* 0"
+// instead of making the sum empty.
+func TestKueueBorrowThrashingCountsPreemptionsAlone(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueBorrowThrashing")
+	compact := regexp.MustCompile(`\s+`).ReplaceAllString(expr, " ")
+	const (
+		releases  = "sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))"
+		preempted = "sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))"
+	)
+	assert.Contains(t, compact, "( "+preempted+" or "+releases+" * 0 )",
+		"preemptions alone must reach the sum: with no release series, the release side falls back to zero")
+	assert.Contains(t, compact, "( "+releases+" or "+preempted+" * 0 )",
+		"releases alone must reach the sum: with no preemption series, the preemption side falls back to zero")
+	assert.Contains(t, compact, ") + on (exported_namespace, model_name) (",
+		"the two sides join on the labels both counters share")
+	assert.ElementsMatch(t,
+		[]string{"wva_borrow_releases_total", "wva_kueue_preempted_pods_total",
+			"wva_borrow_releases_total", "wva_kueue_preempted_pods_total"},
+		ExtractMetricNames(expr))
 }

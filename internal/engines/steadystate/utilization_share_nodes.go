@@ -51,7 +51,12 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	if snap == nil || e.client == nil {
 		return nil, nil, domains
 	}
-	nodes := shareFreeNodes(snap, g.AcceleratorType, reserved)
+	// Net of what today's optimizer placed this cycle for the models the
+	// share does not plan, and of the in-flight ledger's holes: those nodes
+	// are about to be taken. The share's own promises are held below
+	// (reserved), as they always were.
+	st := &e.utilizationShare
+	nodes := shareFreeNodesAfter(snap, g.AcceleratorType, reserved, st.left.NodeDebits(st.planned))
 	if len(nodes) == 0 {
 		return nil, nil, domains
 	}
@@ -196,10 +201,18 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 // they are taken from the nodes with the most free first, which is where they
 // would count most.
 func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserved int) map[string]allocation.ShareNode {
+	return shareFreeNodesAfter(snap, accelerator, reserved, nil)
+}
+
+// shareFreeNodesAfter is shareFreeNodes with taken GPUs per node (what this
+// cycle's optimizer pass and the in-flight ledger hold on each,
+// allocation.PassLeft.NodeDebits) no longer free.
+func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, reserved int,
+	taken map[string]int) map[string]allocation.ShareNode {
 	nodes := map[string]allocation.ShareNode{}
 	for name, n := range snap {
 		if n.Accelerator == accelerator && !n.Unschedulable {
-			nodes[name] = allocation.ShareNode{Free: n.Free(), Labels: n.Labels}
+			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels}
 		}
 	}
 	// The reserved GPUs are taken in one piece from the freest node, then the

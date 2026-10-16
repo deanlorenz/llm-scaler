@@ -253,11 +253,13 @@ cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there needs a
 restart (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`).
 The same holds for an out-of-reach controller (`WVA_WATCH_NS` naming another
 namespace) and its own ConfigMap in its install namespace.
-`make enable-physical-limiter` and `make disable-physical-limiter` do those
+`make enable-physical-limiter` and `make disable-limiter` do those
 restarts. A cluster-scoped controller watches the policy namespace and picks the
 edit up live.
 
-A `limiters:` list selects a **single mode**, so declare **one** of these forms:
+Every entry in a `limiters:` list is built, and scaling must fit all of them. The
+forms below combine: (a) and (b) in one list bound by the GPUs that exist **and**
+the declared caps.
 
 ```yaml
 # (a) physical-capacity limiter. NOT a default -- with no limiters: list,
@@ -279,9 +281,10 @@ default: |
       quotas: { H100: 32 }
 ```
 
-- **Single mode.** With both a `quota` and a `gpu-inventory` entry, the quota
-  wins and `gpu-inventory` is ignored; only one limiter is built. (Composing
-  physical and quota caps is tracked in #1003.)
+- **Every entry is built.** A list holding a `gpu-inventory` and `quota`
+  entries bounds by both: a decision must fit the physical GPUs and every quota.
+  One physical limiter is built: a second `gpu-inventory` entry (under either
+  spelling) is ignored, with a warning, rather than rejecting the policy.
 - `type: quota` uses the **same schema** as `QuotaLimiterConfig`: `scope`,
   `quotas`, `namespaceQuotas` and `exclude` all apply, and several quota entries
   compose. A quota entry may set `kueue: { enabled: true }` to be bounded by
@@ -331,7 +334,9 @@ reports `invalid`) and the controller logs
 **An excluded namespace needs a cluster quota.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
-unlimited and counts as none. Without one, their models stay on today's
+unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
+quota is a finite bound too: with `physicalGroups: true` they are shared over
+it. Without a finite bound, their models stay on today's
 optimizer, and the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.
@@ -1140,15 +1145,20 @@ this variant's answer, never where it only limits it. There are two such places:
   [Prometheus](prometheus.md#wva_learned_state_borrowed)). A variant
   that has not yet measured its own k2 for the traffic it is serving uses a
   compatible sibling's measured k2 in the same namespace, but only where it is
-  lower than the variant's own capacity. After 30 minutes it relaxes back to the
+  lower than the variant's own capacity, and only from a sibling whose measured
+  KV cache is within 3% of the variant's. After 30 minutes it relaxes back to the
   variant's own figure over 6 hours, because a k2 that is too low never corrects
   itself: lightly loaded replicas never saturate, and saturation is the only time
-  k2 is measured.
+  k2 is measured. The hours count only while the variant is serving, so a parked
+  variant keeps its borrow for when it wakes. Once relaxed, it does not start
+  again unless a sibling's figure is more than 20% below the one it last ran
+  on, or the variant's engine arguments change (a new image alone does not).
 
-Neither can be turned off. What they cost is in the other direction: a sibling
-that only *looks* compatible — two configurations whose unread flags both fell
-back to the defaults, for example — can hold extra replicas, for up to the
-6.5 hours of a borrow.
+What they cost is in the other direction: a sibling that only *looks*
+compatible — two configurations whose unread flags both fell back to the
+defaults, for example — can hold extra replicas, for up to the 6.5 serving hours
+of a borrow. The k2 borrow can be turned off per model with
+[`disableK2Borrow`](#disablek2borrow); the ceiling cannot.
 
 #### Why it is off
 
@@ -1202,6 +1212,31 @@ Joining two variants on the fingerprint takes all four of `model_name`,
 `accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
 digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
+### `disableK2Borrow`
+
+Stops the k2 borrow (`P2-borrow`) for a model. Its variants price from their
+own figures only: their own measured k2, or the deployment-derived figure and
+k1 until they measure one. A variant's own measurement from engine arguments
+it ran before (`P2-prior`) is its own figure, not a borrow, and is kept. **The borrow is on by default**, because it can only
+order more replicas, never fewer. Turn it off when it costs you: a sibling that
+looks compatible but is not, holding a fleet larger than its load needs.
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  disableK2Borrow: true
+```
+
+- It takes effect on the next cycle. The `Effective scaling policy` log line
+  shows what the model resolved `disableK2Borrow` to.
+- A borrow already running is paused, not reset. If you turn the borrow back
+  on, it resumes where it stood.
+- One direction only, like `enableLearnedStateReuse`: a per-model entry can turn
+  the borrow **off** where the default leaves it on, but not back on where the
+  `default:` entry turned it off.
+- To discard what one variant has learned, rather than stop it borrowing, see
+  [Reset one variant's learned state](troubleshooting.md#reset-one-variants-learned-state).
 ### `slo` (observe only)
 
 Latency targets, and the analyzer that judges a model against them. **On this

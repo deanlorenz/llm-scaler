@@ -290,6 +290,21 @@ wva_run_prereqs_phase() {
         # yet, so nothing here needs the controller to be applied first.
         if [ "$(wva_install_scope)" = "namespace" ]; then
             pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+            # The Kueue controller's Deployment and leader Lease, by name, in
+            # the Kueue namespace: a namespace-scoped controller cannot read
+            # them otherwise, and Kueue borrowing then freezes
+            # (kueue-controller-down). A Role in another namespace, so not
+            # part of the overlay (pl_grant_kueue_controller_read says why).
+            # In KUEUE_NAMESPACE, else the kueue.controllerNamespace the
+            # policy keeps (wva_kueue_borrow_wanted reads it).
+            wva_kueue_borrow_wanted
+            pl_grant_kueue_controller_read "$WVA_NS" wva-controller-manager "$WVA_KUEUE_KEPT_NS" \
+                || log_warning "Could not grant the Kueue controller read in ${KUEUE_NAMESPACE:-${WVA_KUEUE_KEPT_NS:-kueue-system}}; Kueue borrowing, if counted, freezes as kueue-controller-down until it is granted."
+            # Workloads and LocalQueues in every namespace, only when a policy
+            # of this install counts cohort borrowing: the read reaches every
+            # tenant's Workloads. Revoked when none does.
+            pl_sync_kueue_borrow_read "$WVA_NS" wva-controller-manager \
+                "$WVA_KUEUE_BORROW_WANTED" "${WVA_KUEUE_BORROW_UNREAD:-}" || true
         fi
         WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
             deploy_wva_controller

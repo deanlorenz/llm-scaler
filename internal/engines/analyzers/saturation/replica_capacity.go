@@ -58,6 +58,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// window when present (mu_from_itl.go).
 	derived derivedMu,
 	downstreamSaturated bool,
+	// revisionsMixed is the variant's replicas reporting more than one pod
+	// template revision this cycle (revisionsMixed): mid-rollout, whatever
+	// its scale target's status says.
+	revisionsMixed bool,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	if rm.TotalKvCapacityTokens <= 0 {
@@ -79,7 +83,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 
 	// k2: compute-bound capacity
 	var engineParams *capacity.EngineParams
-	if rec := a.capacityStore.Get(namespace, modelID, rm.VariantName); rec != nil {
+	rec := a.capacityStore.Get(namespace, modelID, rm.VariantName)
+	if rec != nil {
 		engineParams = rec.EngineParams
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
@@ -99,7 +104,46 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// rule is spelled: the k2 write, the throughput write below, the borrow
 	// clock and the capacity-store update all read adm.
 	adm := admissionOf(rm)
-	k2, k2Priority, k2Recordable, k2Borrowed := a.computeK2(
+	// Mid-rollout, a reading may be an old pod's, and the record -- and so the
+	// tag a window would be written under -- already names the new
+	// arguments: recorded, it would price the new engine at the old one's
+	// figure as its own, with full authority. Measured in review: a decode
+	// fleet rolled 256 -> 64 sequences, its old pods saturating while the
+	// groups were replaced, priced the 64-sequence pods at the 256-sequence k2
+	// once the rollout was done. So nothing is written to a window while the
+	// scale target reports ANY rollout. The fleet is priced from what the
+	// variant already holds: its own window under the arguments it runs,
+	// or -- after the arguments changed -- its previous figure on a bound
+	// frozen for the rollout, which keeps its whole hold for the first
+	// serving cycle after; a sibling's figure only below either, as ever.
+	// A rollout's readings price nothing: a minimum of single readings gave
+	// one outlier all the weight, and a median of a few needed readings the
+	// per-cycle sweep did not keep. The gate is the rollout the scale target reports, read afresh
+	// every cycle, with no memory of where a rollout began: an undo, a
+	// restart or a failover in mid-rollout are rollouts like any other. The
+	// cost is that an image-only rollout, whose old pods run the same
+	// arguments, records nothing until it ends either.
+	//
+	// Or while the variant's own replicas report more than one pod template
+	// revision: that is a rollout whatever the status says. A LeaderWorkerSet
+	// status names no generation, so a template change its controller has
+	// acted on for some groups but not yet reported -- or never will, while
+	// the controller is down -- reads as settled there. Which revision is the
+	// new one the pods cannot say, so the whole variant is held, as for a
+	// rollout the status reports. A scale-up is not this: a new group is
+	// created from the template every other group runs.
+	adm.rollout = rec.InRollout() || revisionsMixed
+	// An admitted row not mid-rollout is the variant serving this bucket,
+	// which is the only time a lower bound's clock runs (k2_borrow.go;
+	// admission.serving). With the borrow turned off for the model, a bound
+	// running on a sibling's figure is not in use, so its hold and relaxation
+	// wait, and turning the borrow back on resumes it where it stood (the gap
+	// then reads as a pause). One running on the variant's own previous
+	// figure is not a borrow, and runs.
+	if adm.serving() {
+		a.noteBorrowServing(historyKey, a.now(), !config.DisableK2Borrow)
+	}
+	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -111,9 +155,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		role,
 		downstreamSaturated,
 		adm,
+		config.DisableK2Borrow,
 		logger,
 	)
-	k2Age, k2AgeKnown := a.k2WriteAge(historyKey, k2Priority, k2Borrowed.donor)
+	k2, k2Priority, k2Recordable, k2Borrowed := d.k2, d.src, d.recordable, d.borrowed
+	k2Age, k2AgeKnown := a.k2WriteAge(historyKey, k2Priority, k2Borrowed)
 	// The same saturated moment that yields a k2 observation yields the
 	// replica's saturated THROUGHPUT: with the queue over the threshold the
 	// engine is completing requests as fast as it can, so its completion rate
@@ -172,6 +218,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
+	// A window written under engine arguments the variant no longer runs is
+	// not its service rate (window_args.go).
+	args := windowArgs(engineParams)
+	a.mu.Lock()
+	a.throughputWindowUnderLocked(throughputKey, args)
+	a.mu.Unlock()
 	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
@@ -179,6 +231,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// another is the fault the key exists to prevent.
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
 			a.recordSaturatedThroughput(throughputKey, mu)
+			if args != "" {
+				a.mu.Lock()
+				if _, ok := a.saturatedThroughput[throughputKey]; ok {
+					a.throughputWindowArgs[throughputKey] = args
+				}
+				a.mu.Unlock()
+			}
 		} else {
 			// The replica is full and queued -- the one moment its throughput can
 			// be learned -- and nothing can price it. Every cycle that reaches
@@ -200,7 +259,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				"reason", "saturated, but no throughput could be priced: the role's demand floor has no mu and will not bind")
 		}
 	}
-	reading := a.saturatedThroughputReading(throughputKey)
+	reading := a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
 	// A derived figure prices the shape the fleet has NOT measured -- that is
 	// the whole of its job. Where the fleet HAS measured this shape, under this
@@ -266,24 +325,24 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// report, so a figure measured on an old pod is filed under the new
 	// arguments and fingerprint. The new pods' readings replace it as they
 	// are priced; only a variant parked before any new pod reported keeps it.
-	//
-	// Filed under the STABLE accelerator, as the k2 and throughput keys are
-	// and as every reader of the store looks it up: the raw reading flips to
-	// unresolved with pod placement on a fleet spread over two products, and
-	// a record filed under whichever value the last cycle saw was missed by
-	// the next lookup that saw the other.
-	//
-	// The cost, the same compromise the k2 keys make: on a variant whose pods
-	// sit on two products, the record holds whichever replica was priced last
-	// under the product last RESOLVED, so a compatible sibling parked on one
-	// product can be bounded or estimated from the other's capacity. It needs
-	// a mixed fleet and a compatible parked sibling on the same model; filed
-	// under the raw reading instead, the record matched no sibling at all.
 	if !adm.bridge {
 		var existingParams *capacity.EngineParams
-		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
-			existingParams = existing.EngineParams
+		var rolling bool
+		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil {
+			existingParams, rolling = existing.EngineParams, existing.RollingOut
 		}
+		// Filed under the STABLE accelerator, as the k2 and throughput keys are
+		// and as every reader of the store looks it up: the raw reading flips to
+		// unresolved with pod placement on a fleet spread over two products, and
+		// a record filed under whichever value the last cycle saw was missed by
+		// the next lookup that saw the other.
+		//
+		// The cost, the same compromise the k2 keys make: on a variant whose pods
+		// sit on two products, the record holds whichever replica was priced last
+		// under the product last RESOLVED, so a compatible sibling parked on one
+		// product can be bounded or estimated from the other's capacity. It needs
+		// a mixed fleet and a compatible parked sibling on the same model; filed
+		// under the raw reading instead, the record matched no sibling at all.
 		a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
 			AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
 			GpuCount:              gpuCount,
@@ -292,6 +351,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
 			EffectiveCapacity:     min(k1, k2Recordable),
 			EngineParams:          existingParams,
+			RollingOut:            rolling,
 			LearnedFrom:           capacity.LearnedFromLive,
 		})
 	}
@@ -440,9 +500,9 @@ const derivedBucket = "derived"
 // 4. Fallback → k1 (memory-bound only)
 // Returns the k2 the replica is priced on this cycle, the source that produced
 // it, the k2 the chain gave -- the figure the capacity store may keep -- and
-// the sibling's k2 it borrowed when that is P2-borrow (zero otherwise). The
-// first and third differ only for an unadmitted row (unadmittedPrice), which
-// is then priced at its own reading, not from a borrow.
+// the lower bound it was priced from when that is P2-borrow or P2-prior (zero
+// otherwise). The first and third differ only for an unadmitted row
+// (unadmittedPrice), which is then priced from no bound.
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
 // and variantName are for the log lines only. adm is the row's admission
 // (admissionOf): a row that is not admitted has its saturated reading logged
@@ -460,36 +520,57 @@ func (a *SaturationAnalyzer) computeK2(
 	role string,
 	downstreamSaturated bool,
 	adm admission,
+	// borrowDisabled is the model's disableK2Borrow: no P2-borrow at all.
+	borrowDisabled bool,
 	logger logr.Logger,
-) (k2 int64, src capacity.K2Source, recordable int64, borrow k2Borrow) {
-	chain, chainSrc, chainBorrow := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
+) k2Decision {
+	chain, chainSrc, borrowed := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
 		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
-		adm, logger)
-	k2, src, recordable = a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
+		adm, borrowDisabled, logger)
+	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
-	if src == capacity.K2SrcUnadmitted {
-		return k2, src, recordable, k2Borrow{}
+	if src != chainSrc {
+		// Priced at the unadmitted reading, not at the chain's lower bound.
+		borrowed = k2Borrow{}
 	}
-	return k2, src, recordable, chainBorrow
+	return k2Decision{k2: k2, src: src, recordable: recordable, borrowed: borrowed}
+}
+
+// k2Decision is what computeK2 decided for one replica: the k2 it is priced on
+// this cycle and the source that produced it, the k2 the chain gave -- the
+// figure the capacity store may keep -- and the lower bound it was priced from
+// (zero unless the source is P2-borrow or P2-prior). One value rather than
+// four results, so a caller cannot drop the bound by position.
+type k2Decision struct {
+	k2         int64
+	src        capacity.K2Source
+	recordable int64
+	borrowed   k2Borrow
 }
 
 // unadmittedPrice returns the k2 a row is priced on this cycle, its source,
 // and the k2 the chain gave, which is what the capacity store may keep.
 //
-// The two differ only for a warm-pool bridge that is saturated. Its reading
-// may not be written -- it describes the pool's engine -- but it is what the
-// bridge is holding NOW, and for a variant a bridge alone is carrying it is
-// the only reading there is: falling through to derived, or to k1 for
-// prefill, priced the bridge higher in the very cycle that showed it full, so
-// fewer of the variant's own replicas were ordered while the bridge was its
-// only supply and was saturated. So the bridge is priced at its reading for
-// this cycle, and only where that is LOWER than the chain -- a reading may
-// only make one cycle more conservative, never a record.
+// The two differ only for a saturated warm-pool bridge, or a saturated row of
+// a variant mid-rollout. Neither reading may be written -- a bridge's
+// describes the pool's engine, and mid-rollout the pod may run the old one --
+// but it is what the replica is holding NOW. For a variant a bridge alone is
+// carrying, or a bucket a rollout reaches with no window and no previous
+// figure, it is the only reading there is: falling through to derived, or to
+// k1 for prefill, priced the replica higher in the very cycle that showed it
+// full, so fewer replicas were ordered while it was saturated -- for as long
+// as the rollout lasted. So the row is priced at its reading for this cycle,
+// and only where that is LOWER than the chain: a reading may only make one
+// cycle more conservative, never a record. Nothing is written -- not the
+// window, not the throughput (written only for P1), not the lower bound --
+// so the next cycle prices from the chain again unless it is saturated too.
 //
-// A Pod of the variant's own that is not Ready is priced at the chain. Its
-// reading is not what it is holding now but what it held when it stopped
-// being routed to, or a hang with its gauges frozen, and a frozen reading
-// would price it low for as long as the hang lasts: every cycle re-reads it.
+// A Pod of the variant's own that is not Ready is priced at the chain, mid-rollout
+// or not. Its reading is not what it is holding now but what it held when it
+// stopped being routed to -- an old pod draining, a new one failing its
+// readiness probe -- or a hang with its gauges frozen, and a frozen reading
+// would price it low for as long as the hang lasts: every cycle re-reads it,
+// and a rollout stalled on that pod lasts as long.
 func (a *SaturationAnalyzer) unadmittedPrice(
 	chain int64, chainSrc capacity.K2Source,
 	historyKey, modelID, namespace, variantName string,
@@ -502,13 +583,19 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	if !adm.bridge || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+	// A bridge, or a Ready replica of the variant's own mid-rollout.
+	atReading := adm.bridge || (adm.rollout && adm.admitted())
+	if !atReading || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
+	}
+	why := "a warm-pool bridge"
+	if !adm.bridge {
+		why = "mid-rollout"
 	}
 	logger.V(logging.DEFAULT).Info("k2-decision",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcUnadmitted.String(), "historyKey", historyKey,
-		"reason", "priced this cycle at the saturated reading, lower than the chain; not recorded",
+		"reason", "priced this cycle at the saturated reading, lower than the chain; not recorded ("+why+")",
 		"k2", tokensInUse, "chainK2", chain, "chainPriority", chainSrc.String())
 	return tokensInUse, capacity.K2SrcUnadmitted, chain
 }
@@ -532,9 +619,23 @@ func (a *SaturationAnalyzer) k2Chain(
 	role string,
 	downstreamSaturated bool,
 	adm admission,
+	// borrowDisabled is the model's disableK2Borrow: no sibling's figure.
+	// The variant's own previous figure (P2-prior) is not a borrow and stays.
+	borrowDisabled bool,
 	logger logr.Logger,
 ) (int64, capacity.K2Source, k2Borrow) {
-	armBorrowClock := adm.admitted()
+	// adm.serving() (Ready, not a bridge, not mid-rollout) is the one
+	// predicate for the lower bound: only such a row arms, advances, re-arms
+	// or ends it (borrowedK2WithKv). Any other reads it as it stood at the
+	// variant's last serving cycle.
+	serving := adm.serving()
+	// The window is checked against the arguments the variant runs before
+	// anything reads or writes it: one written under others becomes the
+	// variant's previous figure (window_args.go).
+	args := windowArgs(engineParams)
+	a.mu.Lock()
+	a.k2WindowUnderLocked(historyKey, args)
+	a.mu.Unlock()
 	// Priority 1: Observed (queue saturated)
 	//
 	// A reading above the KV cache's PHYSICAL ceiling is a scrape artifact
@@ -640,6 +741,13 @@ func (a *SaturationAnalyzer) k2Chain(
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", adm.why+"; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
+	case saturatedReading && adm.rollout:
+		logger.V(logging.DEFAULT).Info("k2-decision",
+			"modelID", modelID, "namespace", namespace, "variant", variantName,
+			"priority", k2ReasonObsRollout, "historyKey", historyKey,
+			"queueLength", queueLen, "queueThreshold", queueThreshold,
+			"reason", "the variant is mid-rollout and this pod may run the old engine; not recorded",
+			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading:
 		k2Observed := tokensInUse
 		if kvCeiling > 0 && k2Observed > kvCeiling {
@@ -664,6 +772,15 @@ func (a *SaturationAnalyzer) k2Chain(
 				a.computeCapacityHistory[historyKey] = ra
 			}
 			ra.Add(float64(k2Observed))
+			if args != "" {
+				a.k2WindowArgs[historyKey] = args
+			}
+			// The variant has measured itself under the arguments it runs:
+			// a previous figure of the arguments it left is not a figure for
+			// them.
+			if lb := a.lowerBounds[historyKey]; lb != nil && lb.prior > 0 {
+				lb.clearPrior()
+			}
 			k2Smoothed := int64(ra.Average())
 			historyLen := ra.Len()
 			a.mu.Unlock()
@@ -772,12 +889,18 @@ func (a *SaturationAnalyzer) k2Chain(
 	// would have. 95,000 measured against 64,000 derived at max_num_seqs=16.
 	// An earlier version of this comment claimed the general rule and a
 	// reviewer built the counterexample. k1 is the bound that always holds.
+	// borrow is the key's lower bound: P2-prior, or P2-borrow unless the
+	// model switched the sibling borrow off, when a bound running on a
+	// sibling's figure is not consulted and its clock does not move.
+	borrow := func(own int64) (k2Borrow, bool) {
+		return a.borrowedK2WithKv(historyKey, modelID, own, engineParams, kvCeiling, serving, !borrowDisabled)
+	}
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, armBorrowClock); ok {
+			if b, ok := borrow(min(k1, k2Derived)); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
-				return b.k2, capacity.K2SrcBorrowed, b
+				return b.k2, b.source(), b
 			}
 			logger.V(logging.DEFAULT).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
@@ -789,9 +912,9 @@ func (a *SaturationAnalyzer) k2Chain(
 	}
 
 	// Priority 4: Fallback to k1
-	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, armBorrowClock); ok {
+	if b, ok := borrow(k1); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
-		return b.k2, capacity.K2SrcBorrowed, b
+		return b.k2, b.source(), b
 	}
 	reason := "no observed/historical/derived k2; capacity is memory-bound only"
 	if isPrefill {

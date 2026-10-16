@@ -138,7 +138,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 		}, parked))
 		Expect(err).NotTo(HaveOccurred())
 		for _, vc := range result.VariantCapacities {
-			if vc.VariantName == "variant-b" {
+			if vc.VariantName == parked[1].VariantName {
 				Expect(vc.K2Source).To(BeEmpty(), "a variant priced from no replica named a k2 source")
 				Expect(vc.HasK2Age).To(BeFalse())
 			}
