@@ -118,9 +118,14 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 		var ttl time.Duration
 		if f, ok := flavors[key]; ok {
 			// On a Kueue flavor the governor waits the placement timeout
-			// before it releases an unplaced replica: its hole is held as
+			// before it releases an unplaced replica -- three times it while
+			// a cluster-autoscaler scale-up is pending for the variant
+			// (allocation.BorrowCycle.ScaleUpPending): its hole is held as
 			// long, when that is longer than the ledger's own TTL.
 			shape.Flavor, ttl = f, placementTimeout
+			if e.borrowing.cycle.ScaleUpPending[key] {
+				ttl *= 3
+			}
 		}
 		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
 			PlacedNow: placedNow, Placed: placed, TTL: ttl, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas,
