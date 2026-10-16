@@ -238,9 +238,8 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 				ContainSubstring("on [H100 (bare name), other H100 products, L4]")))
 			second := cluster(map[string]int{"H100": -1, "L4": 0, "NVIDIA-H100-PCIE-80GB": 20})
 			second.Name = secondClusterName
-			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-H100-PCIE-80GB": -1}), second)).To(ConsistOf(
-				ContainSubstring("on [H100 (bare name)]")),
-				"a bare H100 is the first quota's PCIE sum (-1) and the second's family key (-1)")
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-H100-PCIE-80GB": -1}), second)).To(BeEmpty(),
+				"each quota alone leaves a bare H100 unlimited, but under the first it can only be PCIE, which the second holds to 20")
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "NVIDIA-H100-PCIE-80GB": -1}))).To(BeEmpty(),
 				"a finite family key bounds its products")
 		})
@@ -270,6 +269,17 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 			bounded := others
 			bounded.NamespaceQuotas = map[string]map[string]int{"default": {"A100": 2}}
 			Expect(validate(tenants("ns-x"), bounded)).To(BeEmpty())
+		})
+
+		// The planner bounds a bare family in a namespace that lists only
+		// products of it by those products under the cluster quota.
+		It("reads a family a holding quota lists only through products as the planner does", func() {
+			sxm5Only := QuotaLimiterConfig{Name: "others", Type: "quota", Scope: QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"ns-x": {"NVIDIA-H100-SXM5-80GB": -1}}}
+			Expect(validate(tenants("ns-x"), sxm5Only, cluster(map[string]int{"NVIDIA-H100-80GB-HBM3": -1}))).To(BeEmpty(),
+				"a bare H100 in ns-x can only be SXM5, which the cluster quota denies")
+			Expect(validate(tenants("ns-x"), sxm5Only, cluster(map[string]int{"NVIDIA-H100-SXM5-80GB": -1}))).To(ConsistOf(
+				ContainSubstring("on [H100 (bare name), NVIDIA-H100-SXM5-80GB]")), "the cluster quota leaves SXM5 unlimited")
 		})
 
 		It("does not warn about a namespace another namespace quota caps", func() {

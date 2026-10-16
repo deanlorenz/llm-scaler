@@ -1068,20 +1068,17 @@ func quotaBound(v int) accelerator.Bound {
 }
 
 // finite reports whether a cluster-wide bound gives the accelerator called
-// name a number: a scope: cluster quota, read by
-// accelerator.ClusterAllowlistBound (a type it does not list is 0, except
-// "unknown"), or the physical limiter, which bounds every type a workload
-// names and not "unknown".
+// name a number: the scope: cluster quotas together, read by
+// accelerator.ClusterAllowlistsBound (a type one does not list is 0, except
+// "unknown", and a family is bounded by the products that fit under all of
+// them), or the physical limiter, which bounds every type a workload names
+// and not "unknown".
 func (b excludeBounds) finite(name string) bool {
 	if b.physical && name != constants.DefaultAcceleratorName {
 		return true
 	}
-	for _, quotas := range b.cluster {
-		if _, unlimited, bounds := accelerator.ClusterAllowlistBound(quotas, name, quotaBound); bounds && !unlimited {
-			return true
-		}
-	}
-	return false
+	_, unlimited, bounds := accelerator.ClusterAllowlistsBound(b.cluster, name, quotaBound)
+	return bounds && !unlimited
 }
 
 // unbounded reports whether a workload naming name, in a namespace the
@@ -1109,6 +1106,13 @@ func (b excludeBounds) unbounded(name string, caps []map[string]int) bool {
 			_, _, bounds := accelerator.ClusterAllowlistBound(quotas, name, quotaBound)
 			return bounds
 		})
+	}
+	if accelerator.ClosesFamily(caps, name) {
+		// A family one holder lists only through products: the products that
+		// fit under every holder and every cluster quota, as the planner reads
+		// it (mergeNamespaceConstraints).
+		_, unlimited, _ := accelerator.ClusterAllowlistsBound(slices.Concat(caps, b.cluster), name, quotaBound)
+		return unlimited
 	}
 	for _, c := range caps {
 		if _, unlimited, listed := accelerator.AllowlistBound(c, name, quotaBound); !listed || !unlimited {
