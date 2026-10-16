@@ -211,10 +211,16 @@ first, by `holdPartial`: its unplaced pods only, in the topology domain of
 its placed pods' node, plus the placed pods' GPUs on that node when the count
 is newer than the view's snapshot.
 
-- Admission: the steady-state engine admits each decision's target after the
-  enforcer (`admitInFlight`, only when the cycle had a node view), skipping
-  the models the share plans (their fills are promises); placed-now is
-  `FilledReplicas` when the pods were listed. The scale-from-zero engine admits
+- Admission: the steady-state engine admits the pass's targets provisionally
+  right after `Optimize` (`admitPassInFlight` in `decideV2`,
+  `InFlightLedger.Provisional`, which returns the entries it replaced as an
+  `InFlightMark`), so a wake during the rest of the cycle does not take the
+  nodes the pass chose. After the enforcer and the borrowing releases,
+  `admitInFlight` commits the final targets (`Commit`: the marked entries set
+  back, then the final admissions, under one lock), skipping the models the
+  share plans (their fills are promises); placed-now is `FilledReplicas` when
+  the pods were listed. A cycle only fitted to nodes admits either way
+  (`cycleFitted`). The scale-from-zero engine admits
   each woken candidate at want 1 (`wake_tick.go`).
 - TTL: `InFlightTTL` (5 minutes), from the admission that raised `want`; an
   equal or lower `want` keeps the clock, so a replica Pending for good is not

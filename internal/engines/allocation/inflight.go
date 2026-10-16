@@ -111,6 +111,80 @@ func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow i
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.admitLocked(InFlightAdmission{Key: key, Shape: shape, Want: want, PlacedNow: placedNow, Placed: placed}, now)
+}
+
+// InFlightAdmission is one variant's admission to the ledger, as Admit takes
+// it.
+type InFlightAdmission struct {
+	Key       string
+	Shape     ReplicaShape
+	Want      int
+	PlacedNow int
+	Placed    func() (Placed, bool)
+}
+
+// InFlightMark is the entries a provisional admission (Provisional)
+// replaced, per variant key; nil for a variant that had none.
+type InFlightMark map[string]*inFlightEntry
+
+// Provisional admits adms at once and returns what they replaced, for
+// Commit. The steady-state engine admits its pass's placements so right
+// after the optimizer, before the rest of its cycle -- the utilization share,
+// scale-to-zero, the borrowing releases -- may lower them: a wake in that
+// window saw the nodes the pass chose free and took one (WN5).
+func (l *InFlightLedger) Provisional(adms []InFlightAdmission, now time.Time) InFlightMark {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	mark := InFlightMark{}
+	for _, a := range adms {
+		if _, seen := mark[a.Key]; seen {
+			continue
+		}
+		var prev *inFlightEntry
+		if e, ok := l.entries[a.Key]; ok {
+			c := *e
+			c.seen = slices.Clone(e.seen)
+			prev = &c
+		}
+		mark[a.Key] = prev
+	}
+	for _, a := range adms {
+		l.admitLocked(a, now)
+	}
+	return mark
+}
+
+// Commit replaces a provisional admission with the cycle's final one, as one
+// step: every variant mark covers is set back to its entry before, then adms
+// are admitted. A target the cycle lowered after the pass thus holds what
+// the lower target asks, on the clock it had before -- a replica the pass
+// asked again and a release took back does not restart its hold. A nil mark
+// only admits.
+func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, prev := range mark {
+		if prev == nil {
+			delete(l.entries, k)
+			continue
+		}
+		l.entries[k] = prev
+	}
+	for _, a := range adms {
+		l.admitLocked(a, now)
+	}
+}
+
+// admitLocked is Admit under the lock.
+func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time) {
+	key, shape, want, placedNow, placed := a.Key, a.Shape, a.Want, a.PlacedNow, a.Placed
 	if want <= placedNow {
 		delete(l.entries, key)
 		return

@@ -300,7 +300,9 @@ the scaling manager asks for must also fit a node:
   in-flight hold: a new pod holds nothing on a node until it is scheduled,
   which takes seconds, or minutes with an image pull or a preemption, and
   without the hold the next decision saw the hole free again. Two cold models
-  woke into one free 8-GPU node that way. Five minutes is about how long
+  woke into one free 8-GPU node that way. The hold starts as soon as the
+  steady-state pass picks the node, not when its cycle ends, and shrinks if
+  the rest of the cycle lowers the target. Five minutes is about how long
   placement takes; a pod still Pending after that waits for something else (a
   taint, an affinity, CPU or memory on the node), and the hole is released.
 - A scale-from-zero wake is checked the same way. Within one decision tick a

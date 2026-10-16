@@ -42,8 +42,35 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 // exist and by the gated-pod deduction while Kueue's admission gate holds them
 // (prepareBorrowing): one is a hole on a node, the other GPUs of a cohort's
 // pool, so neither is counted twice.
+//
+// The pass's placements were admitted provisionally right after the
+// optimizer (admitPassInFlight); this replaces that admission with the
+// cycle's final one, as one step (allocation.InFlightLedger.Commit).
 func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
+	allocation.DefaultInFlight.Commit(e.inFlightMark, e.inFlightAdmissions(requests, decisions, planned, scaleTargets, now), now)
+	e.inFlightMark = nil
+}
+
+// admitPassInFlight admits the pass's placements to the in-flight ledger
+// right after the optimizer, provisionally: until admitInFlight commits the
+// cycle's final targets, the utilization share, scale-to-zero and the
+// borrowing releases run, and a wake in that window saw the nodes the pass
+// chose free and took one (WN5). A provisional admission an earlier cycle
+// left uncommitted is set back first.
+func (e *Engine) admitPassInFlight(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
+	if e.inFlightMark != nil {
+		allocation.DefaultInFlight.Commit(e.inFlightMark, nil, now)
+	}
+	e.inFlightMark = allocation.DefaultInFlight.Provisional(e.inFlightAdmissions(requests, decisions, nil, scaleTargets, now), now)
+}
+
+// inFlightAdmissions is what admitInFlight admits: per decided variant of a
+// model planned does not name, its target's replicas of its shape.
+func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
+	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) []allocation.InFlightAdmission {
+	var out []allocation.InFlightAdmission
 	states := map[string]domain.VariantReplicaState{}
 	flavors := e.borrowedFlavors(now)
 	for _, req := range requests {
@@ -83,6 +110,8 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 		if f, ok := flavors[key]; ok {
 			shape.Flavor = f
 		}
-		allocation.DefaultInFlight.Admit(key, shape, d.TargetReplicas, placedNow, placed, now)
+		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
+			PlacedNow: placedNow, Placed: placed})
 	}
+	return out
 }

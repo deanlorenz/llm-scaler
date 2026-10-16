@@ -153,6 +153,10 @@ type Engine struct {
 	// admitInFlight needs once the decisions are final. Set by decideV2.
 	cycleFitted  bool
 	cyclePlanned map[string]bool
+	// inFlightMark is what this cycle's provisional admission of the pass's
+	// placements replaced in the in-flight ledger (admitPassInFlight), until
+	// admitInFlight commits the final targets; nil between cycles.
+	inFlightMark allocation.InFlightMark
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
