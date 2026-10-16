@@ -401,7 +401,11 @@ it, the PRC of each variant another analyzer decided, and the holds:
   -- inside its staleness grace with no reading, or returned nothing this
   cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
   of the roles it reports variants for, or of every role when it reports
-  none. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
+  none. A role saturation holds (`HeldRoleDemand`) whose held figure the
+  pricing dropped -- another frame prices it, or another analyzer's demand
+  replaced it -- is held against scale-down too (`keepSaturationHolds`):
+  read as demand, the held figure let the share optimizer release part of a
+  role saturation would keep. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
   raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale

@@ -148,6 +148,7 @@ func buildComposite(
 		Live:              len(contributors) > 0 || sat.Live,
 		Holds:             compositeHolds(*sat, eligibleAnalyzers, roles, sized),
 	}
+	keepSaturationHolds(&composite, *sat, eligibleAnalyzers)
 	buildCapacities(ctx, &composite, nil, scaleUp, scaleDown)
 	boundAllSpare(&composite, pricings, scaleDown)
 	applyHolds(&composite, roles)
@@ -603,6 +604,33 @@ func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.Na
 		return nil
 	}
 	return holds
+}
+
+// keepSaturationHolds holds against scale-down every role saturation, when
+// listed, holds (HeldRoleDemand) but whose held figure the pricing dropped:
+// another analyzer's demand replaced it, or the role is priced in another
+// frame. Read as demand at the scale-up threshold the held figure,
+// scaleDown x supply, released 1 - scaleDown/scaleUp of the role, so an
+// analyzer asking for more than saturation made a role saturation holds
+// shed: 10 prefill GPUs went to 5 under contention. Scale-down needs every
+// analyzer to agree, and saturation's hold is its refusal; growth is
+// unaffected. Saturation alone never drops its hold, so it decides as before.
+func keepSaturationHolds(nr *allocation.NamedAnalyzerResult, sat allocation.NamedAnalyzerResult,
+	eligible []allocation.NamedAnalyzerResult) {
+	if !slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool { return e.Name == sat.Name }) {
+		return
+	}
+	for role := range sat.Result.HeldRoleDemand {
+		if _, kept := nr.Result.HeldRoleDemand[role]; kept {
+			continue
+		}
+		if nr.Holds == nil {
+			nr.Holds = make(map[string]allocation.RoleHold)
+		}
+		h := nr.Holds[role]
+		h.NoScaleDown = true
+		nr.Holds[role] = h
+	}
 }
 
 // applyHolds zeroes the signal each hold forbids: a role's RequiredCapacity

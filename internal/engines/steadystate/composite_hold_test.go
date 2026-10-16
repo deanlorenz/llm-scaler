@@ -223,3 +223,40 @@ func TestCompositeLiveFromContributorsOnly(t *testing.T) {
 	named = []allocation.NamedAnalyzerResult{sat, other}
 	assert.True(t, buildComposite(context.Background(), named, []allocation.NamedAnalyzerResult{other}, 0.85, 0.7).Live)
 }
+
+// TestCompositeKeepsSaturationsHoldWhenAnotherFramePrices: a role saturation
+// holds keeps a scale-down hold when another analyzer's frame prices it and
+// the held figure is dropped. Prefill holds 10 replicas at 100, saturation
+// holds it at 300 with demand 700, and throughput reads 750: priced in
+// throughput's frame, prefill went from 10 GPUs to 5 under contention while
+// saturation alone kept all 10. Saturation alone adds no hold, and an
+// unlisted saturation's hold does not count.
+func TestCompositeKeepsSaturationsHoldWhenAnotherFramePrices(t *testing.T) {
+	mk := func(name string, prefill float64, vcs ...domain.VariantCapacity) allocation.NamedAnalyzerResult {
+		e := variantsEntry(name, prefill+300, vcs...)
+		e.Result.RoleDemand = map[string]float64{domain.RolePrefill: prefill, domain.RoleDecode: 300}
+		return e
+	}
+	sat := mk(domain.SaturationAnalyzerName, 700,
+		domain.VariantCapacity{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 10, PerReplicaCapacity: 100, TotalDemand: 700},
+		domain.VariantCapacity{VariantName: "d", Role: domain.RoleDecode, ReplicaCount: 4, PerReplicaCapacity: 100, TotalDemand: 300})
+	sat.Result.HeldRoleDemand = map[string]float64{domain.RolePrefill: 300}
+	thr := mk("throughput", 750,
+		domain.VariantCapacity{VariantName: "p", Role: domain.RolePrefill, PerReplicaCapacity: 100},
+		domain.VariantCapacity{VariantName: "d", Role: domain.RoleDecode, PerReplicaCapacity: 100})
+	ctx := context.Background()
+
+	alone := buildComposite(ctx, []allocation.NamedAnalyzerResult{sat}, []allocation.NamedAnalyzerResult{sat}, 0.85, 0.7)
+	assert.Contains(t, alone.Result.HeldRoleDemand, domain.RolePrefill, "setup: saturation alone keeps its held figure")
+	assert.False(t, alone.Holds[domain.RolePrefill].NoScaleDown, "saturation alone decides as before")
+
+	named := []allocation.NamedAnalyzerResult{sat, thr}
+	both := buildComposite(ctx, named, named, 0.85, 0.7)
+	assert.NotContains(t, both.Result.HeldRoleDemand, domain.RolePrefill, "setup: priced in throughput's frame")
+	assert.True(t, both.Holds[domain.RolePrefill].NoScaleDown)
+	assert.False(t, both.Holds[domain.RolePrefill].NoScaleUp, "growth is unaffected")
+	assert.False(t, both.Holds[domain.RoleDecode].NoScaleDown, "a role saturation does not hold is not held")
+
+	unlisted := buildComposite(ctx, named, []allocation.NamedAnalyzerResult{thr}, 0.85, 0.7)
+	assert.False(t, unlisted.Holds[domain.RolePrefill].NoScaleDown, "an unlisted saturation does not hold")
+}
