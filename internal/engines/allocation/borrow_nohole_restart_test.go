@@ -72,6 +72,30 @@ func TestNoHoleWatchSurvivesARestart(t *testing.T) {
 	}
 }
 
+// Review 187 (AR2 residual): a restored watch was dropped by the first cycle
+// that had no state for its variant -- the first cycles after a restart may
+// not have read it yet -- and x was left Pending for good again. A restored
+// watch waits for a cycle that has the variant.
+func TestARestoredNoHoleWatchSurvivesACycleWithoutItsVariant(t *testing.T) {
+	t0 := time.Unix(50_000, 0)
+	settings := DefaultBorrowSettings()
+	world := govWorld{g: 32, used: 24}
+	x := unplacedVariant(govModel("x", 3, 8), "x-v", t0)
+	after := NewBorrowGovernor(settings)
+	after.Restore(BorrowLedger{NoHole: map[string]NoHoleReplicas{"b/x-v": {Replicas: 1, GPUs: 8, Since: t0}}})
+
+	// The first cycle after the restart has not read x.
+	after.Observe(BorrowCycle{Now: t0.Add(time.Minute), Constraints: world.constraints()})
+	c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: world.constraints(),
+		Requests: []ModelScalingRequest{x}}
+	after.Observe(c)
+	ds := decisionsOf(c.Requests)
+	after.Releases(c, ds)
+	if got := ds[0].TargetReplicas; got != 2 {
+		t.Fatalf("x's target is %d past the placement timeout, want 2: the restored watch was dropped", got)
+	}
+}
+
 // A persisted no-hole watch past the ledger bounds, or malformed, is dropped.
 func TestNoHoleRestoreDropsWhatThisControllerDidNotWrite(t *testing.T) {
 	g := NewBorrowGovernor(DefaultBorrowSettings())
