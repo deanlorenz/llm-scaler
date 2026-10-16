@@ -296,12 +296,30 @@ What changes without a config change:
 - **The warm pool's headroom is published after the optimizer's pass**, net
   of the replicas the pass ordered. Before, it was the figure from before the
   pass, so a pool could grow into GPUs just ordered for a model.
-- **A namespace-scope quota bounds only the namespaces it lists.** A namespace
-  it excludes is no longer bounded by the sum of the other tenants' caps: it is
+- **A namespace-scope quota bounds only the namespaces it governs**: those it
+  lists, and with a `default` key every other namespace it does not exclude.
+  A namespace it excludes is no longer bounded by the sum of the other tenants' caps: it is
   bounded by the cluster bounds (the physical limiter or a cluster-scope quota),
   and unbounded when there are none.
 - **A namespace allowance that is unlimited (`-1`) for every type now scales**
   when nothing else bounds the cluster. It never did.
+- **A namespace that lists a GPU family now gets GPUs when the cluster quota
+  lists only products of it** (bug fix). A namespace at `{H100: -1}` under a
+  cluster quota of `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8}` was
+  often held at 0, and its warm pool always was. It now gets up to 8 of each
+  product, in every cycle. Its warm pool reads each product at that product's
+  figure. Clusters whose cluster quota lists the family itself, or that have
+  no cluster quota, are not affected.
+- **A family is bounded by what fits under every cluster quota, product by
+  product** (bug fix). This gives fewer GPUs to one setup only: two or more
+  `scope: cluster` quotas that list products of one family in different
+  numbers. `{NVIDIA-H100-80GB-HBM3: 16, NVIDIA-H100-PCIE-80GB: 8}` beside
+  `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 16}` allowed 24 H100s; only
+  16 fit under both, and 16 is the bound now. A workload that names the bare
+  family, in a namespace that lists only products of it, likewise gets only
+  what the cluster allows on those products: `{NVIDIA-H100-SXM5-80GB: -1}`
+  under a cluster quota with no SXM5 now gets 0, where it could get the
+  cluster's other H100s.
 - **Two utilization-share namespace groups on one GPU type split the free
   cluster GPUs** rather than each counting all of them.
 - **A limiter that cannot be consulted in a cycle is skipped; the others still
@@ -334,7 +352,21 @@ frozen, with the reasons the box lists, and the nominal cap applies.
 (`countBorrowable: false`, or `WVA_QUOTA_KUEUE_BORROW=false`), and wait for
 models to drop back under nominal. Turning it off evicts nothing: a lowered
 cap only stops growth, and models move back as they scale down (lower a
-model's `maxReplicaCount` to hurry it). Then install the older release. It
+model's `maxReplicaCount` to hurry it). Check that none is still past it: no
+entry may show `used` above `guaranteed`.
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '(.entries | length), (.entries[] | select(.guaranteed >= 0 and .used > .guaranteed) | {namespace, accelerator, guaranteed, used})'
+```
+
+The first line is the number of entries; it must be above 0, or the check
+read nothing. No line after it means every namespace is back within nominal.
+If the utilization-share
+optimizer is on, also set `shadow: true` and wait one cycle before the
+downgrade, so it removes its marks from the pods
+([why](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade)).
+Then install the older release. It
 ignores the `borrowReleaseLedger` and `limiterBudgets` keys in
 `wva-controller-status`. The RBAC borrowing added stays behind; it grants
 reads only. Remove it by re-applying the older release's roles, or leave it.
@@ -662,6 +694,25 @@ ConfigMap, and work through this list.
    than before; it only loses the faster failover
    ([details](operations.md#stopping-and-leader-handover)).
 
+5. **Analyzers listed beside or instead of `saturation` now size the model.**
+   Before, only saturation sized it and the others were published and ignored.
+   Read every `analyzers:` list in every scaling-policy ConfigMap, per-model
+   and tier entries included ([details](scaling-policy.md#multi-analyzer-registration)):
+   - beside `saturation`, the model is sized to the larger need;
+   - without `saturation`, the others size it alone, and a role none of them
+     can size holds where it is. A list of `slo` alone holds the model.
+
+   The `Effective scaling policy` line does not show the list, so the check
+   below cannot catch this. After the upgrade:
+   - a held model reports `wva_model_scaling_blocked{reason="no-composite-signal"} == 1`
+     or logs `composite holds a role`;
+   - a model another analyzer now sizes above saturation shows a composite
+     demand above saturation's:
+     `wva_analyzer_demand{analyzer_name="CompositeSignal"} > on (exported_namespace, model_name, role) wva_analyzer_demand{analyzer_name="saturation"}`.
+
+   Dashboards and alerts on `wva_analyzer_*` must filter on `analyzer_name`:
+   the series gain `analyzer_name="CompositeSignal"`.
+
 After the upgrade, compare the controller's `Effective scaling policy` log
 lines with the ones you saved in `before.txt`:
 
@@ -838,7 +889,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | the install's ClusterRoles and ClusterRoleBindings | suffixed per install, so other installs keep theirs. Cluster-scoped: a namespace owner gets Forbidden on these, and the uninstall says which are left for a cluster admin |
 | the controller's Role and RoleBinding in a namespace it managed from outside (`WVA_WATCH_NS`) | |
 | RoleBinding `wva-pod-writer-<suffix>` in every workload namespace, and Role `wva-pod-writer` where no other controller's binding uses it | made by `deploy/warmpool.sh create`, utilization-share activate, and the upgrade to this release |
-| `wva-utilization-share-history` and `wva-controller-status` | written by the controller, not rendered, so deleted by name |
+| `wva-utilization-share-history`, `wva-controller-status` and `wva-learned-state` | written by the controller, not rendered, so deleted by name. An uninstall and reinstall therefore starts learned state cold; upgrade in place to keep it |
 | the ScaledObjects **this installer created** | KEDA restores each workload to its pre-autoscaling replica count as they go. Keep them with `UNDEPLOY_SCALEDOBJECTS=false` |
 
 ### What it leaves

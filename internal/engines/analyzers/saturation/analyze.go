@@ -66,10 +66,16 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		case r.Outcome == RestoredIncomplete && r.NoArgs:
 			msg = "learned state not restored: the variant's engine configuration could not be read completely, and the snapshot recorded no engine arguments to check its windows against"
 		case r.Outcome == RestoredWhole || r.Outcome == RestoredArgs || r.Priors > 0:
+		case r.BoundPriors > 0:
+			msg = "learned state restored as lower-only figures: the variant's own previous figures, kept with their lower bounds, price it (P2-prior) until it measures under the arguments it runs"
 		case r.Throughput > 0:
 			msg = "learned state restored as a hold-only service rate: no k2 window was recent enough, on the hardware the variant runs now, to keep, and the old saturated throughput holds the demand floor, hold-only, until the new arguments measure their own"
+		case r.Outcome == RestoredIncomplete && r.Stored == 0:
+			msg = "learned state not restored: the variant's engine configuration could not be read completely, and the snapshot held no k2 window of the variant's own to keep"
 		case r.Outcome == RestoredIncomplete:
 			msg = "learned state not restored: the variant's engine configuration could not be read completely, and no k2 window was recent enough, on the hardware it runs now, to keep"
+		case r.Stored == 0:
+			msg = "learned state not restored: the variant's engine configuration changed, and the snapshot held no k2 window of the variant's own to keep as a lower-only figure"
 		default:
 			msg = "learned state not restored: the variant's engine configuration changed, and no k2 window was recent enough, on the hardware it runs now, to keep as a lower-only figure"
 		}
@@ -78,7 +84,8 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		a.restoreOutcomes[r.Outcome]++
 		a.mu.Unlock()
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "outcome", r.Outcome,
-			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput)
+			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput, "stored", r.Stored,
+			"boundPriors", r.BoundPriors)
 	}
 
 	c := a.newCycle(ctx, input, satConfig)
@@ -97,7 +104,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 
 	roleOf := make(map[string]string, len(c.rolesByVariant))
 	for variant, role := range c.rolesByVariant {
-		roleOf[variant] = canonicalRole(role)
+		roleOf[variant] = domain.CanonicalRole(role)
 	}
 
 	return &domain.AnalyzerResult{
@@ -390,7 +397,7 @@ func (c *cycle) fitLines() {
 		c.a.noteReplicaStart(variantKey,
 			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
 
-		if canonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
+		if domain.CanonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
 			continue
 		}
 		// Fit this variant's OWN readings first, into its own window, keyed
@@ -460,7 +467,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		}
 		gpuCount := c.gpusByVariant[rm.VariantName]
 		role := c.rolesByVariant[rm.VariantName]
-		downstreamSaturated := c.decodeSaturated && canonicalRole(role) == domain.RolePrefill
+		downstreamSaturated := c.decodeSaturated && domain.CanonicalRole(role) == domain.RolePrefill
 		// Priced, then reported on. noteLineMismatch says when the observed
 		// generation-token rate disagrees with the line, and does not act on
 		// it: see its comment for the run that decided that.
@@ -488,7 +495,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// started pricing prefill from decode's physics with nothing to say
 		// so. Stated here instead, beside the call it governs.
 		var derived derivedMu
-		if canonicalRole(role) == domain.RoleDecode {
+		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
@@ -618,7 +625,7 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	// Track active roles for queue demand attribution.
 	activeRoles := make(map[string]bool)
 	for _, vc := range variantCapacities {
-		activeRoles[canonicalRole(vc.Role)] = true
+		activeRoles[domain.CanonicalRole(vc.Role)] = true
 	}
 
 	// Add scheduler queue demand (requests queued upstream in llm-d flow control).

@@ -106,6 +106,10 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 	})
 
+	// These exercise runAnalyzersAndScore directly (Score
+	// population/defaulting, per-analyzer threshold override), the layer
+	// beneath composite construction: the composite is built after these
+	// values are set.
 	Describe("runAnalyzersAndScore config-bridge", func() {
 
 		// minEngine builds a minimal Engine suitable for calling runAnalyzersAndScore.
@@ -128,7 +132,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		}
 
 		It("populates Score from AnalyzerScoreConfig.Score into the returned slice", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",
 				result:       &domain.AnalyzerResult{},
@@ -143,7 +146,7 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 			Expect(err).NotTo(HaveOccurred())
 
 			byName := namedByName(results)
@@ -152,7 +155,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 
 		It("defaults Score to 1.0 when the analyzer has no Analyzers entry", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",
 				result:       &domain.AnalyzerResult{},
@@ -167,7 +169,7 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 			Expect(err).NotTo(HaveOccurred())
 
 			byName := namedByName(results)
@@ -176,7 +178,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 
 		It("applies per-analyzer ScaleUpThreshold override into RequiredCapacity", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			// spy returns TotalDemand=100, everything else zero.
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",
@@ -192,7 +193,7 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy"},
 				},
 			}
-			resultsGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgGlobal, nil, nil, nil, nil, nil, 0)
+			resultsGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", cfgGlobal)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Per-analyzer ScaleUpThreshold=1.10 → RC = 100/1.10 ≈ 90.9
@@ -204,7 +205,7 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy", ScaleUpThreshold: &overrideThreshold},
 				},
 			}
-			resultsOverride, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgOverride, nil, nil, nil, nil, nil, 0)
+			resultsOverride, err := e.runAnalyzersAndScore(context.Background(), "m", cfgOverride)
 			Expect(err).NotTo(HaveOccurred())
 
 			rcGlobal := namedByName(resultsGlobal)["spy"].Remaining

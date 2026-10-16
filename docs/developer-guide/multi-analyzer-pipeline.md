@@ -332,15 +332,131 @@ analyzer's; an analyzer normally has no reason to call them.
 
 ## How results combine
 
-**Scale-down gate** (`needsScaleDownForRole`): the optimizer receives one
-result, saturation's (`CompositeSignal: namedResults[0]` in `collectV2ModelRequest`,
-`engine_v2.go`). A role scales down only when that entry is live and its `RoleSpare`
-for the role is above zero; `safeRemovalReplicasForRole` reads the same entry.
-Throughput and custom analyzers run, are scored and report metrics, but cannot
-veto scale-down. A version in which every live analyzer votes is kept in
-`internal/engines/allocation/multi_backup/` behind `//go:build ignore`; the
-"vote" and "veto" wording below describes that design, and today applies to
-saturation's entry alone.
+**The composite** (`buildComposite`, `steadystate/composite.go`): the
+optimizer receives one result, built in `collectV2ModelRequest` from every
+analyzer that ran. It starts as a copy of saturation's `AnalyzerResult` (every
+field, maps and slices cloned) and changes the need, the demand that carries
+it, the PRC of each variant another analyzer decided, and the holds:
+
+- **Need.** `allocation.ResolveSO` takes, for each eligible analyzer
+  (`allocation.Eligible`: live, informative, non-nil) that has the variant
+  without `ReasonNoData`/`ReasonError`, `N = D[role] / PRC` from the
+  analyzer's own demand and capacity (`allocation.TotalReplicas`), and keeps
+  the largest finite, non-negative one. Saturation is eligible only when the
+  policy lists it (`ScalingPolicy.SaturationListed`: listed and enabled, or no
+  `analyzers` section at all), and `slo` never is: it only observes. `Reason`
+  records the path: `C0-agree` (several), `C1-single`, `C4-no-signal` (none).
+- **Pricing** (`priceRole`, per role). The role is priced in one analyzer's
+  frame (`roleFrames`: saturation's, and one per other analyzer from
+  `Decision.Needs`), whichever needs more replicas for the fleet the role runs:
+  the lowest coverage, the sum over its variants of replicas / N (1 per variant
+  when it runs none), saturation's on a tie. A variant an analyzer does not
+  size is read at saturation's ratio to the variants it does. Mixing frames per
+  variant asked for more than any analyzer, and taking the largest need among
+  the others per variant let one analyzer's zero need veto another's. A
+  VERBOSE `composite-pricing` line names the frame and every frame's coverage
+  and demand.
+  - *Saturation's frame:* its demand and PRCs stand. `HeldRoleDemand` is
+    raised to the others' need in saturation's units,
+    `D_sat x coverage_sat / coverage_others`, and dropped when that reaches
+    `D_sat`: the hold no longer sets the demand, and kept, the share optimizer
+    would give nothing from the role.
+  - *The others' frame:* the role's demand is the largest `N x PRC_sat` over
+    the variants they size, defined when `D_sat[role]` is zero, so another
+    analyzer can grow a role saturation sees as idle. Each variant they size
+    gets `PRC = D / N`, so it needs exactly `N`, and variants on different
+    accelerators keep their view of the relative worth. A variant they do not
+    size keeps saturation's PRC. The model's `TotalDemand` moves with the role
+    (or is the role's demand, aggregated), the role's variants share it in
+    saturation's proportions (evenly when it attributed none), their
+    utilization follows, and `HeldRoleDemand` is dropped.
+  - *Scale-down* is bounded by every frame (`boundSpare`): shedding X of the
+    chosen frame's capacity sheds at most `X x r` of frame f's, `r` the largest
+    `PRC_f / PRC_chosen` over the running variants, so the role's spare (the
+    model's on an aggregated model) is capped at `spare_f / r` for each f. The
+    optimizer releases up to the larger of the spare and `RoleReleasable`, the
+    capacity above the release target, so each frame's own releasable at the
+    release target, over `r`, is published as `ReleaseBound` whenever another
+    frame sizes the role, and `initRoleState` caps `RoleReleasable` at it.
+    The share optimizer and rescale size from demand and never read the
+    spare, so the other frames are published too (`OtherFrames`: each
+    frame's supply, demand and `r`) and read as demand at the utilization
+    the optimizer sizes to (`OtherFrameDemand`: the share's scale-up
+    threshold, rescale's full utilization): `u x (S - Releasable(u))`, never
+    above `u x S`, so another frame stops a release but never grows the
+    role. As a GPU floor at the release target it held a role deeper than
+    saturation alone would, even when the other analyzer agreed, and under
+    contention took GPUs a shortfall shared by weight would have given
+    another model.
+    *Scale-up* follows the chosen frame alone: a variant it grows may leave
+    another frame short for one cycle, until the new replicas are read.
+  - With one variant per role every frame gives saturation's PRC. A need
+    whose demand at saturation's PRC overflows is no reading. A need on a
+    variant saturation has no PRC for is carried only in the others' frame;
+    in saturation's it is logged as dropped.
+- **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
+  saturation unlisted, a role none of whose variants has a need is held both
+  ways, and on P/D every other role is held against growth too, as the share
+  optimizer already froze such a model whole. A listed analyzer other than saturation that is live but not eligible
+  -- inside its staleness grace with no reading, or returned nothing this
+  cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
+  of the roles it reports variants for, or of every role when it reports
+  none. A role saturation holds (`HeldRoleDemand`) whose held figure the
+  pricing dropped -- another frame prices it, or another analyzer's demand
+  replaced it -- is held against scale-down too (`keepSaturationHolds`):
+  read as demand, the held figure let the share optimizer release part of a
+  role saturation would keep. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
+  (per role, and model-level when every role is held that way); the share
+  optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
+  raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale
+  pass (`rescaleModelDecisions`) also reads them: a role held both ways freezes
+  the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
+  such a model exactly its current GPUs in the water-fill, so the rest of the
+  budget goes to the others; no role is reclaimed or filled in a direction it
+  is held against. A role held against scale-down keeps its GPUs both in
+  the water-fill and in the model's split across its roles. A growing role's share is lowered to what `fillRole` can
+  place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
+  variant's own pod size), and what that leaves goes to the roles cut most
+  (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
+  model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
+  share exceeds what its `maxReplicas` allow, and what a role at its maximum
+  cannot hold re-splits over the others, each up to the larger of its demand
+  and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
+  maximum took its share and decode was reclaimed to pay for it. Reclaims are
+  whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
+  role's own cut first, then what is left from the role cut most, never more
+  than the summed cut. A role counts toward the sum only what it can give:
+  not a cut no replica can meet (a variant with no capacity reading, the
+  cheapest held at one), and, while it has a share, not its last replica, so
+  the second pass never takes a role with demand to zero. The second pass
+  runs only when every role cut has one replica size; with mixed sizes the
+  two passes disagreed between adjacent targets, and a larger target left
+  fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
+  alone shed nothing.
+- **Warm-pool pressure** (`publishVariantPressure`) is published from the
+  composite, after it is built, with saturation's scale-up threshold; a role
+  held against growth never reports `NeedsScaleUp`. Warm-pool supply is still
+  published from saturation's entry: the composite keeps saturation's PRC, so
+  the two are the same.
+
+The composite is judged against saturation's thresholds
+(`AnalyzerThresholds(saturation)`), and recorded in the same
+`recordAnalyzerMetrics` call as the analyzers, once a cycle, as analyzer
+`CompositeSignal`. Its `Score` is the largest score among the analyzers that
+contributed a need, saturation's when none did; the cross-model fair share
+reads it. It is live when any analyzer contributed a need, and as live as
+saturation otherwise. `allocation.CompositeHasSignal` is false when every variant
+is `C4-no-signal`; the engine then sets the `no-composite-signal` blocked
+reason (`reportSignalReason`), and clears it on every cycle that builds no
+composite.
+
+**Scale-down gate** (`needsScaleDownForRole`): a role scales down only when
+the composite is live and its `RoleSpare` for the role is above zero;
+`safeRemovalReplicasForRole` reads the same entry. Because the composite's
+need is the largest analyzer need, scale-down requires every contributing
+analyzer to agree. A version in which every live analyzer votes separately is
+kept in `internal/engines/allocation/multi_backup/` behind `//go:build ignore`;
+the "vote" and "veto" wording below describes that design.
 
 **Liveness.** An analyzer is live for the current cycle iff it produced a
 non-error, capacity-bearing result within the staleness window (a fixed

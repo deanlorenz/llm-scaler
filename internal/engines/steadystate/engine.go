@@ -65,7 +65,7 @@ import (
 )
 
 // analyzerEntry binds a registered analyzer to its name. The engine stores
-// these in registration order so runAnalyzersAndScore iterates analyzers
+// these in registration order so runAnalyzers iterates analyzers
 // deterministically.
 type analyzerEntry struct {
 	name     string
@@ -158,6 +158,9 @@ type Engine struct {
 	// placements replaced in the in-flight ledger (admitPassInFlight), until
 	// admitInFlight commits the final targets; nil between cycles.
 	inFlightMark allocation.InFlightMark
+	// inFlightStore is the in-flight ledger's persistence in the controller
+	// status (inflight_persist.go).
+	inFlightStore inFlightStore
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
@@ -263,11 +266,10 @@ type Engine struct {
 	analyzers []analyzerEntry
 
 	// analyzersSnapshot is the frozen, registration-ordered view that
-	// runAnalyzersAndScore iterates. Built from analyzers in StartOptimizeLoop
-	// before the goroutine launches. Saturation always runs and drives scaling
-	// decisions; other registered analyzers are invoked but their results are
-	// not consumed yet — combine and per-analyzer threshold logic lands in
-	// follow-up PRs.
+	// runAnalyzers iterates. Built from analyzers in StartOptimizeLoop
+	// before the goroutine launches. Saturation always runs; every other
+	// registered analyzer runs when the policy lists it, and the composite
+	// combines what they return (buildComposite).
 	analyzersSnapshot []analyzerEntry
 
 	// started transitions to true in StartOptimizeLoop. Late RegisterAnalyzer
@@ -337,6 +339,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
 		"borrowTickGap", satV2.BorrowTickGap(),
+		// Whether the snapshot is on: its counters read 0 both when it is off
+		// and when it works, so this line is where an operator confirms it.
+		"snapshot", cfg.LearnedStateSnapshotEnabled(),
 		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_VARIANT_TIMEOUT, LEARNED_STATE_BUCKET_RETENTION to change them")
 	// A replaced horizon has to say so, because the line above cannot. After
 	// flooring it prints the default, which is byte-identical to what an
@@ -407,8 +412,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			// policy lists it under analyzers:, and its router queries run only
 			// for such a model, so registering it costs nothing elsewhere, and
 			// enabling it needs no restart. Its result is
-			// published and, like every non-saturation result, not yet consumed
-			// (docs/proposals/slo-tiers.md, phase 0).
+			// published and, unlike the other listed analyzers, never sizes a
+			// model: the composite leaves it out (docs/proposals/slo-tiers.md,
+			// phase 0).
 			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
@@ -638,7 +644,7 @@ func toExternalDefinition(label string, def config.ExternalAnalyzerDef) (externa
 // It runs until the context is cancelled.
 //
 // Before launching the goroutine, the registered analyzers are snapshotted
-// to a frozen slice that runAnalyzersAndScore iterates. The started flag is
+// to a frozen slice that runAnalyzers iterates. The started flag is
 // flipped so subsequent RegisterAnalyzer calls return an error. The snapshot is the
 // natural place to invoke any future per-analyzer Init(ctx) hook.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
@@ -648,6 +654,10 @@ func (e *Engine) StartOptimizeLoop(ctx context.Context) {
 
 	e.recordActiveOptimizer() // record active optimizer
 	metrics.SetConfigOptimizationInterval(float64(e.Config.OptimizationInterval().Seconds()))
+	// Read the in-flight holds back before the first cycle, and as early as the
+	// scale-from-zero engine starts: a wake builds its node view from the same
+	// ledger.
+	e.restoreInFlight(ctx, time.Now())
 	e.executor.Start(ctx)
 }
 
@@ -760,6 +770,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	}()
 
 	logger := ctrl.LoggerFrom(ctx)
+	e.restoreInFlight(ctx, time.Now()) // once: the in-flight holds a restart would lose, before any node view
 	e.refreshLimiter(ctx)              // rebuild the GPU limiter if the ConfigMap changed its type/entries
 	e.reconcileExternalAnalyzers(ctx)  // sync the runtime external-analyzer registry with the catalog
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
@@ -1498,10 +1509,12 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 		if data == nil {
 			logger.V(logging.DEBUG).Info("Skipping model: no metrics available", "modelID", modelID)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
 
@@ -1513,8 +1526,11 @@ func (e *Engine) optimizeV2(
 			logger.Error(err, msg, "modelID", modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, data.scaleTargets)
+			reportSignalReason(namespace, modelID, nil)
 			continue
 		}
+
+		reportSignalReason(namespace, modelID, req)
 
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
@@ -1602,6 +1618,7 @@ func (e *Engine) optimizeV2(
 		g.ReclaimBlocked = e.reclaimBlocked()
 		g.BorrowCredit = e.borrowing.credit
 		g.ReclaimCredit = e.borrowing.reclaimCredit
+		g.WakeReclaims = e.borrowing.wakeYield
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
 	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)
@@ -1641,6 +1658,9 @@ func (e *Engine) optimizeV2(
 	if e.cycleFitted {
 		e.admitInFlight(requests, allDecisions, e.cyclePlanned, variantScaleTargets, time.Now())
 	}
+	// Persisted every cycle, fitted or not: a wake's admission and an expired
+	// hold change the ledger too.
+	e.persistInFlight(ctx, time.Now())
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
 	// Utilization, RequiredCapacity, and SpareCapacity are already set by
@@ -2590,4 +2610,17 @@ func publishServing(namespace string, metrics []domain.ReplicaMetrics) {
 	for variant, pods := range byVariant {
 		decision.PublishServing(namespace, variant, len(pods), now)
 	}
+}
+
+// reportSignalReason sets the no-composite-signal reason when req's composite
+// defines no replica need for any variant, and clears it otherwise. A nil req
+// (this cycle built no composite for the model) clears it, so the reason never
+// outlives the cycle that found it. With no signal the optimizer sizes on
+// saturation's own capacity.
+func reportSignalReason(namespace, modelID string, req *allocation.ModelScalingRequest) {
+	var reasons []string
+	if req != nil && !allocation.CompositeHasSignal(req.CompositeSignal) {
+		reasons = []string{constants.ScalingBlockedNoCompositeSignal}
+	}
+	metrics.SetModelScalingBlockedReasons(namespace, modelID, constants.ScalingBlockedReasonsSignal, reasons)
 }

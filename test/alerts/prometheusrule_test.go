@@ -323,7 +323,8 @@ func TestKueueNeverReadAlert(t *testing.T) {
 // resolution, which misses a reason that sets and clears between two samples.
 func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueBorrowThrashing")
-	assert.Contains(t, expr, "increase(wva_borrow_releases_total[1h])")
+	assert.Contains(t, expr, `increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h])`,
+		"a replica Kueue held at its gate where no borrowing is counted is no borrowed capacity lost")
 	assert.Contains(t, expr, "by (exported_namespace, model_name)",
 		"group by the scraped model namespace, as the other per-model alerts do")
 	assert.Regexp(t, `>\s*3\.5\s*$`, expr, "3.5: increase() reads three losses as about 3.1")
@@ -339,7 +340,7 @@ func TestKueueBorrowThrashingCountsPreemptionsAlone(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueBorrowThrashing")
 	compact := regexp.MustCompile(`\s+`).ReplaceAllString(expr, " ")
 	const (
-		releases  = "sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))"
+		releases  = `sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total{cause!="kueue-gate"}[1h]))`
 		preempted = "sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))"
 	)
 	assert.Contains(t, compact, "( "+preempted+" or "+releases+" * 0 )",

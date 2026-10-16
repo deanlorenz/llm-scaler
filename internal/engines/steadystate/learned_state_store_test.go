@@ -352,10 +352,10 @@ func TestARecoveredReadClearsTheErrorWithoutAWrite(t *testing.T) {
 
 	denied = true
 	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
-	require.NotEmpty(t, e.learnedState.lastErr, "precondition: the failed read was reported")
+	require.NotEmpty(t, e.learnedState.lastReadErr, "precondition: the failed read was reported")
 	denied = false
 	e.writeLearnedState(ctx, now.Add(2*learnedStateInterval))
-	assert.Empty(t, e.learnedState.lastErr,
+	assert.Empty(t, e.learnedState.lastReadErr,
 		"a read that works left the error standing until the next write; the same error again would not be logged")
 }
 
@@ -446,10 +446,10 @@ func TestTwoOtherVersionsCountAgainstTheBoundTogether(t *testing.T) {
 		total += len(k) + len(v)
 	}
 	assert.LessOrEqual(t, total, learnedStateMaxData, "the data went past its bound with two other versions")
-	assert.NotEmpty(t, e.learnedState.lastErr, "a snapshot that does not fit was not reported")
+	assert.NotEmpty(t, e.learnedState.lastWriteErr, "a snapshot that does not fit was not reported")
 
 	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
-	assert.NotEmpty(t, e.learnedState.lastErr, "the failure stays reported, once, rather than logged every minute")
+	assert.NotEmpty(t, e.learnedState.lastWriteErr, "the failure stays reported, once, rather than logged every minute")
 }
 
 // The API server bounds the whole object: another version's document takes

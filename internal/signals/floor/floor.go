@@ -114,7 +114,7 @@ type Term struct {
 // Estimate computes the per-role floor from lambda, the
 // backlog per role and the saturated throughput each role's own replicas
 // carry. Units: lambda is the model's arrival rate in requests/s; backlog
-// is queued requests, keyed by role as canonicalRole spells it (an empty
+// is queued requests, keyed by role as domain.CanonicalRole spells it (an empty
 // variant role is domain.RoleBoth, so a backlog keyed "" prices nothing);
 // drainSeconds is the seconds the backlog may take to clear
 // (BacklogDrainSeconds), and a drainSeconds <= 0 leaves the backlog
@@ -225,7 +225,7 @@ func Estimate(
 	startingByRole := make(map[string][]startingReplicas, len(variants))
 	for _, vc := range variants {
 		perReplica[vc.VariantName] = vc.PerReplicaCapacity
-		role := canonicalRole(vc.Role)
+		role := domain.CanonicalRole(vc.Role)
 		roleOf[vc.VariantName] = role
 		readyByRole[role] += vc.ReplicaCount
 		if vc.PendingReplicas > 0 || len(vc.PendingAges) > 0 {
@@ -711,12 +711,4 @@ func median(values []float64) float64 {
 		return (sorted[n/2-1] + sorted[n/2]) / 2
 	}
 	return sorted[n/2]
-}
-
-// canonicalRole reads an empty role as domain.RoleBoth, as aggregation does.
-func canonicalRole(role string) string {
-	if role == "" {
-		return domain.RoleBoth
-	}
-	return role
 }

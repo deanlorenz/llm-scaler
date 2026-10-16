@@ -1,287 +1,156 @@
 # GPU Capacity Accounting
 
-How the controller decides whether GPUs are available, what that number means
-today, and how it can still over-state free capacity.
+How the scaling manager decides whether there are GPUs for a scale-up or a
+wake, and where that answer can still be wrong.
 
-Two consumers read these budgets:
+It decides this only when the scaling policy declares a `limiters:` list. The
+shipped policy declares none: scaling is then bounded only by each workload's
+`maxReplicaCount`, and a scale-from-zero wake is not checked. Setting one up is
+in [Bound every install by real GPUs](../guides/admin-gpu-bounding/).
 
-- the **GPU-aware optimizer** (`GreedyByScoreOptimizer`), active when the
-  saturation config declares any `limiters:` entry — off in the shipped config,
-  see the caveat below; and
-- the **scale-from-zero placement check**, which refuses to wake a variant onto
-  an accelerator with no room (see
-  [`scaleFromZero`](../reference/scaling-policy.md#scalefromzero)).
+The same answer is used by every part that asks for GPUs: the optimizer's
+scale-ups, the scale-from-zero wake, the warm pool's growth and the
+utilization-share optimizer.
 
-Both over-allocate when the budget over-states availability. Pods land in
-`Pending`, and for scale-from-zero the request that triggered the wake times
-out anyway: a wake that looks like progress and delivers none.
+> **Every accelerator must resolve first.** A limiter budgets GPUs per
+> accelerator type. A variant whose type the scaling manager cannot tell (no
+> GPU `nodeSelector` or `nodeAffinity`, and no running pods to look at) gets no
+> budget and **never scales up**, with no error. Check for
+> `AcceleratorNotResolved` events before declaring a limiter
+> ([how](../reference/gpu-limiter.md#what-has-to-be-true-first-every-accelerator-must-resolve)).
 
-> **Declaring a limiter requires resolvable accelerators.** The GPU-aware
-> optimizer allocates from per-accelerator pools. A variant whose accelerator it
-> cannot resolve (no GPU `nodeSelector`/`nodeAffinity`, and no running pods to
-> observe) is charged to no pool, gets no budget, and **never scales up**. Nothing
-> errors. That is why the shipped config declares no limiter: on by default, it
-> would freeze the least carefully configured workloads. Check for
-> `AcceleratorNotResolved` warning events across the fleet before declaring one.
+## What each limiter bounds
 
-## How a budget is computed
+| limiter | asks | counts as used | bounds |
+| --- | --- | --- | --- |
+| `gpu-inventory` | is the hardware there? | every GPU a pod holds on the GPU nodes, whoever owns it: other teams, training jobs, system pods, and pods scheduled or nominated but not running yet | the GPUs the nodes advertise, per accelerator type, and each replica to one node (below) |
+| `quota` | is this tenant within its allowance? | only what the scaling manager's own replicas and warm pools hold: replicas times GPUs per replica | the caps you declare, per accelerator type, for the cluster or per namespace |
+| `quota` with `kueue.enabled` | the same, with Kueue's numbers | the same; for a namespace-scope entry, Kueue's figure is first reduced by what other workloads Kueue admitted hold in the queue | the smaller of your cap and Kueue's grant, plus what the namespace may borrow from its cohort |
 
-`DefaultLimiter.ComputeConstraints` builds a `ResourcePool` per accelerator type:
+The two kinds count differently on purpose. A quota is an allowance: charged
+with every GPU on the nodes, a 4-GPU quota beside an unrelated 4-GPU training
+job would read as spent while the scaling manager had placed nothing. Whether
+the hardware is full is the physical limiter's question. So a quota alone does
+not stop the scaling manager asking for GPUs that other work already holds; the
+extra replicas wait in `Pending`. Declare both kinds for both guarantees.
 
-```text
-Limit = sum of node Allocatable for that GPU type, across nodes  (node discovery)
-Used  = GPUs in use, on the basis this provider asked for      (caller-supplied)
-Available() = max(0, Limit - Used)
-```
+Details: [the GPU limiter](../reference/gpu-limiter.md) and
+[the quota limiter](../reference/quota-limiter.md).
 
-## `Used` depends on the question the provider is answering
+## How limiters compose
 
-There are two measures of "GPUs in use", and they are not interchangeable.
-Each provider declares the one it needs via `allocation.UsageBasis`. The caller
-(`gpuUsageViews` in the saturation engine, `Engine.gpuUsageViews` in
-scale-from-zero) hands each provider the matching view.
+- **Every declared limiter is built, and a decision must fit all of them.** Per
+  accelerator type the smallest figure wins, and a type any limiter denies is
+  denied.
+- **GPU names form families.** `H100` is a family; `NVIDIA-H100-80GB-HBM3` is
+  a product in it. A family cap bounds the sum of its products, and a GPU spent
+  under one name is spent under the other. A quota that lists only products
+  denies the products it does not list.
+- **A namespace quota bounds only the namespaces it governs**: those it lists,
+  and, with a `default` key, every other namespace it does not exclude. An
+  excluded or unlimited (`-1`) namespace is bounded by the cluster-wide limiters
+  alone, and by nothing when there are none.
+- **A limiter that cannot answer is skipped**, and the others still bound. Its
+  usage may not be observed yet, or its read failed; the controller names it
+  in `wva_constraint_provider_skipped`. Only when every limiter is skipped is a
+  decision unchecked. A wake then uses the last answer if it is under 5
+  minutes old. A Kueue-backed quota that has never read Kueue is not skipped:
+  its finite caps still bound, and `wva_kueue_never_read` reports it.
+- **Budgets are per controller.** Each controller charges a static quota only
+  with what its own models hold. N controllers that read one `scope: cluster` quota
+  allow N times the figure.
 
-| basis | counts | produced by | consumed by |
-|---|---|---|---|
-| `PhysicalUsage` | every GPU held on the cluster's GPU nodes, whoever holds it | `internal/gpuusage`, on its own 15s ticker | physical inventory (`TypeInventory`) |
-| `ManagedUsage` | only what our own variants hold | the saturation engine's population sum (`gpuUsageByType`) | quota inventory (`QuotaInventory`) |
+## Node fit and the in-flight hold
 
-The split exists because the two answer different questions:
+With `gpu-inventory` declared, a replica must also fit **one node**. Sixteen
+free GPUs as 4+4+8 hold one 8-GPU replica, not two.
 
-- a **physical inventory** asks *"will the scheduler find a free device?"*. Every
-  GPU-requesting pod counts, whoever owns it: a training job in another
-  namespace blocks a device as much as our own replica. This view attributes by
-  the **node** a pod runs on, so nothing is unattributable and it does not
-  depend on the controller having discovered the workload;
-- a **quota** asks *"how much of the operator's declared allowance have we
-  consumed?"*. The allowance is declared in the policy, or read from Kueue's
-  ClusterQueues ([Kueue as a quota source](../reference/quota-limiter.md#kueue-as-a-quota-source)).
-  A quota governs managed variants and nothing else. Charged the physical
-  figure, a namespace with a 4-GPU quota and an unrelated 4-GPU training job
-  reads as fully spent while we have placed nothing, and every scale-up is
-  refused. The managed view sums `CurrentReplicas × GPUsPerReplica`
-  over the variants we manage, keyed by each variant's resolved accelerator.
+- Each pod is planned into the smallest free hole that holds it, on a node of
+  its accelerator that is schedulable (not cordoned, Ready), whose taints it
+  tolerates, and whose labels match its `nodeSelector` and required node
+  affinity.
+- A P/D model grows only when a prefill and a decode replica both find a node.
+- A replica just ordered keeps its hole from every later decision until its
+  pods hold a node, for up to **5 minutes** (a replica on a Kueue flavor: its
+  `placementTimeout`, when that is longer, and three times that while a
+  cluster-autoscaler scale-up is pending). Without this hold the next
+  decision would see the hole free again while the pod is still being
+  scheduled.
+- The plan assumes the scheduler packs pods the same way. When replicas of
+  different sizes share nodes, configure the scheduler for it
+  ([how](../reference/gpu-limiter.md#the-scheduler-must-pack)).
 
-Physical is the default for anything that declares no basis. That is the safe
-direction. For a quota, a physical figure over-states consumption and errs
-toward refusing. The opposite error would under-state what the hardware holds
-and place a variant onto a device that is already taken.
+Node fit counts GPUs only, not CPU or memory. The full rules and limits are in
+[A replica must fit one node](../reference/gpu-limiter.md#a-replica-must-fit-one-node).
 
-**The physical observation is only taken when something reads it.**
-`internal/gpuusage.Refresher` runs its timer only while a physical limiter is
-declared; the saturation engine is the only consumer that reads the published
-snapshot as-is. The scale-from-zero engine calls `EnsureFresh` when it decides a
-wake, so the timer being off does not affect it, and it asks only when a
-physical provider exists. A quota-only deployment never walks the cluster for a
-number nothing reads. See [quota limiter](../reference/quota-limiter.md#resource-access-with-quotas-only).
+## Kueue borrowing at a glance
 
-**Physical and quota bound together.** Declare both and each provider gets its
-own view: the physical limiter every GPU on the nodes, each quota only what our
-variants hold. The optimizer takes the smaller budget per accelerator, and a
-type either one denies is denied. The warm pool's headroom takes the same
-figures, the physical bound included.
+With a Kueue-backed quota, a namespace may grow past its ClusterQueue's
+nominal quota into capacity its cohort lends. On by default
+(`countBorrowable: false` turns it off).
 
-**A missing view is not zero.** Absent means "unknown", which both engines treat
-as permissive. An empty map claims that nothing is in use, and a provider handed
-one reports its entire capacity free. Callers check
-`GPUUsageViews.MissingBasis` before computing any constraint, and fall back to
-the unlimited optimizer (saturation) or an unchecked wake (scale-from-zero) when
-a needed view has not been observed. Only the bases some provider asks for are
-gathered, so a quota-only deployment never waits for a physical observation it
-does not use, and vice versa.
+- **Guaranteed** is what the namespace keeps whatever the cohort does.
+  **Borrowable** is drawn from the cohort's free GPUs, counted only from
+  lenders Kueue would take capacity back for.
+- Borrowing is **withheld** (capped at nominal) when a condition for it does
+  not hold, and **frozen** (nothing new, last figures kept) when Kueue cannot
+  be trusted right now. The reason is published.
+- A P/D pair borrows only whole. A wake, the warm pool and rescale never
+  borrow.
+- The scaling manager gives back a borrowed replica that never placed (after
+  `placementTimeout`). When one of its own models grows into nominal its queue
+  lent out, it also lowers its own borrower in the same pass (`kueue-reclaim`).
+  Kueue preempts the rest when a lender needs it.
 
-## Reconciling `Used` with `Limit`
+The rules and every reason: [Cohort borrowing](../reference/quota-limiter.md#cohort-borrowing).
 
-The two sides of a pool use different names for the same accelerator. Getting
-this wrong made the budgets inert, not just inaccurate.
+## What an operator sees
 
-- **Limits** are keyed by *normalized short names*: `TypeInventory.Refresh` runs
-  each discovered node product label through `NormalizeAcceleratorName`, so
-  `NVIDIA-A100-PCIE-80GB` becomes `A100`.
-- **Usage** arrives keyed by whatever the workload declares. `gpuUsageByType`
-  keys by `VariantMetadata.AcceleratorName`, i.e. the nodeSelector/label value
-  verbatim — for the common deployment shape, the raw product label.
+| signal | means |
+| --- | --- |
+| `limiter` and `policyAccepted` in the `wva-controller-status` ConfigMap | which limiters this controller runs with, and whether it accepted the policy |
+| `ResourceConstrained` Event on the ScaledObject, ending `(limited by <name>)` | a limiter capped this decision; `<name>` is the entry, `gpu-limiter` for the physical one, `node-fit` when the GPUs exist but no node holds a replica |
+| `wva_decisions_limited_total{limiter_name}` | the same, as a counter |
+| `wva_model_scaling_blocked{reason}` | why a model is held back |
+| `wva_constraint_provider_skipped{provider, reason}` | a limiter left out of decisions; the others still bound |
+| `wva_scale_from_zero_wake_unchecked_total` | wakes made with no capacity check at all |
+| `wva_unattributed_gpus` | GPUs held by workloads whose accelerator did not resolve |
+| `limiterBudgets` in `wva-controller-status` | each quota's guaranteed, borrowable and used GPUs, per namespace and accelerator |
 
-Unreconciled, a product-label usage key never matched a limit key.
-`GetResourcePools` reported `Used = 0` for it, and every pool claimed all its
-GPUs free however much was running. Both consumers saw an empty cluster.
+Runbooks: [GPUs held or quota spent](../reference/troubleshooting.md#gpus-held-or-quota-spent).
 
-`TypeInventory.SetUsed` now reconciles incoming keys onto the discovered limit
-keys, trying the declared name first and then its normalization. Order
-matters: for a name with no known vendor prefix, `NormalizeAcceleratorName` falls
-back to "the segment after the first hyphen". Normalized unconditionally, an
-already-short `Gaudi-2` would become `2` and match nothing. The
-demand side does the same at lookup time (`pipeline.resolvePoolKey`), so both
-spellings work on both sides.
+## Where the numbers can still be wrong
 
-Pinned by `TestUsageIsReconciledOntoPoolKeys` and `TestPoolKeysAreShortNames`.
+1. **An unresolved accelerator, under a quota.** A quota charges a model by
+   its accelerator type, so the GPUs of a model whose type did not resolve are
+   charged to no cap, and the quota looks freer than it is by that much
+   (`wva_unattributed_gpus`). An explicit `unknown` entry in the quota bounds
+   them. The physical limiter counts GPUs by the node they are on, so it is
+   not affected. The fix is a GPU `nodeSelector` on the workload.
+2. **Cordoned or NotReady nodes** still count toward a pool's GPUs. Node fit
+   leaves them out, so they matter only when node fit is off (no node
+   snapshot younger than 2 minutes).
+3. **A namespace-scoped controller without a cluster-wide Pod list** counts
+   only the GPUs its own namespace holds. GPUs other tenants hold on the same
+   nodes read as free (`wva_pod_access_denied` = 1). Grant `list` on Pods
+   cluster-wide, or bound it with a quota
+   ([details](../reference/gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)).
+4. **Kueue's charge is read, not watched.** A namespace-scope Kueue figure is
+   charged with what other workloads Kueue admitted hold in the queue, as of
+   the last read. Replicas can still wait at Kueue's gate when:
+   - the entry is cluster-scope, which is charged with the managed GPUs only;
+   - a variant Kueue does not manage holds GPUs, which makes the charge read
+     low;
+   - several namespaces on one queue grow in the same cycle, each into the
+     same free GPUs;
+   - a replica is gated where borrowing is not counted: it lowers the charge,
+     and nothing releases it.
 
-> **This changed allocation behaviour.** Before it, `Used` was effectively always
-> 0 in nodeSelector deployments, so the GPU-aware optimizer believed the cluster
-> was empty and allocated against the full installed capacity. It now sees real
-> usage and will allocate less. That is the correction, but it is a behavioural
-> change for any existing deployment that declares a limiter.
+   [Details](../reference/quota-limiter.md#what-a-quota-is-charged).
+5. **An FMA warm pool** holds GPUs that no pod requests. A launcher keeps its
+   engine on a GPU after it unbinds, charged to nobody, so in an FMA namespace
+   every figure is a lower bound on use. A `ResourceQuota` has the same blind
+   spot. Nothing in the scaling manager can see it
+   ([details](../reference/gpu-limiter.md#fma-namespaces-the-gpu-picture-is-a-lower-bound)).
 
-## Over-statement 1: usage on an unresolved accelerator is unattributable
-
-A variant that constrains no accelerator and has no running pods to observe
-resolves to `constants.DefaultAcceleratorName`, the internal `"unknown"`
-placeholder. That name matches no discovered type, so reconciliation drops it
-and its GPUs are charged to no pool.
-
-The per-type budgets therefore still over-state free capacity by however many
-GPUs unresolved variants hold. With 8 H100s, 2 held by a resolved variant and 4
-by unresolved ones, the pool reports `Available() == 6` while only 2 are
-genuinely free.
-
-What changed is that the two views now agree: dropped usage is excluded from
-`TotalUsed` too. Previously `SetUsed` summed every key while the pools iterated
-only discovered types, so the aggregate and the pools disagreed in opposite
-directions.
-
-Pinned by `internal/engines/allocation/unresolved_accelerator_usage_test.go`.
-
-**Why it is not fixed further.** Usage with no type cannot be charged to a pool,
-and charging it to every candidate type would deny legitimate scale-ups on a
-guess. The fix is to make the accelerator resolvable: set a
-`nodeSelector`/`nodeAffinity` GPU key on the workload. Once it has running pods
-the controller also resolves it from the nodes the scheduler placed them on. It
-emits an `AcceleratorNotResolved` warning event per affected variant.
-
-## Over-statement 2: `Limit` counts installed GPUs, not available ones
-
-`Limit` sums each node's **Allocatable** for the GPU resource. Allocatable is the
-node's total. It does not subtract what running pods requested, and it does not
-drop to zero when a node is cordoned or `NotReady`.
-
-The `Used` side of that gap is **closed for physical providers**.
-`internal/gpuusage` observes the cluster directly: it walks the pods on GPU
-nodes and attributes each to the node it is scheduled to. A physical pool now
-nets out:
-
-- workloads in other namespaces, or not managed by us at all;
-- system/DaemonSet pods holding GPUs;
-- pods scheduled but not yet running (the scheduler has already committed those
-  devices; treating them as free would let two wakes land on the same one).
-
-Gap 1 does not apply to that view either: attribution is by node, so there is no
-unresolved bucket to leak through. Budgets are **tighter** than before this
-landed. That is the correction; they were over-stated.
-
-Two pieces remain open:
-
-1. **Unschedulable nodes still contribute their GPUs to `Limit`.** Allocatable
-   alone does not exclude cordoned or `NotReady` nodes, so drained capacity reads
-   as available.
-2. **Quota providers still use the population sum**, and deliberately so — see
-   the usage-basis section above. Gap 1 therefore still applies to them: a variant
-   with an unresolved accelerator is charged to no pool, so a quota reports more
-   of its allowance free than it has. `wva_unattributed_gpus` reports the amount.
-
-## Over-statement 3: an FMA warm pool holds GPUs that no pod requests
-
-The two above are about GPUs charged to the wrong place. This one is about GPUs
-the accounting cannot see at all, and it cannot be closed from inside the
-controller.
-
-Fast Model Actuation splits a server across a requester pod, which reserves the
-accelerator, and a launcher pod, which runs the engine on it. Launchers request
-**no** `nvidia.com/gpu`, deliberately: requesting on both halves would
-double-book N launchers plus N requesters on an N-GPU node. While a pair is
-bound the accounting is right: the GPU is charged to the requester, which is the
-scale target.
-
-The gap opens on unbind. The launcher keeps its vLLM instance resident (that is
-what makes the next bind take seconds), and so keeps a physical GPU charged to
-nobody. Measured on an OpenShift cluster with every requester at `replicas: 0`:
-
-```text
-GPU requests charged in the namespace : 1
-launcher pods running a vLLM instance : 9, on 9 distinct GPU UUIDs
-```
-
-So `Used` under-states by the size of the warm pool, and `Limit − Used` over-states
-free capacity by the same amount: the same direction as Gap 1, for a different
-reason.
-
-**Why it cannot be closed here.** The obvious fix is to read the GPUs off the
-pods. FMA records them in `dual-pods.llm-d.ai/vllm-config` and `/accelerators`,
-but those annotations (with `/server-port` and `/instance-id`) exist **only
-while the pair is bound**. An orphaned launcher still running an instance
-carries none, so the API server has no record of what it uses. Only the
-launcher's own HTTP API knows, and the collector does not call workload APIs.
-
-Two things follow for anyone reading these numbers:
-
-- In an FMA namespace, treat the budget as a **lower bound on usage** and an
-  **upper bound on what is free**. `deploy/lib` warns at plan time when it finds
-  launcher pods.
-- A `ResourceQuota` on `requests.nvidia.com/gpu` has the same blind spot, so it is
-  no backstop here. That matters: the limiter is advisory precisely because
-  ResourceQuota is meant to be the real boundary.
-
-Closing it needs FMA to make the occupancy visible; that is item 1 in
-[the FMA post-mortem](../proposals/fma-post-mortem.md).
-Operator-facing guidance is in
-[the GPU limiter guide](../reference/gpu-limiter.md), "FMA namespaces".
-
-## Testing the placement check end-to-end
-
-The scale-from-zero placement check has unit coverage on every seam, and its
-**deny** branch is exercised end-to-end by
-`test/e2e/scale_from_zero_capacity_test.go`. A denial is reachable only when
-three conditions hold together:
-
-1. the variant's accelerator resolves — a `nodeSelector` on a GPU product label,
-   (observation covers a running variant, but a parked one has no pods). Without it the
-   candidate contributes no demand and `FitsGPUBudget` returns true having
-   evaluated nothing;
-2. a GPU-usage snapshot exists for the basis the configured provider needs. For
-   the default physical provider this no longer requires an active managed variant —
-   `internal/gpuusage` observes on its own ticker from process start, which is
-   what makes the check meaningful for a fleet parked at zero. A quota provider
-   does still need a completed saturation cycle, which publishes the managed view
-   (including as an explicit zero when nothing is active); and
-3. that usage is attributed to the same pool key the limits use (see the key
-   reconciliation above).
-
-Condition 2 conflicts with the trigger. Scale-from-zero fires on EPP
-flow-control queueing, and requests queue only when the pool has **no ready
-endpoints**. So the running variant needed for condition 2 must not sit in the
-pool under test, or it serves the requests itself. The one-model-one-pool
-contract makes that natural: the occupier serves its own model, so it belongs to
-its own pool (`fixtures.WithPoolGuide`).
-
-The suite went green once `internal/gpuusage` became an independent producer.
-Before that it could not pass. With the fleet parked, the saturation engine
-returned without publishing, so no snapshot existed when the wake was decided.
-"Unknown" is permissive by design, so the wake the suite expects refused was
-allowed, and nothing in the logs said the check had been skipped.
-
-## Assumption: one model, one InferencePool
-
-The scale-from-zero wake path assumes a model's variants all sit behind a single
-EPP. `buildCandidates` resolves one pool for the model group, and the group's
-pending-request verdict is read from that pool's flow-control queue.
-
-That matches the project's contract, and it is what keeps the wake cheap: one
-scrape per model per tick, rather than one per variant.
-
-**Per-role pools are a possible future shape and are not implemented.** If a
-model's decode sat behind one EPP and its prefill behind another, the current
-code would read both variants' demand from whichever pool resolved first. A
-decode variant could then be judged by the prefill queue, with its activation
-logged against an EPP never consulted. That is silently wrong, not just
-imprecise, which is why the assumption is stated here and checked in code.
-
-Supporting per-role pools would mean:
-
-1. resolving the pool **per candidate** rather than per model group;
-2. reading demand from each distinct pool in turn, attributing the verdict to the
-   pool it came from; and
-3. keeping selection across the whole model, so a P/D pair is still chosen as one
-   set against one joint GPU budget even when its halves are behind different
-   pools.
-
-Until then, a model that resolves to more than one pool is logged
-("Model resolves to more than one InferencePool"), and only the first is used.
+How this is built in the code: [How the limiter set is built](../developer-guide/limiter-composition.md).

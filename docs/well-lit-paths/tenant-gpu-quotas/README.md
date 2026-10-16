@@ -105,7 +105,9 @@ hand-written entry included. `WVA_LIMITER=quota` replaces it and
 `WVA_LIMITER=none` removes it
 ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 `make disable-limiter` also clears the limiter it wrote into
-admin-owned controllers' own ConfigMaps, and leaves its read-only RBAC.
+admin-owned controllers' own ConfigMaps. It leaves the read-only grants,
+except that `WVA_LIMITER_TYPE=quota` or `all` revokes the Kueue controller
+read and the cluster-wide Kueue Workload read.
 
 The two shapes, with examples, are in the reference:
 [cluster scope](../../reference/quota-limiter.md#cluster-scope) and
@@ -133,7 +135,8 @@ statement.
 
 **Ceilings, not reservations.** A finite cap guarantees a tenant never
 *exceeds* it, never that it can *reach* it. The quota bounds only the
-namespaces it lists. A namespace that is unlimited (`-1`) or excluded is
+namespaces it governs: those it lists, and with a `default` key every other
+namespace it does not exclude. A namespace that is unlimited (`-1`) or excluded is
 bounded only by the cluster bounds (a `gpu-inventory` entry or a cluster-scope
 quota; nothing, without one), so it can use GPUs a capped peer would have used.
 Nobody exceeds their own authorization, but know this before you promise a team
@@ -151,7 +154,7 @@ its number.
   reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
 - The utilization-share optimizer shares it only when a finite cluster bound
   covers its GPU type: a `scope: cluster` quota, or a `gpu-inventory` entry
-  with `physicalGroups: true`.
+  with `physicalGroups: true` on a cluster-scoped controller.
 
 To bound it with a quota, add a `scope: cluster` quota beside the tenants'
 quota. Add these two entries to the `limiters:` list of the `default` entry.
@@ -213,14 +216,15 @@ shape, where you need `pods/log` there or the admin reads these two lines.
 kubectl logs -n <controller-namespace> deploy/wva-controller-manager \
   | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 
-# the limiter it built: want type=quota. "constructed" prints at every start,
-# type=none included; a live policy change logs "(re)built from config".
+# the limiter it built: want limiterTypes "quota". "constructed" prints at
+# every start, "none" included; a live policy change logs "(re)built from config".
 kubectl logs -n <controller-namespace> deploy/wva-controller-manager \
   | grep -E 'GPU limiter (constructed|\(re\)built from config)'
 ```
 
-No `Cluster policy comes from` line at the default verbosity (it logs only at
-V(1)) means the budget is in the controller's own `wva-scaling-policy-config`.
+`Cluster policy comes from this controller's own namespace` (logged at V(1),
+which the default `-v=2` prints) means the budget is in the controller's own
+`wva-scaling-policy-config`.
 `... the well-known namespace` (or `... labelled with`) names a policy
 namespace you normally cannot read: ask the admin for read access or the
 figures. The admin can also read

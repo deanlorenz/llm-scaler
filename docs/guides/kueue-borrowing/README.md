@@ -40,13 +40,15 @@ Whether to take it at all (what it buys, what it costs, when not to):
 
 <!-- guide:prerequisites.kueue start -->
 ```bash
-# Kueue runs, and its image carries a version tag. <kueue-ns> is where Kueue runs, kueue-system by default. List the ClusterQueues with their cohort and preemption settings (v1beta1 calls the cohort field spec.cohort).
+# Kueue runs and its image carries a version tag; then each ClusterQueue's cohort and preemption.
 kubectl get deploy kueue-controller-manager -n <kueue-ns> \
   -o jsonpath='{.status.readyReplicas} ready, image {.spec.template.spec.containers[*].image}{"\n"}'
 kubectl get clusterqueue -o custom-columns='NAME:.metadata.name,COHORT:.spec.cohortName,RECLAIM:.spec.preemption.reclaimWithinCohort,BORROW_WITHIN:.spec.preemption.borrowWithinCohort'
 ```
 <!-- guide:prerequisites.kueue end -->
 
+  `<kueue-ns>` is where Kueue runs, `kueue-system` by default. On Kueue's
+  `v1beta1` API the cohort field is `spec.cohort`, not `spec.cohortName`.
   Kueue v0.19 and v0.20 are accepted; CI runs v0.20.0
   ([the table](../../reference/quota-limiter.md#supported-kueue-versions)).
   Kueue elsewhere than `kueue-system`: set `kueue.controllerNamespace` on the
@@ -73,11 +75,16 @@ kubectl auth can-i list resourcequotas -n <namespace> --as="$SA"
 
 <!-- guide:prerequisites.grant start -->
 ```bash
-# (cluster admin) Any no above: re-run the admin phase with the limiter the install declares. It grants the cluster-wide Workload read only because that limiter counts borrowing, and the Role in the Kueue namespace. KUEUE_NAMESPACE puts that Role where Kueue runs; unset, the entry's kueue.controllerNamespace does.
+# (cluster admin) Any no above. Re-run the admin phase with the limiter the install declares.
 KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs \
   WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
 ```
 <!-- guide:prerequisites.grant end -->
+
+  It grants two things: the Role in the Kueue namespace, and the cluster-wide
+  Workload read, the latter only because that limiter counts borrowing.
+  `KUEUE_NAMESPACE` puts the Role where Kueue runs; unset, the entry's
+  `kueue.controllerNamespace` decides.
 
   If the controller runs in a namespace of its own, apart from the models,
   add `WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>`. The Workload read
@@ -191,7 +198,7 @@ Two things Kueue does that the scaling manager does not change:
 
 <!-- guide:deploy.enable start -->
 ```bash
-# Namespace owner. A GPU bound plus a Kueue-backed quota; -1 lets Kueue set the figure. Borrowing is counted by default. With a GPU ResourceQuota as the bound instead, use WVA_LIMITER=quota.
+# Namespace owner. A GPU bound plus a Kueue-backed quota; -1 lets Kueue set the figure.
 make deploy-wva NAMESPACE=<namespace> \
   WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
 ```
@@ -204,8 +211,13 @@ make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1
 ```
 <!-- guide:deploy.cluster end -->
 
+Borrowing is counted by default. With a GPU `ResourceQuota` in the namespace
+as the bound instead of `gpu-inventory`, use `WVA_LIMITER=quota`.
+
 `<accelerator>` is the name the controller logs for each model. The entry it
-writes:
+writes, on a namespace-scoped install (a cluster-scoped install, and the
+cluster policy, key it on the reserved `default` instead of `<namespace>`, so
+every namespace gets the same Kueue-bounded cap):
 
 ```yaml
 limiters:
@@ -226,7 +238,7 @@ limiters:
 ```bash
 # The effective caps, then the borrowing figures. Both are logged when they change.
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
-  | grep -E 'quota entry bounded by external caps|Kueue borrowing applied|external quota source' | tail -5
+  | grep -E 'quota entry bounded by external caps|Kueue borrowing applied|borrowing frozen at the last figures|external quota source' | tail -5
 ```
 <!-- guide:verify.log end -->
 

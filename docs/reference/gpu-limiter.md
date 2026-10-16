@@ -33,9 +33,18 @@ first.**
 
 **Confirm the controller accepted it.** A malformed entry is rejected on read,
 and that costs the **whole** `default` policy, thresholds included, leaving no
-limiter at all. Only the controller log reports it, at ERROR; the install
-reports success either way. The install prints this command, the only check
-that answers:
+limiter at all. The install reports success either way. Check the
+[`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with):
+`policyAccepted` must be `true` and `limiter` must name your limiters.
+
+```bash
+kubectl get configmap wva-controller-status -n <wva-namespace> \
+  -o jsonpath='{.data.limiter} {.data.policyAccepted}{"\n"}'
+```
+
+The controller log says the same. The `GPU limiter constructed` line is
+printed at every start, with no limiter too, so read its `limiterTypes`; a
+rejected entry logs `Invalid saturation scaling` at ERROR:
 
 ```bash
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
@@ -43,9 +52,9 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 ```
 
 ```
-INFO  GPU limiter constructed  {"type": "quota", "limiters": "quota/install-quota", ...}                    # bounded
-INFO  GPU limiter constructed  {"type": "inventory+quota", "limiters": "inventory+quota/gpu,install-quota", ...}  # bounded by both
-INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-limiter"}                  # NOT bounded
+INFO  GPU limiter constructed  {"limiterTypes": "quota", "limiters": "quota/install-quota", ...}                    # bounded
+INFO  GPU limiter constructed  {"limiterTypes": "inventory+quota", "limiters": "inventory+quota/gpu,install-quota", ...}  # bounded by both
+INFO  GPU limiter constructed  {"limiterTypes": "none", "limiters": "none", "name": "no-limiter"}                  # NOT bounded
 ```
 
 > **Both kinds bound together.** Declare `gpu-inventory` and `quota` in one
@@ -208,8 +217,9 @@ A namespace-scoped controller caches only the namespace it manages and reads
 any other ConfigMap at startup. So every
 `enable-physical-limiter` and `disable-limiter` restarts **every
 namespace-scoped controller whose policy source is outside the namespace it
-manages**: a self-managed one reading `wva-policy` or its labelled namespace,
-and an out-of-reach one reading its own ConfigMap. It lists them as
+manages**: one that runs in the namespace it manages and reads `wva-policy`
+or its labelled namespace, and an out-of-reach one (running apart from the
+models, `WVA_WATCH_NS`) reading its own ConfigMap. It lists them as
 `WILL BE RESTARTED` first, and exits non-zero naming any it could not restart.
 
 The label is read at startup too. After pointing `wva.llmd.ai/policy-namespace`
@@ -305,7 +315,8 @@ the scaling manager asks for must also fit a node:
 - Each replica asked for keeps its hole after the cycle, from every later
   decision of the steady-state and scale-from-zero engines alike, until its
   pods hold a node or **5 minutes** pass, whichever is first (for a replica
-  on a Kueue flavor, the borrowing `placementTimeout` when that is longer).
+  on a Kueue flavor, the borrowing `placementTimeout` when that is longer,
+  tripled while a cluster-autoscaler scale-up is pending).
   This is the
   in-flight hold: a new pod holds nothing on a node until it is scheduled,
   which takes seconds, or minutes with an image pull or a preemption, and
@@ -315,6 +326,11 @@ the scaling manager asks for must also fit a node:
   the rest of the cycle lowers the target. Five minutes is about how long
   placement takes; a pod still Pending after that waits for something else (a
   taint, an affinity, CPU or memory on the node), and the hole is released.
+  The holds survive a controller restart or a leader change. They are kept
+  in the `wva-controller-status` ConfigMap (`inFlightLedger`) and read back
+  on start, each with its original end time. This also covers a replica
+  whose pod is Unschedulable, and a LeaderWorkerSet group still waiting for
+  its workers.
 - A scale-from-zero wake is checked the same way. Within one decision tick a
   wake also takes its GPUs and its hole from the wakes after it.
 - A node the utilization share freed for a receiver whose pod is still
@@ -344,6 +360,8 @@ keeps its hole for it.
 
 Limits:
 
+- It assumes the scheduler packs pods into the fullest node that fits; see
+  [The scheduler must pack](#the-scheduler-must-pack).
 - GPUs only. CPU and memory are not checked; a node counts when it carries
   the replica's accelerator, is schedulable (not cordoned, Ready, not being
   removed by an autoscaler), its taints are tolerated, and its labels match
@@ -360,11 +378,24 @@ Limits:
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the
   family, though only one of its products may have budget left.
-- The utilization share sizes its moves with its own node picture: its holes
+- The utilization share sizes its moves with its own node picture. Its holes
   are net of what today's optimizer placed for other models and of the
-  in-flight holds, and it counts a node as node fit does (accelerator by
-  product or family, taints the receivers tolerate). It does not read the
-  templates' `nodeSelector` or node affinity.
+  in-flight holds. It counts a node as node fit does: accelerator by product
+  or family, taints the receivers tolerate, and each pod's `nodeSelector` and
+  node affinity (a LeaderWorkerSet's leader by its own template, its workers
+  by theirs). It places one exclusive-topology group per domain, as node fit
+  does. A domain counts as free for a new group only when every group there
+  is a donor group the share is taking, each judged as its own group: a
+  node shared by a donor's pod and another model's group is not freed.
+- After a restart, a held replica counts its pods again only from the first
+  steady-state cycle. That cycle ends every restored hold it does not decide
+  (a model deleted while the controller was down, or no longer asking). A
+  model that cycle skips, for example because its metrics are missing, loses
+  its restored hold too, Unschedulable replica included.
+  Until then, a hold whose pods landed in the meantime still holds its hole.
+  A restored hold lasts at most three borrowing `placementTimeout`s (at
+  least 5 minutes), whatever the saved value says. A wake decided in the
+  moment before the controller has read the holds back does not see them.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.
@@ -380,6 +411,50 @@ minutes it is off too, and the controller logs `Physical limiter: replicas are
 not fitted to nodes this cycle` with the reason, and `... fitted to nodes
 again` when it returns. A cycle the physical limiter does not bound logs
 neither.
+
+### The scheduler must pack
+
+Node fit plans each pod into the **smallest** hole that holds it. That plan
+holds only if the scheduler places pods the same way. The default
+kube-scheduler scores nodes `LeastAllocated` on CPU and memory, with no weight
+on GPUs, which **spreads** pods instead.
+
+Example: node N1 has 8 free GPUs and N2 has 4. The scaling manager orders a
+4-GPU replica (planned on N2) and an 8-GPU replica (planned on N1). The
+scheduler may put the 4-GPU pod on N1, the emptier node, and the 8-GPU pod
+then stays Pending.
+
+This matters only when replicas of **different sizes** share GPU nodes. With
+one replica size, or whole-node replicas, any placement the scheduler picks is
+as good as the plan.
+
+For mixed sizes, score GPU nodes with `MostAllocated` and give the GPU
+resource a weight, in the scheduler profile that places your model servers:
+
+```yaml
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+profiles:
+  - schedulerName: default-scheduler
+    pluginConfig:
+      - name: NodeResourcesFit
+        args:
+          scoringStrategy:
+            type: MostAllocated
+            resources:
+              - name: nvidia.com/gpu
+                weight: 10
+              - name: cpu
+                weight: 1
+              - name: memory
+                weight: 1
+```
+
+A managed control plane may not let you change the default profile. Then run
+a second scheduler with this profile and set `schedulerName` on the model
+servers' pod templates. Without it, expect occasional Pending replicas that
+node fit did not predict; the in-flight hold releases their hole after 5
+minutes.
 
 ### What this does and does not bound
 

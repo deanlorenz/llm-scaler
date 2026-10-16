@@ -17,7 +17,8 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
-| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
+| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back; `wva_model_scaling_blocked{reason="no-composite-signal"}` (it blocks scaling only when `saturation` is not listed) | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics, no listed analyzer able to size it | [will not scale up](#a-model-will-not-scale-up) |
+| one role (often prefill) never moves | `composite holds a role` in the controller log; no blocked reason is set | a policy without `saturation` whose analyzers do not size that role, or a listed analyzer inside its staleness grace | [will not scale up](#a-model-will-not-scale-up), step 3 under `no-composite-signal` |
 | will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
@@ -74,6 +75,33 @@ wva_metrics_freshness_status{status!="fresh"} > 0         # decided on stale or 
 `wva_node_access_denied` is covered in [controller not Ready](#the-controller-is-not-ready-or-crash-looping);
 a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 [metrics](#metrics-stale-or-missing).
+
+**`no-composite-signal`**: no analyzer the policy lists could size any variant
+this cycle. With `saturation` listed, the model is sized on saturation's own
+result, as before the composite existed; without it, the model holds where it
+is, up and down. The
+dashboard's *Models blocked from scaling* panel counts it.
+
+1. Check each listed analyzer reports the model:
+   `wva_analyzer_target{model_name="<model>"}`, one `analyzer_name` per listed
+   analyzer.
+2. Run the controller at `--v=3` and read the `composite-contributors` line: per
+   variant, which analyzers sized it (`contributors`) and the replicas they
+   needed (`totalReplicas`).
+3. Look for `composite holds a role` in the log: a role no listed analyzer can
+   size, or one waiting out a listed analyzer's missed reading (up to three
+   cycles). It is logged for a single held role too, which sets no blocked
+   reason.
+4. Look for the line that names the cause:
+   - `listed analyzer reports no per-role demand, so it cannot size this P/D
+     model`: the analyzer reports model-level demand only, so on P/D it sizes
+     neither role.
+   - `no listed analyzer can size this model this cycle, so it holds where it
+     is`: the policy leaves `saturation` out and lists nothing else that
+     sizes, for example `slo` alone.
+   - `a listed analyzer's need is dropped: saturation has no per-replica
+     capacity for the variant`: saturation has no capacity estimate for the
+     variant yet, so another analyzer's need cannot be expressed for it.
 
 ## A model will not wake from zero
 
@@ -345,10 +373,12 @@ model cannot grow while others hold GPUs.
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
 | A Kueue-backed namespace stops below its ClusterQueue's `nominalQuota`; a non-zero `charge` on its rows in the `Kueue borrowing applied` log line | other workloads Kueue admitted in the queue (a training job, another namespace on a shared queue) hold that much of it, and the figure is charged with it. Expected: Kueue would hold more replicas pending. See [What a quota is charged](quota-limiter.md#what-a-quota-is-charged) |
-| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
+| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`), `no_constraints` (the limiter answered with no figures at all; the shipped limiters always answer, so report it as a bug with the log line). `GPU constraint provider bounds scaling again` ends it |
 | `Physical limiter: replicas are not fitted to nodes this cycle` | the physical limiter bounds scaling but no node snapshot younger than 2 minutes exists, so replicas are fitted to the pool only, as before node fit; `reason` says why. Usually the GPU usage observation is failing (the same cause skips the provider soon after). `Physical limiter: replicas are fitted to nodes again` ends it. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
-| A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
+| A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (the in-flight hold: up to 5 minutes, or a Kueue flavor's `placementTimeout` when longer, tripled while a cluster-autoscaler scale-up is pending): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | A new group of an exclusive-topology LeaderWorkerSet stays Pending (`FailedScheduling` on pod affinity), and `wva_pod_access_denied` is 1 | a namespace-scoped controller that may not list Pods cluster-wide sees only its own namespace's Pods, so it misses other namespaces' LeaderWorkerSet groups. A topology domain where only such a group runs looks free, and a group is ordered into it. Grant `list` on `pods` cluster-wide. See [When policy demands a limiter the controller cannot serve](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve) |
+| `ResourceConstrained` ends `(limited by pd-pair-borrows-whole)`; `wva_decisions_limited_total{limiter_name="pd-pair-borrows-whole"}` rising | Kueue borrowing: the model's next P/D pair would put one role on guaranteed and the other on borrowed capacity, and a pair borrows only whole. The GPUs are there; the rule holds the pair back, because Kueue could reclaim one half alone. It grows once a whole pair fits borrowed capacity, or guaranteed capacity holds both roles. See [Cohort borrowing](quota-limiter.md#cohort-borrowing) |
+| A Job's pods fail to create (`FailedCreate`, `exceeded quota`) in a namespace where serving pods wait at Kueue's admission gate | a `ResourceQuota` counts gated pods, Kueue does not. A serving replica ordered past what Kueue admits holds the namespace's `ResourceQuota` while it waits, and the Job Kueue did admit cannot create its pods. Find the gated pods with `kubectl get pods -n <ns> -o jsonpath='{range .items[?(@.spec.schedulingGates)]}{.metadata.name}{"\n"}{end}'`, and lower the serving model's `maxReplicaCount` so it stops ordering past Kueue's grant |
 | `Upgrade note (transitional): this policy declares a physical GPU limiter and quotas, and both now bound scaling` | expected once after upgrading a policy that declares both kinds: the listed variants get a different target than the quota alone gave them, because the GPUs that exist now bound them too. Nothing to fix unless the physical bound is not wanted; then drop the `gpu-inventory` entry. Logged only when the set of variants changes, and removed in the next release |
 
 A **fully** spent quota shows the same signals: a model the last GPUs did not
@@ -390,8 +420,8 @@ See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
 
 ## Replicas dropped under Kueue borrowing
 
-**Symptom**: a model on a Kueue quota that counts borrowing went from, say, 6
-to 4 replicas, and nobody lowered it.
+**Symptom**: a model on a Kueue quota, usually one that counts borrowing, went
+from, say, 6 to 4 replicas, and nobody lowered it.
 
 There are four causes. Check them in this order; the first that matches is
 the answer.
@@ -399,8 +429,8 @@ the answer.
 | cause | how to tell |
 | --- | --- |
 | 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
-| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places |
-| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. Expected; the borrower borrows again when the cohort has free GPUs |
+| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places. On an entry that counts no borrowing (`countBorrowable: false`, a queue in no cohort), a replica Kueue held at its admission gate, waiting for quota, past `placementTimeout` is released too: its Event has cause `kueue-gate`, and `wva_borrow_releases_total{cause="kueue-gate"}` counts it. If Kueue was preempting lower-priority work in the queue for it, raise `placementTimeout` above that work's termination grace period |
+| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. When a wake from zero grew it, the borrower gives it back in the next cycle. Expected; the borrower borrows again when the cohort has free GPUs |
 | 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
 
 Commands, in the same order:
@@ -408,7 +438,7 @@ Commands, in the same order:
 ```bash
 kubectl get workloads.kueue.x-k8s.io -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Evicted")].reason}{"\n"}{end}'
 kubectl get events -n <ns> --field-selector reason=BorrowedCapacityReleased
-$LOGS | grep -E 'Releasing borrowed capacity|Kueue preempted a pod' | tail
+$LOGS | grep -E "Releasing borrowed capacity|Releasing replicas held at Kueue|Kueue preempted a pod" | tail
 kubectl get pods -n <ns> --field-selector status.phase=Pending
 ```
 
@@ -505,7 +535,8 @@ guaranteed figure) while its cohort has idle GPUs;
 ```bash
 kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
   | jq -c '.entries[] | select(.reason) | {namespace, accelerator, reason}'
-$LOGS | grep 'Kueue borrowing applied' | tail -1
+# the line reads "applied", or "frozen at the last figures" while stale or Kueue is down
+$LOGS | grep -E 'Kueue borrowing applied|borrowing frozen at the last figures' | tail -1
 ```
 
 Each namespace shows one reason: the first in this table that applies. Every
@@ -681,7 +712,7 @@ too high or too low.
 ```bash
 kubectl get clusterqueue <cluster_queue> -o jsonpath='{.status.flavorsReservation}'
 kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' | jq -c '.entries[]'
-$LOGS | grep 'Kueue borrowing applied' | tail -1     # kueueBorrowed per queue row
+$LOGS | grep -E 'Kueue borrowing applied|borrowing frozen at the last figures' | tail -1     # kueueBorrowed per queue row
 ```
 
 Usual causes: a Kueue feature borrowing does not detect (`waitForPodsReady`
@@ -840,6 +871,10 @@ failed reads and writes, and the log says why (logger `learned-state`):
     be read completely, and no k2 window was recent enough, on the hardware
     it runs now, to keep` -- the unread-configuration case with nothing to
     keep, for the same reasons. Nothing to do; the variant learns again;
+  - `learned state not restored: ... and the snapshot held no k2 window of
+    the variant's own to keep` (either case) -- the variant never measured a
+    k2 of its own before the restart: it had borrowed one, or had not
+    saturated. Nothing was lost. Nothing to do;
   - `learned state not restored: the variant's engine configuration could not
     be read completely, and the snapshot recorded no engine arguments to check
     its windows against` -- an unread configuration and a snapshot from a
@@ -852,15 +887,28 @@ failed reads and writes, and the log says why (logger `learned-state`):
   Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
   `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
-  will be written until a read succeeds` -- typically Forbidden: the Role
-  `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
-  `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
-  the stored state is not overwritten meanwhile. For the first 10 minutes
+  will be written until a read succeeds` -- the read failed; the error says
+  why. Not a missing `wva-learned-state-role`: in every install mode the
+  manager Role reads ConfigMaps in the controller's namespace. Look for an
+  API server or network error, or a `wva-manager-role` or its binding in the
+  controller's namespace that was edited or removed (re-run
+  `NAMESPACE=<controller-namespace> make setup-prereqs` to restore it).
+  Retried every minute;
+  the stored state is not overwritten meanwhile, and `Learned state: the
+  snapshot can be read again` marks recovery. For the first 10 minutes
   lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
   starts; after that they start as usual, and a read that succeeds later
   keeps those over the stored ones -- a borrow the snapshot had as spent
-  runs its hold and relaxation again. Fix the Role within 10 minutes to
+  runs its hold and relaxation again. Fix the cause within 10 minutes to
   avoid it.
+- `Learned state: could not write the snapshot` -- typically Forbidden: the
+  Role `wva-learned-state-role` or its binding is missing. The snapshot is
+  still read and restored -- the manager Role reads it -- but nothing learned
+  since is kept for the next restart, which restores the snapshot as it was
+  when writing stopped. Ask an admin to re-run
+  `NAMESPACE=<controller-namespace> make setup-prereqs`. Logged once, not
+  every minute; `Learned state: the snapshot can be written again` marks
+  recovery.
 - `Learned state: snapshot not restored` -- the document names no writer, or
   a controller in another namespace wrote it (a ConfigMap copied by hand).
 - `Learned state: the snapshot was over its size bound` -- the least recently
@@ -1477,6 +1525,26 @@ same way when its demand rises. Otherwise:
   up) but does not shield them from another model's need.
 
 See the [scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
+
+### A role is held by floors or by a release that failed
+
+Read the role's reason first:
+
+```promql
+wva_model_scaling_blocked{reason=~"floor-pinned|floors-exceed-quota|donors-at-floor|release-timeout|release-taken|release-shape-mismatch"} == 1
+```
+
+| reason | means | what to do |
+| --- | --- | --- |
+| `floor-pinned` | the model's `minReplicaCount` holds at least one replica more than it needs; the share cannot give those GPUs to others | lower `minReplicaCount` if the floor is not deliberate |
+| `floors-exceed-quota` | the floors of the group's models add up to more than its budget; every model of the group shows it | lower a floor or raise the quota |
+| `donors-at-floor` | the role is short, and no other role holds more than its floor to give | lower another model's `minReplicaCount`, or raise the quota |
+| `release-timeout` | the role, as a donor, did not scale down within the release timeout; the release was aborted and it backs off before it is asked again | check the donor's ScaledObject scale-down window, its pods' termination grace, and that KEDA acts on it |
+| `release-taken` | the role's last fill timed out: the GPUs its donors released were taken by a pod the scaling manager did not place. Cleared after one release timeout | look for other workloads scheduling onto that accelerator; a `ResourceQuota` or a dedicated node pool keeps them off |
+| `release-shape-mismatch` | the role's last fill timed out: enough GPUs were free in total, but on no node enough for its largest pod. Cleared after one release timeout | the GPUs are fragmented; free a whole node, or use smaller replicas |
+
+The reasons and their timing are in
+[utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
 
 ### A model shows `no-compatible-donor`
 

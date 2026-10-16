@@ -205,7 +205,7 @@ func newQuotaLimiters(cfg *config.Config, kubeClient client.Client) ([]Limiter, 
 		}
 		inv := NewQuotaInventoryWithSource(entry, source)
 		if shared != nil {
-			// The managed pods the last borrowing cycle saw at Kueue's gate:
+			// The managed pods the last cycle saw at Kueue's gate:
 			// Kueue has not reserved them, so they do not cancel the charge
 			// of what it reserved for others (KU1).
 			inv.SetGatedSource(DefaultBorrowInFlight)

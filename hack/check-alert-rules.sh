@@ -16,6 +16,8 @@
 #      kueue-alerts: the Kueue borrowing alerts fire per namespace, per quota
 #      entry and per controller instance as their runbooks say, and the
 #      thrashing alert counts four losses, not three.
+#      learned-state-alerts: a snapshot that cannot be written raises
+#      WVALearnedStateSnapshotFailing, and one that recovers stops it.
 #      utilization-share-alerts: a frozen group, floors past the quota and an
 #      invalid optimizer block fire, passing states do not, and a parked model
 #      with no wake signal pages once, not twice.
@@ -63,8 +65,8 @@ for t in "$TESTS"/*.test.yaml; do
   RAN=$((RAN + 1))
 done
 # Every file, or a rename silently drops one.
-if [ "$RAN" -ne 3 ]; then
-  echo "FAIL: $RAN alert test files ran, not 3. Update the count deliberately." >&2
+if [ "$RAN" -ne 4 ]; then
+  echo "FAIL: $RAN alert test files ran, not 4. Update the count deliberately." >&2
   exit 1
 fi
 echo "ok: alert rules parse and the alert tests pass ($RAN files)"

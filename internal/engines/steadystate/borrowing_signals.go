@@ -280,6 +280,13 @@ func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now t
 // the scaling manager lowered it to give borrowed capacity back, and why. The
 // recorder aggregates repeats.
 func (e *Engine) borrowReleasedEvent(r allocation.BorrowRelease, acc scaletarget.ScaleTargetAccessor) {
+	if r.AtGate {
+		e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,
+			fmt.Sprintf("Released replicas held at Kueue's admission gate: replicas lowered from %d to %d (cause %s). "+
+				"Kueue did not admit them within the placement timeout: their ClusterQueue has no room for them, "+
+				"and their namespace borrows nothing from its cohort", r.From, r.To, r.Cause))
+		return
+	}
 	e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,
 		fmt.Sprintf("Released borrowed Kueue capacity: replicas lowered from %d to %d (cause %s). "+
 			"Replicas on borrowed GPUs did not place within the placement timeout; this model borrows "+

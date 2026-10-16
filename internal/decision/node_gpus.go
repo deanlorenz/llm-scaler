@@ -27,6 +27,10 @@ type NodeGPU struct {
 	// an exclusive-topology LeaderWorkerSet lands in no topology domain
 	// holding a pod of another group: its pods' anti-affinity refuses it.
 	LWSGroup bool
+	// LWSGroups is the groups whose pods hold the node or are nominated for
+	// it, each "namespace/<group-unique-hash>", sorted; set with LWSGroup. A
+	// node a group leaves still holds the others (allocation.ShareNode).
+	LWSGroups []string
 }
 
 // Free is the node's GPUs no scheduled pod requests.

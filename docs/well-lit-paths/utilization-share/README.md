@@ -6,7 +6,7 @@ Each model gets what it needs, the rest is spread as headroom by weight, and
 GPUs move between models as demand shifts. For GPUs that are paid for whether
 used or not (on-prem, a reservation, a team allotment).
 
-**Maturity:** **Experimental.** One run per configuration, on 1 GPU per Pod
+**Maturity:** **Experimental.** One or two runs per configuration, on 1 GPU per Pod
 ([Evidence](#evidence)). The defaults are starting points.
 
 ## When not to take it
@@ -28,7 +28,7 @@ in a checkout of this repository. Every step is in
 Steps 2 to 4 are run by whoever owns the policy: the namespace owner for an
 own-install quota, the cluster admin for a policy in `wva-policy` or `wva-<ns>`.
 
-1. Namespace owner: [install with a quota](../../guides/install-in-namespace/), adding `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'`, or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
+1. Namespace owner: [install with a quota](../../guides/install-in-namespace/), adding `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'`, or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#a-trial-setup).
 2. [Check there is a budget to share](../../guides/utilization-share/README.md#prerequisites).
 3. [Turn it on in shadow, read what it would move, then activate it](../../guides/utilization-share/README.md#installation-instructions).
 4. [Check it works](../../guides/utilization-share/README.md#verification): the mode reads `active` and transfers end `done`.
@@ -53,9 +53,10 @@ is out of your reach, see [Details](#when-the-controller-is-out-of-your-reach).
 
 ## Evidence
 
-Eight benchmark runs so far, on H200s, two 8B models at 1 GPU per replica,
-**each arm run once**. Every number, table and timeline is in
-[measured](measured.md); all eight runs are summarised [below](#all-eight-runs).
+Nine benchmark runs so far, on H200s, two 8B models at 1 GPU per replica, in
+seven configurations: two were repeated, the rest **run once**. Every number,
+table and timeline is in [measured](measured.md); all nine runs are summarised
+[below](#all-nine-runs).
 
 - **Latest aggregated run (2026-10-12):** the model that burst first was
   served at once, median TTFT (time to first token) 0.07 s against 25.6 s with
@@ -73,7 +74,7 @@ Eight benchmark runs so far, on H200s, two 8B models at 1 GPU per replica,
 
 ## Details
 
-### All eight runs
+### All nine runs
 
 [Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
 runs the same traffic three times: no `optimizer:` block (`today`), `shadow`,
@@ -117,8 +118,8 @@ falling model's whole scale-down window.
   stays on the default optimizer.
 - **A namespace a namespace quota excludes, with no finite cluster bound.** It
   is never planned and stays on the default optimizer. Add a `scope: cluster`
-  quota for its accelerator type, or set `physicalGroups: true` beside a
-  `gpu-inventory` limiter.
+  quota for its accelerator type, or, on a cluster-scoped controller, set
+  `physicalGroups: true` beside a `gpu-inventory` limiter.
 
 ### What it needs
 
@@ -138,8 +139,8 @@ falling model's whole scale-down window.
   ordinary scale-down.
 - A distinct `CONTROLLER_INSTANCE` per controller when several share a
   cluster; each cleans up only its own transfer marks.
-- Node information for placement. A namespace-scoped install cannot list
-  nodes, so it plans by GPU count alone and never reports `release-taken`,
+- Node information for placement. A namespace-scoped install plans without
+  the node read, by GPU count alone and never reports `release-taken`,
   `release-shape-mismatch` or `wrong-pod`.
 
 ### When the controller is out of your reach

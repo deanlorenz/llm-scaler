@@ -69,15 +69,53 @@ keys across the static and Kueue maps match by `accelerator.SameName`, and
 usage reconciliation finds its pool by `accelerator.FindKey`.
 
 `QuotaLimiterEntries.Validate()` holds the rules the reference lists, with
-`MaxQuotaValue` the per-type ceiling; `SaturationScalingConfig.validateLimiters`
-runs it at parse time.
+`MaxQuotaValue` the per-type ceiling; `ScalingPolicy.validateLimiters`
+(`config/saturation_scaling.go`) runs it at parse time.
 
 Quotas alone read no nodes: the limiter paths never call
 `K8sWithGpuOperator.Discover`, `DiscoverUsage` or `DiscoverNodes`;
 `collector.CollectInventoryK8S` (the `WVA_LIMITED_MODE` log) is gated by
 `scalingpolicy.ShouldCollectClusterInventory`; and the `gpuusage.Refresher` timer
-by `Refresher.Periodic` (wired in `cmd/main.go`). The scale-from-zero engine's
+by `Refresher.Periodic` (wired in `cmd/main.go`), which asks
+`allocation.NodeUsageWanted`: a physical limiter, or the utilization-share
+optimizer on a cluster-scoped install. The scale-from-zero engine's
 `EnsureFresh` is ungated but asks only for a provider on the physical basis.
+
+## Usage bases
+
+A provider declares the usage it is charged with through
+`allocation.UsageBasis` (`UsageBasisOf`; physical when it declares none, the
+safe direction):
+
+| basis | counts | produced by | consumed by |
+|---|---|---|---|
+| `PhysicalUsage` | every GPU held on the GPU nodes, attributed by node | `internal/gpuusage` (the pod walk, `gpunodes.usageWalk`) | `TypeInventory` |
+| `ManagedUsage` | the managed population, `CurrentReplicas * GPUsPerReplica` by resolved accelerator, plus the warm pools' Pods (`addWarmPoolGPUs`) | the saturation engine (`gpuUsageByType`, published as `decision.LatestManagedGPUUsage`, an explicit zero when the fleet is parked) | `QuotaInventory` |
+
+`GPUUsageViews` carries both; `For(cp)` hands each provider its pair and
+`Has(basis)` says whether a basis was observed. A nil view is "not observed",
+never "nothing in use": a provider fed a nil map would report its whole
+capacity free. `ComputeAvailableConstraints` therefore skips a provider whose
+basis is unobserved (below). Each engine builds its views in its own
+`gpuUsageViews`; the scale-from-zero one reads only the bases its providers
+ask for.
+
+`TypeInventory.SetUsed` reconciles usage keys onto the discovered pool keys
+with `accelerator.FindKey`. A key no discovered type owns is dropped and
+reported in `wva_unattributed_gpus`, except on a cluster with one accelerator
+type (`soleAcceleratorType`), where it can only be that type. The demand side
+looks its key up with `accelerator.FindBudgetKey` (Budgets and the family tree,
+below).
+
+`TypeInventory`'s limit is node Allocatable per type and still counts a node
+that refuses new pods. Node fit leaves such a node out
+(`gpunodes.refusesNewPods` sets `decision.NodeGPU.Unschedulable`), so the gap
+remains only on a cycle with no node view.
+
+The physical view counts pods by node, so a namespace-scoped controller sees
+other namespaces' pods only through an uncached, cluster-wide Pod list
+(`gpunodes` `listPods`). Denied, the walk counts its own namespace and sets
+`wva_pod_access_denied` while a physical limiter is in force.
 
 ## Budgets and the family tree
 
@@ -102,6 +140,29 @@ family key, and a bare family name at its summed bound. `FitsGPUBudget`
 materializes its demand's names, and fits the demand per budget key and per
 key that covers several of its names (`accelerator.Covers`), as
 `fitPairToBudget` fits a P/D pair.
+
+A family key across several allowlists is read by
+`accelerator.ClusterAllowlistsBound`. When no allowlist lists the family
+itself, or only some do, its GPUs can only be listed products, so the family
+is also bounded by the sum, per product, of the tightest bound on that
+product. When every allowlist lists the family itself, the tightest family
+figure alone applies. `mergeConstraints` uses it for the cluster bounds, and
+`mergeNamespaceConstraints` for a family one holder lists only through
+products (`accelerator.ClosesFamily`), there over the holders and the cluster
+bounds together. The exclude warnings read the same function.
+
+The bound on a key a namespace allowance lists must not depend on the names
+the cycle declares. `mergeWithAllowanceKeys` materializes those keys
+(`namespaceKeys`) on top of the declared names. The reads that bound a
+namespace's allowance use it: the optimizer's pass, `gpuBudgets` for a
+namespace the quotas hold, and `namespaceHeadroom`. The reads of the cluster
+alone keep `mergeConstraints`: an open namespace in `gpuBudgets`, the
+utilization share, and the warm pool's cluster figure
+(`passHeadroom.clusterKeys`). An extra family or product key there would
+read as a listed sibling to `accelerator.FindBudgetKey` and deny products the
+cluster allows. The namespace budgets of the pass and of `namespaceHeadroom`
+also materialize the cluster's products (`clusterProducts`), so the warm pool
+reads each product a namespace may use at that product's figure.
 
 ## Node fit
 
@@ -197,6 +258,25 @@ sparse debits; `adopt` commits a clone's debits.
   counts by the view's rule (`allocation.NodeAdmits`: `accelerator.SameName`,
   schedulable, taints tolerated by every receiver role's
   `scaletarget.PodTolerations`).
+- The share's groups follow the view's domain rule. `ShareNode.Groups` is the
+  snapshot's `LWSGroups`: the groups on the node, `namespace/<group hash>`,
+  from `usageWalk`. `ShareNode.Claimed` is the label keys for which the
+  node's domain already got a group this cycle: from the pass and the
+  in-flight holds (`PassLeft.TakenDomains`, net of the models the share
+  plans, via `ClaimShareDomains`), or from the share itself. `ShareFitPods`
+  (the idle fill and the planner's idle credit) builds a `NodeView` from the
+  share's picture (`shareNodeView`: `Groups` as `LWSGroup`, each claim taken
+  in `NodeView.domains` under its own key) and places through
+  `NodeView.place`. That covers one group per domain, best fit, and
+  each pod judged by its own template (`podTemplates`,
+  `SharePlanInput.Placements`). A group it places claims its domain. The
+  donor-set search (`shareNodeSet`) opens holes the view does not model. It
+  judges templates with the same functions (`sharePodNodes`) and skips a
+  domain claimed for its key. It also skips a domain where a group stays
+  (`freesGroups`): a domain stays allowed only when every group on its nodes
+  is a donor group the set takes (`ShareUnit.Group`, named as in `Groups`).
+  The planner/fill agreement table checks both walk domains, groups, claims
+  and templates the same way.
 - The utilization share's cluster budget is the cluster bounds alone
   (`clusterBudgets`, over `mergeConstraints`): a namespace-scoped quota is no
   budget over every namespace. A model of a namespace such a quota excludes is
@@ -241,9 +321,34 @@ is newer than the view's snapshot.
   applies when the variant has an unplaced replica (`InFlightAdmission.Unplaced`)
   or the ledger has already sighted it in this process (`sighted`, set by
   `Commit` and `Admit`, not by `Provisional`). On the first sighting after a
-  restart a variant with no unplaced replica starts its entry: the ledger is
-  not persisted, and a Pending pod's node stays held. The scale-from-zero engine admits
-  each woken candidate at want 1 (`wake_tick.go`).
+  restart a variant with no unplaced replica and no restored entry starts
+  one, so a Pending pod's node stays held even when the persisted ledger
+  did not carry it. The scale-from-zero engine admits each woken candidate at
+  want 1 (`wake_tick.go`).
+- Persistence (`inflight_persist.go` in `allocation` and in `steadystate`):
+  every steady-state cycle hands `MarshalInFlight` to the status publisher
+  (`controllerstatus.KeyInFlightLedger`, carried over to a new term). It
+  holds each live entry's shape, `want`, placed count, expiry and TTL, and
+  its partial groups' placed pods. It is bounded by `maxInFlightPersisted`
+  and `maxInFlightBytes`, keeping the holds that end last. The engine reads
+  it back once, before its first cycle (`restoreInFlight`, from
+  `StartOptimizeLoop` and each cycle until a read succeeds), and persists
+  nothing before that read. `RestoreInFlight` keeps each entry's clock,
+  skips a variant the ledger already holds, and drops an entry with figures
+  this controller does not write, then keeps the `maxInFlightPersisted` holds
+  that end last. A TTL is cut to `max(InFlightTTL, 3 x PlacementTimeout)`.
+  A restored entry has no `placed` func: it counts no pods until the
+  variant's next `Commit`. The first fitted cycle ends every restored entry
+  it does not admit (`DropRestoredExcept`, from `admitInFlight`; a committed
+  admission, a wake's included, takes the entry off `restored`).
+  `MarshalInFlight` encodes each entry under the lock. On shutdown the
+  publisher writes once more, bounded by 2s (`flushOnShutdown`), so the last
+  cycle's ledger reaches the next leader. A restored partial
+  group's placed pods are seen at the zero time, so they are never charged
+  again on their node. An Unschedulable replica and a half-placed group thus
+  keep their holes across a restart: the first cycle's `ExistingOnly`
+  admission updates the restored entry. A ledger that is not JSON, or of
+  another `InFlightFormat`, is ignored.
 - TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
   (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both
   engines; from the steady-state engine three times it while
@@ -334,3 +439,38 @@ logs `Upgrade note (transitional)` when the set of differing variants changes.
 It is marked `TODO(#164)`: remove it, `quotaAloneReportEvery`, the two
 `quotaAlone*` engine fields and `GreedyByScoreOptimizer.ShadowOptimize` one
 release after the first release that composes limiters.
+
+## Testing the wake's capacity check end to end
+
+`test/e2e/scale_from_zero_capacity_test.go` (label `full`) exercises the
+**deny** branch: it declares the physical limiter, fills an accelerator with an
+occupier, and expects a parked variant on it not to wake. A denial needs three
+things together:
+
+1. the variant's accelerator resolves from a GPU `nodeSelector`: a parked
+   variant has no pods to observe, and an unresolved candidate adds no
+   demand, so `FitsGPUBudget` passes having checked nothing;
+2. a usage view for the provider's basis: for the physical limiter the
+   engine's `EnsureFresh` observes one at decision time; a quota needs a
+   completed saturation cycle;
+3. the occupier's usage lands on the pool key the limits use (Usage bases,
+   above).
+
+The trigger fights condition 2. A wake fires on EPP flow-control queueing,
+which happens only when the pool has **no ready endpoints**, so the occupier
+must not sit in the pool under test. It serves its own model in its own pool
+(`fixtures.WithPoolGuide`).
+
+## Assumption: one model, one InferencePool
+
+The scale-from-zero engine reads a model's pending requests from one EPP.
+`buildCandidates` takes the pool of the first variant whose pool resolves and
+uses it for the whole model group, with no log when another variant resolves
+to a different pool. One scrape per model per tick keeps the wake cheap, and
+it matches the project's one-model-one-pool contract.
+
+Per-role pools (decode behind one EPP, prefill behind another) are not
+supported: a variant would be judged by the other pool's queue. Supporting
+them means resolving the pool per candidate, reading each distinct pool, and
+still selecting across the whole model so a P/D pair is fitted to one joint
+budget.

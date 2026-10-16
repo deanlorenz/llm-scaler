@@ -2,6 +2,7 @@ package accelerator
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -85,6 +86,74 @@ func ClusterAllowlistBound[V any](allowlist map[string]V, name string, bound fun
 		return 0, false, true
 	}
 	return free, unlimited, true
+}
+
+// ClusterAllowlistsBound is the bound several cluster-wide allowlists put
+// together on the accelerator called name: the GPUs that fit under every one
+// of them, and whether any of them bounds name. Each is read by
+// ClusterAllowlistBound, and the tightest wins.
+//
+// A family name needs more than the tightest. When one of the allowlists does
+// not list the family itself, the family's GPUs can only be products that
+// allowlist lists, so the family is also bounded by the sum, over every
+// product any of them lists, of the tightest bound on that product. Two
+// allowlists of {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 2} and
+// {NVIDIA-H100-80GB-HBM3: 2, NVIDIA-H100-PCIE-80GB: 8} each allow 10 H100s,
+// but only 2 of each product fit under both: 4.
+func ClusterAllowlistsBound[V any](allowlists []map[string]V, name string, bound func(V) Bound) (free int, unlimited, bounds bool) {
+	tightestOf := func(name string) (free int, unlimited, bounds bool) {
+		unlimited = true
+		for _, a := range allowlists {
+			f, u, b := ClusterAllowlistBound(a, name, bound)
+			if !b {
+				continue
+			}
+			free, unlimited = tighter(free, unlimited, f, u)
+			bounds = true
+		}
+		return free, unlimited && bounds, bounds
+	}
+	free, unlimited, bounds = tightestOf(name)
+	if !bounds || !ClosesFamily(allowlists, name) {
+		return free, unlimited, bounds
+	}
+	var products []string
+	for _, a := range allowlists {
+		for key := range a {
+			if IsProductOf(key, name) && !slices.ContainsFunc(products, func(p string) bool { return strings.EqualFold(p, key) }) {
+				products = append(products, key)
+			}
+		}
+	}
+	sum, sumUnlimited := 0, false
+	for _, p := range products {
+		f, u, _ := tightestOf(p)
+		if u {
+			sumUnlimited = true
+			break
+		}
+		sum += f
+	}
+	free, unlimited = tighter(free, unlimited, sum, sumUnlimited)
+	return free, unlimited, true
+}
+
+// ClosesFamily reports whether name is a family that one of the allowlists
+// does not list itself, ignoring case. That allowlist admits only the products
+// of name it lists, so GPUs of the family can only be those products. Never
+// true for an unresolved placeholder such as "unknown", which has no products.
+func ClosesFamily[V any](allowlists []map[string]V, name string) bool {
+	if !IsFamily(name) || !constants.IsAcceleratorResolved(name) {
+		return false
+	}
+	return slices.ContainsFunc(allowlists, func(a map[string]V) bool {
+		for key := range a {
+			if strings.EqualFold(key, name) {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // UnlistedProduct returns a product name under family that no real accelerator

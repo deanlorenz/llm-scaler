@@ -157,7 +157,7 @@ func fleetPrefixHitRate(replicas []domain.ReplicaMetrics, rolesByVariant map[str
 	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.PrefixCacheHitRate },
 		func(rm domain.ReplicaMetrics) bool {
-			return canonicalRole(rolesByVariant[rm.VariantName]) == domain.RolePrefill
+			return domain.CanonicalRole(rolesByVariant[rm.VariantName]) == domain.RolePrefill
 		},
 		// A hit rate of zero is a reading -- a fleet with prefix caching off
 		// reports it on every replica, and skipping those would leave the mean

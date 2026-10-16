@@ -191,9 +191,18 @@ func applyGPULimitAttribution(
 // a type the cluster bounds do not list is zero too however the namespace lists
 // it (clusterBudgetFor) -- a physical pool of {H100: 8} leaves a namespace
 // allowance of {A100: 4}, or of unlimited A100s, nothing to place.
+//
+// The cluster bound on each key is read from mergeWithAllowanceKeys, so a key
+// the cluster bounds list only through products, such as a family under a
+// quota of products, reads their sum. A namespace's map also holds every
+// product the cluster bounds list that its allowance admits (clusterProducts),
+// each at the tighter of the two figures: a namespace allowed {H100: -1} under
+// {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8} reads 8 of each
+// product, not the family's 16, and a product the cluster does not list reads
+// 0, as the optimizer plans it.
 func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string]int {
 	out := namespaceAllowance(constraints)
-	cluster := clusterHeadroom(constraints)
+	cluster := mergeWithAllowanceKeys(constraints)
 	for _, perType := range out {
 		for accType, free := range perType {
 			cv, bounded := clusterBudgetFor(cluster, accType)
@@ -232,12 +241,13 @@ func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
 }
 
 // namespaceAllowance is the free GPUs per (namespace, accelerator) under the
-// namespace pools alone: mergeNamespaceConstraints, the optimizer's own merge,
-// so the warm pool cannot read a type the optimizer refuses. An unlimited type
+// namespace pools: mergeNamespaceConstraints, the optimizer's own merge, so the
+// warm pool cannot read a type the optimizer refuses, with the cluster's
+// products materialized as the optimizer's pass does. An unlimited type
 // is decision.HeadroomUnlimited -- skipping it would leave the type absent from
 // a present namespace, which a reader takes as DENIED.
 func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[string]int {
-	out := mergeNamespaceConstraints(constraints)
+	out := mergeNamespaceConstraints(constraints, clusterProducts(constraints)...)
 	for _, perType := range out {
 		for accType, free := range perType {
 			if free < 0 {
@@ -339,6 +349,10 @@ type passHeadroom struct {
 	start     map[string]int
 	startByNS map[string]map[string]int
 	spends    []spendOp
+	// clusterKeys are the keys of available the warm pool's cluster figure
+	// keeps: available also holds every key a namespace allowance lists
+	// (mergeWithAllowanceKeys), which bound those namespaces and nothing else.
+	clusterKeys []string
 }
 
 // cloneNamespaceBudgets copies a namespace -> accelerator -> GPUs map, nil for
@@ -445,6 +459,18 @@ func (p *PassLeft) NodeDebits(exclude map[string]bool) map[string]int {
 	return p.h.nodes.DebitsExcept(func(owner string) bool { return owner == PromisedOwner || exclude[owner] })
 }
 
+// TakenDomains is, per topology label key, the domains the pass's node view
+// gave an exclusive-topology group -- the in-flight ledger's holds and the
+// other models' placements -- for every owner other than the models in
+// exclude (namespace/modelID): the utilization share places no group there
+// (ClaimShareDomains). Nil when the pass had no node view.
+func (p *PassLeft) TakenDomains(exclude map[string]bool) map[string][]string {
+	if p == nil {
+		return nil
+	}
+	return p.h.nodes.TakenDomains(func(owner string) bool { return exclude[owner] })
+}
+
 // publish records h as the warm pool's headroom: each capped namespace's
 // allowance bounded by the cluster budget (as namespaceHeadroom bounds it),
 // the cluster budget, and the nodes' holes.
@@ -468,7 +494,21 @@ func (h passHeadroom) publish(now time.Time) {
 		}
 		free[ns] = inner
 	}
-	decision.PublishHeadroomBoundsOnNodes(free, h.available, h.nodes.Holes(), h.version, now)
+	decision.PublishHeadroomBoundsOnNodes(free, h.clusterFigure(), h.nodes.Holes(), h.version, now)
+}
+
+// clusterFigure is available with only clusterKeys: the cluster figure a
+// namespace no quota holds reads, as mergeConstraints keys it. Nil when
+// available is (no cluster bound in force).
+func (h passHeadroom) clusterFigure() map[string]int {
+	if h.available == nil {
+		return nil
+	}
+	out := make(map[string]int, len(h.clusterKeys))
+	for _, key := range h.clusterKeys {
+		out[key] = h.available[key] // a key mergeConstraints gives is one of available's
+	}
+	return out
 }
 
 // PublishNamespaceHeadroom records what each namespace may still take, from a

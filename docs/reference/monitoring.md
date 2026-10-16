@@ -208,8 +208,11 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 | `wva_unattributed_gpus` | GPUs in use that could not be charged to a pool — usually a workload whose accelerator did not resolve |
 
 **Is the decision itself sane?** Compare `wva_desired_replicas` with
-`wva_current_replicas`; `wva_saturation_utilization`, `wva_analyzer_demand` and
-`wva_analyzer_target` show what drove it.
+`wva_current_replicas`; `wva_saturation_utilization`,
+`wva_analyzer_demand{analyzer_name="CompositeSignal"}` and
+`wva_analyzer_target{analyzer_name="CompositeSignal"}` show what drove it.
+Each analyzer's own reading is under its own `analyzer_name`; never sum across
+it.
 
 - A desired count that never becomes current is an actuation problem (KEDA, the
   HPA or the workload), not a decision problem.

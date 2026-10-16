@@ -294,6 +294,8 @@ type VariantReplicaState struct {
 	UnplacedSince    time.Time
 	UnplacedPods     []string
 	UnplacedAt       map[string]time.Time
+	// GatedAt: see VariantMetadata.GatedAt.
+	GatedAt map[string]time.Time
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.
