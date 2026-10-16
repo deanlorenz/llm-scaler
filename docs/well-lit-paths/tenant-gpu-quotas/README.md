@@ -112,11 +112,11 @@ The two shapes, with examples, are in the reference:
   manages**. N controllers each enforce their own copy, so N of them permit N
   times the figure.
 - **Namespace scope** caps each tenant, with an optional `exclude` list and a
-  fallback for namespaces you did not list. The fallback's key, `default`, is
-  **reserved**: the real `default` namespace cannot be given a quota by
-  listing it. Exclude it, or omit the reserved key so anything unlisted is
-  denied. Excluding it leaves it unlimited unless a `scope: cluster` quota
-  bounds it.
+  fallback for namespaces you did not list. `default` in `namespaceQuotas` is
+  that fallback. So you cannot give the namespace called `default` its own
+  quota. Prefer a strict allowlist with no `default` key: every unlisted
+  namespace is then denied. If you exclude `default` instead, only a
+  `scope: cluster` quota limits it.
 - A value of `-1` means unlimited.
 
 ### Things that surprise people
@@ -135,38 +135,43 @@ the finite caps. Under the default optimizer, a namespace that is unlimited
 capped peer would have used. Nobody exceeds their own authorization, but know
 this before you promise a team its number.
 
-**An excluded namespace has no quota.** It does not use the tenants' quota,
-and a full tenant quota does not stop it. Only a `scope: cluster` quota bounds
-it, and only on the accelerator types that quota lists. Without one, the
-scaling manager does not limit it at all. It does not check free GPUs either:
-if the cluster is full, new pods stay Pending. Such a namespace can take GPUs
-your tenants expect to use, because the scaling manager reserves nothing. A
-Kubernetes `ResourceQuota` or Kueue is the real boundary. The utilization-share
-optimizer does not share an excluded namespace unless a `scope: cluster` quota
-covers it.
+**An excluded namespace has no quota.**
 
-To bound it, add a `scope: cluster` quota beside the tenants' quota:
+- The tenants' quota does not apply to it. A full tenant quota does not stop it.
+- Only a `scope: cluster` quota bounds it, and only on the accelerator types
+  that quota lists. Without one, the scaling manager does not limit it at all,
+  and does not check free GPUs: if the cluster is full, new pods stay Pending.
+- It can take GPUs your tenants expect to use, because the scaling manager
+  reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
+- The utilization-share optimizer shares it only when a `scope: cluster` quota
+  covers it.
+
+To bound it, add a `scope: cluster` quota beside the tenants' quota. This goes
+in the `limiters:` list of the scaling policy's `default` entry:
 
 ```yaml
-limiters:
-  - name: cluster-cap
-    type: quota
-    scope: cluster
-    quotas:
-      A100: 20   # team-a 8 + team-b 6 + up to 6 for ns-x
-  - name: tenants
-    type: quota
-    scope: namespace
-    exclude: [ns-x]
-    namespaceQuotas:
-      team-a: { A100: 8 }
-      team-b: { A100: 6 }
+default: |
+  limiters:
+    - name: cluster-cap
+      type: quota
+      scope: cluster
+      quotas:
+        A100: 20   # 14 for team-a + team-b, plus 6 spare. ns-x may use any of the 20.
+    - name: tenants
+      type: quota
+      scope: namespace
+      exclude: [ns-x]
+      namespaceQuotas:
+        team-a: { A100: 8 }
+        team-b: { A100: 6 }
 ```
 
 The cluster quota caps everyone, tenants too, so size it as the tenants' caps
-plus what `ns-x` may use. It reserves nothing: while team-a is idle, `ns-x` can
-use team-a's part. If `ns-x` is planned first, it can take the whole cluster
-quota, and a tenant then gets less than its cap.
+plus what `ns-x` may use. Like every cluster quota, it is per controller. It
+reserves nothing: while team-a is idle, `ns-x` can use team-a's part. Models
+take turns by how much they still need, and with `enableRescale` on, `ns-x` is
+sized before the tenants. So `ns-x` can take the whole cluster quota, even
+while a tenant is below its cap and wants more.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.

@@ -108,12 +108,14 @@ limiters:
         H100: 2    # per-namespace fallback for unlisted namespaces
 ```
 
+This example logs a `WARNING`, because no cluster quota bounds the excluded
+namespaces. If they run no models, you can ignore it.
+
 > ⚠️ **Reserved key collision.** `default` in `namespaceQuotas` is the fallback
-> for unlisted namespaces, so the Kubernetes namespace named `default` cannot be
-> given a quota by listing it. Either list it in `exclude` to bypass this
-> limiter, which leaves it unlimited unless a `scope: cluster` quota bounds it,
-> or use a strict allowlist (no `default` key), so every unlisted namespace,
-> `default` included, is denied.
+> for unlisted namespaces. So you cannot give the namespace called `default` its
+> own quota. Prefer a strict allowlist with no `default` key: every unlisted
+> namespace is then denied. If you exclude `default` instead, only a
+> `scope: cluster` quota limits it.
 
 ### Special values
 
@@ -141,14 +143,18 @@ When the allocator evaluates a request for namespace `N` and type `T` in
      It does not check free GPUs: if the cluster is full, new pods stay
      `Pending`.
    - With a `scope: cluster` quota, the tenants and `N` share it. It reserves
-     nothing. If `N` is planned first, it can take the whole cluster quota,
-     and a tenant then gets less than its cap.
+     nothing for a tenant. Models take turns by how much they still need, and
+     with `enableRescale` on, `N` is sized before the tenants. So `N` can take
+     the whole cluster quota, even while a tenant is below its cap and wants
+     more.
+   - A workload in `N` that names no accelerator gets no GPUs once a
+     `scope: cluster` quota lists any type, as in every other namespace.
    - The utilization-share optimizer shares `N` only when a finite
      `scope: cluster` quota covers its accelerator type
      ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
    - The controller logs a `WARNING` when no finite `scope: cluster` quota
-     covers the types the namespace quota names, and when an `exclude` entry
-     is not a valid namespace name (it never matches).
+     covers `N`, and when an `exclude` entry is not a valid namespace name (it
+     never matches). See [Validation](#validation).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace
@@ -173,20 +179,28 @@ per `(namespace, type)`: it applies only when `N` is wholly unlisted.
 <summary>How an excluded namespace is planned</summary>
 
 A namespace quota's per-type `Pools` are the sum of its tenants' free quota.
-For a namespace it excludes (and no other namespace quota caps), the default
+Take a namespace it excludes, which no other namespace quota caps. The default
 optimizer, the rescale pass, the scale-from-zero check (`FitsGPUBudget`,
-`GPUBudgets`) and the `LimitedBy` attribution skip those pools. They use the
-budget of the `scope: cluster` quotas alone (`uncappedBudget` in
-`internal/engines/allocation/gpu_budget.go`). A type no such quota lists is
-unbounded. Every GPU a tenant or an excluded namespace takes is charged to that
-budget, so they share it.
+`GPUBudgets`) and the `LimitedBy` attribution all skip those pools for it.
+They use the budget of the `scope: cluster` quotas alone (`uncappedBudget` in
+`internal/engines/allocation/gpu_budget.go`).
+
+- Names are matched as everywhere else in the allocator
+  (`resolveAcceleratorKey`): `a100` and `NVIDIA-A100-SXM4-80GB` spend an
+  `A100` quota.
+- A type no such quota lists is unbounded. A workload that names no
+  accelerator (`unknown`) gets nothing once such a quota lists any type.
+- Every GPU a tenant or an excluded namespace takes is charged to that budget,
+  so they share it.
+- In the rescale pass, the excluded namespaces' group of a type is planned
+  before the namespace-scoped tenant groups of that type.
 
 The exclusion is read from the quota itself (`ResourceConstraints.ExcludedNamespaces`),
 not from a namespace being absent from the caps. A tenant missing from the
 usage map is therefore never treated as excluded.
 
-Out of scope: a namespace that one namespace quota excludes and another caps.
-It is capped, and is still bound by the first quota's tenant total as well.
+A namespace that one namespace quota excludes and another caps is capped by the
+second. The first quota's tenant total also still bounds it.
 
 </details>
 
@@ -383,6 +397,36 @@ make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_Q
 A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
 **warning**: `exclude` wins, and the ConfigMap is still accepted.
 
+The controller also warns about `exclude` lists. These are Info-level log
+lines that start with `WARNING:`. They come from the ConfigMap the limiters
+are read from, at startup and whenever it changes. The ConfigMap is still
+accepted.
+
+- No finite `scope: cluster` quota at all:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit: no scope: cluster quota sets a finite limit, so the scaling manager does not bound them
+  ```
+
+- A cluster quota, but not on every type the tenants' quota names:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit on [H100]: no scope: cluster quota sets a finite limit for those accelerator types
+  ```
+
+- An `exclude` entry that can never match a namespace:
+
+  ```text
+  WARNING: entry[0] ("tenants"): exclude entry "NS-X" is not a valid namespace name (check for spaces or capitals); it never matches a namespace
+  ```
+
+The check looks only at the types the tenants' quota names. If an excluded
+namespace runs another type, check that your cluster quota lists it. Names
+match as at runtime, so a cluster quota's `a100` covers a tenant's `A100`. A
+cluster quota that reads Kueue counts as a bound, because its numbers come
+from Kueue at runtime. A namespace that another namespace quota caps is not
+named.
+
 ### Reload lifecycle
 
 The quota configuration lives in the saturation-scaling ConfigMap and applies
@@ -502,9 +546,9 @@ Remaining boundaries:
   the relevant type does not scale under the V2 `GreedyByScore` optimizer (its
   fair-share loop stops when the finite cluster aggregate is zero). This is a
   benign under-provision, not an isolation breach; configure a finite cluster or
-  per-namespace cap for any type you expect to scale under V2. An excluded
-  namespace does not change this: its models keep scaling, and the unlimited
-  namespace still does not.
+  per-namespace cap for any type you expect to scale under V2. Adding an
+  excluded namespace does not change this. The excluded namespace's models
+  still scale. A tenant that has only unlimited types still does not.
 - An **unlimited (`-1`) cluster-scope** quota scales up: `GetResourcePools`
   emits it as a sentinel pool that `mergeConstraints` carries through as an
   unbounded budget, so the type allocates up to demand. (This differs from the
