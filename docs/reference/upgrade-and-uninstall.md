@@ -302,6 +302,23 @@ What changes without a config change:
   and unbounded when there are none.
 - **A namespace allowance that is unlimited (`-1`) for every type now scales**
   when nothing else bounds the cluster. It never did.
+- **A namespace that lists a GPU family now gets GPUs when the cluster quota
+  lists only products of it** (bug fix). A namespace at `{H100: -1}` under a
+  cluster quota of `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8}` was
+  often held at 0, and its warm pool always was. It now gets up to 8 of each
+  product, in every cycle. Its warm pool reads each product at that product's
+  figure. Clusters whose cluster quota lists the family itself, or that have
+  no cluster quota, are not affected.
+- **A family is bounded by what fits under every cluster quota, product by
+  product** (bug fix). This gives fewer GPUs to one setup only: two or more
+  `scope: cluster` quotas that list products of one family in different
+  numbers. `{NVIDIA-H100-80GB-HBM3: 16, NVIDIA-H100-PCIE-80GB: 8}` beside
+  `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 16}` allowed 24 H100s; only
+  16 fit under both, and 16 is the bound now. A workload that names the bare
+  family, in a namespace that lists only products of it, likewise gets only
+  what the cluster allows on those products: `{NVIDIA-H100-SXM5-80GB: -1}`
+  under a cluster quota with no SXM5 now gets 0, where it could get the
+  cluster's other H100s.
 - **Two utilization-share namespace groups on one GPU type split the free
   cluster GPUs** rather than each counting all of them.
 - **A limiter that cannot be consulted in a cycle is skipped; the others still

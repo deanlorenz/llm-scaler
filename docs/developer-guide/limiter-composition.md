@@ -103,6 +103,29 @@ materializes its demand's names, and fits the demand per budget key and per
 key that covers several of its names (`accelerator.Covers`), as
 `fitPairToBudget` fits a P/D pair.
 
+A family key across several allowlists is read by
+`accelerator.ClusterAllowlistsBound`. When no allowlist lists the family
+itself, or only some do, its GPUs can only be listed products, so the family
+is also bounded by the sum, per product, of the tightest bound on that
+product. When every allowlist lists the family itself, the tightest family
+figure alone applies. `mergeConstraints` uses it for the cluster bounds, and
+`mergeNamespaceConstraints` for a family one holder lists only through
+products (`accelerator.ClosesFamily`), there over the holders and the cluster
+bounds together. The exclude warnings read the same function.
+
+The bound on a key a namespace allowance lists must not depend on the names
+the cycle declares. `mergeWithAllowanceKeys` materializes those keys
+(`namespaceKeys`) on top of the declared names. The reads that bound a
+namespace's allowance use it: the optimizer's pass, `gpuBudgets` for a
+namespace the quotas hold, and `namespaceHeadroom`. The reads of the cluster
+alone keep `mergeConstraints`: an open namespace in `gpuBudgets`, the
+utilization share, and the warm pool's cluster figure
+(`passHeadroom.clusterKeys`). An extra family or product key there would
+read as a listed sibling to `accelerator.FindBudgetKey` and deny products the
+cluster allows. The namespace budgets of the pass and of `namespaceHeadroom`
+also materialize the cluster's products (`clusterProducts`), so the warm pool
+reads each product a namespace may use at that product's figure.
+
 ## Node fit
 
 `NodeView` (`node_view.go`) is one cycle's free GPUs per node, consumed in
