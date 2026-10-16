@@ -3,6 +3,7 @@ package allocation
 import (
 	"maps"
 	"math"
+	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -183,7 +184,8 @@ func clusterProviders(constraints []*ResourceConstraints) (cluster []*ResourceCo
 // namespace quota lists in `exclude` and no namespace quota caps. A namespace
 // quota's pools are the sum of its tenants' free quota, so they do not bound
 // an uncapped namespace; only the providers over every namespace (a cluster
-// quota) do. A type none of those providers lists is unbounded for it.
+// quota) do. A type none of those providers lists is unbounded for it, except
+// for a workload that names no accelerator (see free).
 //
 // Capped namespaces spend this budget too, beside their own, so the two kinds
 // share a cluster quota. A nil *uncappedBudget means no namespace is uncapped
@@ -191,7 +193,8 @@ func clusterProviders(constraints []*ResourceConstraints) (cluster []*ResourceCo
 type uncappedBudget struct {
 	namespaces map[string]bool
 	// budgets is the free GPUs per type of the providers over every
-	// namespace. A type absent is unbounded; math.MaxInt is unlimited.
+	// namespace, one key per accelerator (see foldedClusterBudgets). A type
+	// absent is unbounded; math.MaxInt is unlimited.
 	budgets map[string]int
 }
 
@@ -218,8 +221,25 @@ func newUncappedBudget(constraints []*ResourceConstraints) *uncappedBudget {
 	if namespaces == nil {
 		return nil
 	}
+	return &uncappedBudget{namespaces: namespaces, budgets: foldedClusterBudgets(constraints)}
+}
+
+// foldedClusterBudgets merges the budgets of the providers over every namespace,
+// with one key per accelerator: two providers that spell one type
+// differently ("A100", "a100") share the tighter budget, instead of each
+// bounding a key the other never sees. math.MaxInt is unlimited.
+func foldedClusterBudgets(constraints []*ResourceConstraints) map[string]int {
 	cluster, _ := clusterProviders(constraints)
-	return &uncappedBudget{namespaces: namespaces, budgets: mergeConstraints(cluster)}
+	merged := mergeConstraints(cluster)
+	out := make(map[string]int, len(merged))
+	for _, accType := range slices.Sorted(maps.Keys(merged)) {
+		if key, ok := resolveAcceleratorKey(out, accType); ok {
+			out[key] = min(out[key], merged[accType])
+			continue
+		}
+		out[accType] = merged[accType]
+	}
+	return out
 }
 
 // covers reports whether namespace is uncapped.
@@ -229,20 +249,43 @@ func (u *uncappedBudget) covers(namespace string) bool {
 
 // free returns the GPUs of accType left for an uncapped namespace:
 // math.MaxInt when nothing bounds the type.
+//
+// accType is resolved onto the budget's keys as every other accelerator
+// lookup is (see resolveAcceleratorKey), so a workload's "a100" or
+// "NVIDIA-A100-SXM4-80GB" spends a cluster quota's "A100".
+//
+// A workload that names no accelerator gets no GPUs once any provider over
+// every namespace names a type, unless one names "unknown" itself. Its pods
+// may land on a type that provider bounds, and nothing can charge them to it.
+// That is how the optimizer treats such a workload in every other namespace:
+// its name is not a key of the budget, so the budget for it is 0.
 func (u *uncappedBudget) free(accType string) int {
-	if b, ok := u.budgets[accType]; ok {
-		return b
+	if _, ok := resolveAcceleratorKey(u.budgets, accType); !ok &&
+		!constants.IsAcceleratorResolved(accType) && len(u.budgets) > 0 {
+		return 0
+	}
+	return u.left(accType)
+}
+
+// left returns the GPUs of accType left in the budget, resolving the name as
+// free does: math.MaxInt when no key names the type.
+func (u *uncappedBudget) left(accType string) int {
+	if key, ok := resolveAcceleratorKey(u.budgets, accType); ok {
+		return u.budgets[key]
 	}
 	return math.MaxInt
 }
 
 // clamp bounds n by the GPUs of accType left in the budget. A capped
-// namespace spends the budget too, so its own budget is clamped by it.
+// namespace spends the budget too, so its own budget is clamped by it. A
+// capped namespace's types are keys of its own quota, so the rule free
+// applies to a workload that names no accelerator is not repeated here:
+// that namespace is planned as it was without an uncapped namespace.
 func (u *uncappedBudget) clamp(accType string, n int) int {
 	if u == nil {
 		return n
 	}
-	return min(n, u.free(accType))
+	return min(n, u.left(accType))
 }
 
 // spend takes n GPUs of accType from the budget. An unbounded or unlimited
@@ -251,35 +294,49 @@ func (u *uncappedBudget) spend(accType string, n int) {
 	if u == nil {
 		return
 	}
-	if b, ok := u.budgets[accType]; ok && b != math.MaxInt {
-		u.budgets[accType] = b - n
+	key, ok := resolveAcceleratorKey(u.budgets, accType)
+	if !ok {
+		return
+	}
+	if b := u.budgets[key]; b != math.MaxInt {
+		u.budgets[key] = b - n
 	}
 }
 
 // uncappedReport returns the per-type budget an uncapped namespace is judged
 // against: the merged budget of the providers over every namespace, and the
-// unlimited sentinel (-1) for every other type a provider names.
+// unlimited sentinel (-1) for every other type a provider names. An
+// unlimited type reports -1 too, never math.MaxInt.
 func uncappedReport(constraints []*ResourceConstraints) map[string]int {
-	out := map[string]int{}
+	out := foldedClusterBudgets(constraints)
+	for accType, b := range out {
+		if b == math.MaxInt {
+			out[accType] = -1
+		}
+	}
 	for _, c := range constraints {
 		if c != nil {
 			addTypes(out, c)
 		}
 	}
-	cluster, _ := clusterProviders(constraints)
-	maps.Copy(out, mergeConstraints(cluster))
 	return out
 }
 
 // addTypes records every accelerator type c names, in its pools or in any
-// namespace's, as unlimited in out.
+// namespace's, as unlimited in out, unless out already holds that type under
+// any spelling.
 func addTypes(out map[string]int, c *ResourceConstraints) {
+	add := func(accType string) {
+		if _, ok := resolveAcceleratorKey(out, accType); !ok {
+			out[accType] = -1
+		}
+	}
 	for accType := range c.Pools {
-		out[accType] = -1
+		add(accType)
 	}
 	for _, perType := range c.NamespacePools {
 		for accType := range perType {
-			out[accType] = -1
+			add(accType)
 		}
 	}
 }

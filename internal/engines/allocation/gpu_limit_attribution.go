@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
@@ -170,7 +171,14 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 		if uncapped && c.capsNamespaces() {
 			continue
 		}
-		if pool, ok := c.Pools[accType]; ok && pool.Limit >= 0 {
+		key := accType
+		if uncapped {
+			// Resolved as the uncapped budget resolves it (see uncappedBudget.free).
+			if k, ok := accelerator.FindKey(c.Pools, accType); ok {
+				key = k
+			}
+		}
+		if pool, ok := c.Pools[key]; ok && pool.Limit >= 0 {
 			consider(pool.Available(), c.ProviderName)
 		}
 	}

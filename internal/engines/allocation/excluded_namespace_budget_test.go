@@ -490,4 +490,93 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			Expect(FitsGPUBudget(withheld, "ns-x", map[string]int{"A100": 96})).To(BeFalse())
 		})
 	})
+
+	Describe("accelerator names", func() {
+		// A cluster quota of 16 A100, two 8-GPU nodes, all free. ns-x wants 6.
+		empty := map[string]map[string]int{"team-a": {}, "ns-x": {}}
+		eachRescale := func(f func(o *GreedyByScoreOptimizer)) {
+			GinkgoHelper()
+			for _, rescale := range []bool{false, true} {
+				o := NewGreedyByScoreOptimizer()
+				o.Rescale = RescaleFlags{Cluster: rescale}
+				f(o)
+			}
+		}
+
+		It("bounds an excluded namespace by a cluster quota whatever spelling its workload uses", func() {
+			cons := constraintsOf(empty, tenants, clusterQuota(16))
+			for _, acc := range []string{"A100", "NVIDIA-A100-SXM4-80GB", "a100"} {
+				eachRescale(func(o *GreedyByScoreOptimizer) {
+					dm := targets(o, []ModelScalingRequest{modelOn(acc, "mx", "ns-x", 0, 6, 8)}, cons)
+					Expect(dm["mx-v"].TargetReplicas).To(Equal(2), "%s, rescale=%v: 16 GPUs", acc, o.Rescale.Cluster)
+					if !o.Rescale.Cluster {
+						Expect(dm["mx-v"].LimitedBy).To(Equal("cluster"), acc)
+					}
+				})
+				Expect(FitsGPUBudget(cons, "ns-x", map[string]int{acc: 16})).To(BeTrue(), acc)
+				Expect(FitsGPUBudget(cons, "ns-x", map[string]int{acc: 17})).To(BeFalse(), acc)
+			}
+		})
+
+		It("shares a cluster quota between a tenant and an excluded namespace whatever spelling each uses", func() {
+			// team-a may take 16 of its own; the cluster quota has 16 free.
+			wide := config.QuotaLimiterConfig{
+				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
+				Exclude:         []string{"ns-x"},
+				NamespaceQuotas: map[string]map[string]int{"team-a": {"A100": 16}},
+			}
+			cons := constraintsOf(empty, wide, clusterQuota(16))
+			eachRescale(func(o *GreedyByScoreOptimizer) {
+				dm := targets(o, []ModelScalingRequest{
+					modelOn("A100", "ma", "team-a", 0, 6, 8), modelOn("nvidia-a100-sxm4-80gb", "mx", "ns-x", 0, 6, 8),
+				}, cons)
+				Expect((dm["ma-v"].TargetReplicas+dm["mx-v"].TargetReplicas)*8).To(BeNumerically("<=", 16),
+					"rescale=%v: ma %d, mx %d", o.Rescale.Cluster, dm["ma-v"].TargetReplicas, dm["mx-v"].TargetReplicas)
+			})
+		})
+
+		It("bounds an excluded namespace by a cluster quota spelled differently from the tenants' quota", func() {
+			lower := config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"a100": 16},
+			}
+			cons := constraintsOf(empty, tenants, lower)
+			eachRescale(func(o *GreedyByScoreOptimizer) {
+				dm := targets(o, []ModelScalingRequest{modelOn("A100", "mx", "ns-x", 0, 6, 8)}, cons)
+				Expect(dm["mx-v"].TargetReplicas).To(Equal(2), "rescale=%v", o.Rescale.Cluster)
+			})
+			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"A100": 16})).To(BeTrue())
+			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"A100": 17})).To(BeFalse())
+			budgets, _ := GPUBudgets(cons, "ns-x")
+			Expect(budgets).To(Equal(map[string]int{"a100": 16}), "one key per accelerator")
+		})
+
+		It("gives an excluded namespace's model that names no accelerator nothing under a cluster quota", func() {
+			// As in every other namespace: no budget is keyed by "unknown".
+			cons := constraintsOf(empty, tenants, clusterQuota(16))
+			for _, acc := range []string{constants.DefaultAcceleratorName, ""} {
+				eachRescale(func(o *GreedyByScoreOptimizer) {
+					dm := targets(o, []ModelScalingRequest{modelOn(acc, "mx", "ns-x", 0, 6, 8)}, cons)
+					Expect(dm["mx-v"].TargetReplicas).To(Equal(0), "%q, rescale=%v", acc, o.Rescale.Cluster)
+				})
+			}
+
+			// With no provider over every namespace, nothing bounds it.
+			cons = constraintsOf(empty, tenants)
+			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{
+				modelOn(constants.DefaultAcceleratorName, "mx", "ns-x", 0, 6, 8),
+			}, cons)
+			Expect(dm["mx-v"].TargetReplicas).To(Equal(6))
+		})
+
+		It("reports an unlimited cluster quota as -1", func() {
+			cons := constraintsOf(empty, tenants, config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"A100": -1, "H100": 8},
+			})
+			budgets, nsScoped := GPUBudgets(cons, "ns-x")
+			Expect(nsScoped).To(BeFalse())
+			Expect(budgets).To(Equal(map[string]int{"A100": -1, "H100": 8}))
+		})
+	})
 })
