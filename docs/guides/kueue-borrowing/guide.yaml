@@ -114,7 +114,8 @@ lenders:
   set:
     note: >-
       Opt in (experimental): count what lenders Kueue does not reclaim for lend, and
-      give it back when they wait. Same policy ConfigMap as the pilot.
+      give it back when they wait. Same policy ConfigMap as the pilot; entries with
+      countBorrowable false are left alone (validation refuses the key there).
     run: |
       STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
       POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
@@ -122,7 +123,7 @@ lenders:
       POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
       POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
       kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
-        | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true) | .kueue.releaseToNonReclaimingLenders) = true' \
+        | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true and .kueue.countBorrowable != false) | .kueue.releaseToNonReclaimingLenders) = true' \
         > policy-default.yaml
       kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
         -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
@@ -136,6 +137,25 @@ lenders:
       kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
         | grep 'Releasing borrowed capacity' | grep 'lender-waiting' | tail -5
       kubectl get events -n <namespace> --field-selector reason=BorrowedCapacityReleased
+      kubectl get events -n <namespace> --field-selector reason=LenderReleaseBlocked
+  unset:
+    note: >-
+      Turn it off. First cap each borrowing model at what its guaranteed figure
+      holds: what it borrowed from a lender Kueue never reclaims for stays borrowed
+      once the setting is off. Raise maxReplicaCount again once it is off.
+    run: |
+      kubectl patch scaledobject <scaledobject> -n <namespace> --type=merge \
+        -p '{"spec":{"maxReplicaCount":<guaranteed-replicas>}}'
+      STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
+      POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
+      POLICY_NS=${POLICY_NS:-<wva-namespace>}
+      POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
+      POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
+      kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
+        | yq 'del(.limiters[].kueue.releaseToNonReclaimingLenders)' \
+        > policy-default.yaml
+      kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
+        -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
 
 reasons:
   read:

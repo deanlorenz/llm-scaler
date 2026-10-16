@@ -764,9 +764,11 @@ stands in for a version that cannot be read.
 
 **Fires when** a lender ClusterQueue has waited for capacity it lent longer than
 `wva_kueue_borrow_cooldown_seconds` (the configured `borrowCooldown`), while a
-namespace this controller governs still borrows in its cohort. With
-`releaseToNonReclaimingLenders` on, it waits also for
-`wva_kueue_borrow_release_latency_seconds`, the time a release takes to land.
+namespace this controller governs still borrows in its cohort. In a cohort
+whose quota entries set `releaseToNonReclaimingLenders`, it waits also for
+that cohort's `wva_kueue_borrow_release_latency_seconds`, the time a release
+there takes to land (at most 30 minutes); every other cohort pages at the
+cooldown.
 
 By default the scaling manager counts only what Kueue would reclaim for its
 lender, so Kueue is expected to preempt for it. New borrowing in the cohort
@@ -780,13 +782,32 @@ Check that it did:
 ```bash
 $LOGS | grep 'Releasing borrowed capacity' | grep 'lender-waiting'
 kubectl get events -n <borrowing ns> --field-selector reason=BorrowedCapacityReleased
+kubectl get events -n <borrowing ns> --field-selector reason=LenderReleaseBlocked
 ```
 
-No such line: no model of this controller could give a unit without going
-below `minReplicas` or its namespace's guaranteed figure, or the lender is
-waiting for capacity another borrower holds. A line, but the lender still
-waits: the release has not landed (the model's scale-down window), or the
-GPUs went to someone else first.
+A `LenderReleaseBlocked` Event, or
+`wva_kueue_lender_release_blocked{cluster_queue="<lender>"}`, says why
+nothing was handed back:
+
+- `unservable`: what this controller can give back on the lender's flavor,
+  in whole units and never below `minReplicas` or a guaranteed figure, would
+  not admit the lender's next Workload -- the rest of what it waits for is
+  held by a borrower this controller does not govern, or a model's smallest
+  unit is far larger than the need. Nothing is handed back, so nothing sits
+  idle. Free the rest by hand, or set `reclaimWithinCohort: Any` on the
+  lender.
+- `taken-by-another-borrower`: a release landed, but another borrower took
+  the GPUs before Kueue admitted the lender. Nothing more is handed to it
+  while it waits.
+
+A release line and no block, but the lender still waits: the release has not
+landed yet (the model's scale-down window and termination grace).
+
+No line of either kind: the lender's wait has not triggered a release yet
+(two reads in a row, or a Workload waiting over a minute), its Workload is in
+Kueue's requeue backoff, or it waits behind a `StrictFIFO` head that does not
+fit. A ledger that cannot be read also holds every release
+(`wva_kueue_borrow_ledger_unread`).
 
 ```bash
 kubectl get workloads.kueue.x-k8s.io -n <lender namespace> \

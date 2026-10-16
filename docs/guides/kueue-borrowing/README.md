@@ -349,16 +349,20 @@ guaranteed figure. It is **experimental and off by default**: the scaling
 manager becomes the lender's reclaim agent. Turn it on only where the lender's
 owners agree that serving may borrow their quota.
 
+The setting is on the quota entry: it applies to every namespace the entry
+governs in a cohort, and one tenant cannot opt out alone. Run one scaling
+manager per cohort with it on: two would hand a lender the same GPUs twice.
+
 <!-- guide:lenders.set start -->
 ```bash
-# Opt in (experimental): count what lenders Kueue does not reclaim for lend, and give it back when they wait. Same policy ConfigMap as the pilot.
+# Opt in (experimental): count what lenders Kueue does not reclaim for lend, and give it back when they wait. Same policy ConfigMap as the pilot; entries with countBorrowable false are left alone (validation refuses the key there).
 STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
 POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
 POLICY_NS=${POLICY_NS:-<wva-namespace>}
 POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
 POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
 kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
-  | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true) | .kueue.releaseToNonReclaimingLenders) = true' \
+  | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true and .kueue.countBorrowable != false) | .kueue.releaseToNonReclaimingLenders) = true' \
   > policy-default.yaml
 kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
   -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
@@ -377,17 +381,43 @@ kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.da
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
   | grep 'Releasing borrowed capacity' | grep 'lender-waiting' | tail -5
 kubectl get events -n <namespace> --field-selector reason=BorrowedCapacityReleased
+kubectl get events -n <namespace> --field-selector reason=LenderReleaseBlocked
 ```
 <!-- guide:lenders.check end -->
 
 A release lands only after the model's KEDA scale-down window; the
-lender-waiting alert waits that much longer. The model shows
+lender-waiting alert waits that much longer in that cohort. The model shows
 `released-to-lender` while it lands, and borrows nothing new in that cohort
-for `borrowCooldown`. How it chooses what to give back:
+for `borrowCooldown` after. The scaling manager hands back only what admits
+the lender's next Workload; when it cannot, it hands back nothing and records
+a `LenderReleaseBlocked` Event. How it chooses what to give back:
 [the quota limiter](../../reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for).
 
-To stop, set the key to `false` or remove it. Nothing is evicted; the
-lending stops counting, as before.
+To stop, or before rolling the controller back to a release without the
+setting: what a model borrowed from a lender Kueue never reclaims for stays
+borrowed once the setting is off, the lender waits, and the lender-waiting
+alert pages at the cooldown. A release in flight keeps its targets for up to
+twice its latency. So first lower each borrowing model's `maxReplicaCount` to
+what its guaranteed figure holds, then remove the key, then raise
+`maxReplicaCount` again. Nothing is evicted by the change itself.
+
+<!-- guide:lenders.unset start -->
+```bash
+# Turn it off. First cap each borrowing model at what its guaranteed figure holds: what it borrowed from a lender Kueue never reclaims for stays borrowed once the setting is off. Raise maxReplicaCount again once it is off.
+kubectl patch scaledobject <scaledobject> -n <namespace> --type=merge \
+  -p '{"spec":{"maxReplicaCount":<guaranteed-replicas>}}'
+STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
+POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
+POLICY_NS=${POLICY_NS:-<wva-namespace>}
+POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
+POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
+kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
+  | yq 'del(.limiters[].kueue.releaseToNonReclaimingLenders)' \
+  > policy-default.yaml
+kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
+  -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
+```
+<!-- guide:lenders.unset end -->
 
 ## Cleanup
 

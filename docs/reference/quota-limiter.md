@@ -606,7 +606,9 @@ borrowing model itself only where a borrowed unit never placed:
   releases to lenders in flight are kept under `borrowReleaseLedger` in the
   `wva-controller-status` ConfigMap, so a restart or a new leader neither
   releases twice nor forgets a cooldown. Figures or entry counts past sane
-  bounds are dropped on load; a ledger a newer version wrote is discarded.
+  bounds are dropped on load. A ledger a newer version wrote is kept as it
+  is: it is not overwritten, and no release to a lender is decided while it
+  stays.
 - **A frozen read freezes everything** (`stale`, `kueue-controller-down`):
   nothing new is borrowed and nothing is given back until reads recover.
 - **A failed ResourceQuota read freezes one namespace.** When one namespace's
@@ -626,34 +628,71 @@ when the lender does not outrank the borrowing model.
 
 - **Counting.** Their unused nominal is counted in the shared pool, for every
   model. `lender-cannot-reclaim` is no longer shown.
-- **Giving back.** When such a lender waits, in the first fresh read that
-  shows it, the scaling manager lowers the borrowing models in one cycle:
-  - by whole units -- a replica, a P/D pair at the model's role ratio, a
-    LeaderWorkerSet group -- until the GPUs given back cover what the
-    lender's pending Workloads ask, bounded by what it lent out. A unit
-    larger than the need still goes (a whole-node model has no smaller one);
-  - lowest Kueue priority first (a priority class not read last), then the
-    lowest scaling priority, then the most expensive;
-  - never below `minReplicas`, and never below the namespace's guaranteed
-    figure;
-  - a model a `LowerPriority` lender outranks is left to Kueue, which
-    preempts it.
-- **One at a time.** One release per lender is in flight until its replicas
-  are gone and a fresh Kueue read follows, or until twice the expected release
-  time has passed. Its targets are held until then, in the ledger.
-- **Latency.** A release lands after the model's KEDA scale-down window, the
-  HPA sync, the KEDA poll and the pods' termination grace
-  (`wva_kueue_borrow_release_latency_seconds`). The lender-waiting alert waits
-  that much longer.
+- **When.** A lender's wait starts a release once it was read waiting twice in
+  a row, or its Workload has waited more than a minute. A Workload in Kueue's
+  requeue backoff, one the lender admits by preempting its own lower-priority
+  Workloads, and, under `StrictFIFO`, one behind a head that does not fit, do
+  not count.
+- **How much.** Only what unblocks the lender: its smallest Workload Kueue
+  could admit next, less the part of its nominal it keeps (`lendingLimit`),
+  less the cohort's free pool, less what the cycle already frees (lower
+  targets, terminating pods, releases that landed), less what Kueue preempts
+  for it from models it outranks.
+- **All or nothing.** The borrowing models are lowered by whole units -- a
+  replica, a P/D pair at the model's role ratio, a LeaderWorkerSet group --
+  until that is covered. The last unit may pass it by at most one replica; a
+  model whose smallest unit is larger (a 2P:3D pair for an 8-GPU need) is
+  skipped. If the models cannot cover it, **nothing** is handed back: the GPUs
+  would sit idle while the lender still waits. The lender is then reported
+  (`wva_kueue_lender_release_blocked{reason="unservable"}`, a Warning
+  `LenderReleaseBlocked` Event on the borrowing models).
+- **Order.** Lowest Kueue priority first (a priority class not read last),
+  then the lowest scaling priority, then the most expensive. Never below
+  `minReplicas`, never below the namespace's guaranteed figure. Under a
+  `LowerPriority` lender, a model its waiting Workload outranks is left to
+  Kueue, and a model whose priority class was not read is left alone.
+- **One at a time.** One release per lender is in flight. It ends when the
+  lender stops waiting, when Kueue's borrowed figure falls by what was handed
+  back, or after twice the release latency. If it landed but the lender still
+  waits and Kueue's borrowed figure did not fall, another borrower took the
+  GPUs: nothing more is handed to that lender while it waits
+  (`reason="taken-by-another-borrower"`). A P/D pair half scaled down at the
+  timeout keeps its targets until both roles land.
+- **Latency.** A release lands after the models' KEDA scale-down window, the
+  HPA sync, the KEDA poll and the pods' termination grace, capped at 30
+  minutes. It is measured per cohort, over the models a release there may
+  lower (`wva_kueue_borrow_release_latency_seconds{cohort}`), and the
+  lender-waiting alert waits that much longer in that cohort only.
 - **What you see.** The model carries `released-to-lender` on
   `wva_model_scaling_blocked` while the release is in flight, its scale
   target a Normal `BorrowedCapacityReleased` Event naming the lender, and
-  `wva_borrow_releases_total{cause="lender-waiting"}` counts it. The model
+  `wva_borrow_releases_total{cause="lender-waiting"}` counts it
+  (`WVAKueueBorrowThrashing` does not). Once the release lands the model
   borrows nothing new in that cohort for `borrowCooldown`.
 
-It needs `countBorrowable`; the entry is refused with `countBorrowable: false`.
-Kueue still decides who is admitted: a release only lowers targets, as a
-demand fall would.
+It needs `countBorrowable`; the entry is refused with `countBorrowable: false`,
+and validation warns when `kueue.enabled` is false. Kueue still decides who is
+admitted: a release only lowers targets, as a demand fall would. No release is
+decided while the release ledger cannot be read
+(`wva_kueue_borrow_ledger_unread`).
+
+**It is cohort-wide.** The setting is on the quota entry, so it applies to
+every namespace that entry governs in a cohort; one tenant cannot opt out
+alone. Two entries over one cohort release only when both set it.
+
+**One scaling manager per cohort.** Each controller sizes a release by Kueue's
+cohort-wide figures. Two scaling managers borrowing in one cohort would both
+hand the same waiting lender the same GPUs. Run one per cohort with this
+setting on; the controller logs a warning when Kueue's borrowed figure exceeds
+what its own namespaces hold.
+
+**Turning it off, or rolling back.** Capacity a model borrowed from a `Never`
+lender stays borrowed: Kueue never reclaims it, so that lender waits and
+`WVAKueueLenderWaitingPastCooldown` pages at the cooldown alone. A release in
+flight keeps its targets for up to twice the release latency. Before you turn
+it off or roll back, lower the borrowing models' `maxReplicaCount` on their
+ScaledObjects to what their guaranteed figure holds, and raise it again once
+the setting is off.
 
 **Settings**, on the entry's `kueue:` block:
 

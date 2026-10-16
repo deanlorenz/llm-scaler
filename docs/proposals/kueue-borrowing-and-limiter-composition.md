@@ -358,7 +358,7 @@ allowed flavors are unknown it counts on all of them.
   cooldown.
 - **Kueue's preemption gives capacity back**; every counted lender can
   reclaim (with PR-C's opt-in, the scaling manager gives back what lenders
-  Kueue does not reclaim for, at the first sighting). A partner or group left without its preempted half is released by
+  Kueue does not reclaim for, once the wait is confirmed). A partner or group left without its preempted half is released by
   the placement timeout.
 - **Backoff.** After a preemption or a placement-timeout release, the model
   borrows nothing new in that cohort for `borrowCooldown` (default 10
@@ -392,7 +392,7 @@ guaranteed, or demand fell. Read these first:
 | `WVAKueueVersionUnknown` | `wva_kueue_controller_version_known` (version read, or `assumeTestedVersion`; published only while some entry counts borrowing) is 0; quiet while `kueue-controller-down` holds |
 | `WVAKueueVersionUntested` | borrowing is withheld as `kueue-version-untested` for 30 minutes (info) |
 | `WVAKueueBorrowDrift` | computed borrowed differs from Kueue's for 15 minutes (warning) |
-| `WVAKueueLenderWaitingPastCooldown` | a lender waits past `wva_kueue_borrow_cooldown_seconds`, plus `wva_kueue_borrow_release_latency_seconds` under PR-C's opt-in, while this controller borrows |
+| `WVAKueueLenderWaitingPastCooldown` | a lender waits past `wva_kueue_borrow_cooldown_seconds`, plus, in a cohort that opts in to PR-C, that cohort's `wva_kueue_borrow_release_latency_seconds`, while this controller borrows |
 | `WVAKueuePodsUnplaced` | managed pods unplaced past the placement timeout |
 | `WVAKueueBorrowThrashing` | more than 3.5 loss events (releases plus preemptions; a pair or group is one) per model per hour; series start at 0 |
 
@@ -446,23 +446,30 @@ Kueue's reclaim agent, which is why it is off by default.
 **As built** (operator page:
 [lenders Kueue does not reclaim for](../reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for)):
 
-- The release fires on the **raw** lender-waiting signal, the first fresh read
-  that shows the lender waiting, not the debounced one: the same signal that
-  closes the cohort. One release in flight per lender is the damping.
-- "What it lent" is `min(Unused, the pool's Kueue borrowed figure)`, and
-  "pending" is the sum of its pending Workloads that each fit its unused
-  nominal. Units are taken until the GPUs given back on the lender's flavor
-  cover `min(pending, lent)`: `ceil(need / unit)` for a uniform fleet.
-- Units follow the reclaim yield's rule (a replica, a P/D pair at the role
-  ratio), counted from the cycle's targets after every other release, so
-  nothing is given twice. A model a `LowerPriority` lender outranks is left
-  to Kueue. Each model released backs off in that cohort as after a
-  preemption.
-- A release clears on the first fresh read after it lands, or after twice the
-  expected latency (the borrowing models' scale-down window, HPA sync, KEDA
-  poll, grace; `wva_kueue_borrow_release_latency_seconds`) or the actuation
-  window, whichever is longer. The ledger is versioned (1), written only beside
-  a release, and nothing is released until it is read.
+- The release fires once the lender was read waiting twice in a row, or its
+  Workload waited over a minute (one read can catch a Workload between
+  creation and admission). New borrowing still stops at the first sighting.
+- It is sized to what unblocks the lender: its smallest Workload Kueue could
+  admit next (queue order; none in requeue backoff, none it admits by
+  preempting its own, the head alone under `StrictFIFO`), less its kept
+  part, less the pool's free GPUs and what the cycle already frees, less what
+  Kueue preempts for it from models it outranks (at the head's priority).
+  One budget per pool, so two lenders never count the same GPUs.
+- All or nothing: units follow the reclaim yield's rule and its overshoot
+  guard (at most one replica past the need), counted on replicas held, never
+  on cancelled growth. If this controller cannot cover the need, nothing is
+  handed back and the lender is reported (`wva_kueue_lender_release_blocked`).
+- A release ends when the lender stops waiting, when Kueue's borrowed figure
+  falls by what was handed back, or after twice the cohort's release latency
+  (capped at 30 minutes). Landed without either, another borrower took it:
+  nothing more goes to that lender while it waits. A P/D pair half landed at
+  the timeout keeps its targets. The model's backoff in the cohort starts at
+  the landing. The ledger is versioned (1), written only beside a release;
+  nothing is released until it is read, and a newer version is held, not
+  overwritten.
+- Review of #203 found the first cut over-gave: it summed every fitting
+  Workload, ignored the free pool and the kept part, counted cancelled growth
+  as freed, and fired on one read. The rules above replace it.
 
 ## Appendix: decided by the owner
 

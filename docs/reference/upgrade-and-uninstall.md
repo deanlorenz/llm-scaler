@@ -227,11 +227,20 @@ they enable. Do this, in order:
 > changes until you set it. Set, it adds `released-to-lender` on
 > `wva_model_scaling_blocked`, cause `lender-waiting` on
 > `wva_borrow_releases_total` and the `BorrowedCapacityReleased` Event, and
-> the gauge `wva_kueue_borrow_release_latency_seconds`, which
-> `WVAKueueLenderWaitingPastCooldown` adds to its threshold. The release
-> ledger in `wva-controller-status` gains a `version` field; a controller
-> older than this release that finds one in it ignores the fields it does not
-> know, so a rollback hands nothing back but keeps the cooldowns.
+> the gauges `wva_kueue_borrow_release_latency_seconds{cohort}` (which
+> `WVAKueueLenderWaitingPastCooldown` adds to its threshold, in that cohort
+> only), `wva_kueue_lender_release_blocked` and
+> `wva_kueue_borrow_ledger_unread`, and the Warning Event
+> `LenderReleaseBlocked`. The release ledger in `wva-controller-status` gains
+> a `version` field; a controller older than this release ignores the fields
+> it does not know, so a rollback hands nothing back but keeps the cooldowns.
+>
+> **Before turning it off or rolling back**, lower each borrowing model's
+> `maxReplicaCount` to what its guaranteed figure holds: capacity borrowed
+> from a `Never` lender stays borrowed (Kueue never reclaims it), the lender
+> waits, and the alert pages at the cooldown alone. A release in flight keeps
+> its targets for up to twice its latency. Raise `maxReplicaCount` again
+> afterwards.
 
 **Before you upgrade**, list the limiter types every policy declares, and
 every Kueue-backed entry with its borrowing settings. A cluster admin runs
