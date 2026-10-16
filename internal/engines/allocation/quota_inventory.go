@@ -393,7 +393,9 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	}
 	q.withheld = q.withheldReasons(ext, view, frozenWhy)
 	q.nominal = nil
-	if frozenWhy == "" && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+	// Read for every Kueue-backed namespace entry: one that counts no
+	// borrowing still carries its queues' co-resources (uncountedNominal).
+	if frozenWhy == "" && q.static.Scope == config.QuotaScopeNamespace && q.source != nil && !ext.ObservedAt.IsZero() {
 		q.nominal = q.uncountedNominal(ext, view, effective)
 	}
 	q.logBorrowing(logger, ext, view, frozenWhy)

@@ -564,6 +564,10 @@ type ExternalBorrow struct {
 	// A quota entry charges the queue's figures with the part its own variants
 	// do not hold (the non-managed charge).
 	Reserved int `json:"reserved,omitempty"`
+	// CoUnused is, per co-resource, what the queue's nominal quota of it
+	// leaves after everything reserved, in milli-units: the co-resource
+	// headroom of growth within nominal.
+	CoUnused map[string]int64 `json:"coUnused,omitempty"`
 	// Charge is the queue's non-managed charge on this flavor and resource:
 	// Reserved less the managed GPUs counted as held in the queue. Set by the
 	// quota entry, not the source; the row's Nominal, Guaranteed and

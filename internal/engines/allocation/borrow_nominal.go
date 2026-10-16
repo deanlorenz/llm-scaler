@@ -47,6 +47,12 @@ type NominalFigures struct {
 	// Flavors are the flavors its own queues offer the type on, sorted
 	// (NamespaceBorrow.Flavors).
 	Flavors []string
+	// CoHeadroom is, per co-resource its queues' GPU flavor's resource group
+	// covers, what their nominal quota of it leaves after everything Kueue
+	// reserved (ExternalBorrow.CoUnused), in milli-units: a replica grown
+	// within nominal must fit it as well as its GPUs (K2). Nil when no group
+	// covers one.
+	CoHeadroom map[string]int64
 }
 
 // uncountedNominal is, per namespace the read granted borrowing rows for and
@@ -84,7 +90,13 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 			}
 			f.Flavors = rowFlavors(rowsOfType(rows, accType))
 			f.NominalLentOut = max(0, nominal-f.WithinNominal)
-			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
+			f.CoHeadroom = sumCo(rowsOfType(rows, accType), func(r config.ExternalBorrow) map[string]int64 { return r.CoUnused }, true)
+			if !q.countsBorrowing() {
+				// Not counting borrowing, the entry caps at nominal: only the
+				// co-resources are carried (K2 on the nominal path).
+				f = NominalFigures{WithinNominal: nominal, Guaranteed: nominal, Flavors: f.Flavors, CoHeadroom: f.CoHeadroom}
+			}
+			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed && len(f.CoHeadroom) == 0 {
 				continue // nominal, whatever the pool holds: nothing to carry
 			}
 			if out[ns] == nil {

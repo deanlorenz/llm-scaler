@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
 // cpuModel is an H100 model of 8-GPU, 32-CPU replicas in ns wanting want more.
@@ -63,5 +64,48 @@ func TestGuaranteedReplicaChecksCoResources(t *testing.T) {
 	}
 	if got := run(map[string]int64{"cpu": 32000}); got != 16 {
 		t.Errorf("ordered %d GPUs with 32 CPUs kept unlent, want 16: the kept CPU holds the second replica", got)
+	}
+}
+
+// K2 on the nominal path: Kueue admits a replica within nominal only when its
+// CPU fits the queue's nominal CPU too, borrowing counted or not. A queue of
+// 16 GPUs and 64 CPUs, nothing reserved: one 48-CPU replica, not two. Before,
+// the co-resources were checked only where borrowing was counted, so an entry
+// with countBorrowable false, or a queue in no cohort, ordered both and the
+// second waited gated.
+func TestNominalPathChecksCoResources(t *testing.T) {
+	noCohort := kueue.QueueFigures{Nominal: 16, Guaranteed: 16, WithinNominal: 16, BorrowCap: config.QuotaUnlimited,
+		Reason: kueue.ReasonNoCohort}
+	inCohort := kueue.QueueFigures{Nominal: 16, Guaranteed: 16, WithinNominal: 16, BorrowCap: config.QuotaUnlimited}
+	f := false
+	for _, tc := range []struct {
+		name  string
+		row   config.ExternalBorrow
+		count *bool
+	}{
+		{"countBorrowable false", chargeRow("c", inCohort, 0), &f},
+		{"no cohort", chargeRow("", noCohort, 0), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.row.CoUnused = map[string]int64{"cpu": 64000}
+			e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+				Kueue:           &config.KueueQuotaSource{Enabled: true, CountBorrowable: tc.count}}
+			src := &fakeQuotaSource{}
+			src.push(chargeSnapshot(tc.row, 0, "c"), nil)
+			inv := NewQuotaInventoryWithSource(e, src)
+			inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+			c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil, map[string]map[string]int{"c": {}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := cpuModel("c", 2)
+			m.VariantStates[0].ReplicaRequests["cpu"] = 48000
+			got := addedGPUs(NewGreedyByScoreOptimizer().Optimize(context.Background(), []ModelScalingRequest{m},
+				[]*ResourceConstraints{physicalH100(64), c}))
+			if got["m"] != 8 {
+				t.Errorf("ordered %d GPUs, want 8: the second 48-CPU replica does not fit the queue's 64 CPUs", got["m"])
+			}
+		})
 	}
 }

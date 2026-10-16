@@ -156,7 +156,7 @@ type borrowState struct {
 // counts borrowing. nodes is the cycle's node view, nil without a physical
 // limiter or a fresh node snapshot.
 func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrowState {
-	if !HasBorrowing(constraints) {
+	if !HasBorrowing(constraints) && !hasNominalCo(constraints) {
 		return nil
 	}
 	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{}, nodes: nodes}
@@ -216,9 +216,11 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 					prev.lentOut = min(prev.lentOut, f.LentOut)
 					prev.after = max(prev.after, f.PreemptAfter)
 					prev.kept = min(prev.kept, f.PreemptKept)
+					prev.coHeadroom = tighterCo(prev.coHeadroom, f.CoHeadroom, true) // K2, nominal path
 					continue
 				}
-				bs.lent[ns][accType] = &nsBorrowLeft{after: f.PreemptAfter, kept: min(f.PreemptKept, f.PreemptAfter), lentOut: f.LentOut}
+				bs.lent[ns][accType] = &nsBorrowLeft{after: f.PreemptAfter, kept: min(f.PreemptKept, f.PreemptAfter), lentOut: f.LentOut,
+					coHeadroom: maps.Clone(f.CoHeadroom)} // K2, nominal path: coGuaranteed
 			}
 		}
 	}
