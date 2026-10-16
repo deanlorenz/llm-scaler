@@ -160,3 +160,33 @@ func TestARestoredBoundFigureIsReportedAsRestored(t *testing.T) {
 	}
 	t.Fatal("no restart line for variant-a")
 }
+
+// A previous figure held in a bound on hardware the variant no longer runs is
+// never looked up, so it is not counted as restored: the line falls through to
+// what the variant is priced on.
+func TestABoundFigureOnOtherHardwareIsNotCountedAsRestored(t *testing.T) {
+	first, store, clock := waProcess(mtParams(256, "vllm:v1"))
+	waRun(t, first, clock, 4000, 6)
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	waRun(t, first, clock, 1000, 0)
+	doc := first.ExportLearnedState()
+
+	count := func(accelerator string) int {
+		a, s, _ := waProcess(mtParams(128, "vllm:v1"))
+		s.Update("test-ns", "test-model", "variant-a", capacity.Record{
+			EngineParams: mtParams(128, "vllm:v1"), AcceleratorName: accelerator, GpuCount: 1,
+		})
+		a.RestoreLearnedState(doc)
+		r, done := a.installRestored("test-ns", "test-model", "variant-a")
+		if !done {
+			t.Fatalf("precondition: the variant's entries were pending (%s)", accelerator)
+		}
+		return r.BoundPriors
+	}
+	if n := count("H100"); n != 1 {
+		t.Fatalf("precondition: on the same hardware the bound's figure is counted, got %d", n)
+	}
+	if n := count("A100"); n != 0 {
+		t.Errorf("a bound on hardware the variant left was counted as restored: %d", n)
+	}
+}

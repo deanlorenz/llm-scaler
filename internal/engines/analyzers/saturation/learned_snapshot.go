@@ -1034,7 +1034,7 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
 	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size(), Stored: p.stored,
-		BoundPriors: a.boundPriorsLocked(namespace, modelID, variant)}
+		BoundPriors: a.boundPriorsLocked(namespace, modelID, variant, rec)}
 	switch {
 	case whole:
 		out.Outcome, out.Installed = RestoredWhole, true
@@ -1220,12 +1220,15 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 }
 
 // boundPriorsLocked counts the variant's lower bounds holding a previous
-// figure. Callers hold a.mu.
-func (a *SaturationAnalyzer) boundPriorsLocked(namespace, modelID, variant string) int {
+// figure on the hardware it runs now (priorKeyRuns, rec): a bound filed under
+// another accelerator or GPU count is never looked up, and counted, the
+// restart line said a figure priced a variant that had moved off it. Callers
+// hold a.mu.
+func (a *SaturationAnalyzer) boundPriorsLocked(namespace, modelID, variant string, rec *capacity.Record) int {
 	prefix := namespace + "|" + variant + "|" + modelID + "|"
 	n := 0
 	for k, lb := range a.lowerBounds {
-		if lb.prior > 0 && strings.HasPrefix(k, prefix) {
+		if lb.prior > 0 && strings.HasPrefix(k, prefix) && priorKeyRuns(k, rec) {
 			n++
 		}
 	}
