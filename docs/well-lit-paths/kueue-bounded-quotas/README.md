@@ -2,7 +2,7 @@
 
 If Kueue already decides your GPU quotas, the scaling manager can read them
 instead of keeping a second copy. It caps each namespace and accelerator type
-at **the smaller of Kueue's grant and its own static cap**, so it does not ask
+at **the smaller of Kueue's grant and its own static cap**, so it rarely asks
 KEDA for a replica Kueue would hold pending. Kueue's grant is first charged
 with what other work Kueue admitted on the same ClusterQueue holds (a
 cluster-scope entry is the exception; see
@@ -20,8 +20,8 @@ What backs it: [Evidence](#evidence).
 - One source of truth for tenant GPU numbers: change the ClusterQueue, and the
   scaling manager follows within one `refreshInterval` (30s) plus one
   [optimize cycle](../../reference/cycle-log.md).
-- No replica ordered that Kueue would hold at its admission gate, so no
-  Pending pod a scale-up counted on.
+- Few replicas ordered that Kueue would hold at its admission gate, so few
+  Pending pods a scale-up counted on; the cases that remain are listed below.
 - With borrowing: a model grows into GPUs its cohort leaves idle (batch quota
   between jobs, say), and gives them back when Kueue reclaims them.
 

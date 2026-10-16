@@ -72,7 +72,8 @@ free GPUs as 4+4+8 hold one 8-GPU replica, not two.
 - A P/D model grows only when a prefill and a decode replica both find a node.
 - A replica just ordered keeps its hole from every later decision until its
   pods hold a node, for up to **5 minutes** (a replica on a Kueue flavor: its
-  `placementTimeout`, when that is longer). Without this hold the next
+  `placementTimeout`, when that is longer, and three times that while a
+  cluster-autoscaler scale-up is pending). Without this hold the next
   decision would see the hole free again while the pod is still being
   scheduled.
 - The plan assumes the scheduler packs pods the same way. When replicas of

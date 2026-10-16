@@ -315,7 +315,8 @@ the scaling manager asks for must also fit a node:
 - Each replica asked for keeps its hole after the cycle, from every later
   decision of the steady-state and scale-from-zero engines alike, until its
   pods hold a node or **5 minutes** pass, whichever is first (for a replica
-  on a Kueue flavor, the borrowing `placementTimeout` when that is longer).
+  on a Kueue flavor, the borrowing `placementTimeout` when that is longer,
+  tripled while a cluster-autoscaler scale-up is pending).
   This is the
   in-flight hold: a new pod holds nothing on a node until it is scheduled,
   which takes seconds, or minutes with an image pull or a preemption, and

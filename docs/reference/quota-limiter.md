@@ -276,12 +276,14 @@ rules the table does not show:
   LocalQueue at it. If the labels cannot be read (no `get` on namespaces),
   that queue's grant is withheld and the namespace, with no other grant, is
   bounded at nothing; the error is logged once with the remedy.
-- **A shared ClusterQueue is a per-namespace ceiling, not a partition.** Every
-  namespace with a LocalQueue on it is bounded at the queue's full nominal
-  quota, so several such namespaces may in sum still ask for more than the
-  queue admits and Kueue holds the excess pending. The bound removes the
-  single-namespace over-ask; a shared budget stays Kueue's to arbitrate. Give
-  each tenant its own ClusterQueue (cohorts for borrowing) where that matters.
+- **A shared ClusterQueue is charged per namespace, not partitioned.** Each
+  namespace with a LocalQueue on it is bounded at the queue's figure less what
+  everything else Kueue admitted on the queue holds, other namespaces included
+  (see [What a quota is charged](#what-a-quota-is-charged)). Namespaces that
+  grow in the same cycle still each see the same free part, so together they
+  may ask for more than the queue admits, and Kueue holds the excess pending.
+  Give each tenant its own ClusterQueue (cohorts for borrowing) where that
+  matters.
 - **Untyped grants carry no vendor.** Within one ClusterQueue the untyped
   figures of different GPU resources (`nvidia.com/gpu`, `amd.com/gpu`) are not
   summed; the largest is taken, the loosest bound no single resource
@@ -535,7 +537,8 @@ the pool holds and no such node does is limited by `node-fit`, as any replica
 is ([A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node)),
 and a borrowed replica ordered keeps its hole on the flavor's nodes until its
 pods hold a node, for up to 5 minutes or `placementTimeout`, whichever is
-longer. What Kueue
+longer (`placementTimeout` tripled while a cluster-autoscaler scale-up is
+pending). What Kueue
 has not reserved yet is taken out of the pool first: growth ordered and not yet
 admitted, and pods held at the admission gate in **every** namespace of the
 cohort's ClusterQueues, so a second controller's ask is seen. Still, run one
