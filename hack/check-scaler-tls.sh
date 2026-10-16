@@ -226,6 +226,9 @@ eps_json() {
 #                      NotFound); FORBIDDEN makes it unreadable
 #   STUB_KEDA_DEPLOYS  FORBIDDEN makes the Deployments in KEDA's namespace unreadable
 #   STUB_KEDA_OBJ_NS   KEDA_CLUSTER_OBJECT_NAMESPACE on KEDA's operator (else unset)
+#   STUB_LOGS          FORBIDDEN makes the controller's log unreadable; else $WORK/ctrl.log
+#   STUB_KEDA_PODS     FORBIDDEN makes the Pods in KEDA's namespace (keda) unreadable; else
+#                      keda-operator-7f9c at 10.128.5.168 and keda-admission-5d at 10.128.5.170
 # A file $STORE/deployment@<ns>__keda-operator.json is KEDA's operator in <ns>.
 stub_kubectl() {
     printf '%s\n' "$*" >>"$WORK/kubectl.log"
@@ -305,6 +308,18 @@ stub_kubectl() {
             ;;
         "get hpa "*" -n "*" -o json")
             stub_hpa
+            ;;
+        "logs -n $NS -l "*)
+            if [ "${STUB_LOGS:-}" = FORBIDDEN ]; then
+                echo 'Error from server (Forbidden): pods "wva-new" is forbidden: User "tenant" cannot get resource "pods/log"' >&2
+                return 1
+            fi
+            [ ! -f "$WORK/ctrl.log" ] || cat "$WORK/ctrl.log"
+            ;;
+        "get pods -n keda -o json")
+            [ "${STUB_KEDA_PODS:-}" != FORBIDDEN ] || { forbidden; return 1; }
+            jq -n '{items: [{metadata: {name: "keda-operator-7f9c"}, status: {podIP: "10.128.5.168", podIPs: [{ip: "10.128.5.168"}]}},
+                            {metadata: {name: "keda-admission-5d"}, status: {podIP: "10.128.5.170"}}]}'
             ;;
         "get pods -n $NS -l "*" -o json")
             if [ -f "$WORK/pods.json" ]; then cat "$WORK/pods.json"; else stub_pods wva-new; fi
@@ -426,7 +441,7 @@ run() {
     . "$WORK/vars" 2>/dev/null || true
 }
 
-reset_store() { rm -rf "$STORE" "$WORK/eps.d"; mkdir -p "$STORE"; rm -f "$WORK/so.json" "$WORK/pods.json"; }
+reset_store() { rm -rf "$STORE" "$WORK/eps.d"; mkdir -p "$STORE"; rm -f "$WORK/so.json" "$WORK/pods.json" "$WORK/ctrl.log"; }
 
 # secret_file <name> <key> <out>: a stored Secret key, decoded.
 secret_file() {
@@ -1017,12 +1032,15 @@ so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAu
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
 ok '[ "$RC" = 0 ] && grep -q "written for the first time while KEDA.s operator is running" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "reinstall: no restart notice: $(cat "$WORK/warnings")"
 
-echo "== a first write of KEDA's side while KEDA runs, with no ScaledObject on the TLS address, is a note, not a warning"
+# A first install and a reinstall look the same to the admin phase (the
+# uninstall removed the marker), and an unwired HPA is what a missed restart
+# costs. So it is a warning that says it cannot tell, and where to find out.
+echo "== a first write of KEDA's side while KEDA runs, with no ScaledObject on the TLS address, warns that it cannot tell a reinstall"
 reset_store
 fresh_k
 echo '{}' >"$STORE/deployment@keda__keda-operator.json"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
-ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && ! grep -q "rollout restart" "$WORK/warnings" && grep -q "written for the first time. If this scaler was installed here before" "$WORK/info" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/info"' "plain first install with KEDA running: exit $RC, on=$WVA_SCALER_TLS_ON, warnings '$(cat "$WORK/warnings")', info '$(grep -i restart "$WORK/info")'"
+ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && grep -q "cannot tell a first install from a reinstall" "$WORK/warnings" && grep -q "KEDA keeps the old client certificate until its operator restarts" "$WORK/warnings" && grep -q "HPAs stay unwired" "$WORK/warnings" && grep -q "make verify-deployment" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "first write with KEDA running: exit $RC, on=$WVA_SCALER_TLS_ON, warnings '$(cat "$WORK/warnings")'"
 reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
@@ -1558,6 +1576,78 @@ fresh_k
 so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA_OPERATOR=FORBIDDEN
 ok '[ "$RC" = 0 ] && grep -q "written for the first time while KEDA.s operator is running" "$WORK/warnings"' "KEDA operator Forbidden: read as absent, no reinstall warning: $(cat "$WORK/warnings")"
+
+# ---------------------------------------------------------------- KEDA still presents an old client certificate
+# Measured on an OpenShift cluster: after an uninstall and a reinstall in the
+# same namespace, KEDA's operator kept its pooled connection to the scaler
+# address, opened with the OLD client certificate. The controller refused it
+# about once a minute ("certificate signed by unknown authority", from KEDA's
+# Pod IP), the HPA stayed on CPU, and only a KEDA operator restart fixed it.
+# The re-wire patch cannot help, so it must not be what the operator is told.
+
+# refusal_line <ip>: one controller log line refusing a handshake from <ip>
+# for a client certificate signed by an unknown authority, as the console
+# encoder writes it.
+refusal_line() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' 2026-10-16T17:41:21Z INFO external-scaler scaler/refusal_log.go:118 \
+        'KEDA external scaler refused a TLS handshake; this client reaches no call' \
+        "{\"remote\": \"$1:34856\", \"reason\": \"tls: failed to verify certificate: x509: certificate signed by unknown authority (possibly because of \\\"crypto/rsa: verification error\\\" while trying to verify candidate authority certificate \\\"wva-external-scaler-ca.$NS\\\")\", \"refusedSinceLastLine\": 7}" \
+        >>"$WORK/ctrl.log"
+}
+# stale_case: the admin and controller phases ran, one ScaledObject is on the
+# TLS address, and the controller's log holds whatever the case adds.
+stale_case() {
+    store_tls_controller
+    so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+}
+RESTART="rollout restart deployment/keda-operator -n keda"
+
+echo "== verify: refusals for an unknown authority from KEDA's Pod: fails, names the restart, no re-wire"
+stale_case
+refusal_line 10.128.5.168
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "keda-operator-7f9c" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "verify, stale KEDA connection: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+ok '! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "Change it again" "$WORK/warnings"' "verify, stale KEDA connection: still offers the re-wire: $(cat "$WORK/stderr")"
+# A ScaledObject KEDA wired before the reinstall fails the same way: every
+# call on the connection is refused.
+run wva_verify_scaler_wiring
+ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings"' "verify, stale KEDA connection with a wired HPA: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+
+echo "== verify: the certificate KEDA was given is not from the current CA: setup-prereqs and the restart"
+stale_case
+refusal_line 10.128.5.168
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=another-ca \
+    -keyout "$WORK/other.key" -out "$WORK/other.crt" >/dev/null 2>&1
+jq --arg ca "$(base64 <"$WORK/other.crt" | tr -d '\n')" '.data["ca.crt"] = $ca' "$STORE/secret__$CLIENT.json" >"$WORK/client.json" \
+    && mv "$WORK/client.json" "$STORE/secret__$CLIENT.json"
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 1 ] && grep -q "not signed by the scaler.s current client CA" "$WORK/warnings" && grep -q "setup-prereqs" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && ! grep -q "OLD client certificate" "$WORK/warnings" && ! grep -q "kubectl patch scaledobject" "$WORK/stderr"' "verify, KEDA given a certificate from another CA: exit $RC, warnings $(cat "$WORK/warnings")"
+
+echo "== verify: refusals from a Pod that is not KEDA's are not this case"
+stale_case
+refusal_line 10.131.0.44
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 1 ] && ! grep -q "OLD client certificate" "$WORK/warnings" && ! grep -q "$RESTART" "$WORK/warnings" && grep -q "Change it again" "$WORK/warnings" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "verify, refusals from another host: exit $RC, warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+run wva_verify_scaler_wiring
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/warnings" ]' "verify, refusals from another host, HPA wired: exit $RC, warnings $(cat "$WORK/warnings")"
+
+echo "== verify: an unreadable controller log or KEDA Pods: says so, and lists both fixes"
+stale_case
+refusal_line 10.128.5.168
+run wva_verify_scaler_wiring STUB_UNWIRED=always STUB_LOGS=FORBIDDEN
+ok '[ "$RC" = 1 ] && grep -q "controller.s log in $NS cannot be read" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "Change it again" "$WORK/warnings" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "verify, log unreadable: exit $RC, warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+run wva_verify_scaler_wiring STUB_UNWIRED=always STUB_KEDA_PODS=FORBIDDEN
+ok '[ "$RC" = 1 ] && grep -q "Pods in keda, where KEDA runs, cannot be read" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "verify, KEDA Pods unreadable: exit $RC, warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+
+echo "== after a move: the re-wire loop stops at a stale KEDA connection and names the restart"
+stale_case
+refusal_line 10.128.5.168
+run 'wva_scaler_ensure_wired apps/app-so' STUB_UNWIRED=always WVA_SCALER_REWIRE_TRIES=3
+REWIRES="$(grep -c "^patch scaledobject" "$WORK/patches")"
+ok '[ "$RC" = 1 ] && [ "$REWIRES" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && ! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "change it again" "$WORK/warnings"' "re-wire, stale KEDA connection: exit $RC, $REWIRES re-wire patches (want 0), warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+run 'wva_scaler_ensure_wired apps/app-so' STUB_UNWIRED=always WVA_SCALER_REWIRE_TRIES=2 STUB_LOGS=FORBIDDEN
+REWIRES="$(grep -c "^patch scaledobject" "$WORK/patches")"
+ok '[ "$RC" = 1 ] && [ "$REWIRES" = 2 ] && grep -q "$RESTART" "$WORK/warnings" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "re-wire, log unreadable: exit $RC, $REWIRES re-wire patches (want 2), both fixes not listed: warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

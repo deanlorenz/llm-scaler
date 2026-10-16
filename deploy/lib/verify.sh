@@ -537,12 +537,26 @@ wva_verify_scaler_tls() {
 # ScaledObject reads Ready and Active, while its HPA scales on the CPU default
 # and WVA's decisions reach nothing. KEDA wires a new or changed ScaledObject
 # within about half a minute, so this waits up to WVA_VERIFY_WIRE_WAIT seconds
-# (default 60) before it calls one unwired. Returns 1 when one is.
+# (default 60) before it calls one unwired. Returns 1 when one is, and when
+# KEDA presents a client certificate the controller refuses
+# (wva_scaler_keda_conn_state): then it names the KEDA restart, not a re-wire.
 wva_verify_scaler_wiring() {
     declare -F wva_scaler_so_wiring >/dev/null || return 0
     local rows rc=0
     rows="$(wva_scaler_plaintext_scaledobjects any)" || rc=$?
     [ "$rc" = 0 ] && [ -n "$rows" ] || return 0
+    # KEDA presenting an old client certificate fails every call, wired or
+    # not, and only a restart of its operator fixes it: said first, and no
+    # re-wire offered.
+    wva_scaler_keda_conn_state
+    if [ "$WVA_SCALER_KEDA_CONN" = stale ] || [ "$WVA_SCALER_KEDA_CONN" = copy ]; then
+        log_warning "=================================================================="
+        log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it and the HPA scales on the CPU default:"
+        printf '%s\n' "$rows" | sed 's/^/    /' >&2
+        wva_scaler_keda_conn_report || true
+        log_warning "=================================================================="
+        return 1
+    fi
     if wva_scaler_wait_wired "$rows" "${WVA_VERIFY_WIRE_WAIT:-60}"; then
         [ -z "$WVA_SCALER_WIRE_UNKNOWN" ] \
             || log_info "  Could not read these ScaledObjects or their HPAs, so whether KEDA wired the scaler's metric is not checked: $(printf '%s' "$WVA_SCALER_WIRE_UNKNOWN" | paste -sd' ' -)"
@@ -551,6 +565,12 @@ wva_verify_scaler_wiring() {
     log_warning "=================================================================="
     log_warning "KEDA did not wire the scaler's metric onto the HPA of these ScaledObjects. They read Ready, but the HPA scales on the CPU default and WVA's decisions reach nothing:"
     printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+    # Read again: refusals may have started while it waited.
+    wva_scaler_keda_conn_state
+    if wva_scaler_keda_conn_report; then
+        log_warning "=================================================================="
+        return 1
+    fi
     log_warning "  KEDA asks for the metric spec only when the spec changes, and a call that failed then (the scaler moving or restarting) is not retried. Change it again:"
     printf '%s' "$WVA_SCALER_UNWIRED" | while IFS= read -r row; do
         [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")" >&2

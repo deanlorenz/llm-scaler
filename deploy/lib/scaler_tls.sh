@@ -961,15 +961,19 @@ wva_scaler_keda_auth_apply() {
         log_warning "KEDA's client certificate or the CA it trusts changed. KEDA keeps the TLS of a connection it already has until it restarts, so restart KEDA's operator now:  $(wva_scaler_keda_restart_cmd)"
     elif [ "$obj_state" = absent ] && wva_scaler_keda_operator_may_run; then
         # A first write while KEDA runs: after an uninstall and reinstall, KEDA
-        # still holds the connection it built with the old certificate. That
-        # matters only when ScaledObjects already dial the TLS address, or when
-        # they cannot be listed; on a plain first install it is a note.
+        # still holds the connection it built with the old certificate.
+        # A first install and a reinstall look the same here: an uninstall
+        # removes everything it wrote, the marker included, and KEDA does not
+        # show which connections it holds. So both get the warning, and the
+        # controller's log tells them apart after the fact
+        # (wva_scaler_keda_conn_state, run by verify-deployment and after a
+        # ScaledObject move).
         local tls_rows tls_rc=0
         tls_rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || tls_rc=$?
         if [ "$tls_rc" != 0 ] || [ -n "$tls_rows" ]; then
             log_warning "KEDA's side was written for the first time while KEDA's operator is running, and ScaledObjects already use the scaler's TLS address (or they cannot be listed). If this scaler was installed here before (an uninstall and reinstall), KEDA still holds the old certificate and every handshake fails until it restarts. Then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
         else
-            log_info "KEDA's side was written for the first time. If this scaler was installed here before and KEDA's operator was not restarted since, restart it:  $(wva_scaler_keda_restart_cmd)"
+            log_warning "KEDA's side was written for the first time while KEDA's operator is running. The installer cannot tell a first install from a reinstall. If this namespace had the scaler before, KEDA keeps the old client certificate until its operator restarts, and without a restart the HPAs stay unwired (on the CPU default). On a first install, nothing to do. After the install,  $(wva_make_cmd verify-deployment)  tells which. To be safe now, restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
         fi
     fi
 }
@@ -1482,6 +1486,103 @@ wva_scaler_keda_ca_report() {
     esac
 }
 
+# wva_scaler_keda_conn_state sets WVA_SCALER_KEDA_CONN from the controller's
+# log of the last WVA_SCALER_REFUSAL_SINCE (default 5m):
+#   stale    it refused handshakes from a Pod in KEDA's namespace because their
+#            client certificate is signed by an unknown authority, while the
+#            certificate KEDA was given (the marker's copy) is signed by the
+#            current client CA. KEDA presents an older certificate than the one
+#            it was given: it keeps one connection per scaler address, built
+#            once, and never closes it. Seen after an uninstall and reinstall in
+#            the same namespace, with KEDA's operator running throughout.
+#   copy     the same refusals, but the certificate KEDA was given is not signed
+#            by the current client CA either
+#   none     no such refusal from a Pod in KEDA's namespace
+#   unknown  the log, KEDA's Pods, the marker or the client CA cannot be read
+#            (WVA_SCALER_KEDA_CONN_WHY says which)
+# WVA_SCALER_KEDA_CONN_PODS names the refused KEDA Pods. The controller logs at
+# most one refusal per remote host per minute, so a KEDA that keeps retrying
+# shows up within the window.
+wva_scaler_keda_conn_state() {
+    local kns logs pods out rc=0 hosts d
+    WVA_SCALER_KEDA_CONN=unknown
+    WVA_SCALER_KEDA_CONN_WHY=""
+    WVA_SCALER_KEDA_CONN_PODS=""
+    [ -n "${WVA_SCALER_KEDA_RUN_NS:-}" ] || wva_scaler_keda_run_ns
+    kns="$WVA_SCALER_KEDA_RUN_NS"
+    if [ -z "$kns" ]; then
+        WVA_SCALER_KEDA_CONN_WHY="where KEDA runs is not known (set KEDA_NAMESPACE)"
+        return 0
+    fi
+    logs="$(kubectl logs -n "$WVA_NS" -l "$WVA_CONTROLLER_LABEL_SELECTOR" -c manager \
+        --since="${WVA_SCALER_REFUSAL_SINCE:-5m}" --tail=-1 --max-log-requests=10 2>&1)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        WVA_SCALER_KEDA_CONN_WHY="the controller's log in $WVA_NS cannot be read ($(printf '%s\n' "$logs" | head -1))"
+        return 0
+    fi
+    # The remote host of each refusal for an unknown authority, port and IPv6
+    # brackets dropped. Console and JSON log lines both quote the field.
+    hosts="$(printf '%s\n' "$logs" | grep -F 'refused a TLS handshake' | grep -F 'unknown authority' \
+        | sed -n 's/.*"remote": *"\([^"]*\)".*/\1/p' | sed 's/:[0-9]*$//; s/^\[//; s/\]$//' | sort -u)" || hosts=""
+    if [ -z "$hosts" ]; then
+        WVA_SCALER_KEDA_CONN=none
+        return 0
+    fi
+    rc=0
+    pods="$(kubectl get pods -n "$kns" -o json 2>&1)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        WVA_SCALER_KEDA_CONN_WHY="the controller refused handshakes for an unknown authority, but the Pods in $kns, where KEDA runs, cannot be read ($(printf '%s\n' "$pods" | head -1)), so whether KEDA sent them is not known"
+        return 0
+    fi
+    WVA_SCALER_KEDA_CONN_PODS="$(printf '%s' "$pods" | jq -r --arg h "$hosts" '
+        ($h | split("\n")) as $hs
+        | [.items[]? | select([(.status.podIPs // [])[]?.ip, (.status.podIP // empty)] | any(. as $ip | $hs | any(. == $ip)))
+           | .metadata.name] | unique | join(" ")' 2>/dev/null)" || WVA_SCALER_KEDA_CONN_PODS=""
+    if [ -z "$WVA_SCALER_KEDA_CONN_PODS" ]; then
+        WVA_SCALER_KEDA_CONN=none
+        return 0
+    fi
+    # The certificate KEDA was given, against the client CA the controller
+    # trusts now.
+    rc=0
+    out="$(kubectl get configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" -o json 2>&1)" || rc=$?
+    d="$(mktemp -d)"
+    [ "$rc" = 0 ] && printf '%s' "$out" | jq -r '.data.clientCert // ""' > "$d/keda.crt" 2>/dev/null || : > "$d/keda.crt"
+    wva_scaler_object_state secret "$WVA_SCALER_CLIENT_SECRET"
+    wva_scaler_secret_field ca.crt "$d/ca.crt"
+    if [ ! -s "$d/keda.crt" ] || [ ! -s "$d/ca.crt" ]; then
+        rm -rf "$d"
+        WVA_SCALER_KEDA_CONN_WHY="the controller refused KEDA's Pod(s) $WVA_SCALER_KEDA_CONN_PODS for a certificate signed by an unknown authority, but the certificate KEDA was given (ConfigMap $WVA_SCALER_KEDA_MARKER) or the client CA (Secret $WVA_SCALER_CLIENT_SECRET) in $WVA_NS cannot be read"
+        return 0
+    fi
+    if openssl verify -CAfile "$d/ca.crt" "$d/keda.crt" >/dev/null 2>&1; then
+        WVA_SCALER_KEDA_CONN=stale
+    else
+        WVA_SCALER_KEDA_CONN=copy
+    fi
+    rm -rf "$d"
+}
+
+# wva_scaler_keda_conn_report reports what wva_scaler_keda_conn_state found.
+# Succeeds when the cause is on KEDA's side (stale or copy): changing a
+# ScaledObject cannot fix that, so the caller must not offer the re-wire. For
+# unknown it names the KEDA restart as the other possible fix and fails, so the
+# caller still lists the re-wire. Prints nothing for none.
+wva_scaler_keda_conn_report() {
+    case "${WVA_SCALER_KEDA_CONN:-none}" in
+        stale)
+            log_warning "  Cause: KEDA's operator still presents an OLD client certificate. The controller refused handshakes from KEDA's Pod(s) $WVA_SCALER_KEDA_CONN_PODS: certificate signed by unknown authority. The certificate KEDA was given (ClusterTriggerAuthentication $(wva_scaler_keda_auth_name)) is signed by the current CA, so KEDA is still using a connection it opened before. KEDA keeps one connection per scaler address and never closes it, so this follows an uninstall and reinstall in the same namespace. Changing the ScaledObjects does not help. Restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+            return 0 ;;
+        copy)
+            log_warning "  Cause: KEDA's client certificate is not signed by the scaler's current client CA. The controller refused handshakes from KEDA's Pod(s) $WVA_SCALER_KEDA_CONN_PODS: certificate signed by unknown authority, and the certificate KEDA was given (ClusterTriggerAuthentication $(wva_scaler_keda_auth_name)) does not chain to the client CA in Secret $WVA_SCALER_CLIENT_SECRET. A cluster admin runs:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+            return 0 ;;
+        unknown)
+            log_warning "  Whether KEDA still presents an old client certificate is not checked: ${WVA_SCALER_KEDA_CONN_WHY}. One of two fixes applies. If this scaler was uninstalled and reinstalled in this namespace while KEDA's operator kept running (the controller log then shows \"refused a TLS handshake\" with \"certificate signed by unknown authority\"), restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)  Otherwise change the ScaledObjects again (below)."
+            return 1 ;;
+    esac
+    return 1
+}
+
 # wva_scaler_tls_stay_plaintext names the ScaledObjects a plaintext scaler
 # strands (wva_scaler_tls_warn_stranded), from every phase but the admin's.
 wva_scaler_tls_stay_plaintext() {
@@ -1732,10 +1833,22 @@ wva_scaler_ensure_wired() {
     local rows="$1" wait="${WVA_SCALER_REWIRE_WAIT:-30}" tries="${WVA_SCALER_REWIRE_TRIES:-6}" t=0
     [ -n "$rows" ] || return 0
     while ! wva_scaler_wait_wired "$rows" "$wait"; do
+        # A KEDA that still presents an old client certificate: no re-wire
+        # helps, only a restart of its operator.
+        wva_scaler_keda_conn_state
+        if [ "$WVA_SCALER_KEDA_CONN" = stale ] || [ "$WVA_SCALER_KEDA_CONN" = copy ]; then
+            log_warning "=================================================================="
+            log_warning "KEDA has not wired the scaler's metric onto the HPA of these ScaledObjects, so they scale on the CPU default and WVA's decisions do not reach them:"
+            printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+            wva_scaler_keda_conn_report || true
+            log_warning "=================================================================="
+            return 1
+        fi
         if [ "$t" -ge "$tries" ]; then
             log_warning "=================================================================="
             log_warning "KEDA has not wired the scaler's metric onto the HPA of these ScaledObjects, so they scale on the CPU default and WVA's decisions do not reach them:"
             printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+            wva_scaler_keda_conn_report || true
             log_warning "  KEDA asks for the metric spec only when a ScaledObject's spec changes. Once the scaler answers (make verify-deployment), change it again:"
             printf '%s' "$WVA_SCALER_UNWIRED" | while IFS= read -r row; do
                 [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")" >&2
