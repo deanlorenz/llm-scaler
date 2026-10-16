@@ -27,11 +27,7 @@ verify:
     note: Every controller should be Ready.
     run: kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
   source:
-    note: >-
-      Print the policy namespace, limiter and acceptance each controller reports.
-      Expect a line such as `wva-policy inventory/gpu-inventory true`, or
-      `wva-policy inventory+quota/gpu-inventory,tenant-quota true` when a quota is
-      declared beside it: the limiter types joined by +, then every entry's name.
+    note: Print each controller's policy namespace, limiter and whether it accepted the policy.
     run: |
       for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
           -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
@@ -43,7 +39,7 @@ verify:
           || echo "   (no status and no startup line: restart the controller to print it)"
       done
   budget:
-    note: Show the published limiter, then whether the controller built it.
+    note: Show the published limiter, then what the controller built from it.
     run: |
       POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> \
         -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
@@ -54,11 +50,7 @@ verify:
 
 cleanup:
   disable:
-    note: >-
-      Removes the physical limiter; a quota in the same policy stays, and with none
-      left scaling is unbounded again. WVA_LIMITER_TYPE=quota removes a quota instead,
-      and WVA_LIMITER_TYPE=all every limiter (use it when uninstalling: it exits 0
-      even where nothing is declared).
+    note: Remove the physical limiter. A quota in the same policy stays.
     run: |
       make disable-limiter
       # a quota instead:
