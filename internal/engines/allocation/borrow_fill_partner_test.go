@@ -59,3 +59,41 @@ func TestGuaranteedFillNeedsAPartnerOfTheOtherRole(t *testing.T) {
 		t.Fatalf("control: with a guaranteed pair running, the remainder fills and a pair borrows whole: grew %v, want 24 in all", got)
 	}
 }
+
+// Review round 3 (N-m2 partial): guaranteedPartners counted only the
+// partner's draws in flight as borrowed. A decode borrowed and landed -- its
+// pods exist, the read shows its namespace 8 past guaranteed -- counted as a
+// guaranteed partner, and the prefill filled the guaranteed remainder alone,
+// serving nothing once Kueue reclaims the decode. Whose the 8 past guaranteed
+// are the read does not say, so they count against every partner, the
+// cautious side; a decode this pass drew counts too. Control: nothing past
+// guaranteed, the running decode partners the prefill.
+func TestGuaranteedPartnerCountsLandedBorrowing(t *testing.T) {
+	variants := []variantRecord{
+		{VariantMetadata: domain.VariantMetadata{VariantName: "p", AcceleratorName: "H100"}},
+		{VariantMetadata: domain.VariantMetadata{VariantName: "d", AcceleratorName: "H100"}},
+	}
+	states := map[string]domain.VariantReplicaState{"p": {VariantName: "p", GPUsPerReplica: 8}, "d": {VariantName: "d", GPUsPerReplica: 8}}
+	byRole := map[string]string{"prefill": "p", "decode": "d"}
+	for _, tc := range []struct {
+		name     string
+		heldPast int
+		drawn    bool
+		want     bool
+	}{
+		{"the decode is borrowed and landed: no guaranteed partner", 8, false, false},
+		{"the decode was drawn this pass: no guaranteed partner", 0, true, false},
+		{"control: nothing past guaranteed, the decode partners it", 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bs := &borrowState{heldPast: map[string]map[string]int{"b": {"H100": tc.heldPast}}}
+			if tc.drawn {
+				bs.draws = []BorrowDraw{{Namespace: "b", Variant: "d", GPUs: 8, Replicas: 1}}
+			}
+			p := &modelPlacer{bs: bs, namespace: "b", targets: map[string]int{"p": 1, "d": 1}}
+			if got := p.guaranteedPartners([]string{"prefill", "decode"}, "prefill", byRole, variants, states); got != tc.want {
+				t.Fatalf("guaranteedPartners = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

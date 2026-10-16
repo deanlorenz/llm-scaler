@@ -146,6 +146,10 @@ type borrowState struct {
 	// reclaimBlocked reports a model whose growth may not skip the node hole
 	// this pass (ReclaimBlocked); nil blocks none.
 	reclaimBlocked func(namespace, modelID string) bool
+	// heldPast is, per namespace and type, the GPUs it holds past its
+	// guaranteed figure by the read (namespaceHeldPast): borrowed replicas
+	// already landed, whose they are the read does not say.
+	heldPast map[string]map[string]int
 }
 
 // newBorrowState builds the pass's borrowing state, or nil when no constraint
@@ -158,6 +162,7 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{}, nodes: nodes}
 	bs.chunks, bs.cohorts = mergeSharedPools(constraints)
 	bs.ownFlavors = ownFlavorsOf(constraints)
+	bs.heldPast = namespaceHeldPast(constraints)
 	for _, c := range constraints {
 		if c == nil {
 			continue
@@ -692,7 +697,7 @@ func (p *modelPlacer) fillGuaranteed(picked []string, kByRole map[string]int, va
 	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
 	for _, role := range picked {
 		v := variantByRole[role]
-		if !p.guaranteedPartners(picked, role, variantByRole, stateMap) {
+		if !p.guaranteedPartners(picked, role, variantByRole, variants, stateMap) {
 			continue
 		}
 		r := p.replica(variants, stateMap, v)
@@ -721,12 +726,15 @@ func (p *modelPlacer) fillGuaranteed(picked []string, kByRole map[string]int, va
 
 // guaranteedPartners reports whether every role of picked other than role
 // has a replica that is not borrowed -- its replicas so far less those its
-// draws in flight hold (BorrowCredit) -- to pair with role's replicas placed
-// alone on guaranteed capacity (N-m2). Without one, the role filled alone
-// pairs only with borrowed replicas: once Kueue reclaims them it serves
-// nothing, a prefill with no decode.
+// draws in flight hold (BorrowCredit), those this pass drew, and, the
+// cautious side, all its namespace holds past its guaranteed figure of the
+// type by the read (a borrowed replica already landed: the read does not say
+// whose) -- to pair with role's replicas placed alone on guaranteed capacity
+// (N-m2). Without one, the role filled alone pairs only with borrowed
+// replicas: once Kueue reclaims them it serves nothing, a prefill with no
+// decode.
 func (p *modelPlacer) guaranteedPartners(picked []string, role string, variantByRole map[string]string,
-	stateMap map[string]domain.VariantReplicaState) bool {
+	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
 	for _, other := range picked {
 		if other == role {
 			continue
@@ -735,6 +743,14 @@ func (p *modelPlacer) guaranteedPartners(picked []string, role string, variantBy
 		borrowed := 0
 		for _, gpus := range p.bs.credit[p.namespace+"/"+v] {
 			borrowed += gpus
+		}
+		for _, d := range p.bs.draws {
+			if d.Namespace == p.namespace && d.Variant == v {
+				borrowed += d.GPUs
+			}
+		}
+		if k, ok := accelerator.FindBudgetKey(p.bs.heldPast[p.namespace], accFromVCs(variants, v)); ok {
+			borrowed += p.bs.heldPast[p.namespace][k]
 		}
 		if g := gpusPerReplicaFromState(stateMap, v); g > 0 {
 			borrowed = ceilDiv(borrowed, g)
