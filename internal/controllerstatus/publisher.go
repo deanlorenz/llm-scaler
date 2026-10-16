@@ -80,6 +80,12 @@
 //	                       controller with no quota on its namespace ignores
 //	                       physicalGroups and says so here. The mode is not
 //	                       invalid; absent otherwise.
+//	inFlightLedger         the in-flight node ledger, JSON
+//	                       (allocation.PersistedInFlight): the holes held for
+//	                       replicas whose pods hold no node yet, each with its
+//	                       expiry. State, not status: the steady-state engine
+//	                       reads it back after a restart, and a new term
+//	                       carries it over. See KeyInFlightLedger.
 //
 // limiter, limiterWarnings and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -148,6 +154,12 @@ const (
 	// a model's cooldown. The steady-state engine writes it and reads it back
 	// on start.
 	KeyBorrowReleaseLedger = "borrowReleaseLedger"
+	// KeyInFlightLedger is the in-flight node ledger, JSON
+	// (allocation.PersistedInFlight): the replicas ordered or woken whose
+	// pods hold no node yet, with the shape and expiry of the hole each
+	// holds, so a restart does not hand a held node to another decision. The
+	// steady-state engine writes it and reads it back on start.
+	KeyInFlightLedger = "inFlightLedger"
 	// KeyClusterQuotaPerController carries the warning that a scope: cluster
 	// quota caps this namespace-scoped controller only. Derived from the
 	// applied configuration; absent when it does not apply.
@@ -172,7 +184,7 @@ const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so 
 // persistedKeys are the keys a new term carries over from the ConfigMap it
 // finds, rather than overwriting with this process's empty start: state, not
 // status.
-var persistedKeys = []string{KeyBorrowReleaseLedger}
+var persistedKeys = []string{KeyBorrowReleaseLedger, KeyInFlightLedger}
 
 // Labels on the controller-status ConfigMap.
 const (
@@ -342,6 +354,14 @@ func (p *Publisher) SetBorrowReleaseLedger(ledger string) {
 		return
 	}
 	p.update(func(d map[string]string) { d[KeyBorrowReleaseLedger] = ledger })
+}
+
+// SetInFlightLedger records the in-flight node ledger (JSON).
+func (p *Publisher) SetInFlightLedger(ledger string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { d[KeyInFlightLedger] = ledger })
 }
 
 // ReadKey reads one key of the controller-status ConfigMap in namespace

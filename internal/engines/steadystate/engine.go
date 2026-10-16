@@ -158,6 +158,9 @@ type Engine struct {
 	// placements replaced in the in-flight ledger (admitPassInFlight), until
 	// admitInFlight commits the final targets; nil between cycles.
 	inFlightMark allocation.InFlightMark
+	// inFlightStore is the in-flight ledger's persistence in the controller
+	// status (inflight_persist.go).
+	inFlightStore inFlightStore
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
@@ -648,6 +651,10 @@ func (e *Engine) StartOptimizeLoop(ctx context.Context) {
 
 	e.recordActiveOptimizer() // record active optimizer
 	metrics.SetConfigOptimizationInterval(float64(e.Config.OptimizationInterval().Seconds()))
+	// Read the in-flight holds back before the first cycle, and as early as the
+	// scale-from-zero engine starts: a wake builds its node view from the same
+	// ledger.
+	e.restoreInFlight(ctx, time.Now())
 	e.executor.Start(ctx)
 }
 
@@ -760,6 +767,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	}()
 
 	logger := ctrl.LoggerFrom(ctx)
+	e.restoreInFlight(ctx, time.Now()) // once: the in-flight holds a restart would lose, before any node view
 	e.refreshLimiter(ctx)              // rebuild the GPU limiter if the ConfigMap changed its type/entries
 	e.reconcileExternalAnalyzers(ctx)  // sync the runtime external-analyzer registry with the catalog
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
@@ -1646,6 +1654,9 @@ func (e *Engine) optimizeV2(
 	if e.cycleFitted {
 		e.admitInFlight(requests, allDecisions, e.cyclePlanned, variantScaleTargets, time.Now())
 	}
+	// Persisted every cycle, fitted or not: a wake's admission and an expired
+	// hold change the ledger too.
+	e.persistInFlight(ctx, time.Now())
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
 	// Utilization, RequiredCapacity, and SpareCapacity are already set by
