@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -539,18 +540,32 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 // gave another model never reached it. The cuts are summed instead and shed as
 // whole replicas: first what fits within each role's own cut, then what is
 // left of the sum, from the role with the most of its cut still unshed first,
-// each role no further than its cut rounded up to one replica. The model sheds
-// no more than the summed cut, a role under a scale-down hold is not cut at
-// all, and reclaimRole keeps every variant at its minReplicas. It mutates
-// targets.
+// each role no further than its cut rounded up to one replica. A role counts
+// toward the sum only what it can actually give: a cut no replica can meet (a
+// variant with no capacity reading, the cheapest held at one) made the other
+// role pay for it, and a role with a share does not count its last replica, so
+// the second pass never takes it: with two equal variants the cheapest-at-one
+// rule does not protect a role's one pod, and a role with demand went to zero.
+// The second pass runs only when every role cut has one replica size. The model
+// sheds no more than the summed
+// cut, a role under a scale-down hold is not cut at all, and reclaimRole keeps
+// every variant at its minReplicas. It mutates targets.
 func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
 	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
 	cut := make(map[string]int, len(roles))
 	total := 0
+	trialCtx := ctrl.LoggerInto(ctx, logr.Discard())
 	for _, role := range roles {
 		if tgt[role] < cur[role] && !e.Holds[role].NoScaleDown {
 			cut[role] = cur[role] - tgt[role]
-			total += cut[role]
+			// A role with a share keeps its last replica, so that is not
+			// something it can give either.
+			keep := 0
+			if tgt[role] > 0 {
+				keep = max(roleReplicaStepGPUs(records, role, stateMap), 1)
+			}
+			can := reclaimRole(trialCtx, e, records, role, stateMap, maps.Clone(targets), max(cur[role]-keep, 0))
+			total += min(cut[role], can)
 		}
 	}
 	if total == 0 {
@@ -561,6 +576,15 @@ func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []
 		if cut[role] > 0 {
 			shed[role] = reclaimRole(ctx, e, records, role, stateMap, targets, cut[role])
 			total -= shed[role]
+		}
+	}
+	// With more than one replica size in a role, the per-role rounding of the
+	// first pass and the summed second pass can disagree between adjacent
+	// targets, so a larger target left fewer GPUs; such a model is rounded
+	// per role only, as before.
+	for _, role := range roles {
+		if cut[role] > 0 && !uniformReplicaGPUs(records, role, stateMap) {
+			return
 		}
 	}
 	order := slices.Clone(roles)
@@ -920,6 +944,23 @@ func roleReplicaStepGPUs(variants []variantRecord, role string, stateMap map[str
 		}
 	}
 	return least
+}
+
+// uniformReplicaGPUs reports whether every variant of role that can be sized
+// (a capacity reading and a GPU count) takes the same GPUs per replica.
+func uniformReplicaGPUs(variants []variantRecord, role string, stateMap map[string]domain.VariantReplicaState) bool {
+	size := 0
+	for _, vc := range variantsForRole(variants, role) {
+		g := gpusPerReplicaFromState(stateMap, vc.VariantName)
+		if vc.PerReplicaCapacity <= 0 || g <= 0 {
+			continue
+		}
+		if size != 0 && g != size {
+			return false
+		}
+		size = g
+	}
+	return true
 }
 
 // ceilToReplica rounds gpus up to a whole number of g-GPU replicas; g <= 0

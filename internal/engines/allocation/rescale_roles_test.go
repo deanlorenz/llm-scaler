@@ -84,3 +84,61 @@ func TestRescaleReclaimsNoPodBelowAFloor(t *testing.T) {
 	assert.Equal(t, 2, got["p"], "a role that may not shrink keeps its pods")
 	assert.Equal(t, 1, got["d"], "the pod comes from decode")
 }
+
+// TestRescaleSecondPassKeepsARolesLastPod: the summed second pass never takes
+// a role's last replica. Prefill holds three 8-GPU pods, decode one, on the
+// first of two equal decode variants, where the cheapest-at-one rule does not
+// protect it; demand weighs a target of 16 at 12 and 4. Decode, with demand,
+// went to zero pods.
+func TestRescaleSecondPassKeepsARolesLastPod(t *testing.T) {
+	req := pdWholeNodeRequest(3, 300, 100)
+	req.CompositeSignal.Result.VariantCapacities[1].ReplicaCount = 1
+	req.VariantStates[1].CurrentReplicas = 1
+	req.CompositeSignal.Result.VariantCapacities = append(req.CompositeSignal.Result.VariantCapacities,
+		domain.VariantCapacity{VariantName: "d-b", Role: domain.RoleDecode, PerReplicaCapacity: 100})
+	req.VariantStates = append(req.VariantStates,
+		domain.VariantReplicaState{VariantName: "d-b", Role: domain.RoleDecode, GPUsPerReplica: 8})
+	req.Variants = append(req.Variants,
+		domain.VariantMetadata{VariantName: "d-b", Role: domain.RoleDecode, AcceleratorName: "A100", Cost: 1})
+	got := rescaleTargets(req, 16, 0)
+	assert.Equal(t, 1, got["d"]+got["d-b"], "decode keeps its one pod: %v", got)
+	assert.Equal(t, 2, got["p"], "prefill gives the pod its own cut buys: %v", got)
+}
+
+// TestRescaleCountsOnlyACutARoleCanGive: a cut no replica can meet does not
+// count toward the summed cut. Decode's variant has no capacity reading, so
+// none of its 32 GPUs can be shed; counted anyway, prefill shed it for decode
+// and went from 4 pods to 2 at a target of 20, and to 3 at 28.
+func TestRescaleCountsOnlyACutARoleCanGive(t *testing.T) {
+	req := pdWholeNodeRequest(4, 300, 100)
+	req.CompositeSignal.Result.VariantCapacities[1].PerReplicaCapacity = 0
+	assert.Equal(t, 3, rescaleTargets(req, 20, 0)["p"], "prefill sheds its own cut, rounded down")
+	assert.Equal(t, 4, rescaleTargets(req, 28, 0)["p"])
+	assert.Equal(t, 4, rescaleTargets(req, 20, 0)["d"], "decode cannot shed")
+}
+
+// TestRescaleRoundsMixedPodSizesPerRole: with more than one replica size in a
+// role the summed pass is skipped, as it made a larger target leave fewer
+// GPUs. Prefill holds one 8-GPU and one 4-GPU pod, decode two 8-GPU pods: a
+// target of 18 left 20 GPUs where 17 left 24.
+func TestRescaleRoundsMixedPodSizesPerRole(t *testing.T) {
+	req := pdWholeNodeRequest(2, 100, 100)
+	req.CompositeSignal.Result.VariantCapacities[0].ReplicaCount = 1
+	req.CompositeSignal.Result.VariantCapacities[0].PerReplicaCapacity = 200
+	req.CompositeSignal.Result.VariantCapacities[1].PerReplicaCapacity = 200
+	req.VariantStates[0].CurrentReplicas = 1
+	req.Variants[0].Cost, req.Variants[1].Cost = 8, 8
+	req.CompositeSignal.Result.VariantCapacities = append(req.CompositeSignal.Result.VariantCapacities,
+		domain.VariantCapacity{VariantName: "p4", Role: domain.RolePrefill, ReplicaCount: 1, PerReplicaCapacity: 100})
+	req.VariantStates = append(req.VariantStates,
+		domain.VariantReplicaState{VariantName: "p4", Role: domain.RolePrefill, CurrentReplicas: 1, GPUsPerReplica: 4})
+	req.Variants = append(req.Variants,
+		domain.VariantMetadata{VariantName: "p4", Role: domain.RolePrefill, AcceleratorName: "A100", Cost: 4})
+	gpus := func(target int) int {
+		got := rescaleTargets(req, target, 0)
+		return 8*got["p"] + 4*got["p4"] + 8*got["d"]
+	}
+	for target := 16; target < 28; target++ {
+		assert.LessOrEqual(t, gpus(target), gpus(target+1), "target %d gives more GPUs than %d", target, target+1)
+	}
+}
