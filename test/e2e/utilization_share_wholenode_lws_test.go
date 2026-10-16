@@ -12,7 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 )
 
@@ -97,12 +96,12 @@ var _ = Describe("Utilization share with a whole-node model: a two-node LeaderWo
 	It("lends G's highest group, two whole nodes, to S1", func() {
 		start := time.Now()
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelS1, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelS1, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		By("Lowering G's floor to 1")
 		floorDropped := time.Now()
-		e.bounds(soG, lwsG, modelG, 1, 2, "LeaderWorkerSet")
+		e.lowerFloor(soG, lwsG, modelG, 2, "LeaderWorkerSet")
 
 		By("Waiting for a transfer from G to S1 to complete")
 		var set transferSet

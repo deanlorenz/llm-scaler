@@ -9,7 +9,6 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 )
 
@@ -83,12 +82,12 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 		start := time.Now()
 		wholeNodeProm()
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelG, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelG, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		By("Lowering S1's and S2's floors to 1, so they have replicas to give")
-		e.bounds(soS1, depS1, modelS1, 1, 5, "")
-		e.bounds(soS2, depS2, modelS2, 1, 5, "")
+		e.lowerFloor(soS1, depS1, modelS1, 5, "")
+		e.lowerFloor(soS2, depS2, modelS2, 5, "")
 		floorDropped := time.Now()
 
 		By("Holding eight minutes: nothing is given for G, G orders no replica, and says why")
@@ -170,7 +169,7 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 		start := time.Now()
 		pc := wholeNodeProm()
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelG, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelG, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 
@@ -184,8 +183,8 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 		}, 20*time.Second, 5*time.Second).Should(Succeed())
 
 		By("Lowering S1's and S2's floors to 1")
-		e.bounds(soS1, depS1, modelS1, 1, 5, "")
-		e.bounds(soS2, depS2, modelS2, 1, 5, "")
+		e.lowerFloor(soS1, depS1, modelS1, 5, "")
+		e.lowerFloor(soS2, depS2, modelS2, 5, "")
 		floorDropped := time.Now()
 
 		By("Waiting for the transfer to G to end")

@@ -20,6 +20,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
@@ -50,7 +51,7 @@ type wholeNodeEnv struct {
 	key, product, gpuRN string
 	// nodes are the schedulable nodes of the product with wholeNodeGPUs
 	// GPUs, all free when the spec started, by name.
-	nodes []string
+	nodes        []string
 	ns, fillerNS string
 	// shared is true when ns is not the spec's own -- the controller's
 	// namespace, for a namespace-scoped controller -- so what the spec creates
@@ -308,8 +309,9 @@ func (e *wholeNodeEnv) register(so, target, modelID string, minR, maxR int32, ki
 	waitForKEDAExternalMetricWired(e.ns, target, so)
 }
 
-// bounds changes a registered model's minReplicas and maxReplicas.
-func (e *wholeNodeEnv) bounds(so, target, modelID string, minR, maxR int32, kind string) {
+// lowerFloor sets a registered model's minReplicas to 1, keeping maxReplicas
+// at maxR, so it has replicas to give.
+func (e *wholeNodeEnv) lowerFloor(so, target, modelID string, maxR int32, kind string) {
 	GinkgoHelper()
 	opts := []fixtures.ScaledObjectOption{
 		fixtures.WithWVATriggerMetadata(modelID, "10.0"),
@@ -318,7 +320,14 @@ func (e *wholeNodeEnv) bounds(so, target, modelID string, minR, maxR int32, kind
 	if kind != "" {
 		opts = append(opts, fixtures.WithScaledObjectScaleTargetKind(kind))
 	}
-	Expect(fixtures.EnsureScaledObject(ctx, crClient, e.ns, so, target, target, minR, maxR, cfg.MonitoringNS, opts...)).To(Succeed())
+	Expect(fixtures.EnsureScaledObject(ctx, crClient, e.ns, so, target, target, 1, maxR, cfg.MonitoringNS, opts...)).To(Succeed())
+}
+
+// shortOf reports whether the controller's last two analyzer results since
+// since ask aggregated model modelID for a whole replica more than it holds
+// (roleShortFor), and says what it read.
+func (e *wholeNodeEnv) shortOf(modelID string, since time.Time) (bool, string) {
+	return roleShortFor(e.ns, modelID, domain.RoleBoth, since, 2)
 }
 
 // load starts a load Job of workers against model server ms for an hour; the
@@ -407,11 +416,12 @@ func (e *wholeNodeEnv) holdUnfunded(label, modelG, depG string, small []string, 
 		}
 		reasons, err := blockedReasons(pc, e.ns, modelG)
 		g.Expect(err).NotTo(HaveOccurred())
-		at := fmt.Sprintf("%v G=%d/%d", reasons, gSpec, e.readyReplicas(g, depG))
+		var b strings.Builder
+		fmt.Fprintf(&b, "%v G=%d/%d", reasons, gSpec, e.readyReplicas(g, depG))
 		for _, dep := range small {
-			at += fmt.Sprintf(" %s=%d", dep, e.specReplicas(g, dep))
+			fmt.Fprintf(&b, " %s=%d", dep, e.specReplicas(g, dep))
 		}
-		if !seen[at] {
+		if at := b.String(); !seen[at] {
 			seen[at] = true
 			timeline = append(timeline, fmt.Sprintf("+%s %s", time.Since(floorDropped).Round(time.Second), at))
 		}

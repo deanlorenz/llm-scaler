@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
@@ -82,12 +81,12 @@ var _ = Describe("Utilization share with a whole-node model: a namespace-scoped 
 		start := time.Now()
 		wholeNodeProm()
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelG, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelG, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		By("Lowering S1's and S2's floors to 1")
-		e.bounds(soS1, depS1, modelS1, 1, 5, "")
-		e.bounds(soS2, depS2, modelS2, 1, 5, "")
+		e.lowerFloor(soS1, depS1, modelS1, 5, "")
+		e.lowerFloor(soS2, depS2, modelS2, 5, "")
 		floorDropped := time.Now()
 
 		By("Holding eight minutes: nothing is given for G, and G says why")
@@ -246,7 +245,7 @@ var _ = Describe("Utilization share with a whole-node model: under Kueue", Label
 		start := time.Now()
 		pc := wholeNodeProm()
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelG, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelG, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		By("Holding five minutes: G stays at one replica, queue a borrows nothing")

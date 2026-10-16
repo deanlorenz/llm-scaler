@@ -9,7 +9,6 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 )
 
@@ -83,13 +82,13 @@ var _ = Describe("Utilization share with a whole-node model: lending a node", La
 		start := time.Now()
 		By("Waiting until the controller sees S1 short of a whole replica")
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelS1, domain.RoleBoth, start.Add(-5*time.Minute))
+			short, read := e.shortOf(modelS1, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("Lowering G's floor to 1, so it has a node to give")
 		floorDropped := time.Now()
-		e.bounds(soG, depG, modelG, 1, 2, "")
+		e.lowerFloor(soG, depG, modelG, 2, "")
 
 		By("Waiting for a transfer from G to S1")
 		var set transferSet
@@ -225,14 +224,14 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 		start := time.Now()
 		By("Waiting until the controller sees G short of a whole replica")
 		Eventually(func(g Gomega) {
-			short, read := roleShortOf(e.ns, modelG, domain.RoleBoth, start.Add(-10*time.Minute))
+			short, read := e.shortOf(modelG, start.Add(-10*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("Lowering S1's and S2's floors to 1, so they have pods to give")
 		floorDropped := time.Now()
-		e.bounds(soS1, depS1, modelS1, 1, 5, "")
-		e.bounds(soS2, depS2, modelS2, 1, 5, "")
+		e.lowerFloor(soS1, depS1, modelS1, 5, "")
+		e.lowerFloor(soS2, depS2, modelS2, 5, "")
 
 		By("Waiting for the transfers that fund a G replica to complete")
 		var sets []transferSet
