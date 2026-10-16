@@ -1368,6 +1368,67 @@ test-e2e-kueue-borrow-with-setup: ## Deploy e2e infra + Kueue, then run the live
 	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
 	$(MAKE) test-e2e-kueue-borrow
 
+# The whole-node utilization-share specs (label utilization-share-wholenode): a
+# large model whose replica is one whole 8-GPU node, or a LeaderWorkerSet group
+# of two, beside 1-GPU models. They need up to five free schedulable nodes of
+# exactly 8 GPUs of one product, which the default kind cluster (one product
+# per 16-GPU node) does not have, so they are outside the full tier and run
+# here. docs/developer-guide/testing.md lists them.
+# REQUIRE_WHOLENODE_E2E=true (the default here) turns their skips -- no such
+# nodes, no Prometheus, no Kueue -- into failures. About two and a half hours.
+USHARE_WHOLENODE_CLUSTER_GPU_TYPE ?= nvidia
+USHARE_WHOLENODE_CLUSTER_GPUS     ?= 8
+USHARE_WHOLENODE_CLUSTER_NODES    ?= 6
+REQUIRE_WHOLENODE_E2E             ?= true
+USHARE_WHOLENODE_TIMEOUT          ?= 200m
+USHARE_WHOLENODE_GO_TIMEOUT       ?= 210m
+.PHONY: test-e2e-ushare-wholenode
+test-e2e-ushare-wholenode: ## Run the whole-node utilization-share e2e specs (8-GPU nodes)
+	@echo "Running the whole-node utilization-share e2e specs..."
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	PF_PID=""; \
+	if kubectl get svc -n $(E2E_MONITORING_NAMESPACE) kube-prometheus-stack-prometheus >/dev/null 2>&1; then \
+		kubectl port-forward -n $(E2E_MONITORING_NAMESPACE) svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 & \
+		PF_PID=$$!; \
+		for i in $$(seq 1 20); do \
+			curl -sk --max-time 2 https://localhost:9090/-/ready >/dev/null 2>&1 && break; \
+			sleep 1; \
+		done; \
+	else \
+		echo "WARNING: svc/kube-prometheus-stack-prometheus not found in $(E2E_MONITORING_NAMESPACE)"; \
+	fi; \
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
+	SCALER_BACKEND=keda \
+	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
+	MODEL_ID=$(MODEL_ID) \
+	REQUIRE_WHOLENODE_E2E=$(REQUIRE_WHOLENODE_E2E) \
+	go test ./test/e2e/ -timeout $(USHARE_WHOLENODE_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(USHARE_WHOLENODE_TIMEOUT) \
+		-ginkgo.label-filter="utilization-share-wholenode" -ginkgo.fail-on-empty $(FOCUS_ARGS) $(SKIP_ARGS); \
+	TEST_EXIT_CODE=$$?; \
+	[ -n "$$PF_PID" ] && kill $$PF_PID 2>/dev/null || true; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Test execution completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
+
+# Creates the whole-node kind cluster (CREATE_CLUSTER=true, five 8-GPU workers
+# of one product), deploys the e2e infra with LeaderWorkerSet and Kueue's
+# controller, and runs the whole-node specs. It never deletes the cluster.
+.PHONY: test-e2e-ushare-wholenode-with-setup
+test-e2e-ushare-wholenode-with-setup: ## Create an 8-GPU-node kind cluster, deploy infra + Kueue, run the whole-node share specs
+	CLUSTER_GPU_TYPE=$(USHARE_WHOLENODE_CLUSTER_GPU_TYPE) CLUSTER_GPUS=$(USHARE_WHOLENODE_CLUSTER_GPUS) \
+		CLUSTER_NODES=$(USHARE_WHOLENODE_CLUSTER_NODES) DEPLOY_LWS=true SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
+	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
+	$(MAKE) test-e2e-ushare-wholenode
+
 ##@ llm-d-benchmark CLI (standup / run / teardown)
 
 # llmdbenchmark binary from the benchmark repo venv
