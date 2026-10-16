@@ -56,7 +56,7 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		c := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(m).
 			WithObjects(append(objs, extra...)...).Build()
 		var err error
-		snap, err = NewReader(c, Options{}).Quotas(context.Background())
+		snap, err = NewReader(c, Options{CountsBorrowing: true}).Quotas(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(snap.SharedPools).To(HaveLen(1))
 		for _, l := range snap.SharedPools[0].Lenders {

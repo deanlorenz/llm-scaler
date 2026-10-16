@@ -75,7 +75,7 @@ func cohortObj(version, name string, spec map[string]interface{}) *unstructured.
 }
 
 func readBorrow(c client.Client) config.ExternalQuotas {
-	snap, err := NewReader(c, Options{}).Quotas(context.Background())
+	snap, err := NewReader(c, Options{CountsBorrowing: true}).Quotas(context.Background())
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	return snap
 }
@@ -181,6 +181,7 @@ var _ = Describe("Reader borrowing figures", func() {
 	It("withholds as lenders-unreadable when the Workloads are not read cluster-wide", func() {
 		const v = "v1beta2"
 		reason := func(c client.Client, opts Options) string {
+			opts.CountsBorrowing = true // only an entry that counts borrowing reads the Workloads (M-m2)
 			snap, err := NewReader(c, opts).Quotas(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			return snap.Borrow["team-a"][0].Reason

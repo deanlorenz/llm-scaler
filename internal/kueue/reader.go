@@ -332,8 +332,14 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// Known as the borrowing reasons read it: an image that names no
 		// version is known once the operator vouches for it (R2).
 		metrics.PublishKueueVersionKnown(r.opts.Entry, version.Known || r.opts.AssumeTestedVersion, r.opts.CountsBorrowing)
-		pending, unreadable := r.readPending(ctx, localQueues)
-		topo.LendersUnreadable = unreadable
+		// The Workloads are read cluster-wide only for an entry that counts
+		// borrowing (M-m2): only borrowing reads a lender's wait or a
+		// priority, and an install without the cluster-wide grant would
+		// otherwise make a Forbidden list on every refresh for nothing.
+		var pending pendingRead
+		if r.opts.CountsBorrowing {
+			pending, topo.LendersUnreadable = r.readPending(ctx, localQueues)
+		}
 		classPriority, highest = pending.classPriority, pending.highestByNamespace
 		for name, q := range topo.Queues {
 			q.PendingWorkloads = pending.byQueue[name]
