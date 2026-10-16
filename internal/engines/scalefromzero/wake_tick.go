@@ -99,6 +99,15 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 		place.nodes = e.tickNodeViewFor(ctx, place.constraints)
 	}
 	place.reclaimable = e.reclaimableLeft(group.namespace, place.reclaimable)
+	if allocation.DefaultBorrowCooldowns.CoolingDown(group.namespace, group.modelID, time.Now()) {
+		// The governor's safety net released a replica of this model that
+		// was ordered without a node hole and never placed, and its cooldown
+		// runs: the wake needs a real hole until it ends, as the steady-state
+		// pass's growth does (GreedyByScoreOptimizer.ReclaimBlocked). Without
+		// it the released wake was woken again at once, and Kueue preempted a
+		// peer for it every placement timeout (AR1).
+		place.reclaimable = allocation.RequireHoles(place.reclaimable)
+	}
 	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, place)
 	if len(selected) > 0 {
 		e.recordWake(ctx, group, place, selected)

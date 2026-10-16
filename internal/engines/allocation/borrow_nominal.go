@@ -155,6 +155,27 @@ type Reclaim struct {
 	After int
 	Kept  int
 	GPUs  int
+	// needsHole is set while the model's borrowing cooldown is in force
+	// (RequireHoles): no replica places without a node hole.
+	needsHole bool
+}
+
+// RequireHoles is reclaimable with every figure kept and the node-hole
+// exemption off (Reclaim.exempt): for a model in its borrowing cooldown
+// (BorrowGovernor.CoolingDown). A replica the governor's safety net released
+// because it never placed without a hole (M3) must not be ordered without one
+// again until the cooldown ends, or Kueue preempts a peer for it every
+// placement timeout.
+func RequireHoles(reclaimable map[string]Reclaim) map[string]Reclaim {
+	if len(reclaimable) == 0 {
+		return reclaimable
+	}
+	out := make(map[string]Reclaim, len(reclaimable))
+	for t, r := range reclaimable {
+		r.needsHole = true
+		out[t] = r
+	}
+	return out
 }
 
 // pool is the part of After the cohort's free pool covers.
@@ -162,10 +183,11 @@ func (r Reclaim) pool() int {
 	return max(0, r.After-max(0, r.Kept))
 }
 
-// sub is r less o, each figure clamped at 0, Kept at most After.
+// sub is r less o, each figure clamped at 0, Kept at most After; r's
+// needsHole is kept.
 func (r Reclaim) sub(o Reclaim) Reclaim {
 	after := max(0, r.After-o.After)
-	return Reclaim{After: after, Kept: min(after, max(0, r.Kept-o.Kept)), GPUs: max(0, r.GPUs-o.GPUs)}
+	return Reclaim{After: after, Kept: min(after, max(0, r.Kept-o.Kept)), GPUs: max(0, r.GPUs-o.GPUs), needsHole: r.needsHole}
 }
 
 // add is r plus o.
@@ -187,7 +209,7 @@ func (r Reclaim) atMost(o Reclaim) Reclaim {
 // exempted whole, half its gang waited Pending for a hole no preemption
 // frees.
 func (r Reclaim) exempt(g int) bool {
-	return r.After <= 0 && r.GPUs >= g
+	return !r.needsHole && r.After <= 0 && r.GPUs >= g
 }
 
 // take is what a replica of g GPUs grown next consumes: After first -- its
