@@ -323,9 +323,9 @@ func (e *wholeNodeEnv) lowerFloor(so, target, modelID string, maxR int32, kind s
 	Expect(fixtures.EnsureScaledObject(ctx, crClient, e.ns, so, target, target, 1, maxR, cfg.MonitoringNS, opts...)).To(Succeed())
 }
 
-// shortOf reports whether the controller's last two analyzer results since
-// since ask aggregated model modelID for a whole replica more than it holds
-// (roleShortFor), and says what it read.
+// shortOf reports whether the controller's last two analyzer results, read
+// from the time given, ask aggregated model modelID for a whole replica more
+// than it holds (roleShortFor), and says what it read.
 func (e *wholeNodeEnv) shortOf(modelID string, since time.Time) (bool, string) {
 	return roleShortFor(e.ns, modelID, domain.RoleBoth, since, 2)
 }
