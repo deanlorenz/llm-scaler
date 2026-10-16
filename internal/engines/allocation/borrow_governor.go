@@ -231,7 +231,10 @@ type BorrowGovernor struct {
 	// lenderRel is the releases to waiting lenders in flight, one per lender
 	// (borrow_lender_release.go).
 	lenderRel map[LenderKey]*LenderRelease
-	started   bool
+	// report is what the last Releases saw of the waiting lenders it did not
+	// serve (LenderReport).
+	report  LenderReport
+	started bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time

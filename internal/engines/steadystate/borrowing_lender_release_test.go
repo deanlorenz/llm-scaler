@@ -32,7 +32,8 @@ func lenderReleaseWorld(readAt time.Time) ([]*allocation.ResourceConstraints, []
 		NamespaceCohorts: map[string][]string{"b": {"c"}},
 		SharedPools: []allocation.SharedPoolChunk{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
 			FlavorPlacement: kueue.FlavorPlacement{AcceleratorType: "NVIDIA-H100-80GB-HBM3"},
-			Lenders:         []kueue.LenderState{{Queue: "lender", Waiting: true, Reclaim: kueue.ReclaimNever, Unused: 32, PendingGPUs: 16}},
+			Lenders: []kueue.LenderState{{Queue: "lender", Waiting: true, Reclaim: kueue.ReclaimNever, Unused: 32, PendingGPUs: 16,
+				PendingSince: readAt.Add(-time.Hour)}},
 			ReadAt:          readAt, Borrowed: 32, ReleaseToNonReclaiming: true}},
 	}
 	reqs := []allocation.ModelScalingRequest{{ModelID: "x", Namespace: "b", Priority: 1,
