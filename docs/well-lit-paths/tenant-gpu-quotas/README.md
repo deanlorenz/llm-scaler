@@ -34,9 +34,12 @@ and a cluster admin for a budget the tenant cannot edit
 3. Check it works: a model held at its allowance raises `wva_decisions_limited_total` or a `ResourceConstrained` Event. A fully spent quota shows neither ([Verifying it](#verifying-it)).
 
 The `<accelerator>` key must match the accelerator name the controller logs
-exactly. To undo, the admin runs `make disable-physical-limiter`
-([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)); for one
-install, re-run `make deploy-wva` with `WVA_LIMITER=none`.
+exactly. To undo, the admin runs
+`make disable-limiter WVA_LIMITER_TYPE=quota`
+([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)); without
+`WVA_LIMITER_TYPE=quota` it removes only the physical limiter and leaves the
+quota in force. For one install, re-run `make deploy-wva` with
+`WVA_LIMITER=none`.
 
 ## What it costs
 
@@ -44,7 +47,7 @@ install, re-run `make deploy-wva` with `WVA_LIMITER=none`.
 - Latency when a cap binds: a model held at its allowance queues what another
   replica would have served. That shows up as TTFT (time to first token).
 - A fairness gap between capped and uncapped tenants
-  ([ceilings, not reservations](#three-things-that-surprise-people)), and an
+  ([ceilings, not reservations](#things-that-surprise-people)), and an
   owner for the policy.
 
 ## Evidence
@@ -101,7 +104,7 @@ A later `make deploy-wva` without `WVA_LIMITER` keeps the `limiters:` list, a
 hand-written entry included. `WVA_LIMITER=quota` replaces it and
 `WVA_LIMITER=none` removes it
 ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
-`make disable-physical-limiter` also clears the limiter it wrote into
+`make disable-limiter` also clears the limiter it wrote into
 admin-owned controllers' own ConfigMaps, and leaves its read-only RBAC.
 
 The two shapes, with examples, are in the reference:
@@ -112,13 +115,14 @@ The two shapes, with examples, are in the reference:
   manages**. N controllers each enforce their own copy, so N of them permit N
   times the figure.
 - **Namespace scope** caps each tenant, with an optional `exclude` list and a
-  fallback for namespaces you did not list. The fallback's key, `default`, is
-  **reserved**: the real `default` namespace cannot be given a quota by
-  listing it. Exclude it, or omit the reserved key so anything unlisted is
-  denied.
+  fallback for namespaces you did not list. `default` in `namespaceQuotas` is
+  that fallback. So you cannot give the namespace called `default` its own
+  quota. Prefer a strict allowlist with no `default` key: every unlisted
+  namespace is then denied. If you exclude `default` instead, only the
+  cluster bounds limit it.
 - A value of `-1` means unlimited.
 
-### Three things that surprise people
+### Things that surprise people
 
 **A quota does not bound the cluster.** It counts only what the scaling
 manager's own variants hold, so it can hand out capacity unmanaged workloads
@@ -128,11 +132,59 @@ manager had placed nothing. "The hardware is full" is the physical limiter's
 statement.
 
 **Ceilings, not reservations.** A finite cap guarantees a tenant never
-*exceeds* it, never that it can *reach* it. The cluster aggregate is the sum of
-the finite caps. A namespace that is unlimited (`-1`) or excluded draws from
-that aggregate without adding to it, and can use budget a capped peer would
-have used. Nobody exceeds their own authorization, but know this before you
-promise a team its number.
+*exceeds* it, never that it can *reach* it. The quota bounds only the
+namespaces it lists. A namespace that is unlimited (`-1`) or excluded is
+bounded only by the cluster bounds (a `gpu-inventory` entry or a cluster-scope
+quota; nothing, without one), so it can use GPUs a capped peer would have used.
+Nobody exceeds their own authorization, but know this before you promise a team
+its number.
+
+**An excluded namespace has no quota.**
+
+- The tenants' quota does not apply to it. A full tenant quota does not stop it.
+- Only the cluster bounds limit it: a `gpu-inventory` entry and any
+  `scope: cluster` quota. A cluster quota denies it a type the quota does not
+  list, as it does everyone. With no cluster bound, the scaling manager does
+  not limit it at all. Without a `gpu-inventory` limiter, free GPUs are not
+  checked: if the cluster is full, new pods stay Pending.
+- It can take GPUs your tenants expect to use, because the scaling manager
+  reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
+- The utilization-share optimizer shares it only when a finite cluster bound
+  covers its GPU type: a `scope: cluster` quota, or a `gpu-inventory` entry
+  with `physicalGroups: true`.
+
+To bound it with a quota, add a `scope: cluster` quota beside the tenants'
+quota. Add these two entries to the `limiters:` list of the `default` entry.
+Keep the entry's other keys.
+
+```yaml
+default: |
+  limiters:
+    - name: cluster-cap
+      type: quota
+      scope: cluster
+      quotas:
+        A100: 20   # 14 for team-a + team-b, plus 6 spare. ns-x may use any of the 20.
+    - name: tenants
+      type: quota
+      scope: namespace
+      exclude: [ns-x]
+      namespaceQuotas:
+        team-a: { A100: 8 }
+        team-b: { A100: 6 }
+```
+
+This config logs no WARNING. Any namespace not listed, other than ns-x, is
+denied.
+
+The cluster quota caps everyone, tenants too, so size it as the tenants' caps
+plus what `ns-x` may use. List every GPU type your namespaces use: a type it
+does not list is denied to all of them. Like every cluster quota, it is per
+controller. It reserves nothing: while team-a is idle, `ns-x` can use team-a's
+part. Models take turns by how much they still need. With
+`enableRescale: true` on the `default` entry, `ns-x` is sized before the
+tenants when GPUs run short. So `ns-x` can take the whole cluster quota, even
+while a tenant is below its cap and wants more.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.
@@ -173,7 +225,8 @@ V(1)) means the budget is in the controller's own `wva-scaling-policy-config`.
 namespace you normally cannot read: ask the admin for read access or the
 figures. The admin can also read
 `kubectl get cm wva-controller-status -n <wva-namespace> -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}'`,
-which shows `quota/<name>`.
+which shows `quota/<name>` (`inventory+quota/gpu-inventory,<name>` when a
+`gpu-inventory` entry is declared beside it).
 
 A clamped decision shows in Prometheus (labels `variant_name`,
 `limiter_name`; the model's namespace is `exported_namespace`):

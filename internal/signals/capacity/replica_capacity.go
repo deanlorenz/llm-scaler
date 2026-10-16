@@ -1,5 +1,7 @@
 package capacity
 
+import "time"
+
 // ReplicaCapacity holds the per-replica capacity breakdown computed by
 // the saturation analyzer: what it measured on the replica, what it learned
 // about it, and the throughput reading the floor (signals/floor) prices with.
@@ -12,7 +14,23 @@ type ReplicaCapacity struct {
 	MemoryBoundCapacity   int64    // k1: KV-cache-limited capacity
 	ComputeBoundCapacity  int64    // k2: compute/scheduling-limited capacity
 	K2Priority            K2Source // how k2 was computed
-	EffectiveCapacity     int64    // min(k1, k2)
+	// K2BorrowedFrom names the sibling variant whose measured k2 this one
+	// used, when K2Priority is K2SrcBorrowed; K2BorrowRelaxed is how far that
+	// borrow has relaxed back to the variant's own figure, 0 at full strength
+	// and 1 fully relaxed. Diagnostics: published as
+	// wva_learned_state_borrowed and wva_learned_state_borrow_relaxed.
+	K2BorrowedFrom  string
+	K2BorrowRelaxed float64
+	// K2WriteAge is how long ago the k2 window this replica's figure came
+	// from was last WRITTEN: the replica's own window for P1-obs and
+	// P2-hist, the donor's for P2-borrow. A read does not reset it -- a
+	// window is touched on every read so it is retained, which says nothing
+	// about how old its figure is (see RollingAverage). K2WriteAgeKnown is
+	// false for P3 and P4, which come from no window. Diagnostics: published
+	// as wva_learned_state_k2_age_seconds.
+	K2WriteAge        time.Duration
+	K2WriteAgeKnown   bool
+	EffectiveCapacity int64 // min(k1, k2)
 	// ReplicaDemand is the replica's resident KV tokens — TokensInUse on the main
 	// path, kvCacheUsage * effectiveCapacity on the fallback path — plus the
 	// role-aware waiting-queue footprint: queueLength * avgInputTokens for

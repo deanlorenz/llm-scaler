@@ -32,11 +32,17 @@ const (
 	// not in the capacity store, and no saturated throughput is learned from
 	// it.
 	K2SrcUnadmitted
+	// K2SrcPrior is the variant's own k2, measured under engine arguments it
+	// no longer runs, used only where it is LOWER than what the variant would
+	// otherwise get and relaxing to it on the same clock as a borrowed figure.
+	// Not a borrow: it is the variant's own measurement, of an engine it ran
+	// before.
+	K2SrcPrior
 )
 
 // String is the log label of a K2Source; the labels are what the k2 decision
 // log line and the analyzer result's Reason carry. Empty for a source that is
-// none of the six.
+// none of the seven.
 func (s K2Source) String() string {
 	switch s {
 	case K2SrcObserved:
@@ -51,6 +57,8 @@ func (s K2Source) String() string {
 		return "P2-borrow"
 	case K2SrcUnadmitted:
 		return "P1-obs-unadmitted"
+	case K2SrcPrior:
+		return "P2-prior"
 	}
 	return ""
 }

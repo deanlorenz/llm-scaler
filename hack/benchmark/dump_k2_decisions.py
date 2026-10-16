@@ -73,6 +73,9 @@ except ImportError:
     print("ERROR: PyYAML required. pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from controller_pods import controller_log_selector  # noqa: E402
+
 # Tab-delimited zap console encoding: ts, level, caller, message, json-fields.
 # Matched on message name only (not file:line) — see dump_wva_target_timeseries.py
 # for why pinning the caller path is the wrong thing to do here. The message
@@ -443,8 +446,14 @@ def fetch_logs(namespace, since_seconds, results_dir=None):
             print(f"{captured} exists but is empty — falling back to live kubectl logs.",
                   file=sys.stderr)
 
-    cmd = ["kubectl", "logs", "-n", namespace,
-           "-l", "app.kubernetes.io/name=workload-variant-autoscaler",
+    # The controller's Pods by ownership, not by label: warm-pool Pods share
+    # app.kubernetes.io/name, and their logs used to be read as the controller's.
+    try:
+        selector = controller_log_selector(namespace)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    cmd = ["kubectl", "logs", "-n", namespace, "-l", selector,
            f"--since={since_seconds}s", "--tail=200000"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -552,9 +561,10 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
                      "(P1-obs=observed, P2-hist=historical average, P2-borrow=a compatible "
                      "sibling's lower figure, relaxing to this variant's own, P3-k2=derived from deployment "
                      "args, P4-k1=no signal, memory-bound only; P1-obs-invalid, "
-                     "P1-obs-downstream and P1-obs-unadmitted mark an observation that was NOT "
-                     "recorded -- above the KV ceiling, a prefill saturation while decode was "
-                     "saturated, or a warm-pool bridge or not-Ready pod -- and are "
+                     "P1-obs-downstream, P1-obs-unadmitted and P1-obs-rollout mark an observation "
+                     "that was NOT recorded -- above the KV ceiling, a prefill saturation while "
+                     "decode was saturated, a warm-pool bridge or not-Ready pod, or a variant "
+                     "mid-rollout to other engine arguments -- and are "
                      "followed by the tier it fell through to). Time is HH:MM:SS on the run date "
                      "above.")
         lines.append("")

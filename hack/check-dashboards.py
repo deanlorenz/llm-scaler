@@ -227,6 +227,51 @@ def check_metric_names(name, dashboard, fail):
                      f"{METRIC_CONSTANTS.relative_to(ROOT).as_posix()}")
 
 
+SLO_SOURCE_PAIR = re.compile(r'source="([a-z-]+)"\}\s*==\s*1\)\s*\*\s*(\d+)')
+
+
+def declared_slo_sources():
+    """The SLOSources list in internal/constants/slo_metrics.go, resolved to its
+    values, in order; None if it cannot be read."""
+    path = METRIC_CONSTANTS / "slo_metrics.go"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    values = dict(re.findall(r'\b(SLOSource[A-Za-z]+)\s*=\s*"([^"]+)"', text))
+    block = re.search(r"var SLOSources = \[\]string\{([^}]*)\}", text)
+    if not block:
+        return None
+    names = re.findall(r"\b(SLOSource[A-Za-z]+)\b", block.group(1))
+    return [values.get(n) for n in names]
+
+
+def check_slo_sources(name, dashboard, fail):
+    """A panel that maps wva_slo_source values to codes and the codes back to
+    names lists the sources by hand. A source added to constants.SLOSources, or
+    one renamed, rendered as "No data" on it and failed nothing."""
+    sources = declared_slo_sources()
+    if sources is None:
+        return
+    for panel, _ in panels_of(dashboard):
+        exprs = [t.get("expr") or "" for t in panel.get("targets") or []]
+        pairs = [p for e in exprs if "wva_slo_source" in e for p in SLO_SOURCE_PAIR.findall(e)]
+        if not pairs:
+            continue
+        title = panel.get("title")
+        coded = {src: code for src, code in pairs}
+        if sorted(coded) != sorted(sources):
+            fail(f"SLO SOURCES   {name}: {title}: queries {sorted(coded)}, "
+                 f"constants.SLOSources is {sorted(sources)}")
+        options = {}
+        for m in panel.get("fieldConfig", {}).get("defaults", {}).get("mappings") or []:
+            options.update(m.get("options") or {})
+        for src, code in coded.items():
+            text = (options.get(code) or {}).get("text")
+            if text != src:
+                fail(f"SLO SOURCES   {name}: {title}: code {code} is queried as {src!r} "
+                     f"and mapped to {text!r}")
+
+
 def check_format(name, text, dashboard, fail):
     """Both files are exactly json.dumps(indent=2). Keeping them that way is what
     makes a one-line change show up as a one-line diff -- a Grafana export or a
@@ -250,6 +295,7 @@ def main():
         check_namespace_labels(name, dashboard, failures.append)
         check_row_scope(name, dashboard, failures.append)
         check_metric_names(name, dashboard, failures.append)
+        check_slo_sources(name, dashboard, failures.append)
 
     for line in failures:
         print(line)

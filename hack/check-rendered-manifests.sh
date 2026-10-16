@@ -31,7 +31,7 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh infra_wva.sh install_core.sh limiter_policy.sh physical_limiter.sh; do
+for lib in common.sh infra_wva.sh install_core.sh limiter_policy.sh physical_limiter.sh prereqs.sh; do
     tr -d '\r' < "deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
@@ -45,9 +45,11 @@ source "$WORK/install_core.sh"
 source "$WORK/limiter_policy.sh"
 # shellcheck source=/dev/null
 source "$WORK/physical_limiter.sh"
-for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
+# shellcheck source=/dev/null
+source "$WORK/prereqs.sh"
+for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch wva_kueue_source_configured \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
-          wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read \
+          wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read pl_grant_kueue_borrow_read \
           wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
@@ -55,7 +57,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=46
+EXPECT_CASES=55
 RAN=0
 FAILED=0
 
@@ -127,6 +129,40 @@ prereq_objects() {
         wva_rendered_prereq_objects
     )
 }
+# kueue_reader_objects <WVA_LIMITER> [<own policy>] counts the Kueue reader's
+# ClusterRole and binding in the namespace-scoped install's expected set, with
+# the controller's own policy ConfigMap as given (absent when empty) and no
+# wva-policy namespace.
+kueue_reader_objects() {
+    (
+        WVA_PROJECT="$ROOT" WVA_NS=wns ENVIRONMENT=kubernetes WVA_SCOPE=namespace WVA_WATCH_NS=''
+        WVA_LIMITER="$1" KR_OWN="${2:-}"
+        PROMETHEUS_SA='' PROMETHEUS_URL='https://prom.obs.svc:9090'
+        PROMETHEUS_URL_EXPLICIT=1 DEPLOY_PROMETHEUS=false
+        kubectl() {
+            case "$1 $*" in
+                kustomize*) command "${KBUILD[@]}" "$2" ;;
+                *"get configmap wva-scaling-policy-config -n wns "*)
+                    [ -n "$KR_OWN" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; return 1; }
+                    printf '%s\n' "$KR_OWN" ;;
+                *"get namespace wva-policy -o name")
+                    echo 'Error from server (NotFound): namespaces "wva-policy" not found' >&2; return 1 ;;
+                *) return 0 ;;
+            esac
+        }
+        wva_rendered_prereq_objects | grep -c '^ClusterRole wva-kueue-reader-role-\|^ClusterRoleBinding wva-kueue-reader-rolebinding-' || true
+    )
+}
+# components/kueue-reader is in every namespace-scoped overlay, and kustomize
+# cannot make a component conditional: an install declaring no limiter was
+# granted a Kueue read it never uses. The installer drops it -- unless a policy
+# the controller reads still configures a Kueue source, or the limiter is kept.
+check 'kueue-reader: WVA_LIMITER=none and no Kueue source -> not rendered' '0' "$(kueue_reader_objects none)"
+check 'kueue-reader: WVA_LIMITER=quota -> rendered' '2' "$(kueue_reader_objects quota)"
+check 'kueue-reader: WVA_LIMITER unset keeps the live limiter -> rendered' '2' "$(kueue_reader_objects '')"
+check 'kueue-reader: WVA_LIMITER=none over a policy with a Kueue source -> rendered' '2' \
+    "$(kueue_reader_objects none "$(printf 'limiters:\n- name: q\n  type: quota\n  kueue:\n    enabled: true\n')")"
+
 reader_crb="ClusterRoleBinding wva-metrics-reader-rolebinding-$(wva_ns_suffix wns)"
 for scope in cluster namespace; do
     objs="$(prereq_objects "$scope" '')"
@@ -243,6 +279,15 @@ render_kueue_role() {
     wva_append_kueue_reader_scope_patch "$dir/kustomization.yaml" wns "$managed"
     "${KBUILD[@]}" "$dir" | yq -N "select(.kind == \"ClusterRole\" and .metadata.name == \"wva-kueue-reader-role-$(wva_ns_suffix wns)\")"
 }
+# render_kueue_all <overlay> renders the whole namespace-scoped overlay.
+render_kueue_all() {
+    local dir
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/$1" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    wva_append_crb_name_patches "$dir/kustomization.yaml" wns
+    "${KBUILD[@]}" "$dir"
+}
 for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
     role="$(render_kueue_role "$overlay" tenant-a)" || role=''
     [ -n "$role" ] || { printf 'FATAL: no kueue-reader ClusterRole rendered for %s.\n' "$overlay" >&2; exit 1; }
@@ -250,6 +295,12 @@ for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
         "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames | join(",")')"
     check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
         "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
+    # The cluster-wide Workload and LocalQueue read reaches every tenant, so
+    # the overlay never grants it: the installer does, and only when a policy
+    # counts borrowing (pl_grant_kueue_borrow_read). An overlay that renders
+    # it hands it to every namespace-scoped install, WVA_LIMITER=none included.
+    check "$overlay: no rendered ClusterRole reads Kueue Workloads or LocalQueues" '0' \
+        "$(render_kueue_all "$overlay" | yq -N 'select(.kind == "ClusterRole") | [.rules[] | select(.resources[] == "workloads" or .resources[] == "localqueues")] | length' | grep -cv '^0$')"
 done
 
 # ----------------------------------------------------------------------------
@@ -330,6 +381,19 @@ rules:
 CREOF
 check 'install/enable/install over an admin-added name: kept by both' \
     'foo,admin-added foo,admin-added foo,admin-added' "$(seq_run wva-foo foo)"
+# enable-physical-limiter writes the kueue-reader role without the Workload
+# and LocalQueue rules too, as the overlay renders it; the borrowing read is
+# its own role (pl_grant_kueue_borrow_read), which carries both and no more.
+: > "$LIVE_ROLE"
+seq_enable wva-foo foo
+check 'enable writes no Workload or LocalQueue rule into the kueue-reader role' '0' \
+    "$(yq '[.rules[] | select(.resources[] == "workloads" or .resources[] == "localqueues")] | length' "$LIVE_ROLE")"
+: > "$LIVE_ROLE"
+( kubectl() { seq_kubectl "$@"; }; pl_grant_kueue_borrow_read wva-foo wva-controller-manager )
+check 'the borrowing role reads Workloads cluster-wide' 'get,list,watch' \
+    "$(yq -r '.rules[] | select(.resources[] == "workloads") | .verbs | sort | join(",")' "$LIVE_ROLE")"
+check 'the borrowing role lists LocalQueues cluster-wide, and reads nothing else' 'get,list 2' \
+    "$(yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")' "$LIVE_ROLE") $(yq '.rules | length' "$LIVE_ROLE")"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped policy-namespace reader gets only the Namespaces it reads

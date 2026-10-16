@@ -473,11 +473,55 @@ file by file:
   config's key lands beside the node's own);
 - a failed copy is removed and retried at the pod's next start;
 - a marker records which seed the node has, so a changed seed is merged too;
-- a subPath that does not exist yet is nothing to seed, not an error.
+- a subPath that does not exist yet is nothing to seed, not an error;
+- a symbolic link is skipped, and the log names it: vLLM writes none, and a
+  link is not the cache;
+- a file not every user can read is copied readable by every user, and the
+  log counts it: the engine may run as another user;
+- every directory it creates is readable and searchable by every user.
+  Publish does the same in the seed.
+
+The copies are made as root. Kept at their source modes, vLLM's `600` AOT files
+would be unreadable to an engine that does not run as root, on every seeded
+node. The cache directory is already world-writable and shared by every engine
+on the node, so world-readable copies expose nothing more.
+
+**A node seeded by an earlier version keeps its old copies.** A merge keeps
+what a node already has. Earlier versions of the preparer kept the source
+modes, so a node they seeded can still hold files only root can read, such as
+vLLM's `600` AOT files. An engine that is not root cannot read them, and
+`make engine-cache-verify ENGINE_CACHE_UID=<uid>` shows them as `UNREADABLE`.
+Fix it once on that node, through its preparer, which runs as root on
+Kubernetes:
+
+```bash
+# the preparer pod on that node
+kubectl get pods -n <ns> -l wva.llmd.ai/engine-cache=engine-cache --field-selector spec.nodeName=<node>
+# make every file readable and every directory searchable by every user
+kubectl exec -n <ns> <preparer pod> -c prepare -- \
+  chmod -R a+rX /engine-cache/vllm /engine-cache/flashinfer /engine-cache/triton
+```
+
+Or reseed the node: with no engine running there, delete its cache and the
+record of its seed, then restart its preparer, which merges the seed again.
+This also drops what the node compiled itself.
+
+```bash
+kubectl exec -n <ns> <preparer pod> -c prepare -- \
+  rm -rf /engine-cache/vllm /engine-cache/flashinfer /engine-cache/triton /engine-cache/.seeded
+kubectl delete pod -n <ns> <preparer pod>
+```
+
+Each copy belongs to the user the preparer runs as (root on Kubernetes), not to
+the user that compiled it. An engine under another user can read what was
+seeded, but cannot change it. Any image with `/bin/sh` works: with GNU `cp` the
+copies keep their file times; with busybox `cp` they do not.
 
 With a seed, a node is Ready only once it carries it, so `engine-cache-status`
-counts a node whose seed did not complete as not prepared. The engines never
-wait on the preparer.
+counts a node whose seed did not complete as not prepared. That holds for the
+newest seed: before the preparer merges a new one, it drops the record of the
+old one. A node whose newest merge failed is not prepared, even if an older
+merge worked. The engines never wait on the preparer.
 
 The seed is code the engines load, so trust it as the cache itself, and more:
 one write to it reaches every node at the next prepare, while a write to the
@@ -512,6 +556,11 @@ make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
 Run it again after adding a model or changing an engine flag: the new stamp
 makes every node merge the new keys.
 
+Publish waits up to 10 minutes for every usable node to merge the new stamp.
+If a node does not, publish fails and says so. The seed stays stamped, so run
+`make engine-cache-status` to see which node, and read that node's preparer log
+to see why.
+
 #### Check the cache without a second start
 
 You can check that every node holds the torch.compile cache without
@@ -530,10 +579,13 @@ make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>...]'
 
 If your engines do not run as root and any node was seeded or published to,
 add `ENGINE_CACHE_UID=$(kubectl exec -n <ns> <engine pod> -- id -u)`.
-Without it, a seeded key is judged for root and passes even when your engines
-cannot read it. The UID is also the pod's `securityContext.runAsUser` (or the
-container's), when set. `ENGINE_CACHE_UID` is one UID for every pod: if prefill
-and decode run as different users, run the check once for each.
+Without it, a key owned by root is judged for root and passes even when your
+engines cannot read it: seeded and published copies are readable by every
+user, but a key written by a root engine may not be, nor one a node kept from
+a seed by an earlier version (see seeding above). The UID is also the
+pod's `securityContext.runAsUser` (or the container's), when set.
+`ENGINE_CACHE_UID` is one UID for every pod: if prefill and decode run as
+different users, run the check once for each.
 
 Pass the keys exactly as `engine-cache-keys` prints them, for example
 `torch_compile_cache/3f2a9c1d0e@rank_0_0+rank_1_0`. The part after `@` lists
@@ -563,11 +615,13 @@ leader pod, the check covers only the leader's ranks.
 When `ENGINE_CACHE_UID` is not set, each key is judged for the user that owns
 it. That is your engines' user only if they wrote the key. A seeded or
 published key is owned by root. A key can also belong to another deployment
-sharing the cache, or to the engines' old user if the image changed it. So the
-summary always warns, says how many node/key checks it judged that way, and
-names the UIDs it assumed. The last line names them too: `VERIFIED for root`,
-`VERIFIED for uid 1000`, or `VERIFIED for uids 0, 1000`. More than one UID
-means the keys have different owners. The engines of one configuration all run
+sharing the cache, or to the engines' old user if the image changed it. So
+whenever a key was judged for the owner of its key directory (a `present`
+line, or an `UNREADABLE` one for its modes), the summary warns, says how many
+node/key checks it judged that way, and names the UIDs it assumed. The last
+line names them too: `VERIFIED for root`, `VERIFIED for uid 1000`, or
+`VERIFIED for uids 0, 1000`. More than one UID means the keys have different
+owners. The engines of one configuration all run
 as one UID, so at least one line was judged for the wrong user. These verdicts
 still exit zero. Re-run with `ENGINE_CACHE_UID` to check your engines' user;
 only then does the last line say plain `VERIFIED`.
@@ -606,16 +660,18 @@ engine's user:
   that wrote the key. A file it owns needs owner read. A file owned by
   another user needs group read if it is in the key directory's group, and
   read for others if not. The check assumes the engine is in the key
-  directory's group. Directories need read and search the same way, both
-  under the key and on the way to it, from the volume mount (`/engine-cache`)
-  down.
+  directory's group. The directories above a key, from the volume mount
+  (`/engine-cache`) down, need only search (`x`) the same way: a `711`
+  mount is fine. The key directory and every directory under it need read
+  and search.
 - vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
   fine when the engine owns them, which it does when it wrote them. They are
   `present`.
 - A seeded or published key is owned by root: the preparer copied it there as
-  root, keeping the modes. By default it is judged for root, which can read
-  it, so it is `present (... for uid 0, ...)`, the summary warns, and the
-  last line says `VERIFIED for root`.
+  root, and made every file readable and every directory readable and
+  searchable by every user, so an engine that is not root can read it. By
+  default it is judged for root, so it is `present (... for uid 0, ...)`,
+  the summary warns, and the last line says `VERIFIED for root`.
 - Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
   the one that owns the keys. The check then reads the permissions for
   that UID: owner read if it owns the file, read for others if not. Its
@@ -626,7 +682,9 @@ make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>' ENGINE_CACHE_U
 ```
 
 vLLM writes no symbolic links. A link under the key, or a linked directory on
-the way to it, is `UNREADABLE` and is never followed.
+the way to it, is `UNREADABLE` and is never followed. Seeding and publish do
+not copy links. An earlier version copied with `cp -a`, which copies links,
+so a link found here was made on that node or copied by that version.
 
 `engine-cache-keys` takes no key from a log line saying an AOT save failed
 (`unable to save AOT compiled function to ...`), or that a load failed and

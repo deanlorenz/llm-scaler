@@ -90,7 +90,8 @@ only to change it. Limiters an admin published in a policy namespace
 ### Upgrading to this release
 
 This release adds two cluster-scoped grants (`wva-policy-namespace-reader-*`,
-`wva-kueue-reader-*`) and a namespaced Role (`wva-controller-status-role`, for
+`wva-kueue-reader-*`), a third made only where a policy counts Kueue borrowing
+(`wva-kueue-borrow-reader-*`), and a namespaced Role (`wva-controller-status-role`, for
 the status ConfigMap). It also moves the external-scaler NetworkPolicy into the
 admin phase. `make check-prereqs` reports all three grants as **optional**, so a
 tenant's upgrade goes ahead without them and the controller runs without what
@@ -112,6 +113,10 @@ they enable. Do this, in order:
      install first used). Without one, the re-run keeps the existing
      `metrics-reader` binding unchanged and warns which account it names
      ([Prometheus](prometheus.md)).
+
+   Before this step, save the controller's `Effective scaling policy` log
+   lines, to compare after the upgrade
+   ([Policy that starts to apply](#policy-that-starts-to-apply)).
 2. **Policy may move.** After its next restart, a controller that manages its
    own namespace can read Namespaces, so it finds a published cluster policy:
    the namespace its `wva.llmd.ai/policy-namespace` label names, else
@@ -119,7 +124,7 @@ they enable. Do this, in order:
    from there, and the `limiters:` in its own `wva-scaling-policy-config`
    **stop applying**. Thresholds, tiers and per-model entries still come from
    its own ConfigMap.
-3. **`make enable-physical-limiter` and `make disable-physical-limiter` restart
+3. **`make enable-physical-limiter` and `make disable-limiter` restart
    every namespace-scoped controller whose policy lives outside the namespace it
    manages**, on every run. That is a self-managed controller reading
    `wva-policy` (or its labelled namespace), or an out-of-reach one reading its
@@ -156,9 +161,248 @@ they enable. Do this, in order:
      kubectl get cm wva-controller-status -n "$NS" \
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
+     It prints, for example, `wva-policy inventory+quota/gpu-inventory,tenant-quota true`:
+     the limiter types joined by `+`, then the name of every entry
+     ([what changed in this format](#limiters-and-kueue-borrowing)).
+
+#### Limiters and Kueue borrowing
+
+> **ACTION REQUIRED before upgrade.** A Kueue-backed namespace quota starts
+> counting cohort borrowing **without a config change**. Borrowing is
+> experimental but on by default. Before the upgrade:
+>
+> 1. **(cluster admin) Re-run `make setup-prereqs`** for every
+>    namespace-scoped install ([step 1 above](#upgrading-to-this-release)).
+>    It adds a Role in the Kueue namespace to read the
+>    `kueue-controller-manager` Deployment and its leader Lease and, only
+>    where a limiter policy of the install counts borrowing, the cluster-wide
+>    Workload read (ClusterRole `wva-kueue-borrow-reader-role-<hash>`).
+>    Where Kueue runs elsewhere than `kueue-system`, add
+>    `KUEUE_NAMESPACE=<kueue-ns>`, or set `kueue.controllerNamespace` on the
+>    entry, which a re-run then uses. Without that Role, borrowing stops with
+>    `kueue-controller-down`; without the Workload read, with
+>    `lenders-unreadable`. The Workload read reaches every tenant's Workloads,
+>    pod templates included ([security model](security-model.md#kueue-borrowing)),
+>    so it is revoked when no policy counts borrowing: on a re-run with
+>    `WVA_QUOTA_KUEUE_BORROW=false`, on `make disable-limiter
+>    WVA_LIMITER_TYPE=quota`, and on uninstall.
+>
+>    **A cluster-scoped install** re-applies its manifests instead; its
+>    manager ClusterRole gains every read borrowing needs, Workloads in every
+>    namespace included, whether or not borrowing is counted:
+>    ```bash
+>    make setup-prereqs SCOPE=cluster WVA_NS=<controller namespace>   # (cluster admin)
+>    ```
+> 2. **Check the node read** for every policy that declares `gpu-inventory`
+>    beside `quota` (below).
+> 3. **Choose, per Kueue-backed entry**:
+>    - **borrow everywhere**: nothing to do, where the conditions hold;
+>    - **pilot**: set `borrowNamespaces` on the entry to the namespaces that
+>      may borrow ([how](../guides/kueue-borrowing/#pilot-on-a-few-namespaces));
+>    - **opt out**: set `countBorrowable: false` on the entry
+>      (`WVA_QUOTA_KUEUE_BORROW=false` on the install), which keeps the
+>      Kueue cap at nominal exactly as before.
+> 4. **Give borrowing a GPU bound** where you borrow: a `gpu-inventory` entry,
+>    or a GPU `ResourceQuota` whose `hard` is **at most nominal plus
+>    `borrowingLimit`**. The installer adds neither; without one borrowing is
+>    withheld as `no-gpu-bound`.
+> 5. **After the upgrade**, check that borrowing is counted where you want it,
+>    and read the reason where it is not:
+>    ```promql
+>    wva_quota_limit_gpus{tier="borrowable"} > 0
+>    sum by (reason) (wva_quota_borrow_withheld)
+>    ```
+>    A missing permission shows as the reason of the read it blocks, never as
+>    "nothing to borrow": `lenders-unreadable` (Workloads),
+>    `not-kueue-managed` (a GPU pod's owner), `resourcequota-unreadable`,
+>    `hierarchy-unknown` (Cohorts), `kueue-controller-down` (the Role in the
+>    Kueue namespace). [What each reason means](troubleshooting.md#borrowing-is-withheld).
+>
+> Counting the capacity of lenders that do **not** reclaim
+> (`reclaimWithinCohort: Never`, or `LowerPriority` that does not outrank the
+> borrowers), and handing it back to them, is not in this release: it moves to
+> a later release, as an opt-in. Here such a lender's capacity is not counted
+> (`lender-cannot-reclaim`).
+
+**Before you upgrade**, list the limiter types every policy declares, and
+every Kueue-backed entry with its borrowing settings. A cluster admin runs
+this; a namespace owner runs the inner commands for their own namespace:
+
+```bash
+for ns in $(kubectl get cm -A --field-selector metadata.name=wva-scaling-policy-config \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+  printf '%s: ' "$ns"
+  kubectl get cm wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' \
+    | yq -r '[.limiters[]?.type] | join(",")'
+  # Kueue entries: null countBorrowable means the default, true;
+  # null borrowNamespaces means every governed namespace.
+  kubectl get cm wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' \
+    | yq -o=json -I=0 '.limiters[]? | select(.kueue.enabled == true) | {"name": .name, "countBorrowable": .kueue.countBorrowable, "borrowNamespaces": .kueue.borrowNamespaces}'
+done
+```
+
+For each line that lists `gpu-inventory` (or `inventory`, the same limiter)
+**and** `quota`:
+
+- **Check that the controller reading it can list nodes**:
+  ```bash
+  kubectl auth can-i list nodes --as=system:serviceaccount:<controller-namespace>:wva-controller-manager
+  ```
+  `no` is typical for a namespace-scoped install. The controller stays Ready
+  after the upgrade, skips the physical limiter and keeps bounding by the quota,
+  as it did before; it logs `Cluster policy declares gpu-inventory beside quota
+  limiters, but this controller may not list nodes` and sets
+  `wva_constraint_provider_skipped{provider="gpu-limiter",reason="node_read_denied"}`
+  to 1. To have both bound, a cluster admin runs `make setup-prereqs` for that
+  install (or `make enable-physical-limiter`); to keep the quota alone, drop the
+  `gpu-inventory` entry. A policy that lists `gpu-inventory` **alone** still
+  takes a controller without node read NotReady, as before.
+- **Check that every entry lists every GPU type its models use.** A type one
+  entry does not list is now denied even when another entry lists it, so a
+  model can lose a type it scaled on before. Print the entries and compare their
+  types with the `accelerator` the controller logs for each model:
+  ```bash
+  kubectl get cm wva-scaling-policy-config -n <ns> -o jsonpath='{.data.default}' | yq '.limiters'
+  ```
+  The physical limiter lists the GPUs the nodes advertise
+  (`wva_available_gpus`).
+
+What changes without a config change:
+
+- **A policy that declares both `gpu-inventory` and `quota` is bounded by
+  both.** Before, the quota alone applied and the physical entry was never
+  built. This can be tighter where other workloads hold GPUs. For this release
+  only, the controller also computes what the quota alone would have decided, at
+  most once every 10 cycles, and logs `Upgrade note (transitional)` naming the
+  variants that differ. That note is removed in the next release.
+- **A type one limiter entry denies stays denied** when another entry lists
+  it. Before, entries listing different types allowed the union (bug fix).
+- **Budgets follow the GPU family and product names.** A family key such as
+  `H100` bounds the sum of its products (`NVIDIA-H100-80GB-HBM3`, ...), so two
+  models, or the two roles of one P/D model, spelled differently can no longer
+  order the same GPUs twice. An allowlist that names only products denies the
+  products it does not name; one that names the family too admits them up to
+  the family's figure. A workload that names the bare family is bounded by the
+  family's total (bug fix).
+- **A P/D pair commits only what fits together.** Before, a budget of 8 with
+  two 8-GPU roles ordered 16. A P/D wake, and two wakes in one tick, fit the
+  family's figure together too (bug fix).
+- **With the physical limiter, a replica must fit one node.** Free GPUs split
+  across nodes in holes smaller than a replica no longer count: 16 free as
+  4+4+8 order one 8-GPU replica, not two, and a P/D model grows only when both
+  roles find a node. Scale-from-zero and the warm pool check the same way; a
+  Pending pod nominated for a node now holds it. See
+  [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node).
+- **The warm pool's headroom is published after the optimizer's pass**, net
+  of the replicas the pass ordered. Before, it was the figure from before the
+  pass, so a pool could grow into GPUs just ordered for a model.
+- **A namespace-scope quota bounds only the namespaces it lists.** A namespace
+  it excludes is no longer bounded by the sum of the other tenants' caps: it is
+  bounded by the cluster bounds (the physical limiter or a cluster-scope quota),
+  and unbounded when there are none.
+- **A namespace allowance that is unlimited (`-1`) for every type now scales**
+  when nothing else bounds the cluster. It never did.
+- **Two utilization-share namespace groups on one GPU type split the free
+  cluster GPUs** rather than each counting all of them.
+- **A limiter that cannot be consulted in a cycle is skipped; the others still
+  bound.** Before, one missing input lifted every limiter. A skip sets
+  `wva_constraint_provider_skipped` and is logged when it starts and ends.
+- **Scale-from-zero debits each wake against its fallback snapshot**, so wakes
+  during a limiter outage cannot all pass on the same free GPUs. A wake with no
+  check at all counts in `wva_scale_from_zero_wake_unchecked_total`.
+- **A Kueue-bounded namespace quota counts cohort borrowing**, on by default,
+  where it is safe, and only capacity Kueue would take back for its lender
+  (`lender-cannot-reclaim` otherwise). Kueue takes borrowed replicas back for
+  that lender, and the scaling manager lowers a borrowed replica that did not
+  place within `placementTimeout`. While a declared `gpu-inventory` limiter
+  is skipped (no node read, say), no new borrowing starts. See the box above
+  and [the guide](../guides/kueue-borrowing/). Borrowing state is kept in
+  `wva-controller-status`, so it survives a restart.
+
+New reads, for borrowing: `cohorts` and `workloads` (Kueue; `workloads`
+cluster-wide, watched through an informer), the `kueue-controller-manager`
+Deployment and its leader Lease in the Kueue namespace, and in the managed
+namespace `resourcequotas`, `events`, and the owners of GPU pods
+(`replicasets`, `statefulsets`, `jobs`, `leaderworkersets`). A cluster-scoped
+install gets them from the install itself, Workloads in every namespace
+included. **A namespace-scoped install needs a cluster admin to re-run
+`make setup-prereqs`** (step 1 above), which grants the cluster-wide Workload
+read only while a policy of the install counts borrowing. Until then borrowing is withheld or
+frozen, with the reasons the box lists, and the nominal cap applies.
+
+**Rolling back past this release**: first turn borrowing off
+(`countBorrowable: false`, or `WVA_QUOTA_KUEUE_BORROW=false`), and wait for
+models to drop back under nominal. Turning it off evicts nothing: a lowered
+cap only stops growth, and models move back as they scale down (lower a
+model's `maxReplicaCount` to hurry it). Then install the older release. It
+ignores the `borrowReleaseLedger` and `limiterBudgets` keys in
+`wva-controller-status`. The RBAC borrowing added stays behind; it grants
+reads only. Remove it by re-applying the older release's roles, or leave it.
+
+What you read changes:
+
+- **`wva-controller-status` `.data.limiter`** was `<mode>/<names>`, and a policy
+  declaring both kinds read `quota/<quota names>`. It is now the limiter types
+  joined by `+`, then every entry's name: `inventory+quota/gpu,tenant-quota`. An
+  unnamed physical entry is named after its type:
+  `inventory+quota/gpu-inventory,tenant-quota`. The guides' `jsonpath` recipes
+  print this form.
+- **Log keys.** `GPU limiter constructed` and `GPU limiter (re)built from config`
+  carry `limiterTypes` (was `type`), in the same `+` form; `Loaded cluster
+  policy from the policy namespace` carries `limiterTypes` (was `limiterMode`).
+  A query on the old keys finds nothing.
+- **A second physical entry** logs `Ignoring physical (gpu-inventory) limiters
+  entries after the first` (was `WARNING: limiters declares more than one
+  physical (gpu-inventory) entry`).
+- **New metrics**: `wva_constraint_provider_skipped` and
+  `wva_scale_from_zero_wake_unchecked_total` ([Prometheus](prometheus.md)),
+  and for Kueue: the borrowing series ([Prometheus](prometheus.md#kueue-borrowing-metrics)),
+  `wva_kueue_borrowed_gpus`, `wva_kueue_controller_version_known`,
+  `wva_kueue_borrow_cooldown_seconds` and `wva_kueue_never_read`, with the
+  alerts `WVAKueueNeverRead`, `WVAKueueVersionUnknown`, `WVAKueueBorrowDrift`
+  and the others in [Kueue borrowing alerts](troubleshooting.md#kueue-borrowing-alerts).
+- **`scaling-decision`** lines carry `borrowed`, the GPUs a model holds past
+  its guaranteed figure.
+
+**Rolling back** to an older controller reads a policy that declares both kinds
+as quota-only again: the physical limiter stops bounding, and that release only
+warns about it (`notEnforced`).
+
+Installer:
+
+- `WVA_LIMITER` takes a list: `WVA_LIMITER=gpu-inventory,quota`. Left unset, it
+  keeps the live policy's limiters, and the prerequisite check now asks for node
+  read against those: it warns, with the remedy, when a kept `gpu-inventory`
+  entry has none.
+- `make enable-physical-limiter` keeps a limiter of the other kind already in
+  the policy.
+- `make disable-limiter` (new; `make disable-physical-limiter` is the same
+  target under its older name) removes the kind
+  `WVA_LIMITER_TYPE` names: `gpu-inventory` (the default), `quota`, or `all`.
+  Exit codes are in [Uninstall](#policy-namespace-and-limiter-leftovers-cluster-admin).
+- `WVA_QUOTA_KUEUE_BORROW=false`, beside `WVA_QUOTA_KUEUE=true`, keeps the
+  Kueue cap at nominal (`countBorrowable: false`).
+- A re-run of the install, or of `make enable-physical-limiter`, keeps the
+  quota entry's whole `kueue:` block (`borrowNamespaces`,
+  `assumeTestedVersion`, the timings), and rewrites only what its variables
+  set.
+- With `WVA_QUOTA_KUEUE=true` the installer adds no `gpu-inventory` entry.
+  Name it yourself (`WVA_LIMITER=gpu-inventory,quota`) to give borrowing its
+  GPU bound.
 
 #### Other changes that need an action
 
+- **A namespace-scoped controller ignores `utilizationShare.physicalGroups`.**
+  Only a cluster-scoped controller plans physical groups. Under a quota the
+  setting changed nothing before and changes nothing now. Under `gpu-inventory`
+  alone, a namespace-scoped controller now plans no group: it logs a warning
+  and sets `utilizationShareNote` in `wva-controller-status`. The optimizer
+  mode is unchanged. Check every tenant controller that reads a shared policy:
+  ```bash
+  kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data.utilizationShareNote}{"\n"}'
+  ```
+  If it prints a note, give the namespace a quota, or remove `physicalGroups`
+  from the shared policy.
 - **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
   now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
   `wva-controller-manager-token` is deleted. Only the admin phase does both.
@@ -179,6 +423,63 @@ they enable. Do this, in order:
   default `92.7.0`). A newer release already installed is kept, with a
   warning. Set the variable to install that exact version, including an older
   one.
+- **`wva_learned_state_restores_total` has new `outcome` values.** `installed`
+  and `rejected` are gone; the label is now `whole`, `args`, `prior`,
+  `incomplete` or `differs`
+  ([the metric](prometheus.md#wva_learned_state_restores_total)). `installed`
+  is `whole` plus `args`; `rejected` is `prior`, `incomplete` and `differs`.
+  Rewrite queries and alerts:
+  ```promql
+  # was: wva_learned_state_restores_total{outcome="installed"}
+  sum without (outcome) (wva_learned_state_restores_total{outcome=~"whole|args"})
+  # was: wva_learned_state_restores_total{outcome="rejected"}
+  sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
+  ```
+- **Rename a quota entry named `gpu-limiter`, `node-fit`,
+  `pd-pair-borrows-whole` or `lender-cannot-reclaim`.** These names are now
+  reserved for what a held-back decision is reported under when no quota
+  entry held it. In this release such an entry still loads and applies, with
+  a warning: the log line `WARNING: Quota limiter entry has a reserved name`
+  and the `limiterWarnings` key of the controller status. A later release
+  rejects it, and a rejected `default` entry stops the controller at start.
+  Check before upgrading. `limiterWarnings` is written only by the new
+  controller, so read the policy itself: the controller's own
+  `wva-scaling-policy-config`, and the one in `wva-policy` if that namespace
+  governs the install. Each line prints how many entry names it read before
+  the reserved ones, so a policy that was not read is not taken for a pass:
+  ```bash
+  for ns in <controller namespace> wva-policy; do
+    if ! entry=$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}'); then
+      echo "$ns: not read"; continue
+    fi
+    names=$(printf '%s\n' "$entry" | grep -E '^[[:space:]-]*name:' | sed -E 's/.*name:[[:space:]]*"?([^"[:space:]]*)"?.*/\1/')
+    reserved=$(printf '%s\n' "$names" | grep -xE 'gpu-limiter|node-fit|pd-pair-borrows-whole|lender-cannot-reclaim')
+    echo "$ns: $(printf '%s' "$names" | grep -c .) entry names read, $(printf '%s' "$reserved" | grep -c .) reserved"
+    printf '%s\n' "$reserved"
+  done
+  ```
+  `wva-policy: not read` is expected when no policy namespace exists. Only a
+  `quota` entry needs renaming; a `gpu-inventory` entry may keep any name.
+  Renaming an entry renames its `limiter_name` series and the name in its
+  Events: update any alert or query that selects it.
+- **A parked model refused a wake has new reasons on
+  `wva_model_scaling_blocked`.** `wake-no-capacity` when no serving set fits
+  the GPU budget or the nodes, and `wake-nominal-lent-out` when the
+  ClusterQueue lent its nominal to a peer it cannot reclaim from. A parked
+  model used to show `nominal-lent-out` for the second;
+  `nominal-lent-out` now marks only a capped serving model. Point any selector
+  on `reason="nominal-lent-out"` meant for parked models at
+  `reason="wake-nominal-lent-out"`
+  ([reasons](prometheus.md#wva_model_scaling_blocked)).
+- **Before rolling the controller back to an earlier release, remove the
+  `llm-d.ai/forget-learned-state` annotation** from every scale target that
+  carries it. The earlier release rewrites the learned-state snapshot without
+  the record of which value was acted on, so upgrading again with the
+  annotation still in place forgets the variant a second time
+  ([reset one variant](troubleshooting.md#reset-one-variants-learned-state)):
+  ```bash
+  kubectl annotate deployment <name> -n <namespace> llm-d.ai/forget-learned-state-
+  ```
 
 #### Prometheus TLS verification is on by default
 
@@ -272,6 +573,18 @@ pools or models to grant for, and the upgrade says nothing.
 
 #### Policy that starts to apply
 
+Before you upgrade, save what the controller resolves today:
+
+```bash
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy' > before.txt
+```
+
+Each line names a model and its `scaleUpThreshold`, `scaleDownBoundary`,
+`kvCacheThreshold` and `priority`. It does not show `queueLengthThreshold` or
+`analyzers`. A line is logged once per change, not every cycle, so a
+controller whose log has rotated may print nothing. If `before.txt` is empty,
+keep a copy of your ConfigMaps instead.
+
 Some settings in named tiers and per-model entries were ignored or replaced
 before. They now apply. Before you upgrade, read your
 `wva-scaling-policy-config` **and** every namespace-local scaling-policy
@@ -295,20 +608,28 @@ ConfigMap, and work through this list.
 
    | field | tier before | per-model before | now |
    | --- | --- | --- | --- |
-   | `scaleToZero` | ignored | applied | applied; a model parks only if every tier its variants name allows it, and waits for the longest `retentionPeriod` |
+   | `scaleToZero` | ignored (except the tier `default.defaultPolicy` names) | applied | applied; a model parks only if every tier its variants name allows it, and waits for the longest `retentionPeriod` |
    | `scaleFromZero.requirePrefill` | ignored | ignored | applied; a model waits for prefill if any of its tiers requires it |
    | `shapeChangeHoldSeconds` | ignored | ignored | applied |
    | `disableShapeChangeHold` | ignored | ignored | applied |
 
    Nothing reports these the first time they take effect. To keep the old
-   behaviour, remove the field from the tier or per-model entry.
+   behaviour, remove the field from the tier (from a per-model entry, only for
+   the rows marked ignored there).
 
-   Two consequences to check:
+   Consequences to check:
 
+   - A tier that enables `scaleToZero` now parks its models after
+     `retentionPeriod`, even when `default` disables it. The first request
+     after that waits for a cold start. Disable `scaleToZero` on the tier to
+     keep them up.
    - A tier that disables `scaleToZero` now keeps its models up, even when
      `default` enables it. `WVAModelWillNotScaleToZero` may start firing for
-     those models (reason `policy-forbids-zero`). Enable `scaleToZero` on the
-     tier, or accept the alert.
+     those models (reason `policy-forbids-zero`). The controller log line
+     `Scale-to-zero is disabled by the scaling policy of a tier` lists the
+     tiers in `disabledBy`. Enable `scaleToZero` on each, or on the model's
+     per-model entry, or accept the alert. If the per-model entry is what
+     disables it, the line says so (`disabledByPerModelEntry=true`).
    - A tier or per-model `requirePrefill: true` now applies. A P/D model whose
      prefill cannot be placed stays at zero rather than waking decode alone.
 
@@ -325,25 +646,36 @@ ConfigMap, and work through this list.
    in the log, and for the `default` entry in the `policyIgnored` key of the
    [`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with).
    A negative `shapeChangeHoldSeconds` is skipped and reported the same way.
+   So are a non-finite number (`.inf`, `-.inf`, `.nan`) in `priority`, the
+   thresholds, the scaling band, or an analyzer's `score` or band; a negative
+   analyzer `score`; and a `priority` or `score` above 1000000. An entry that
+   was rejected before only because of such a value (for example
+   `scaleUpThreshold: .inf`) now applies, with that field from the layer below.
+   A `priority: .nan` used to act as 1 in the fair share, and under rescale
+   gave the model nothing above its floor; it now takes the layer below's
+   value, so under rescale such a model can grow and take GPUs from the others
+   in its budget.
 
 4. **`terminationGracePeriodSeconds` patches below 40.** The controller now
    takes up to 40s to stop: it finishes the running cycle, then releases its
    lease. Raise the patch to 40, or remove it. A patch left at 10 is no worse
    than before; it only loses the faster failover
-   ([details](operations.md#what-the-controller-is-running-with)).
+   ([details](operations.md#stopping-and-leader-handover)).
 
 After the upgrade, compare the controller's `Effective scaling policy` log
-lines with the ones from before. Each names a model and its
-`scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold` and `priority`:
+lines with the ones you saved in `before.txt`:
 
 ```bash
-kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy'
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy' > after.txt
+diff before.txt after.txt
 ```
-
-Save the same output before you upgrade, so you have something to compare.
 
 Other changes you may notice:
 
+- **The TTFT SLO alert is `WVAModelSLOAttainmentLow`.** `WVAModelSLOMissed`
+  now covers the TPOT mean only. Move any Alertmanager route or silence that
+  matches `WVAModelSLOMissed` for TTFT to the new name, or TTFT misses go
+  unrouted, or page where they were silenced.
 - A scale-from-zero wake records one `ScaledUp` Event. It used to record one
   on every 100ms tick until KEDA scaled the target, so a dashboard that counts
   `ScaledUp` Events will show far fewer.
@@ -351,6 +683,16 @@ Other changes you may notice:
   while Prometheus is unreachable, is now logged as
   `Shutdown requested during startup` and exits 143. Previously the process was
   killed by the signal with no log line; the exit code was 143 as well.
+- A scale-from-zero wake claims a utilization-share transfer with the weight of
+  the model's tier, as the planner does. It used to use the `default` weight.
+- The `gpu-policy` readiness check no longer goes NotReady on a passing error
+  when listing nodes, such as a timeout. It is not ready until the API server
+  first answers. When it is not ready, its message now reads
+  `cannot confirm it may list nodes` (it read `may not list nodes`).
+- A P/D model whose idle role's pool is empty may now scale up its other role.
+  The idle role used to block it.
+- A decode-only model with `requirePrefill: true` now claims utilization-share
+  transfers for its decode. It used to claim none.
 
 ### External scaler TLS on upgrade
 
@@ -566,14 +908,24 @@ kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the
 Only when no scaling-manager install remains on the cluster:
 
 ```bash
-make disable-physical-limiter   # clears the limiter from wva-policy and every policy ConfigMap a controller reads
+make disable-limiter WVA_LIMITER_TYPE=all   # every limiter, from wva-policy and every policy ConfigMap a controller reads
 kubectl delete namespace "$POLICY_NS"
 ```
 
-`disable-physical-limiter` leaves the read-only RBAC in place on purpose; the
+`WVA_LIMITER_TYPE=all` removes every limiter, of either kind, and exits 0 also
+where none is declared, so it is safe in an uninstall script.
+
+With `WVA_LIMITER_TYPE=gpu-inventory` (the default) or `quota` it removes that
+kind only and keeps the other. Run on a policy that holds only the other kind,
+it removes nothing and exits non-zero, naming the kind that stays: `make` prints
+`make: *** [Makefile:<line>: disable-limiter] Error 1` and itself exits
+2.
+
+`disable-limiter` leaves the read-only RBAC in place on purpose; the
 namespace delete removes it. Like `enable-physical-limiter`, it needs `kubectl`,
 `jq` and `yq`. Where no limiter is declared it changes nothing and prints
-`No limiter declared in <ns>/wva-scaling-policy-config; nothing to remove.` A
+`No limiter declared in <ns>/wva-scaling-policy-config; nothing to remove.`,
+then warns `Nothing removed`, and exits 0. A
 failed edit stops with an error naming the step, and never leaves an emptied
 ConfigMap.
 

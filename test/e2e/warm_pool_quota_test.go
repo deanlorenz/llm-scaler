@@ -51,17 +51,14 @@ var _ = Describe("Warm pool - what it costs its namespace", Label("full"), Label
 	)
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceRestart)
 		return logs, err
 	}
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		By("Pinning the pool to a node and giving that node an accelerator nothing else wants")
 		nodes, err := fixtures.SchedulableNodes(ctx, k8sClient)

@@ -6,6 +6,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 )
 
@@ -28,6 +29,37 @@ func NewDeploymentAccessor(deploy *appsv1.Deployment) ScaleTargetAccessor {
 func LabelSelector(acc ScaleTargetAccessor) *v1.LabelSelector {
 	if d, ok := acc.(*deploymentAccessor); ok {
 		return d.deployment.Spec.Selector
+	}
+	return nil
+}
+
+// OwnedByDeployment reports whether a pod is controlled by a ReplicaSet of the
+// named Deployment. A Deployment names each ReplicaSet
+// <deployment>-<pod-template-hash> and stamps that hash on the ReplicaSet's
+// pods, so the pod's own label names the one owner that counts. Labels alone
+// cannot answer this: any pod may copy a Deployment's labels.
+func OwnedByDeployment(p *corev1.Pod, deployment string) bool {
+	hash := p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]
+	if hash == "" {
+		return false
+	}
+	for _, o := range p.OwnerReferences {
+		if o.Controller != nil && *o.Controller && o.Kind == constants.ReplicaSetKind && o.Name == deployment+"-"+hash {
+			return true
+		}
+	}
+	return false
+}
+
+// Annotations is the scale target's own metadata annotations -- the
+// Deployment's or the LeaderWorkerSet's, not its pod template's, so setting
+// one rolls nothing. Nil for an unknown kind.
+func Annotations(acc ScaleTargetAccessor) map[string]string {
+	switch t := acc.(type) {
+	case *deploymentAccessor:
+		return t.deployment.GetAnnotations()
+	case *lwsAccessor:
+		return t.lws.GetAnnotations()
 	}
 	return nil
 }

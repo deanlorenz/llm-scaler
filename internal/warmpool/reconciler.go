@@ -139,6 +139,13 @@ type Reconciler struct {
 	//     never left waiting.
 	Headroom func(namespace, accelerator string, poolsVersion uint64) (int, decision.HeadroomState)
 
+	// NodeUnits reports how many whole units of unitGPUs GPUs the nodes of
+	// this accelerator still hold, each on one node, from the same headroom
+	// snapshot, and whether that is known (decision.HeadroomStore.Units).
+	// Optional; nil, or not known, judges the allowance in GPUs alone. A Pod
+	// lands on one node: twelve GPUs free as 4+4+4 afford no 8-GPU Pod.
+	NodeUnits func(accelerator string, unitGPUs int, poolsVersion uint64) (int, bool)
+
 	// poolsVersion is the version decision.PublishWarmPoolGPUs returned for this
 	// pass's charge, the bar a headroom snapshot has to clear before the pool
 	// grows on it. Written by Once under passMu.
@@ -722,7 +729,13 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 			if perPod > 0 || len(memberships) == 0 {
 				affordable := current
 				if perPod > 0 {
-					affordable += free / perPod
+					units := free / perPod
+					if r.NodeUnits != nil {
+						if onNodes, known := r.NodeUnits(accelerator, perPod, r.poolsVersion); known {
+							units = min(units, onNodes)
+						}
+					}
+					affordable += units
 				}
 				if want > affordable {
 					r.reportCapped(ctx, spec, accelerator, want, affordable, free)

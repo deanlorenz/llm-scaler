@@ -281,6 +281,38 @@ const (
 	// was true when written and stopped being true in the same PR.
 	WVAEngineConfig = "wva_engine_config"
 
+	// WVALearnedStateBorrowed is a gauge, 1 while a variant is priced from a
+	// figure a sibling variant learned: a k2 below its own capacity, or a
+	// shared ITL line. Labels: namespace, model_name, variant_name, quantity
+	// (k2 or itl-line), donor, donor_namespace. Absent when it borrows nothing.
+	WVALearnedStateBorrowed = "wva_learned_state_borrowed"
+	// WVALearnedStateBorrowRelaxed is a gauge of how far a variant's k2 borrow
+	// has relaxed back to its own figure: 0 at full strength, 1 fully relaxed.
+	// Labels: namespace, model_name, variant_name. Present only while
+	// wva_learned_state_borrowed{quantity="k2"} is.
+	WVALearnedStateBorrowRelaxed = "wva_learned_state_borrow_relaxed"
+	// WVALearnedStateK2Source is a gauge, 1 for the source of the k2 a
+	// variant is priced on (P1-obs, P2-hist, P2-borrow, P3-k2, P4-k1), or
+	// k1-bound when the k2 is at or above k1 and the KV cache prices it.
+	// Labels: namespace, model_name, variant_name, role, source. Absent when
+	// no replica of the variant reported this cycle.
+	WVALearnedStateK2Source = "wva_learned_state_k2_source"
+	// WVALearnedStateK2AgeSeconds is how long ago the k2 a variant is priced
+	// on was last measured -- written, not read. Same labels as
+	// WVALearnedStateK2Source; present only for P1-obs, P2-hist, P2-borrow
+	// and P2-prior, the sources that read a measured window. Like every
+	// analyzer series it keeps its last value through a cycle whose
+	// collection or analysis failed.
+	WVALearnedStateK2AgeSeconds = "wva_learned_state_k2_age_seconds"
+	// WVALearnedStateRestoresTotal counts variants whose restored learned
+	// state was checked against their engine configuration
+	// (LEARNED_STATE_SNAPSHOT), by outcome: whole, args, prior, incomplete or
+	// differs (saturation.RestoreOutcome).
+	WVALearnedStateRestoresTotal = "wva_learned_state_restores_total"
+	// WVALearnedStateSnapshotErrorsTotal counts failed reads and writes of
+	// the learned-state snapshot ConfigMap, by operation (read or write).
+	WVALearnedStateSnapshotErrorsTotal = "wva_learned_state_snapshot_errors_total"
+
 	// LabelFingerprint is the engine-configuration digest, and
 	// LabelFingerprintVersion the hash's own version -- published beside it
 	// because the hash's input set is a wire format, and a bump means every
@@ -352,6 +384,35 @@ const (
 	// controller cannot see, so it may be running under a weaker bound than the
 	// admin believes is in force.
 	WVAPolicyNamespaceUnverified = "wva_policy_namespace_unverified"
+
+	// WVAConstraintProviderSkipped is 1 while a declared GPU constraint provider
+	// -- the physical limiter or a quota entry -- is left out of scaling
+	// decisions, by provider and reason (ProviderSkip*). The series is removed
+	// when the provider bounds again, so absence means every declared limiter is
+	// in force.
+	//
+	// A skipped provider lifts its bound: the others still apply, because the
+	// constraints are intersected, but nothing checks what the skipped one
+	// would have denied. Without the series that was one Info line per cycle.
+	WVAConstraintProviderSkipped = "wva_constraint_provider_skipped"
+
+	// WVAScaleFromZeroWakeUnchecked counts scale-from-zero wakes published
+	// without any GPU capacity check: limiters are declared, every provider is
+	// unavailable, and no recent snapshot of their constraints exists.
+	WVAScaleFromZeroWakeUnchecked = "wva_scale_from_zero_wake_unchecked_total"
+
+	// ProviderSkipUnobserved: the usage the provider is measured against (all
+	// GPUs on the nodes, or WVA's own) has not been observed.
+	ProviderSkipUnobserved = "unobserved"
+	// ProviderSkipFailed: the provider could not compute its constraints (a
+	// Kueue read failed, nodes could not be listed, ...).
+	ProviderSkipFailed = "failed"
+	// ProviderSkipNoConstraints: the provider returned none.
+	ProviderSkipNoConstraints = "no_constraints"
+	// ProviderSkipNodeReadDenied: a physical limiter declared beside quota
+	// entries, on a controller that may not list nodes. The quota entries still
+	// bound; a physical-only policy takes the controller NotReady instead.
+	ProviderSkipNodeReadDenied = "node_read_denied"
 
 	// WVAScaleFromZeroQueueFallbackActive is 1 while the scale-from-zero engine is
 	// reading the EPP flow-control queue from Prometheus because the direct EPP
@@ -810,6 +871,177 @@ const (
 	ScalingBlockedDonorNotSteerable = "donor-not-steerable"
 )
 
+// Kueue cohort borrowing reasons (values for the `reason` label of
+// WVAModelScalingBlocked), decided by the steady-state engine each cycle
+// (the Kueue borrowing proposal, PR #161, Part C). They
+// answer "why did my model drop": Kueue preempted a replica, or a replica did
+// not place and the scaling manager released it. A model that dropped with
+// none of them present dropped because its demand fell.
+const (
+	// ScalingBlockedLenderReclaimed indicates Kueue preempted a pod of the
+	// model for a lender reclaiming its nominal quota. Present for the borrow
+	// cooldown after the preemption, while the model borrows nothing new.
+	ScalingBlockedLenderReclaimed = "lender-reclaimed"
+	// ScalingBlockedBorrowUnplaced indicates a variant of the model has
+	// replicas that did not place: it grows on no borrowed capacity, and its
+	// borrowed replicas still unplaced after the placement timeout are
+	// released.
+	ScalingBlockedBorrowUnplaced = "borrow-unplaced"
+	// ScalingBlockedNominalLentOut indicates the model was capped this cycle
+	// while part of its namespace's nominal quota is held by a peer its
+	// ClusterQueue cannot reclaim from (reclaimWithinCohort: Never), so its
+	// guaranteed figure sits below nominal. A parked model refused a wake for
+	// the same cause carries ScalingBlockedWakeNominalLentOut instead.
+	ScalingBlockedNominalLentOut = "nominal-lent-out"
+)
+
+// Scale-from-zero refusal reasons (values for the `reason` label of
+// WVAModelScalingBlocked): a model at zero with requests queued was not woken
+// because the limiters left no room for it. Set every tick the wake is
+// refused, and cleared once it wakes, is refused for another reason, or its
+// queue empties.
+const (
+	// ScalingBlockedWakeNoCapacity indicates a wake was refused because no
+	// serving set fit the GPU budget or the nodes (the scale-from-zero
+	// outcomes no-capacity and prefill-required). The log line "Scale-from-zero:
+	// no variant woken for a model with pending requests" names the budgets it
+	// was measured against and the demand.
+	ScalingBlockedWakeNoCapacity = "wake-no-capacity"
+	// ScalingBlockedWakeNominalLentOut is ScalingBlockedWakeNoCapacity in a
+	// namespace whose ClusterQueue lent part of its nominal quota to a peer it
+	// cannot reclaim from: the wake was checked against its guaranteed figure
+	// plus the cohort's free pool, not its whole nominal.
+	ScalingBlockedWakeNominalLentOut = "wake-nominal-lent-out"
+)
+
+// ScalingBlockedReasonsBorrowing are decided by the steady-state engine from
+// cohort borrowing, every cycle; with no borrowing counted, none holds.
+var ScalingBlockedReasonsBorrowing = []string{
+	ScalingBlockedLenderReclaimed,
+	ScalingBlockedBorrowUnplaced,
+	ScalingBlockedNominalLentOut,
+}
+
+// ScalingBlockedReasonsWakeCapacity are decided by the scale-from-zero loop
+// when the limiters refuse a wake. They are its own, not the steady-state
+// engine's nominal-lent-out: two producers sharing one reason delete each
+// other's series.
+var ScalingBlockedReasonsWakeCapacity = []string{
+	ScalingBlockedWakeNoCapacity,
+	ScalingBlockedWakeNominalLentOut,
+}
+
+// ScalingBlockedReasonOwners is every producer's reason set, by producer. No
+// reason may appear in two of them: SetModelScalingBlockedReasons deletes
+// every reason its caller owns that does not hold.
+var ScalingBlockedReasonOwners = map[string][]string{
+	"policy":            ScalingBlockedReasonsPolicy,
+	"wake":              ScalingBlockedReasonsWake,
+	"wake-capacity":     ScalingBlockedReasonsWakeCapacity,
+	"utilization-share": ScalingBlockedReasonsUtilizationShare,
+	"borrowing":         ScalingBlockedReasonsBorrowing,
+}
+
+// Kueue cohort borrowing metrics
+// (the Kueue borrowing proposal, PR #161, Part C). Every
+// other borrowing condition is a reason on WVAModelScalingBlocked.
+const (
+	// WVAQuotaLimitGPUs is a gauge: a namespace-scope quota entry's cap for one
+	// namespace and accelerator, by tier. tier="guaranteed" is the cap without
+	// borrowing; tier="borrowable" is what the namespace may draw past it now,
+	// were no other namespace to draw first -- min(its borrow cap, the free
+	// GPUs of its cohorts' shared pools serving the type) -- and 0 where
+	// borrowing is not counted. An unlimited guaranteed figure publishes no
+	// series. Labels: limiter_name, namespace, accelerator, tier.
+	WVAQuotaLimitGPUs = "wva_quota_limit_gpus"
+
+	// WVAQuotaBorrowWithheld is a gauge, 1 for the reason a namespace's
+	// borrowable figure is 0, for an entry that reads Kueue borrowing. Present
+	// only while that reason holds: a namespace that borrows, or whose reason
+	// changed, has its old series deleted. Labels: limiter_name, namespace,
+	// accelerator, reason.
+	WVAQuotaBorrowWithheld = "wva_quota_borrow_withheld"
+
+	// WVAKueueUnplacedPods is a gauge: per variant in a namespace that counts
+	// borrowing, the pods that have not placed for longer than the placement
+	// timeout (Unschedulable, or held at Kueue's admission gate). Absent
+	// otherwise. Labels: namespace, variant_name.
+	WVAKueueUnplacedPods = "wva_kueue_unplaced_pods"
+
+	// WVAKueuePreemptedPodsTotal is a counter of preempted Workloads of a
+	// model: Kueue preemptions (a Workload evicted with reason Preempted) in a
+	// namespace that counts borrowing, one per Workload, so a LeaderWorkerSet
+	// or pod group counts once. The name predates that and is kept for the
+	// alert and dashboards that read it. Labels: namespace, model_name.
+	WVAKueuePreemptedPodsTotal = "wva_kueue_preempted_pods_total"
+
+	// WVABorrowReleasesTotal is a counter of the variant targets the scaling
+	// manager lowered to give borrowed Kueue capacity back, one per release
+	// record (a P/D unit counts once per variant it lowers). The namespace is
+	// the model's, scraped as exported_namespace. Labels: namespace,
+	// model_name, cause (placement-timeout: a borrowed replica did not place
+	// in time).
+	WVABorrowReleasesTotal = "wva_borrow_releases_total"
+
+	// WVAKueueLenderWaitingSeconds is a gauge: how long a lender ClusterQueue
+	// has waited for capacity it lent (debounced), published only while some
+	// namespace this controller governs still borrows in the lender's cohort.
+	// Above the borrow cooldown it means Kueue has not taken back what the
+	// lender lent. Labels: cohort, cluster_queue.
+	WVAKueueLenderWaitingSeconds = "wva_kueue_lender_waiting_seconds"
+
+	// WVAKueueBorrowDriftGPUs is a gauge, the conformance check of the
+	// borrowing figures: per ClusterQueue in a cohort, the GPUs by which the
+	// borrowed figure computed from its reservation (usage past nominal, per
+	// flavor and GPU resource) differs from Kueue's own
+	// status.flavorsReservation[].borrowed, summed as absolute differences. 0
+	// while Kueue and the scaling manager agree. Labels: cluster_queue.
+	WVAKueueBorrowDriftGPUs = "wva_kueue_borrow_drift_gpus"
+
+	// WVAKueueNeverRead is a gauge, 1 for a quota entry that reads Kueue,
+	// leaves some accelerator type unlimited (-1) in its static caps, and has
+	// never read Kueue successfully since the controller started: nothing
+	// bounds that type. Absent otherwise. Labels: limiter_name.
+	WVAKueueNeverRead = "wva_kueue_never_read"
+
+	// WVAKueueControllerVersionKnown is a gauge, 1 when the Kueue controller's
+	// Deployment was read and its image names a version, 0 when not (a
+	// digest-only image, or a Deployment that cannot be read). Published on
+	// each Kueue read that checks the controller (a cluster with a cohort).
+	// While 0, borrowing is withheld (kueue-version-unknown, a digest-only
+	// image) or frozen (kueue-controller-down, a Deployment that cannot be
+	// read). No labels beyond the controller instance.
+	WVAKueueControllerVersionKnown = "wva_kueue_controller_version_known"
+
+	// WVAKueueBorrowCooldownSeconds is a gauge: the borrowCooldown in force,
+	// in seconds, while a quota entry counts Kueue borrowing; the threshold
+	// the lender-waiting alert compares against. Absent otherwise.
+	WVAKueueBorrowCooldownSeconds = "wva_kueue_borrow_cooldown_seconds"
+
+	// WVAKueueBorrowedGPUs is a gauge: per cohort and flavor, the GPUs the
+	// namespaces this controller governs hold past their guaranteed figures,
+	// as the last cycle counted them. Absent where nothing is borrowed.
+	// Labels: cohort, flavor.
+	WVAKueueBorrowedGPUs = "wva_kueue_borrowed_gpus"
+
+	// LabelFlavor is a Kueue ResourceFlavor name.
+	LabelFlavor = "flavor"
+
+	// LabelTier is the tier of WVAQuotaLimitGPUs: guaranteed or borrowable.
+	LabelTier = "tier"
+	// LabelCause is why borrowed capacity was released, on
+	// WVABorrowReleasesTotal.
+	LabelCause = "cause"
+	// LabelCohort is a Kueue cohort name.
+	LabelCohort = "cohort"
+	// LabelClusterQueue is a Kueue ClusterQueue name.
+	LabelClusterQueue = "cluster_queue"
+
+	// QuotaTierGuaranteed and QuotaTierBorrowable are the values of LabelTier.
+	QuotaTierGuaranteed = "guaranteed"
+	QuotaTierBorrowable = "borrowable"
+)
+
 // Pod-mapping miss reasons (values for the `reason` label of WVAPodMappingMissTotal).
 const (
 	// PodMappingMissUnresolved indicates a scraped pod resolved to no managed scaler:
@@ -905,6 +1137,7 @@ const (
 	LabelAcceleratorModel   = "accelerator_model"
 	LabelAcceleratorType    = "accelerator_type"
 	LabelControllerInstance = "controller_instance"
+	LabelProvider           = "provider"
 	LabelRole               = "role"
 	LabelStatus             = "status"
 	LabelLimiterName        = "limiter_name"
@@ -913,7 +1146,15 @@ const (
 	LabelPool               = "pool"
 	// LabelOutcome distinguishes a borrow that hit, one blocked by an exhausted
 	// reserve, and one that missed because the model was resident nowhere.
-	LabelOutcome            = "outcome"
+	LabelOutcome = "outcome"
+	// LabelQuantity names what a variant borrowed from a sibling (k2 or
+	// itl-line), and LabelDonor the sibling it borrowed from.
+	LabelQuantity = "quantity"
+	LabelDonor    = "donor"
+	// LabelDonorNamespace is the donor variant's namespace.
+	LabelDonorNamespace = "donor_namespace"
+	// LabelOperation names the operation a store error happened in.
+	LabelOperation          = "operation"
 	LabelErrorType          = "error_type"
 	LabelAnalyzerName       = "analyzer_name"
 	LabelLimiterEnabled     = "limiter_enabled"

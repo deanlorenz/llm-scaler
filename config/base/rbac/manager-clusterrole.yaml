@@ -29,7 +29,16 @@ rules:
   - events
   verbs:
   - create
+  - get
+  - list
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - resourcequotas
+  verbs:
+  - get
+  - list
 - apiGroups:
   - apps
   resources:
@@ -44,6 +53,20 @@ rules:
   - apps
   resources:
   - deployments/scale
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+- apiGroups:
+  - coordination.k8s.io
+  resourceNames:
+  - c1f6bfd2.kueue.x-k8s.io
+  resources:
+  - leases
   verbs:
   - get
 - apiGroups:
@@ -65,11 +88,20 @@ rules:
   - kueue.x-k8s.io
   resources:
   - clusterqueues
+  - cohorts
   - localqueues
   - resourceflavors
   verbs:
   - get
   - list
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - workloads
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:

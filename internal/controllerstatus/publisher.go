@@ -49,6 +49,11 @@
 //	limiter                the limiter in force, "<mode>/<entry names>": for
 //	                       example "quota/install-quota",
 //	                       "inventory/gpu-inventory", or "none".
+//	limiterWarnings        what is wrong with the limiters in force though
+//	                       they still apply as written, joined by "; ": a
+//	                       quota entry named one of the reserved limiter
+//	                       names, which a later release rejects. Empty when
+//	                       none.
 //	utilizationShare       the optimizer's mode: off, invalid, shadow or
 //	                       active.
 //	utilizationShareError  the optimizer block's configuration error when the
@@ -56,8 +61,27 @@
 //	leader                 the pod that wrote this: POD_NAME, else the
 //	                       hostname.
 //	controllerInstance     the controller_instance metrics label, when set.
+//	limiterBudgets         the GPU budget the steady-state engine used in its
+//	                       last cycle, JSON (LimiterBudgets); absent until a
+//	                       cycle with a limiter. See KeyLimiterBudgets.
+//	clusterQuotaPerController
+//	                       present while a namespace-scoped controller
+//	                       enforces a scope: cluster quota: the warning
+//	                       (config.ClusterQuotaPerControllerMessage). That
+//	                       quota caps this controller only; absent otherwise.
+//	podListDenied          present while the GPU usage walk of a
+//	                       namespace-scoped controller is refused a
+//	                       cluster-wide Pod list and a physical limiter reads
+//	                       it: GPUs other namespaces hold on the same nodes
+//	                       count as free. Mirrors wva_pod_access_denied;
+//	                       absent otherwise.
+//	utilizationShareNote   present while the optimizer's settings in force
+//	                       differ from its block as written: a namespace-scoped
+//	                       controller with no quota on its namespace ignores
+//	                       physicalGroups and says so here. The mode is not
+//	                       invalid; absent otherwise.
 //
-// limiter and utilizationShare are recomputed from the applied configuration
+// limiter, limiterWarnings and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
 // it. The steady-state engine republishes utilizationShare every cycle as a
 // backstop; the ConfigMap is rewritten only when a value changes.
@@ -66,7 +90,8 @@
 //
 // Only the elected leader writes: Publisher is a manager Runnable that needs
 // leader election, so a standby keeps the state in memory and writes it the
-// moment it is elected. Content carries no timestamps, and a write happens only
+// moment it is elected. Content carries no timestamp that moves on its own
+// (limiterBudgets' asOf moves only with its figures), and a write happens only
 // when the content differs from what this process last wrote, so a quiet
 // controller does not write at all. A failed write -- Forbidden included -- is
 // logged and retried with backoff; it never stops the controller.
@@ -111,11 +136,43 @@ const (
 	KeyPolicyError           = "policyError"
 	KeyPolicyIgnored         = "policyIgnored"
 	KeyLimiter               = "limiter"
+	KeyLimiterWarnings       = "limiterWarnings"
 	KeyUtilizationShare      = "utilizationShare"
 	KeyUtilizationShareError = "utilizationShareError"
 	KeyLeader                = "leader"
 	KeyControllerInstance    = "controllerInstance"
+	// KeyBorrowReleaseLedger is the Kueue borrowing release ledger, JSON
+	// (allocation.BorrowLedger): the placement-timeout holds still in force
+	// and the borrowing cooldowns with their backoff, so a restart neither
+	// lets a released replica grow back before its pods are gone nor forgets
+	// a model's cooldown. The steady-state engine writes it and reads it back
+	// on start.
+	KeyBorrowReleaseLedger = "borrowReleaseLedger"
+	// KeyClusterQuotaPerController carries the warning that a scope: cluster
+	// quota caps this namespace-scoped controller only. Derived from the
+	// applied configuration; absent when it does not apply.
+	KeyClusterQuotaPerController = "clusterQuotaPerController"
+	// KeyPodListDenied carries the warning that the GPU usage walk is refused
+	// a cluster-wide Pod list while a physical limiter reads it. Absent when
+	// it is not.
+	KeyPodListDenied = "podListDenied"
+	// KeyUtilizationShareNote carries why the optimizer's settings in force
+	// differ from its block as written (config.UtilizationShare.Note), for
+	// example a physicalGroups a namespace-scoped controller ignores. Absent
+	// when they do not.
+	KeyUtilizationShareNote = "utilizationShareNote"
 )
+
+// PodListDeniedMessage is the KeyPodListDenied value.
+const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so GPU usage counts only its own " +
+	"namespace (wva_pod_access_denied). If other namespaces run GPU pods on the same nodes, their GPUs read as " +
+	"free to the physical limiter; if none do, nothing is miscounted. Grant list on pods cluster-wide, or bound " +
+	"this controller with a quota limiter alone."
+
+// persistedKeys are the keys a new term carries over from the ConfigMap it
+// finds, rather than overwriting with this process's empty start: state, not
+// status.
+var persistedKeys = []string{KeyBorrowReleaseLedger}
 
 // Labels on the controller-status ConfigMap.
 const (
@@ -198,6 +255,7 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 			KeyPolicyError:           "",
 			KeyPolicyIgnored:         "",
 			KeyLimiter:               string(config.LimiterTypeNone),
+			KeyLimiterWarnings:       "",
 			KeyUtilizationShare:      constants.UtilizationShareModeOff,
 			KeyUtilizationShareError: "",
 			KeyLeader:                leader,
@@ -278,6 +336,53 @@ func (p *Publisher) SetUtilizationShare(mode string, err error) {
 	})
 }
 
+// SetBorrowReleaseLedger records the borrowing release ledger (JSON).
+func (p *Publisher) SetBorrowReleaseLedger(ledger string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { d[KeyBorrowReleaseLedger] = ledger })
+}
+
+// ReadKey reads one key of the controller-status ConfigMap in namespace
+// through reader, which should bypass the manager's cache. found is false when
+// the ConfigMap or the key is absent; any other failure is returned.
+func ReadKey(ctx context.Context, reader client.Reader, namespace, key string) (value string, found bool, err error) {
+	var cm corev1.ConfigMap
+	err = reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ConfigMapName}, &cm)
+	if apierrors.IsNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	value, found = cm.Data[key]
+	return value, found, nil
+}
+
+// carryOver copies the persisted keys from the ConfigMap into the desired
+// status where this process has not set them yet, so the first write of a
+// term does not erase state another term persisted. A read that fails is
+// returned: Start writes nothing until one succeeds (review R10), since a
+// write without the persisted keys would erase them.
+func (p *Publisher) carryOver(ctx context.Context) error {
+	for _, key := range persistedKeys {
+		v, found, err := ReadKey(ctx, p.reader, p.namespace, key)
+		if err != nil {
+			return fmt.Errorf("reading the persisted %s key before the first write: %w", key, err)
+		}
+		if !found {
+			continue
+		}
+		p.mu.Lock()
+		if _, set := p.desired[key]; !set {
+			p.desired[key] = v
+		}
+		p.mu.Unlock()
+	}
+	return nil
+}
+
 // Data returns a copy of the status as it will be written.
 func (p *Publisher) Data() map[string]string {
 	if p == nil {
@@ -306,6 +411,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	// reads the instance from the environment.
 	p.desired[KeyControllerInstance] = metrics.GetControllerInstance()
 	p.mu.Unlock()
+	carried := false
 	p.signal() // the first write after election, whatever is pending
 	backoff := p.retryMin
 	// One timer for the whole term, armed only while a write is failing. retry
@@ -326,7 +432,17 @@ func (p *Publisher) Start(ctx context.Context) error {
 		if !sleep(ctx, p.debounce) {
 			return nil
 		}
-		if err := p.flush(ctx); err != nil {
+		err := error(nil)
+		if !carried {
+			// The persisted keys first, retried with the write's backoff.
+			if err = p.carryOver(ctx); err == nil {
+				carried = true
+			}
+		}
+		if err == nil {
+			err = p.flush(ctx)
+		}
+		if err != nil {
 			p.reportErr(logger, err)
 			timer.Reset(backoff)
 			retry = timer.C
@@ -460,9 +576,49 @@ func observe(d map[string]string, cfg *config.Config) {
 	}
 	d[KeyPolicyNamespace] = cfg.PolicyNamespace()
 	d[KeyLimiter] = cfg.EffectiveLimiterSummary()
+	d[KeyLimiterWarnings] = strings.Join(cfg.EffectiveLimiterWarnings(), "; ")
 	mode, err := cfg.UtilizationShareMode()
 	d[KeyUtilizationShare] = mode
 	d[KeyUtilizationShareError] = errText(err)
+	setOrDelete(d, KeyUtilizationShareNote, cfg.UtilizationShareNote())
+	if cfg.ClusterQuotaPerController() {
+		d[KeyClusterQuotaPerController] = config.ClusterQuotaPerControllerMessage
+	} else {
+		delete(d, KeyClusterQuotaPerController)
+	}
+}
+
+// SetPodListDenied records whether the GPU usage walk is refused a
+// cluster-wide Pod list while a physical limiter reads it.
+func (p *Publisher) SetPodListDenied(denied bool) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) {
+		if denied {
+			d[KeyPodListDenied] = PodListDeniedMessage
+		} else {
+			delete(d, KeyPodListDenied)
+		}
+	})
+}
+
+// SetUtilizationShareNote records why the optimizer's settings in force differ
+// from its block as written; "" removes the key.
+func (p *Publisher) SetUtilizationShareNote(note string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { setOrDelete(d, KeyUtilizationShareNote, note) })
+}
+
+// setOrDelete sets key to value, or removes it when value is empty.
+func setOrDelete(d map[string]string, key, value string) {
+	if value == "" {
+		delete(d, key)
+		return
+	}
+	d[key] = value
 }
 
 func errText(err error) string {

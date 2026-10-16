@@ -9,15 +9,15 @@ rule_files:
   - rules.yaml
 evaluation_interval: 1m
 tests:
-  # 1. A sustained, judged TTFT miss with a live analyzer fires once five
-  #    misses are counted (t=4m) and for: 2m has passed (t=6m), not before.
+  # 1. A sustained, judged TPOT miss with a live analyzer fires once seven
+  #    misses are counted (t=6m) and for: 2m has passed (t=8m), not before.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="wva-a"}'
         values: '5x60'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="wva-a"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="wva-a"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -27,12 +27,15 @@ tests:
         exp_alerts: []
       - eval_time: 7m
         alertname: WVAModelSLOMissed
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 30m
         alertname: WVAModelSLOUnjudged
         exp_alerts: []
@@ -40,11 +43,11 @@ tests:
   # 2. The same miss with the analyzer stopped (request count frozen) does not fire.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x60'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -53,15 +56,15 @@ tests:
         alertname: WVAModelSLOMissed
         exp_alerts: []
 
-  # 3. Fewer than five judged misses (judged for 4 minutes, then excluded) does
+  # 3. Fewer than seven judged misses (judged for 4 minutes, then excluded) does
   #    not fire, though every judged minute missed.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x3 stale'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -138,11 +141,11 @@ tests:
   # 7. A parked model (no replicas) fires neither alert.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x10 stale'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x120'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x120'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '0x120'
@@ -160,11 +163,11 @@ tests:
   #    count; counted against judged minutes it fires.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6 5 5 5 stale _x6'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -172,17 +175,17 @@ tests:
       - eval_time: 45m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
 
   # 9. Misses in fewer than half of the judged minutes: 9 misses, then 21
   #    minutes that meet the target. Does not fire.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x8 2x21'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -195,11 +198,11 @@ tests:
   #     40m (20 misses of 30 judged), resolved by 50m (10 of 30).
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x29 2x60'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x90'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x90'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x90'
@@ -207,22 +210,22 @@ tests:
       - eval_time: 40m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 50m
         alertname: WVAModelSLOMissed
         exp_alerts: []
 
-  # 11. The freshness gate is per objective: a TTFT miss whose request count
-  #     froze does not fire because TPOT's count still moves.
+  # 11. The freshness gate is per objective: a TPOT miss whose request count
+  #     froze does not fire because TTFT's count still moves.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x60'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x60'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
-        values: '300+1x19 320x40'
       - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '300+1x19 320x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
         values: '300+1x60'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x60'
@@ -230,7 +233,7 @@ tests:
       - eval_time: 15m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 30m
         alertname: WVAModelSLOMissed
         exp_alerts: []
@@ -401,17 +404,17 @@ tests:
   #     the alert, and fired it again after for: 2m.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="old"}'
         values: '5x40 stale'
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="new"}'
         values: '_x42 5x30'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="old"}'
         values: '3x40 stale'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="new"}'
         values: '_x42 3x30'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="old"}'
         values: '300+1x40 stale'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean",pod="new"}'
         values: '_x42 400+1x30'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m",pod="old"}'
         values: '2x40 stale'
@@ -421,15 +424,15 @@ tests:
       - eval_time: 40m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 42m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 44m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
 
   # 21. A policy with a TPOT target alone, clients without include_usage: no
   #     TTFT objective to compare with, but the router's own counter shows
@@ -537,11 +540,11 @@ tests:
   #     park; it clears by 36m.
   - interval: 1m
     input_series:
-      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '5x29 stale'
-      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '3x29 stale'
-      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
         values: '300+1x29 stale'
       - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
         values: '2x29 0x60'
@@ -549,7 +552,251 @@ tests:
       - eval_time: 29m
         alertname: WVAModelSLOMissed
         exp_alerts:
-          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
       - eval_time: 36m
         alertname: WVAModelSLOMissed
+        exp_alerts: []
+
+  # A1. TTFT attainment: eight minutes with half the requests late, after 20
+  #     good ones. Counted in miss-minutes this reached 10 of 30 and did not
+  #     fire; request-weighted, the 30-minute attainment is below 0.9 from 24m
+  #     (pending), firing 26m, and it resolves once a judged reading of the
+  #     last five minutes meets the objective again (32m).
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+        values: '0.98x19 0.5x7 0.98x40'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+        values: '0.9x70'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="wva-a"}'
+        values: '600+1x70'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x70'
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 34m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A2. A steady miss: 89% within target against a promise of 90% fires once
+  #     15 minutes are judged (14m) and for: 2m has passed.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.89x40'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '600+1x40'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # A3. One bad minute: a fifth of its requests late, so the five windows that
+  #     hold it read 0.8. Request-weighted over 30 minutes that is 0.95: quiet.
+  #     Counted in miss-minutes it reached five and fired for 25 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.98x19 0.8x4 0.98x20'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '600+1x40'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A4. A miss with the analyzer stopped (request count frozen) does not fire,
+  #     nor does one on a parked model.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.5x40'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '600x40'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="parked",objective="ttft",statistic="p90"}'
+        values: '0.5x40'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="parked",objective="ttft",statistic="p90"}'
+        values: '0.9x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="parked",objective="ttft",statistic="p90"}'
+        values: '600+1x40'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="parked"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A5. A controller restart: the old pod's series and the new one's overlap.
+  #     max by () keeps every join one-to-one; the miss still fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '0.5x15'
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x10 0.5x30'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '0.9x15'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x10 0.9x30'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="old"}'
+        values: '600+1x15'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90",pod="new"}'
+        values: '_x10 600+1x30'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # A6. A starting replica excludes the windows while the miss goes on: judged
+  #     at 0.5 from 10m to 14m, then excluded, requests flowing. The exclusion
+  #     does not resolve it (25m, firing): only a judged reading that meets the
+  #     objective does. It ends once the judged windows hold under half the
+  #     half hour's requests (35m).
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.98x9 0.5x4 stale'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '600+1x40'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 25m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 35m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A7. Sparse traffic at p99: a window needs 1000 requests to be judged, so
+  #     only busy minutes are. Judged at 0.97 for 15 minutes while 15 more
+  #     carried 1500 requests each unjudged: the judged windows hold 40% of the
+  #     half hour's requests, and a burst's misses are not the half hour's.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '0.97x14 stale'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '0.99x40'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '1000x14 1500 1501 1502 1503 1504 1505 1506 1507 1508 1509 1510 1511 1512 1513 1514 1515 1516 1517 1518 1519 1520 1521 1522 1523 1524'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A8. A new series (a percentile changed, a fresh install): judged at 0.985
+  #     against p99 for ten minutes. Fewer than 15 judged minutes is not a half
+  #     hour; it stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '0.985x10'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '0.99x10'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p99"}'
+        values: '1200+1x10'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A9. Requests weigh, not minutes: 15 minutes at 0.98 on 5000 requests a
+  #     window, then 15 at 0.5 on 120. Request-weighted the half hour is 0.97:
+  #     quiet. A plain average of the readings, 0.74, would fire.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.98x14 0.5x14'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x29'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5000+1x14 120+1x14'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x29'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts: []
+
+  # A10. The objective is the gauge's, not a fixed 0.9: p50 at 0.7 met is
+  #      quiet, p99 at 0.985 is a miss.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="median",objective="ttft",statistic="p50"}'
+        values: '0.7x29'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="median",objective="ttft",statistic="p50"}'
+        values: '0.5x29'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="median",objective="ttft",statistic="p50"}'
+        values: '600+1x29'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="median"}'
+        values: '2x29'
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="tail",objective="ttft",statistic="p99"}'
+        values: '0.985x29'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="tail",objective="ttft",statistic="p99"}'
+        values: '0.99x29'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="tail",objective="ttft",statistic="p99"}'
+        values: '1200+1x29'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="tail"}'
+        values: '2x29'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WVAModelSLOAttainmentLow
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: tail, objective: ttft, statistic: p99}
+
+  # A11. Exactly the promised share is met, and a recent reading that meets
+  #      the objective keeps the alert quiet.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_attainment_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x29'
+      - series: 'wva_slo_objective_ratio{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '0.9x29'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '600+1x29'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x29'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WVAModelSLOAttainmentLow
         exp_alerts: []

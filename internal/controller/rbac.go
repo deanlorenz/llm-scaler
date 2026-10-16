@@ -80,6 +80,33 @@ package controller
 // ClusterQueue namespaceSelector; the namespaces rule above already covers that.
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=clusterqueues;localqueues;resourceflavors,verbs=get;list
 
+// Kueue cohort borrowing (the Kueue borrowing proposal, PR #161,
+// B2). Cohorts are listed to tell a flat cohort from a nested one; a Forbidden
+// list reads as "hierarchy unknown", never as flat. Workloads, the namespace's
+// own ResourceQuotas and the owners of GPU pods (Jobs; the apps kinds and
+// LeaderWorkerSets are granted above) back the checks that decide whether
+// borrowing may be counted. Workloads are read through an informer of the
+// manager's cache (kueue.InformerWorkloads), started on first use, so they
+// need watch; everything else is get and list only. Nothing is written.
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=cohorts,verbs=get;list
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get
+//
+// Whether a Kueue leader runs is read from its leader-election Lease
+// (kueue.ControllerLease) in the Kueue namespace: get only. A namespace-scoped
+// install gets it, with the kueue-controller-manager Deployment, from a Role in
+// the Kueue namespace the prereqs phase creates; without either, borrowing
+// freezes (kueue-controller-down). Limited by name to that Lease
+// (kueue.ControllerLease), as the namespace-scoped Role is: the cluster-scoped
+// install reads no other Lease through this rule.
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,resourceNames=c1f6bfd2.kueue.x-k8s.io,verbs=get
+//
+// The placement timeout of a borrowed replica waits while the cluster
+// autoscaler reports TriggeredScaleUp on its pod (B5): Events are read, get and
+// list only, never watched.
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list
+
 // InferencePool discovery and controller-owned ServiceMonitor observation.
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=inference.networking.x-k8s.io;inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch

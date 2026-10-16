@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -76,12 +77,13 @@ type ScalingPolicy struct {
 	//
 	// It does not govern the k2 borrow (P2-borrow, saturation/k2_borrow.go),
 	// which uses a compatible sibling's measured k2 only where that is LOWER
-	// than the variant's own capacity, and relaxes back to it over 6.5 hours.
-	// That runs whatever this says, by the rule below: a figure that can only
-	// lower a capacity orders more replicas, never fewer. Its cost is in the
-	// other direction -- a false match, such as two configurations whose
-	// unread flags both fell back to defaults, holds extra replicas for up to
-	// the 6.5 hours -- and there is no switch for it.
+	// than the variant's own capacity, and relaxes back to it over 6.5 hours
+	// of serving. That runs whatever this says, by the rule below: a figure
+	// that can only lower a capacity orders more replicas, never fewer. Its
+	// cost is in the other direction -- a false match, such as two
+	// configurations whose unread flags both fell back to defaults, holds
+	// extra replicas for up to the 6.5 hours -- and DisableK2Borrow is its
+	// switch.
 	//
 	// OFF BY DEFAULT, and that is the whole of this setting's story. Reuse is
 	// decided by an equality over a digest of 14 parsed engine flags, and that
@@ -131,6 +133,24 @@ type ScalingPolicy struct {
 	// ever have switched reuse back on; as an enable defaulting to false, the
 	// same idiom turns it on exactly where someone asks.
 	EnableLearnedStateReuse bool `yaml:"enableLearnedStateReuse,omitempty"`
+
+	// DisableK2Borrow stops the k2 borrow (P2-borrow) for the model: a
+	// variant with no saturated reading of its own prices from its own
+	// derived figure or k1, never from a sibling's measurement. A clock
+	// already running is left where it stands, and resumes if the borrow is
+	// switched back on.
+	//
+	// ON BY DEFAULT, because the borrow is lower-only: it can order more
+	// replicas, never fewer. This is the switch for its cost -- an incident
+	// where a false match holds a fleet on a sibling's figure, which before
+	// this needed a new image or a flush of every model's learned state.
+	//
+	// A DISABLE, unlike EnableLearnedStateReuse, because the default is on
+	// and Merge is one-way for a plain bool: a true in a per-model override
+	// turns the borrow off for that model, which is the scope it is for. The
+	// limitation is the mirror of reuse's: a model cannot turn the borrow back
+	// on where a `default:` entry turned it off.
+	DisableK2Borrow bool `yaml:"disableK2Borrow,omitempty"`
 
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
@@ -235,13 +255,13 @@ type ScalingPolicy struct {
 
 	// Limiters is the sole source that selects the GPU limiter for the scaling
 	// pipeline; it is applied live (no restart) and is honored only on the cluster
-	// "default" entry (a budget-scope setting, like EnableRescale). A limiters list
-	// selects a single mode — a quota entry wins over any gpu-inventory entry.
-	// Each entry is either
-	//   - {type: gpu-inventory}  — physical GPU limiter, no quota fields; or
+	// "default" entry (a budget-scope setting, like EnableRescale). Every entry
+	// is built, and a decision must fit all of them. Each entry is either
+	//   - {type: gpu-inventory}  — physical GPU limiter, no quota fields; at most
+	//     one (the "inventory" alias counts too); or
 	//   - {type: quota, ...}     — an inline quota entry (see QuotaLimiterConfig).
-	// With no limiters declared, the physical-inventory limiter is used.
-	// See Config.EffectiveLimiterMode / Config.EffectiveQuotaEntries.
+	// With no limiters declared, nothing limits.
+	// See Config.EffectiveLimiterTypes / Config.EffectiveQuotaEntries.
 	Limiters []QuotaLimiterConfig `yaml:"limiters,omitempty"`
 
 	// Optimizer selects and configures the fleet's optimizer. Like Limiters it is
@@ -617,6 +637,10 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.EnableLearnedStateReuse {
 		c.EnableLearnedStateReuse = true
 	}
+	// One-way like the rest: a true turns the borrow off for the model.
+	if override.DisableK2Borrow {
+		c.DisableK2Borrow = true
+	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a
 	// number from the default entry, which would read as both set.
@@ -661,7 +685,7 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	//   DefaultOutputTokens -- not a ConfigMap field; folded in from the model's
 	//     trigger metadata after resolution.
 	// Limiters is intentionally NOT merged: it is a cluster-"default"-scope setting
-	// read only from the global default entry (see Config.EffectiveLimiterMode), so
+	// read only from the global default entry (see Config.EffectiveLimiterTypes), so
 	// a per-model override's limiters would never be consumed. Optimizer is not
 	// merged for the same reason (see Config.UtilizationShare).
 	if override.ModelID != "" {
@@ -767,6 +791,25 @@ func TruncateIgnoredValue(v string) string {
 	return fmt.Sprintf("%s...(%d more bytes)", v[:cut], len(v)-cut)
 }
 
+// errNotFinite is the reason ResetUnusableFields gives for a NaN or infinite
+// number.
+var errNotFinite = errors.New("must be a finite number")
+
+// MaxPrecedence is the largest priority or analyzer score a policy may set.
+// Both multiply a model's weight in the fair share (priority x score x
+// demand), and a weight a million times another's already takes the whole
+// contended budget, so the bound loses nothing; it keeps the product finite: a
+// priority of 1e308 overflowed it to +Inf, and with rescale on the NaN share
+// that followed corrupted the GPU target of every model in the budget.
+const MaxPrecedence = 1e6
+
+// errAboveMaxPrecedence is the reason ResetUnusableFields gives for a priority
+// or score above MaxPrecedence.
+var errAboveMaxPrecedence = fmt.Errorf("must be at most %g", float64(MaxPrecedence))
+
+// isNonFinite reports whether v is NaN or infinite.
+func isNonFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
+
 // IgnoredField is one setting ResetUnusableFields cleared.
 type IgnoredField struct {
 	// Field is the YAML path of the setting, e.g. "scaleToZero.retentionPeriod".
@@ -802,8 +845,62 @@ func (f IgnoredField) String() string {
 //   - shapeChangeHoldSeconds below zero. Merge copies any non-zero value, so a
 //     negative one replaced the default entry's hold, and the getters then
 //     honour only positive values: the operator's hold was silently lost.
+//   - A number that is not finite (YAML .nan, .inf), in priority, the
+//     capacity thresholds, the scaling band, and each analyzer's score and
+//     band. NaN passes every range check in Validate, since each comparison
+//     is false, and an infinite priority or score put the model last in the
+//     greedy-by-score fair share, not first, and with rescale on drew
+//     replicas away from other models (#171).
+//   - An analyzer score below zero, which AnalyzerScore read as 1 without a
+//     word.
+//   - A priority or analyzer score above MaxPrecedence.
 func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 	var ignored []IgnoredField
+	notFinite := func(field string, v float64) {
+		ignored = append(ignored, IgnoredField{
+			Field: field, Value: strconv.FormatFloat(v, 'g', -1, 64), Reason: errNotFinite,
+		})
+	}
+	nonFinite := func(field string, v *float64) {
+		if isNonFinite(*v) {
+			notFinite(field, *v)
+			*v = 0
+		}
+	}
+	nonFinitePtr := func(field string, v **float64) {
+		if *v != nil && isNonFinite(**v) {
+			notFinite(field, **v)
+			*v = nil
+		}
+	}
+	nonFinite("priority", &c.Priority)
+	aboveMax := func(field string, v *float64) {
+		if *v > MaxPrecedence {
+			ignored = append(ignored, IgnoredField{
+				Field: field, Value: strconv.FormatFloat(*v, 'g', -1, 64), Reason: errAboveMaxPrecedence,
+			})
+			*v = 0
+		}
+	}
+	aboveMax("priority", &c.Priority)
+	nonFinite("kvCacheThreshold", &c.KvCacheThreshold)
+	nonFinite("queueLengthThreshold", &c.QueueLengthThreshold)
+	nonFinite("scaleUpThreshold", &c.ScaleUpThreshold)
+	nonFinite("scaleDownBoundary", &c.ScaleDownBoundary)
+	for i := range c.Analyzers {
+		a := &c.Analyzers[i]
+		at := fmt.Sprintf("analyzers[%d].", i)
+		nonFinite(at+"score", &a.Score)
+		if a.Score < 0 {
+			ignored = append(ignored, IgnoredField{
+				Field: at + "score", Value: strconv.FormatFloat(a.Score, 'g', -1, 64), Reason: errors.New("must be >= 0"),
+			})
+			a.Score = 0
+		}
+		aboveMax(at+"score", &a.Score)
+		nonFinitePtr(at+"scaleUpThreshold", &a.ScaleUpThreshold)
+		nonFinitePtr(at+"scaleDownBoundary", &a.ScaleDownBoundary)
+	}
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
 			ignored = append(ignored, IgnoredField{
@@ -824,8 +921,12 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 }
 
 // validateLimiters checks the inline Limiters list. gpu-inventory/inventory
-// entries must carry no quota fields; quota entries are validated end-to-end by
-// the existing QuotaLimiterEntries.Validate() (name uniqueness, scope, per-type
+// entries must carry no quota fields. A second physical entry is NOT an error:
+// there is one physical cluster and one physical limiter is built, so the
+// duplicate is ignored and reported (IgnoredPhysicalLimiters). Rejecting it
+// would discard the whole default policy, and that list installed before the
+// limiters composed. Quota entries are validated end-to-end by the
+// existing QuotaLimiterEntries.Validate() (name uniqueness, scope, per-type
 // ranges), so the inline and file-based quota schemas stay identical.
 func (c *ScalingPolicy) validateLimiters() error {
 	if len(c.Limiters) == 0 {
@@ -854,45 +955,55 @@ func (c *ScalingPolicy) validateLimiters() error {
 	return nil
 }
 
-// UnenforcedLimiterTypes returns the limiter types this policy declares that
-// will NOT be built, in declaration order and de-duplicated. Empty when
-// everything declared is enforced.
-//
-// The limiters: list reads like a set of bounds that all apply. It is not:
-// Config.EffectiveLimiterMode collapses it to ONE mode — quota if any entry is
-// quota — and NewLimiterFromConfig builds only that. So a policy declaring both
-// quota and gpu-inventory gets the quota caps and NO physical limiter at all,
-// which is the dangerous direction: the operator reads the config as "bounded by
-// real GPUs as well" while nothing consults physical capacity, and a
-// scale-from-zero wake can be placed onto an accelerator that is already full.
-//
-// Bounding by min(physical, quota) is issue #1003. Until that exists, the drop
-// has to be visible — validateLimiters deliberately does not reject the
-// combination, because refusing a config that used to install is a worse failure
-// than one that says what it is doing.
-func (c ScalingPolicy) UnenforcedLimiterTypes() []string {
-	if len(c.Limiters) == 0 {
-		return nil
-	}
-	hasQuota := false
+// LimiterWarnings returns the non-fatal findings about this policy's quota
+// limiters (see QuotaLimiterEntries.Validate), and the namespaces a namespace
+// quota excludes that have no GPU limit on some accelerator type (see
+// unboundedExcludeWarnings). A physical limiter bounds every type a workload
+// names, so with one declared only a workload that names none can be reported.
+// Empty when there are none, or when the quota entries do not validate: the
+// error is reported elsewhere.
+func (c ScalingPolicy) LimiterWarnings() []string {
+	var quotaOnes []QuotaLimiterConfig
 	for _, l := range c.Limiters {
 		if l.Type == string(LimiterTypeQuota) {
-			hasQuota = true
-			break
+			quotaOnes = append(quotaOnes, l)
 		}
 	}
-	if !hasQuota {
-		// Every entry is a physical one, and the inventory limiter is built.
+	if len(quotaOnes) == 0 {
 		return nil
 	}
-	var dropped []string
-	for _, l := range c.Limiters {
-		if l.Type == string(LimiterTypeQuota) || slices.Contains(dropped, l.Type) {
+	entries := QuotaLimiterEntries{Limiters: quotaOnes}
+	warnings, err := entries.Validate()
+	if err != nil {
+		return nil
+	}
+	physical := slices.ContainsFunc(c.Limiters, func(l QuotaLimiterConfig) bool { return isPhysicalLimiterType(l.Type) })
+	return append(warnings, entries.unboundedExcludeWarnings(physical)...)
+}
+
+// IgnoredPhysicalLimitersMessage is the one log message for physical entries
+// after the first, shared by the startup check (cmd/main.go) and the ConfigMap
+// reconciler, which logs it only for the ConfigMap the limiters are read from
+// (warnAboutLimiters), so an operator searching for one finds both.
+const IgnoredPhysicalLimitersMessage = "Ignoring physical (gpu-inventory) limiters entries after the first: " +
+	"one physical limiter is built, from the first"
+
+// IgnoredPhysicalLimiters returns the indexes of the physical (gpu-inventory
+// or inventory) entries after the first. One physical limiter is built from
+// the first; these are ignored, and callers log IgnoredPhysicalLimitersMessage.
+func (c ScalingPolicy) IgnoredPhysicalLimiters() []int {
+	var dups []int
+	seen := false
+	for i, l := range c.Limiters {
+		if !isPhysicalLimiterType(l.Type) {
 			continue
 		}
-		dropped = append(dropped, l.Type)
+		if seen {
+			dups = append(dups, i)
+		}
+		seen = true
 	}
-	return dropped
+	return dups
 }
 
 // AnalyzerScore returns the AnalyzerScoreConfig.Score for the named analyzer,
@@ -902,7 +1013,7 @@ func (c ScalingPolicy) UnenforcedLimiterTypes() []string {
 func (c ScalingPolicy) AnalyzerScore(analyzerName string) float64 {
 	for _, aw := range c.Analyzers {
 		if aw.EffectiveType() == analyzerName {
-			if aw.Score > 0 {
+			if aw.Score > 0 && !math.IsInf(aw.Score, 0) {
 				return aw.Score
 			}
 			return 1.0

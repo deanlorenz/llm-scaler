@@ -43,18 +43,24 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 ```
 
 ```
-INFO  GPU limiter constructed  {"type": "quota", "name": "install-quota"}   # bounded
-INFO  GPU limiter constructed  {"type": "none", "name": "no-limiter"}       # NOT bounded
+INFO  GPU limiter constructed  {"type": "quota", "limiters": "quota/install-quota", ...}                    # bounded
+INFO  GPU limiter constructed  {"type": "inventory+quota", "limiters": "inventory+quota/gpu,install-quota", ...}  # bounded by both
+INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-limiter"}                  # NOT bounded
 ```
 
-> **Declare one kind, not both.** `limiters:` is a list, but only one limiter is
-> built, and a quota entry wins. `quota` next to `gpu-inventory` gives the
-> declared caps and **no physical limiter**, so nothing checks whether the GPUs
-> exist, and a scale-from-zero wake can land on a full accelerator.
+> **Both kinds bound together.** Declare `gpu-inventory` and `quota` in one
+> `limiters:` list and every one is built: a decision must fit the GPUs that
+> exist **and** the allowance. One physical limiter is built: a second
+> `gpu-inventory` entry is ignored, with a warning in the controller log.
 >
-> The ConfigMap parse and the startup log both name what is not enforced
-> (`notEnforced`). Bounding by `min(physical, quota)` is
-> [issue #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003).
+> **Upgrading from a release that built only one.** There, a quota entry made
+> the physical one inert. Now both apply, which can hold a model lower when
+> other workloads (training jobs included) hold GPUs. For one release the
+> controller logs `Upgrade note (transitional)` naming every variant whose
+> target the quota alone would have set differently, checked every tenth cycle.
+>
+> If one limiter cannot be consulted in a cycle (its usage is not observed yet,
+> or it errors), it is skipped and named in the log; the others still bound.
 
 ## Who is allowed to change the bound
 
@@ -198,9 +204,9 @@ whether policy was published for it. It starts on its own ConfigMap, logs
 create the grant, and `enable-physical-limiter` also restarts the affected
 controllers.
 
-A namespace-scoped controller caches only the namespace it manages
-(`cmd/main.go`) and reads any other ConfigMap at startup. So every
-`enable-physical-limiter` and `disable-physical-limiter` restarts **every
+A namespace-scoped controller caches only the namespace it manages and reads
+any other ConfigMap at startup. So every
+`enable-physical-limiter` and `disable-limiter` restarts **every
 namespace-scoped controller whose policy source is outside the namespace it
 manages**: a self-managed one reading `wva-policy` or its labelled namespace,
 and an out-of-reach one reading its own ConfigMap. It lists them as
@@ -221,6 +227,17 @@ the policy namespace already exists.
 If cluster policy declares `gpu-inventory` and the controller may not list nodes,
 it reports **not ready** and stays that way.
 
+Declared **beside a quota**, it does not go NotReady. It skips the physical
+limiter. The quotas still bound the namespaces they cap, but a namespace a
+namespace quota excludes is then bounded only by a `scope: cluster` quota, and
+by nothing without one. The exclude warnings read the configuration only, so
+they do not report this. It logs `Cluster policy
+declares gpu-inventory beside quota limiters, but this controller may not list
+nodes` when that starts, and
+`wva_constraint_provider_skipped{provider="gpu-limiter",reason="node_read_denied"}`
+is 1 until the read is granted. Such a policy was bounded by the quota alone
+before limiters composed, so failing the pod would freeze scaling on upgrade.
+
 It is a *readiness* check, not a startup one, because this can happen at two
 times:
 
@@ -232,7 +249,8 @@ times:
 
 The check lists nodes with a 2s timeout and asks again at most every 30s.
 
-- **Forbidden**: the controller may not list nodes. It stays not ready.
+- **Forbidden**: the controller may not list nodes. It is not ready until node
+  read is granted.
 - **Unauthorized**: the API server did not accept the controller's credentials.
   This is an authentication problem, not missing RBAC. It stays not ready.
 - **Any other error** (slow or restarting API server): the check keeps its last
@@ -256,8 +274,112 @@ which the node-reader grant does not include. Without it the list is Forbidden,
 and usage counts only the controller's own namespace, so GPUs other namespaces
 hold on those nodes read as free. While a `gpu-inventory` limiter is in force,
 `wva_pod_access_denied` is **1** and an error is logged. Grant `list` on `pods`
-cluster-wide, or bound with a quota limiter. Under a quota limiter, or none, the
-undercount bounds nothing: the gauge stays 0 and the log says so once at info.
+cluster-wide, or drop `gpu-inventory` and bound with a quota limiter alone (a
+quota declared beside `gpu-inventory` leaves the physical limiter reading this
+count). Under quota limiters alone, or none, the undercount bounds nothing: the gauge stays 0 and the log says so once at info.
+
+The same denied list hides other namespaces' LeaderWorkerSet groups. A topology
+domain where only another namespace's group runs then looks free to an
+exclusive-topology LeaderWorkerSet, and its new group can be ordered there and
+stay Pending.
+
+### A replica must fit one node
+
+The pool counts free GPUs per accelerator; a replica also needs its GPUs on one
+node (each of its pods on one node). Sixteen free H100s as 4+4+8 hold one 8-GPU
+replica, not two. So while the physical limiter bounds scaling, every replica
+the scaling manager asks for must also fit a node:
+
+- A model grows only by replicas some node can hold. A model held back that
+  way is GPU-limited, like one the pool cannot fit, and says why: when the
+  pools held the GPUs and no node held a replica, the `ResourceConstrained`
+  Event ends `(limited by node-fit)` and `wva_decisions_limited_total` counts
+  it under `limiter_name="node-fit"`. When a pool ran out first, both name
+  that limiter as before. `node-fit` names no limiter entry: defragment a node
+  or add one the size of a replica; more GPUs in the pool will not help.
+- A P/D model grows only when a prefill and a decode replica each find a node.
+  Otherwise neither role grows this cycle. This holds for the rescale
+  pre-pass (`rescale.enabled`) too.
+- Each replica asked for takes its node's hole for the rest of the cycle, so
+  two models never both count on one hole.
+- Each replica asked for keeps its hole after the cycle, from every later
+  decision of the steady-state and scale-from-zero engines alike, until its
+  pods hold a node or **5 minutes** pass, whichever is first (for a replica
+  on a Kueue flavor, the borrowing `placementTimeout` when that is longer).
+  This is the
+  in-flight hold: a new pod holds nothing on a node until it is scheduled,
+  which takes seconds, or minutes with an image pull or a preemption, and
+  without the hold the next decision saw the hole free again. Two cold models
+  woke into one free 8-GPU node that way. The hold starts as soon as the
+  steady-state pass picks the node, not when its cycle ends, and shrinks if
+  the rest of the cycle lowers the target. Five minutes is about how long
+  placement takes; a pod still Pending after that waits for something else (a
+  taint, an affinity, CPU or memory on the node), and the hole is released.
+- A scale-from-zero wake is checked the same way. Within one decision tick a
+  wake also takes its GPUs and its hole from the wakes after it.
+- A node the utilization share freed for a receiver whose pod is still
+  Pending is held for it: today's optimizer, a wake and the warm pool all see
+  it taken. Which node is not known, so the freest is held. The share's own
+  idle fill places only on what today's optimizer left for the models the
+  share does not plan.
+- The warm pool grows only by Pods a node can hold, after this cycle's
+  replicas have taken theirs. A Pod larger than every node grows nothing.
+- Each pod goes into the smallest hole that holds it, so a small replica does
+  not break up a whole node a large one needs.
+- A node with a `NoSchedule` or `NoExecute` taint holds a replica only if its
+  pod template tolerates the taint. A LeaderWorkerSet with an exclusive
+  topology (`leaderworkerset.sigs.k8s.io/exclusive-topology`) places all pods
+  of a replica in one domain of that label, and a domain holds one replica: a
+  domain where any LeaderWorkerSet group's pod already runs, or where another
+  replica was just placed or is held, is skipped. Free GPUs left in such a
+  domain are not counted for a new group.
+- A LeaderWorkerSet group whose leader holds a node while its workers do
+  not (or do not exist yet) keeps holes for those workers only, in the
+  leader's domain, until the in-flight hold ends.
+
+What holds a node: every pod scheduled to it that has not finished, and a
+Pending pod the scheduler has nominated it for (after preempting pods there).
+A Pending pod with neither holds nothing on the node; the in-flight hold above
+keeps its hole for it.
+
+Limits:
+
+- GPUs only. CPU and memory are not checked; a node counts when it carries
+  the replica's accelerator, is schedulable (not cordoned, Ready, not being
+  removed by an autoscaler), its taints are tolerated, and its labels match
+  the pod templates' `nodeSelector` and required node affinity. That holds for
+  growth, wakes and in-flight holds alike. A LeaderWorkerSet's leader pod is
+  judged by the leader template's `nodeSelector` and affinity, its workers by
+  the worker template's. When the pod layout is unknown, so the leader cannot
+  be told from a worker, neither template's is judged. A LeaderWorkerSet's
+  workers are judged by its leader's tolerations. A node affinity term's
+  `matchFields` (which name nodes, not labels) is not judged: a term with
+  only `matchFields` admits every node, so such a replica can be ordered onto
+  a node it will not schedule to.
+- A replica whose pod layout is unknown and larger than any node (a
+  multi-node group) is bounded by the pool alone.
+- A workload that names a bare family (`H100`) lands on any node of the
+  family, though only one of its products may have budget left.
+- The utilization share sizes its moves with its own node picture: its holes
+  are net of what today's optimizer placed for other models and of the
+  in-flight holds, and it counts a node as node fit does (accelerator by
+  product or family, taints the receivers tolerate). It does not read the
+  templates' `nodeSelector` or node affinity.
+- A wake funded by claiming a share transfer, or checked against a remembered
+  snapshot because every limiter was unreadable, is not fitted to nodes and
+  holds no hole.
+- A steady-state cycle reads the in-flight holds when it starts; a wake
+  admitted while that cycle runs is seen by the next one.
+- While a nominated pod's preempted victims are still terminating, both are
+  counted on the node. That reads it fuller than it is, for a few seconds.
+
+Node fit is off when the physical limiter does not bound the cycle: none is
+declared, or it is skipped (no node read, its usage not observed yet), which
+`wva_constraint_provider_skipped` reports. With no node snapshot younger than 2
+minutes it is off too, and the controller logs `Physical limiter: replicas are
+not fitted to nodes this cycle` with the reason, and `... fitted to nodes
+again` when it returns. A cycle the physical limiter does not bound logs
+neither.
 
 ### What this does and does not bound
 
@@ -374,6 +496,12 @@ it is reported three ways:
 - `wva_node_access_denied` set to **1**;
 - the **`WVANodeAccessDenied`** alert (critical, fires after 2m) if you installed
   with `DEPLOY_ALERTING_RULES=true`.
+
+That is for `gpu-inventory` declared alone. Beside a quota, the controller
+still scales: the physical limiter is skipped and the quota bounds. Then
+`wva_node_access_denied` stays 0, and the skip is reported as
+`wva_constraint_provider_skipped{reason="node_read_denied"}` and the
+**`WVAConstraintProviderSkipped`** alert (warning, after 10m).
 
 ## FMA namespaces: the GPU picture is a lower bound
 

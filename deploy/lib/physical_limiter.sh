@@ -423,8 +423,11 @@ EOF
 
 # pl_grant_kueue_read grants one controller the cluster-scoped Kueue read a quota
 # entry with kueue.enabled needs: ClusterQueues and ResourceFlavors, and get on
-# Namespaces to evaluate a ClusterQueue namespaceSelector. LocalQueues are
-# namespaced and come with the controller's own Role.
+# Namespaces to evaluate a ClusterQueue namespaceSelector. The LocalQueues of
+# its nominal grant come with the controller's own Role. The cluster-wide
+# Workload and LocalQueue read that cohort borrowing needs is NOT here: it is
+# its own ClusterRole, granted only to a controller whose policy counts
+# borrowing (pl_grant_kueue_borrow_read).
 #
 # Same object names as components/kueue-reader, for the same reason as
 # pl_grant_node_read. Without this, a cluster policy carrying the kueue block
@@ -498,7 +501,7 @@ metadata:
     app.kubernetes.io/name: workload-variant-autoscaler
 rules:
 - apiGroups: ["kueue.x-k8s.io"]
-  resources: ["clusterqueues", "resourceflavors"]
+  resources: ["clusterqueues", "cohorts", "resourceflavors"]
   verbs: ["get", "list"]
 - apiGroups: [""]
   resources: ["namespaces"]${names}
@@ -521,6 +524,239 @@ subjects:
 EOF
 }
 
+# pl_grant_kueue_controller_read grants ServiceAccount $2 in $1, through a Role
+# in the Kueue namespace, get on the
+# kueue-controller-manager Deployment and on the controller's leader-election
+# Lease, both by name: borrowing reads the version from the one and liveness
+# from the other. Without it a namespace-scoped controller reads both as
+# Forbidden, which freezes borrowing (kueue-controller-down). A cluster-scoped
+# install has both from its manager ClusterRole.
+#
+# The Kueue namespace is KUEUE_NAMESPACE when given, else $3 -- the
+# kueue.controllerNamespace the policy keeps (policy_kueue_namespace) -- else
+# kueue-system. Without $3 a re-run that did not repeat KUEUE_NAMESPACE put the
+# Role in kueue-system while the controller read the namespace its policy names.
+#
+# A Role, not part of components/kueue-reader: a kustomize overlay moves every
+# namespaced object into the install namespace, and this one must live in the
+# Kueue namespace. Skipped, with a note, when that namespace does not exist.
+#
+# Both carry WVA_KUEUE_CONTROLLER_READER_LABEL=<suffix of $1>, so the uninstall
+# and disable-limiter find them by label wherever KUEUE_NAMESPACE put them
+# (pl_revoke_kueue_controller_read): the namespace is not recorded anywhere
+# else, and a revoke that guessed kueue-system left a grant made elsewhere.
+WVA_KUEUE_CONTROLLER_READER_LABEL="llm-d.ai/wva-kueue-controller-reader"
+pl_grant_kueue_controller_read() {
+    local ns="$1" sa="$2" kns="${KUEUE_NAMESPACE:-${3:-kueue-system}}" suffix
+    suffix="$(wva_ns_suffix "$ns")"
+    if ! kubectl get namespace "$kns" >/dev/null 2>&1; then
+        log_info "  No namespace $kns (KUEUE_NAMESPACE, else the policy's kueue.controllerNamespace): not granting the Kueue controller read. Kueue borrowing, if counted, freezes as kueue-controller-down until it is granted."
+        return 0
+    fi
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wva-kueue-controller-reader-${suffix}
+  namespace: ${kns}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+    ${WVA_KUEUE_CONTROLLER_READER_LABEL}: "${suffix}"
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["kueue-controller-manager"]
+  verbs: ["get"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["c1f6bfd2.kueue.x-k8s.io"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wva-kueue-controller-reader-${suffix}
+  namespace: ${kns}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+    ${WVA_KUEUE_CONTROLLER_READER_LABEL}: "${suffix}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wva-kueue-controller-reader-${suffix}
+subjects:
+- kind: ServiceAccount
+  name: ${sa}
+  namespace: ${ns}
+EOF
+}
+
+# pl_revoke_kueue_controller_read removes the Role and RoleBinding that
+# pl_grant_kueue_controller_read made for the controller installed in $1: by
+# label in every namespace, then by name in KUEUE_NAMESPACE (default
+# kueue-system) for a grant made before the label existed. A label delete that
+# is refused cluster-wide is reported, not passed over. Prints what failed and
+# returns 1 when anything did.
+pl_revoke_kueue_controller_read() {
+    local ns="$1" suffix name kns="${KUEUE_NAMESPACE:-kueue-system}" out err=""
+    suffix="$(wva_ns_suffix "$ns")"
+    name="wva-kueue-controller-reader-${suffix}"
+    if ! out="$(kubectl delete role,rolebinding -A -l "${WVA_KUEUE_CONTROLLER_READER_LABEL}=${suffix}" \
+        --ignore-not-found 2>&1 >/dev/null)"; then
+        err="by label ${WVA_KUEUE_CONTROLLER_READER_LABEL}=${suffix} in every namespace: ${out}"
+    fi
+    if ! out="$(kubectl delete role,rolebinding "$name" -n "$kns" --ignore-not-found 2>&1 >/dev/null)"; then
+        err="${err:+$err; }by name in ${kns}: ${out}"
+    fi
+    [ -z "$err" ] && return 0
+    printf '%s' "$err"
+    return 1
+}
+
+# pl_grant_kueue_borrow_read grants ServiceAccount $2 in $1 the cluster-wide
+# Kueue read that counting cohort borrowing needs: Workloads (get, list, watch)
+# and LocalQueues (get, list) in EVERY namespace. A lender waiting in another
+# namespace must stop new borrowing, and a LowerPriority lender is judged by
+# its Workloads' priorities, so the controller's own namespace is not enough.
+#
+# Its own ClusterRole, not part of components/kueue-reader, because it reaches
+# every tenant's Kueue Workloads, pod templates included. The installer grants
+# it only to a controller some limiter policy of which counts borrowing (a
+# quota entry with kueue.enabled and countBorrowable not false), and revokes it
+# when none does (pl_sync_kueue_borrow_read). Denied, borrowing is withheld as
+# lenders-unreadable; the nominal Kueue bound is unaffected. A cluster-scoped
+# install reads Workloads through its manager ClusterRole whatever this says.
+pl_grant_kueue_borrow_read() {
+    local ns="$1" sa="$2" suffix
+    suffix="$(wva_ns_suffix "$ns")"
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wva-kueue-borrow-reader-role-${suffix}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+rules:
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["workloads"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["localqueues"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wva-kueue-borrow-reader-rolebinding-${suffix}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wva-kueue-borrow-reader-role-${suffix}
+subjects:
+- kind: ServiceAccount
+  name: ${sa}
+  namespace: ${ns}
+EOF
+}
+
+# pl_revoke_kueue_borrow_read removes what pl_grant_kueue_borrow_read made for
+# the controller installed in $1: the binding first, then the role. Absent is
+# fine. Prints what failed and returns 1 when anything did.
+pl_revoke_kueue_borrow_read() {
+    local suffix out err=""
+    suffix="$(wva_ns_suffix "$1")"
+    if ! out="$(kubectl delete clusterrolebinding "wva-kueue-borrow-reader-rolebinding-${suffix}" --ignore-not-found 2>&1 >/dev/null)"; then
+        err="ClusterRoleBinding wva-kueue-borrow-reader-rolebinding-${suffix}: ${out}"
+    fi
+    if ! out="$(kubectl delete clusterrole "wva-kueue-borrow-reader-role-${suffix}" --ignore-not-found 2>&1 >/dev/null)"; then
+        err="${err:+$err; }ClusterRole wva-kueue-borrow-reader-role-${suffix}: ${out}"
+    fi
+    [ -z "$err" ] && return 0
+    printf '%s' "$err"
+    return 1
+}
+
+# pl_sync_kueue_borrow_read grants ServiceAccount $2 in $1 the borrowing read
+# when $3 is yes, revokes it when $3 is no, and leaves it as it is, with a
+# warning, when $3 is unknown -- a policy that could not be read is not one
+# that counts nothing, and revoking on a guess would stop borrowing. Logs what
+# it did; returns 1 when a grant or revoke failed.
+#
+# A revoke of a read that was granted says to restart the controller: its
+# Workload informer keeps the Workloads it already cached, and a policy that
+# still counts borrowing would go on counting lenders from that stale copy.
+pl_sync_kueue_borrow_read() {
+    local ns="$1" sa="$2" want="$3" suffix err had=no
+    suffix="$(wva_ns_suffix "$ns")"
+    case "$want" in
+        yes)
+            if ! pl_grant_kueue_borrow_read "$ns" "$sa"; then
+                log_warning "  Could not grant $ns/$sa the Kueue borrowing read (ClusterRole wva-kueue-borrow-reader-role-${suffix}). Borrowing is withheld (lenders-unreadable) until it is granted; the nominal Kueue cap still applies."
+                return 1
+            fi
+            log_info "  $ns/$sa may read Kueue Workloads and LocalQueues in every namespace: its policy counts cohort borrowing (ClusterRole wva-kueue-borrow-reader-role-${suffix})"
+            ;;
+        no)
+            if kc_capture get clusterrolebinding "wva-kueue-borrow-reader-rolebinding-${suffix}" -o name && [ -n "$KC_OUT" ]; then
+                had=yes
+            fi
+            if ! err="$(pl_revoke_kueue_borrow_read "$ns")"; then
+                log_warning "  Could not revoke the Kueue borrowing read of $ns/$sa: $err"
+                return 1
+            fi
+            if [ "$had" = yes ]; then
+                log_warning "  Revoked the cluster-wide Kueue Workload read of $ns/$sa: no policy it reads counts cohort borrowing. RESTART THE CONTROLLER in $ns (kubectl rollout restart deployment -n $ns <controller>): until then it keeps the Workloads it already cached."
+            fi
+            ;;
+        *)
+            log_warning "  Could not tell whether a policy of $ns/$sa counts Kueue cohort borrowing${4:+ ($4)}, so its cluster-wide Workload read (ClusterRole wva-kueue-borrow-reader-role-${suffix}) is left as it is."
+            ;;
+    esac
+    return 0
+}
+
+# pl_published_kueue <policy namespace> <limiter> reads the policy in the
+# namespace and sets, for what enable_physical_limiter is about to publish
+# there: PL_BORROW_WANTED (yes | no | unknown) -- whether the policy, with this
+# limiter composed in, counts cohort borrowing -- and PL_KUEUE_KEPT_NS, the
+# kueue.controllerNamespace it keeps. Composed the way pl_set_limiter composes,
+# so a kept countBorrowable: false (WVA_QUOTA_KUEUE_BORROW not given) counts.
+#
+# Decided from that policy ALONE. A controller that reads its policy from
+# another namespace reads its limiters from nowhere else, and this command
+# makes sure it does (the Namespace read, the policy read, the restart). Its
+# own ConfigMap -- which the tenant writes, for a self-managed controller --
+# used to be ORed in, so a tenant who put kueue.enabled there was granted the
+# read of every tenant's Workloads by this cluster-admin command, and one who
+# broke it kept that read for good (unknown is never revoked). The admin phase
+# decides the same way (wva_kueue_borrow_wanted).
+PL_BORROW_WANTED=unknown
+PL_KUEUE_KEPT_NS=""
+pl_published_kueue() {
+    local cm_ns="$1" limiter="$2" cur="" rc=0 composed
+    PL_BORROW_WANTED=unknown
+    PL_KUEUE_KEPT_NS=""
+    kc_capture get configmap wva-scaling-policy-config -n "$cm_ns" -o jsonpath='{.data.default}' || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        case "$KC_ERR" in
+            *NotFound*|*"not found"*) ;;
+            *) return 0 ;;
+        esac
+    else
+        cur="$KC_OUT"
+    fi
+    [ -n "$cur" ] || cur='limiters: []'
+    PL_KUEUE_KEPT_NS="$(printf '%s\n' "$cur" | policy_kueue_namespace)"
+    # A subshell: policy_declared_limiters refuses through log_error, which
+    # exits, and its warnings were already printed by the validation above.
+    composed="$( (policy_declared_limiters "$limiter" "$cur" default compose && printf '%s\n' "$POLICY_DECLARED") 2>/dev/null)" || composed=""
+    [ -n "$composed" ] || return 0
+    PL_BORROW_WANTED="$(printf '%s\n' "$composed" | policy_counts_borrowing)" || PL_BORROW_WANTED=unknown
+    [ -n "$PL_BORROW_WANTED" ] || PL_BORROW_WANTED=unknown
+}
+
 # pl_can_watch_namespaces echoes yes | no | unknown: whether ServiceAccount $2
 # in $1 may WATCH every Namespace. Watch, not get: the kueue-reader role grants
 # get only, so a yes comes from somewhere else -- the manager ClusterRole of a
@@ -535,6 +771,115 @@ pl_can_watch_namespaces() {
         no*)  if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
         *)    echo unknown ;;
     esac
+}
+
+# pl_can_list_pods echoes yes | no | unknown: whether ServiceAccount $2 in $1
+# may list Pods in every namespace. A namespace-scoped controller's GPU usage
+# walk needs it (internal/gpunodes, WithPodReader); denied, it counts only its
+# own namespace's Pods. "unknown" when the caller cannot impersonate.
+pl_can_list_pods() {
+    local ns="$1" sa="$2" rc=0
+    kc_capture auth can-i list pods --all-namespaces --as "system:serviceaccount:${ns}:${sa}" || rc=$?
+    case "$KC_OUT" in
+        yes*) echo yes ;;
+        no*)  if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
+        *)    echo unknown ;;
+    esac
+}
+
+# pl_cohort_root echoes the root of cohort $1's tree. Kueue's hierarchical
+# cohorts (a Cohort object's spec.parentName, spec.parent before v1beta2) let
+# ClusterQueues in sibling cohorts borrow from each other through their
+# parent, so two borrowers are compared by the tree they share, not by their
+# direct cohort. A cohort with no Cohort object, or whose Cohort cannot be read
+# (no CRD, Forbidden), is taken as its own root: siblings under a parent that
+# cannot be read are not linked, and are not warned about. At most 8 levels.
+pl_cohort_root() {
+    local c="$1" depth=0
+    while [ "$depth" -lt 8 ]; do
+        kc_capture get cohorts.kueue.x-k8s.io "$c" -o jsonpath='{.spec.parentName}{.spec.parent}' || break
+        [ -n "$KC_OUT" ] && [ "$KC_OUT" != "$c" ] || break
+        c="$KC_OUT"
+        depth=$((depth + 1))
+    done
+    printf '%s' "$c"
+}
+
+# pl_cohorts_of echoes, space-separated, the root Kueue cohorts
+# (pl_cohort_root) of the ClusterQueues the LocalQueues in namespace $1 point
+# at: nothing when none has a cohort.
+# Returns non-zero when that cannot be told -- a cluster-scoped controller
+# (`*`) or an unknown one (`-`) manages more than one namespace, and a read
+# that fails is not an empty answer.
+pl_cohorts_of() {
+    local managed="$1" cq cqs cohorts=""
+    case "$managed" in '*'|-|'') return 1 ;; esac
+    kc_capture get localqueues.kueue.x-k8s.io -n "$managed" \
+        -o jsonpath='{range .items[*]}{.spec.clusterQueue}{"\n"}{end}' || return 1
+    cqs="$(printf '%s\n' "$KC_OUT" | sort -u)"
+    for cq in $cqs; do
+        # cohortName in v1beta2, cohort in v1beta1: one of them is set.
+        kc_capture get clusterqueues.kueue.x-k8s.io "$cq" \
+            -o jsonpath='{.spec.cohortName}{.spec.cohort}' || return 1
+        [ -z "$KC_OUT" ] || cohorts="$cohorts $(pl_cohort_root "$KC_OUT")"
+    done
+    # shellcheck disable=SC2086 # one word per cohort
+    [ -z "$cohorts" ] || printf '%s\n' $cohorts | sort -u | tr '\n' ' '
+}
+
+# pl_warn_shared_cohort_borrowers warns when Kueue cohort borrowing is granted
+# to more than one controller whose namespaces share a cohort. $1 holds one
+# line per borrowing controller: `<namespace>/<deployment> <managed namespace>`.
+#
+# Each controller counts only the borrowing IT has in flight, so two of them in
+# one cohort each see the same free GPUs and each orders them: the cohort is
+# over-ordered, and Kueue admits one and leaves the other's pods pending. The
+# documented arrangement is one borrowing controller per cohort. Named per
+# cohort when the cohorts can be read; otherwise every borrower is named, with
+# the condition. Warns only: countBorrowable stays on by default.
+pl_warn_shared_cohort_borrowers() {
+    local rows="$1" label managed cohorts c n=0 all="" unknown="" pairs="" names
+    while read -r label managed; do
+        [ -n "$label" ] || continue
+        n=$((n + 1))
+        all="${all:+$all, }$label"
+        if cohorts="$(pl_cohorts_of "$managed")"; then
+            for c in $cohorts; do pairs="${pairs}${c} ${label}"$'\n'; done
+        else
+            unknown="${unknown:+$unknown, }$label"
+        fi
+    done <<< "$rows"
+    [ "$n" -gt 1 ] || return 0
+    pairs="$(printf '%s' "$pairs" | sort -u)"
+    for c in $(printf '%s\n' "$pairs" | awk 'NF { print $1 }' | uniq -d); do
+        names="$(printf '%s\n' "$pairs" | awk -v c="$c" '$1 == c { print $2 }' | paste -sd, - | sed 's/,/, /g')"
+        log_warning "  KUEUE COHORT ${c} IS BORROWED FROM BY MORE THAN ONE CONTROLLER: ${names}."
+    done
+    if [ -n "$unknown" ]; then
+        log_warning "  Kueue cohort borrowing is granted to ${n} controllers (${all}), and the cohort of ${unknown} could not be read: a cluster-scoped controller, or no LocalQueue or ClusterQueue read. If two of them share a cohort, the warning below applies."
+    fi
+    if [ -n "$unknown" ] || printf '%s\n' "$pairs" | awk 'NF { print $1 }' | uniq -d | grep -q .; then
+        log_warning "    Each controller counts only the borrowing it has in flight, so two in one cohort each spend the same free GPUs, and Kueue leaves the pods of one of them pending."
+        log_warning "    Keep one borrowing controller per cohort: give the others a policy with countBorrowable: false (WVA_QUOTA_KUEUE_BORROW=false, in a policy namespace of their own), or put their ClusterQueues in separate cohorts."
+    fi
+}
+
+# pl_kueue_borrowers_besides echoes `<namespace>/<deployment> <managed>` for
+# every OTHER controller the installer granted the Kueue borrowing read
+# (ClusterRoleBinding wva-kueue-borrow-reader-rolebinding-*), skipping the
+# controllers in the namespaces given as arguments: the ones the caller already
+# lists. <managed> is `-` when its Deployment cannot be read. Prints nothing
+# when the bindings cannot be listed. A cluster-scoped controller reads
+# Workloads through its manager ClusterRole and is not found here.
+pl_kueue_borrowers_besides() {
+    local ns rows row
+    kc_capture get clusterrolebindings -o json || return 0
+    for ns in $(printf '%s' "$KC_OUT" | jq -r '.items[]? | select(.metadata.name | startswith("wva-kueue-borrow-reader-rolebinding-")) | .subjects[0].namespace // empty' 2>/dev/null | sort -u); do
+        case " $* " in *" $ns "*) continue ;; esac
+        rows="$(printf '%s\n' "$ns" | pl_controller_targets 2>/dev/null)" || rows=""
+        row="$(printf '%s\n' "$rows" | awk '$1 != "!" && NF >= 4 { print $1 "/" $2 " " $4; exit }')"
+        printf '%s\n' "${row:-$ns/wva-controller-manager -}"
+    done
 }
 
 # pl_grant_policy_read lets one controller READ the policy ConfigMap. Read only,
@@ -695,11 +1040,19 @@ pl_grant_published_policy_read() {
     log_success "  ${ns}/${sa} may read cluster policy in $target (Role wva-policy-reader, RoleBinding wva-policy-reader-$(wva_ns_suffix "$ns"))"
 }
 
-# pl_set_limiter writes the limiters list into the policy ConfigMap's default
-# entry, preserving every other setting in it.
+# pl_set_limiter writes the limiter into the policy ConfigMap's default entry,
+# preserving every other setting in it.
 #
-# It REPLACES rather than appends: two limiter kinds in one list is not a chain,
-# a quota entry wins over a gpu-inventory one, and the loser is built as nothing.
+# It COMPOSES: an entry of the kind it declares (the physical limiter, or the
+# quota) replaces the existing entries of that kind, and an entry of the other
+# kind is kept. Every declared limiter is built and a decision must fit all of
+# them, so enabling the physical limiter on a policy that already carries a
+# quota bounds by both rather than dropping the quota. `none` still removes
+# every limiter.
+#
+# `remove-<kind>` removes that kind only. When the policy declares no entry of
+# that kind it writes nothing, warns, and returns 3; PL_OTHER_KEPT is set to the
+# number of entries of the other kind that stay.
 pl_set_limiter() {
     local policy_ns="$1" limiter="$2" current updated exists=0
     # ABSENT and FAILED are different answers, and folding them together
@@ -749,6 +1102,44 @@ pl_set_limiter() {
         # "Removed the limiter".
         updated="$(printf '%s\n' "$current" | yq 'del(.limiters)')" \
             || log_error "could not remove the limiter from ${policy_ns}/wva-scaling-policy-config: yq del(.limiters) failed on its default entry. Nothing was written."
+    elif [ "$limiter" = "remove-gpu-inventory" ] || [ "$limiter" = "remove-quota" ]; then
+        # Remove ONE kind and keep the other, mirroring the composing enable:
+        # disabling the physical limiter must not take a quota with it. When
+        # nothing is left the list goes, exactly as `none` does.
+        local keep kind="${limiter#remove-}" other n_kind n_all
+        if [ "$limiter" = "remove-gpu-inventory" ]; then
+            keep='(.limiters // []) | map(select(.type != "gpu-inventory" and .type != "inventory"))'
+            other="quota"
+        else
+            keep='(.limiters // []) | map(select(.type != "quota"))'
+            other="gpu-inventory"
+        fi
+        # Nothing of this kind declared: write nothing and say so, returning 3
+        # ("nothing removed") for the caller to count. Reporting "Removed the
+        # gpu-inventory limiter" over a policy holding only a quota is how the
+        # documented undo of a quota left the quota in force.
+        n_all="$(printf '%s\n' "$current" | yq '(.limiters // []) | length')" \
+            || log_error "could not read the limiters declared in ${policy_ns}/wva-scaling-policy-config."
+        n_kind="$(printf '%s\n' "$current" | yq "($keep) | length")" \
+            || log_error "could not read the limiters declared in ${policy_ns}/wva-scaling-policy-config."
+        n_kind=$((n_all - n_kind))
+        # How many entries of the other kind stay, for the caller's summary.
+        PL_OTHER_KEPT=$((n_all - n_kind))
+        if [ "$n_kind" = "0" ]; then
+            if [ "$n_all" = "0" ]; then
+                log_warning "no ${kind} entry in ${policy_ns}/wva-scaling-policy-config; nothing removed; it declares no limiter."
+            else
+                log_warning "no ${kind} entry in ${policy_ns}/wva-scaling-policy-config; nothing removed; the ${other} limiter stays. To remove it: WVA_LIMITER_TYPE=${other}."
+            fi
+            return 3
+        fi
+        updated="$(printf '%s\n' "$current" | yq ".limiters = ($keep)")" \
+            || log_error "could not remove the ${limiter#remove-} limiter from the policy in ${policy_ns}."
+        if [ "$(printf '%s\n' "$updated" | yq '.limiters | length')" = "0" ]; then
+            # Checked, as `none` is: an unchecked failure wrote an empty entry.
+            updated="$(printf '%s\n' "$updated" | yq 'del(.limiters)')" \
+                || log_error "could not remove the ${kind} limiter from ${policy_ns}/wva-scaling-policy-config: yq del(.limiters) failed on its default entry. Nothing was written."
+        fi
     else
         # Through limiter_entry_yaml, the same builder the installer uses.
         #
@@ -773,14 +1164,15 @@ pl_set_limiter() {
         # installer's own rule would pick -- that namespace gets the budget and
         # every other one gets ZERO, so this command would stop scaling
         # everywhere it was meant to bound it.
-        policy_declared_limiters "$limiter" "$current" default
+        policy_declared_limiters "$limiter" "$current" default compose
         updated="$POLICY_DECLARED"
     fi
     # An entry that is now empty is removed, not written as "{}". A ConfigMap
     # whose default entry is an empty object is a policy that says nothing while
     # looking like one that says something, and the next reader has to open it to
     # find out which.
-    if [ "$limiter" = "none" ] && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
+    if { [ "$limiter" = "none" ] || [ "${limiter#remove-}" != "$limiter" ]; } \
+        && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
         # The `default` ENTRY, not the ConfigMap. Deleting the object took every
         # other entry in it -- the per-model and named-tier policies an operator
         # added -- which is the same data loss this file was just fixed for, on
@@ -1048,16 +1440,42 @@ enable_physical_limiter() {
     # controller without node access must refuse — a self-inflicted outage across
     # the cluster, arriving as NotReady pods rather than as an error from this
     # command.
-    local targets="" restart_list="" bound=""
+    local targets="" restart_list="" bound="" pods_blind="" pods_unknown="" borrowers="" run_ns=""
     while read -r ns deploy sa cm_ns src restart managed <&3; do
         [ -n "$ns" ] || continue
         if [ "$limiter" = "gpu-inventory" ]; then
             pl_grant_node_read "$ns" "$sa" \
                 || log_error "could not grant $ns/$sa the node read (ClusterRole/ClusterRoleBinding wva-node-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
+            # A namespace-scoped controller counts GPU usage from a Pod list.
+            # Without list on pods cluster-wide -- this command does not grant
+            # it -- it counts only its own namespace's Pods.
+            if [ "$managed" != '*' ]; then
+                case "$(pl_can_list_pods "$ns" "$sa")" in
+                    yes) ;;
+                    no) pods_blind="${pods_blind:+$pods_blind, }$ns/$deploy" ;;
+                    *) pods_unknown="${pods_unknown:+$pods_unknown, }$ns/$deploy" ;;
+                esac
+            fi
+        fi
+        if [ "$limiter" = "quota" ]; then
+            # What the policy in cm_ns will say once this quota is composed in:
+            # the only policy the controller reads its limiters from.
+            pl_published_kueue "$cm_ns" "$limiter"
+            [ "$PL_BORROW_WANTED" = yes ] && borrowers="${borrowers}${ns}/${deploy} ${managed}"$'\n'
+            run_ns="$run_ns $ns"
         fi
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
             pl_grant_kueue_read "$ns" "$sa" "$managed" \
                 || log_error "could not grant $ns/$sa the Kueue read (ClusterRole/ClusterRoleBinding wva-kueue-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
+            pl_grant_kueue_controller_read "$ns" "$sa" "$PL_KUEUE_KEPT_NS" \
+                || log_error "could not grant $ns/$sa the Kueue controller read (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$ns") in ${KUEUE_NAMESPACE:-${PL_KUEUE_KEPT_NS:-kueue-system}}). Nothing was published; the grants made before this one stay in place."
+        fi
+        if [ "$limiter" = "quota" ]; then
+            # The cluster-wide Workload read, only while the published quota
+            # counts borrowing: WVA_QUOTA_KUEUE_BORROW=false, a kept
+            # countBorrowable: false, or a quota without Kueue revokes it.
+            pl_sync_kueue_borrow_read "$ns" "$sa" "$PL_BORROW_WANTED" "${cm_ns}/wva-scaling-policy-config unreadable" \
+                || log_error "could not change $ns/$sa's Kueue borrowing read (ClusterRole/ClusterRoleBinding wva-kueue-borrow-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
         fi
         if [ "$src" != own ]; then
             pl_grant_namespace_read "$ns" "$sa" "$cm_ns" \
@@ -1125,6 +1543,26 @@ enable_physical_limiter() {
         done 3<<< "$PL_SKIP"
         log_warning "  A skipped controller keeps whatever policy it read before. One that can see a policy namespace it has no read grant for refuses to start at its next restart. If one is genuine, name its namespace in WVA_LIMITER_TARGETS and re-run."
     fi
+    # After the banner, so it does not scroll away above it: a bound these
+    # controllers hold only against their own namespace's GPUs.
+    if [ -n "$pods_blind" ] || [ -n "$pods_unknown" ]; then
+        if [ -n "$pods_blind" ]; then
+            log_warning "  GPU USAGE NOT SEEN ACROSS NAMESPACES: these namespace-scoped controllers cannot list Pods cluster-wide: ${pods_blind}."
+        fi
+        if [ -n "$pods_unknown" ]; then
+            log_warning "  Could not check (impersonation was not allowed) whether these namespace-scoped controllers may list Pods cluster-wide: ${pods_unknown}."
+        fi
+        log_warning "    Without it the gpu-inventory limiter counts only the GPUs its own namespace holds: if other namespaces run GPU pods on the same nodes, their GPUs read as FREE and scale-ups are admitted onto full nodes; if none do, nothing is miscounted. This command grants node read, not that."
+        log_warning "    Each such controller says so at runtime: wva_pod_access_denied=1, and podListDenied in its wva-controller-status ConfigMap."
+        log_warning "    Remedy: grant its ServiceAccount list on pods in every namespace, or bound it with a quota limiter instead (WVA_LIMITER_TYPE=quota) -- a quota beside gpu-inventory leaves the physical limiter reading the same undercount."
+    fi
+    # Borrowers granted by earlier runs too: onboarding one tenant per run, the
+    # run alone never holds two.
+    if [ -n "$borrowers" ]; then
+        # shellcheck disable=SC2086 # one word per namespace
+        borrowers="${borrowers}$(pl_kueue_borrowers_besides $run_ns)"
+    fi
+    pl_warn_shared_cohort_borrowers "$borrowers"
     log_info "  Policy in:   $(echo $targets | tr ' ' ',') (ConfigMap wva-scaling-policy-config, data.default.limiters)"
     log_info "  Controllers: ${granted} granted, $(printf '%s' "$PL_SKIP" | grep -c . || true) skipped"
     if [ -n "${WVA_LIMITER_TARGETS:-}" ]; then
@@ -1139,9 +1577,29 @@ disable_physical_limiter() {
     # The same tools enable asks for: this path rewrites the policy with yq and
     # builds the patch with jq, and without them it wrote an empty entry.
     pl_require_tools
+    # The kind to remove: the one enable published (WVA_LIMITER_TYPE). Only
+    # that kind goes; a limiter of the other kind in the same policy stays.
+    # `all` removes every limiter, whatever its kind: the uninstall form, and
+    # the one a script that must not care what was declared should use.
+    #
+    # Exit status: 0 when something was removed, and 0 -- with a warning --
+    # when no policy this command reads declares any limiter. Non-zero only
+    # when nothing was removed while a limiter of the OTHER kind stays, the
+    # "undo my quota without WVA_LIMITER_TYPE=quota" mistake. Through make that
+    # reads `make: *** [...] Error 1`, and make itself exits 2.
+    local limiter="${WVA_LIMITER_TYPE:-gpu-inventory}"
+    case "$limiter" in
+        gpu-inventory|quota|all) ;;
+        *) log_error "WVA_LIMITER_TYPE must be gpu-inventory, quota or all (got '$limiter')" ;;
+    esac
+    local other="quota"
+    case "$limiter" in
+        quota) other="gpu-inventory" ;;
+        all) other="" ;;
+    esac
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
-    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart=""
+    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart="" set_rc other_left="" reads_from=""
 
     # The SAME per-controller resolution enable uses. Looking only at the
     # well-known namespace left the limiter in force everywhere it had actually
@@ -1169,6 +1627,7 @@ disable_physical_limiter() {
         # One that does not watch its policy namespace sees the removal only
         # when it restarts (pl_policy_is_live).
         pl_policy_is_live "$managed" "$cm_ns" || to_restart="$to_restart $ns/$deploy/$cm_ns"
+        reads_from="$reads_from $ns/$cm_ns"
     done 3<<< "$PL_GRANT"
     # The well-known namespace too, even with no controller reading it today: a
     # WVA installed tomorrow would read whatever was left there.
@@ -1200,13 +1659,57 @@ disable_physical_limiter() {
             log_info "No limiter declared in ${cm_ns}/wva-scaling-policy-config; nothing to remove."
             continue
         fi
-        pl_set_limiter "$cm_ns" none
-        log_success "Removed the limiter from ${cm_ns}/wva-scaling-policy-config"
+        if [ "$limiter" = "all" ]; then
+            # Every kind: the same removal as WVA_LIMITER=none at install.
+            pl_set_limiter "$cm_ns" none
+            log_success "Removed every limiter from ${cm_ns}/wva-scaling-policy-config"
+            cleared=$((cleared + 1))
+            cleared_ns="$cleared_ns$cm_ns "
+            continue
+        fi
+        set_rc=0
+        PL_OTHER_KEPT=0
+        pl_set_limiter "$cm_ns" "remove-$limiter" || set_rc=$?
+        if [ "$set_rc" -eq 3 ]; then
+            # Nothing of this kind there (pl_set_limiter said so). Note a policy
+            # still bounded by the other kind: that decides the exit status below.
+            [ "$PL_OTHER_KEPT" -gt 0 ] && other_left="$other_left $cm_ns"
+            continue
+        elif [ "$set_rc" -ne 0 ]; then
+            log_error "could not remove the $limiter limiter from ${cm_ns}/wva-scaling-policy-config."
+        fi
+        if [ "$PL_OTHER_KEPT" -gt 0 ]; then
+            log_success "Removed the $limiter limiter from ${cm_ns}/wva-scaling-policy-config; the $other limiter declared there stays"
+            other_left="$other_left $cm_ns"
+        else
+            log_success "Removed the $limiter limiter from ${cm_ns}/wva-scaling-policy-config"
+        fi
         cleared=$((cleared + 1))
         cleared_ns="$cleared_ns$cm_ns "
     done
 
-    local entry r_ns r_deploy r_cm not_restarted=""
+    # The Kueue controller read (pl_grant_kueue_controller_read) and the
+    # cluster-wide borrowing read (pl_grant_kueue_borrow_read) go with the
+    # quota: a controller whose policy no longer declares one reads no Kueue,
+    # and nothing else revokes either. The kueue-reader role stays: it reads
+    # cluster-scoped quota objects only.
+    local entry r_ns r_deploy r_cm not_restarted="" revoke_err
+    if [ "$limiter" = "quota" ] || [ "$limiter" = "all" ]; then
+        for entry in $reads_from; do
+            r_ns="${entry%%/*}"; r_cm="${entry#*/}"
+            case "$cleared_ns" in *" $r_cm "*) ;; *) continue ;; esac
+            if revoke_err="$(pl_revoke_kueue_controller_read "$r_ns")"; then
+                log_info "  Revoked the Kueue controller read of $r_ns (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$r_ns"))"
+            else
+                log_warning "  Could not revoke the Kueue controller read of $r_ns: $revoke_err"
+            fi
+            if revoke_err="$(pl_revoke_kueue_borrow_read "$r_ns")"; then
+                log_info "  Revoked the Kueue borrowing read of $r_ns (ClusterRole/ClusterRoleBinding wva-kueue-borrow-reader-*-$(wva_ns_suffix "$r_ns"))"
+            else
+                log_warning "  Could not revoke the Kueue borrowing read of $r_ns: $revoke_err"
+            fi
+        done
+    fi
     for entry in $to_restart; do
         r_ns="${entry%%/*}"; r_cm="${entry##*/}"; r_deploy="${entry#*/}"; r_deploy="${r_deploy%/*}"
         case "$cleared_ns" in *" $r_cm "*) ;; *) continue ;; esac
@@ -1251,14 +1754,26 @@ disable_physical_limiter() {
     fi
 
     if [ "$cleared" -eq 0 ]; then
+        # Non-zero, not a warning: the command removed nothing while a limiter
+        # of the other kind still bounds these controllers. That is the shape
+        # of "undo my quota" run without WVA_LIMITER_TYPE=quota, and a script
+        # or runbook that goes on after exit 0 believes the bound is gone. A
+        # policy with no limiter at all stays exit 0: nothing to do is done.
+        if [ -n "$other_left" ]; then
+            log_error "nothing removed: no $limiter entry in any policy this command reads. The $other limiter stays in:${other_left}. To remove it: make disable-limiter WVA_LIMITER_TYPE=${other}, or WVA_LIMITER_TYPE=all for every limiter"
+        fi
         if [ "$left" -gt 0 ]; then
             log_warning "No verified controller policy declared a limiter, but $left skipped controller(s) above still do."
         else
-            log_info "No scaling-policy ConfigMap declared a limiter — nothing to disable."
+            log_warning "Nothing removed: no scaling-policy ConfigMap this command reads declares a limiter. Nothing was bounded, so there is nothing to disable (exit 0)."
         fi
         return 0
     fi
-    log_warning "Scaling is now bounded by nothing WVA knows about for the controllers that read the policies above: the optimizer allocates without a GPU budget, and a scale-from-zero wake is published without a capacity check."
+    if [ -n "$other_left" ]; then
+        log_info "The $other limiter still bounds the controllers that read the policy in:${other_left}."
+    else
+        log_warning "Scaling is now bounded by nothing WVA knows about for the controllers that read the policies above: the optimizer allocates without a GPU budget, and a scale-from-zero wake is published without a capacity check."
+    fi
     [ "$left" -eq 0 ] || log_warning "$left skipped controller(s) above still declare a limiter in their own policy."
-    log_info "The RBAC is left in place — it grants reads only, and removing it would break the next enable."
+    log_info "The cluster-wide RBAC is left in place — it grants reads only, and removing it would break the next enable. The Role in the Kueue namespace goes with the quota; enable grants it again."
 }

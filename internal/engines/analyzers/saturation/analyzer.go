@@ -64,19 +64,38 @@ type SaturationAnalyzer struct {
 	// saturated replica HOLDS, this says how fast it COMPLETES, and only the
 	// latter tells how many replicas a given arrival rate needs.
 	saturatedThroughput map[string]*capacity.RollingAverage
-	// k2BorrowedSince is, per own historyKey (variant AND bucket), when the
-	// variant first borrowed a sibling's k2 for that bucket (borrowedK2). The
-	// relaxation back to the variant's own figure is measured from it, so it
-	// must NOT be reset by a donor that comes and goes, which would hold a
-	// borrowed figure at full strength again. A bucket the variant has never
-	// measured gets its own clock: see k2_borrow.go for why per bucket and not
-	// per variant. Swept a retention after the relaxation ended.
-	k2BorrowedSince map[string]time.Time
-	// priorK2 is, per own historyKey, a k2 restored from before the variant's
-	// engine arguments changed (installRestored), kept as a lower-only prior
-	// that borrowedK2 takes like a sibling's figure. Swept PriorK2Life after
-	// it was installed.
-	priorK2 map[string]priorK2
+	// lowerBounds is, per own historyKey (variant AND bucket), the one lower
+	// bound the key may be priced below its own figure: a compatible
+	// sibling's measured k2, or the variant's own k2 from engine arguments it
+	// no longer runs (k2_borrow.go). One record, one clock on serving time,
+	// one expiry. A spent bound re-arms only on new evidence
+	// (lowerBound.rearms), so the record is kept for as long as its variant
+	// exists and swept with it.
+	lowerBounds map[string]*lowerBound
+	// k2WindowArgs and throughputWindowArgs are, per window key, the engine
+	// arguments (ArgsFingerprint) the k2 and throughput windows were written
+	// under (window_args.go). Kept beside the windows rather than in their
+	// key, so recording them costs no cold start; a window read or written
+	// under other arguments is moved out of the way.
+	k2WindowArgs         map[string]string
+	throughputWindowArgs map[string]string
+	// k2Stash and throughputStash are windows put aside because they were
+	// read under other engine arguments, keyed window key + "#" + the
+	// arguments they were written under (stashKey). A variant rolled back to
+	// those arguments gets them back as its own (window_args.go). They age
+	// like the windows they were.
+	k2Stash         map[string]*capacity.RollingAverage
+	throughputStash map[string]stashedThroughput
+	// borrowTickGap is the longest gap between two serving cycles a borrow
+	// clock counts as serving time (WithOptimizationInterval); never below
+	// BorrowedK2TickGap.
+	borrowTickGap time.Duration
+	// boundsHeld holds every lower bound as it stands (HoldLowerBounds).
+	boundsHeld bool
+	// forgotten is, per namespace/variant, the last forget token acted on
+	// (ForgetVariant), so an annotation left in place is not acted on again.
+	// Swept with the variant.
+	forgotten map[string]forgetMark
 	// pendingRestore is learned state restored after a controller restart and
 	// not yet installed, keyed namespace/variant: it waits for its variant's
 	// first cycle, when the engine configuration it runs is known, and is
@@ -84,6 +103,10 @@ type SaturationAnalyzer struct {
 	// (installRestored, learned_snapshot.go). Swept a retention after the
 	// restore, for a variant that never comes back.
 	pendingRestore map[string]*pendingVariant
+	// restoreOutcomes counts the variants installRestored decided since
+	// TakeRestoreOutcomes last read them, by outcome, for the engine to
+	// publish (wva_learned_state_restores_total).
+	restoreOutcomes map[RestoreOutcome]int
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
 	// last reading it was given, sample or not (recordSaturatedThroughput);
@@ -125,6 +148,18 @@ type SaturationAnalyzer struct {
 	// that has once been measured never falls back to a constant guessed for
 	// another card.
 	itlTracker *itl.Tracker
+	// itlArgs is the engine arguments each key's ITL window and baseline were
+	// learned under (windowArgs), so a change of arguments drops them
+	// (itlUnderArgs): an ITL line is a property of the engine, and one from
+	// the arguments a variant left priced the new engine's service rate with
+	// the old engine's latency.
+	itlArgs map[string]string
+	// itlBaselineStash is a key's ITL baseline put aside under the arguments
+	// it was learned under (stashKey), for a rollback to them: the slope
+	// refits from new readings within a window, the baseline only on a full
+	// fit, which a fleet the router balances rarely spans -- dropped, a
+	// rollback priced the engine that measured it at the default intercept.
+	itlBaselineStash map[string]float64
 	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
 	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
@@ -207,10 +242,11 @@ type Evicted struct {
 	// saturated-throughput windows the demand floor prices from.
 	K2History int
 	MuWindows int
-	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
+	// K2Borrows is lower bounds that went with their variant (lowerBounds).
 	K2Borrows int
-	// K2Priors is a variant's own k2 from before its arguments changed, kept
-	// as a prior after a restart (priorK2).
+	// K2Priors is lower bounds that only held the variant's own figure from
+	// engine arguments it no longer runs, never used within a bucket
+	// retention of becoming one.
 	K2Priors int
 	// PendingRestores is restored learned state whose variant never came back.
 	PendingRestores int
@@ -239,6 +275,12 @@ type Evicted struct {
 	// a reader asking why a cold variant stopped finding a line to borrow
 	// needs to see it move.
 	ITLLines int
+	// ForgetMarks is the per-variant record of the last forget request
+	// acted on (ForgetVariant).
+	ForgetMarks int
+	// StashedWindows is k2 and throughput windows put aside under engine
+	// arguments the variant no longer runs, unread for a bucket retention.
+	StashedWindows int
 }
 
 // Any reports whether the sweep evicted anything at all.
@@ -246,7 +288,7 @@ func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
-		e.FleetShapes > 0 || e.VariantStamps > 0
+		e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -275,8 +317,14 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		computeCapacityHistory: make(map[string]*capacity.RollingAverage),
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
-		k2BorrowedSince:        make(map[string]time.Time),
-		priorK2:                make(map[string]priorK2),
+		lowerBounds:            make(map[string]*lowerBound),
+		k2WindowArgs:           make(map[string]string),
+		throughputWindowArgs:   make(map[string]string),
+		k2Stash:                make(map[string]*capacity.RollingAverage),
+		throughputStash:        make(map[string]stashedThroughput),
+		restoreOutcomes:        make(map[RestoreOutcome]int),
+		borrowTickGap:          BorrowedK2TickGap,
+		forgotten:              make(map[string]forgetMark),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -284,6 +332,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlTracker:             itl.NewTracker(),
+		itlArgs:                make(map[string]string),
+		itlBaselineStash:       make(map[string]float64),
 		itlLines:               make(map[string]learnedLine),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -398,6 +448,26 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 			}
 		}
 	}
+	// A lower bound is swept on the same liveness, and keyed the k2 way
+	// (namespace|variant|model|...), so it is matched on its own prefixes.
+	k2Prefixes := make([]string, 0, len(variantNames))
+	for _, v := range variantNames {
+		k2Prefixes = append(k2Prefixes, namespace+"|"+v+"|"+modelID+"|")
+	}
+	for key, lb := range a.lowerBounds {
+		for _, p := range k2Prefixes {
+			if strings.HasPrefix(key, p) {
+				lb.seen = now
+				break
+			}
+		}
+	}
+	for _, v := range variantNames {
+		if m, ok := a.forgotten[namespace+"/"+v]; ok {
+			m.seen = now
+			a.forgotten[namespace+"/"+v] = m
+		}
+	}
 	// The memo ages on the wall clock (stableAccelerator), so it is touched on
 	// the wall clock too.
 	for _, v := range variantNames {
@@ -455,6 +525,11 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.K2History++
 		}
 	}
+	// A window's arguments go with the window.
+	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {
+		_, ok := a.computeCapacityHistory[key]
+		return !ok
+	})
 	// bucketRetention, NOT variantTimeout, although this memo is per
 	// variant. It is the value that RESOLVES into the k2 history key, so
 	// expiring it ahead of the window it keys silently moves the key: the
@@ -519,6 +594,18 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.StartEstimates++
 		}
 	}
+	// The arguments the ITL state was learned under, and the baselines put
+	// aside for a rollback, go with their variant.
+	for key := range a.itlArgs {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlArgs, key)
+		}
+	}
+	for key := range a.itlBaselineStash {
+		if base, _, _ := strings.Cut(key, "#"); a.variantIsStale(base, now, variantTimeout) {
+			delete(a.itlBaselineStash, key)
+		}
+	}
 	// Belt and braces, and deliberately kept as such. Today
 	// keys(startOutliers) is a strict SUBSET of keys(startSeconds) -- the
 	// counter is only ever incremented under `measured` (so the estimate
@@ -568,33 +655,70 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.MuWindows++
 		}
 	}
-	// A borrow's start goes a retention after its relaxation ended, and not
-	// sooner: deleting it restarts the borrow at full strength, so a variant
-	// that never saturates would be held at the donor's figure by the sweep
-	// instead of by a donor. After that long the restart is a deliberate
-	// re-probe: a variant that still has no reading of its own borrows again.
-	// Not on the variant's own window appearing: an own window displaces the
-	// borrow already (P2 reads it first), and a clock kept until its age runs
-	// out is what stops a variant hovering at full strength by moving between
-	// its own buckets.
-	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
-	for key, since := range a.k2BorrowedSince {
-		if a.now().Sub(since) > borrowLife {
-			delete(a.k2BorrowedSince, key)
-			evicted.K2Borrows++
+	maps.DeleteFunc(a.throughputWindowArgs, func(key, _ string) bool {
+		_, ok := a.saturatedThroughput[key]
+		return !ok
+	})
+	// A window put aside under arguments the variant no longer runs ages as
+	// it did in use: a bucket retention after it was last read.
+	for key, ra := range a.k2Stash {
+		if ra.Stale(bucketRetention) {
+			delete(a.k2Stash, key)
+			evicted.StashedWindows++
 		}
 	}
-	// A prior goes on its borrow clock once used, not on when it was
-	// installed: a bucket first priced hours after a restart would otherwise
-	// lose its prior part way through the relaxation, and capacity would jump
-	// to the variant's own figure in one cycle.
-	for key, p := range a.priorK2 {
-		since, used := a.k2BorrowedSince[key]
-		if priorExpired(p, since, used, a.now(), bucketRetention) {
-			delete(a.priorK2, key)
+	for key, st := range a.throughputStash {
+		if st.window.Stale(bucketRetention) {
+			delete(a.throughputStash, key)
+			evicted.StashedWindows++
+		}
+	}
+	// A lower bound goes with its variant: when nothing has read it, ticked
+	// it or found the variant present for VariantTimeout. Not on its age, and
+	// not on a park: its clock counts serving time only, so a bound a parked
+	// variant had relaxed part way is where it was when the variant wakes.
+	// Dropping a spent bound is what used to re-arm a borrow at full strength
+	// a retention after it ended -- a weekly re-probe that held extra
+	// replicas for a variant already living on its own figure, with no new
+	// evidence behind it (see k2_borrow.go). Not on the variant's own window
+	// appearing either: an own window displaces the bound already (P2 reads
+	// it first), and a kept record is what stops a variant hovering at full
+	// strength by moving between its own buckets.
+	//
+	// A previous figure goes a bucket retention after it was last offered to
+	// a decision, as the window it stands in for goes a retention after its
+	// last read: a figure, on the same clock as one. Not on when it became
+	// one: a bound frozen by a rollout, or used by a variant serving a few
+	// minutes a day, lost its figure at full strength, in one cycle, a
+	// retention after the change -- a cliff from the previous figure to
+	// derived or k1 with no relaxation. One nothing reads still goes. One
+	// that only holds a previous figure goes with it.
+	for key, lb := range a.lowerBounds {
+		used := lb.priorUsed
+		if used.IsZero() {
+			used = lb.priorSince
+		}
+		if lb.prior > 0 && now.Sub(used) > bucketRetention {
+			lb.clearPrior()
 			evicted.K2Priors++
 		}
+		switch {
+		case lb.armed && now.Sub(lb.seen) > variantTimeout:
+			delete(a.lowerBounds, key)
+			evicted.K2Borrows++
+		case !lb.armed && lb.prior <= 0:
+			delete(a.lowerBounds, key)
+		}
 	}
+	// A forget mark goes with its variant. Kept past it, a variant deleted
+	// and re-created under the same name with the same token would not be
+	// forgotten; dropped sooner, a variant parked past the timeout would be
+	// forgotten again on waking -- which is why NoteVariantsPresent keeps it.
+	marks := len(a.forgotten)
+	maps.DeleteFunc(a.forgotten, func(_ string, m forgetMark) bool {
+		return a.now().Sub(m.seen) > variantTimeout
+	})
+	evicted.ForgetMarks = marks - len(a.forgotten)
 	// Restored entries for a variant that has not been analysed since the
 	// restore. A retention later, any entry in them is past its own horizon
 	// too, so none could have been installed.

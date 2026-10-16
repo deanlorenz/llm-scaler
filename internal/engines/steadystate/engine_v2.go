@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -53,6 +54,10 @@ func (e *Engine) runV2AnalysisOnly(
 				"variant", va.Name, "scaleTargetKey", key)
 			continue
 		}
+		// Before the record is loaded and before Analyze, so a forgotten
+		// variant's capacity record is refiled from the scale target this
+		// cycle and nothing restored for it is installed.
+		e.forgetOnRequest(ctx, namespace, modelID, va.Name, scaleTarget)
 		// Get accelerator name from scale target nodeSelector/nodeAffinity or VA label
 		accelerator := accelerator.GetAcceleratorNameFromScaleTarget(va, scaleTarget)
 		gpuCount := scaleTarget.GetTotalGPUsPerReplica()
@@ -258,6 +263,11 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 		target:      make(map[analyzerTargetSeries]struct{}),
 		serviceRate: make(map[string]struct{}),
 	}
+	borrows := map[string][]domain.LearnedStateBorrow{}
+	// k2s holds, per variant, the entry that carries a k2 source, if any
+	// analyzer reported one; otherwise any entry, so the variant is still
+	// written and a source it no longer has is removed.
+	k2s := map[string]domain.VariantCapacity{}
 
 	for _, nr := range results {
 		if nr.Result == nil {
@@ -276,6 +286,10 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerTarget(nr.Name, namespace, modelID, vc.VariantName, vc.PerReplicaCapacity)
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
+			borrows[vc.VariantName] = append(borrows[vc.VariantName], vc.Borrowed...)
+			if _, seen := k2s[vc.VariantName]; !seen || vc.K2Source != "" {
+				k2s[vc.VariantName] = vc
+			}
 			// Beside the target it explains, from the struct the analyzer
 			// priced with (domain.ServiceRateSignal), so the published line
 			// and rate are the ones the target came from.
@@ -288,6 +302,19 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordPricingK(namespace, modelID, nr.Result.PricingK)
 			current.pricingK = true
 		}
+	}
+	// Per variant, not per analyzer: gathered across every analyzer that
+	// reported the variant this cycle, so one that borrows nothing does not
+	// unpublish another's borrow. Every reported variant is written,
+	// borrowing or not, which is what removes a borrow that ended. (A variant
+	// that one analyzer stops reporting while another still does has its
+	// borrow deleted by the eviction below and republished next cycle, as
+	// wva_engine_config is; only the saturation analyzer borrows today.)
+	for variant, b := range borrows {
+		e.metricsEmitter.RecordLearnedStateBorrows(namespace, modelID, variant, b)
+	}
+	for variant, vc := range k2s {
+		e.metricsEmitter.RecordLearnedStateK2Source(namespace, modelID, variant, vc.Role, vc.K2Source, vc.K2Age, vc.HasK2Age)
 	}
 
 	// Evict after emitting, never before, so a series that survives the cycle is
@@ -352,6 +379,33 @@ var _ staleHistoryEvictor = (*saturation.SaturationAnalyzer)(nil)
 
 type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
+}
+
+// variantForgetter is the part of the saturation analyzer forgetOnRequest
+// needs, reached through an assertion like the others here.
+type variantForgetter interface {
+	ForgottenToken(namespace, variant string) string
+	ForgetVariant(namespace, modelID, variant, token string) int
+}
+
+// Pinned at compile time, for the same reason as presenceNoter.
+var _ variantForgetter = (*saturation.SaturationAnalyzer)(nil)
+
+// forgetOnRequest forgets one variant's learned state when its scale target
+// carries the ForgetLearnedState annotation with a token not yet acted on.
+func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
+	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
+	if token == "" {
+		return
+	}
+	f, ok := e.saturationV2Analyzer.(variantForgetter)
+	if !ok || f.ForgottenToken(namespace, variant) == token {
+		return
+	}
+	n := f.ForgetVariant(namespace, modelID, variant, token)
+	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
+		"namespace", namespace, "modelID", modelID, "variant", variant,
+		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n)
 }
 
 // presenceNoter is the part of the saturation analyzer notePresentVariants
@@ -540,6 +594,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"decodeSaturation", history.DecodeSaturation,
 			"fleetShapes", history.FleetShapes,
 			"variantStamps", history.VariantStamps,
+			"stashedWindows", history.StashedWindows,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)
@@ -580,6 +635,11 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 	for prev := range e.lastAnalyzerSeries[modelKey].target {
 		e.metricsEmitter.RecordAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant, 0)
 	}
+	// Nothing was priced, so nothing was borrowed and no k2 is in use: a
+	// model parked at zero, or whose scrape is lost, must not keep reporting
+	// the borrow or the k2 source its last priced cycle had. The next priced
+	// cycle publishes afresh.
+	e.metricsEmitter.DeleteLearnedStateBorrowsForModel(namespace, modelID)
 }
 
 // dropServiceRateSeries deletes every service-rate series this model
@@ -624,6 +684,7 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			// The config series is per variant, not per analyzer, so this is
 			// idempotent when several analyzers report the same variant.
 			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
+			e.metricsEmitter.DeleteLearnedStateBorrows(namespace, modelID, prev.variant)
 		}
 	}
 	for prev := range e.lastAnalyzerSeries[modelKey].serviceRate {
@@ -658,6 +719,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteLearnedStateBorrowsForModel(series.namespace, series.modelID)
 			metrics.DeleteSLOModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
@@ -675,6 +737,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteLearnedStateBorrowsForModel(series.namespace, series.modelID)
 		metrics.DeleteSLOModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
@@ -1363,6 +1426,13 @@ func warnUnsizableShortfall(ctx context.Context, nr *allocation.NamedAnalyzerRes
 	if nr.RequiredCapacity <= 0 || len(result.VariantCapacities) == 0 {
 		return
 	}
+	// An analyzer that priced no variant this cycle (every one no-data or
+	// error) has no capacity to be missing: the slo analyzer before its line
+	// is ready, or for a role it does not price, carries demand with no PRC.
+	// Warned, every such model logged a stuck-looking shortfall every cycle.
+	if !allocation.ResultIsInformative(*nr) {
+		return
+	}
 	for _, vc := range result.VariantCapacities {
 		if vc.PerReplicaCapacity > 0 {
 			return // at least one variant can absorb the shortfall
@@ -1522,11 +1592,15 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 }
 
 // logScalingDecisions emits one INFO "scaling-decision" line per model after
-// the optimizer has produced per-variant decisions.
+// the optimizer has produced per-variant decisions. borrowed, non-nil while
+// the cycle counts Kueue borrowing, is per "namespace/model" the GPUs the
+// decision draws from the cohorts' shared pools; every model's line then
+// carries it as "borrowed", 0 included.
 func logScalingDecisions(
 	ctx context.Context,
 	modelRequests []allocation.ModelScalingRequest,
 	decisions []domain.VariantDecision,
+	borrowed map[string]int,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -1553,6 +1627,14 @@ func logScalingDecisions(
 		// with demand still climbing means raise maxReplicas, which is a
 		// different remedy from adding GPUs.
 		AtMax bool `json:"atMax,omitempty"`
+		// LimitedBy names what held a scale-up back this cycle -- a limiter
+		// entry, node-fit, or a borrowing rule -- as the ResourceConstrained
+		// Event and the limiter_name label of wva_decisions_limited_total
+		// name it. Absent when nothing did.
+		LimitedBy string `json:"limitedBy,omitempty"`
+		// LimitedByAlso names the limiters tied with LimitedBy: their pools
+		// left exactly as little.
+		LimitedByAlso []string `json:"limitedByAlso,omitempty"`
 	}
 
 	// maxReplicas per variant, from the request the optimizer was given. The
@@ -1578,13 +1660,17 @@ func logScalingDecisions(
 		if m, ok := maxByVariant[k][d.VariantName]; ok {
 			atMax = d.TargetReplicas >= m
 		}
-		grouped[k] = append(grouped[k], decisionEntry{
+		entry := decisionEntry{
 			Name:   d.VariantName,
 			Curr:   d.CurrentReplicas,
 			Tgt:    d.TargetReplicas,
 			Action: string(d.Action),
 			AtMax:  atMax,
-		})
+		}
+		if d.WasLimited {
+			entry.LimitedBy, entry.LimitedByAlso = d.LimitedBy, d.LimitedByAlso
+		}
+		grouped[k] = append(grouped[k], entry)
 		metrics.SetVariantAtMaxReplicas(d.Namespace, d.VariantName, atMax)
 	}
 
@@ -1594,11 +1680,15 @@ func logScalingDecisions(
 		if len(entries) == 0 {
 			continue
 		}
-		logger.Info("scaling-decision",
+		kv := []any{
 			"modelID", req.ModelID,
 			"namespace", req.Namespace,
 			"decisions", entries,
-		)
+		}
+		if borrowed != nil {
+			kv = append(kv, "borrowed", borrowed[req.Namespace+"/"+req.ModelID])
+		}
+		logger.Info("scaling-decision", kv...)
 	}
 }
 
@@ -1630,8 +1720,10 @@ func unattributedGPUs(byType map[string]int) (total int, keys []string) {
 // allowance, so a pool at its quota must read as no headroom left rather than as
 // a namespace nobody bounds.
 //
-// Where constraints cannot be had -- no limiter, no usage observation on a
-// basis a provider needs, every provider failed -- it publishes UNBOUNDED, the
+// A provider whose usage basis is unobserved, or that fails, is skipped and the
+// others still bound the pool (allocation.ComputeAvailableConstraints). Where
+// no constraints can be had at all -- no limiter, or every provider
+// unavailable -- it publishes UNBOUNDED, the
 // same posture the optimizing path takes for the models in those states, rather
 // than a fabricated figure or nothing: a fabricated one would cap a pool for a
 // reason nobody could find, and nothing would now hold it, since a pool grows
@@ -1644,31 +1736,27 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 		// Nothing bounds anything. Published, not merely implied by silence:
 		// the pool grows only on a snapshot, and this is the only place one
 		// would come from on a limiter-less cluster with nothing to optimize.
+		e.providerSkips.report(ctx, nil)
 		allocation.PublishUnboundedHeadroom(decision.WarmPoolGPUsVersion(), time.Now())
 		return
 	}
 	views := gpuUsageViews(nil)
-	if _, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. The optimizing path
-		// runs the models unbounded in this state; the pool is told the same,
-		// rather than held against a limit nobody could compute.
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views, nil)
+	// The optimizing path does not run on an idle fleet, so this is the cycle's
+	// one report of which providers bound.
+	e.providerSkips.report(ctx, skipped)
+	if len(constraints) == 0 {
+		// Every provider unavailable. The optimizing path runs the models
+		// unbounded in this state; the pool is told the same, rather than held
+		// against a limit nobody could compute.
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return
 	}
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-	}
-	if len(constraints) == 0 {
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now()) // every provider failed: same posture
-		return
-	}
-	allocation.PublishNamespaceHeadroom(constraints, time.Now())
+	now := time.Now()
+	// Nothing is being ordered, so the nodes' holes are as observed.
+	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, now)
+	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
+	allocation.PublishNamespaceHeadroomOnNodes(constraints, nodes, now)
 }
 
 // publishWarmPoolSupply records what BRIDGES are contributing to each variant.

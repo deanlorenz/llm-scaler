@@ -1,6 +1,10 @@
 package allocation
 
-import "maps"
+import (
+	"maps"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+)
 
 // WithholdPromised returns copies of constraints with the utilization-share
 // optimizer's promised GPUs counted as used, for the consumers that must not
@@ -10,7 +14,9 @@ import "maps"
 //
 // A promise in a namespace group is charged to that namespace's pool and to
 // the cluster pool of its accelerator, since the receiver's pods will hold
-// both. A cluster-group promise is charged to the cluster pool only. Pools
+// both. A cluster-group promise is charged to the cluster pool only, and not
+// to a namespace quota's: the cluster group's namespaces are the ones no
+// namespace quota caps, so they do not spend its tenants' quota. Pools
 // with no finite limit are left alone. The inputs are not modified: the
 // optimizer itself already counts promised GPUs as its receivers' and must
 // read the constraints unchanged.
@@ -18,11 +24,21 @@ func WithholdPromised(constraints []*ResourceConstraints, promised map[string]ma
 	if len(promised) == 0 {
 		return constraints
 	}
-	charge := func(pools map[string]ResourcePool, acc string, g int) {
-		if p, ok := pools[acc]; ok && p.Limit >= 0 {
-			p.Used += g
-			pools[acc] = p
+	// The promise is keyed by the merged budget's spelling of the accelerator,
+	// which need not be this provider's; match by identity. Reports whether a
+	// finite pool was charged.
+	charge := func(pools map[string]ResourcePool, acc string, g int) bool {
+		key, ok := accelerator.FindKey(pools, acc)
+		if !ok {
+			return false
 		}
+		p := pools[key]
+		if p.Limit < 0 {
+			return false
+		}
+		p.Used += g
+		pools[key] = p
+		return true
 	}
 	out := make([]*ResourceConstraints, 0, len(constraints))
 	for _, c := range constraints {
@@ -48,11 +64,12 @@ func WithholdPromised(constraints []*ResourceConstraints, promised map[string]ma
 					if pools, ok := cc.NamespacePools[scope]; ok {
 						charge(pools, acc, g)
 					}
+				} else if !isClusterBound(c) {
+					continue
 				}
-				if p, ok := cc.Pools[acc]; ok && p.Limit >= 0 {
+				if charge(cc.Pools, acc, g) {
 					withheld += g
 				}
-				charge(cc.Pools, acc, g)
 			}
 		}
 		cc.TotalUsed += withheld

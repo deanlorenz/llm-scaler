@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 // K8sWithGpuOperator implements CapacityDiscovery for Kubernetes clusters with GPU Operator
@@ -35,6 +36,9 @@ type K8sWithGpuOperator struct {
 	// (podsDeniedNone, podsDeniedInfo or podsDeniedError), so it is logged when
 	// it starts or changes rather than on every refresh.
 	podsDenied atomic.Int32
+	// onPodAccessDenied, when set, is told every value wva_pod_access_denied
+	// is set to. See WithPodAccessDeniedHook.
+	onPodAccessDenied func(denied bool)
 }
 
 // How a Forbidden cluster-wide pod list was last reported.
@@ -72,12 +76,21 @@ func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator 
 // limiter is in force, and returns d. The limiter list is live, so inForce is
 // asked on every Forbidden list.
 //
-// Only a physical limiter reads the per-node usage the walk produces. With a
-// quota limiter, or none, the undercount a Forbidden list causes bounds
+// Only a physical limiter reads the per-node usage the walk produces, alone or
+// beside quota limiters. With quota limiters alone, or none, the undercount a Forbidden list causes bounds
 // nothing, so it is not reported as a failure: no error log, and
 // wva_pod_access_denied stays 0.
 func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
 	d.physicalLimiterInForce = inForce
+	return d
+}
+
+// WithPodAccessDeniedHook makes every change of wva_pod_access_denied also
+// call hook with the new value, and returns d. The controller publishes it in
+// its status ConfigMap (controllerstatus.KeyPodListDenied), beside the gauge
+// and the error logged once when the denial starts.
+func (d *K8sWithGpuOperator) WithPodAccessDeniedHook(hook func(denied bool)) *K8sWithGpuOperator {
+	d.onPodAccessDenied = hook
 	return d
 }
 
@@ -177,6 +190,7 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 					Labels:        copyStringMap(node.Labels),
 					Accelerators:  make(map[string]AcceleratorModelInfo),
 					Unschedulable: refusesNewPods(&node),
+					Taints:        placementTaints(&node),
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -271,13 +285,16 @@ func (d *K8sWithGpuOperator) DiscoverUsage(ctx context.Context) (map[string]int,
 // Counts REQUESTS, not allocations, and includes pods that are scheduled but not
 // yet running (Spec.NodeName set, not Succeeded/Failed): the scheduler has already
 // committed those GPUs, so treating them as free would let two wakes place onto
-// the same device. Unscheduled pods hold nothing and are skipped.
+// the same device. A Pending pod the scheduler has nominated a node for
+// (Status.NominatedNodeName, after preempting pods there) is counted on that
+// node too: the hole it is waiting for is not free to anyone else. Other
+// unscheduled pods hold nothing and are skipped.
 func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[string]int, map[string]map[string]int, error) {
 	nodeGPUType, err := d.discoverNodeGPUTypes(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover node GPU types: %w", err)
 	}
-	byType, byNamespace, _, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, _, _, err := d.usageWalk(ctx, nodeGPUType)
 	return byType, byNamespace, err
 }
 
@@ -292,7 +309,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 		return nil, nil, nil, fmt.Errorf("failed to discover GPU nodes: %w", err)
 	}
 	nodeGPUType := nodeGPUTypesOf(nodes)
-	byType, byNamespace, byNode, err := d.usageWalk(ctx, nodeGPUType)
+	byType, byNamespace, byNode, groups, err := d.usageWalk(ctx, nodeGPUType)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -304,35 +321,44 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Used:          byNode[name],
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
+			Taints:        nodes[name].Taints,
+			LWSGroup:      groups[name],
 		}
 	}
 	return byType, byNamespace, out, nil
 }
 
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
-// pods occupying GPU nodes, per accelerator type, per namespace and per node.
-func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
+// pods occupying GPU nodes, per accelerator type, per namespace and per node;
+// and the GPU nodes a LeaderWorkerSet group's pod occupies, GPUs or not
+// (decision.NodeGPU.LWSGroup).
+func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, map[string]bool, error) {
 	pods, err := d.listPods(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
+	groups := make(map[string]bool)
 
 	for _, pod := range pods {
-		if pod.Spec.NodeName == "" {
+		node := occupiedNode(&pod)
+		if node == "" {
 			continue
 		}
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
 
-		gpuType, ok := nodeGPUType[pod.Spec.NodeName]
+		gpuType, ok := nodeGPUType[node]
 		if !ok {
 			// Node doesn't have GPUs, skip
 			continue
+		}
+		if _, ok := pod.Labels[lwsv1.GroupUniqueHashLabelKey]; ok {
+			groups[node] = true
 		}
 
 		gpuCount := resources.PodGPURequests(&pod)
@@ -340,7 +366,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 			continue
 		}
 		usageByType[gpuType] += gpuCount
-		usageByNode[pod.Spec.NodeName] += gpuCount
+		usageByNode[node] += gpuCount
 		perType, seen := usageByNamespace[pod.Namespace]
 		if !seen {
 			perType = make(map[string]int)
@@ -349,7 +375,20 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 		perType[gpuType] += gpuCount
 	}
 
-	return usageByType, usageByNamespace, usageByNode, nil
+	return usageByType, usageByNamespace, usageByNode, groups, nil
+}
+
+// occupiedNode is the node whose GPUs pod holds or is about to: the node it is
+// scheduled to, else, while Pending, the node the scheduler nominated for it.
+// "" for a pod that holds no node.
+func occupiedNode(pod *corev1.Pod) string {
+	if pod.Spec.NodeName != "" {
+		return pod.Spec.NodeName
+	}
+	if pod.Status.Phase == corev1.PodPending {
+		return pod.Status.NominatedNodeName
+	}
+	return ""
 }
 
 // listPods returns every Pod the usage walk considers: through Client, or,
@@ -367,7 +406,7 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 	if d.podReader != nil {
 		pods, err := listAllPods(ctx, d.podReader)
 		if err == nil {
-			metrics.SetPodAccessDenied(false)
+			d.setPodAccessDenied(false)
 			d.podsDenied.Store(podsDeniedNone)
 			return pods, nil
 		}
@@ -390,15 +429,24 @@ func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error)
 // else would clear the gauge then, and without clearing the remembered level,
 // a physical limiter turned off and on again would not log the denial again.
 func (d *K8sWithGpuOperator) ResetPodAccessDenied() {
-	metrics.SetPodAccessDenied(false)
+	d.setPodAccessDenied(false)
 	d.podsDenied.Store(podsDeniedNone)
+}
+
+// setPodAccessDenied sets wva_pod_access_denied and tells the hook
+// WithPodAccessDeniedHook installed, if any.
+func (d *K8sWithGpuOperator) setPodAccessDenied(denied bool) {
+	metrics.SetPodAccessDenied(denied)
+	if d.onPodAccessDenied != nil {
+		d.onPodAccessDenied(denied)
+	}
 }
 
 // reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
 // while a physical limiter is in force, and as information otherwise.
 func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	physical := d.physicalLimiterInForce == nil || d.physicalLimiterInForce()
-	metrics.SetPodAccessDenied(physical)
+	d.setPodAccessDenied(physical)
 	level := podsDeniedInfo
 	if physical {
 		level = podsDeniedError
@@ -409,9 +457,11 @@ func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 	logger := log.FromContext(ctx)
 	if physical {
 		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
-			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
-			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
-			"or bound with a quota limiter instead.",
+			"this controller's own namespace. If other namespaces run GPU pods on the same nodes, their GPUs "+
+			"read as FREE and the physical limiter can admit scale-ups onto full nodes; if none do, nothing is "+
+			"miscounted. Grant list on pods cluster-wide, "+
+			"or drop gpu-inventory from the limiters and bound with a quota limiter alone: a quota "+
+			"beside gpu-inventory leaves the physical limiter reading this count.",
 			"metric", constants.WVAPodAccessDenied)
 		return
 	}
@@ -516,8 +566,8 @@ var nodeRemovalTaints = map[string]bool{
 // (node.kubernetes.io/...: not-ready, unreachable, a pressure) or an
 // autoscaler's removal taint. A placement
 // that counted on its free GPUs would open a hole nobody can use. Other taints
-// are not read: a GPU pool's own taint is tolerated by the pods it exists for,
-// and matching a receiver's tolerations is not built.
+// are kept apart (placementTaints): a GPU pool's own taint is tolerated by the
+// pods it exists for, and node fit matches it against each pod's tolerations.
 func refusesNewPods(node *corev1.Node) bool {
 	if node.Spec.Unschedulable {
 		return true
@@ -536,4 +586,21 @@ func refusesNewPods(node *corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+// placementTaints is node's NoSchedule and NoExecute taints that refusesNewPods
+// does not already judge: the ones a pod's tolerations decide, such as a
+// dedicated GPU pool's. Nil when there are none.
+func placementTaints(node *corev1.Node) []corev1.Taint {
+	var out []corev1.Taint
+	for _, t := range node.Spec.Taints {
+		if t.Effect != corev1.TaintEffectNoSchedule && t.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if strings.HasPrefix(t.Key, "node.kubernetes.io/") || nodeRemovalTaints[t.Key] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }

@@ -36,8 +36,6 @@ var _ = Describe("FMA launcher attribution", Label("full"), Label("fma"), Ordere
 		modelID    = "default/default"
 		modelLabel = "e2e-fma-model"
 		maxNumSeqs = 4
-		// Same selector the other specs use to read the controller's logs.
-		fmaControllerManagerLabel = "control-plane=controller-manager"
 	)
 
 	var (
@@ -87,8 +85,8 @@ var _ = Describe("FMA launcher attribution", Label("full"), Label("fma"), Ordere
 		// how long Prometheus takes to make a new series visible, and the line
 		// names the pair so a failure says which one.
 		Eventually(func() bool {
-			ok, _, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-				fmaControllerManagerLabel, "Attributed FMA launcher pods through their dual-pods pairing", 300)
+			ok, _, err := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace,
+				testutils.ControllerDeploymentName, "Attributed FMA launcher pods through their dual-pods pairing", 300)
 			return err == nil && ok
 		}, 5*time.Minute, 15*time.Second).Should(BeTrue(),
 			"the collector never reported attributing a launcher through its pairing; "+
@@ -113,25 +111,35 @@ var _ = Describe("FMA launcher attribution", Label("full"), Label("fma"), Ordere
 		//
 		// So the assertion is the absence: the spare never turns up in an
 		// attribution line, however long we watch.
-		Consistently(func() bool {
-			ok, _, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-				fmaControllerManagerLabel, layout.UnboundLauncherPod, 600)
-			return err == nil && ok
-		}, 90*time.Second, 30*time.Second).Should(BeFalse(),
-			"the unbound launcher appeared in the controller's logs; a warm spare must be "+
-				"neither scraped nor attributed, so it should be invisible to the collector entirely")
+		//
+		// Every poll must READ the log. A failed read (no controller Pod, or a
+		// GetLogs error) has no launcher in it either, and used to pass. Nothing
+		// restarts the controller during these specs, so no read error is
+		// expected and none is tolerated.
+		Consistently(func(g Gomega) {
+			ok, _, err := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace,
+				testutils.ControllerDeploymentName, layout.UnboundLauncherPod, 600)
+			g.Expect(err).NotTo(HaveOccurred(),
+				"could not read the controller log, so the launcher's absence proves nothing")
+			g.Expect(ok).To(BeFalse(),
+				"the unbound launcher appeared in the controller's logs; a warm spare must be "+
+					"neither scraped nor attributed, so it should be invisible to the collector entirely")
+		}, 90*time.Second, 30*time.Second).Should(Succeed())
 	})
 
 	It("never files a bound launcher as unresolved", func() {
 		// The negative that matters. `unresolved` means the walk reached nothing
 		// AND no pairing rescued it — for a bound launcher that is a regression in
 		// the hop, and it is silent: demand simply reads low.
-		Consistently(func() bool {
-			ok, _, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-				fmaControllerManagerLabel,
+		// Read strictly, for the reason given in the spec above.
+		Consistently(func(g Gomega) {
+			ok, _, err := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace,
+				testutils.ControllerDeploymentName,
 				layout.LauncherPod+`", "instance`, 300)
-			return err == nil && ok
-		}, 60*time.Second, 20*time.Second).Should(BeFalse(),
-			"the bound launcher appeared in a skip message; the pairing hop is not resolving it")
+			g.Expect(err).NotTo(HaveOccurred(),
+				"could not read the controller log, so the skip message's absence proves nothing")
+			g.Expect(ok).To(BeFalse(),
+				"the bound launcher appeared in a skip message; the pairing hop is not resolving it")
+		}, 60*time.Second, 20*time.Second).Should(Succeed())
 	})
 })

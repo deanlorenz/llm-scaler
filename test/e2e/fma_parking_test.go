@@ -38,11 +38,10 @@ import (
 // guard stops it being charged to a variant that serves nothing.
 var _ = Describe("FMA parking - a parked variant's launchers", Label("full"), Label("fma"), Ordered, func() {
 	const (
-		layoutName                = "e2e-fma-park"
-		modelID                   = "default/default-fma-park"
-		modelLabel                = "e2e-fma-park-model"
-		maxNumSeqs                = 4
-		fmaControllerManagerLabel = "control-plane=controller-manager"
+		layoutName = "e2e-fma-park"
+		modelID    = "default/default-fma-park"
+		modelLabel = "e2e-fma-park-model"
+		maxNumSeqs = 4
 	)
 
 	var (
@@ -95,8 +94,8 @@ var _ = Describe("FMA parking - a parked variant's launchers", Label("full"), La
 		// Without this the suite would pass on a controller that had simply not
 		// collected anything yet.
 		Eventually(func() bool {
-			ok, _, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-				fmaControllerManagerLabel, "Attributed FMA launcher pods through their dual-pods pairing", 300)
+			ok, _, err := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace,
+				testutils.ControllerDeploymentName, "Attributed FMA launcher pods through their dual-pods pairing", 300)
 			return err == nil && ok
 		}, 5*time.Minute, 15*time.Second).Should(BeTrue(),
 			"the pairing hop never attributed the bound launcher, so this suite cannot observe it stopping")
@@ -117,8 +116,8 @@ var _ = Describe("FMA parking - a parked variant's launchers", Label("full"), La
 		// partner is not there". Attributing it instead would be silent and wrong:
 		// the variant would report a serving replica while its requester is at zero.
 		Eventually(func() bool {
-			ok, _, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-				fmaControllerManagerLabel, "pairing_unresolved", 600)
+			ok, _, err := testutils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace,
+				testutils.ControllerDeploymentName, "pairing_unresolved", 600)
 			return err == nil && ok
 		}, 5*time.Minute, 15*time.Second).Should(BeTrue(),
 			"a launcher whose partner was deleted was not filed as pairing_unresolved; if it is "+

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,12 +27,18 @@ import (
 // utilization-share optimizer, so a standing condition is reported once per
 // change rather than once per cycle.
 type utilizationShareState struct {
-	lastConfigErr  string
-	lastIgnored    string
+	lastConfigErr string
+	lastIgnored   string
+	// lastNote is the optimizer's last note (config.UtilizationShare.Note):
+	// reported once per change.
+	lastNote       string
 	lastWeightErrs map[string]string
 	// lastUnmatched are the disabled namespaces the last cycle found no
 	// namespace quota for, comma-joined: reported once per change.
 	lastUnmatched string
+	// lastUnshared are the models the last cycle planned in no group because
+	// no budget bounds them, comma-joined: reported once per change.
+	lastUnshared string
 	// noBoundSince is when the cycles began to see no constraints at all;
 	// zero while they see some. goneSince is when each ledger's group began
 	// to be missing from cycles that saw constraints. See shareAbsenceGrace.
@@ -74,6 +81,15 @@ type utilizationShareState struct {
 	// nodes is the per-node GPU picture; nil is decision.DefaultNodeGPUs,
 	// which the usage refresher publishes. Tests set it.
 	nodes *decision.NodeGPUStore
+	// left is what today's optimizer pass left this cycle (decideV2 sets it
+	// for the evaluation that follows the pass, and clears it after): the
+	// groups' budgets and the node picture are net of what the pass ordered
+	// for every model the share does not plan. Nil plans on the constraints
+	// and the node snapshot as they are.
+	left *allocation.PassLeft
+	// planned is the models (namespace/modelID) the evaluation in progress
+	// plans, whose pass placements the node picture does not count.
+	planned map[string]bool
 }
 
 // resetActuation forgets every ledger. A transfer's donor marks stay on its
@@ -108,6 +124,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor) (overrides map[string]utilizationShareOverride) {
 	logger := ctrl.LoggerFrom(ctx).WithName("utilization-share")
 	st := &e.utilizationShare
+	st.planned = nil
 	// The optimizer must never cost the cycle it rides on: a bug here loses
 	// this cycle's report and leaves today's decisions, not the controller.
 	defer func() {
@@ -146,6 +163,12 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			logger.Info("Utilization share: the optimizer block is valid again")
 		}
 		st.lastConfigErr = errText
+	}
+	if us.Note != st.lastNote {
+		if us.Note != "" {
+			logger.Info("WARNING: "+us.Note, "watchNamespace", e.Config.WatchNamespace())
+		}
+		st.lastNote = us.Note
 	}
 	if ignored := strings.Join(e.Config.IgnoredOptimizerNamespaces(), ","); ignored != st.lastIgnored {
 		if ignored != "" {
@@ -186,8 +209,15 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	seen := map[string]bool{}
 
 	weightErrs := map[string]string{}
+	var unshared []string
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
-		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
+		Left: st.left,
+		// Only a cluster-scoped quota is a cluster budget: a namespace-scoped
+		// one bounds the namespaces it caps, and one it excludes not at all.
+		ClusterIsQuota: e.Config.HasClusterQuota(),
+		Unshared: func(req allocation.ModelScalingRequest, why string) {
+			unshared = append(unshared, utils.GetNamespacedKey(req.Namespace, req.ModelID)+": "+why)
+		},
 		PhysicalGroups:   us.PhysicalGroups,
 		ReserveGPUs:      us.ReserveGPUs,
 		PoolUnheld:       decision.DefaultWarmPoolUnheld.Latest(decision.WarmPoolUnheldMaxAge, now),
@@ -221,6 +251,8 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 	}
 	st.lastWeightErrs = weightErrs
+	st.reportUnshared(logger, unshared)
+	st.planned = allocation.PlannedModels(groups)
 	published := make([]metrics.UtilizationShareGroup, 0, len(groups))
 	for _, g := range groups {
 		// Every target gives a role at most its headroom of the spare
@@ -521,6 +553,23 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 	}
 }
 
+// reportUnshared logs, once per change, the models planned in no group because
+// no budget bounds them -- a namespace a namespace quota excludes, with no
+// finite cluster bound for its accelerator type. The default optimizer keeps
+// them.
+func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []string) {
+	slices.Sort(models)
+	joined := strings.Join(models, ",")
+	if joined == st.lastUnshared {
+		return
+	}
+	st.lastUnshared = joined
+	if joined != "" {
+		logger.Info("Utilization share: not sharing models no quota bounds; the default optimizer keeps them",
+			"models", models)
+	}
+}
+
 // reportFloorHeavy logs, once per change, a group whose floors hold more than
 // half its budget above their models' need: the optimizer can share only what
 // floors leave, and the floor_excess series shows whose floors they are
@@ -567,6 +616,7 @@ func (e *Engine) observeUtilizationShareMode(ctx context.Context) {
 	mode, err := e.Config.UtilizationShareMode()
 	metrics.SetUtilizationShareMode(mode)
 	e.Status.SetUtilizationShare(mode, err)
+	e.Status.SetUtilizationShareNote(e.Config.UtilizationShareNote())
 	if mode != constants.UtilizationShareModeActive {
 		e.dropShareActuation(ctx, ctrl.LoggerFrom(ctx).WithName("utilization-share"))
 	}

@@ -24,6 +24,10 @@ mkdir -p "$WORK/lib"
 if [ -f "$ROOT/deploy/lib/pod_writer.sh" ]; then
     tr -d '\r' < "$ROOT/deploy/lib/pod_writer.sh" > "$WORK/lib/pod_writer.sh"
 fi
+# And lib/physical_limiter.sh, for the managed-namespace program.
+if [ -f "$ROOT/deploy/lib/physical_limiter.sh" ]; then
+    tr -d '\r' < "$ROOT/deploy/lib/physical_limiter.sh" > "$WORK/lib/physical_limiter.sh"
+fi
 
 # shellcheck disable=SC1090
 . "$WORK/us.sh"
@@ -75,7 +79,14 @@ expect() { # expect <name> <want> <got>
 expect "kind: quota" quota "$(printf '%s\n' "$QUOTA_POLICY" | us_limiter_kind)"
 expect "kind: gpu-inventory" inventory "$(printf '%s\n' "$INV_POLICY" | us_limiter_kind)"
 expect "kind: the inventory alias" inventory "$(printf 'limiters:\n  - name: p\n    type: inventory\n' | us_limiter_kind)"
-expect "kind: quota and inventory is quota" quota "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_limiter_kind)"
+expect "kind: quota and inventory is both" inventory+quota "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_limiter_kind)"
+expect "kind: inventory first, then quota, is both" inventory+quota "$(printf 'limiters:\n  - type: inventory\n  - name: q\n    type: quota\n    scope: cluster\n    quotas: {H100: 8}\n' | us_limiter_kind)"
+expect "share budget: a namespace quota alone is no cluster budget" none "$(printf '%s\n' "$QUOTA_POLICY" | us_share_cluster_budget)"
+expect "share budget: a cluster quota alone" quota "$(printf 'limiters:\n  - name: q\n    type: quota\n    scope: cluster\n    quotas: {H100: 8}\n' | us_share_cluster_budget)"
+expect "share budget: inventory alone" physical "$(printf '%s\n' "$INV_POLICY" | us_share_cluster_budget)"
+expect "share budget: inventory beside a namespace quota is physical" physical "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_share_cluster_budget)"
+expect "share budget: inventory beside a cluster quota is the quota" quota "$(printf 'limiters:\n  - type: gpu-inventory\n  - name: q\n    type: quota\n    scope: cluster\n    quotas: {H100: 8}\n' | us_share_cluster_budget)"
+expect "share budget: no limiters" none "$(printf 'scaleUpThreshold: 0.85\n' | us_share_cluster_budget)"
 expect "kind: no limiters" none "$(printf 'scaleUpThreshold: 0.85\n' | us_limiter_kind)"
 # The controller rejects a policy naming a type it does not know and runs with
 # no limiter, whatever else the list holds. Was: inventory, from the known half.
@@ -89,11 +100,11 @@ expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | u
 expect "state: another optimizer" "other:fancy plain" "$(printf 'optimizer:\n  type: fancy\n' | us_block_state)"
 expect "budget: quotas per namespace share nothing" namespace "$(printf '%s\n' "$QUOTA_POLICY" | us_budget_scope)"
 expect "budget: a cluster quota is shared" cluster "$(printf '%s\n' "$CLUSTER_POLICY" | us_budget_scope)"
-# As the controller builds its groups (utilization_share_groups.go): beside a
-# quota it builds no gpu-inventory limiter and ignores physicalGroups, and a
+# As the controller builds its groups (utilization_share_groups.go): a
 # namespace a namespace-scoped entry covers -- even with no figure, a zero
-# budget -- gets its own group. Only a namespace excluded from every such entry
-# shares the cluster group. These two said "cluster" before, and activate
+# budget -- gets its own group, beside a gpu-inventory limiter and with
+# physicalGroups too. Only a namespace excluded from every such entry can
+# share the cluster group. These two said "cluster" before, and activate
 # warned about namespaces that share nothing.
 expect "budget: quotas per namespace beside gpu-inventory share nothing" namespace \
     "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_budget_scope)"
@@ -109,6 +120,12 @@ expect "budget: excluded from the quota, no cluster quota: not shared" namespace
     "$(printf '%s\n' "$EXCL_POLICY" | us_budget_scope)"
 expect "budget: excluded from the quota, with a cluster quota: shared" cluster \
     "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]' | us_budget_scope)"
+# The inventory is a finite cluster bound, so beside the quota with
+# physicalGroups: true it shares the excluded namespaces too. Was namespace.
+expect "budget: excluded from the quota, gpu-inventory with physicalGroups: shared" cluster \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "p", "type": "gpu-inventory"}] | .optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
+expect "budget: excluded from the quota, gpu-inventory without physicalGroups: not shared" namespace \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "p", "type": "gpu-inventory"}]' | us_budget_scope)"
 # Equality, not substring: an exclude of team-a-prod does not exclude team-a.
 # Was "team-a".
 expect "budget: a namespace name that is a prefix of another is not excluded by it" "" \
@@ -239,7 +256,11 @@ case "$args" in
            '{metadata:{labels:(if $l == "" then {} else {"wva.llmd.ai/policy-namespace":$l} end)}}' ;;
     esac ;;
   *" get deploy "*)
-    echo '{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}}}}' ;;
+    # deploy.json, when present, is the controller Deployment (a manager
+    # container with --watch-namespace makes it namespace-scoped); else one
+    # with no manager container, which reads as cluster-scoped.
+    if [ -e "$S/deploy.json" ]; then cat "$S/deploy.json"; else
+      echo '{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}}}}'; fi ;;
   *" logs "*)
     [ -e "$S/logs.forbidden" ] && { echo 'Error from server (Forbidden): pods/log is forbidden' >&2; exit 1; }
     case "$args" in *" -l "*) ;; *) [ -e "$S/standby" ] && exit 0 ;; esac
@@ -312,6 +333,22 @@ vcase "shadow: writes shadow true and confirms the reload" \
 fresh "$INV_POLICY"; run shadow --physical-groups
 vcase "shadow --physical-groups: plans the inventory" \
     eval '[ $RC -eq 0 ] && [ "$(pol .optimizer.utilizationShare.physicalGroups)" = true ]'
+
+# A namespace-scoped controller ignores physicalGroups (every such controller
+# would plan the same free GPUs), so the script does not write it for one.
+NS_SCOPED_DEPLOY='{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}},"template":{"spec":{"containers":[{"name":"manager","image":"x","args":["--watch-namespace=team-a"]}]}}}}'
+fresh "$INV_POLICY"; printf '%s' "$NS_SCOPED_DEPLOY" > "$STATE/deploy.json"; run shadow --physical-groups
+vcase "shadow --physical-groups: refused for a namespace-scoped controller, writes nothing" \
+    eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "--physical-groups is refused: the controller manages only team-a"'
+
+fresh "$INV_POLICY
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    shadow: true
+    physicalGroups: true"; printf '%s' "$NS_SCOPED_DEPLOY" > "$STATE/deploy.json"; run check
+vcase "check: a namespace-scoped controller ignores the physical groups the block sets" \
+    eval 'says "this controller is namespace-scoped and ignores it" && ! says "the block plans physical groups"'
 
 fresh "$INV_POLICY"; run shadow
 vcase "shadow on inventory without the flag: warns it plans nothing" \
@@ -477,7 +514,7 @@ vcase "off: marks that do not clear keep the block in shadow" \
 fresh "$QUOTA_POLICY"; run off
 vcase "off: nothing to remove is not an error" eval '[ $RC -eq 0 ] && [ "$(patches)" = 0 ]'
 
-fresh "$QUOTA_POLICY"; echo 'INFO GPU limiter (re)built from config {"type": "quota"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
+fresh "$QUOTA_POLICY"; echo 'INFO GPU limiter (re)built from config {"limiterTypes": "quota", "limiters": "quota/install-quota"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: a resolving quota passes" eval '[ $RC -eq 0 ] && says "no AcceleratorNotResolved"'
 
 # H200 is a substring of the quota's NVIDIA-H200 key; a substring match passed it.
@@ -498,6 +535,19 @@ vcase "check: no limiters fails" eval '[ $RC -ne 0 ] && says "no limiters: list"
 
 fresh "$INV_POLICY"; run check
 vcase "check: inventory without physical groups says how to plan it" eval '[ $RC -eq 0 ] && says "--physical-groups"'
+
+# A composed set: both kinds bound, and check says which is the share's cluster
+# budget. It used to read the list as a quota alone, as the controller did.
+COMPOSED_POLICY="$QUOTA_POLICY
+  - name: gpu
+    type: gpu-inventory"
+fresh "$COMPOSED_POLICY"; echo 'INFO GPU limiter constructed {"limiterTypes": "inventory+quota", "limiters": "inventory+quota/install-quota,gpu"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
+vcase "check: a composed set names both limiters and the physical cluster budget" \
+    eval '[ $RC -eq 0 ] && says "gpu-inventory and quota, both in force" && says "budget is the GPUs that exist" && ! says "--physical-groups"'
+
+fresh "$COMPOSED_POLICY"; printf '{"policyNamespace":"team-a","policyResourceVersion":"1","utilizationShare":"off","policyAccepted":"true","limiter":"inventory+quota/install-quota,gpu"}' > "$STATE/status.json"; run status
+vcase "status: a composed set's limiter reads types/names from the controller status" \
+    eval 'says "limiter inventory+quota/install-quota,gpu"'
 
 fresh "$TUNED_POLICY"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; echo 'LAST SEEN TYPE REASON
 1m Warning UtilizationShareCancelled deploy/a' > "$STATE/events.warning"; run status
@@ -608,7 +658,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=99
+CASES_EXPECTED=112
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

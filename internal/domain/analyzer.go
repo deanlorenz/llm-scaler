@@ -183,6 +183,30 @@ type AnalyzerResult struct {
 	PricingK float64
 }
 
+// LearnedStateBorrow is one figure a variant was priced from that a sibling
+// variant learned.
+type LearnedStateBorrow struct {
+	// Quantity is what was borrowed: BorrowedK2 or BorrowedITLLine.
+	Quantity string
+	// Donor is the variant that measured it, and DonorNamespace its
+	// namespace. A k2 is borrowed only within a namespace; an ITL line is
+	// shared by engine configuration, whatever namespace the lender runs in,
+	// so the variant name alone can be ambiguous -- or read as the variant
+	// borrowing from itself.
+	Donor          string
+	DonorNamespace string
+	// Relaxed is how far a k2 borrow has relaxed back to the variant's own
+	// figure: 0 at full strength, 1 fully relaxed. Always 0 for a line,
+	// which is used as it is.
+	Relaxed float64
+}
+
+// The quantities a variant can borrow from a sibling.
+const (
+	BorrowedK2      = "k2"
+	BorrowedITLLine = "itl-line"
+)
+
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in
 // analyzer-specific units. For saturation: tokens. For throughput: tokens/sec.
 // For SLO: latency-constrained capacity.
@@ -275,10 +299,36 @@ type VariantCapacity struct {
 
 	// Reason is a free-text string set by the analyzer to describe how the
 	// variant's per-replica capacity was computed. Empty for analyzers that
-	// do not set it. Saturation V2 uses "P0-store", "P1-obs", "P2-hist",
-	// "P2-borrow", "P3-k2", "P4-k1", "no-data", "error". Throughput uses "T1-ols",
-	// "T2-pinned", "T2-default", "T2-failed".
+	// do not set it. Saturation V2 uses "P0-store", "P1-obs", "P1-obs-unadmitted"
+	// (a warm-pool bridge priced for the cycle at its own lower reading, not
+	// recorded), "P2-hist", "P2-prior" (the variant's own figure from engine
+	// arguments it no longer runs), "P2-borrow", "P3-k2", "P4-k1", "no-data",
+	// "error". Throughput uses "T1-ols", "T2-pinned", "T2-default", "T2-failed".
 	Reason string
+
+	// Borrowed lists what this variant was priced from that a sibling
+	// variant learned, this cycle: a k2 below its own capacity (P2-borrow) and
+	// a shared ITL line. Diagnostics only -- published as
+	// wva_learned_state_borrowed -- so that a variant priced from someone
+	// else's measurement is visible without reading the cycle log. Nil when
+	// it borrowed nothing.
+	Borrowed []LearnedStateBorrow
+
+	// K2Source is the k2 source (P1-obs, P2-hist, P2-borrow, P3-k2, P4-k1) of
+	// the replica the variant's per-replica capacity was taken from -- the
+	// lower-median replica, the one Reason names -- or k1-bound when that
+	// replica's k2 is at or above its k1, so the KV cache prices it and the
+	// k2 has no age worth reporting. K2Age is how long ago the window that figure came
+	// from was last WRITTEN, when HasK2Age: the variant's own window for
+	// P1-obs and P2-hist, the donor's for P2-borrow; P3-k2 and P4-k1 come
+	// from no window. A read does not make a figure younger. K2Source is
+	// empty when no replica reported this cycle, or the analyzer learns no
+	// k2. Diagnostics only -- published as wva_learned_state_k2_source and
+	// wva_learned_state_k2_age_seconds -- so that a fleet held up by a
+	// figure measured a week ago is visible without reading the cycle log.
+	K2Source string
+	K2Age    time.Duration
+	HasK2Age bool
 
 	// WarmPoolReplicas is how many BRIDGES are serving this variant: warm pool
 	// Pods lent to it while it is short, counted in the same scale-target units

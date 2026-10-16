@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +100,12 @@ type Engine struct {
 	// controller-status ConfigMap. Nil-safe: tests leave it unset.
 	Status *controllerstatus.Publisher
 
+	// Preemptions records Kueue's preemptions of managed pods from the
+	// manager's pod informer, between cycles. Nil: preemptions are read only
+	// by listing, once per cycle, which misses a pod and Workload that are gone
+	// within seconds.
+	Preemptions *PreemptionWatch
+
 	// ReplicaMetricsCollector is the collector for replica metrics using the source infrastructure
 	ReplicaMetricsCollector *collector.ReplicaMetricsCollector
 
@@ -120,6 +127,37 @@ type Engine struct {
 	limiterBuilder func() (allocation.Limiter, error)
 	limiterSig     string
 	limiterMu      sync.Mutex
+
+	// lastQuotaAloneDiff is the last quota-alone versus composed allocation
+	// difference reported (see reportQuotaAloneAllocation), so the transitional
+	// upgrade log prints when the difference changes, not every cycle. Written
+	// only from the optimize goroutine.
+	lastQuotaAloneDiff string
+	// quotaAloneCycles counts the cycles reportQuotaAloneAllocation was
+	// eligible to run in, so its shadow pass runs once per
+	// quotaAloneReportEvery of them. TRANSITIONAL, with it.
+	quotaAloneCycles int
+
+	// providerSkips publishes the constraint providers left out of the last
+	// decision (wva_constraint_provider_skipped) and logs when that set changes.
+	providerSkips providerSkipReport
+
+	// nodeFitSkipped is why the last cycle bounded by the physical limiter
+	// fitted replicas to the pool and not to nodes ("" when it did fit them),
+	// logged when it changes. Written only from the optimize goroutine.
+	nodeFitSkipped string
+	// layouts remembers the variants whose unknown pod layout this engine's
+	// node views have logged, so each is logged once, not once per cycle.
+	layouts allocation.LayoutLog
+	// cycleFitted is whether this cycle's optimizer pass was fitted to nodes,
+	// and cyclePlanned the models the utilization share planned in it: what
+	// admitInFlight needs once the decisions are final. Set by decideV2.
+	cycleFitted  bool
+	cyclePlanned map[string]bool
+	// inFlightMark is what this cycle's provisional admission of the pass's
+	// placements replaced in the in-flight ledger (admitPassInFlight), until
+	// admitInFlight commits the final targets; nil between cycles.
+	inFlightMark allocation.InFlightMark
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
@@ -197,6 +235,11 @@ type Engine struct {
 	// state: what it reported, and the transfer ledgers it acts on unless its
 	// policy is in shadow mode; see evaluateUtilizationShare.
 	utilizationShare utilizationShareState
+
+	// borrowing is the engine's cohort-borrowing state across cycles: growth
+	// ordered on borrowed capacity that Kueue has not reserved yet, and this
+	// cycle's node view (borrowing.go).
+	borrowing borrowingState
 
 	// learnedState is the learned-state snapshot store's between-cycle state
 	// (learned_state_store.go).
@@ -285,11 +328,15 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
 	}
 	satV2, replaced := satV2.WithHorizons(requested)
+	// A k2 borrow's clock counts serving cycles; how far apart two of them may
+	// be is the loop's cadence (k2_borrow.go).
+	satV2 = satV2.WithOptimizationInterval(cfg.OptimizationInterval())
 	h := satV2.Horizons()
 	ctrl.Log.Info("learned-state horizons",
 		"episodeGap", h.EpisodeGap,
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
+		"borrowTickGap", satV2.BorrowTickGap(),
 		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_VARIANT_TIMEOUT, LEARNED_STATE_BUCKET_RETENTION to change them")
 	// A replaced horizon has to say so, because the line above cannot. After
 	// flooring it prints the default, which is byte-identical to what an
@@ -628,14 +675,14 @@ func (e *Engine) recordDefaultConfigMetrics() {
 	// the operational dashboard and the zero-allocatable-GPU alert, which both
 	// reference it.
 	if cfg, ok := globalSatCfgMap["default"]; ok {
-		limiterEnabled := e.Config.EffectiveLimiterMode() != config.LimiterTypeNone
+		limiterEnabled := e.Config.EffectiveLimiterTypes().Declared()
 		metrics.SetConfigInfo(cfg.GetAnalyzerName(), limiterEnabled, e.Config.ScaleToZeroEnabled())
 	}
 }
 
 // SetLimiterBuilder installs a builder that rebuilds the GPU limiter from the
 // current effective config. The engine calls it at the top of each optimize
-// cycle and swaps the limiter when the effective limiter mode / quota entries
+// cycle and swaps the limiter when the declared limiters (types, quota entries)
 // change — so switching the ConfigMap's limiters: list takes effect without a
 // restart. Call before StartOptimizeLoop. Passing nil disables live rebuilds
 // (the injected GPULimiter is used as-is, e.g. in tests).
@@ -664,13 +711,20 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	limiter, err := e.limiterBuilder()
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "failed to rebuild GPU limiter from config; keeping the previous limiter",
-			"effectiveMode", e.Config.EffectiveLimiterMode())
+			"limiters", e.Config.EffectiveLimiterSummary())
 		return
 	}
 	e.GPULimiter = limiter
 	e.limiterSig = sig
 	ctrl.LoggerFrom(ctx).Info("GPU limiter (re)built from config",
-		"type", e.Config.EffectiveLimiterMode(), "name", limiter.Name())
+		"limiterTypes", e.Config.EffectiveLimiterTypes().String(), "limiters", e.Config.EffectiveLimiterSummary(),
+		"name", limiter.Name())
+	// Once per build, which is once per change of the limiters: the
+	// controller-status key (clusterQuotaPerController) carries it between.
+	if e.Config.ClusterQuotaPerController() {
+		ctrl.LoggerFrom(ctx).Info(config.ClusterQuotaPerControllerMessage,
+			"watchNamespace", e.Config.WatchNamespace(), "limiters", e.Config.EffectiveLimiterSummary())
+	}
 }
 
 // limiterSignature detects when the limiter config changed. Delegates to the
@@ -785,9 +839,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 
-	// Collect accelerator inventory (only in limited mode AND only when the
-	// inventory-based limiter is active). In quota mode (an inline limiters: quota
-	// entry), the controller deliberately runs without consulting physical capacity —
+	// Collect accelerator inventory (only in limited mode AND only when a physical
+	// limiter is declared). With quota entries alone, the controller deliberately
+	// runs without consulting physical capacity —
 	// listing Nodes here would defeat that contract (and trigger a
 	// controller-runtime Node informer for the lifetime of the process). The
 	// collected inventory is currently only logged anyway (see comment at
@@ -842,9 +896,8 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// silently not enforced, which is what that flag allowed. V2
 	// (saturation-token-based) is the sole analysis path and always uses the
 	// optimizer pipeline.
-	limiterMode := e.Config.EffectiveLimiterMode()
 	savedOptimizer := e.optimizer
-	if limiterMode == config.LimiterTypeNone {
+	if !e.Config.EffectiveLimiterTypes().Declared() {
 		e.optimizer = allocation.NewCostAwareOptimizer()
 	} else {
 		e.optimizer = allocation.NewGreedyByScoreOptimizer()
@@ -853,7 +906,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		e.recordActiveOptimizer() // optimizer has changed, record active optimizer
 	}
 	logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName,
-		"optimizer", e.optimizer.Name(), "limiter", limiterMode)
+		"optimizer", e.optimizer.Name(), "limiter", e.Config.EffectiveLimiterSummary())
 
 	// V2 (saturation): saturation.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge.
 	mode := modeLabelForAnalyzer(analyzerName)
@@ -890,6 +943,17 @@ func modeLabelForAnalyzer(analyzerName string) string {
 	default:
 		return "saturation-only"
 	}
+}
+
+// constrainedMessage is a ResourceConstrained event's message: the decision's
+// reason and what held it back (LimitedBy) -- a limiter's name, or
+// allocation.NodeFitLimiterName when the pools held the GPUs but no node held
+// a whole replica -- with every limiter tied with it (LimitedByAlso).
+func constrainedMessage(d *domain.VariantDecision) string {
+	if d.LimitedBy == "" {
+		return d.Reason()
+	}
+	return fmt.Sprintf("%s (limited by %s)", d.Reason(), strings.Join(append([]string{d.LimitedBy}, d.LimitedByAlso...), " and "))
 }
 
 // recordEvent ensures only one event is recorded per VA in an optimization cycle.
@@ -1135,6 +1199,34 @@ func scaleToZeroPolicy(
 	return out, disabledBy
 }
 
+// scaleToZeroForbiddenMessage is the log line that names the tiers disabling a
+// model's scale-to-zero. The alert WVAModelScalingBlocked quotes its start.
+const scaleToZeroForbiddenMessage = "Scale-to-zero is disabled by the scaling policy of a tier this model's variants name " +
+	"(its per-model entry, if any, included)"
+
+// scaleToZeroForbiddenFix says where to enable scale-to-zero for a model whose
+// resolved policy disables it, and whether the model's per-model entry is what
+// disables it.
+//
+// Each tier is resolved with the model's per-model entry merged in, so a
+// per-model enabled: false disables every tier at once; naming the tiers then
+// sends the operator to the wrong place. disabledBy is spelled by tierNames.
+func scaleToZeroForbiddenFix(
+	configMap map[string]config.ScalingPolicy,
+	modelID, namespace string,
+	disabledBy []string,
+) (fix string, perModel bool) {
+	if override, ok := config.FindModelOverride(configMap, modelID, namespace); ok &&
+		override.ScaleToZero != nil && override.ScaleToZero.Enabled != nil && !*override.ScaleToZero.Enabled {
+		return "enable scaleToZero on the model's per-model entry", true
+	}
+	if slices.Equal(disabledBy, []string{config.GlobalDefaultsKey}) {
+		return "no variant names a tier: enable scaleToZero on the default entry (or the tier its defaultPolicy names), " +
+			"or on the model's per-model entry", false
+	}
+	return "enable scaleToZero on each tier in disabledBy, or on the model's per-model entry", false
+}
+
 // tierNames spells policy tiers for a log line: "" is the default entry.
 func tierNames(tiers []string) []string {
 	out := make([]string, 0, len(tiers))
@@ -1156,14 +1248,16 @@ func tierNames(tiers []string) []string {
 // available capacity (deny-all), NOT as unlimited — so if it were run with
 // empty constraints it would silently suppress all scale-up.
 //
-// Therefore, whenever real constraints cannot be obtained — the limiter does
-// not provide constraints (no ConstraintProvider), no usage has been observed on
-// a basis some provider needs, or computing them failed because, e.g., node
-// objects are not readable on this cluster — we fall back to the cost-aware
-// optimizer, which is the engine's unlimited path (the same optimizer used when
-// no limiter is declared), so scale-up proceeds unconstrained instead of being
-// blocked. A constraint that is present but reports zero GPUs is left intact:
-// that is a genuine "no capacity" signal and should still block scale-up.
+// A provider whose usage basis has not been observed, or whose constraints
+// cannot be computed (e.g. node objects are not readable on this cluster), is
+// SKIPPED and named in the log; the other providers still bound the cycle (see
+// allocation.ComputeAvailableConstraints). Only when no provider can supply
+// constraints -- the limiter provides none, or every one is unavailable -- do we
+// fall back to the cost-aware optimizer, which is the engine's unlimited path
+// (the same optimizer used when no limiter is declared), so scale-up proceeds
+// unconstrained instead of being blocked. A constraint that is present but
+// reports zero GPUs is left intact: that is a genuine "no capacity" signal and
+// should still block scale-up.
 //
 // Providers do not all consume the same usage figure. A physical inventory is fed
 // every GPU held on the cluster's nodes; a quota is fed only what WVA's own
@@ -1191,6 +1285,7 @@ func (e *Engine) selectV2Optimizer(
 		// Nothing bounds anything -- said out loud, because the warm pool waits
 		// for a headroom snapshot before it grows and nothing else here would
 		// publish one on a cluster with no limiter.
+		e.providerSkips.report(ctx, nil)
 		allocation.PublishUnboundedHeadroom(decision.WarmPoolGPUsVersion(), time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}
@@ -1211,76 +1306,91 @@ func (e *Engine) selectV2Optimizer(
 	// hold. One figure broadcast to both answers the wrong question for one of
 	// them — see allocation.UsageBasis.
 	views := gpuUsageViews(requests)
-	if basis, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. Constraints built on an
-		// absent usage figure would not be "unknown", they would be a confident
-		// claim that nothing is running — and GreedyByScore would allocate the
-		// whole cluster against it. Fall back to the unlimited optimizer, the same
-		// posture this function already takes when no provider can supply
-		// constraints.
-		logger.V(logging.DEBUG).Info("No GPU usage observation yet on a basis some provider needs; "+
-			"using the unlimited optimizer for this cycle", "basis", basis.String())
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views,
+		func(cp allocation.ConstraintProvider, constraint *allocation.ResourceConstraints,
+			usageByType map[string]int, usageByNS map[string]map[string]int) {
+			// What the limiter decided this cycle, as numbers.
+			//
+			// Nothing reported this, and the gap is expensive: a quota that fails
+			// to bind and a quota that was never declared look identical from
+			// outside, and the three things that could be wrong -- the cap, the
+			// usage charged against it, and whether the namespace was
+			// materialized at all -- are each invisible. Chasing one cost a day
+			// of fifteen-minute cluster runs that this line would have answered
+			// on the first.
+			logger.V(logging.DEBUG).Info("GPU constraints computed",
+				"provider", cp.Name(),
+				"basis", allocation.UsageBasisOf(cp).String(),
+				"usageByType", usageByType,
+				"usageByNamespace", usageByNS,
+				"pools", constraint.Pools,
+				"namespacePools", constraint.NamespacePools,
+				"totalLimit", constraint.TotalLimit,
+				"totalUsed", constraint.TotalUsed,
+				"totalAvail", constraint.TotalAvail)
+		})
+	// Published as wva_constraint_provider_skipped and logged when the set
+	// changes, so a bound that stopped applying is visible without a log line
+	// every cycle. A Kueue entry never read is not among them: it is in the
+	// decision, its finite caps bound, and wva_kueue_never_read reports it.
+	e.providerSkips.report(ctx, skipped)
+
+	// GreedyByScore treats absent constraints as zero available capacity
+	// (deny-all), not as unlimited. When no provider could supply constraints
+	// -- every one's usage view is unobserved, or every one failed (the usual
+	// cause is the Node API, for an inventory limiter without node read) --
+	// fall back to the cost-aware optimizer, the engine's unlimited path, so
+	// scale-up proceeds instead of being silently blocked. Constraints built on
+	// an absent usage figure would not be "unknown", they would be a confident
+	// claim that nothing is running, which is why an unobserved basis skips its
+	// provider instead of feeding it nothing.
+	if len(constraints) == 0 {
 		// The models scale unbounded this cycle; the pool follows the same
 		// posture rather than being held against a limit nobody could compute.
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}
-
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			logger.Error(err, "Failed to compute GPU constraints, skipping provider", "provider", cp.Name())
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-
-		// What the limiter decided this cycle, as numbers.
-		//
-		// Nothing reported this, and the gap is expensive: a quota that fails to
-		// bind and a quota that was never declared look identical from outside,
-		// and the three things that could be wrong -- the cap, the usage charged
-		// against it, and whether the namespace was materialized at all -- are
-		// each invisible. Chasing one cost a day of fifteen-minute cluster runs
-		// that this line would have answered on the first.
-		logger.V(logging.DEBUG).Info("GPU constraints computed",
-			"provider", cp.Name(),
-			"basis", allocation.UsageBasisOf(cp).String(),
-			"usageByType", usageByType,
-			"usageByNamespace", usageByNS,
-			"pools", constraint.Pools,
-			"namespacePools", constraint.NamespacePools,
-			"totalLimit", constraint.TotalLimit,
-			"totalUsed", constraint.TotalUsed,
-			"totalAvail", constraint.TotalAvail)
+	// With the physical limiter among the constraints, a replica must fit a
+	// node, not just the pool. A physical limiter that was skipped is not
+	// among them, and its node fit goes with it (the skip is reported above).
+	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, time.Now())
+	// The pass sizes every variant from its current replicas and re-places
+	// the growth whose pods are not created yet: the holes the ledger holds
+	// for those replicas are theirs to re-place.
+	allocation.DefaultInFlight.ReleaseUncreated(nodes, createdReplicas(requests))
+	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
+	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
+		g.Nodes = nodes.WithLayoutLog(&e.layouts)
 	}
-
-	// GreedyByScore treats absent constraints as zero available capacity
-	// (deny-all), not as unlimited. When no provider could supply constraints
-	// (limiter is not constraint-backed, or every provider failed — e.g. GPU
-	// capacity cannot be discovered), fall back to the cost-aware optimizer, the
-	// engine's unlimited path, so scale-up proceeds instead of being silently
-	// blocked.
-	if len(constraints) == 0 {
-		// Same posture as above: every provider failed (the usual cause is the
-		// Node API, for an inventory limiter without node read), the models
-		// scale unbounded, and so may the pool.
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
-		return allocation.NewCostAwareOptimizer(), nil
-	}
-	// What each namespace may still take, for the warm pool -- published HERE,
-	// once per cycle, from the constraints every provider agreed on. The
-	// optimizer publishes it too, but only from the attribution pass of a model
-	// that is scaling UP: a fleet of steady models never took that branch, the
-	// fleet was not idle either, and so a live cluster with one no-change variant
-	// never published headroom at all -- the pool read "unknown" forever and
-	// grew past a one-GPU quota unopposed.
-	// GPUs the utilization-share optimizer has promised to a receiver are
-	// withheld from the pool (section 6.3 of its proposal).
-	now := time.Now()
-	allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
+	// What each namespace may still take, for the warm pool, is published by
+	// the optimizer once its pass is over -- every pass, a fleet of steady
+	// models included -- from what the pass left (decideV2 republishes it
+	// with the utilization share's new promises withheld). Published here, it
+	// was the figure before the pass, which still counted the GPUs the pass
+	// was about to order as free.
 	return optimizer, constraints
+}
+
+// reportNodeFitSkipped logs, when it changes, that the physical limiter bounds
+// the cycle (bounded) but replicas are fitted to the pool and not to nodes,
+// and why; and once more when nodes are fitted again. A cycle the physical
+// limiter does not bound fits nothing to nodes and says nothing: no physical
+// limiter is not "fitted again", and the next skip is reported afresh.
+func (e *Engine) reportNodeFitSkipped(ctx context.Context, bounded bool, reason string) {
+	if !bounded {
+		e.nodeFitSkipped = ""
+		return
+	}
+	if reason == e.nodeFitSkipped {
+		return
+	}
+	logger := ctrl.LoggerFrom(ctx)
+	if reason != "" {
+		logger.Info("Physical limiter: replicas are not fitted to nodes this cycle", "reason", reason)
+	} else {
+		logger.Info("Physical limiter: replicas are fitted to nodes again")
+	}
+	e.nodeFitSkipped = reason
 }
 
 // resolveRescaleFlags builds the scope-coupled rescale enablement for this cycle:
@@ -1328,6 +1438,12 @@ func (e *Engine) optimizeV2(
 	e.pruneLastGoodAnalysis(activeKeys)
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
+	// evaluated are the models whose scale-to-zero stage 3 resolves this cycle.
+	// A model skipped by a cycle -- config not loaded, collection failed, or
+	// every model failed and the cycle returned early -- has its "disabled by
+	// tier" record forgotten, so the line is said again when it comes back.
+	evaluated := make(map[string]bool, len(modelGroups))
+	defer func() { e.forgetForbiddenBy(evaluated) }()
 	e.pruneLastDecided(e.stickyAge(), time.Now())
 	// The learned-state snapshot, restored once before anything is learned or
 	// swept, and written after the cycle has learned what it will.
@@ -1472,13 +1588,24 @@ func (e *Engine) optimizeV2(
 
 	// Stage 2: Compute GPU constraints and call optimizer
 	optimizer, constraints := e.selectV2Optimizer(ctx, requests)
+	// Cohort borrowing: what Kueue has not reserved yet leaves the shared
+	// pools (borrowing.go). A no-op without borrowing.
+	// One clock reading for every borrowing step of the cycle.
+	borrowNow := time.Now()
+	constraints = e.prepareBorrowing(ctx, constraints, requests, variantScaleTargets, borrowNow)
 	// Scope-coupled rescale enablement (cluster + per-namespace) is resolved from
 	// config and handed to the GPU-aware optimizer for this cycle.
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
+		g.BorrowBlocked = e.borrowBlocked()
+		g.BorrowBlockedIn = e.borrowBlockedIn()
+		g.ReclaimBlocked = e.reclaimBlocked()
+		g.BorrowCredit = e.borrowing.credit
+		g.ReclaimCredit = e.borrowing.reclaimCredit
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
-	logScalingDecisions(ctx, requests, allDecisions)
+	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)
+	logScalingDecisions(ctx, requests, allDecisions, borrowedByModel(draws, constraints))
 
 	logger.Info("V2 optimizer produced decisions",
 		"optimizer", optimizer.Name(),
@@ -1487,6 +1614,7 @@ func (e *Engine) optimizeV2(
 
 	// Stage 3: Apply enforcer per-model (directly on decisions)
 	for _, req := range requests {
+		evaluated[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = true
 		e.applyScaleToZeroEnforcement(
 			ctx, req.ModelID, req.Namespace, optimizer.Name(),
 			modelTiers[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
@@ -1494,6 +1622,24 @@ func (e *Engine) optimizeV2(
 			modelScaleTargets[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			req.VariantStates,
 		)
+	}
+
+	// Stage 3b: release borrowed capacity a waiting lender or an unplaced
+	// replica asks back, last, so nothing above raises it again
+	// (borrowing_release.go). A no-op without borrowing.
+	e.releaseBorrowed(ctx, requests, allDecisions, variantScaleTargets, borrowNow)
+	// A release lowers a target; what was in flight above it is not.
+	e.borrowing.inFlight.Trim(decidedTargets(allDecisions))
+	// What on-call sees: the budgets the cycle used, the borrowing reasons,
+	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
+	// so a cleared condition clears its series.
+	e.publishBorrowSignals(constraints, requests, allDecisions, borrowNow)
+
+	// The holes this cycle ordered replicas into stay held, from both
+	// engines, until the replicas' pods hold their nodes. After the release:
+	// a released replica holds no hole.
+	if e.cycleFitted {
+		e.admitInFlight(requests, allDecisions, e.cyclePlanned, variantScaleTargets, time.Now())
 	}
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
@@ -1698,10 +1844,12 @@ func (e *Engine) applyScaleToZeroEnforcement(
 		forbiddenBy = tierNames(disabledBy)
 	}
 	if e.recordForbiddenBy(namespace, modelID, forbiddenBy) && len(forbiddenBy) > 0 {
-		logger.Info("Scale-to-zero is disabled by the scaling policy of a tier this model's variants name; "+
-			"enable scaleToZero on every such tier",
+		fix, perModel := scaleToZeroForbiddenFix(e.Config.ScalingPolicyConfigForNamespace(namespace),
+			modelID, namespace, forbiddenBy)
+		logger.Info(scaleToZeroForbiddenMessage,
 			"modelID", modelID, "namespace", namespace,
-			"tiers", tierNames(tiers), "disabledBy", forbiddenBy)
+			"tiers", tierNames(tiers), "disabledBy", forbiddenBy,
+			"disabledByPerModelEntry", perModel, "fix", fix)
 	}
 
 	if len(decisions) == 0 {
@@ -2138,7 +2286,7 @@ func (e *Engine) applySaturationDecisions(
 		// cycle.
 		if !constants.IsAcceleratorResolved(acceleratorName) {
 			e.emitAcceleratorNotResolvedEvent(&updateVa)
-			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, string(e.Config.EffectiveLimiterMode()))
+			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, e.Config.EffectiveLimiterSummary())
 		}
 
 		// Stage the just-computed decision on the in-memory VA so that
@@ -2225,7 +2373,7 @@ func (e *Engine) applySaturationDecisions(
 				// Emit Kubernetes event for observability
 				e.recordScalingEvent(&updateVa, decision.Action, decision.TargetReplicas, decision.Reason())
 				if decision.WasLimited {
-					e.recordEvent(va, corev1.EventTypeWarning, constants.K8SEventResourceConstrained, decision.Reason())
+					e.recordEvent(va, corev1.EventTypeWarning, constants.K8SEventResourceConstrained, constrainedMessage(&decision))
 				}
 
 				logger.Info("Successfully emitted metrics",

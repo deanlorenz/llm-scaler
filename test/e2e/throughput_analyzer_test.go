@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // Saturation config YAML strings for multi-analyzer (V2) mode.
@@ -139,10 +140,10 @@ func restartWVAController(ctx context.Context) error {
 	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"` + restartedAtAnnotation + `":"` +
 		stamp + `"}}}}}`)
 	if _, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Patch(
-		ctx, "wva-controller-manager",
+		ctx, utils.ControllerDeploymentName,
 		types.StrategicMergePatchType, patch, metav1.PatchOptions{},
 	); err != nil {
-		return fmt.Errorf("patch wva-controller-manager: %w", err)
+		return fmt.Errorf("patch %s: %w", utils.ControllerDeploymentName, err)
 	}
 	// One budget for the rollout and the lease wait together. The lease wait
 	// alone has been measured at 64 s (an old pod that died without releasing,
@@ -152,9 +153,9 @@ func restartWVAController(ctx context.Context) error {
 	poll := time.Duration(cfg.PollIntervalSec) * time.Second
 	rolledOut := false
 	for time.Now().Before(deadline) {
-		dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+		dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, utils.ControllerDeploymentName, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("get wva-controller-manager: %w", err)
+			return fmt.Errorf("get %s: %w", utils.ControllerDeploymentName, err)
 		}
 		// Status lags the patch: until the controller has observed the new
 		// generation, the counts describe the previous rollout and read as
@@ -173,7 +174,7 @@ func restartWVAController(ctx context.Context) error {
 		time.Sleep(poll)
 	}
 	if !rolledOut {
-		return fmt.Errorf("wva-controller-manager rollout did not complete within %ds", cfg.PodReadyTimeout)
+		return fmt.Errorf("%s rollout did not complete within %ds", utils.ControllerDeploymentName, cfg.PodReadyTimeout)
 	}
 	if err := waitForWVALeadership(ctx, stamp, deadline, poll); err != nil {
 		return err
@@ -187,25 +188,18 @@ const externalScalerService = "wva-external-scaler"
 
 // wvaControllerPods names the controller-manager Pods that exist now.
 //
-// By owner, not by label: the e2e may install the controller in the model
-// namespace, where the warm-pool relays wear the controller's labels on
-// purpose (fixtures.ControllerDriverLabels) and would otherwise be waited on
-// as though they were a controller that never goes away.
+// By owner, not by label (utils.ControllerPods): the e2e may install the
+// controller in the model namespace, where the warm-pool relays wear the
+// controller's labels on purpose (fixtures.ControllerDriverLabels) and would
+// otherwise be waited on as though they were a controller that never goes away.
 func wvaControllerPods(ctx context.Context) ([]string, error) {
-	pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
+	pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 	if err != nil {
-		return nil, fmt.Errorf("list controller pods: %w", err)
+		return nil, err
 	}
 	var names []string
-	for i := range pods.Items {
-		for _, owner := range pods.Items[i].OwnerReferences {
-			if owner.Kind == "ReplicaSet" && strings.HasPrefix(owner.Name, "wva-controller-manager-") {
-				names = append(names, pods.Items[i].Name)
-				break
-			}
-		}
+	for i := range pods {
+		names = append(names, pods[i].Name)
 	}
 	return names, nil
 }
@@ -377,8 +371,8 @@ func waitForWVALeadership(ctx context.Context, stamp string, deadline time.Time,
 		}
 		time.Sleep(poll)
 	}
-	return fmt.Errorf("no live wva-controller-manager pod acquired the leader lease within %ds (last holder %q)",
-		cfg.PodReadyTimeout, lastHolder)
+	return fmt.Errorf("no live %s pod acquired the leader lease within %ds (last holder %q)",
+		utils.ControllerDeploymentName, cfg.PodReadyTimeout, lastHolder)
 }
 
 // buildThroughputSustainedLoadJob returns a Job spec that sends continuous completions

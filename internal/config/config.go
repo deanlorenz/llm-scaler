@@ -2,6 +2,7 @@ package config
 
 import (
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +24,13 @@ type Config struct {
 	saturation scalingPolicyConfig // namespace-aware
 }
 
-// LimiterType selects which pipeline.Limiter implementation
-// pipeline.NewLimiterFromConfig builds at startup. The two values are
-// mutually exclusive in the initial implementation — composing physical and
-// quota bounds (min(physical, quota)) is the limiter chain's job, tracked in
-// issue #1003.
+// LimiterType names one kind of GPU limiter allocation.NewLimiterFromConfig can
+// build. A policy declares a SET of them (Config.EffectiveLimiterTypes): a
+// physical entry and quota entries compose, and a decision must fit every one
+// (bounding by min(physical, quota), issue #1003). LimiterTypeNone is the empty
+// set, not a member of one: it never appears in a LimiterTypes, and "none" is
+// only how logs and the controller status spell an empty set
+// (LimiterTypes.String).
 type LimiterType string
 
 const (
@@ -45,9 +48,9 @@ const (
 	// (physical GPU discovery via the GPU operator).
 	LimiterTypeInventory LimiterType = "inventory"
 
-	// LimiterTypeQuota builds one or more QuotaInventory-backed limiters
-	// from an operator-supplied YAML file. Multiple entries are wrapped in
-	// a CompositeLimiter that applies them sequentially.
+	// LimiterTypeQuota builds one QuotaInventory-backed limiter per inline
+	// quota entry. They are grouped with the physical limiter, when one is
+	// declared, in a CompositeLimiter whose constraints are intersected.
 	LimiterTypeQuota LimiterType = "quota"
 )
 
@@ -682,72 +685,144 @@ func (c *Config) MarkConfigMapsBootstrapFailed(err error) {
 	c.configSync.lastConfigMapsSyncError = ""
 }
 
-// EffectiveLimiterMode returns the GPU limiter implementation to construct. The
-// limiters: list on the global saturation "default" entry is the SOLE source: no
-// entries selects LimiterTypeNone, a quota entry selects LimiterTypeQuota, and
-// otherwise a gpu-inventory/inventory entry selects LimiterTypeInventory.
+// EffectiveLimiterTypes returns the set of GPU limiter kinds to construct, in a
+// fixed order: LimiterTypeInventory first when a gpu-inventory/inventory entry
+// is declared, then LimiterTypeQuota when any quota entry is. Empty when no
+// limiter is declared. The limiters: list on the global saturation "default"
+// entry is the SOLE source.
 //
-// The list carries the whole intent — declaring a limiter is what turns limiting
-// on. There is no separate enable flag: enableLimiter used to gate the saturation
-// optimizer independently, so quota entries could be declared and silently not
-// enforced, while the scale-from-zero path consulted a limiter the operator never
-// asked for. Both halves now follow this one value.
+// It is a set because the limiters compose: a policy that declares both a
+// physical entry and quota entries is bounded by both. It used to collapse to
+// one mode, quota winning, and the physical limiter a policy declared was then
+// never built -- the operator read the list as "bounded by real GPUs as well"
+// while nothing consulted physical capacity.
+//
+// The list carries the whole intent -- declaring a limiter is what turns
+// limiting on. There is no separate enable flag: enableLimiter used to gate the
+// saturation optimizer independently, so quota entries could be declared and
+// silently not enforced, while the scale-from-zero path consulted a limiter the
+// operator never asked for. Both halves now follow this one value.
 //
 // Because it reads the live saturation config, the value changes without a
-// restart when the ConfigMap changes.
+// restart when the ConfigMap changes. A caller asking more than one question of
+// the set (is a physical limiter declared, is a quota, how to log it) takes ONE
+// snapshot and asks it, so a ConfigMap edit between two reads cannot give it
+// answers about two different policies.
 // Thread-safe.
-func (c *Config) EffectiveLimiterMode() LimiterType {
+func (c *Config) EffectiveLimiterTypes() LimiterTypes {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return limiterModeOf(c.effectiveLimitersLocked())
+	return limiterTypesOf(c.effectiveLimitersLocked())
 }
 
-// limiterModeOf is the limiter implementation a limiters: list selects: none
-// for an empty list, quota when any entry is a quota, otherwise inventory.
-func limiterModeOf(limiters []QuotaLimiterConfig) LimiterType {
-	if len(limiters) == 0 {
-		return LimiterTypeNone
+// HasPhysicalLimiter reports whether a gpu-inventory (or inventory) entry is
+// declared, alone or beside quota entries: EffectiveLimiterTypes().HasPhysical(),
+// for callers with that one question.
+// Thread-safe.
+func (c *Config) HasPhysicalLimiter() bool {
+	return c.EffectiveLimiterTypes().HasPhysical()
+}
+
+// LimiterTypes is a declared limiter set, in the order EffectiveLimiterTypes
+// documents. Empty means no limiter is declared.
+type LimiterTypes []LimiterType
+
+// Declared reports whether any limiter is declared, which is what turns
+// limiting on.
+func (t LimiterTypes) Declared() bool { return len(t) > 0 }
+
+// HasPhysical reports whether the physical (gpu-inventory) limiter is in the set.
+func (t LimiterTypes) HasPhysical() bool { return slices.Contains(t, LimiterTypeInventory) }
+
+// HasQuota reports whether quota limiters are in the set.
+func (t LimiterTypes) HasQuota() bool { return slices.Contains(t, LimiterTypeQuota) }
+
+// String renders the set for logs and the controller status: the types joined
+// by "+" ("inventory", "quota", "inventory+quota"), or LimiterTypeNone for the
+// empty set.
+func (t LimiterTypes) String() string {
+	if len(t) == 0 {
+		return string(LimiterTypeNone)
 	}
+	kinds := make([]string, 0, len(t))
+	for _, k := range t {
+		kinds = append(kinds, string(k))
+	}
+	return strings.Join(kinds, "+")
+}
+
+// isPhysicalLimiterType reports whether an inline limiters: type selects the
+// physical limiter, under either spelling.
+func isPhysicalLimiterType(t string) bool {
+	return t == limiterTypeGPUInventory || t == string(LimiterTypeInventory)
+}
+
+// limiterTypesOf is the limiter set a limiters: list selects, in the order
+// EffectiveLimiterTypes documents.
+func limiterTypesOf(limiters []QuotaLimiterConfig) LimiterTypes {
+	var physical, quota bool
 	for _, l := range limiters {
-		if l.Type == string(LimiterTypeQuota) {
-			return LimiterTypeQuota
+		switch {
+		case isPhysicalLimiterType(l.Type):
+			physical = true
+		case l.Type == string(LimiterTypeQuota):
+			quota = true
 		}
 	}
-	return LimiterTypeInventory
+	var types LimiterTypes
+	if physical {
+		types = append(types, LimiterTypeInventory)
+	}
+	if quota {
+		types = append(types, LimiterTypeQuota)
+	}
+	return types
 }
 
-// EffectiveLimiterSummary describes the limiter in force as "<mode>/<names>":
-// the mode EffectiveLimiterMode selects and, comma-separated in declared order,
-// the names of the entries that mode builds -- "quota/install-quota", say, or
-// "none" when no limiter is declared. Entries a mixed list does not enforce
-// (UnenforcedLimiterTypes) are left out, so the summary names only what bounds.
+// IgnoredPhysicalLimiters returns the indexes of the physical entries in the
+// effective limiters list beyond the first, which are not built (see
+// ScalingPolicy.IgnoredPhysicalLimiters). Callers log IgnoredPhysicalLimitersMessage.
+// Thread-safe.
+func (c *Config) IgnoredPhysicalLimiters() []int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ScalingPolicy{Limiters: c.effectiveLimitersLocked()}.IgnoredPhysicalLimiters()
+}
+
+// EffectiveLimiterSummary describes the limiters in force as
+// "<types>/<names>": the types EffectiveLimiterTypes selects (LimiterTypes.String)
+// and, comma-separated in declared order, the name of every entry -- an unnamed
+// physical entry by its type. "quota/install-quota", say, or
+// "inventory+quota/gpu,tenant-quota" for a composed set, or "none" when no
+// limiter is declared. Every declared entry is built, so every one is named.
 // Thread-safe.
 func (c *Config) EffectiveLimiterSummary() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	limiters := c.effectiveLimitersLocked()
-	mode := limiterModeOf(limiters)
-	if mode == LimiterTypeNone {
-		return string(mode)
+	types := limiterTypesOf(limiters)
+	if !types.Declared() {
+		return types.String()
 	}
-	var names []string
+	names := make([]string, 0, len(limiters))
 	for _, l := range limiters {
-		if (l.Type == string(LimiterTypeQuota)) == (mode == LimiterTypeQuota) {
-			names = append(names, l.Name)
+		name := l.Name
+		if name == "" {
+			name = l.Type
 		}
+		names = append(names, name)
 	}
-	return string(mode) + "/" + strings.Join(names, ",")
+	return types.String() + "/" + strings.Join(names, ",")
 }
 
-// UnenforcedLimiterTypes returns the limiter types cluster policy declares that
-// will not be built. See ScalingPolicy.UnenforcedLimiterTypes for why a mixed
-// list silently loses one. Reads the same source as EffectiveLimiterMode, so the
-// two cannot disagree about what is in force.
+// EffectiveLimiterWarnings returns the warnings about the limiters in force
+// that still apply as written: a quota entry named one of
+// ReservedLimiterNames (ReservedLimiterNameWarnings). Empty when none.
 // Thread-safe.
-func (c *Config) UnenforcedLimiterTypes() []string {
+func (c *Config) EffectiveLimiterWarnings() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return ScalingPolicy{Limiters: c.effectiveLimitersLocked()}.UnenforcedLimiterTypes()
+	return ReservedLimiterNameWarnings(c.effectiveLimitersLocked())
 }
 
 // EffectiveQuotaEntries returns the quota entries the quota limiter should
@@ -767,9 +842,70 @@ func (c *Config) EffectiveQuotaEntries() []QuotaLimiterConfig {
 	return inline
 }
 
+// HasClusterQuota reports whether an enforced limiter entry is a quota with
+// cluster scope: a budget over every namespace. A namespace-scoped quota bounds
+// only the namespaces it caps, so a list of those alone has no cluster budget,
+// and a namespace it excludes is bound by no quota at all.
+//
+// It answers the same with or without a physical limiter beside the quotas:
+// beside one, a namespace-scoped quota still bounds namespaces, not the
+// cluster, so the cluster-wide figure is the physical one; a cluster-scoped
+// quota is a closed allowlist over the whole cluster, so the cluster budget is
+// a quota even with the physical limiter beside it.
+// Thread-safe.
+func (c *Config) HasClusterQuota() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	// Only a quota entry carries a scope that counts; the physical inventory
+	// (gpu-inventory) has none.
+	return slices.ContainsFunc(c.effectiveLimitersLocked(), func(l QuotaLimiterConfig) bool {
+		return l.Type == string(LimiterTypeQuota) && l.Scope == QuotaScopeCluster
+	})
+}
+
+// ClusterQuotaPerController reports whether this controller manages one
+// namespace and enforces a quota entry of scope: cluster. Such a quota is
+// charged what THIS controller's variants hold, so N namespace-scoped
+// controllers reading one shared cluster quota of Q may together hold N x Q:
+// the cap is per controller, not per cluster. Callers log
+// ClusterQuotaPerControllerMessage and publish it. Thread-safe.
+func (c *Config) ClusterQuotaPerController() bool {
+	return c.WatchNamespace() != "" && c.HasClusterQuota()
+}
+
+// ClusterQuotaPerControllerMessage is the warning for ClusterQuotaPerController.
+const ClusterQuotaPerControllerMessage = "This namespace-scoped controller enforces a scope: cluster quota. " +
+	"It is charged only what its own variants hold, so the quota caps this controller, not the cluster. " +
+	"If it is the only controller reading this policy, that is the same cap. " +
+	"If other namespace-scoped controllers read it, each may spend all of it: bound tenants with a " +
+	"scope: namespace quota, or run one cluster-scoped controller for a cluster-wide cap."
+
+// KueueCountsBorrowable reports whether some quota entry counts Kueue
+// borrowing. Thread-safe.
+func (c *Config) KueueCountsBorrowable() bool {
+	for _, e := range c.EffectiveQuotaEntries() {
+		if e.KueueCountsBorrowable() {
+			return true
+		}
+	}
+	return false
+}
+
+// KueueBorrowTimings returns the borrowing timings of the first quota entry that
+// counts Kueue borrowing, or the defaults when none does.
+// Thread-safe.
+func (c *Config) KueueBorrowTimings() KueueBorrowTimings {
+	for _, e := range c.EffectiveQuotaEntries() {
+		if e.KueueCountsBorrowable() {
+			return e.BorrowTimings()
+		}
+	}
+	return QuotaLimiterConfig{}.BorrowTimings()
+}
+
 // effectiveLimitersLocked returns the limiters that actually bound this cluster.
 //
-// One place decides where they come from, so the limiter MODE and the quota
+// One place decides where they come from, so the limiter TYPES and the quota
 // ENTRIES can never disagree about it — a split that would be invisible in the
 // logs and would show up only as a quota limiter enforcing nothing. Callers must
 // hold at least the read lock.

@@ -75,8 +75,15 @@ const (
 // port; the engine answers /health whether awake or asleep, exactly as vLLM does
 // — which is why the pool asks /is_sleeping rather than inferring from /health,
 // and why a test can tell the two states apart.
+//
+// Every listener serves each connection on its own thread, as the real launcher
+// and vLLM do. A single-threaded server is held by any client that connects and
+// sends nothing, and the controller makes such connections: Go's Transport
+// finishes a dial its request no longer wants and parks the connection idle for
+// up to 90 s. CI hit this when the controller stopped a namespace's reconciler
+// with a read in flight: every later call to :8001 timed out behind it.
 const warmPoolSupervisorScript = `import json, os, threading, urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 INSTANCES = {}          # id -> {"instance_id","status","options","env_vars"}
 SLEEPING = {}           # port -> bool
@@ -224,7 +231,7 @@ class Engine(BaseHTTPRequestHandler):
 
 
 def start_engine(port, model):
-    server = HTTPServer(("0.0.0.0", port), Engine)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Engine)
     server.model = model
     with LOCK:
         SLEEPING[port] = False   # a freshly created engine is awake, then slept
@@ -290,7 +297,7 @@ class Supervisor(BaseHTTPRequestHandler):
 
 
 port = int(os.environ.get("SUPERVISOR_PORT", "8001"))
-HTTPServer(("0.0.0.0", port), Supervisor).serve_forever()
+ThreadingHTTPServer(("0.0.0.0", port), Supervisor).serve_forever()
 `
 
 // WarmPoolSpec describes an emulated pool.

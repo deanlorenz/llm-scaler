@@ -85,16 +85,33 @@ only the decode of a P/D model with `pd-gpu`, and the untagged prefill parks,
 scales and wakes under `pd-gpu` too, not under `default`. `default` applies only
 when no variant of the model names a tier.
 
-**A bad value is skipped, not fatal.** This covers two fields:
+**A bad value is skipped, not fatal.** This covers these fields:
 
 - `scaleToZero.retentionPeriod` that is not a duration (for example
   `5 minutes`) or is shorter than 30s (for example `0s` or `10s`). A retention
   that short would park a model between two requests and wake it on the next.
 - `shapeChangeHoldSeconds` below zero.
+- A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
+  `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
+  `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
+  `priority` multiplies the model's weight in the fair share (priority x
+  demand), so a finite value such as 5 weighs it five times as heavily.
+- An analyzer `score` below zero. It is read as 1, as before; the change is
+  that it is now reported.
+- A `priority` or analyzer `score` above 1000000. A weight a million times
+  another model's already takes the whole contended budget; a larger value
+  only risks overflowing the fair-share arithmetic that every model in the GPU
+  budget shares.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in
 value (10m for the retention). Everything else in the entry still applies.
+
+An analyzer's fields are the exception. The `analyzers` list is never merged
+with the layer below; an entry that sets it replaces it whole. So a skipped
+analyzer `score` is 1, and a skipped analyzer `scaleUpThreshold` or
+`scaleDownBoundary` uses the same policy's own band.
 
 You can see a skipped value in these places:
 
@@ -180,7 +197,8 @@ prefill is best-effort. That follows the llm-d router: with no prefill endpoint
 it sends the request to a decode endpoint, which runs both stages itself. The
 router already skips disaggregation for short prompts and high prefix-cache hits,
 so decode-only is a normal mode, not a failure. If prefill cannot be placed (no
-free GPUs on its accelerator, or a namespace quota excludes it), waking decode
+free GPUs on its accelerator, or its namespace quota does not allow that
+accelerator), waking decode
 alone still serves the queued request; refusing would trade a slower model for no
 model.
 
@@ -253,11 +271,13 @@ cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there needs a
 restart (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`).
 The same holds for an out-of-reach controller (`WVA_WATCH_NS` naming another
 namespace) and its own ConfigMap in its install namespace.
-`make enable-physical-limiter` and `make disable-physical-limiter` do those
+`make enable-physical-limiter` and `make disable-limiter` do those
 restarts. A cluster-scoped controller watches the policy namespace and picks the
 edit up live.
 
-A `limiters:` list selects a **single mode**, so declare **one** of these forms:
+Every entry in a `limiters:` list is built, and scaling must fit all of them. The
+forms below combine: (a) and (b) in one list bound by the GPUs that exist **and**
+the declared caps.
 
 ```yaml
 # (a) physical-capacity limiter. NOT a default -- with no limiters: list,
@@ -279,9 +299,10 @@ default: |
       quotas: { H100: 32 }
 ```
 
-- **Single mode.** With both a `quota` and a `gpu-inventory` entry, the quota
-  wins and `gpu-inventory` is ignored; only one limiter is built. (Composing
-  physical and quota caps is tracked in #1003.)
+- **Every entry is built.** A list holding a `gpu-inventory` and `quota`
+  entries bounds by both: a decision must fit the physical GPUs and every quota.
+  One physical limiter is built: a second `gpu-inventory` entry (under either
+  spelling) is ignored, with a warning, rather than rejecting the policy.
 - `type: quota` uses the **same schema** as `QuotaLimiterConfig`: `scope`,
   `quotas`, `namespaceQuotas` and `exclude` all apply, and several quota entries
   compose. A quota entry may set `kueue: { enabled: true }` to be bounded by
@@ -324,12 +345,45 @@ reports `invalid`) and the controller logs
 
 - one group per namespace that a namespace quota (`scope: namespace`) covers, per
   accelerator type;
-- one cluster group per accelerator type for every other model, when the cluster
-  limiter is a `quota`. Under a `gpu-inventory` limiter alone there is no cluster
-  group unless you set `physicalGroups: true` (see the table).
+- one cluster group per accelerator type for every other model, when a
+  `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
+  is no cluster group unless you set `physicalGroups: true` (see the table).
+
+**An excluded namespace needs a finite cluster bound.** To share the models of a
+namespace that a namespace quota lists in `exclude`, add a finite
+`scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
+unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
+quota is a finite bound too: with `physicalGroups: true` they are shared over
+it. Without a finite bound, their models stay on the default optimizer, and
+the controller logs them once:
+`Utilization share: not sharing models no quota bounds`. No line says when they
+are shared again; their role series appear instead.
+
+<details>
+<summary>Details: why, and what the cluster group gets</summary>
+
+The namespace quota does not bound an excluded namespace. Without a finite
+cluster bound there is no budget to share.
+
+With a `scope: cluster` quota, the excluded namespace's models form the cluster
+group. Every GPU a tenant's own group fills is also charged to the cluster
+quota. So the cluster group gets only what the cluster quota leaves after the
+tenants' claims: its free GPUs, less every tenant group's free quota, never
+below zero. For example, a cluster quota of 20
+with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
+fill 4.
+
+A tenant claims only whole replicas. With 8-GPU replicas, a tenant with 4 free
+GPUs claims none of them, so the cluster group can still fill a free node.
+
+This stops the cluster group from counting GPUs a tenant may also fill. It does
+not bound the tenants against each other: each tenant's group is bounded only by
+its own free quota and the whole cluster free.
+
+</details>
 
 A model whose variants run on more than one accelerator type, or whose analyzer
-result is not live this cycle, is left to today's optimizer for that cycle.
+result is not live this cycle, is left to the default optimizer for that cycle.
 
 **Start in shadow mode.** `shadow` defaults to `false`, so
 `optimizer: {type: utilizationShare}` on its own **acts**: it moves replicas
@@ -363,10 +417,10 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `reserveGPUs` | `0` | GPUs held out of the shared budget so a scale-from-zero wake can start at once instead of waiting for a transfer. |
 | `maxHeadroomReplicas` | `1` | Applies only while the quota is **contended**: when it cannot hold every model at its peak need over the last `stabilization.flappingWindow` at the same time (each model's peak need, or its `minReplicaCount` if higher, rounded up to whole replicas, summed, is more than the quota). A peak counts only once two readings in a row reach it, so one glitched reading does not cap the group for a window. While no model's peak is known -- a new group, or every model after a controller restart that finds no usable stored history, until a `flappingWindow` of history exists -- each counts at its `maxReplicas` (the whole quota without one), so the cap is on until a full window of history shows the peaks fit. The demand history is stored in the ConfigMap `wva-utilization-share-history` in the controller's namespace and read back after a restart or a leader change, so a restart costs a window of capped headroom only when that history is missing, cannot be read, or ends more than ten minutes before the restart (see **After a restart or a leader change** below). A model that joins a group whose peaks are known counts at what it holds until its own window fills, and a model absent for longer than a `flappingWindow` starts its history again. `wva_utilization_share_headroom_capped` shows whether the cap is on. While the peaks fit, the whole spare is spread by weight and nothing is given back: in simulation, capping a quota with room for every peak made whole-node models lose 6 to 43% of their demand to giving replicas back and cold-starting them again, against none with the spare spread. While they fit, a model already at its need takes no headroom from a donor that it would leave below the donor's own peak over the last `flappingWindow` (counted as `donor-peak` in `wva_utilization_share_withheld_total`): such a move, from a donor that may drain for minutes, lands after the receiver's burst and just before the donor's own. While contended: how many replicas of headroom the quota's spare GPUs give a model of weight 1 above its need (or above its `minReplicaCount`, if that is higher). A model of weight `w` gets `w` times as many, rounded up: with the default classes, `best-effort` 1, `standard` 1, `important` 2, `critical` 4. Each role of a P/D model counts separately. An integer from `0` to `10000`. The rest of the spare stays unassigned, so a model whose demand rises takes it at once instead of waiting for another model's pods to finish their requests and release their GPUs. `0` gives no headroom; a value as large as the models' `maxReplicas` spreads the whole spare by weight (the behaviour before this key existed). While contended, a model that has held more than its need plus its headroom for `stabilization.consecutiveCyclesBeforeMove` cycles in a row (two by default) starts giving all of the extra back to the quota in one cycle, but only while no model that can grow is short of its need and only while it would stay calm (see `stabilization.returnSpareWhenLoadAtMost`). The release that follows still waits the model's scale-down window, as a scale-down does, and is called off while it waits if the model's demand comes back. A return always goes to the unassigned GPUs. A model that turns short while a return is still releasing waits for the returned GPUs that will free whole replicas of it, rather than draining other models for GPUs already on their way (`awaiting-return`), and the idle fill raises it once they are released; only returned pods its pods fit count (two 4-GPU pods do not make room for one 8-GPU pod), and a return whose pod shape is not known -- one rebuilt from its pod marks after a restart -- counts for nothing. It never goes below its need (the higher of its current and average need while it swings) plus its headroom, its `minReplicaCount` or its last replica, and never below what the other models' peaks leave of the quota in whole replicas: a model that bursts alone keeps its spare, and GPUs are returned only when another model's recent peak could use them. Weight buys more headroom replicas, not protection: a model's headroom is still taken for another model's need. While another model bursts for longer than a transfer takes to land, a model whose demand swings faster than that (up and down at least twice, by a quarter of its peak or more) is capped on its average need rather than its current one: capped on its crest, it took the spare GPUs that the longer burst then had to wait a release for. |
 | `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
-| `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
+| `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. Cluster-scoped controllers only. A namespace-scoped controller ignores it: where a quota bounds its namespace it changes nothing, and under `gpu-inventory` alone the optimizer runs without it, logs a warning and sets `utilizationShareNote` in `wva-controller-status`. The mode is not `invalid`. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
-| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
-| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
+| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on the default optimizer. |
+| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to the default optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
 | `stabilization` | see below | How fast GPUs move between models against how often they move back. |
 
 **Stabilization.** GPUs that move between models take minutes to become useful
@@ -433,7 +487,7 @@ clamped into it.
 A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
-where its weight would be weighed against other tenants'; there today's optimizer
+where its weight would be weighed against other tenants'; there the default optimizer
 keeps it.
 
 **Disabling one namespace:**
@@ -453,7 +507,7 @@ disables nothing, and the controller logs
 **A canary on a cluster quota.** `namespaces:` cannot narrow a cluster group;
 `clusterNamespaces:` does. With it set, the cluster group of each accelerator type
 plans only the models of the listed namespaces, sharing among them the quota's
-free GPUs plus what they hold. Every other model stays on today's optimizer, and
+free GPUs plus what they hold. Every other model stays on the default optimizer, and
 the GPUs it holds stay outside the group. Start with one or two namespaces whose
 owners agreed to it, then widen the list or remove it (empty plans every
 namespace):
@@ -1106,18 +1160,25 @@ this variant's answer, never where it only limits it. There are two such places:
 
 - **A ceiling on a stored estimate.** A variant with no ready replica is priced
   from its stored record, bounded above by a compatible sibling's.
-- **The k2 borrow** (`P2-borrow` in the [cycle log](cycle-log.md)). A variant
+- **The k2 borrow** (`P2-borrow` in the [cycle log](cycle-log.md), and
+  `wva_learned_state_borrowed{quantity="k2"}` in
+  [Prometheus](prometheus.md#wva_learned_state_borrowed)). A variant
   that has not yet measured its own k2 for the traffic it is serving uses a
   compatible sibling's measured k2 in the same namespace, but only where it is
-  lower than the variant's own capacity. After 30 minutes it relaxes back to the
+  lower than the variant's own capacity, and only from a sibling whose measured
+  KV cache is within 3% of the variant's. After 30 minutes it relaxes back to the
   variant's own figure over 6 hours, because a k2 that is too low never corrects
   itself: lightly loaded replicas never saturate, and saturation is the only time
-  k2 is measured.
+  k2 is measured. The hours count only while the variant is serving, so a parked
+  variant keeps its borrow for when it wakes. Once relaxed, it does not start
+  again unless a sibling's figure is more than 20% below the one it last ran
+  on, or the variant's engine arguments change (a new image alone does not).
 
-Neither can be turned off. What they cost is in the other direction: a sibling
-that only *looks* compatible — two configurations whose unread flags both fell
-back to the defaults, for example — can hold extra replicas, for up to the
-6.5 hours of a borrow.
+What they cost is in the other direction: a sibling that only *looks*
+compatible — two configurations whose unread flags both fell back to the
+defaults, for example — can hold extra replicas, for up to the 6.5 serving hours
+of a borrow. The k2 borrow can be turned off per model with
+[`disableK2Borrow`](#disablek2borrow); the ceiling cannot.
 
 #### Why it is off
 
@@ -1171,6 +1232,31 @@ Joining two variants on the fingerprint takes all four of `model_name`,
 `accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
 digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
+### `disableK2Borrow`
+
+Stops the k2 borrow (`P2-borrow`) for a model. Its variants price from their
+own figures only: their own measured k2, or the deployment-derived figure and
+k1 until they measure one. A variant's own measurement from engine arguments
+it ran before (`P2-prior`) is its own figure, not a borrow, and is kept. **The borrow is on by default**, because it can only
+order more replicas, never fewer. Turn it off when it costs you: a sibling that
+looks compatible but is not, holding a fleet larger than its load needs.
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  disableK2Borrow: true
+```
+
+- It takes effect on the next cycle. The `Effective scaling policy` log line
+  shows what the model resolved `disableK2Borrow` to.
+- A borrow already running is paused, not reset. If you turn the borrow back
+  on, it resumes where it stood.
+- One direction only, like `enableLearnedStateReuse`: a per-model entry can turn
+  the borrow **off** where the default leaves it on, but not back on where the
+  `default:` entry turned it off.
+- To discard what one variant has learned, rather than stop it borrowing, see
+  [Reset one variant's learned state](troubleshooting.md#reset-one-variants-learned-state).
 ### `slo` (observe only)
 
 Latency targets, and the analyzer that judges a model against them. **On this
@@ -1300,7 +1386,8 @@ One thing about turning it on **can** change scaling: a tier that lists
 - The **SLO** row of the operational dashboard (collapsed by default): observed
   against target per objective, what it judged and why it did not.
 - The series under [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics),
-  and, if installed, two alerts, `WVAModelSLOMissed` and `WVAModelSLOUnjudged`.
+  and, if installed, three alerts, `WVAModelSLOAttainmentLow` (TTFT),
+  `WVAModelSLOMissed` (TPOT) and `WVAModelSLOUnjudged`.
   Their runbook is
   [A model misses, or is never judged against, its SLO](troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo).
 - The first judged point comes a window plus its grace after you turn it on
@@ -1343,8 +1430,9 @@ share of the last day a model was not excluded, for either objective, is
 judged either).
 
 **Judged attainment reads higher than what users saw.** The windows left out are
-the ones around a scale-up, which are when misses happen, so attainment and
-`WVAModelSLOMissed` describe the fleet in steady state. To score what clients
+the ones around a scale-up, which are when misses happen, so attainment,
+`WVAModelSLOAttainmentLow` and `WVAModelSLOMissed` describe the fleet in steady
+state. To score what clients
 got over a whole run, score their own per-request records.
 
 **Rules**
@@ -1993,7 +2081,12 @@ tier has a say: a model parks only if every tier its variants name allows
 all variants name the same tier, this is just that tier's setting. When a tier
 stops a model from parking, the controller logs `Scale-to-zero is disabled by
 the scaling policy of a tier this model's variants name`, once per change, with
-the model's `tiers` and the ones that disable it (`disabledBy`).
+the model's `tiers` and the ones that disable it (`disabledBy`). Each tier is
+resolved with the model's per-model entry merged in, so a per-model
+`scaleToZero.enabled: false` disables every tier. The line then says
+`disabledByPerModelEntry=true`, and its `fix` field says to enable it on that
+entry. When no variant names a tier, `disabledBy` is `[default]` and `fix`
+names the `default` entry.
 
 A variant that names no tier follows the variants that do, for parking,
 `requirePrefill` and the utilization-share weight, as it already did for the

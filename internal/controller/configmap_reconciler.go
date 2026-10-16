@@ -283,7 +283,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 				// error. This line only says what stays in force.
 				logger.Info("Keeping the cluster policy already in force",
 					"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
-					"limiters", len(previous.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
+					"limiters", len(previous.Limiters), "limiterTypes", r.Config.EffectiveLimiterTypes().String())
 				return nil
 			}
 			if !r.Config.ConfigMapsBootstrapComplete() {
@@ -310,11 +310,12 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 	}
 
 	r.reportRejectedEntries(ctx, cm, rejected, nil, true)
+	warnAboutLimiters(logger, policy)
 	r.Config.UpdateClusterPolicy(&policy)
 	r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
 		"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
-		"limiters", len(policy.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
+		"limiters", len(policy.Limiters), "limiterTypes", r.Config.EffectiveLimiterTypes().String())
 	return nil
 }
 
@@ -469,6 +470,12 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		// raise their own quota, which is the entire thing WVA_POLICY_NAMESPACE
 		// exists to prevent. Say so rather than dropping it silently: a limiter
 		// block that reads as enforcing and enforces nothing is the worst outcome.
+		if !r.Config.PolicyNamespaceIsSeparate() {
+			// This ConfigMap's "default" entry is where the limiters are read.
+			if policy, ok := configs[config.GlobalDefaultsKey]; ok {
+				warnAboutLimiters(logger, policy)
+			}
+		}
 		if r.Config.PolicyNamespaceIsSeparate() {
 			for key, satConfig := range configs {
 				if len(satConfig.Limiters) > 0 {
@@ -495,7 +502,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		logger.Info("Updated global scaling policy from ConfigMap", "entries", count)
 		r.warnIfThroughputRegistrationDiverged(logger, cm)
 	} else {
-		// Limiters and quotas are CLUSTER-scope: EffectiveLimiterMode reads them only
+		// Limiters and quotas are CLUSTER-scope: EffectiveLimiterTypes reads them only
 		// from the system namespace's ConfigMap, so a tenant cannot grant themselves
 		// capacity by declaring a limiter — or raise a quota by declaring a looser
 		// one — in their own namespace. That is the point, but silently dropping the

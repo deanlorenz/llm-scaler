@@ -65,7 +65,8 @@ kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
   waits for the longest `retentionPeriod` among them. A variant that names no
   tier follows the ones that do.
 - `retentionPeriod` must be at least 30s. A shorter or misspelled value is
-  skipped, and the model uses the tier's, then `default`'s, then 10m. The
+  skipped, and the model uses the value from the layer below: the tier's,
+  then `default`'s, then 10m. The
   `ConfigFieldIgnored` event on the ConfigMap says so.
 - Re-running `make deploy-wva` resets the `default` entry, which drops
   `scaleToZero`. Put it on a per-model entry or a named tier to keep it, or
@@ -176,7 +177,7 @@ serving.
 | --- | --- |
 | scale-to-zero on, one variant with `minReplicaCount > 0` | the model never reaches zero; idle accelerators stay billed |
 | every variant at `minReplicaCount: 0`, scale-to-zero off | the scaling manager keeps the model up |
-| every variant at `minReplicaCount: 0`, scale-to-zero on in `default` but off in a tier one variant names | the model never reaches zero: every tier its variants name must allow it. Enable `scaleToZero` on every such tier. The log line `Scale-to-zero is disabled by the scaling policy of a tier` names them (`disabledBy`) |
+| every variant at `minReplicaCount: 0`, scale-to-zero on in `default` but off in a tier one variant names | the model never reaches zero: every tier its variants name must allow it. The log line `Scale-to-zero is disabled by the scaling policy of a tier` lists the tiers in `disabledBy` and says what to change in `fix`. Enable `scaleToZero` on each of them, or on the model's per-model entry. If that entry is what disables it, the line says `disabledByPerModelEntry=true`; enable it there |
 
 The second is most misleading with a **single variant**, where
 `minReplicaCount: 0` looks like a request to park. None is rejected. All

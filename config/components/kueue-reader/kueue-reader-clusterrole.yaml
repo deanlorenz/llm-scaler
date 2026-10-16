@@ -3,10 +3,13 @@ kind: ClusterRole
 metadata:
   name: kueue-reader-role
 rules:
+# Cohorts are listed to tell a flat cohort from a nested one, for borrowing.
+# Denied, borrowing reads hierarchy-unknown; the nominal bound is unaffected.
 - apiGroups:
   - kueue.x-k8s.io
   resources:
   - clusterqueues
+  - cohorts
   - resourceflavors
   verbs:
   - get
@@ -20,3 +23,8 @@ rules:
   - namespaces
   verbs:
   - get
+# Not here: Workloads and LocalQueues of every namespace, which counting cohort
+# borrowing reads. That read reaches every tenant's Workloads, so it is its own
+# ClusterRole, granted by the installer only to a controller whose policy
+# counts borrowing (pl_grant_kueue_borrow_read in deploy/lib/physical_limiter.sh).
+# The installer patches rules/1 (namespaces) by index.

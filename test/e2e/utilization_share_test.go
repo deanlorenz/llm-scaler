@@ -17,6 +17,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // The utilization-share optimizer on a real cluster
@@ -311,15 +312,15 @@ func unreadyPods(ns string) string {
 
 // controllerLogsSince returns the controller pods' logs since t, all pods
 // together: only the leader logs the optimizer, and which pod leads is not
-// this spec's business.
+// this spec's business. No controller Pod fails the spec: an empty log would
+// otherwise read as "the controller said nothing".
 func controllerLogsSince(t time.Time) string {
-	pods, err := k8sClient.CoreV1().Pods(cfg.WVANamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "control-plane=controller-manager",
-	})
+	pods, err := utils.ControllerPods(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName)
 	Expect(err).NotTo(HaveOccurred())
+	Expect(pods).NotTo(BeEmpty(), "no Pod of Deployment %s in %s", utils.ControllerDeploymentName, cfg.WVANamespace)
 	since := metav1.NewTime(t)
 	var b strings.Builder
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		// Bounded, so a stuck read fails the poll instead of stalling the spec.
 		readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		rc, err := k8sClient.CoreV1().Pods(p.Namespace).GetLogs(p.Name, &corev1.PodLogOptions{SinceTime: &since}).Stream(readCtx)

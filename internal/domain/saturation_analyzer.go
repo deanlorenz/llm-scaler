@@ -1,7 +1,10 @@
 package domain
 
 import (
+	"time"
+
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -167,8 +170,15 @@ type VariantDecision struct {
 	// intent and leaves this false.
 	WasLimited bool
 	// LimitedBy names the constraint provider whose pool bound the decision
-	// (empty when no provider imposes a finite bound).
+	// (empty when no provider imposes a finite bound). It is the one value
+	// the limiter_name label of wva_decisions_limited_total carries: on a tie,
+	// the first provider in the declared order.
 	LimitedBy string
+	// LimitedByAlso names the other providers whose pools bound the decision
+	// exactly as tightly as LimitedBy's, in the declared order; nil when one
+	// bound alone. The ResourceConstrained Event and the scaling-decision line
+	// name them beside LimitedBy.
+	LimitedByAlso []string
 
 	// --- Replica bounds ---
 	// MinReplicas is the minimum number of replicas for this variant (from VA spec field).
@@ -265,6 +275,25 @@ type VariantReplicaState struct {
 	FilledReplicas int
 	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
 	PodGPUs []int
+	// Tolerations and TopologyKey say which nodes a replica's pods may land
+	// on; see VariantMetadata.
+	Tolerations []corev1.Toleration
+	TopologyKey string
+	// Placements is each pod template's node placement; see
+	// VariantMetadata.Placements.
+	Placements []PodPlacement
+	// ReplicaRequests is what one replica requests of each resource; see
+	// VariantMetadata.ReplicaRequests.
+	ReplicaRequests map[string]int64
+	// PriorityClass is the replica's Kueue priority class; see
+	// VariantMetadata.PriorityClass.
+	PriorityClass string
+	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedAt: see
+	// VariantMetadata.UnplacedReplicas.
+	UnplacedReplicas int
+	UnplacedSince    time.Time
+	UnplacedPods     []string
+	UnplacedAt       map[string]time.Time
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

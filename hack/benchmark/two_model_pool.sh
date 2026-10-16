@@ -272,6 +272,21 @@ kc() { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
 
 need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
 
+# The last few metric-read errors in the controller's own log, or nothing.
+#
+# Its Pods are found by ownership (controller_pods.py), not by label: warm-pool
+# Pods carry app.kubernetes.io/name too, so `logs -l` on it read a pool Pod's
+# log as the controller's. No controller Pod means no errors to show, as a
+# failed kubectl always has here.
+controller_metric_errors() {
+    local selector
+    selector="$(k get pods -l control-plane=controller-manager -o json 2>/dev/null \
+        | python3 "$HERE/controller_pods.py" 2>/dev/null)" || return 0
+    [ -n "$selector" ] || return 0
+    k logs -l "$selector" --tail=400 2>/dev/null \
+        | grep -iE 'prometheus|metrics' | grep -iE 'error|refused|denied|timeout|no such host' | tail -5
+}
+
 case "$GATEWAY_REUSE" in
     auto|true|false) ;;
     *) die "GATEWAY_REUSE=$GATEWAY_REUSE: use auto (reuse the cluster's Istio when it runs one), true or false" ;;
@@ -1396,8 +1411,7 @@ verb_verify() {
         ok "every model ScaledObject reports Ready"
     fi
     local errs
-    errs="$(k logs -l app.kubernetes.io/name=workload-variant-autoscaler --tail=400 2>/dev/null \
-        | grep -iE 'prometheus|metrics' | grep -iE 'error|refused|denied|timeout|no such host' | tail -5)"
+    errs="$(controller_metric_errors)"
     if [ -n "$errs" ]; then
         warn "the controller is logging metric-read errors; it may be pointed at a Prometheus that does not scrape this namespace:"
         printf '%s\n' "$errs" | sed 's/^/      /' >&2

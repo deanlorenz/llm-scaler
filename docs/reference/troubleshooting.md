@@ -17,19 +17,26 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
-| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
-| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason="no-wake-signal"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch | [will not wake](#a-model-will-not-wake-from-zero) |
+| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
+| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
+| replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
+| a lender's replica Pending after Kueue preempted | the lender's new pod `Pending` with no node; a borrower's Workload evicted with reason `Preempted`; later `reason="borrow-unplaced"` | Kueue preempts by priority, not by node: the GPUs it freed form no node the replica fits | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
+| a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
+| Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `reason` in `limiterBudgets`; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold (withheld), Kueue cannot be trusted right now (frozen), or there is nothing to draw (counted, but 0) | [borrowing is withheld](#borrowing-is-withheld) |
+| scaled past nominal | a model holds more GPUs than its ClusterQueue's `nominalQuota`; `used` above `guaranteed` in `limiterBudgets`; `wva_kueue_borrowed_gpus > 0` | expected: borrowing is on by default for a Kueue-backed namespace quota | [past nominal](#a-model-runs-past-its-kueue-nominal-quota) |
+| a Kueue borrowing alert fires | `WVAKueueReaderStale`, `WVAKueueReaderStaleNamespace`, `WVAKueueControllerDown`, `WVAKueueBorrowDrift`, `WVAKueueVersionUnknown`, `WVAKueueVersionUntested`, `WVAKueueLenderWaitingPastCooldown` | a read is failing, the Kueue controller is not running, Kueue accounts differently, its version cannot be read or is untested, a lender is not getting its capacity back | [Kueue borrowing alerts](#kueue-borrowing-alerts) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
-| controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
-| misses its SLO, or is never judged | `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
+| one variant held larger than its load needs | `k2-decision` keeps `P2-hist`, `P2-prior` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-prior`: the variant's own k2 from before its engine arguments changed; expected after a rollout that changes them, held for 30 minutes of serving, then relaxed over 6 hours of serving. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist` or `P2-prior`: [reset one variant](#reset-one-variants-learned-state) (`disableK2Borrow` does not affect `P2-prior`). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
+| misses its SLO, or is never judged | `WVAModelSLOAttainmentLow`; `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -57,7 +64,8 @@ Then check the silent causes, in this order:
 
 ```promql
 wva_model_scaling_blocked{model_name="<model>"}           # any reason holding it back
-wva_node_access_denied == 1                               # gpu-inventory limiter, nodes unreadable: nothing scales up
+wva_node_access_denied == 1                               # gpu-inventory alone, nodes unreadable: nothing scales up
+wva_constraint_provider_skipped == 1                      # a declared limiter is left out; the others still bound
 increase(wva_decisions_limited_total[15m]) > 0            # a limiter capped it
 wva_unmeasured_queue{model_name="<model>"} > 0            # requests queue for pods it cannot see
 wva_metrics_freshness_status{status!="fresh"} > 0         # decided on stale or missing data
@@ -71,8 +79,26 @@ a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 
 **Symptom**: the workload stays at 0 replicas while requests are pending.
 
-Work through these in order. Do not run `hack/verify_scale_from_zero.sh` during
-an incident: it parks the model first.
+First check whether a limiter refused the wake: the model sees its queue,
+and nothing fits.
+
+```bash
+$LOGS | grep 'Scale-from-zero: no variant woken' | grep '"modelID": "<model>"' | tail -3
+```
+
+While the wake is refused, `wva_model_scaling_blocked{reason="wake-no-capacity"}`
+is set for the model. The log line's `reason` is the outcome (`no-capacity`,
+`prefill-required`, `nominal-lent-out`), `gpuBudgets` what the wake was measured
+against, and `demand` what it asked for. Free GPUs or raise the quota, as in
+[GPUs held](#gpus-held-or-quota-spent). It is also set while the model is in a
+borrowing cooldown (`borrowCooldown`) after a borrowed replica of it was
+released: until the cooldown ends, the wake places only into a free node hole
+and borrows none. `wake-nominal-lent-out` in its place
+means the ClusterQueue lent its nominal to a peer it cannot reclaim from: see
+[past nominal](#a-model-runs-past-its-kueue-nominal-quota).
+
+With no such line and no such reason, work through these in order. Do not run
+`hack/verify_scale_from_zero.sh` during an incident: it parks the model first.
 
 1. **The InferencePool.**
    ```bash
@@ -318,10 +344,19 @@ model cannot grow while others hold GPUs.
 | `wva_available_gpus` | GPUs the `gpu-inventory` limiter sees per accelerator type |
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
+| A Kueue-backed namespace stops below its ClusterQueue's `nominalQuota`; a non-zero `charge` on its rows in the `Kueue borrowing applied` log line | other workloads Kueue admitted in the queue (a training job, another namespace on a shared queue) hold that much of it, and the figure is charged with it. Expected: Kueue would hold more replicas pending. See [What a quota is charged](quota-limiter.md#what-a-quota-is-charged) |
+| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
+| `Physical limiter: replicas are not fitted to nodes this cycle` | the physical limiter bounds scaling but no node snapshot younger than 2 minutes exists, so replicas are fitted to the pool only, as before node fit; `reason` says why. Usually the GPU usage observation is failing (the same cause skips the provider soon after). `Physical limiter: replicas are fitted to nodes again` ends it. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
+| A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
+| A new group of an exclusive-topology LeaderWorkerSet stays Pending (`FailedScheduling` on pod affinity), and `wva_pod_access_denied` is 1 | a namespace-scoped controller that may not list Pods cluster-wide sees only its own namespace's Pods, so it misses other namespaces' LeaderWorkerSet groups. A topology domain where only such a group runs looks free, and a group is ordered into it. Grant `list` on `pods` cluster-wide. See [When policy demands a limiter the controller cannot serve](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve) |
+| `Upgrade note (transitional): this policy declares a physical GPU limiter and quotas, and both now bound scaling` | expected once after upgrading a policy that declares both kinds: the listed variants get a different target than the quota alone gave them, because the GPUs that exist now bound them too. Nothing to fix unless the physical bound is not wanted; then drop the `gpu-inventory` entry. Logged only when the set of variants changes, and removed in the next release |
 
-A **fully** spent quota can show none of these: the decision is `no-change`
-(`tgt` equals `curr` with `util` over the threshold) and no Event is recorded.
-Compare the quota with what the models hold. First find where the limiters come
+A **fully** spent quota shows the same signals: a model the last GPUs did not
+reach gets the `ResourceConstrained` Event and counts in
+`wva_decisions_limited_total`, named after the limiter that ran out, though its
+decision is `no-change`. The `scaling-decision` line carries the same name as
+`limitedBy`. To see where the GPUs went, compare the quota with what the models
+hold. First find where the limiters come
 from: when a policy namespace governs this controller (`wva-policy` by default),
 the limiters there apply and any in the controller's own ConfigMap are ignored:
 
@@ -352,6 +387,374 @@ What to do:
   On AMD nodes read `amd\.com/gpu` instead.
 
 See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
+
+## Replicas dropped under Kueue borrowing
+
+**Symptom**: a model on a Kueue quota that counts borrowing went from, say, 6
+to 4 replicas, and nobody lowered it.
+
+There are four causes. Check them in this order; the first that matches is
+the answer.
+
+| cause | how to tell |
+| --- | --- |
+| 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
+| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places |
+| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. Expected; the borrower borrows again when the cohort has free GPUs |
+| 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
+
+Commands, in the same order:
+
+```bash
+kubectl get workloads.kueue.x-k8s.io -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Evicted")].reason}{"\n"}{end}'
+kubectl get events -n <ns> --field-selector reason=BorrowedCapacityReleased
+$LOGS | grep -E 'Releasing borrowed capacity|Kueue preempted a pod' | tail
+kubectl get pods -n <ns> --field-selector status.phase=Pending
+```
+
+To see the budget the controller used, per quota entry, namespace and
+accelerator (`guaranteed`, `borrowable`, `used`, and the `reason` borrowable is
+0):
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}'
+```
+
+What to do:
+
+- **Preempted or released, often** (`WVAKueueBorrowThrashing`): the model
+  keeps growing onto capacity its lenders take back. Raise its ClusterQueue's
+  `nominalQuota`, lengthen `borrowCooldown`, or set `countBorrowable: false` on
+  the quota entry.
+- **Did not place**: a replica waiting for a node the cluster autoscaler is
+  adding counts as unplaced. The placement timeout waits up to three times as
+  long while the autoscaler reports `TriggeredScaleUp` on the pod. If new nodes
+  take longer than that on your cluster, raise `placementTimeout`, or borrowed
+  replicas are given back while their node is still coming.
+- **A lender's replica stays Pending after Kueue preempted a borrower**:
+  Kueue picks the borrowers to preempt by priority, not by node. A lender
+  growing into the nominal it lent out gets its quota back, but the GPUs
+  freed may not form a node its replica fits: two 4-GPU borrowers preempted
+  on two different nodes free no 8-GPU node, and a borrower that was itself
+  `Pending` frees none. The scaling manager orders such a replica without a
+  free node, so it watches it under the placement timeout: if it never
+  places, it is released (`borrow-unplaced`), and the model's growth into
+  lent-out nominal needs a free node until `borrowCooldown` ends. To avoid it,
+  keep borrowed replicas whole-node in a cohort of whole-node lenders, or
+  leave a node free for the lender.
+- **A prefill stays unplaced after a partner was released**: when a P/D
+  model's last prefill does not place, the scaling manager releases a decode
+  to free GPUs for it. The freed GPUs may sit on nodes the prefill cannot use,
+  for example a prefill pinned to RDMA nodes. It then stays `Pending`, and
+  `WVAKueuePodsUnplaced` fires. Check the pod's scheduling message with
+  `kubectl describe pod`; free or add a node it can use.
+- **Borrowing is frozen as `stale`**: see
+  [WVAKueueReaderStale](#wvakueuereaderstale).
+- **The Kueue controller is down** (reason `kueue-controller-down`): see
+  [WVAKueueControllerDown](#wvakueuecontrollerdown).
+- **A lender waits past the cooldown**: see
+  [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown).
+- **Pods refused by a ResourceQuota**: no shipped alert covers this. No
+  scaling-manager metric carries the refusal, and the shipped alerts depend on
+  no kube-state-metrics series (`kube_resourcequota` would). Check by hand:
+  `kubectl get events -n <ns> --field-selector reason=FailedCreate | grep -i quota`.
+
+Timings are in [configuration](configuration.md#kueue-borrowing-timings); the
+series in [Prometheus](prometheus.md#kueue-borrowing-metrics).
+
+## A Kueue-backed quota was never read
+
+**Symptom**: `WVAKueueNeverRead` fires; `wva_kueue_never_read{limiter_name}`
+is 1.
+
+The quota entry has `kueue.enabled: true` and caps at least one accelerator
+type at `-1`, so Kueue is meant to supply that figure. No Kueue read has
+succeeded since the controller started, so a type at `-1` is bounded only by
+the other limiters, and borrowing is not counted. The entry's finite caps still
+bound, so it is not reported as a skipped provider.
+
+This is not fail-closed, and it is not over-allocation. The other limiters
+still bound, and Kueue still gates every pod past its quota at admission, so
+replicas ordered past Kueue's quota wait as gated pods. The cost is churn:
+replicas created, held Pending at Kueue's gate, and their GPUs not delivered.
+
+```bash
+$LOGS | grep 'external quota source unreadable and never read' | tail -3
+kubectl get crd clusterqueues.kueue.x-k8s.io localqueues.kueue.x-k8s.io resourceflavors.kueue.x-k8s.io
+kubectl auth can-i list clusterqueues.kueue.x-k8s.io \
+  --as=system:serviceaccount:<controller-namespace>:<controller-serviceaccount>
+```
+
+What to do:
+
+- **CRDs absent**: Kueue is not installed. Install it, or set
+  `kueue.enabled: false` and give the type a number.
+- **Forbidden**: re-run the install so the controller's ClusterRole carries
+  the Kueue reads (see [the quota limiter](quota-limiter.md)).
+- **Meanwhile**: replace `-1` with a number in the entry to bound the type.
+
+The scaling manager does not refuse to scale while the entry is unread, by
+design: see above.
+
+## Borrowing is withheld
+
+**Symptom**: a model on a Kueue quota stops at its nominal quota (or its
+guaranteed figure) while its cohort has idle GPUs;
+`wva_quota_borrow_withheld == 1` names a reason.
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '.entries[] | select(.reason) | {namespace, accelerator, reason}'
+$LOGS | grep 'Kueue borrowing applied' | tail -1
+```
+
+Each namespace shows one reason: the first in this table that applies. Every
+reason below is published on `wva_quota_borrow_withheld`. "Re-run the admin
+phase" means a cluster admin runs `NAMESPACE=<ns> make setup-prereqs` with the
+variables the install used, adding `KUEUE_NAMESPACE=<kueue-ns>` where Kueue
+runs elsewhere than `kueue-system`. `<controller SA>` is
+`system:serviceaccount:$NS:wva-controller-manager`; `<kueue-ns>` is where
+Kueue runs.
+
+**Withheld**: borrowable is 0, and the namespace is capped at its nominal
+quota, as with `countBorrowable: false`. One that holds borrowed capacity now
+is frozen at its guaranteed figure instead, until it scales down.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `not-selected` | the entry's `borrowNamespaces` is set and does not list this namespace | add it to `borrowNamespaces`, or remove the list to borrow everywhere ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)) |
+| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install whose admin phase predates the grant or whose policy did not count borrowing when it ran, a Forbidden, a failed list), so it could not see a lender wait. A read revoked while the controller runs shows here within about 5 minutes. Granted again, borrowing resumes at the next check, while the Workload cache may still hold what it last listed before the revoke: up to about 30 more seconds, until its watch re-lists, a lender's Workload created in the gap is not seen | **(cluster admin)** re-run the admin phase with the install's `WVA_LIMITER` and `WVA_QUOTA_KUEUE`: it grants the cluster-wide Workload read when that policy counts borrowing. `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must then say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
+| `not-kueue-managed` | a GPU pod in the namespace is not backed by a Workload with quota reserved, owned by a kind a Kueue integration manages; or the controller may not read the pod's owner | find it: `kubectl get workloads.kueue.x-k8s.io -n <ns>` against `kubectl get pods -n <ns>`. Put the workload behind a LocalQueue (`kueue.x-k8s.io/queue-name`), or move it out of the namespace. For a Forbidden owner read, re-run the admin phase |
+| `resourcequota-unreadable` | the namespace's ResourceQuotas cannot be read: Forbidden, or failing for five refresh intervals | `kubectl auth can-i list resourcequotas -n <ns> --as=<controller SA>`; re-run the admin phase |
+| `no-gpu-bound` | nothing checks that borrowed GPUs exist: no `gpu-inventory` limiter, and no GPU `ResourceQuota` at most nominal plus `borrowingLimit` | declare one ([prerequisites](../guides/kueue-borrowing/#prerequisites)) |
+| `multi-queue-namespace` | more than one of the namespace's GPU ClusterQueues grants this accelerator type (a flavor without a product label grants every type). The controller does not read which one a variant uses, so the type is capped at the smallest single queue's figure, not at their sum. A type one queue grants is not affected | `kubectl get localqueues -n <ns>` lists them. Move serving to a namespace with one LocalQueue, or point every GPU LocalQueue of the namespace at one ClusterQueue |
+| `kueue-version-unknown` | the `kueue-controller-manager` Deployment was read, but its image carries no version tag (a digest-only image, say) | check the image: `kubectl get deploy kueue-controller-manager -n <kueue-ns> -o jsonpath='{.spec.template.spec.containers[*].image}'`. If it runs a [tested version](quota-limiter.md#supported-kueue-versions), set `kueue.assumeTestedVersion: true` on the entry |
+| `kueue-version-untested` | Kueue runs a release outside the tested range | run a [tested version](quota-limiter.md#supported-kueue-versions); the nominal cap applies meanwhile |
+| `no-cohort` | the namespace's ClusterQueue is in no cohort, so there is nothing to borrow from | set `spec.cohortName` on the ClusterQueue, if borrowing is wanted |
+| `inactive` | the ClusterQueue admits nothing: `stopPolicy` is `Hold` or `HoldAndDrain`, or it names a flavor that does not exist | `kubectl get clusterqueue <cq> -o yaml`: read its `Active` condition |
+| `malformed` | a `nominalQuota`, `borrowingLimit` or `lendingLimit` of the queue does not parse | fix the quantity on the ClusterQueue |
+| `no-status` | a queue in the cohort has no reservation status yet | wait one refresh; if it stays, check that Kueue's controller is reconciling (its log) |
+| `hierarchical-cohort` | the cohort has a parent or child Cohort | not supported: flatten the cohort, or set `countBorrowable: false` |
+| `hierarchy-unknown` | Cohort objects cannot be read, so a nested cohort cannot be ruled out | `kubectl auth can-i list cohorts.kueue.x-k8s.io --as=<controller SA>`; re-run the admin phase |
+| `effective-quotas` | a queue in the cohort uses `status.effectiveQuotas` | not supported |
+| `fair-sharing` | Kueue Fair Sharing is on | not supported |
+| `topology-aware` | a GPU flavor in the cohort has a `topologyName` (Topology-Aware Scheduling) | not supported |
+| `admission-checks` | a queue in the cohort has admission checks, MultiKueue included | not supported |
+| `borrow-within-cohort` | a queue in the cohort sets `preemption.borrowWithinCohort` other than `Never`, so a borrower could preempt another queue's work | set `borrowWithinCohort.policy: Never` (or remove it) on every queue in the cohort |
+| `flavor-unpinned` | more than one flavor of the queue offers the GPU, and a variant's pod template does not select the flavor's `nodeLabels`, so Kueue could admit it on another flavor than the one counted. A queue with one GPU flavor never shows it | add the flavor's `nodeLabels` to the variant's `nodeSelector` |
+| `co-resource-bound` | the GPU flavor's resource group also covers other resources (CPU, memory) and a variant's per-replica request for one of them cannot be read from its pod template | set requests for every covered resource on the variant's containers |
+
+**Frozen**: nothing new is borrowed, the last figures are kept, and nothing
+borrowed is taken away.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `stale` | the last Kueue read failed, or is older than twice `refreshInterval`; or one namespace's ResourceQuota read is failing (for five refresh intervals at most; then `resourcequota-unreadable`) | `$LOGS \| grep 'external quota source unreadable'` names the read; usually RBAC or a missing CRD. Alerts `WVAKueueReaderStale` (per entry) and `WVAKueueReaderStaleNamespace` |
+| `kueue-controller-down` | Kueue's leader Lease was not renewed within twice its `leaseDuration` (with no Lease, the Deployment has no ready replica), or the controller cannot read the Deployment or the Lease at all: never found, or Forbidden for want of the Role in the Kueue namespace | see [WVAKueueControllerDown](#wvakueuecontrollerdown): check Kueue runs, then the controller's read of its Deployment and Lease in `<kueue-ns>`; re-run the admin phase. Kueue elsewhere: set `kueue.controllerNamespace` too |
+
+**Counted, but 0 this cycle**: borrowing is on, and there is nothing to draw.
+
+| reason | what it means | what to do |
+| --- | --- | --- |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. A `LowerPriority` lender with no GPU Workloads at all (idle) has no priority to compare, so it counts as cannot-reclaim too, even though its capacity is free. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender |
+| `lender-waiting` | a lender waits for capacity it lent. What is borrowed stays until Kueue preempts it; nothing new is borrowed in the cohort, until `borrowCooldown` after the wait ends | nothing: Kueue reclaims for the lender. If it lasts, see [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown) |
+| `cohort-pool-empty` | the cohort's free pool holds no GPUs, after what is in flight and held at Kueue's gate | nothing: the cohort is in use |
+| `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed | raise the one that binds, if borrowing is wanted |
+| `preemptions-unreadable` | Kueue's preemptions in the namespace could not be read this cycle | transient; if it repeats, check the controller's `get`/`list`/`watch` on Workloads and pods |
+
+Two more labels you may meet:
+
+- `nominal-lent-out` is not a withheld reason. It qualifies a guaranteed
+  figure below nominal: a peer holds part of the queue's nominal and need not
+  give it back. On `wva_model_scaling_blocked`, it marks a serving model
+  capped for that reason, and `wake-nominal-lent-out` a parked model that
+  cannot wake for it. To get the nominal back, set `reclaimWithinCohort:
+  Any` on the queue.
+- `borrow-namespaces-split` is a warning in the log: two Kueue entries govern
+  one cohort and only one sets `borrowNamespaces`. Nothing is withheld; set
+  the list on both entries, or on neither.
+
+## A model runs past its Kueue nominal quota
+
+**Symptom**: a model holds more GPUs than its ClusterQueue's `nominalQuota`.
+
+This is borrowing, on by default for a namespace-scope quota entry with
+`kueue.enabled`. Confirm it:
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '.entries[] | select(.namespace == "<ns>") | {accelerator, guaranteed, borrowable, used}'
+kubectl get clusterqueue <cq> -o jsonpath='{.status.flavorsReservation}'
+```
+
+`used` above `guaranteed`, and Kueue's own `borrowed` above 0, is a model on
+borrowed capacity. `wva_kueue_borrowed_gpus` shows what this controller holds
+borrowed, per cohort and flavor.
+
+What to do, if it is not wanted:
+
+- Set `countBorrowable: false` on the entry, or pilot with
+  `borrowNamespaces` ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces),
+  [turn off](../guides/kueue-borrowing/#cleanup)). This
+  evicts nothing: the cap only stops growth, and models move back under
+  nominal as they scale down.
+- To hand GPUs back now, lower the model's `maxReplicaCount` on its
+  ScaledObject.
+- To stop a queue borrowing for anyone, set its `borrowingLimit` to 0 in
+  Kueue.
+
+## Kueue borrowing alerts
+
+Runbooks for the alerts on Kueue borrowing. `WVAKueuePodsUnplaced` and
+`WVAKueueBorrowThrashing` point at
+[replicas dropped](#replicas-dropped-under-kueue-borrowing);
+`WVAKueueNeverRead` at [never read](#a-kueue-backed-quota-was-never-read).
+In the commands, `<kueue-ns>` is where Kueue runs: `kueue-system`, or the
+entry's `kueue.controllerNamespace`.
+
+### WVAKueueReaderStale
+
+**Fires when** borrowing has been frozen as `stale` for 5 minutes. Nothing new
+is borrowed and nothing is given back. Two alerts, so one fault pages once:
+
+- **`WVAKueueReaderStale`**, one per quota entry, while two or more of its
+  namespaces are stale. Its value is how many. The entry's last Kueue read
+  failed, or is older than twice `refreshInterval`.
+- **`WVAKueueReaderStaleNamespace`**, one per namespace, only while it is the
+  entry's only stale one. Either the entry covers that namespace alone and
+  its Kueue read failed, or the namespace's ResourceQuota read is failing.
+  A failing ResourceQuota read becomes `resourcequota-unreadable` after five
+  refresh intervals, so at the default 30s it never reaches this alert; it
+  does only with a `refreshInterval` above one minute.
+
+`wva_quota_borrow_withheld{reason="stale"}` lists the frozen namespaces.
+
+```bash
+$LOGS | grep 'external quota source unreadable' | tail -3
+kubectl auth can-i list resourcequotas -n <namespace> --as=system:serviceaccount:$NS:wva-controller-manager
+```
+
+The log line names the read that failed; usually RBAC or a missing CRD. To
+hand capacity back by hand meanwhile, lower the borrowing model's
+`maxReplicaCount` on its ScaledObject, or set `countBorrowable: false` on the
+entry, which caps the namespace at nominal.
+
+### WVAKueueControllerDown
+
+**Fires when** borrowing has been frozen as `kueue-controller-down` for 5
+minutes: Kueue's API answers, but no running Kueue controller is seen.
+
+Nothing new is borrowed, nothing is given back, and nothing borrowed is taken
+away. Kueue itself admits and preempts nothing while it is down.
+
+```bash
+kubectl get deploy kueue-controller-manager -n <kueue-ns>
+kubectl get lease c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> -o jsonpath='{.spec.renewTime}{"\n"}'
+kubectl auth can-i get deployments/kueue-controller-manager -n <kueue-ns> \
+  --as=system:serviceaccount:$NS:wva-controller-manager
+kubectl auth can-i get leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> \
+  --as=system:serviceaccount:$NS:wva-controller-manager
+```
+
+- **Kueue is not running**, or its Lease is not renewed: fix Kueue.
+- **`no` above**: a namespace-scoped install needs the Role in the Kueue
+  namespace. A cluster admin runs `NAMESPACE=<namespace>
+  KUEUE_NAMESPACE=<kueue-ns> make setup-prereqs`, with the other variables the
+  install used.
+- **Kueue runs elsewhere than `kueue-system`**: set
+  `kueue.controllerNamespace` on the entry.
+- **Kueue runs with a custom leader-election ID**: the scaling manager reads
+  only the default Lease, `c1f6bfd2.kueue.x-k8s.io`, so such a Kueue always
+  reads as down. Borrowing cannot be counted there; set
+  `countBorrowable: false`.
+
+### WVAKueueBorrowDrift
+
+**Fires when** `wva_kueue_borrow_drift_gpus` is above 0 for 15 minutes: for a
+ClusterQueue, the borrowed GPUs the scaling manager computes (usage past
+nominal) differ from Kueue's own `status.flavorsReservation` borrowed figure.
+
+Borrowing still runs. The figures it counts are from a model of Kueue's
+accounting, and that model no longer matches this cohort, so borrowable may be
+too high or too low.
+
+```bash
+kubectl get clusterqueue <cluster_queue> -o jsonpath='{.status.flavorsReservation}'
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' | jq -c '.entries[]'
+$LOGS | grep 'Kueue borrowing applied' | tail -1     # kueueBorrowed per queue row
+```
+
+Usual causes: a Kueue feature borrowing does not detect (`waitForPodsReady`
+with `blockAdmission`), or a Kueue release whose accounting changed. Brief
+drift while Kueue admits or preempts is normal; 15 minutes is not. If it
+persists, set `countBorrowable: false` on the entry and report the two
+figures.
+
+### WVAKueueVersionUnknown
+
+**Fires when** `wva_kueue_controller_version_known` has been 0 for 10 minutes,
+per controller instance: the controller cannot tell which Kueue release runs,
+and withholds borrowing as `kueue-version-unknown`.
+
+The gauge is 1 once the version is read, or when the entry sets
+`kueue.assumeTestedVersion: true`. It is published only while some quota
+entry counts borrowing, so a cluster with borrowing off never fires. A
+Deployment that cannot be read also sets it to 0, but freezes borrowing as
+`kueue-controller-down`; this alert then stays quiet and
+[WVAKueueControllerDown](#wvakueuecontrollerdown) pages instead.
+
+```bash
+kubectl get deploy kueue-controller-manager -n <kueue-ns> \
+  -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
+kubectl auth can-i get deployments/kueue-controller-manager -n <kueue-ns> \
+  --as=system:serviceaccount:$NS:wva-controller-manager
+```
+
+- **The image has no version tag** (a digest only): if the release is a
+  [tested one](quota-limiter.md#supported-kueue-versions), set
+  `kueue.assumeTestedVersion: true` on the entry. The alert clears.
+- **The Deployment cannot be read** (`no` above, or not found): borrowing is
+  frozen as `kueue-controller-down`, which `assumeTestedVersion` does not
+  lift. See [WVAKueueControllerDown](#wvakueuecontrollerdown).
+
+### WVAKueueVersionUntested
+
+**Fires when** (severity `info`) Kueue has run a release outside the
+[tested range](quota-limiter.md#supported-kueue-versions) for 30 minutes.
+
+Borrowing is withheld (`kueue-version-untested`): every namespace stays at
+its nominal quota, and nothing is evicted. Run a tested release to count
+borrowing again. `assumeTestedVersion` does not lift this reason: it only
+stands in for a version that cannot be read.
+
+### WVAKueueLenderWaitingPastCooldown
+
+**Fires when** a lender ClusterQueue has waited for capacity it lent longer than
+`wva_kueue_borrow_cooldown_seconds` (the configured `borrowCooldown`), while a
+namespace this controller governs still borrows in its cohort.
+
+The scaling manager counts only what Kueue would reclaim for its lender, so
+Kueue is expected to preempt for it. New borrowing in the cohort stopped at
+the first sighting (reason `lender-waiting`); the scaling manager never hands
+borrowed replicas back to a lender itself.
+
+```bash
+kubectl get workloads.kueue.x-k8s.io -n <lender namespace> \
+  -o custom-columns='NAME:.metadata.name,PRIORITY:.spec.priority,ADMITTED:.status.conditions[?(@.type=="Admitted")].status'
+kubectl describe workload <pending workload> -n <lender namespace>
+```
+
+A long wait usually means:
+
+- the lender's pending Workload does not outrank the borrowers'
+  (`LowerPriority`), so Kueue will not preempt for it;
+- the GPUs it waits for are held by a borrower this controller does not
+  govern;
+- the pending Workload does not fit where the borrowed GPUs are (another
+  flavor, or CPU or memory short).
+
+To free capacity by hand, lower the borrowing model's `maxReplicaCount` on its
+ScaledObject, or set `countBorrowable: false` on the quota entry.
 
 ## Metrics stale or missing
 
@@ -388,7 +791,9 @@ from the deployment-derived capacity until the model saturates again; that is
 higher than the measured figure, so the fleet is smaller and TTFT worse for a
 while after every upgrade or leader change. `LEARNED_STATE_SNAPSHOT=true`
 carries the measured state across ([configuration](configuration.md#learned-state-across-a-restart)).
-With it on, the log says what happened (logger `learned-state`):
+With it on, `wva_learned_state_restores_total{outcome}` counts the variants by
+how their state was restored, `wva_learned_state_snapshot_errors_total{operation}` the
+failed reads and writes, and the log says why (logger `learned-state`):
 
 - `Learned state: no snapshot to restore` -- the first start with the store,
   or after a flush. Expected once.
@@ -399,25 +804,50 @@ With it on, the log says what happened (logger `learned-state`):
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the
     controller was down. Capacity, throughput and start time are kept;
-  - `learned state not restored: the variant's engine arguments changed; its
-    k2 is kept as a lower-only prior for the buckets it was measured in` --
-    its flags changed while the controller was down. The old capacity is used
-    only where it is lower, and expires (30 minutes from a bucket's first use,
-    then a 6-hour relaxation);
-  - `learned state not restored: the variant's engine arguments changed, and
-    no k2 window was recent enough, on the hardware it runs now, to keep as a
-    prior` -- the same, with nothing to keep: the windows were old, or were
-    measured on another accelerator or GPU count;
+  - `learned state restored as lower-only figures: the variant's engine
+    arguments changed, so its k2 windows become previous figures (P2-prior)
+    for the buckets they were measured in` -- its flags changed while the
+    controller was down. The old capacity is used only where it is lower, and
+    expires (30 minutes of serving from a bucket's first use, then a 6-hour
+    relaxation). The old service rate comes back too, and holds the
+    throughput floor hold-only -- it may keep the fleet, never grow it -- for
+    the same 30 minutes plus 6 hours of serving at most, until the new flags
+    measure their own. A saturated throughput already measured under the
+    flags it runs now -- a rollback made while the controller was down -- is
+    kept as its own;
+  - `learned state restored under the unread configuration: ...` -- a flag
+    such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
+    `envFrom`. Its windows are its own only if the variant runs the same
+    unread configuration, and lower-only figures otherwise (with the old
+    service rate holding the floor hold-only, as above).
+    `wva_engine_config`'s `unresolved` label names the flag;
+  - `learned state restored as lower-only figures: the document recorded no
+    engine arguments and its configuration differs, ...` -- a snapshot
+    written by an older release. Expect it for every variant after an upgrade
+    from a release that did not record engine arguments, or one with another
+    `fingerprint_version` label on `wva_engine_config`. Only the k2 is kept;
+    the old service rate is not;
+  - `learned state restored as a hold-only service rate: no k2 window was
+    recent enough, ...` -- a lower-only case where no k2 could be kept, but
+    the old saturated throughput could: it holds the throughput floor,
+    hold-only, until the new arguments measure their own. Nothing to do;
+  - `learned state not restored: the variant's engine configuration changed,
+    and no k2 window was recent enough, on the hardware it runs now, to keep
+    as a lower-only figure` -- one of the two lower-only cases above, with
+    nothing to keep: the windows were old, or were measured on another
+    accelerator or GPU count;
   - `learned state not restored: the variant's engine configuration could not
-    be read completely, so it could not be checked` -- a flag such as
-    `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an `envFrom`.
-    Nothing is restored for that variant, by design. `wva_engine_config`'s
-    `unresolved` label names the flag;
-  - `learned state not restored: the variant's engine configuration differs
-    from the one it was learned under` -- a snapshot written by an older
-    release. Expect it for every variant after an upgrade of the scaling
-    manager that changes the `fingerprint_version` label of
-    `wva_engine_config` -- this release moves it from 2 to 3, once.
+    be read completely, and no k2 window was recent enough, on the hardware
+    it runs now, to keep` -- the unread-configuration case with nothing to
+    keep, for the same reasons. Nothing to do; the variant learns again;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, and the snapshot recorded no engine arguments to check
+    its windows against` -- an unread configuration and a snapshot from a
+    release that did not record arguments: nothing can be matched, so nothing
+    is kept. To restore it next time, make the configuration readable: give
+    flags literal values in the container's `args` or `env` rather than from
+    an `envFrom` or another source the controller cannot resolve
+    (`wva_engine_config`'s `unresolved` label names them).
 
   Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
   `incomplete` or `differs`.
@@ -425,7 +855,12 @@ With it on, the log says what happened (logger `learned-state`):
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
   `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
-  the stored state is not overwritten meanwhile.
+  the stored state is not overwritten meanwhile. For the first 10 minutes
+  lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
+  starts; after that they start as usual, and a read that succeeds later
+  keeps those over the stored ones -- a borrow the snapshot had as spent
+  runs its hold and relaxation again. Fix the Role within 10 minutes to
+  avoid it.
 - `Learned state: snapshot not restored` -- the document names no writer, or
   a controller in another namespace wrote it (a ConfigMap copied by hand).
 - `Learned state: the snapshot was over its size bound` -- the least recently
@@ -442,7 +877,62 @@ The running controller notices within a minute or two and forgets everything
 it learned too, rather than writing it straight back (`Learned state: the
 snapshot was deleted; everything learned is forgotten`). Every model then
 prices from the derived capacity until it saturates again, as after a restart
-with no store.
+with no store. To forget one variant instead, see the next section.
+
+## Reset one variant's learned state
+
+Use this when one variant is priced from its own history you no longer trust:
+it holds more replicas than its load needs, and `k2-decision` shows `P2-hist`
+or `P2-prior` for it. It forgets that variant only; every other variant keeps
+what it has learned.
+
+- `P2-hist` is the variant's own measured k2.
+- `P2-prior` is its own k2 from before its engine arguments changed. It is
+  expected after a rollout that changes them, and wears off by itself: held
+  for 30 minutes of serving, then relaxed over 6 hours of serving. Forget it
+  only to end it sooner; `disableK2Borrow` does not affect it.
+- `P2-borrow` is a sibling's figure. Forgetting ends a running borrow, but the
+  variant can borrow again on new evidence. To stop borrowing, set
+  [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model instead.
+
+1. Annotate the variant's scale target -- the Deployment or LeaderWorkerSet
+   itself, not its pod template, so nothing restarts. The value is any string;
+   a timestamp is convenient:
+
+   ```bash
+   kubectl annotate deployment <name> -n <namespace> --overwrite \
+     llm-d.ai/forget-learned-state="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
+2. Check the controller log on the variant's next cycle:
+   `Learned state forgotten for one variant, on request`, with the variant and
+   the number of `entries` dropped.
+
+What is forgotten: the variant's measured k2 and throughput, its ITL line
+(including one it lent to siblings), its replica start estimate, and its
+capacity record. Also its previous k2 (`P2-prior`), the old service rate that
+holds the throughput floor after a change of arguments, and the windows set
+aside under earlier arguments for a rollback. The variant then prices as a new variant would until it
+saturates again: from its deployment-derived figure, or from a lower measured
+k2 of a compatible sibling where one exists (the k2 borrow), which orders more
+replicas, not fewer. Expect more replicas or a higher price for a while,
+depending on which figure was wrong.
+
+A k2 borrow the variant was running is ended, not dropped: it does not start
+again unless the sibling's figure or the variant's configuration changes. A
+dropped one would have started again at full strength on the next cycle.
+
+- **Acted on once per value.** Leaving the annotation in place does nothing
+  more, across controller restarts too when `LEARNED_STATE_SNAPSHOT` is on.
+  To forget again, set a new value.
+- **A variant parked at zero** is forgotten on the first cycle it is analysed
+  again, once it has a replica.
+- **To stop a variant borrowing** a sibling's figure rather than forget what it
+  has, set [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model.
+- **Remove the annotation before rolling the controller back** to a release
+  without this feature. That release rewrites the snapshot without the
+  record of which value was acted on, so upgrading again with the annotation
+  still in place forgets the variant a second time.
 
 ## The controller is not Ready or crash-looping
 
@@ -463,7 +953,8 @@ kill %1
 
 | failing check, or log line | means | fix |
 | --- | --- | --- |
-| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes` | a limiter is in cluster policy and the node list failed. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same. The error after the colon says which: `forbidden` is missing node read; `Unauthorized` means the API server rejected the controller's credentials; `no answer yet` means the API server has not answered since the pod started (2s timeout per try) | Forbidden: (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter. Unauthorized: check the controller's ServiceAccount token, then restart the pod. No answer yet: check the API server; no action unless it persists ([details](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)) |
+| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes` | a `gpu-inventory` limiter, declared alone, is in cluster policy and the node list failed. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. For `forbidden`, `wva_node_access_denied` and `WVANodeAccessDenied` report the same; `Unauthorized` and `no answer yet` do not set them. The error after the colon says which: `forbidden` is missing node read; `Unauthorized` means the API server rejected the controller's credentials; `no answer yet` means the API server has not answered since the pod started (2s timeout per try) | Forbidden: (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter. Unauthorized: check the controller's ServiceAccount token, then restart the pod. No answer yet: check the API server; no action unless it persists ([details](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)) |
+| `Cluster policy declares gpu-inventory beside quota limiters, but this controller may not list nodes` (an error line; the pod stays Ready) | the physical limiter is skipped and only the quota bounds; `wva_constraint_provider_skipped{reason="node_read_denied"}` is 1. Only a definite answer (`forbidden` or `Unauthorized`) sets it: a node list that gets no answer keeps what was last reported | (cluster admin) grant node read: `make setup-prereqs` for the install, or `make enable-physical-limiter`. Or drop `gpu-inventory` to keep the quota alone |
 | `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller it finds and verifies when it runs (re-run it after a new install) |
 | `CrashLoopBackOff`, log `refusing to start unbounded: the "default" entry of ConfigMap <ns>/<name> is invalid` | the `default` entry of the ConfigMap the limiters come from has an invalid value. It carries the GPU limits, so the controller will not start without it. The entry was often edited while the controller ran: then the old entry stayed in force, and a `ConfigEntryRejected` event warned that the next restart would fail | fix the entry the log names, then let the pod restart. The line before it gives the reason: `Scaling-policy entry rejected: entry "default" rejected (<reason>)` |
 | `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
@@ -530,9 +1021,9 @@ Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uni
 
 ## A model misses, or is never judged against, its SLO
 
-**Symptom**: `WVAModelSLOMissed` (warning) or `WVAModelSLOUnjudged` (info)
+**Symptom**: `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed` (warning), or `WVAModelSLOUnjudged` (info)
 fires, or the SLO dashboard row stays empty for a model whose policy sets
-targets. Both alerts carry `component: slo`, so they can be routed apart from
+targets. All three carry `component: slo`, so they can be routed apart from
 pages.
 
 **On this release the slo analyzer only observes**, so neither alert means the
@@ -545,10 +1036,15 @@ The `wva_slo_*` series carry the model's namespace as `exported_namespace`
 (see [the labels](prometheus.md#slo-analyzer-metrics)); filter on that, not on
 `namespace`.
 
-### `WVAModelSLOMissed`
+### `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed`
 
-At least half of the judged minutes of the last 30, and at least 5, were over
-target.
+- `WVAModelSLOAttainmentLow` (TTFT): over the last 30 minutes fewer requests
+  met the target than the objective promises (90% for `p90`), every judged
+  request counted once. It needs at least 15 judged minutes, holding at least
+  half the half hour's requests: at p99 a window needs 1000 requests to be
+  judged, and a model judged only in its busy bursts is not judged at all.
+- `WVAModelSLOMissed` (TPOT): the mean was over target in at least half of the
+  judged minutes of the last 30, and in at least 7.
 
 **1. Check the target can be met at all.** If it cannot, more replicas do not
 help: loosen the target, or move the model to faster hardware.
@@ -556,10 +1052,17 @@ help: loosen the target, or move the model to faster hardware.
 ```promql
 # tpot: 1 for "infeasible" -- even an almost empty replica is over the target
 wva_slo_source{model_name="<model>", source="infeasible"} == 1
-# ttft: prefill time per pod (vLLM), queue left out; at or above the TTFT
-# target, no replica count meets it
-rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
+# ttft: the objective's percentile of prefill time alone (vLLM), queue left
+# out; at or above the TTFT target, no replica count meets it. Use the same
+# percentile as the objective (0.90 for p90): a mean under the target hides a
+# tail of long prompts that no replica count can make faster.
+histogram_quantile(0.90, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{namespace="<ns>", model_name="<model>"}[5m])))
 ```
+
+The prefill buckets are coarse above 2s (2.5s, then 5s), so a reading in the
+bucket that holds the target is inconclusive. On P/D, read the prefill pods
+alone (decode pods report almost no prefill time and pull the percentile
+down), and the KV transfer to decode is extra time on top.
 
 `infeasible` read from a `pinned-default` line is not reliable: that line's
 intercept is a default for no particular card.
@@ -594,9 +1097,14 @@ low-priority band back on purpose, that wait counts as a miss too. Only
 completed requests count, so under shedding the alert can resolve while
 requests are refused: read `llm_d_epp_request_error_total` too.
 
-The alert resolves once the judged minutes that meet the target outnumber the
-misses in the last 30, so it stays up for a while after a fix. Changing the
-tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
+`WVAModelSLOAttainmentLow` resolves once a judged reading of the last 5
+minutes meets the objective. A window excluded while a replica starts does not
+resolve it, so the miss that brought the replica on stays one alert. It also
+ends when too few minutes are judged to hold half the requests.
+`WVAModelSLOMissed` resolves once the judged minutes that meet the target
+outnumber the misses in the last 30, so it stays up for a while after a fix.
+Changing the tier's TTFT percentile clears the old percentile's alert at once;
+the new one needs 15 judged minutes before it can fire.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 
@@ -670,7 +1178,7 @@ Work down the list in order.
 
 1. **Is it selected at all?** Exactly one `wva_utilization_share_mode` series
    is `1`: `off`, `invalid`, `shadow` or `active`.
-   - For `invalid` or `off`, the log says why: `Utilization share: invalid
+   - For `invalid` (alert `WVAUtilizationShareModeInvalid`) or `off`, the log says why: `Utilization share: invalid
      optimizer block; keeping today's optimizer` (a misspelled key, a value out
      of range, an empty `clusterNamespaces` entry, or `needs a limiters: list`,
      no budget to share).
@@ -691,8 +1199,10 @@ Work down the list in order.
    namespace-local scaling-policy map (not planned in the cluster group), or a
    namespace not in `clusterNamespaces`. These models are in no group at all
    and publish no role series: variants on more than one accelerator type, a
-   namespace with `enabled: false`, or only a `gpu-inventory` limiter without
-   `physicalGroups: true`.
+   namespace with `enabled: false`, only a `gpu-inventory` limiter without
+   `physicalGroups: true`, or a namespace a namespace quota lists in `exclude`
+   with no finite cluster bound for its accelerator type (logged once as
+   `Utilization share: not sharing models no quota bounds`).
 4. **Is any role actionable?** `wva_utilization_share_actionable` is `1` only
    for a role outside its tolerance band *and* off its whole-replica target. All
    `0` means the fleet is where the optimizer wants it, or every imbalance is
@@ -761,8 +1271,9 @@ Work down the list in order.
    - While it lasts, every planned model shows blocked reason `quiet-period`,
      and the log line `Utilization share: ledger started` carries
      `planningFrom`.
-   - A freeze that does not end shows `marks-unreadable`: the controller cannot
-     read the transfer marks on the donors' pods. The Error line `Utilization
+   - A freeze that does not end shows `marks-unreadable` (alert
+     `WVAUtilizationShareMarksUnreadable`): the controller cannot read the
+     transfer marks on the donors' pods. The Error line `Utilization
      share: could not read transfer marks; retrying next cycle` says why,
      typically a missing RBAC grant to list pods in one model's namespace.
 

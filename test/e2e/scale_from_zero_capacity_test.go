@@ -276,11 +276,10 @@ func expectScaleFromZeroRefusal(since time.Time, reason string) {
 		}
 	}()
 
-	const controllerManagerLabel = "control-plane=controller-manager"
 	const pattern = "no variant woken for a model with pending requests"
 	Eventually(func(g Gomega) {
 		sinceSeconds := int64(time.Since(since).Seconds()) + 1
-		ok, logs, logErr := utils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace, controllerManagerLabel, pattern, sinceSeconds)
+		ok, logs, logErr := utils.ControllerLogsContain(ctx, k8sClient, cfg.WVANamespace, utils.ControllerDeploymentName, pattern, sinceSeconds)
 		g.Expect(logErr).NotTo(HaveOccurred())
 		g.Expect(ok).To(BeTrue(), "the engine never reported declining to wake anything")
 		matched := false

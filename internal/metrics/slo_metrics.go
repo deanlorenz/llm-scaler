@@ -14,6 +14,7 @@ var (
 	sloTarget       *prometheus.GaugeVec
 	sloObserved     *prometheus.GaugeVec
 	sloAttainment   *prometheus.GaugeVec
+	sloObjective    *prometheus.GaugeVec
 	sloFill         *prometheus.GaugeVec
 	sloPredictedITL *prometheus.GaugeVec
 	sloSource       *prometheus.GaugeVec
@@ -46,6 +47,10 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 		"SLO analyzer: the share of completed streaming requests whose TTFT met the target, as the "+
 			"router measured it (including its queue). Absent below the sample minimum.",
 		objectiveLabels)
+	sloObjective = gauge(constants.WVASLOObjectiveRatio,
+		"SLO analyzer: the share of requests a TTFT objective promises within its target, 0.90 for p90. "+
+			"TTFT only.",
+		objectiveLabels)
 	sloRequests = gauge(constants.WVASLOWindowRequests,
 		"SLO analyzer: requests the router recorded for the objective over its window. Present "+
 			"whenever the router reported anything for the model.",
@@ -71,8 +76,8 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 		"SLO analyzer: per objective, 1 for the reason its router window is not judged this cycle (a wake "+
 			"from zero, a replica starting), 0 for the others; all 0 while it is judged.",
 		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelObjective, constants.LabelReason))
-	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL,
-		sloSource, sloRequests, sloExcluded} {
+	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloObjective, sloFill,
+		sloPredictedITL, sloSource, sloRequests, sloExcluded} {
 		if err := registry.Register(g); err != nil {
 			return err
 		}
@@ -91,7 +96,11 @@ type SLOObjectiveReading struct {
 	TargetSeconds float64
 	Observed      float64
 	Attainment    float64
-	Requests      float64
+	// ObjectiveRatio is the share of requests the objective promises within
+	// its target, 0.90 for p90; published only when above 0, so a TPOT mean,
+	// which promises no share, leaves it out.
+	ObjectiveRatio float64
+	Requests       float64
 	// WindowSeconds is the router window the figures were taken over; zero
 	// when the router reported nothing.
 	WindowSeconds float64
@@ -175,6 +184,9 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		set(sloTarget, ol, o.TargetSeconds)
 		set(sloObserved, ol, o.Observed)
 		set(sloAttainment, ol, o.Attainment)
+		if o.ObjectiveRatio > 0 {
+			set(sloObjective, ol, o.ObjectiveRatio)
+		}
 		set(sloRequests, ol, o.Requests)
 		for _, reason := range constants.SLOExcludedReasons {
 			on := 0.0

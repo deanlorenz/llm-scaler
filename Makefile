@@ -44,17 +44,21 @@ NAMESPACE           ?= llm-d-optimized-baseline
 # Install scope: cluster | namespace. Empty means the historical default —
 # namespace on OpenShift, cluster elsewhere. See deploy/lib/common.sh.
 WVA_SCOPE           ?=
-# Declare a GPU limiter at install: none | gpu-inventory | quota. Unset keeps the
-# limiter the live policy already declares (a first install has none, matching the
-# shipped config); none removes it -- the default was none before, so every
+# Declare GPU limiters at install: none | gpu-inventory | quota, or a list such as
+# gpu-inventory,quota -- every limiter in it bounds scaling. Unset keeps the
+# limiters the live policy already declares (a first install has none, matching the
+# shipped config); none removes them -- the default was none before, so every
 # re-install silently unbounded a bounded controller.
 # See docs/reference/gpu-limiter.md.
 # `quota` additionally REQUIRES WVA_QUOTAS, the per-accelerator budget
 # (WVA_QUOTAS='H200=8 A100=4'); there is no default, and an empty quota entry is
 # a budget of zero rather than unlimited. WVA_QUOTA_SCOPE is namespace|cluster.
 # WVA_QUOTA_KUEUE=true also reads Kueue: per namespace and accelerator type the
-# smaller of the Kueue nominal quota and WVA_QUOTAS applies (name the types with
-# -1 to let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/.
+# smaller of the Kueue grant and WVA_QUOTAS applies (name the types with -1 to
+# let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/. The
+# grant counts cohort borrowing where it is safe; WVA_QUOTA_KUEUE_BORROW=false
+# keeps it at nominal. Borrowing needs a GPU bound beside the quota: declare
+# gpu-inventory (WVA_LIMITER=gpu-inventory,quota) or a GPU ResourceQuota.
 WVA_LIMITER         ?=
 # A ScaledObject is how a workload registers with WVA. WVA_DEFAULT_SO=true has the
 # installer create one per llm-d model server; WVA_DEFAULT_SO_NS picks the
@@ -486,13 +490,22 @@ enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publish
 		WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
+		$(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; enable_physical_limiter'
 
-.PHONY: disable-physical-limiter
-disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster policy. Scaling becomes unbounded for every WVA that reads it.
-	@WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
+# Exit status: 0 when the kind was removed, or when no policy it reads declares
+# any limiter; non-zero (make prints "Error 1" and exits 2) when nothing was
+# removed while a limiter of the other kind stays -- the "undo my quota without
+# WVA_LIMITER_TYPE=quota" mistake. WVA_LIMITER_TYPE=all removes every limiter
+# and is the one to use when uninstalling.
+.PHONY: disable-limiter
+disable-limiter: ## CLUSTER ADMIN: remove the WVA_LIMITER_TYPE limiter (gpu-inventory by default, quota, or all) from cluster policy; a limiter of another kind stays.
+	@WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
+
+.PHONY: disable-physical-limiter
+disable-physical-limiter: disable-limiter ## CLUSTER ADMIN: the older name of disable-limiter.
 
 ##@ Utilization share
 
@@ -574,7 +587,7 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 define wva_phase
 	@echo "Phase '$(if $(1),$(1),auto)', $(SCOPE)-scoped$(if $(2), on $(2),)"
 	$(if $(filter prereqs,$(1)),,@echo "Image: $(IMG)")
-	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
+	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
 endef
 
 # wva_check: $(1)=ENVIRONMENT
@@ -617,7 +630,7 @@ setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCO
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
-deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota|gpu-inventory,quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),$(ENVIRONMENT_INSTALL))
 
 .PHONY: undeploy-wva
@@ -629,7 +642,7 @@ deploy-wva-on-k8s: ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTAL
 	$(call wva_phase,$(INSTALL_PHASE_ARG),kubernetes)
 
 .PHONY: deploy-wva-on-openshift
-deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota|gpu-inventory,quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),openshift)
 
 ## Removing. Pass the SAME SCOPE and namespace you installed with — an uninstall
@@ -1239,7 +1252,7 @@ test-e2e-full: ## Run full e2e test suite
 	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
 	MODEL_ID=$(MODEL_ID) \
 	go test ./test/e2e/ -timeout $(E2E_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_TIMEOUT) \
-		-ginkgo.label-filter="full && !smoke && !flaky" $(FOCUS_ARGS) $(SKIP_ARGS); \
+		-ginkgo.label-filter="full && !smoke && !flaky && !kueue-borrow" $(FOCUS_ARGS) $(SKIP_ARGS); \
 	TEST_EXIT_CODE=$$?; \
 	[ -n "$$PF_PID" ] && kill $$PF_PID 2>/dev/null || true; \
 	echo ""; \
@@ -1295,12 +1308,72 @@ test-e2e-multi-controller-with-setup: deploy-e2e-infra test-e2e-multi-controller
 .PHONY: test-e2e-full-with-setup
 test-e2e-full-with-setup:
 	DEPLOY_LWS=true SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
-	@# The Kueue-bounded quota spec (kueue_quota_test.go) lists Kueue objects, so
-	@# the three CRDs it reads must exist. kind only: the script refuses a cluster
-	@# that already has them, and a shared cluster is not ours to add CRDs to.
-	@if [ "$(ENVIRONMENT)" = "kind-emulator" ]; then deploy/ci-pr-checks/install-kueue-crds.sh; fi
+	@# Kueue, kind only: a shared cluster is not ours to install Kueue into.
+	@# The quota-reader spec (kueue_quota_test.go) needs only the three CRDs,
+	@# and passes against the controller too. The borrowing spec
+	@# (kueue_borrow_test.go) is not in this suite: it runs on its own,
+	@# test-e2e-kueue-borrow-with-setup.
+	@if [ "$(ENVIRONMENT)" = "kind-emulator" ]; then $(MAKE) install-kueue-e2e; fi
 	$(MAKE) test-e2e-full
 
+# Whether the kind e2e installs Kueue's controller (true) or only its CRDs.
+KUEUE_CONTROLLER ?= true
+# The namespace label Kueue's job webhooks are narrowed to on the kind e2e, so a
+# restarting Kueue cannot fail pod creation in the rest of the suite. Must match
+# fixtures.KueueE2ENamespaceLabel.
+KUEUE_WEBHOOK_NAMESPACE_LABEL ?= llm-d.ai/kueue-e2e
+
+# Installs Kueue onto the current (kind) cluster for the e2e: the controller
+# through deploy/ci-pr-checks/install-kueue.sh, or with KUEUE_CONTROLLER=false the
+# three CRDs alone through install-kueue-crds.sh. Both scripts pin a version and
+# refuse to change a Kueue somebody else installed.
+.PHONY: install-kueue-e2e
+install-kueue-e2e: ## Install Kueue (controller, or CRDs only with KUEUE_CONTROLLER=false) onto the kind e2e cluster
+	@if [ "$(KUEUE_CONTROLLER)" = "true" ]; then \
+		KUEUE_WEBHOOK_NAMESPACE_LABEL=$(KUEUE_WEBHOOK_NAMESPACE_LABEL) deploy/ci-pr-checks/install-kueue.sh; \
+	else \
+		deploy/ci-pr-checks/install-kueue-crds.sh; \
+	fi
+
+# Runs only the live-Kueue borrowing spec (label kueue-borrow), which the full
+# suite excludes. Needs the Kueue controller: `make install-kueue-e2e` on a
+# cluster from deploy-e2e-infra, or test-e2e-kueue-borrow-with-setup.
+# REQUIRE_KUEUE_E2E=true turns the spec's runtime skips (no Kueue, no GPUs, a
+# cluster too slow for the cooldown check) into failures; CI sets it.
+REQUIRE_KUEUE_E2E ?=
+.PHONY: test-e2e-kueue-borrow
+test-e2e-kueue-borrow: ## Run the live-Kueue cohort borrowing e2e spec
+	@echo "Running the live-Kueue borrowing e2e spec..."
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
+	SCALER_BACKEND=keda \
+	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
+	MODEL_ID=$(MODEL_ID) \
+	REQUIRE_KUEUE_E2E=$(REQUIRE_KUEUE_E2E) \
+	go test ./test/e2e/ -timeout $(E2E_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_TIMEOUT) \
+		-ginkgo.label-filter="kueue-borrow" -ginkgo.fail-on-empty $(FOCUS_ARGS) $(SKIP_ARGS); \
+	TEST_EXIT_CODE=$$?; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Test execution completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
+
+
+# Deploys the e2e infra on kind, installs the Kueue controller, and runs the
+# live-Kueue borrowing spec alone. It never deletes the cluster.
+.PHONY: test-e2e-kueue-borrow-with-setup
+test-e2e-kueue-borrow-with-setup: ## Deploy e2e infra + Kueue, then run the live-Kueue borrowing spec
+	SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
+	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
+	$(MAKE) test-e2e-kueue-borrow
 
 ##@ llm-d-benchmark CLI (standup / run / teardown)
 
@@ -2704,6 +2777,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
+	@for script in deploy/ci-pr-checks/*.sh; do bash -n "$$script"; done
 	@echo "Checking for apostrophes inside quoted jq/yq programs..."
 	@# `bash -n` catches an ODD number and misses an EVEN one, which
 	@# rebalances the quoting and hands jq a truncated program. Both have
@@ -2717,6 +2791,15 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# the optimizer block and strand the marks, and parses perfectly.
 	@bash -n deploy/utilization-share.sh
 	@bash hack/check-utilization-share-script.sh
+	@echo "Checking install-kueue.sh refuses a non-kind context..."
+	@# It installs Kueue and narrows its webhooks cluster-wide; on a real
+	@# cluster that is somebody else's Kueue. The guard parses either way.
+	@bash hack/check-install-kueue-context.sh
+	@echo "Checking a rebuilt Kueue quota entry keeps its borrowing settings..."
+	@# Executes policy_with_limiters. A re-run that drops a hand-written
+	@# borrowNamespaces turns a pilot into borrowing everywhere, and the
+	@# document it writes is perfectly valid.
+	@bash hack/check-kueue-borrow-keep.sh
 	@echo "Checking workload readiness detection..."
 	@# Executes the real functions against fixture pod specs. `bash -n` above
 	@# cannot see any of what this covers: choosing the wrong container, counting
@@ -2728,6 +2811,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# already on disk, or that watches a cluster nobody named, parses perfectly
 	@# -- and both have cost data here.
 	@bash hack/check-benchmark-capture.sh
+	@echo "Checking the benchmark scripts read the controller's own log..."
+	@# Executes them against a stub kubectl. Warm-pool Pods share the label
+	@# they selected the controller by, so a pool Pod's log was read as the
+	@# controller's -- and the selector parses perfectly.
+	@bash hack/check-benchmark-controller-pod.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name

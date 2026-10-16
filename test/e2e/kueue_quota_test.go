@@ -62,8 +62,8 @@ var _ = Describe("Quota limiter - bounded by Kueue", Label("full"), Label("kueue
 	)
 
 	controllerLog := func() (string, error) {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", sinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", sinceRestart)
 		return logs, err
 	}
 
@@ -76,10 +76,7 @@ var _ = Describe("Quota limiter - bounded by Kueue", Label("full"), Label("kueue
 
 	BeforeAll(func() {
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		if !fixtures.KueueInstalled(crClient) {
 			if cfg.Environment == envKindEmulator {

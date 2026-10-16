@@ -145,18 +145,22 @@ them](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-dow
 
 ## Under the physical GPU limiter
 
-**A cluster-admin task:** the policy is the cluster's, in `wva-policy`. With a
+**A cluster-admin task, on a cluster-scoped controller only.** With a
 `gpu-inventory` limiter and no quota, the budget is every GPU of a type on the
 cluster. Three things differ:
 
 - **Add `PHYSICAL_GROUPS=true` to the shadow step.** Without
   `physicalGroups: true` the optimizer plans no group and moves nothing. The
   check warns about this.
-- **It turns the optimizer on for every self-managed controller**, not just
-  yours: they all read `wva-policy`. Admin-owned controllers (cluster-scoped or
-  out-of-reach) read their own ConfigMap. A controller reads a policy in another
-  namespace only at start, so add `RESTART=1`, or the step stops and says the
-  block was written but not read.
+- **A namespace-scoped controller ignores `physicalGroups`.** Every such
+  controller would plan the same free GPUs of the whole cluster. Where a quota
+  bounds its namespace, the setting changes nothing anyway. Under
+  `gpu-inventory` alone, the optimizer keeps running without physical groups,
+  so it plans nothing. It logs a warning and sets `utilizationShareNote` in
+  `wva-controller-status`. The mode stays `shadow` or `active`. The script
+  refuses `PHYSICAL_GROUPS=true` for such a controller. Give each tenant a
+  namespace quota instead. A cluster-scoped controller reads its own
+  ConfigMap, so write the block there.
 - **Spare GPUs are shared with everything on the cluster.** A GPU a donor
   releases can be taken by a pod the scaling manager did not place. That
   transfer ends `release-taken`.
@@ -214,9 +218,10 @@ Activate follows the controller's own grouping:
 - **Quota with namespace-scoped entries:** each namespace an entry covers has
   its own budget, even with no figure for it (that is a zero budget). A
   namespace listed in the `exclude:` of every such entry shares the cluster
-  budget only when a `scope: cluster` quota entry bounds it. Without one, it is
-  not shared at all: the controller logs it as unshared and plans it as before.
-  A `gpu-inventory` limiter and `physicalGroups` do not change this.
+  budget only when a finite cluster bound covers its GPU type: a
+  `scope: cluster` quota, or a `gpu-inventory` limiter with
+  `physicalGroups: true`. Otherwise it is not shared and stays on the default
+  optimizer. When nothing finite bounds it, the controller logs it as unshared.
 - **Quota with only `scope: cluster` entries:** every namespace shares it.
 - **`gpu-inventory` alone:** namespaces share only with `physicalGroups: true`.
 - **No limiter:** nothing is shared.

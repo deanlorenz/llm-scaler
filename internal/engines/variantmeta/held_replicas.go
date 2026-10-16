@@ -1,18 +1,23 @@
 package variantmeta
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
+	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
@@ -75,6 +80,99 @@ func heldReplicaCount(ctx context.Context, k8sClient client.Client, namespace st
 	return len(groups), filled, true
 }
 
+// PlacedReplicas counts a variant's replicas every pod of which holds a node or
+// is about to: scheduled to one, or, while Pending, nominated for one after a
+// preemption -- as the usage walk counts a pod on its node. Pods being deleted
+// or finished do not count. On a LeaderWorkerSet a replica is a group, placed
+// when all its group size is. ok is false when the pods cannot be listed.
+func PlacedReplicas(ctx context.Context, k8sClient client.Client, namespace string,
+	scaleTarget scaletarget.ScaleTargetAccessor) (placed int, ok bool) {
+	placed, _, ok = PlacedGroups(ctx, k8sClient, namespace, scaleTarget)
+	return placed, ok
+}
+
+// PlacedGroups is PlacedReplicas and, on a LeaderWorkerSet, each group some
+// but not all of whose pods hold a node or are nominated for one, in group
+// index order: a node one of its pods holds, and each such pod's GPUs. The
+// in-flight ledger holds the rest of such a group's pods in that node's
+// topology domain (WN2): a leader bound before its workers exist leaves the
+// group unplaced, and holding the whole group anew found no hole for it.
+func PlacedGroups(ctx context.Context, k8sClient client.Client, namespace string,
+	scaleTarget scaletarget.ScaleTargetAccessor) (placed int, partial []domain.PartialReplica, ok bool) {
+	if k8sClient == nil || scaleTarget == nil {
+		return 0, nil, false
+	}
+	pods, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
+	if err != nil {
+		return 0, nil, false
+	}
+	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
+	groups := map[string]*domain.PartialReplica{}
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp != nil || !holdsOrNominated(p) {
+			continue
+		}
+		if !group {
+			placed++
+			continue
+		}
+		idx, ok := p.Labels[lwsv1.GroupIndexLabelKey]
+		if !ok {
+			continue
+		}
+		g := groups[idx]
+		if g == nil {
+			g = &domain.PartialReplica{}
+			groups[idx] = g
+		}
+		if g.Node == "" {
+			g.Node = p.Spec.NodeName
+			if g.Node == "" {
+				g.Node = p.Status.NominatedNodeName
+			}
+		}
+		g.PlacedGPUs = append(g.PlacedGPUs, resources.PodGPURequests(p))
+	}
+	if !group {
+		return placed, nil, true
+	}
+	size := max(int(scaleTarget.GetGroupSize()), 1)
+	for _, idx := range slices.SortedFunc(maps.Keys(groups), compareGroupIndex) {
+		if g := groups[idx]; len(g.PlacedGPUs) >= size {
+			placed++
+		} else {
+			partial = append(partial, *g)
+		}
+	}
+	return placed, partial, true
+}
+
+// compareGroupIndex orders LeaderWorkerSet group indexes numerically, those
+// that are not numbers after, by name.
+func compareGroupIndex(a, b string) int {
+	na, ea := strconv.Atoi(a)
+	nb, eb := strconv.Atoi(b)
+	switch {
+	case ea == nil && eb == nil:
+		return cmp.Compare(na, nb)
+	case ea == nil:
+		return -1
+	case eb == nil:
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+// holdsOrNominated reports whether a pod holds its GPUs (holdsGPUs) or, while
+// Pending, has a node nominated for it.
+func holdsOrNominated(p *corev1.Pod) bool {
+	if holdsGPUs(p) {
+		return true
+	}
+	return p.Status.Phase == corev1.PodPending && p.Status.NominatedNodeName != ""
+}
+
 // holdsGPUs reports whether a pod holds the GPUs it requested: it is bound to a
 // node and its containers have not finished. Deletion does not change that.
 func holdsGPUs(p *corev1.Pod) bool {
@@ -113,7 +211,7 @@ func ListVariantPods(ctx context.Context, c client.Client, namespace string,
 		return nil, err
 	}
 	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
-		return !ownedByDeployment(&p, acc.GetName())
+		return !scaletarget.OwnedByDeployment(&p, acc.GetName())
 	}), nil
 }
 
@@ -133,21 +231,6 @@ func ListDeploymentPods(ctx context.Context, c client.Client, namespace, name st
 		return nil, err
 	}
 	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
-		return !ownedByDeployment(&p, name)
+		return !scaletarget.OwnedByDeployment(&p, name)
 	}), nil
-}
-
-// ownedByDeployment reports whether a pod is controlled by a ReplicaSet of the
-// named Deployment.
-func ownedByDeployment(p *corev1.Pod, deployment string) bool {
-	hash := p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]
-	if hash == "" {
-		return false
-	}
-	for _, o := range p.OwnerReferences {
-		if o.Controller != nil && *o.Controller && o.Kind == "ReplicaSet" && o.Name == deployment+"-"+hash {
-			return true
-		}
-	}
-	return false
 }

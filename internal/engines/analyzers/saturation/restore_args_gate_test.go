@@ -54,6 +54,35 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		Expect(back.Args).To(HaveKey("test-ns/variant-a"), "the arguments travel with the configuration")
 		return back
 	}
+	// serve advances the clock by d of SERVING time: a cycle a minute, each
+	// ticking every running lower bound, as the variant's own Ready replica
+	// does (noteBorrowServing). The clock counts serving time only, so a bare
+	// jump of hours reads as a park.
+	serve := func(a *SaturationAnalyzer, clock *time.Time, d time.Duration) {
+		for end := clock.Add(d); clock.Before(end); {
+			*clock = clock.Add(time.Minute)
+			a.mu.Lock()
+			for k := range a.lowerBounds {
+				a.noteBorrowServingLocked(k, *clock, true)
+			}
+			a.mu.Unlock()
+		}
+	}
+	// convert moves the variant's restored k2 windows out of the way as their
+	// first read would (window_args.go), without pricing a cycle, and returns
+	// the key of the last one.
+	convert := func(a *SaturationAnalyzer, p *capacity.EngineParams) string {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		var key string
+		for k := range a.computeCapacityHistory {
+			key = k
+		}
+		for k := range a.computeCapacityHistory {
+			a.k2WindowUnderLocked(k, p.ArgsFingerprint())
+		}
+		return key
+	}
 	itlBaselines := func(a *SaturationAnalyzer) int {
 		return len(a.itlBaselines())
 	}
@@ -93,24 +122,28 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		Expect(r.Priors).To(Equal(1))
 
 		second.mu.Lock()
-		Expect(second.computeCapacityHistory).To(BeEmpty(), "a k2 under other arguments was installed as the variant's own")
+		Expect(second.k2WindowArgs).To(HaveLen(1), "the k2 window was not installed under the arguments it was learned under")
+		for _, args := range second.k2WindowArgs {
+			Expect(args).To(Equal(params(256, "vllm:v1").ArgsFingerprint()),
+				"a k2 under other arguments was installed as the variant's own")
+		}
 		Expect(second.saturatedThroughput).To(BeEmpty(), "a throughput under other arguments was installed")
 		Expect(second.startSeconds).To(BeEmpty(), "a start time under other arguments was installed")
 		second.mu.Unlock()
 
 		Expect(capacityOf(second)).To(Equal(float64(4000)), "held at the prior")
-		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		serve(second, &clock, BorrowedK2Hold+BorrowedK2Relax/2)
 		Expect(capacityOf(second)).To(Equal(float64(8400)), "relaxing half way to own")
-		clock = clock.Add(BorrowedK2Relax / 2)
+		serve(second, &clock, BorrowedK2Relax/2)
 		Expect(capacityOf(second)).To(Equal(float64(12800)), "the prior outlived its relaxation")
+		Expect(previousFigures(second)).To(BeEmpty(), "a spent previous figure is still offered")
 
+		// Spent, it stays spent: the record is kept, as any spent bound's
+		// is, so the figure cannot come back without new evidence.
 		clock = clock.Add(time.Minute)
 		evicted := second.EvictStaleHistory()
-		Expect(evicted.K2Priors).To(Equal(1))
-		Expect(evicted.K2Borrows).To(BeZero(), "a prior is not a borrow clock")
-		second.mu.Lock()
-		defer second.mu.Unlock()
-		Expect(second.priorK2).To(BeEmpty(), "the sweep kept a prior past its life")
+		Expect(evicted.K2Borrows+evicted.K2Priors).To(BeZero(), "a spent bound was swept while its variant lives")
+		Expect(capacityOf(second)).To(Equal(float64(12800)))
 	})
 
 	// The prior's hold and relaxation run on the borrow clock, which starts
@@ -130,15 +163,16 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		Expect(second.EvictStaleHistory().K2Priors).To(BeZero(), "an unused prior went before the bucket retention")
 		Expect(capacityOf(second)).To(Equal(float64(4000)), "first use, five hours in: the hold starts now")
 
-		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		serve(second, &clock, BorrowedK2Hold+BorrowedK2Relax/2)
 		Expect(second.EvictStaleHistory().K2Priors).To(BeZero(), "the prior went part way through its relaxation")
 		Expect(capacityOf(second)).To(Equal(float64(8400)), "relaxing half way to own")
 
-		clock = clock.Add(BorrowedK2Relax/2 + time.Minute)
-		Expect(second.EvictStaleHistory().K2Priors).To(Equal(1), "the prior outlived its own relaxation")
+		serve(second, &clock, BorrowedK2Relax/2+time.Minute)
+		Expect(capacityOf(second)).To(Equal(float64(12800)), "the prior outlived its own relaxation")
+		Expect(previousFigures(second)).To(BeEmpty())
 	})
 
-	It("lets a prior never used go a bucket retention after it was installed", func() {
+	It("lets a prior never used go a bucket retention after it became one", func() {
 		saved := learn(params(256, "vllm:v1"))
 		second := newProcess(params(64, "vllm:v1"))
 		clock := time.Now()
@@ -146,6 +180,8 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		second.RestoreLearnedState(saved)
 		_, done := second.installRestored("test-ns", "test-model", "variant-a")
 		Expect(done).To(BeTrue())
+		convert(second, params(64, "vllm:v1"))
+		Expect(previousFigures(second)).To(HaveLen(1), "precondition: the window became a previous figure")
 
 		clock = clock.Add(second.horizons.BucketRetention - time.Minute)
 		Expect(second.EvictStaleHistory().K2Priors).To(BeZero())
@@ -166,13 +202,16 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		Expect(done).To(BeTrue())
 		Expect(capacityOf(second)).To(Equal(float64(4000)), "precondition: the prior in use")
 
-		clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+		serve(second, &clock, BorrowedK2Hold+BorrowedK2Relax/2)
 		Expect(capacityOf(second)).To(Equal(float64(8400)), "precondition: half way")
 		raw, err := json.Marshal(second.ExportLearnedState())
 		Expect(err).NotTo(HaveOccurred())
 		var again LearnedState
 		Expect(json.Unmarshal(raw, &again)).To(Succeed())
-		Expect(again.PriorK2).To(HaveLen(1), "the prior was not exported")
+		Expect(again.LowerBounds).To(HaveLen(1), "the prior was not exported")
+		for _, lb := range again.LowerBounds {
+			Expect(lb.Prior).To(Equal(int64(4000)), "the prior's figure was not exported with its clock")
+		}
 
 		third := newProcess(params(64, "vllm:v1"))
 		third.now = func() time.Time { return clock }
@@ -236,27 +275,26 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		second.RestoreLearnedState(saved)
 		_, done := second.installRestored("test-ns", "test-model", "variant-a")
 		Expect(done).To(BeTrue())
-		second.mu.Lock()
-		Expect(second.priorK2).To(HaveLen(1))
-		var key string
-		for k := range second.priorK2 {
-			key = k
-		}
-		second.mu.Unlock()
 		ownParams := params(64, "vllm:v1")
+		key := convert(second, ownParams)
+		Expect(previousFigures(second)).To(HaveLen(1))
 
 		// The control: a prior below what the variant would get is taken.
-		b, ok := second.borrowedK2(key, "test-model", 5000, ownParams, true)
+		b, ok := second.borrowedK2(key, "test-model", 5000, ownParams, true, true)
 		Expect(ok).To(BeTrue())
 		Expect(b.k2).To(Equal(int64(4000)))
-		Expect(b.prior).To(BeTrue())
+		Expect(b.own).To(BeTrue())
 
 		// Above it, not: 4000 against an own capacity of 3000 would raise it.
-		_, ok = second.borrowedK2(key, "test-model", 3000, ownParams, true)
+		_, ok = second.borrowedK2(key, "test-model", 3000, ownParams, true, true)
 		Expect(ok).To(BeFalse(), "a prior raised capacity")
 	})
 
-	It("takes no prior for a configuration it could not read completely", func() {
+	It("takes a configuration it could not read completely as other arguments, not as a match", func() {
+		// The live path tags an incomplete configuration's windows
+		// incomplete:<fingerprint>, so a window from the complete arguments
+		// becomes a lower-only previous figure on its first read; a restore
+		// does the same, where it used to install nothing.
 		saved := learn(params(256, "vllm:v1"))
 		unread := params(64, "vllm:v1")
 		unread.Unresolved = []string{"max_num_seqs"}
@@ -264,8 +302,10 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		second.RestoreLearnedState(saved)
 		r, done := second.installRestored("test-ns", "test-model", "variant-a")
 		Expect(done).To(BeTrue())
-		Expect(r.Priors).To(BeZero())
-		Expect(capacityOf(second)).To(Equal(float64(12800)))
+		Expect(r.Outcome).To(Equal(RestoredIncomplete))
+		Expect(r.Priors).To(Equal(1))
+		Expect(capacityOf(second)).To(Equal(float64(4000)))
+		Expect(previousFigures(second)).To(HaveLen(1), "taken as the variant's own window, not as a previous figure")
 	})
 
 	It("writes back the arguments of entries still pending", func() {

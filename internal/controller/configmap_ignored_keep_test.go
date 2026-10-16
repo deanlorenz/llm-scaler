@@ -51,7 +51,7 @@ func TestBadRetentionKeepsTheNewEntry(t *testing.T) {
 	if entry.ScaleToZero != nil && entry.ScaleToZero.RetentionPeriod != "" {
 		t.Errorf("retentionPeriod = %q, want it cleared", entry.ScaleToZero.RetentionPeriod)
 	}
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Errorf("limiter mode %q, want quota", got)
 	}
 	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 1 {
@@ -73,7 +73,7 @@ func TestPolicyNamespaceIgnoredFieldsNotReported(t *testing.T) {
 	f.cfg.MarkConfigMapsBootstrapComplete()
 
 	f.apply(rejectsPolicyNS, map[string]string{config.GlobalDefaultsKey: badRetentionDefault})
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Fatalf("limiter mode %q, want quota from the policy namespace", got)
 	}
 	if got := testutil.GetErrorMetricValue(registry, constants.ComponentController, ignoredFieldErrorType); got != 0 {

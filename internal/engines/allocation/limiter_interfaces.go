@@ -83,9 +83,19 @@ type ResourceConstraints struct {
 	// that only impose cluster/per-type constraints. The optimizer caps a
 	// model's allocation at min(per-type pool, this namespace's pool).
 	NamespacePools map[string]map[string]ResourcePool
-	TotalLimit     int
-	TotalUsed      int
-	TotalAvail     int
+	// NamespaceScoped reports a namespace-scope provider: its bounds are its
+	// per-namespace allowlists (NamespacePools), and its Pools are only their
+	// sum, for reporting. Such a provider does not bound the cluster: a
+	// namespace it excludes bypasses it. Every other provider's Pools is a
+	// cluster bound and a CLOSED allowlist -- a type it does not list has no
+	// capacity under it (physical inventory, a cluster-scope quota) -- and the
+	// optimizer intersects them (mergeConstraints). A provider that carries
+	// NamespacePools is read as namespace-scoped whether or not it sets this;
+	// it is set so that one with no active namespace is read the same way.
+	NamespaceScoped bool
+	TotalLimit      int
+	TotalUsed       int
+	TotalAvail      int
 	// PoolsVersion is the version of the warm-pool figure
 	// (decision.WarmPoolGPUsVersion) that the usage these constraints were
 	// computed against included. Set by the engine that built the usage views,
@@ -93,6 +103,61 @@ type ResourceConstraints struct {
 	// headroom published from these constraints carries it on, so a warm pool
 	// can tell a snapshot that has charged its Pods from one that has not.
 	PoolsVersion uint64
+
+	// The three figures of cohort borrowing (B4), set only by a provider that
+	// counts it -- a namespace-scope Kueue quota with countBorrowable on, for
+	// the namespaces where every B1 condition holds. All nil otherwise, and then
+	// every consumer behaves exactly as before borrowing was counted.
+	//
+	// Where they are set, NamespacePools carries the GUARANTEED figure as each
+	// namespace's Limit, and Pools aggregates the reach (guaranteed plus borrow
+	// cap), for reporting: the provider is NamespaceScoped, so its aggregate is
+	// never a cluster bound, and borrowing is bounded by the namespace's own
+	// figures, the shared pools and the cluster bounds. The greedy optimizer spends the
+	// guaranteed pool first, then draws from SharedPools up to NamespaceBorrow's
+	// cap. Every other consumer reads a copy without them: WithinNominal for
+	// scale-from-zero, the warm pool and rescale, GuaranteedOnly for the
+	// utilization-share optimizer.
+
+	// NamespaceBorrow is, per namespace and accelerator type (NamespacePools'
+	// spelling), how far the namespace may go past its guaranteed figure.
+	NamespaceBorrow map[string]map[string]NamespaceBorrow
+	// SharedPools are the cohorts' free pools, one chunk per cohort, flavor and
+	// GPU resource, spent once across every namespace in the cohort.
+	SharedPools []SharedPoolChunk
+	// NamespaceCohorts maps a namespace to the cohorts of the queues it is
+	// granted, for every namespace the provider read -- not only those it counts
+	// borrowing for -- so the engine can charge a gated pod to its cohort.
+	NamespaceCohorts map[string][]string
+	// BorrowWithheld is, per active namespace a borrowing-capable provider
+	// reads cohort borrowing for and does not count it, why (a kueue.Reason).
+	// Set even when no namespace counts borrowing; read only to report
+	// (LimiterBudgets), never to decide.
+	BorrowWithheld map[string]string
+	// NamespaceNominal is, per active namespace a Kueue-reading provider reads
+	// cohort borrowing for and does NOT count it (withheld, not selected), and
+	// per accelerator type (NamespacePools' spelling), its queues' nominal
+	// figures (NominalFigures): what of its nominal peers borrow that Kueue
+	// reclaims for it (reclaimWithinCohort Any), and what it can reach
+	// without borrowing. Set even when no
+	// namespace counts borrowing. A counted namespace carries the same figures
+	// in NamespaceBorrow.
+	NamespaceNominal map[string]map[string]NominalFigures
+	// BorrowNamespacesSet is set on a provider whose quota entry names
+	// kueue.borrowNamespaces (a pilot), so two entries over one cohort that
+	// disagree can be warned about (BorrowNamespacesSplit).
+	BorrowNamespacesSet bool
+	// KueueNeverRead is set on a quota entry that reads Kueue, leaves some
+	// type unlimited in its static caps, and has never read Kueue
+	// successfully: nothing bounds that type. Read only to report
+	// (wva_kueue_never_read).
+	KueueNeverRead bool
+}
+
+// KueueReadReporter is an inventory that reports a Kueue source never read
+// (QuotaInventory).
+type KueueReadReporter interface {
+	KueueNeverRead() bool
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.
@@ -158,6 +223,24 @@ type Inventory interface {
 	GetResourcePools() map[string]ResourcePool
 }
 
+// NamespaceScopedInventory is an Inventory that says whether it is
+// namespace-scoped, which DefaultLimiter carries onto
+// ResourceConstraints.NamespaceScoped. Optional: an inventory that does not
+// implement it bounds the cluster.
+type NamespaceScopedInventory interface {
+	Inventory
+
+	// NamespaceScoped reports whether this inventory's bounds are per
+	// namespace only, its per-type pools no cluster bound.
+	NamespaceScoped() bool
+}
+
+// namespaceScopedOf reports whether inv declares itself namespace-scoped.
+func namespaceScopedOf(inv Inventory) bool {
+	c, ok := inv.(NamespaceScopedInventory)
+	return ok && c.NamespaceScoped()
+}
+
 // NamespaceAwareInventory is an Inventory whose constraints depend on the
 // namespace of the decision, not just the accelerator type. Implementations
 // bucket usage by namespace in addition to type; the chain orchestrator is
@@ -193,6 +276,10 @@ type NamespaceAwareInventory interface {
 	// sentinel pool with Limit < 0 (so it stays distinct from a type the
 	// namespace does not list, which the optimizer must deny). SetUsedByNamespace
 	// should be called first so the returned pools carry current usage.
+	// An inventory with no namespace dimension (a cluster-scoped quota)
+	// returns nil; a namespace-scoped one returns a non-nil map, empty when
+	// no active namespace is capped (DefaultLimiter reads the difference as
+	// ResourceConstraints.NamespaceScoped).
 	NamespaceResourcePools(activeNamespaces []string) map[string]map[string]ResourcePool
 }
 

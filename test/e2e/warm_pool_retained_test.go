@@ -102,8 +102,8 @@ var _ = Describe("Warm pool - a retained pool does not churn its Pod", Label("fu
 	}
 
 	poolState := func() string {
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, controller.Namespace,
-			"control-plane=controller-manager", "", rtSinceRestart)
+		_, logs, err := testutils.ControllerLogsContain(ctx, k8sClient, controller.Namespace,
+			controller.Name, "", rtSinceRestart)
 		if err != nil {
 			return ""
 		}
@@ -130,10 +130,7 @@ var _ = Describe("Warm pool - a retained pool does not churn its Pod", Label("fu
 			Skip("--fake-metrics is simulator-only, and this spec needs demand that does not depend on timing")
 		}
 		ctx = context.Background()
-		controller = fixtures.ControllerDeployment{
-			Namespace: cfg.WVANamespace,
-			Name:      "wva-controller-manager",
-		}
+		controller = fixtures.WVAController(cfg.WVANamespace)
 
 		nodes, err := fixtures.SchedulableNodes(ctx, k8sClient)
 		Expect(err).NotTo(HaveOccurred())

@@ -6,6 +6,7 @@ package steadystate
 import (
 	"cmp"
 	"context"
+	"maps"
 	"slices"
 	"time"
 
@@ -51,7 +52,20 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	if snap == nil || e.client == nil {
 		return nil, nil, domains
 	}
-	nodes := shareFreeNodes(snap, g.AcceleratorType, reserved)
+	// Net of what today's optimizer placed this cycle for the models the
+	// share does not plan, and of the in-flight ledger's holes: those nodes
+	// are about to be taken. The share's own promises are held below
+	// (reserved), as they always were.
+	st := &e.utilizationShare
+	// A node counts only when every receiver's pods may land on it: the
+	// node view's rule, tolerations included.
+	var tolerations [][]corev1.Toleration
+	for _, role := range slices.Sorted(maps.Keys(g.Grow)) {
+		if acc := accessor(role, g.Grow[role].Name); acc != nil {
+			tolerations = append(tolerations, scaletarget.PodTolerations(acc))
+		}
+	}
+	nodes := shareFreeNodesAfter(snap, g.AcceleratorType, reserved, st.left.NodeDebits(st.planned), tolerations...)
 	if len(nodes) == 0 {
 		return nil, nil, domains
 	}
@@ -196,10 +210,26 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 // they are taken from the nodes with the most free first, which is where they
 // would count most.
 func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserved int) map[string]allocation.ShareNode {
+	return shareFreeNodesAfter(snap, accelerator, reserved, nil)
+}
+
+// shareFreeNodesAfter is shareFreeNodes with taken GPUs per node (what this
+// cycle's optimizer pass and the in-flight ledger hold on each,
+// allocation.PassLeft.NodeDebits) no longer free. A node counts as the node
+// view counts it (allocation.NodeAdmits): schedulable, carrying the group's
+// accelerator by name or family, and its taints tolerated by each of
+// tolerations (the receivers' pod templates; none given: no toleration).
+// Matched by exact name and blind to taints, the share placed a receiver on
+// a node of another product of the family, or one a taint keeps it off.
+func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, reserved int,
+	taken map[string]int, tolerations ...[]corev1.Toleration) map[string]allocation.ShareNode {
+	if len(tolerations) == 0 {
+		tolerations = [][]corev1.Toleration{nil}
+	}
 	nodes := map[string]allocation.ShareNode{}
 	for name, n := range snap {
-		if n.Accelerator == accelerator && !n.Unschedulable {
-			nodes[name] = allocation.ShareNode{Free: n.Free(), Labels: n.Labels}
+		if !slices.ContainsFunc(tolerations, func(t []corev1.Toleration) bool { return !allocation.NodeAdmits(n, accelerator, t) }) {
+			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels}
 		}
 	}
 	// The reserved GPUs are taken in one piece from the freest node, then the

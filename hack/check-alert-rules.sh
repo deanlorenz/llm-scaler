@@ -9,10 +9,16 @@
 # synthetic series. It needs no cluster.
 #
 #   1. promtool check rules: every expression in the shipped rule parses;
-#   2. promtool test rules on test/alerts/testdata/slo-alerts.test.yaml: a judged
-#      miss fires, a frozen or parked model and too few miss-minutes do not,
-#      overlapping series from two controller pods still join, and a model
-#      never judged raises WVAModelSLOUnjudged.
+#   2. promtool test rules on every test/alerts/testdata/*.test.yaml:
+#      slo-alerts: a judged miss fires, a frozen or parked model and too few
+#      miss-minutes do not, overlapping series from two controller pods still
+#      join, and a model never judged raises WVAModelSLOUnjudged.
+#      kueue-alerts: the Kueue borrowing alerts fire per namespace, per quota
+#      entry and per controller instance as their runbooks say, and the
+#      thrashing alert counts four losses, not three.
+#      utilization-share-alerts: a frozen group, floors past the quota and an
+#      invalid optimizer block fire, passing states do not, and a parked model
+#      with no wake signal pages once, not twice.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.
@@ -22,7 +28,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROMTOOL=${PROMTOOL:-promtool}
 YQ=${YQ:-yq}
 RULE=${RULE:-$ROOT/config/components/prometheus-alerts/prometheusrule.yaml}
-TESTS="$ROOT/test/alerts/testdata/slo-alerts.test.yaml"
+TESTS="$ROOT/test/alerts/testdata"
 
 if ! command -v "$PROMTOOL" >/dev/null 2>&1; then
   echo "FAIL: promtool not found (PROMTOOL=$PROMTOOL); run make promtool" >&2
@@ -46,9 +52,19 @@ fi
 
 # The tests compare labels and firing, not the annotation prose.
 "$YQ" 'del(.groups[].rules[].annotations)' "$WORK/full.yaml" > "$WORK/rules.yaml" || exit 1
-cp "$TESTS" "$WORK/slo-alerts.test.yaml"
-if ! (cd "$WORK" && "$PROMTOOL" test rules slo-alerts.test.yaml); then
-  echo "FAIL: an SLO alert fired, or stayed quiet, against its test" >&2
+RAN=0
+for t in "$TESTS"/*.test.yaml; do
+  [ -f "$t" ] || continue
+  cp "$t" "$WORK/"
+  if ! (cd "$WORK" && "$PROMTOOL" test rules "$(basename "$t")"); then
+    echo "FAIL: an alert fired, or stayed quiet, against $(basename "$t")" >&2
+    exit 1
+  fi
+  RAN=$((RAN + 1))
+done
+# Every file, or a rename silently drops one.
+if [ "$RAN" -ne 3 ]; then
+  echo "FAIL: $RAN alert test files ran, not 3. Update the count deliberately." >&2
   exit 1
 fi
-echo "ok: alert rules parse and the SLO alert tests pass"
+echo "ok: alert rules parse and the alert tests pass ($RAN files)"
