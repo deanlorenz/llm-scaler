@@ -422,6 +422,28 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}
 	})
 
+	// A tenant whose every role is at its ceiling grows nothing, so its fill
+	// places nothing. It claimed its 8 free GPUs all the same, and the free
+	// node went to it, not to the cluster group's 8-GPU replica.
+	It("claims nothing for a tenant that grows nothing", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 16, Used: 8}},
+			}},
+		}
+		full := node("ma", "team-a", 1)
+		full.VariantStates[0].MaxReplicas = ptrInt(1)
+		groups, unshared := build([]ModelScalingRequest{full, node("mx", "ns-x", 1)}, cons, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(unshared).To(BeEmpty())
+		Expect(groups["team-a"].Grow).To(BeEmpty())
+		idle := map[string]int{}
+		for scope, g := range groups {
+			idle[scope] = max(0, min(idleClaim(g), g.ClusterFree))
+		}
+		Expect(idle).To(Equal(map[string]int{"": 8, "team-a": 0}))
+	})
+
 	// A claim rounded down to whole replicas leaves part of the namespace's
 	// free quota unclaimed. A warm pool there can grow into that remainder,
 	// so the cluster group carves it: team-a has 12 free, claims one 8-GPU

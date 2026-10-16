@@ -229,7 +229,9 @@ sparse debits; `adopt` commits a clone's debits.
   `splitClusterFree` divides each finite cluster key between every group that
   draws on it. Both round to whole replicas of the smallest variant each group
   grows (`growStepGPUs`, over `ShareGroup.Grow`), since a group's fills place
-  only those; a group that grows nothing falls back to its smallest variant.
+  only those. A group that grows nothing (every role at its ceiling) claims
+  nothing, in both; in the claim, unless it has a frozen model, which today's
+  optimizer may still grow.
 - `gpunodes.usageWalk` counts a Pending pod on its `Status.NominatedNodeName`
   (`occupiedNode`), in every view.
 

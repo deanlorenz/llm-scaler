@@ -371,7 +371,8 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// grows (growStepGPUs), which is all its fills place: with 8-GPU
 	// replicas, 4 free GPUs place nothing, and claiming them would leave a
 	// free node unused by every group. A 1-GPU variant it does not grow does
-	// not shrink the step. (Capping each claim at the
+	// not shrink the step, and a group that grows nothing claims nothing
+	// unless it has a frozen model. (Capping each claim at the
 	// cluster free first gives the same remainder: once one claim reaches it,
 	// nothing is left either way.) This keeps the cluster group from counting
 	// GPUs a namespace group may also fill. A claim is charged to the cluster
@@ -405,9 +406,12 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			if !ok {
 				continue
 			}
-			step := 0
+			step, placesNone := 0, false
 			if g := groups[key{acc, ns}]; g != nil {
 				step = growStepGPUs(g)
+				// A group that grows nothing, with no frozen model that
+				// today's optimizer may grow, places nothing: it claims none.
+				placesNone = step == 0 && len(g.Frozen) == 0
 			}
 			if step <= 0 {
 				step = steps[ns][acc]
@@ -416,10 +420,13 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				step = smallestReplicaGPUs(g)
 			}
 			rest := 0
-			if step > 0 {
+			switch {
+			case placesNone:
+				rest = nsFree
+			case step > 0:
 				rest = nsFree % step
-				nsFree -= rest
 			}
+			nsFree -= rest
 			claimed[budgetKey(available, acc)] += nsFree
 			if unclaimed[ns] == nil {
 				unclaimed[ns] = map[string]int{}
@@ -496,17 +503,14 @@ func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[str
 // replica of a variant it grows (Grow) takes, since its fills and transfers
 // place only those. A 1-GPU variant g does not grow places nothing, so it does
 // not count: beside an 8-GPU variant g grows, it let g claim GPUs only an
-// 8-GPU replica could use. With no variant to grow, it is the smallest variant
-// (smallestReplicaGPUs).
+// 8-GPU replica could use. It is 0 when g grows nothing: every role is at its
+// ceiling, so its fills place nothing.
 func growStepGPUs(g *ShareGroup) int {
 	step := 0
 	for _, v := range g.Grow {
 		if v.GPUs > 0 && (step == 0 || v.GPUs < step) {
 			step = v.GPUs
 		}
-	}
-	if step == 0 {
-		return smallestReplicaGPUs(g)
 	}
 	return step
 }
@@ -552,7 +556,8 @@ func clusterBudgets(constraints []*ResourceConstraints, declared ...string) (map
 // grows (growStepGPUs), as the namespace groups' claims on the cluster group
 // are in BuildShareGroups: a share of 4 GPUs to a group of 8-GPU replicas
 // places nothing, and splitting one free 8-GPU node 4 and 4 left it unused by
-// every group. The remainder is handed out a replica at a time, round robin.
+// every group. A group that grows nothing claims nothing. The remainder is
+// handed out a replica at a time, round robin.
 func splitClusterFree(groups []ShareGroup, available map[string]int) {
 	for _, key := range slices.Sorted(maps.Keys(available)) {
 		free := available[key]
@@ -572,9 +577,13 @@ func splitClusterFree(groups []ShareGroup, available map[string]int) {
 		steps := make([]int, len(sharing))
 		total := 0
 		for j, i := range sharing {
-			steps[j] = max(1, growStepGPUs(&groups[i]))
+			step := growStepGPUs(&groups[i])
+			steps[j] = max(1, step)
 			claims[j] = min(groups[i].ClusterFree, idleClaim(groups[i]))
 			claims[j] -= claims[j] % steps[j]
+			if step == 0 {
+				claims[j] = 0 // it grows nothing, so its fill places nothing
+			}
 			total += claims[j]
 		}
 		if total <= free {

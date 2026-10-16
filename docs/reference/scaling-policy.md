@@ -378,7 +378,9 @@ its most cost-efficient variant that is below its `maxReplicas`. With 8-GPU
 replicas, a tenant with 4 free GPUs claims none of them, so the cluster group
 can still fill a free node. This holds even when the tenant also has a 1-GPU
 variant: it does not grow that variant, so it claims nothing for it. It claims
-the 4 GPUs only when it grows the 1-GPU variant and can place them.
+the 4 GPUs only when it grows the 1-GPU variant and can place them. A tenant
+whose models are all shared and all at their `maxReplicas` grows nothing, so
+it claims nothing.
 
 This stops the cluster group from counting GPUs a tenant may also fill. It does
 not bound the tenants against each other: each tenant's group is bounded only by
