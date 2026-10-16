@@ -70,6 +70,9 @@ const (
 	// failure to pass, short enough that a store that stays unreadable --
 	// a missing Role -- does not keep every lower bound at full strength.
 	learnedStateBoundHold = 10 * time.Minute
+	// learnedStateFlushTimeout bounds the last write as the loop stops: the
+	// manager waits for runnables only so long before it releases the lease.
+	learnedStateFlushTimeout = 5 * time.Second
 )
 
 // learnedStateKey is the ConfigMap data key this version's document lives
@@ -367,6 +370,24 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",
 			"dropped", dropped, "maxBytes", budget)
 	}
+}
+
+// flushLearnedState writes the learned state once more as the optimize loop
+// stops, whatever the interval and the digest say. Without it, a planned
+// upgrade or a leader hand-off lost up to a minute of readings and up to
+// learnedStateRefresh of lower-bound clock progress: the digest leaves the
+// clocks out, so they are written only on the refresh, and the next leader
+// read the time since then as a pause, holding bounds at full strength
+// longer. Best effort, on its own short context: the loop's is cancelled.
+func (e *Engine) flushLearnedState() {
+	if e.Config == nil || !e.Config.LearnedStateSnapshotEnabled() || !e.learnedState.restored {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), learnedStateFlushTimeout)
+	defer cancel()
+	st := &e.learnedState
+	st.lastWrite, st.lastDigest = time.Time{}, ""
+	e.writeLearnedState(ctx, time.Now())
 }
 
 // learnedStateDigest identifies what was learned, so a state that changed only

@@ -67,3 +67,30 @@ func TestAStoreThatCannotBeWrittenSaysSoOnce(t *testing.T) {
 	assert.Equal(t, 1, count("the snapshot can be written again"), "the recovery of the write is logged once")
 	assert.Zero(t, count("the snapshot can be read again"), "the read never failed")
 }
+
+// The loop stopping -- an upgrade, a leader hand-off -- writes what was
+// learned since the last write, inside the interval that would hold an
+// ordinary write back; a controller that never read the snapshot writes
+// nothing over it.
+func TestTheLoopStoppingWritesTheLatestState(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	spy := &stateSpy{state: sampleState(4000)}
+	e := snapshotEngine(t, c, spy)
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	spy.state = sampleState(5000)
+	e.writeLearnedState(ctx, now.Add(10*time.Second))
+	before, _ := storedDoc(t, c)
+	assert.Equal(t, []float64{4000}, before.State.K2["ns|v|m|H100|1|both|short|q5"].Values, "precondition: the interval holds an ordinary write back")
+
+	e.flushLearnedState()
+	after, _ := storedDoc(t, c)
+	assert.Equal(t, []float64{5000}, after.State.K2["ns|v|m|H100|1|both|short|q5"].Values, "the loop stopped without writing what it learned")
+
+	unread := snapshotEngine(t, c, &stateSpy{state: sampleState(9000)})
+	unread.flushLearnedState()
+	kept, _ := storedDoc(t, c)
+	assert.Equal(t, []float64{5000}, kept.State.K2["ns|v|m|H100|1|both|short|q5"].Values, "a controller that never read the snapshot overwrote it")
+}
