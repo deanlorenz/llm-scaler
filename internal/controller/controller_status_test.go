@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -126,6 +127,26 @@ optimizer:
 			Expect(r.Reader.(client.Client).Update(ctx, &cm)).To(Succeed())
 			reconcile(r, systemNS)
 			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
+		})
+
+		// Review 183-3: a quota entry with a reserved name still applies in
+		// this release; the status says so until it is renamed.
+		It("accepts a quota entry with a reserved name, noting it in limiterWarnings until renamed", func() {
+			reserved := strings.Replace(quotaShadowPolicy, "name: install-quota", "name: gpu-limiter", 1)
+			r := newReconciler(policyConfigMap(systemNS, "", reserved))
+			reconcile(r, systemNS)
+
+			d := status.Data()
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "true"))
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "quota/gpu-limiter"))
+			Expect(d[controllerstatus.KeyLimiterWarnings]).To(ContainSubstring(`limiters[0]: quota entry name "gpu-limiter" is reserved`))
+
+			var cm corev1.ConfigMap
+			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &cm)).To(Succeed())
+			cm.Data[config.GlobalDefaultsKey] = quotaShadowPolicy
+			Expect(r.Reader.(client.Client).Update(ctx, &cm)).To(Succeed())
+			reconcile(r, systemNS)
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyLimiterWarnings, ""))
 		})
 	})
 

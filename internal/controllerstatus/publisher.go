@@ -49,7 +49,12 @@
 //	limiter                the limiter in force, "<mode>/<entry names>": for
 //	                       example "quota/install-quota",
 //	                       "inventory/gpu-inventory", or "none".
-//	utilizationShare       the optimizer's mode: off, invalid, shadow or
+//	limiterWarnings        what is wrong with the limiters in force though
+//	                       they still apply as written, joined by "; ": a
+//	                       quota entry named one of the reserved limiter
+//	                       names, which a later release rejects. Empty when
+//	                       none.
+//	utilizationShare      the optimizer's mode: off, invalid, shadow or
 //	                       active.
 //	utilizationShareError  the optimizer block's configuration error when the
 //	                       mode is invalid; empty otherwise.
@@ -60,7 +65,7 @@
 //	                       last cycle, JSON (LimiterBudgets); absent until a
 //	                       cycle with a limiter. See KeyLimiterBudgets.
 //
-// limiter and utilizationShare are recomputed from the applied configuration
+// limiter, limiterWarnings and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
 // it. The steady-state engine republishes utilizationShare every cycle as a
 // backstop; the ConfigMap is rewritten only when a value changes.
@@ -115,6 +120,7 @@ const (
 	KeyPolicyError           = "policyError"
 	KeyPolicyIgnored         = "policyIgnored"
 	KeyLimiter               = "limiter"
+	KeyLimiterWarnings       = "limiterWarnings"
 	KeyUtilizationShare      = "utilizationShare"
 	KeyUtilizationShareError = "utilizationShareError"
 	KeyLeader                = "leader"
@@ -214,6 +220,7 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 			KeyPolicyError:           "",
 			KeyPolicyIgnored:         "",
 			KeyLimiter:               string(config.LimiterTypeNone),
+			KeyLimiterWarnings:       "",
 			KeyUtilizationShare:      constants.UtilizationShareModeOff,
 			KeyUtilizationShareError: "",
 			KeyLeader:                leader,
@@ -534,6 +541,7 @@ func observe(d map[string]string, cfg *config.Config) {
 	}
 	d[KeyPolicyNamespace] = cfg.PolicyNamespace()
 	d[KeyLimiter] = cfg.EffectiveLimiterSummary()
+	d[KeyLimiterWarnings] = strings.Join(cfg.EffectiveLimiterWarnings(), "; ")
 	mode, err := cfg.UtilizationShareMode()
 	d[KeyUtilizationShare] = mode
 	d[KeyUtilizationShareError] = errText(err)

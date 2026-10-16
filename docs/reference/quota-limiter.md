@@ -720,9 +720,7 @@ The nominal cap is unaffected by all of them.
 
 The policy entry is rejected for any of:
 
-- Empty or duplicate `name`, or a `name` reserved for what a held-back
-  decision is reported under when it is not a quota entry: `gpu-limiter`,
-  `node-fit`, `pd-pair-borrows-whole`, `lender-cannot-reclaim`.
+- Empty or duplicate `name`.
 - `type` other than `"quota"`.
 - `scope` outside `{cluster, namespace}`.
 - `namespaceQuotas` or `exclude` set on a cluster-scoped entry.
@@ -730,6 +728,14 @@ The policy entry is rejected for any of:
 - Negative quota values other than `-1`.
 - A quota value above 1,048,576.
 - Empty accelerator type or namespace key.
+
+Reserved names: `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and
+`lender-cannot-reclaim` are what a held-back decision is reported under when
+no quota entry held it. A quota entry with one of them is still accepted in
+this release, with a warning: the log line `WARNING: Quota limiter entry has a
+reserved name`, a count in `wva_errors_total` under that `error_type`, and the
+`limiterWarnings` key of the controller status. A later release rejects it.
+Rename the entry ([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
 - In a `kueue:` block, an empty resource name or a `refreshInterval` that is not
   a positive duration; a `kueue:` block on a `gpu-inventory` entry.
 

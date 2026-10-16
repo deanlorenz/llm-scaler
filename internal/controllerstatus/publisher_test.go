@@ -91,7 +91,7 @@ func TestFlushCreatesOnceAndSkipsUnchanged(t *testing.T) {
 		t.Errorf("leader = %q, want POD_NAME", got)
 	}
 	for _, k := range []string{KeyPolicyNamespace, KeyPolicyConfigMap, KeyPolicyResourceVersion, KeyPolicyAccepted,
-		KeyPolicyError, KeyPolicyIgnored, KeyLimiter, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
+		KeyPolicyError, KeyPolicyIgnored, KeyLimiter, KeyLimiterWarnings, KeyUtilizationShare, KeyUtilizationShareError, KeyControllerInstance} {
 		if _, ok := cm.Data[k]; !ok {
 			t.Errorf("key %q missing", k)
 		}

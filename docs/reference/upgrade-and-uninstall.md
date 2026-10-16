@@ -424,6 +424,29 @@ Installer:
   # was: wva_learned_state_restores_total{outcome="rejected"}
   sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
   ```
+- **Rename a quota entry named `gpu-limiter`, `node-fit`,
+  `pd-pair-borrows-whole` or `lender-cannot-reclaim`.** These names are now
+  reserved for what a held-back decision is reported under when no quota
+  entry held it. In this release such an entry still loads and applies, with
+  a warning: the log line `WARNING: Quota limiter entry has a reserved name`
+  and the `limiterWarnings` key of the controller status. A later release
+  rejects it, and a rejected `default` entry stops the controller at start.
+  Check before upgrading:
+  ```bash
+  kubectl get configmap wva-controller-status -n <controller namespace> \
+    -o jsonpath='{.data.limiterWarnings}'
+  ```
+  Renaming an entry renames its `limiter_name` series and the name in its
+  Events: update any alert or query that selects it.
+- **A parked model refused a wake has new reasons on
+  `wva_model_scaling_blocked`.** `wake-no-capacity` when no serving set fits
+  the GPU budget or the nodes, and `wake-nominal-lent-out` when the
+  ClusterQueue lent its nominal to a peer it cannot reclaim from. A parked
+  model used to show `nominal-lent-out` for the second;
+  `nominal-lent-out` now marks only a capped serving model. Point any selector
+  on `reason="nominal-lent-out"` meant for parked models at
+  `reason="wake-nominal-lent-out"`
+  ([reasons](prometheus.md#wva_model_scaling_blocked)).
 - **Before rolling the controller back to an earlier release, remove the
   `llm-d.ai/forget-learned-state` annotation** from every scale target that
   carries it. The earlier release rewrites the learned-state snapshot without

@@ -43,6 +43,11 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 // ResetUnusableFields is counted under, once per field per ConfigMap read.
 const ignoredFieldErrorType = "Ignored unusable saturation scaling config field"
 
+// reservedLimiterNameErrorType is the error_type a quota entry named one of
+// config.ReservedLimiterNames is counted under, once per entry per ConfigMap
+// read, and starts its log line. The entry still applies.
+const reservedLimiterNameErrorType = "Quota limiter entry has a reserved name"
+
 // parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
 // by key, why each entry that was dropped was dropped: a YAML error, or a
 // Normalize or Validate failure. An entry that parsed is never in it. A key the
@@ -143,6 +148,16 @@ func warnAboutLimiters(logger logr.Logger, policy config.ScalingPolicy) {
 	// exclude that nothing bounds. Logged once per config change.
 	for _, w := range policy.LimiterWarnings() {
 		logger.Info("WARNING: "+w, "key", key)
+	}
+	// A quota entry with a reserved name is accepted in this release
+	// (config.ReservedLimiterNames): rejecting it would drop the default
+	// entry, and at startup stop the controller mid-upgrade. Warned on
+	// every read, counted, and listed in the controller status
+	// (limiterWarnings) while it is in force.
+	for _, w := range config.ReservedLimiterNameWarnings(policy.Limiters) {
+		logger.Info("WARNING: "+reservedLimiterNameErrorType+"; it applies in this release, rename it before a later one rejects it",
+			"key", key, "warning", w)
+		metrics.RecordError(constants.ComponentController, reservedLimiterNameErrorType)
 	}
 }
 
