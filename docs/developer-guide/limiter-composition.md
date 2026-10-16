@@ -231,11 +231,20 @@ is newer than the view's snapshot.
   the pods were listed. Only a cycle fitted to nodes admits (`cycleFitted`).
   Only growth starts an entry: a target at or below the current replicas
   updates an entry the variant has (`InFlightAdmission.ExistingOnly`), so a
-  replacement pod at Kueue's gate after a preemption holds no hole. The scale-from-zero engine admits
+  replacement pod at Kueue's gate after a preemption holds no hole. That
+  applies when the variant has an unplaced replica (`InFlightAdmission.Unplaced`)
+  or the ledger has already sighted it in this process (`sighted`, set by
+  `Commit` and `Admit`, not by `Provisional`). On the first sighting after a
+  restart a variant with no unplaced replica starts its entry: the ledger is
+  not persisted, and a Pending pod's node stays held. The scale-from-zero engine admits
   each woken candidate at want 1 (`wake_tick.go`).
 - TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
   (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both
-  engines), from the admission that raised `want`; an
+  engines; from the steady-state engine three times it while
+  `BorrowCycle.ScaleUpPending`), from the
+  admission that raised `want`; an admission of the same replicas with another
+  TTL moves the end by the difference, so it shrinks once the entry leaves
+  its flavor; an
   equal or lower `want` keeps the clock, so a replica Pending for good is not
   held anew every cycle. An expired entry holds nothing and is dropped a TTL
   later.
