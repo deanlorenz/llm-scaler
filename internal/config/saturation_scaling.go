@@ -883,10 +883,11 @@ func (c *ScalingPolicy) validateLimiters() error {
 
 // LimiterWarnings returns the non-fatal findings about this policy's quota
 // limiters (see QuotaLimiterEntries.Validate), and the namespaces a namespace
-// quota excludes that nothing bounds (see unboundedExcludeWarnings). A
-// physical limiter bounds every namespace, so with one declared the second
-// kind is not reported. Empty when there are none, or when the quota entries
-// do not validate: the error is reported elsewhere.
+// quota excludes that have no GPU limit on some accelerator type (see
+// unboundedExcludeWarnings). A physical limiter bounds every type a workload
+// names, so with one declared only a workload that names none can be reported.
+// Empty when there are none, or when the quota entries do not validate: the
+// error is reported elsewhere.
 func (c ScalingPolicy) LimiterWarnings() []string {
 	var quotaOnes []QuotaLimiterConfig
 	for _, l := range c.Limiters {
@@ -903,15 +904,13 @@ func (c ScalingPolicy) LimiterWarnings() []string {
 		return nil
 	}
 	physical := slices.ContainsFunc(c.Limiters, func(l QuotaLimiterConfig) bool { return isPhysicalLimiterType(l.Type) })
-	if !physical {
-		warnings = append(warnings, entries.unboundedExcludeWarnings()...)
-	}
-	return warnings
+	return append(warnings, entries.unboundedExcludeWarnings(physical)...)
 }
 
 // IgnoredPhysicalLimitersMessage is the one log message for physical entries
-// after the first, shared by the ConfigMap parse and the startup check so an
-// operator searching for one finds both.
+// after the first, shared by the startup check (cmd/main.go) and the ConfigMap
+// reconciler, which logs it only for the ConfigMap the limiters are read from
+// (warnAboutLimiters), so an operator searching for one finds both.
 const IgnoredPhysicalLimitersMessage = "Ignoring physical (gpu-inventory) limiters entries after the first: " +
 	"one physical limiter is built, from the first"
 

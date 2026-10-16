@@ -152,12 +152,14 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		cluster := func(quotas map[string]int) QuotaLimiterConfig {
 			return QuotaLimiterConfig{Name: "cluster", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: quotas}
 		}
+		// A second cluster entry needs a name of its own.
+		const secondClusterName = "cluster-2"
 		validate := func(entries ...QuotaLimiterConfig) []string {
 			GinkgoHelper()
 			e := &QuotaLimiterEntries{Limiters: entries}
 			warnings, err := e.Validate()
 			Expect(err).NotTo(HaveOccurred())
-			return append(warnings, e.unboundedExcludeWarnings()...)
+			return append(warnings, e.unboundedExcludeWarnings(false)...)
 		}
 
 		It("warns that an excluded namespace has no limit without a cluster quota", func() {
@@ -170,7 +172,7 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 
 		It("names the accelerator types every cluster quota leaves unlimited", func() {
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1, "H100": -1}))).To(ConsistOf(
-				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100 H100]"))),
+				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100, H100]"))),
 				"an unlimited cluster quota bounds nothing")
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "A100": -1}))).To(ConsistOf(
 				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100]"))))
@@ -184,7 +186,7 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		It("does not warn about a type a cluster quota leaves out", func() {
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16}))).To(BeEmpty())
 			second := cluster(map[string]int{"H100": 8})
-			second.Name = "cluster-2"
+			second.Name = secondClusterName
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1}), second)).To(BeEmpty(),
 				"the second cluster quota denies A100")
 		})
@@ -200,9 +202,20 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 			Expect(validate(tenants("ns-x"), bounded)).To(BeEmpty())
 		})
 
+		// Its static -1 would read as unbounded; Kueue's figures bound it at
+		// runtime, and they cannot be read here.
 		It("does not warn when a cluster quota reads its numbers from Kueue", func() {
 			kueue := QuotaLimiterConfig{Name: "cluster", Type: "quota", Scope: QuotaScopeCluster,
-				Kueue: &KueueQuotaSource{Enabled: true}}
+				ClusterQuotas: map[string]int{"A100": -1}, Kueue: &KueueQuotaSource{Enabled: true}}
+			Expect(validate(tenants("ns-x"), kueue)).To(BeEmpty())
+			kueue.Kueue = nil
+			Expect(validate(tenants("ns-x"), kueue)).To(ConsistOf(ContainSubstring("on [A100]")),
+				"the same entry without Kueue")
+		})
+
+		It("does not warn about a namespace a namespace quota that reads Kueue holds", func() {
+			kueue := QuotaLimiterConfig{Name: "kueue-tenants", Type: "quota", Scope: QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"default": {"A100": -1}}, Kueue: &KueueQuotaSource{Enabled: true}}
 			Expect(validate(tenants("ns-x"), kueue)).To(BeEmpty())
 		})
 
@@ -210,7 +223,53 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"a100": -1, "NVIDIA-H100-80GB-HBM3": 16}))).To(ConsistOf(
 				ContainSubstring("on [A100]")), "a100 is A100; the H100 product key bounds the H100 family")
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-A100-SXM4-80GB": 20, "nvidia-h100-80gb": -1}))).To(ConsistOf(
-				ContainSubstring("on [H100]")))
+				ContainSubstring("on [H100 (bare name), nvidia-h100-80gb]")),
+				"the bare family is the sum of its listed products; an unlisted H100 product is denied")
+		})
+
+		// The planner reads a family key as the bound of every product a
+		// quota does not list (accelerator.AllowlistBound), so the warning must
+		// too: a finite product key does not bound its family.
+		It("reads a family key as the planner does: it bounds the products the quota does not list", func() {
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": -1, "NVIDIA-H100-PCIE-80GB": 4}))).To(ConsistOf(
+				ContainSubstring("on [H100 (bare name), other H100 products]")),
+				"only PCIE has a number; HBM3, SXM5 and the bare family fall back to H100: -1")
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": -1, "L4": -1, "NVIDIA-H100-80GB-HBM3": 0}))).To(ConsistOf(
+				ContainSubstring("on [H100 (bare name), other H100 products, L4]")))
+			second := cluster(map[string]int{"H100": -1, "L4": 0, "NVIDIA-H100-PCIE-80GB": 20})
+			second.Name = secondClusterName
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-H100-PCIE-80GB": -1}), second)).To(ConsistOf(
+				ContainSubstring("on [H100 (bare name)]")),
+				"a bare H100 is the first quota's PCIE sum (-1) and the second's family key (-1)")
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "NVIDIA-H100-PCIE-80GB": -1}))).To(BeEmpty(),
+				"a finite family key bounds its products")
+		})
+
+		// Each cluster quota leaves "unknown" (a workload naming no GPU type)
+		// unbounded unless it lists it, so one quota listing it as -1 is enough.
+		It("warns about a workload that names no accelerator when a cluster quota lists unknown as -1", func() {
+			second := cluster(map[string]int{"A100": 4})
+			second.Name = secondClusterName
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"unknown": -1, "A100": 4}), second)).To(ConsistOf(
+				ContainSubstring("on [unknown]")))
+			finite := cluster(map[string]int{"unknown": 2})
+			finite.Name = secondClusterName
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"unknown": -1, "A100": 4}), finite)).To(BeEmpty())
+		})
+
+		// A namespace another namespace quota holds is a closed allowlist there,
+		// bounded by that quota's caps for it, which may be -1.
+		It("warns about an excluded namespace another namespace quota holds with -1", func() {
+			others := QuotaLimiterConfig{Name: "others", Type: "quota", Scope: QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"default": {"A100": -1}}}
+			Expect(validate(tenants("ns-x"), others)).To(ConsistOf(And(
+				ContainSubstring("exclude [ns-x] have no GPU limit on [A100]"),
+				ContainSubstring(`the namespace quotas that hold them ("others") set those accelerator types to -1`))))
+			Expect(validate(tenants("ns-x"), others, cluster(map[string]int{"A100": 8}))).To(BeEmpty(),
+				"a finite cluster quota bounds it")
+			bounded := others
+			bounded.NamespaceQuotas = map[string]map[string]int{"default": {"A100": 2}}
+			Expect(validate(tenants("ns-x"), bounded)).To(BeEmpty())
 		})
 
 		It("does not warn about a namespace another namespace quota caps", func() {

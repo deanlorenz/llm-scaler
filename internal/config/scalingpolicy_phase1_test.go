@@ -389,6 +389,15 @@ var _ = Describe("Config.EffectiveLimiterTypes / EffectiveQuotaEntries", func() 
 				"the other quota findings are still reported")
 		})
 
+		// No physical inventory lists "unknown", so a cluster quota that lists
+		// it as -1 leaves a workload that names no GPU type unbounded.
+		It("names unknown beside a physical limiter when a cluster quota lists it as -1", func() {
+			cluster := QuotaLimiterConfig{Type: "quota", Name: "cluster", Scope: QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"unknown": -1, "A100": -1}}
+			p := ScalingPolicy{Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory"}, tenants, cluster}}
+			Expect(p.LimiterWarnings()).To(ConsistOf(ContainSubstring("exclude [ns-x] have no GPU limit on [unknown]")))
+		})
+
 		It("returns nothing without quota limiters, or for entries that do not validate", func() {
 			Expect(ScalingPolicy{Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory"}}}.LimiterWarnings()).To(BeEmpty())
 			Expect(ScalingPolicy{Limiters: []QuotaLimiterConfig{
