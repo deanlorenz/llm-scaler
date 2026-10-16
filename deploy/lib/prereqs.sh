@@ -666,11 +666,20 @@ wva_policy_candidates() {
 # unknown, with WVA_KUEUE_BORROW_UNREAD naming what, when no policy says yes
 # and one an ADMIN owns could not be read: the caller leaves the grant as it
 # is. The tenant's own policy (wva_policy_is_tenants) that cannot be read or
-# parsed counts as no, with a warning. Also sets
+# parsed counts as no, with a warning.
+#
+# The tenant's own policy -- a self-managed controller whose policy namespace
+# does not resolve -- never grants the read on its own. Only this run's
+# explicit admin settings do: WVA_LIMITER naming quota with
+# WVA_QUOTA_KUEUE=true. With WVA_LIMITER unset, a tenant ConfigMap that counts
+# borrowing counts as no, with a warning naming those settings, and sets
+# WVA_KUEUE_BORROW_TENANT_ONLY=yes so the tenant-phase check still says the
+# controller lacks the read. Also sets
 # WVA_KUEUE_KEPT_NS, the kueue.controllerNamespace a policy keeps, for the
 # Kueue controller read (pl_grant_kueue_controller_read).
 WVA_KUEUE_BORROW_WANTED=unknown
 WVA_KUEUE_BORROW_UNREAD=""
+WVA_KUEUE_BORROW_TENANT_ONLY=no
 WVA_KUEUE_KEPT_NS=""
 
 # wva_policy_is_tenants reports whether the policy ConfigMap in namespace $1 is
@@ -692,6 +701,7 @@ wva_kueue_borrow_wanted() {
     local ns rc doc ans=no unread kept_false
     WVA_KUEUE_BORROW_WANTED=unknown
     WVA_KUEUE_BORROW_UNREAD=""
+    WVA_KUEUE_BORROW_TENANT_ONLY=no
     WVA_KUEUE_KEPT_NS=""
     wva_policy_candidates
     unread="$WVA_POLICY_CANDS_UNREAD"
@@ -713,6 +723,15 @@ wva_kueue_borrow_wanted() {
         fi
         [ -n "$doc" ] || doc='limiters: []'
         [ -n "$WVA_KUEUE_KEPT_NS" ] || WVA_KUEUE_KEPT_NS="$(printf '%s\n' "$doc" | policy_kueue_namespace)"
+        if wva_policy_is_tenants "$ns" && [ -z "${WVA_LIMITER:-}" ]; then
+            # The tenant writes this ConfigMap, and the read reaches every
+            # tenant's Workloads: only the admin's explicit settings grant it.
+            if [ "$(printf '%s\n' "$doc" | policy_counts_borrowing)" = yes ]; then
+                WVA_KUEUE_BORROW_TENANT_ONLY=yes
+                log_warning "  $ns/wva-scaling-policy-config counts Kueue cohort borrowing, but it is the tenant's own policy (no policy namespace resolves), so it does not grant the cluster-wide Kueue Workload read. To grant it, re-run with this install's WVA_LIMITER=quota and WVA_QUOTA_KUEUE=true."
+            fi
+            continue
+        fi
         if [ "$ns" = "$WVA_NS" ] && [ -n "${WVA_LIMITER:-}" ]; then
             # This install rewrites its own entry.
             # A WVA_LIMITER limiter_types_of refuses names no quota here; the
@@ -767,7 +786,7 @@ wva_check_kueue_borrow_read() {
     [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
     local sa
     wva_kueue_borrow_wanted
-    [ "$WVA_KUEUE_BORROW_WANTED" = yes ] || return 0
+    [ "$WVA_KUEUE_BORROW_WANTED" = yes ] || [ "$WVA_KUEUE_BORROW_TENANT_ONLY" = yes ] || return 0
     sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
     case "$(can_i_as "$sa" list workloads.kueue.x-k8s.io --all-namespaces)" in
         yes) log_success "The controller can list Kueue Workloads in every namespace, which counting borrowing needs" ;;
