@@ -18,7 +18,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
 | will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
-| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake | [will not wake](#a-model-will-not-wake-from-zero) |
+| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
@@ -90,7 +90,10 @@ While the wake is refused, `wva_model_scaling_blocked{reason="wake-no-capacity"}
 is set for the model. The log line's `reason` is the outcome (`no-capacity`,
 `prefill-required`, `nominal-lent-out`), `gpuBudgets` what the wake was measured
 against, and `demand` what it asked for. Free GPUs or raise the quota, as in
-[GPUs held](#gpus-held-or-quota-spent). `wake-nominal-lent-out` in its place
+[GPUs held](#gpus-held-or-quota-spent). It is also set while the model is in a
+borrowing cooldown (`borrowCooldown`) after a borrowed replica of it was
+released: until the cooldown ends, the wake places only into a free node hole
+and borrows none. `wake-nominal-lent-out` in its place
 means the ClusterQueue lent its nominal to a peer it cannot reclaim from: see
 [past nominal](#a-model-runs-past-its-kueue-nominal-quota).
 
