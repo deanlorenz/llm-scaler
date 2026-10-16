@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -122,19 +123,19 @@ func TestRoundFillsToReplicas(t *testing.T) {
 	cur := map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16}
 
 	tgt := map[string]int{domain.RolePrefill: 17, domain.RoleDecode: 23}
-	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, cur, initTargets(req.VariantStates))
+	roundFillsToReplicas(records, stateMap, roles, tgt, cur, maps.Clone(tgt), initTargets(req.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 24}, tgt)
 
 	// A cut too small for any pod stays unspent rather than overshooting.
 	tgt = map[string]int{domain.RolePrefill: 19, domain.RoleDecode: 19}
-	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, cur, initTargets(req.VariantStates))
+	roundFillsToReplicas(records, stateMap, roles, tgt, cur, maps.Clone(tgt), initTargets(req.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16}, tgt)
 
 	// One-GPU replicas are left as split.
 	one := pdRescaleRequest(nil)
 	tgt = map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}
 	roundFillsToReplicas(buildVariantRecords(one, one.CompositeSignal.Result), buildStateMap(one.VariantStates),
-		"A100", roles, tgt, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 4}, initTargets(one.VariantStates))
+		roles, tgt, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 4}, maps.Clone(tgt), initTargets(one.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}, tgt)
 }
 
@@ -161,9 +162,37 @@ func TestRoundFillsToReplicasUsesTheVariantThatFills(t *testing.T) {
 	}
 	records := buildVariantRecords(req, req.CompositeSignal.Result)
 	tgt := map[string]int{domain.RoleDecode: 16}
-	roundFillsToReplicas(records, buildStateMap(req.VariantStates), "A100", []string{domain.RoleDecode},
-		tgt, map[string]int{domain.RoleDecode: 12}, initTargets(req.VariantStates))
+	roundFillsToReplicas(records, buildStateMap(req.VariantStates), []string{domain.RoleDecode},
+		tgt, map[string]int{domain.RoleDecode: 12}, maps.Clone(tgt), initTargets(req.VariantStates))
 	assert.Equal(t, 16, tgt[domain.RoleDecode])
+}
+
+// TestRescaleGivesNoRolePodsBeyondItsDemand: what a role at its maxReplicas
+// cannot place is not handed to the other role as whole pods. Prefill is at
+// its max of one 8-GPU pod with demand for three; decode has one pod and
+// demand for two. At a model target of 32 the leftover was 16, and decode
+// went to three pods, more than at a target of 40.
+func TestRescaleGivesNoRolePodsBeyondItsDemand(t *testing.T) {
+	one := 1
+	req := pdRescaleRequest(nil)
+	req.CompositeSignal.Result.RoleDemand = map[string]float64{domain.RolePrefill: 300, domain.RoleDecode: 150}
+	req.CompositeSignal.RoleCapacities = map[string]domain.RoleCapacity{
+		domain.RolePrefill: {Role: domain.RolePrefill, TotalDemand: 300, TotalSupply: 100},
+		domain.RoleDecode:  {Role: domain.RoleDecode, TotalDemand: 150, TotalSupply: 100},
+	}
+	for i := range req.CompositeSignal.Result.VariantCapacities {
+		req.CompositeSignal.Result.VariantCapacities[i].ReplicaCount = 1
+	}
+	for i := range req.VariantStates {
+		req.VariantStates[i].CurrentReplicas = 1
+		req.VariantStates[i].GPUsPerReplica = 8
+	}
+	req.VariantStates[0].MaxReplicas = &one
+	for _, target := range []int{32, 36, 40} {
+		got := rescaleTargets(req, target, 64)
+		assert.Equal(t, 1, got["p"], "target %d: prefill is at its max", target)
+		assert.Equal(t, 2, got["d"], "target %d: decode goes to its demand of two pods, no further", target)
+	}
 }
 
 // TestRescaleReclaimsNoMoreThanTheReleaseBound: a role is reclaimed only as

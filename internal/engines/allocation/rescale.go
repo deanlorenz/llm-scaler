@@ -395,7 +395,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	tgtByRole := curByRole
 	if !pinned {
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
-		roundFillsToReplicas(records, stateMap, accType, roles, tgtByRole, curByRole, targets)
+		roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
 	}
 
 	limited := make(gpuLimitTracker)
@@ -824,11 +824,14 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 // that left on whole replicas of the roles cut most. The GPU split ignores
 // replica size, so with 8-GPU pods a model given 8 more GPUs split them +1
 // and +7 between its roles, neither a replica, and the GPUs sat free every
-// cycle. It fills a copy of targets; the real fill follows tgt.
+// cycle. A role takes from the leftover no more than its demand dem still
+// asks for, or its own cut rounded up to one replica: the leftover also
+// holds what a role at its maxReplicas could not place, and given to the
+// other role that was pods beyond its demand. It fills a copy of targets;
+// the real fill follows tgt.
 func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	accType string, roles []string, tgt, cur, targets map[string]int) {
+	roles []string, tgt, cur, dem, targets map[string]int) {
 	trial := maps.Clone(targets)
-	onType := variantsOnType(records, accType)
 	cut := make(map[string]int, len(roles))
 	leftover := 0
 	for _, role := range roles {
@@ -836,7 +839,7 @@ func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.Va
 		if want <= 0 {
 			continue
 		}
-		placed := fillRole(onType, role, stateMap, trial, want)
+		placed := fillRole(records, role, stateMap, trial, want)
 		cut[role] = want - placed
 		tgt[role] -= cut[role]
 		leftover += cut[role]
@@ -847,10 +850,32 @@ func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.Va
 		if leftover <= 0 || cut[role] <= 0 {
 			continue
 		}
-		extra := fillRole(onType, role, stateMap, trial, leftover)
+		limit := max(dem[role]-tgt[role], ceilToReplica(cut[role], roleReplicaStepGPUs(records, role, stateMap)))
+		extra := fillRole(records, role, stateMap, trial, min(leftover, limit))
 		tgt[role] += extra
 		leftover -= extra
 	}
+}
+
+// roleReplicaStepGPUs is the fewest GPUs one replica of any of role's
+// fillable variants takes, or 0 when none is.
+func roleReplicaStepGPUs(variants []variantRecord, role string, stateMap map[string]domain.VariantReplicaState) int {
+	least := 0
+	for _, vc := range variantsForRole(variants, role) {
+		if g := gpusPerReplicaFromState(stateMap, vc.VariantName); vc.PerReplicaCapacity > 0 && g > 0 && (least == 0 || g < least) {
+			least = g
+		}
+	}
+	return least
+}
+
+// ceilToReplica rounds gpus up to a whole number of g-GPU replicas; g <= 0
+// leaves it as is.
+func ceilToReplica(gpus, g int) int {
+	if g <= 0 {
+		return gpus
+	}
+	return (gpus + g - 1) / g * g
 }
 
 // releaseFloorGPUs is the fewest GPUs role may keep on accType this cycle by
