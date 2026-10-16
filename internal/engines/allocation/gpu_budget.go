@@ -18,347 +18,139 @@ import (
 // placed is worse than not waking it, because it looks like progress.
 //
 // The budget semantics are the optimizer's, reused rather than restated so the
-// two cannot drift:
+// two cannot drift (see the budget model in budget_merge.go):
 //
-//   - Per-type budgets are the minimum available across providers, with the
-//     Limit < 0 sentinel meaning unlimited (see mergeConstraints).
+//   - The cluster bounds (physical inventory, cluster-scope quotas) are
+//     intersected, with the Limit < 0 sentinel meaning unlimited; a type they do
+//     not list is denied. With no cluster bound in force the cluster is
+//     unbounded.
 //   - A namespace that appears in any provider's NamespacePools is a CLOSED
 //     allowlist: an accelerator type it does not list is denied outright, and a
 //     listed type is capped at the tighter of its cluster and namespace budgets
-//     (see mergeNamespaceConstraints).
-//   - An uncapped namespace — one a namespace quota excludes and no namespace
-//     quota caps — is judged only by the providers that bound every namespace
-//     (see uncappedBudget). A namespace quota's pools are the other tenants'
-//     free quota, and they do not bound it. A type none of those providers
-//     lists is unbounded for it, so it fits.
-//   - For any other namespace, an accelerator type no provider knows about is
-//     denied, matching the optimizer's treatment of absent constraints as zero
-//     capacity rather than unlimited.
+//     (see mergeNamespaceConstraints and GPUBudgets).
 //
 // No constraints at all means "unknown", which returns true. That mirrors the
 // engine's own fallback when no provider can supply constraints: proceed rather
 // than block scaling silently. Denying instead would keep a model down for the
 // first cycle after every restart — exactly when a queued request is waiting on
 // it.
+//
+// A workload that names no accelerator ("unknown") can be placed on any GPU, so
+// on the cluster path it fits if any pool does (anyPoolFits). In a namespace
+// with a closed allowlist that would let it draw on a quota it is charged to
+// nowhere: the quota tracks usage per type, and an unnamed workload's GPUs land
+// in no type. So there it fits only when the allowlist lists "unknown" itself,
+// or lists exactly one type, which it is then checked (and, its pods landing
+// there, charged) against; an allowlist of several types denies it. The
+// alternative, charging the largest remaining type, would guess a type the
+// scheduler is free to contradict.
+//
+// The demand is fitted per budget key AND per key that covers several of its
+// types (accelerator.Covers), as the greedy optimizer fits a P/D pair
+// (fitPairToBudget): a decode on NVIDIA-H100-80GB-HBM3 and a prefill on
+// NVIDIA-H100-PCIE-80GB both draw on an H100 family key, so 8 + 8 does not fit
+// a family residual of 12 although each product alone does.
 func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand map[string]int) bool {
 	if len(constraints) == 0 {
 		return true
 	}
 
-	perType := mergeConstraints(constraints)
-	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
-	uncapped := newUncappedBudget(constraints).covers(namespace)
-	if uncapped {
-		perType = uncappedReport(constraints)
+	// One map for every branch below, so a workload with no named accelerator
+	// is judged against the same figures as one that names its GPU.
+	budgets, nsScoped := gpuBudgets(constraints, namespace, slices.Collect(maps.Keys(demand))...)
+	if budgets == nil && !nsScoped {
+		return true // no cluster bound, and no allowance for this namespace
 	}
 
+	// spent is the demand by the budget key it is drawn from.
+	spent := make(map[string]int, len(demand))
 	for rawType, need := range demand {
 		if need <= 0 {
 			continue
 		}
-
-		// A workload that constrains no accelerator can be placed on any of them,
-		// so it fits if any pool does. Resolving it to a named pool would be a
-		// guess the scheduler is free to contradict; see anyPoolFits.
-		if rawType == constants.DefaultAcceleratorName {
-			if nsScoped {
-				if !anyPoolFits(nsBudgets, need) {
+		key, known := accelerator.FindBudgetKey(budgets, rawType)
+		if rawType == constants.DefaultAcceleratorName && !known {
+			if !nsScoped {
+				// A workload that constrains no accelerator can be placed on any
+				// of them, so it fits if any pool does. See anyPoolFits.
+				if !anyPoolFits(budgets, need) {
 					return false
 				}
 				continue
 			}
-			// An uncapped namespace with no type named anywhere has no bound.
-			if !anyPoolFits(perType, need) && (!uncapped || len(perType) > 0) {
-				return false
+			if len(budgets) != 1 {
+				return false // not chargeable to the namespace's allowance
 			}
+			key, known = slices.Collect(maps.Keys(budgets))[0], true
+		}
+		// In a closed namespace the map is the allowlist, so an unlisted type is
+		// denied; on the cluster path it is the merged cluster bounds, closed too.
+		if !known {
+			return false
+		}
+		spent[key] += need
+	}
+
+	// Every key bounds the sum of what is drawn on the keys it covers: itself,
+	// its case spellings and, for a family key, its products. A negative budget
+	// survives tighterBudget only when every contributing budget was unlimited.
+	for key, budget := range budgets {
+		if isUnboundedBudget(budget) {
 			continue
 		}
-
-		var budget int
-		if nsScoped {
-			// A namespace present in any provider's NamespacePools is a CLOSED
-			// allowlist, and it — not the cluster aggregate — decides what this
-			// namespace may use. Resolve against it FIRST: a type the namespace
-			// grants as unlimited is legitimately absent from the cluster Pools
-			// (aggregateNamespacePools omits the -1 sentinel), so resolving
-			// against the cluster first would deny a wake the optimizer allows.
-			nsKey, listed := resolveAcceleratorKey(nsBudgets, rawType)
-			if !listed {
-				return false
+		sum := 0
+		for drawn, need := range spent {
+			if accelerator.Covers(key, drawn) {
+				sum += need
 			}
-			budget = nsBudgets[nsKey]
-			// Still bounded by the cluster pool where one is known: a namespace
-			// may not be granted more than physically exists.
-			if clusterKey, known := resolveAcceleratorKey(perType, rawType); known {
-				budget = tighterBudget(budget, perType[clusterKey])
-			}
-		} else {
-			accType, known := resolveAcceleratorKey(perType, rawType)
-			if !known {
-				if uncapped {
-					continue // no provider bounds this type for it
-				}
-				return false
-			}
-			budget = perType[accType]
 		}
-
-		// A negative budget survives tighterBudget only when every contributing
-		// budget was unlimited.
-		if budget < 0 {
-			continue
-		}
-		if need > budget {
+		if sum > budget {
 			return false
 		}
 	}
-
 	return true
 }
 
 // GPUBudgets reports the per-accelerator-type budgets an allocation in namespace
 // is judged against, and whether that namespace is a closed allowlist (in which
-// case a type absent from the map is denied outright rather than unconstrained).
-// A negative budget is the unlimited sentinel. Nil constraints yield nil, which
-// is "unknown" — the permissive case. For an uncapped namespace (see
-// uncappedBudget) it reports the budgets of the providers that bound every
-// namespace, and every other type a provider names as unlimited; a type no
-// provider names is unbounded for it too.
+// case a type absent from the map is denied outright). On the cluster path a
+// type absent from a non-nil map is denied too, and a nil map is unbounded: no
+// cluster bound is in force. A negative budget is the unlimited sentinel.
 //
 // It exists so the budgets can be REPORTED with the same resolution FitsGPUBudget
 // applies. Nothing else exposes what the check actually compared against: the
 // pools carry Limit and Used, the merge takes the minimum across providers, and a
-// namespace allowlist overrides the cluster aggregate — so a log line that summed
+// namespace allowlist overrides the cluster figures — so a log line that summed
 // the pools itself would be free to disagree with the verdict it purports to
 // explain, which is worse than no line at all.
 func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[string]int, bool) {
+	return gpuBudgets(constraints, namespace)
+}
+
+// gpuBudgets is GPUBudgets with the declared accelerator names materialized as
+// keys (see mergeConstraints).
+func gpuBudgets(constraints []*ResourceConstraints, namespace string, declared ...string) (map[string]int, bool) {
 	if len(constraints) == 0 {
 		return nil, false
 	}
 
-	if newUncappedBudget(constraints).covers(namespace) {
-		return uncappedReport(constraints), false
-	}
-	perType := mergeConstraints(constraints)
-	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
+	perType := mergeConstraints(constraints, declared...)
+	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints, declared...)[namespace]
 	if !nsScoped {
 		return perType, false
 	}
 
-	// Mirrors the namespace branch of FitsGPUBudget: the allowlist decides what the
-	// namespace may use, still bounded by the cluster pool where one is known.
+	// The allowlist decides what the namespace may use, still bounded by the
+	// cluster bounds: a namespace may not be granted more than they allow, and
+	// a type they do not list is 0 (clusterBudgetFor).
 	budgets := make(map[string]int, len(nsBudgets))
 	for accType, budget := range nsBudgets {
-		if clusterKey, known := resolveAcceleratorKey(perType, accType); known {
-			budget = tighterBudget(budget, perType[clusterKey])
+		if cv, bounded := clusterBudgetFor(perType, accType); bounded && cv != math.MaxInt {
+			budget = tighterBudget(budget, cv)
 		}
 		budgets[accType] = budget
 	}
 	return budgets, true
-}
-
-// capsNamespaces reports whether c is a namespace-scoped provider: its pools
-// are per-namespace caps, not a budget over every namespace. A provider that
-// carries NamespacePools is namespace-scoped whether or not it says so.
-func (c *ResourceConstraints) capsNamespaces() bool {
-	return c.NamespaceScoped || len(c.NamespacePools) > 0
-}
-
-// clusterProviders returns the providers whose pools bound every namespace —
-// a cluster-scoped quota, or the physical inventory — and whether any
-// provider is a namespace-scoped quota.
-func clusterProviders(constraints []*ResourceConstraints) (cluster []*ResourceConstraints, namespaced bool) {
-	for _, c := range constraints {
-		switch {
-		case c == nil:
-		case c.capsNamespaces():
-			namespaced = true
-		default:
-			cluster = append(cluster, c)
-		}
-	}
-	return cluster, namespaced
-}
-
-// uncappedBudget is the budget of the uncapped namespaces: the ones a
-// namespace quota lists in `exclude` and no namespace quota caps. A namespace
-// quota's pools are the sum of its tenants' free quota, so they do not bound
-// an uncapped namespace; only the providers over every namespace (a cluster
-// quota) do. A type none of those providers lists is unbounded for it, except
-// for a workload that names no accelerator (see free).
-//
-// Capped namespaces spend this budget too, beside their own, so the two kinds
-// share a cluster quota. A nil *uncappedBudget means no namespace is uncapped
-// this cycle, and every namespace is planned exactly as without it.
-type uncappedBudget struct {
-	namespaces map[string]bool
-	// budgets is the free GPUs per type of the providers over every
-	// namespace, one key per accelerator (see foldedClusterBudgets). A type
-	// absent is unbounded; math.MaxInt is unlimited.
-	budgets map[string]int
-}
-
-// newUncappedBudget returns the uncapped namespaces of constraints and their
-// budget, or nil when there are none. A namespace one namespace quota
-// excludes and another caps is capped: the cap binds it.
-func newUncappedBudget(constraints []*ResourceConstraints) *uncappedBudget {
-	capped := mergeNamespaceConstraints(constraints)
-	var namespaces map[string]bool
-	for _, c := range constraints {
-		if c == nil {
-			continue
-		}
-		for ns := range c.ExcludedNamespaces {
-			if _, ok := capped[ns]; ok {
-				continue
-			}
-			if namespaces == nil {
-				namespaces = map[string]bool{}
-			}
-			namespaces[ns] = true
-		}
-	}
-	if namespaces == nil {
-		return nil
-	}
-	return &uncappedBudget{namespaces: namespaces, budgets: foldedClusterBudgets(constraints)}
-}
-
-// foldedClusterBudgets merges the budgets of the providers over every namespace,
-// with one key per accelerator: two providers that spell one type
-// differently ("A100", "a100") share the tighter budget, instead of each
-// bounding a key the other never sees. math.MaxInt is unlimited.
-func foldedClusterBudgets(constraints []*ResourceConstraints) map[string]int {
-	cluster, _ := clusterProviders(constraints)
-	merged := mergeConstraints(cluster)
-	out := make(map[string]int, len(merged))
-	for _, accType := range slices.Sorted(maps.Keys(merged)) {
-		if key, ok := resolveAcceleratorKey(out, accType); ok {
-			out[key] = min(out[key], merged[accType])
-			continue
-		}
-		out[accType] = merged[accType]
-	}
-	return out
-}
-
-// covers reports whether namespace is uncapped.
-func (u *uncappedBudget) covers(namespace string) bool {
-	return u != nil && u.namespaces[namespace]
-}
-
-// free returns the GPUs of accType left for an uncapped namespace:
-// math.MaxInt when nothing bounds the type.
-//
-// accType is resolved onto the budget's keys as every other accelerator
-// lookup is (see resolveAcceleratorKey), so a workload's "a100" or
-// "NVIDIA-A100-SXM4-80GB" spends a cluster quota's "A100".
-//
-// A workload that names no accelerator gets no GPUs once any provider over
-// every namespace names a type, unless one names "unknown" itself. Its pods
-// may land on a type that provider bounds, and nothing can charge them to it.
-// That is how the optimizer treats such a workload in every other namespace:
-// its name is not a key of the budget, so the budget for it is 0.
-func (u *uncappedBudget) free(accType string) int {
-	if _, ok := resolveAcceleratorKey(u.budgets, accType); !ok &&
-		!constants.IsAcceleratorResolved(accType) && len(u.budgets) > 0 {
-		return 0
-	}
-	return u.left(accType)
-}
-
-// left returns the GPUs of accType left in the budget, resolving the name as
-// free does: math.MaxInt when no key names the type.
-func (u *uncappedBudget) left(accType string) int {
-	if key, ok := resolveAcceleratorKey(u.budgets, accType); ok {
-		return u.budgets[key]
-	}
-	return math.MaxInt
-}
-
-// clamp bounds n by the GPUs of accType left in the budget. A capped
-// namespace spends the budget too, so its own budget is clamped by it. A
-// capped namespace's types are keys of its own quota, so the rule free
-// applies to a workload that names no accelerator is not repeated here:
-// that namespace is planned as it was without an uncapped namespace.
-func (u *uncappedBudget) clamp(accType string, n int) int {
-	if u == nil {
-		return n
-	}
-	return min(n, u.left(accType))
-}
-
-// spend takes n GPUs of accType from the budget. An unbounded or unlimited
-// type has nothing to draw down.
-func (u *uncappedBudget) spend(accType string, n int) {
-	if u == nil {
-		return
-	}
-	key, ok := resolveAcceleratorKey(u.budgets, accType)
-	if !ok {
-		return
-	}
-	if b := u.budgets[key]; b != math.MaxInt {
-		u.budgets[key] = b - n
-	}
-}
-
-// uncappedReport returns the per-type budget an uncapped namespace is judged
-// against: the merged budget of the providers over every namespace, and the
-// unlimited sentinel (-1) for every other type a provider names. An
-// unlimited type reports -1 too, never math.MaxInt.
-func uncappedReport(constraints []*ResourceConstraints) map[string]int {
-	out := foldedClusterBudgets(constraints)
-	for accType, b := range out {
-		if b == math.MaxInt {
-			out[accType] = -1
-		}
-	}
-	for _, c := range constraints {
-		if c != nil {
-			addTypes(out, c)
-		}
-	}
-	return out
-}
-
-// addTypes records every accelerator type c names, in its pools or in any
-// namespace's, as unlimited in out, unless out already holds that type under
-// any spelling.
-func addTypes(out map[string]int, c *ResourceConstraints) {
-	add := func(accType string) {
-		if _, ok := resolveAcceleratorKey(out, accType); !ok {
-			out[accType] = -1
-		}
-	}
-	for accType := range c.Pools {
-		add(accType)
-	}
-	for _, perType := range c.NamespacePools {
-		for accType := range perType {
-			add(accType)
-		}
-	}
-}
-
-// resolveAcceleratorKey maps an accelerator name as a WORKLOAD declares it onto
-// the key an accelerator-keyed map actually uses, reporting whether the map
-// covers it.
-//
-// The two sides are written in different vocabularies and neither can be changed
-// unilaterally. Physical pool keys come from node product labels normalized to
-// short names ("A100"); quota keys are whatever the operator typed; and a
-// workload's nodeSelector may carry either the full product name
-// ("NVIDIA-A100-PCIE-80GB") or the short one.
-//
-// The matching order (declared name, then its short name, then either ignoring
-// case) lives in accelerator.FindKey, with the reasons. The case fold is what
-// lets a GKE node's "nvidia-l4" land on an operator's "L4".
-//
-// Shared by every accelerator-keyed lookup — physical limits, quotas, and the
-// demand check — so they cannot drift in how they reconcile a name.
-func resolveAcceleratorKey(known map[string]int, declared string) (string, bool) {
-	return accelerator.FindKey(known, declared)
 }
 
 // anyPoolFits reports whether some pool in budgets can take need GPUs.

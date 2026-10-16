@@ -38,10 +38,6 @@ func (m *namespaceAwareMockInventory) NamespaceResourcePools(activeNamespaces []
 	return m.nsPools
 }
 
-func (m *namespaceAwareMockInventory) ExcludedNamespaces([]string) map[string]bool {
-	return nil
-}
-
 // Compile-time check that the mock satisfies NamespaceAwareInventory.
 var _ NamespaceAwareInventory = (*namespaceAwareMockInventory)(nil)
 

@@ -78,6 +78,15 @@ type utilizationShareState struct {
 	// nodes is the per-node GPU picture; nil is decision.DefaultNodeGPUs,
 	// which the usage refresher publishes. Tests set it.
 	nodes *decision.NodeGPUStore
+	// left is what today's optimizer pass left this cycle (decideV2 sets it
+	// for the evaluation that follows the pass, and clears it after): the
+	// groups' budgets and the node picture are net of what the pass ordered
+	// for every model the share does not plan. Nil plans on the constraints
+	// and the node snapshot as they are.
+	left *allocation.PassLeft
+	// planned is the models (namespace/modelID) the evaluation in progress
+	// plans, whose pass placements the node picture does not count.
+	planned map[string]bool
 }
 
 // resetActuation forgets every ledger. A transfer's donor marks stay on its
@@ -112,6 +121,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor) (overrides map[string]utilizationShareOverride) {
 	logger := ctrl.LoggerFrom(ctx).WithName("utilization-share")
 	st := &e.utilizationShare
+	st.planned = nil
 	// The optimizer must never cost the cycle it rides on: a bug here loses
 	// this cycle's report and leaves today's decisions, not the controller.
 	defer func() {
@@ -192,6 +202,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	weightErrs := map[string]string{}
 	var unshared []string
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
+		Left: st.left,
 		// Only a cluster-scoped quota is a cluster budget: a namespace-scoped
 		// one bounds the namespaces it caps, and one it excludes not at all.
 		ClusterIsQuota: e.Config.HasClusterQuota(),
@@ -232,6 +243,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	st.lastWeightErrs = weightErrs
 	st.reportUnshared(logger, unshared)
+	st.planned = allocation.PlannedModels(groups)
 	published := make([]metrics.UtilizationShareGroup, 0, len(groups))
 	for _, g := range groups {
 		// Every target gives a role at most its headroom of the spare

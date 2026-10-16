@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -152,6 +153,11 @@ type Engine struct {
 	// the same loop, and a second mutex would only invite them to be taken in
 	// different orders.
 	lastBudgets map[string]string
+	// lastGood is each namespace's last successful constraints, used to check a
+	// wake when every provider is unavailable (see gpuConstraints). Guarded by
+	// snapshotMu: it is placement state, not logging state.
+	snapshotMu sync.Mutex
+	lastGood   map[string]constraintSnapshot
 	// QueueFallback reads the flow-control queue from Prometheus when the direct
 	// EPP scrape fails. Nil disables it — every method guards its receiver — and
 	// the engine then behaves exactly as it did before the fallback existed. See
@@ -163,6 +169,23 @@ type Engine struct {
 	// behind an EPP without flow control is parked by the enforcer on a signal
 	// that has nothing to do with flow control, and is only then unwakeable.
 	wakeSignal wakeSignalState
+
+	// wakeMu makes a wake decision -- the check and what the wake takes --
+	// one step, so two models deciding concurrently in one tick cannot both
+	// pass on the same free GPUs. tickWakes and tickNodes are this tick's
+	// (wake_tick.go), guarded by it.
+	wakeMu    sync.Mutex
+	tickWakes map[string]map[string]int
+	tickNodes tickNodeView
+	// tickReclaimed is, per namespace and type, the lent-out nominal this
+	// tick's wakes grew into without a node hole (placement.reclaimable).
+	tickReclaimed map[string]map[string]allocation.Reclaim
+	// lentOutBlocked is the models (modelGroup.key) this loop set
+	// nominal-lent-out on wva_model_scaling_blocked for (reportLentOutBlocked).
+	lentOutBlocked sync.Map
+	// layouts remembers the variants whose unknown pod layout this engine's
+	// node views have logged, so each is logged once, not once per tick.
+	layouts allocation.LayoutLog
 }
 
 // SetGPULimiter injects the limiter whose constraints bound a wake, so the
@@ -208,13 +231,15 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	limiter, err := e.limiterBuilder()
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to rebuild the GPU limiter from config; "+
-			"keeping the previous one", "effectiveMode", e.config.EffectiveLimiterMode())
+			"keeping the previous one", "limiters", e.config.EffectiveLimiterSummary())
 		return
 	}
 	e.gpuLimiter = limiter
 	e.limiterSig = sig
+	e.forgetConstraints()
 	log.FromContext(ctx).Info("Scale-from-zero: GPU limiter (re)built from config",
-		"type", e.config.EffectiveLimiterMode(), "name", limiter.Name())
+		"limiterTypes", e.config.EffectiveLimiterTypes().String(), "limiters", e.config.EffectiveLimiterSummary(),
+		"name", limiter.Name())
 }
 
 // currentGPULimiter reads the active limiter under the lock, so a placement is
@@ -268,6 +293,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
 	e.refreshLimiter(ctx) // pick up a limiters: edit without a restart
+	e.beginTick()
 	// Get all inactive (replicas == 0) VAs
 	e.VariantEnricher.Refresh(ctx) // resolve the scale target of anything newly registered
 
@@ -503,8 +529,8 @@ func (e *Engine) processInactiveModel(
 			"metric", pending.Labels, "value", pending.Value)
 	}
 
-	constraints := e.gpuConstraints(ctx, group.namespace)
-	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, constraints)
+	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
+	constraints := place.constraints
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
 			// The steady state for every serving model with a queue. Not a
@@ -529,7 +555,7 @@ func (e *Engine) processInactiveModel(
 				"modelID", group.modelID,
 				"reason", string(outcome),
 			}
-			if outcome == OutcomeNoCapacity {
+			if outcome == OutcomeNoCapacity || outcome == OutcomeNominalLentOut {
 				// The one reason that cannot be diagnosed from the verdict alone: it
 				// says a set did not fit, not what it was measured against nor what
 				// it asked for. Both halves are needed — a budget of zero and a
@@ -564,6 +590,40 @@ func (e *Engine) processInactiveModel(
 		e.publishActivation(ctx, scaleTargets, va, pool, 1, outcome)
 	}
 	return nil
+}
+
+// wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a
+// namespace whose queue lent nominal it cannot reclaim is nominal-lent-out
+// (B10), the same reason wva_model_scaling_blocked then carries for the model.
+func (e *Engine) wakeVerdict(ctx context.Context, group modelGroup, candidates []Candidate,
+	covered coverage) (placement, []Candidate, SelectionOutcome) {
+	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
+	if len(selected) == 0 && outcome == OutcomeNoCapacity && place.nominalLentOut {
+		// The budget it missed is within nominal, short of nominal because a
+		// peer holds what the queue lent and need not give it back (B10).
+		outcome = OutcomeNominalLentOut
+	}
+	e.reportLentOutBlocked(group, len(selected) == 0 && outcome == OutcomeNominalLentOut)
+	return place, selected, outcome
+}
+
+// reportLentOutBlocked sets nominal-lent-out on wva_model_scaling_blocked for a
+// model at zero whose wake it refuses, every tick it is refused, and clears
+// only what it set once the model wakes or is refused for another reason:
+// the steady-state engine sets the same reason for a capped serving model,
+// and its series is not this loop's to delete.
+func (e *Engine) reportLentOutBlocked(group modelGroup, on bool) {
+	key := group.key()
+	if on {
+		e.lentOutBlocked.Store(key, true)
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, []string{constants.ScalingBlockedNominalLentOut})
+		return
+	}
+	if _, set := e.lentOutBlocked.LoadAndDelete(key); set {
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, nil)
+	}
 }
 
 // publishActivation records the wake for one selected variant: it publishes the
@@ -687,22 +747,71 @@ func observeCompletedWakes(
 	}
 }
 
+// recordWake accounts for a wake about to be published against place.
+//
+// Admitted against a snapshot nothing refreshes, it is charged to the snapshot,
+// so the next wake in its lifetime does not pass on the GPUs this one takes.
+// Admitted with no check at all although limiters are declared -- every
+// provider unavailable, no young snapshot -- it is counted and logged, one per
+// wake, so an uncapped wake is never silent.
+func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placement, selected []Candidate) {
+	prior := maps.Clone(e.tickWakes[group.namespace])
+	if !place.snapshotTakenAt.IsZero() {
+		e.debitSnapshot(group.namespace, place.snapshotTakenAt, demandOf(selected))
+	} else if place.constraints != nil {
+		e.debitTick(group.namespace, demandOf(selected))
+	}
+	// What the wake takes on the nodes, for the next wake in this tick, and in
+	// the in-flight ledger for every later decision of either engine until its
+	// pods hold a node. A set that passed the node check (fits) places by
+	// construction. Two kinds of wake bypass that check, and place and hold
+	// only what fits now: a claimed share transfer (claimShareTransfer funds
+	// the wake from a donor's pods still releasing, which the snapshot shows
+	// in use -- the transfer, not the ledger, holds that hole); and a wake
+	// checked against a remembered snapshot, or not at all, which has no node
+	// view (decideWake builds one for this tick's constraints only).
+	// A wake into lent-out nominal places without a hole (fits); what it took
+	// of the namespace's reclaimable nominal is gone for this tick's next wake.
+	placed, took := place.nodes.PlaceReplicasReclaiming(replicaShapes(group.namespace, selected, place.queueFlavor), true, place.reclaimable)
+	if placed && place.nodes != nil {
+		e.admitInFlight(group.namespace, selected, place.queueFlavor)
+	}
+	e.debitReclaimed(group.namespace, took)
+	// What the wake takes of its cohort's free pool, and what Kueue reclaims
+	// for it from borrowers, is in no Kueue read until its pods are admitted:
+	// the shared record holds it, so the steady-state engine does not borrow
+	// the same GPUs meanwhile, nor a later wake reclaim them again (N3).
+	if placed && place.snapshotTakenAt.IsZero() && place.raw != nil {
+		allocation.DefaultBorrowInFlight.RecordWake(allocation.WakeDraws(place.raw, group.namespace, group.modelID,
+			wakeReplicas(selected), prior, place.reclaimable), time.Now())
+	}
+	if place.unchecked {
+		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
+		log.FromContext(ctx).Info("Scale-from-zero: woke WITHOUT a GPU capacity check; every declared limiter is unavailable and no recent snapshot exists",
+			"namespace", group.namespace, "modelID", group.modelID, "metric", constants.WVAScaleFromZeroWakeUnchecked)
+	}
+}
+
 // selectOrClaim selects the variants a wake starts. When no idle GPU and no
 // reserve can host them, a transfer still releasing for another receiver may
 // be claimed instead (utilization-share optimizer, section 6.3); outcome is
 // the selection's either way.
 func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage,
-	constraints []*allocation.ResourceConstraints) ([]Candidate, SelectionOutcome) {
+	place placement) ([]Candidate, SelectionOutcome) {
 	selected, outcome := selectServingSet(SelectionInput{
 		Namespace:      group.namespace,
 		Candidates:     candidates,
 		DecodeCovered:  covered.decode,
 		PrefillCovered: covered.prefill,
-		Constraints:    constraints,
+		Constraints:    place.constraints,
+		Admitted:       place.admitted,
+		Nodes:          place.nodes,
+		Reclaimable:    place.reclaimable,
+		QueueFlavor:    place.queueFlavor,
 		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {
-		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {
+		if set, ok := e.claimShareTransfer(ctx, group, candidates, place.constraints, covered); ok {
 			selected = set
 		}
 	}

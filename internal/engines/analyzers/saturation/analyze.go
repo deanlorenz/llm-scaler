@@ -54,27 +54,31 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		case RestoredArgs:
 			msg = "learned state restored without the ITL baseline: the engine image changed, the arguments did not"
 		case RestoredPrior:
-			msg = "learned state not restored: the variant's engine arguments changed; its k2 is kept as a lower-only prior for the buckets it was measured in"
-			if r.Priors == 0 {
-				msg = "learned state not restored: the variant's engine arguments changed, and no k2 window was recent enough, on the hardware it runs now, to keep as a prior"
-			}
+			msg = "learned state restored as lower-only figures: the variant's engine arguments changed, so its k2 windows become previous figures (P2-prior) for the buckets they were measured in"
 		case RestoredIncomplete:
-			msg = "learned state not restored: the variant's engine configuration could not be read completely, so it could not be checked"
+			msg = "learned state restored under the unread configuration: the variant's engine configuration could not be read completely; its windows are its own only if it runs the same unread configuration, and lower-only figures otherwise"
 		case RestoredDiffers:
-			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under"
+			msg = "learned state restored as lower-only figures: the document recorded no engine arguments and its configuration differs, so its k2 windows become previous figures (P2-prior)"
 		}
-		// wva_learned_state_restores_total counts two outcomes: installed is
-		// r.Installed (whole, args), and every other outcome is rejected -- a
-		// restore that kept only a lower-only prior included.
+		switch {
+		case r.Outcome == RestoredIncomplete && r.Installed:
+			msg = "learned state restored under the unread configuration: the variant's engine configuration could not be read completely, and it runs the same unread configuration it was exported under, so its windows are its own"
+		case r.Outcome == RestoredIncomplete && r.NoArgs:
+			msg = "learned state not restored: the variant's engine configuration could not be read completely, and the snapshot recorded no engine arguments to check its windows against"
+		case r.Outcome == RestoredWhole || r.Outcome == RestoredArgs || r.Priors > 0:
+		case r.Throughput > 0:
+			msg = "learned state restored as a hold-only service rate: no k2 window was recent enough, on the hardware the variant runs now, to keep, and the old saturated throughput holds the demand floor, hold-only, until the new arguments measure their own"
+		case r.Outcome == RestoredIncomplete:
+			msg = "learned state not restored: the variant's engine configuration could not be read completely, and no k2 window was recent enough, on the hardware it runs now, to keep"
+		default:
+			msg = "learned state not restored: the variant's engine configuration changed, and no k2 window was recent enough, on the hardware it runs now, to keep as a lower-only figure"
+		}
+		// Counted by outcome (wva_learned_state_restores_total).
 		a.mu.Lock()
-		if r.Installed {
-			a.restoresInstalled++
-		} else {
-			a.restoresRejected++
-		}
+		a.restoreOutcomes[r.Outcome]++
 		a.mu.Unlock()
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "outcome", r.Outcome,
-			"entries", r.Entries, "priors", r.Priors)
+			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput)
 	}
 
 	c := a.newCycle(ctx, input, satConfig)
@@ -364,6 +368,7 @@ func (c *cycle) fitLines() {
 	// itl.Model carries neither the tier nor the sample count, so there is
 	// nothing to tie-break on here yet; that is a known gap, not a property.
 	sort.Strings(variants)
+	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
 		// deriveMu divides a token rate by an output length; prefill emits
@@ -394,7 +399,20 @@ func (c *cycle) fitLines() {
 		// bug stableAccelerator exists to prevent for k2 (the k1<->k2
 		// oscillation of PR #40 on a heterogeneous cluster), and a blended
 		// ITL line is meaningless for either product.
-		own := c.a.noteITL(variantKey, c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
+		// Under the arguments the variant runs, and, mid-rollout, fitted from
+		// the window it holds with no new readings: a reading may be an old
+		// pod's, as for k2 and the throughput (replica_capacity.go).
+		rec := c.a.capacityStore.Get(c.input.Namespace, c.input.ModelID, variant)
+		var params *capacity.EngineParams
+		if rec != nil {
+			params = rec.EngineParams
+		}
+		c.a.itlUnderArgs(variantKey, windowArgs(params))
+		rows := c.input.ReplicaMetrics
+		if rec.InRollout() || mixed[variant] {
+			rows = nil
+		}
+		own := c.a.noteITL(variantKey, rows, variant, c.a.now(), c.logger)
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.
@@ -433,6 +451,7 @@ func (c *cycle) fitLines() {
 // service rate the floor will divide the arrival rate by.
 func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, error) {
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
+	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, rm := range c.input.ReplicaMetrics {
 		select {
 		case <-ctx.Done():
@@ -511,7 +530,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, downstreamSaturated, c.logger)
+			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName], c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through

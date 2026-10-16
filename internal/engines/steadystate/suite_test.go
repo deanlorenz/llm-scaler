@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -53,6 +55,10 @@ func TestSaturationEngine(t *testing.T) {
 
 	RunSpecs(t, "Saturation Engine Suite")
 }
+
+// The borrow record is process-wide (allocation.DefaultBorrowInFlight): every
+// spec starts with it empty, so one spec's draws are not another's.
+var _ = BeforeEach(func() { allocation.DefaultBorrowInFlight.Reset() })
 
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))

@@ -93,7 +93,7 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			continue
 		}
 		// limiters: is a cluster-"default"-scope setting read only from the global
-		// default entry (Config.EffectiveLimiterMode). Warn if it appears elsewhere so
+		// default entry (Config.EffectiveLimiterTypes). Warn if it appears elsewhere so
 		// a misplaced block is not silently ignored.
 		if key != config.GlobalDefaultsKey && len(satConfig.Limiters) > 0 {
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
@@ -134,17 +134,10 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 // Error: V-levels only go more verbose. Same convention as cmd/main.go.
 func warnAboutLimiters(logger logr.Logger, policy config.ScalingPolicy) {
 	key := config.GlobalDefaultsKey
-	// The limiters: list reads like a set of bounds that all apply; it is not.
-	// One mode is selected, quota wins, and anything else declared is built as
-	// nothing. Silence here is the hazard: the operator reads the config as
-	// bounded by real GPUs too, while nothing consults physical capacity and a
-	// scale-from-zero wake can land on a full accelerator.
-	if dropped := policy.UnenforcedLimiterTypes(); len(dropped) > 0 {
-		logger.Info("WARNING: some declared limiters will NOT be enforced; a quota entry "+
-			"selects the quota limiter and it is the only one built, so physical "+
-			"GPU capacity is not consulted at all. Declare one kind, or track "+
-			"issue #1003 for bounding by min(physical, quota)",
-			"key", key, "notEnforced", dropped, "enforcing", config.LimiterTypeQuota)
+	// A second physical entry is accepted (rejecting it would drop the whole
+	// policy) but only one physical limiter is built; say which were ignored.
+	if dups := policy.IgnoredPhysicalLimiters(); len(dups) > 0 {
+		logger.Info(config.IgnoredPhysicalLimitersMessage, "key", key, "ignoredIndexes", dups)
 	}
 	// Quota findings that do not reject the config, such as a namespace in
 	// exclude that nothing bounds. Logged once per config change.

@@ -274,8 +274,18 @@ wva_cluster_policy_limiter() {
     fi
     cm="$(printf '%s\n' "$listing" | grep -E "configmap/(wva-)?scaling-policy-config$" | head -1 | cut -d/ -f2 || true)"
     [ -n "$cm" ] || return 0
-    kubectl get configmap "$cm" -n "$policy_ns" -o jsonpath='{.data.default}' 2>/dev/null \
-        | yq -r '.limiters[0].type // ""' 2>/dev/null || true
+    # The physical limiter when the list declares one, wherever it sits: every
+    # declared limiter is built, and it is the one that needs node read. The
+    # first entry alone missed it behind a quota. The types are listed by the
+    # parser and chosen here, in the shell.
+    local types
+    types="$(kubectl get configmap "$cm" -n "$policy_ns" -o jsonpath='{.data.default}' 2>/dev/null \
+        | yq -r '(.limiters // [])[] | .type' 2>/dev/null || true)"
+    if printf '%s\n' "$types" | grep -qxE 'gpu-inventory|inventory'; then
+        echo gpu-inventory
+        return 0
+    fi
+    printf '%s\n' "$types" | head -1
 }
 
 # check_tenant_install enforces the contract for a scope that creates no
@@ -573,6 +583,133 @@ wva_model_server_count() {
     echo "$total"
 }
 
+# wva_policy_candidates sets WVA_POLICY_CANDS to the namespaces whose
+# wva-scaling-policy-config this controller may read -- for a SELF-MANAGED
+# namespace-scoped controller the namespace its managed Namespace's
+# wva.llmd.ai/policy-namespace label names (else wva-policy), then always its
+# own -- and WVA_POLICY_CANDS_UNREAD to what could not be read finding them.
+# Globals, set in the caller's shell.
+WVA_POLICY_CANDS=""
+WVA_POLICY_CANDS_UNREAD=""
+wva_policy_candidates() {
+    local managed policy_ns rc=0
+    managed="${WVA_WATCH_NS:-$WVA_NS}"
+    WVA_POLICY_CANDS="$WVA_NS"
+    WVA_POLICY_CANDS_UNREAD=""
+    if [ "$(wva_install_scope)" = "namespace" ] && [ "$managed" = "$WVA_NS" ]; then
+        # Streams apart (kc_capture): a warning on stderr is neither the label
+        # nor a NotFound.
+        kc_capture get namespace "$managed" \
+            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            case "$KC_ERR" in
+                *NotFound*|*"not found"*) policy_ns=wva-policy ;;
+                *)
+                    # The label may point anywhere; wva-policy is still worth a look.
+                    WVA_POLICY_CANDS_UNREAD=" Namespace $managed (its policy-namespace label);"
+                    policy_ns=wva-policy ;;
+            esac
+        else
+            policy_ns="${KC_OUT:-wva-policy}"
+        fi
+        case " $WVA_POLICY_CANDS " in *" $policy_ns "*) ;; *) WVA_POLICY_CANDS="$policy_ns $WVA_POLICY_CANDS" ;; esac
+    fi
+}
+
+# wva_kueue_borrow_wanted sets WVA_KUEUE_BORROW_WANTED to yes | no | unknown:
+# whether some limiter policy this controller reads counts Kueue cohort
+# borrowing (policy_counts_borrowing), and so needs the cluster-wide Workload
+# read the admin phase grants (pl_sync_kueue_borrow_read). The policies are
+# those of wva_policy_candidates, its own one as THIS install leaves it:
+#
+#   * WVA_LIMITER naming quota with WVA_QUOTA_KUEUE=true: WVA_QUOTA_KUEUE_BORROW
+#     decides, and unset keeps what the live entry says, as policy_with_limiters
+#     keeps it -- a live countBorrowable: false stays false;
+#   * WVA_LIMITER naming no Kueue quota: nothing is counted there;
+#   * WVA_LIMITER unset: the live policy, which the install keeps.
+#
+# unknown, with WVA_KUEUE_BORROW_UNREAD naming what, when no policy says yes
+# and one could not be read: the caller leaves the grant as it is. Also sets
+# WVA_KUEUE_KEPT_NS, the kueue.controllerNamespace a policy keeps, for the
+# Kueue controller read (pl_grant_kueue_controller_read).
+WVA_KUEUE_BORROW_WANTED=unknown
+WVA_KUEUE_BORROW_UNREAD=""
+WVA_KUEUE_KEPT_NS=""
+wva_kueue_borrow_wanted() {
+    local ns rc doc ans=no unread kept_false
+    WVA_KUEUE_BORROW_WANTED=unknown
+    WVA_KUEUE_BORROW_UNREAD=""
+    WVA_KUEUE_KEPT_NS=""
+    wva_policy_candidates
+    unread="$WVA_POLICY_CANDS_UNREAD"
+    for ns in $WVA_POLICY_CANDS; do
+        rc=0
+        kc_capture get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' || rc=$?
+        doc="$KC_OUT"
+        if [ "$rc" -ne 0 ]; then
+            case "$KC_ERR" in
+                *NotFound*|*"not found"*) doc="" ;;
+                *) unread="$unread $ns/wva-scaling-policy-config;"; continue ;;
+            esac
+        fi
+        [ -n "$doc" ] || doc='limiters: []'
+        [ -n "$WVA_KUEUE_KEPT_NS" ] || WVA_KUEUE_KEPT_NS="$(printf '%s\n' "$doc" | policy_kueue_namespace)"
+        if [ "$ns" = "$WVA_NS" ] && [ -n "${WVA_LIMITER:-}" ]; then
+            # This install rewrites its own entry.
+            # A WVA_LIMITER limiter_types_of refuses names no quota here; the
+            # install refuses it on its own.
+            if ! limiter_set_has "$(limiter_types_of "$WVA_LIMITER" 2>/dev/null)" quota \
+                || [ "${WVA_QUOTA_KUEUE:-false}" != "true" ]; then
+                continue
+            fi
+            case "${WVA_QUOTA_KUEUE_BORROW:-}" in
+                false) continue ;;
+                true) ans=yes; continue ;;
+            esac
+            kept_false="$(printf '%s\n' "$doc" | yq '[.limiters[]? | select(.type == "quota" and .kueue.countBorrowable == false)] | length' 2>/dev/null)" || kept_false=""
+            case "$kept_false" in
+                0) ans=yes ;;
+                ''|null|*[!0-9]*) unread="$unread $ns/wva-scaling-policy-config (does not parse);" ;;
+            esac
+            continue
+        fi
+        case "$(printf '%s\n' "$doc" | policy_counts_borrowing)" in
+            yes) ans=yes ;;
+            no) ;;
+            *) unread="$unread $ns/wva-scaling-policy-config (does not parse);" ;;
+        esac
+    done
+    if [ "$ans" = yes ]; then
+        WVA_KUEUE_BORROW_WANTED=yes
+    elif [ -n "$unread" ]; then
+        WVA_KUEUE_BORROW_UNREAD="$(printf '%s' "${unread%;}" | sed 's/^ *//')"
+    else
+        WVA_KUEUE_BORROW_WANTED=no
+    fi
+}
+
+# wva_check_kueue_borrow_read warns when a controller-only install counts
+# Kueue cohort borrowing and its controller cannot list Workloads in every
+# namespace. That read is granted by the admin phase only to a controller
+# whose policy counts borrowing, so a tenant who turns borrowing on later has
+# to ask for it. Denied, borrowing is withheld (lenders-unreadable) and the
+# nominal Kueue cap applies, so this warns and never refuses.
+wva_check_kueue_borrow_read() {
+    [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
+    local sa
+    wva_kueue_borrow_wanted
+    [ "$WVA_KUEUE_BORROW_WANTED" = yes ] || return 0
+    sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
+    case "$(can_i_as "$sa" list workloads.kueue.x-k8s.io --all-namespaces)" in
+        yes) log_success "The controller can list Kueue Workloads in every namespace, which counting borrowing needs" ;;
+        no)
+            log_warning "This install counts Kueue cohort borrowing, and $sa cannot list Kueue Workloads in every namespace."
+            log_warning "  Borrowing is then withheld (lenders-unreadable); the nominal Kueue cap still applies. The read reaches every tenant's Workloads, so it is granted only when asked: a cluster admin re-runs '$(wva_make_cmd setup-prereqs)' with this install's WVA_LIMITER and WVA_QUOTA_KUEUE. WVA_QUOTA_KUEUE_BORROW=false keeps nominal and needs no such read."
+            ;;
+        *) log_warning "Could not verify that $sa may list Kueue Workloads in every namespace (checking needs impersonate permission). Without it, cohort borrowing is withheld." ;;
+    esac
+}
+
 # wva_kueue_source_configured echoes where a Kueue quota source is configured
 # for this controller, nothing when there is none, or `unknown <what>` when a
 # policy it may read could not be read.
@@ -580,7 +717,7 @@ wva_model_server_count() {
 # Sources, in the controller's own terms (internal/controller/policy_namespace.go,
 # mirrored by pl_policy_resolution):
 #
-#   this install's WVA_LIMITER=quota with WVA_QUOTA_KUEUE=true;
+#   this install's WVA_LIMITER naming quota, with WVA_QUOTA_KUEUE=true;
 #   the controller's OWN ConfigMap in WVA_NS -- always: it is the only source
 #     of an admin-owned controller (cluster scope, or WVA_WATCH_NS naming
 #     another namespace), and the fallback of a self-managed one. An upgrade
@@ -594,34 +731,15 @@ wva_model_server_count() {
 # A Forbidden or otherwise unreadable read is "unknown", never "no source": the
 # caller warns rather than staying silent about a source it could not see.
 wva_kueue_source_configured() {
-    if [ "${WVA_LIMITER:-none}" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
+    if limiter_set_has "$(limiter_types_of "${WVA_LIMITER:-none}" 2>/dev/null)" quota \
+        && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
         echo "WVA_QUOTA_KUEUE=true"
         return 0
     fi
-    local managed cands policy_ns out rc unread="" ns n
-    managed="${WVA_WATCH_NS:-$WVA_NS}"
-    cands="$WVA_NS"
-    if [ "$(wva_install_scope)" = "namespace" ] && [ "$managed" = "$WVA_NS" ]; then
-        rc=0
-        # Streams apart (kc_capture): a warning on stderr is neither the label
-        # nor a NotFound.
-        kc_capture get namespace "$managed" \
-            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' || rc=$?
-        out="$KC_OUT"
-        if [ "$rc" -ne 0 ]; then
-            case "$KC_ERR" in
-                *NotFound*|*"not found"*) policy_ns=wva-policy ;;
-                *)
-                    # The label may point anywhere; wva-policy is still worth a look.
-                    unread="$unread Namespace $managed (its policy-namespace label);"
-                    policy_ns=wva-policy ;;
-            esac
-        else
-            policy_ns="${out:-wva-policy}"
-        fi
-        case " $cands " in *" $policy_ns "*) ;; *) cands="$policy_ns $cands" ;; esac
-    fi
-    for ns in $cands; do
+    local out rc unread ns n
+    wva_policy_candidates
+    unread="$WVA_POLICY_CANDS_UNREAD"
+    for ns in $WVA_POLICY_CANDS; do
         rc=0
         kc_capture get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' || rc=$?
         out="$KC_OUT"
@@ -711,11 +829,53 @@ then re-run this install."
     esac
 }
 
+# wva_check_kueue_cohort_read warns when a controller-only install's controller
+# could not list Kueue Cohort objects.
+#
+# The Kueue reader lists Cohorts to tell a flat cohort from a nested one before
+# it counts borrowing. Denied, borrowing reads as hierarchy-unknown and is not
+# counted; the nominal Kueue bound is unaffected, so this warns and never
+# refuses. Same phase and source rules as wva_check_kueue_namespace_read.
+wva_check_kueue_cohort_read() {
+    [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
+    local source sa
+    source="$(wva_kueue_source_configured)"
+    case "$source" in
+        ''|unknown*) return 0 ;;
+    esac
+    sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
+    case "$(can_i_as "$sa" list cohorts.kueue.x-k8s.io)" in
+        yes) log_success "The controller can list Kueue Cohorts, which counting borrowing needs" ;;
+        no)
+            log_warning "A Kueue quota source is configured ($source), and $sa cannot list cohorts.kueue.x-k8s.io."
+            log_warning "  Cohort borrowing is then not counted (reason hierarchy-unknown); the nominal Kueue cap still applies. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            ;;
+        *) log_warning "Could not verify that $sa may list cohorts.kueue.x-k8s.io (checking needs impersonate permission). Without it, Cohort borrowing is not counted." ;;
+    esac
+}
+
 check_permissions() {
     log_info "Checking permissions..."
 
     local ns="${WVA_NS}" denied=() sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
     local kinds kind resource namespaced cluster_denied="" unknown=()
+    # The limiter set this install will declare, normalised (a list such as
+    # gpu-inventory,quota declares both), printed so the reader sees it before
+    # anything changes. Unset keeps the live policy's limiters.
+    local lset node_set node_source=named
+    lset="$(wva_limiter_set)" || exit 1
+    node_set="$lset"
+    if [ -n "${WVA_LIMITER:-}" ]; then
+        log_info "Limiters this install declares: ${lset}"
+    else
+        # Unset keeps the live policy's limiters, so THEY are what the
+        # controller will need node read for. Reading WVA_LIMITER alone said
+        # "no limiter is configured" over a live gpu-inventory,quota policy --
+        # the upgrade that went NotReady.
+        node_set="$(wva_live_limiter_set "$ns")"
+        node_source=live
+        [ "$node_set" = none ] || log_info "WVA_LIMITER is not set: the live policy's limiters are kept: ${node_set}"
+    fi
 
     # What this install creates, read from the RENDERED overlay rather than
     # inferred from the scope name. The scope does not decide it: the
@@ -864,7 +1024,7 @@ $advice"
     # No `declare -F` guard: install.sh sources limiter_policy.sh
     # unconditionally, so a missing function is a broken source tree, and
     # skipping a safety check on it would fail open.
-    if [ "${WVA_LIMITER:-none}" = "quota" ]; then
+    if limiter_set_has "$lset" quota; then
         limiter_entry_yaml quota >/dev/null || exit 1
         log_success "WVA_QUOTAS parses, so the quota limiter can be declared at the end of the install"
     fi
@@ -873,6 +1033,8 @@ $advice"
     # See wva_check_kueue_namespace_read. Before the tenant early-return: the
     # controller-only phase is exactly the one that cannot fix it.
     wva_check_kueue_namespace_read
+    wva_check_kueue_cohort_read
+    wva_check_kueue_borrow_read
 
     # A tenant install has its own contract for what the CONTROLLER will need, and
     # it is not the node-read question below: the physical limiter's inventory is
@@ -884,21 +1046,53 @@ $advice"
     fi
 
     # What the CONTROLLER will need once it is running.
-    local node_read
+    wva_check_limiter_node_read "$node_set" "$sa" "$node_source"
+
+    log_success "Permissions look sufficient"
+}
+
+# wva_check_limiter_node_read <limiter set> <service account> [named|live]
+# checks the node read a physical limiter needs.
+#
+# With gpu-inventory in the set WVA_LIMITER names (named, the default), a
+# controller that cannot list nodes is REFUSED, with the remedy: the admin
+# setup phase grants it. Installing anyway leaves the physical limiter the
+# operator asked for unenforced: alone, the controller goes NotReady and the
+# fleet never scales up; beside a quota, the controller skips it and only the
+# quota bounds.
+#
+# A live set -- WVA_LIMITER unset, the live policy's limiters kept -- is
+# WARNED about instead: an upgrade must not be refused for a policy it did not
+# write, and the warning carries the same remedy.
+wva_check_limiter_node_read() {
+    local lset="$1" sa="$2" source="${3:-named}" node_read effect
     node_read="$(can_i_as "$sa" list nodes)"
-    if [ "${WVA_LIMITER:-none}" = "gpu-inventory" ]; then
+    if limiter_set_has "$lset" physical; then
+        if limiter_set_has "$lset" quota; then
+            effect="The controller stays Ready but SKIPS the physical limiter: only the quota bounds scaling, and wva_constraint_provider_skipped{reason=\"node_read_denied\"} reports it."
+        else
+            effect="The controller would also go NotReady (its gpu-policy readiness check)."
+        fi
+        if [ "$node_read" = no ] && [ "$source" = live ]; then
+            log_warning "The live policy's limiters '${lset}' include gpu-inventory, which needs the controller to list nodes, and $sa cannot. ${effect}"
+            log_warning "  Remedy: have a cluster admin run '$(wva_make_cmd setup-prereqs)', which grants node read; or drop gpu-inventory from the policy (re-run with WVA_LIMITER naming the limiters to keep)."
+            return 0
+        fi
         case "$node_read" in
             yes)
                 log_success "The controller can list nodes, which the gpu-inventory limiter requires"
                 ;;
             no)
-                log_error "WVA_LIMITER=gpu-inventory needs the controller to list nodes, and $sa cannot.
+                log_error "The limiters '${lset}' include gpu-inventory, which needs the controller to list nodes, and $sa cannot.
 
 A GPU-aware limiter allocates out of per-accelerator pools. Without nodes, a
 variant's accelerator never resolves, it is charged to no pool, it receives no
 budget, and it NEVER SCALES UP — with nothing in the logs to say why.
+${effect}
 
-Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
+Node read is cluster-scoped; the admin setup phase grants it: have a cluster
+admin run 'make setup-prereqs', then install again. Or install without the
+physical limiter: drop gpu-inventory from WVA_LIMITER."
                 ;;
             *)
                 # Cannot impersonate, so this is unanswerable from here. It is not a
@@ -906,7 +1100,7 @@ Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
                 # controller publishes wva_node_access_denied if it turns out not to
                 # have it. Say what to watch instead of guessing.
                 log_warning "Could not verify that $sa may list nodes (checking needs impersonate permission, which you do not have)."
-                log_warning "  WVA_LIMITER=gpu-inventory requires it. After the install, confirm with: kubectl get --raw /metrics | grep wva_node_access_denied — 1 means every variant is getting no GPU budget and will not scale up."
+                log_warning "  The gpu-inventory limiter requires it. After the install, confirm with: kubectl get --raw /metrics | grep wva_node_access_denied — 1 means every variant is getting no GPU budget and will not scale up."
                 ;;
         esac
     else
@@ -920,8 +1114,6 @@ Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
                 ;;
         esac
     fi
-
-    log_success "Permissions look sufficient"
 }
 
 # wva_report_scaledobjects says what already registers workloads with WVA. It never

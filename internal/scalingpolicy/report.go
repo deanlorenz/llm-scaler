@@ -159,6 +159,9 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 		// now means "still off". This line is the only place that confirms it
 		// either way.
 		"enableLearnedStateReuse", cfg.EnableLearnedStateReuse,
+		// Reported for the opposite reason: it is the switch an operator
+		// reaches for in an incident, and needs to see take effect.
+		"disableK2Borrow", cfg.DisableK2Borrow,
 		// The SLO targets and whether the analyzer that reads them is listed:
 		// both halves resolve through the overlay separately, and this is the
 		// one place that shows the model ended up with both.
@@ -185,9 +188,9 @@ func formatBand(cfg config.ScalingPolicy) string {
 	// toggling it would log nothing: the readout fires only when this string
 	// changes, so a field reported but not keyed is reported once and then
 	// never again when it actually changes.
-	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%s",
+	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%t|%s",
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
-		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse, cfg.SLOSummary())
+		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse, cfg.DisableK2Borrow, cfg.SLOSummary())
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a
@@ -225,9 +228,10 @@ func joinSorted(values []string) string {
 //     SCALES UP. Nothing errors; it simply sits at its current replica count.
 //
 // Reported once per change per variant, so a persistent misconfiguration does not
-// print every cycle.
-func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namespace, variant, limiterMode string) {
-	limited := limiterMode != "" && limiterMode != string(config.LimiterTypeNone)
+// print every cycle. limiter is Config.EffectiveLimiterSummary: "none" (or empty)
+// when no limiter is declared, otherwise the limiters in force.
+func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namespace, variant, limiter string) {
+	limited := limiter != "" && limiter != string(config.LimiterTypeNone)
 	if !p.changed("accel|"+namespace+"/"+variant, strconv.FormatBool(limited)) {
 		return
 	}
@@ -237,7 +241,7 @@ func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namesp
 		logger.Info("Accelerator not resolved and a GPU limiter is declared: this variant will "+
 			"NOT be allocated any GPU budget and therefore will not scale up. Set a GPU product "+
 			"key in the workload's nodeSelector or nodeAffinity.",
-			"namespace", namespace, "variant", variant, "limiter", limiterMode)
+			"namespace", namespace, "variant", variant, "limiter", limiter)
 		return
 	}
 	logger.Info("Accelerator not resolved: this variant's GPUs are charged to no accelerator "+

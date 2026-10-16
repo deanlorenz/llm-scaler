@@ -1,5 +1,11 @@
 package domain
 
+import (
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
 // DefaultVariantCost is the per-replica cost assumed when a variant declares no
 // cost (the llm-d.ai/variant-cost annotation is absent or unparseable). It lives
 // here, next to the variant metadata it belongs to, so every consumer
@@ -67,9 +73,51 @@ type VariantMetadata struct {
 	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
 	// says nothing about shape.
 	PodGPUs []int
+	// Tolerations are the tolerations of a replica's pods
+	// (scaletarget.PodTolerations): node fit places a pod only on a node whose
+	// NoSchedule and NoExecute taints they tolerate.
+	Tolerations []corev1.Toleration
+	// TopologyKey is the node label every pod of one replica must share a
+	// value of (an exclusive-topology LeaderWorkerSet), "" for none.
+	TopologyKey string
+	// Placements is the node placement each distinct pod template of one
+	// replica asks for, leader first: one entry for a Deployment, two for a
+	// LeaderWorkerSet with its own leader template. A node fits a pod of the
+	// replica only if it satisfies every entry. Nil when no template
+	// constrains its nodes.
+	Placements []PodPlacement
+	// ReplicaRequests is what one replica's pods request in all of each
+	// resource, in milli-units (resource.Quantity's MilliValue): a container
+	// that sets only a limit requests the limit, an init container counts only
+	// when larger. A resource no container of the template names is absent:
+	// its request is not known (a LimitRange may set it), so Kueue borrowing
+	// is not counted for a co-resource it is (co-resource-bound). Nil when the
+	// template could not be read.
+	ReplicaRequests map[string]int64
+	// PriorityClass is the Kueue priority class a replica's Workload gets
+	// from the pod template (kueue.TemplatePriorityClass): its
+	// WorkloadPriorityClass label, else its priorityClassName, else
+	// kueue.PriorityClassNone. Empty when the template could not be read.
+	PriorityClass string
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
+	// UnplacedReplicas counts replicas that cannot place
+	// (the Kueue borrowing proposal, PR #161, B5): a pod
+	// with PodScheduled=False reason Unschedulable, or held at Kueue's
+	// admission gate for longer than one cycle. Pulling an image or loading
+	// weights is not unplaced. In scale-target units: a LeaderWorkerSet group
+	// is unplaced while any of its pods is, so a hold on it lifts only once the
+	// whole group has placed. UnplacedSince is when the newest unplaced pod
+	// became so, and UnplacedPods their names. UnplacedAt is, per unplaced
+	// replica, when it became unplaced, for the placement timeout: keyed by
+	// pod name, or for a LeaderWorkerSet by group index, a group counting from
+	// when its newest unplaced pod became so. Same pod listing as
+	// PendingReplicas' ages.
+	UnplacedReplicas int
+	UnplacedSince    time.Time
+	UnplacedPods     []string
+	UnplacedAt       map[string]time.Time
 }
 
 // ToReplicaState projects the metadata onto the VariantReplicaState the analyzers
@@ -83,21 +131,30 @@ type VariantMetadata struct {
 // optimizer switch to reading VariantMetadata.
 func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 	return VariantReplicaState{
-		VariantName:     m.VariantName,
-		CurrentReplicas: m.CurrentReplicas,
-		DesiredReplicas: m.DesiredReplicas,
-		PendingReplicas: m.PendingReplicas,
-		PendingAges:     m.PendingAges,
-		StuckReplicas:   m.StuckReplicas,
-		HeldReplicas:    m.HeldReplicas,
-		HeldKnown:       m.HeldKnown,
-		FilledReplicas:  m.FilledReplicas,
-		PodGPUs:         m.PodGPUs,
-		GPUsPerReplica:  m.GPUsPerReplica,
-		Role:            m.Role,
-		AcceleratorName: m.AcceleratorName,
-		Engine:          m.Engine,
-		MinReplicas:     m.MinReplicas,
-		MaxReplicas:     m.MaxReplicas,
+		VariantName:      m.VariantName,
+		CurrentReplicas:  m.CurrentReplicas,
+		DesiredReplicas:  m.DesiredReplicas,
+		PendingReplicas:  m.PendingReplicas,
+		PendingAges:      m.PendingAges,
+		StuckReplicas:    m.StuckReplicas,
+		HeldReplicas:     m.HeldReplicas,
+		HeldKnown:        m.HeldKnown,
+		FilledReplicas:   m.FilledReplicas,
+		PodGPUs:          m.PodGPUs,
+		Tolerations:      m.Tolerations,
+		TopologyKey:      m.TopologyKey,
+		Placements:       m.Placements,
+		ReplicaRequests:  m.ReplicaRequests,
+		PriorityClass:    m.PriorityClass,
+		UnplacedReplicas: m.UnplacedReplicas,
+		UnplacedSince:    m.UnplacedSince,
+		UnplacedPods:     m.UnplacedPods,
+		UnplacedAt:       m.UnplacedAt,
+		GPUsPerReplica:   m.GPUsPerReplica,
+		Role:             m.Role,
+		AcceleratorName:  m.AcceleratorName,
+		Engine:           m.Engine,
+		MinReplicas:      m.MinReplicas,
+		MaxReplicas:      m.MaxReplicas,
 	}
 }

@@ -154,25 +154,39 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		}
 		validate := func(entries ...QuotaLimiterConfig) []string {
 			GinkgoHelper()
-			warnings, err := (&QuotaLimiterEntries{Limiters: entries}).Validate()
+			e := &QuotaLimiterEntries{Limiters: entries}
+			warnings, err := e.Validate()
 			Expect(err).NotTo(HaveOccurred())
-			return warnings
+			return append(warnings, e.unboundedExcludeWarnings()...)
 		}
 
-		It("warns that an excluded namespace has no limit without a finite cluster quota", func() {
+		It("warns that an excluded namespace has no limit without a cluster quota", func() {
 			Expect(validate(tenants("ns-x"))).To(ConsistOf(
 				And(ContainSubstring("[ns-x]"), ContainSubstring("no scope: cluster quota"))))
-			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1, "H100": -1}))).To(HaveLen(1),
-				"an unlimited cluster quota bounds nothing")
 			excludeOnly := QuotaLimiterConfig{Name: "tenants", Type: "quota", Scope: QuotaScopeNamespace, Exclude: []string{"ns-x"}}
 			Expect(validate(excludeOnly)).To(ConsistOf(ContainSubstring("[ns-x] have no GPU limit")),
 				"also when the namespace quota names no accelerator type")
 		})
 
-		It("names the accelerator types no cluster quota bounds", func() {
-			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16}))).To(ConsistOf(
+		It("names the accelerator types every cluster quota leaves unlimited", func() {
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1, "H100": -1}))).To(ConsistOf(
+				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100 H100]"))),
+				"an unlimited cluster quota bounds nothing")
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "A100": -1}))).To(ConsistOf(
 				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100]"))))
 			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "A100": 20}))).To(BeEmpty())
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "L4": -1}))).To(ConsistOf(
+				ContainSubstring("on [L4]")), "a type only the cluster quota names counts too")
+		})
+
+		// A cluster quota is a closed allowlist: a type it does not list is
+		// denied to an excluded namespace, not left unbounded.
+		It("does not warn about a type a cluster quota leaves out", func() {
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16}))).To(BeEmpty())
+			second := cluster(map[string]int{"H100": 8})
+			second.Name = "cluster-2"
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1}), second)).To(BeEmpty(),
+				"the second cluster quota denies A100")
 		})
 
 		It("does not warn without an exclude list", func() {
@@ -193,8 +207,9 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		})
 
 		It("matches accelerator names as the limiter does at runtime", func() {
-			Expect(validate(tenants("ns-x"), cluster(map[string]int{"a100": 20, "NVIDIA-H100-80GB-HBM3": 16}))).To(BeEmpty())
-			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-A100-SXM4-80GB": 20}))).To(ConsistOf(
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"a100": -1, "NVIDIA-H100-80GB-HBM3": 16}))).To(ConsistOf(
+				ContainSubstring("on [A100]")), "a100 is A100; the H100 product key bounds the H100 family")
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-A100-SXM4-80GB": 20, "nvidia-h100-80gb": -1}))).To(ConsistOf(
 				ContainSubstring("on [H100]")))
 		})
 
@@ -205,6 +220,12 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 			// Both entries exclude ns-y, so each says so; neither names ns-x.
 			Expect(validate(tenants("ns-x", "ns-y"), capsX)).To(And(HaveLen(2),
 				HaveEach(And(ContainSubstring("exclude [ns-y] have no GPU limit"), Not(ContainSubstring("ns-x"))))))
+		})
+
+		It("leaves the bound check out of Validate: a physical limiter is not one of these entries", func() {
+			warnings, err := (&QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{tenants("ns-x")}}).Validate()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
 		})
 	})
 

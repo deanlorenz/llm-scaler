@@ -44,6 +44,9 @@ type podServingState struct {
 	// the EPP route on, so it is the moment the replica starts draining a queue,
 	// which is what the projection is about.
 	startSeconds float64
+	// revision is the pod template revision the Pod was created from
+	// (podRevision), "" when it carries none.
+	revision string
 }
 
 // namespacePods is one namespace's listing, plus whether it could be read.
@@ -104,9 +107,29 @@ func podStates(ctx context.Context, reader client.Reader, namespace string) name
 			state.startedAt = p.Status.StartTime.Time
 		}
 		state.startSeconds = podStartSeconds(p)
+		state.revision = podRevision(p)
 		out[p.Name] = state
 	}
 	return namespacePods{byName: out, listed: true}
+}
+
+// podRevisionLabels are the labels a workload controller stamps a Pod's
+// template revision under, the first one present wins: a LeaderWorkerSet's
+// leader and workers, a Deployment's ReplicaSet, a StatefulSet.
+var podRevisionLabels = []string{
+	"leaderworkerset.sigs.k8s.io/template-revision-hash",
+	"pod-template-hash",
+	"controller-revision-hash",
+}
+
+// podRevision is the template revision the Pod was created from, or "".
+func podRevision(p *corev1.Pod) string {
+	for _, l := range podRevisionLabels {
+		if v := p.Labels[l]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // podListErrorReason names a failed Pod listing for the reason label of
@@ -226,6 +249,17 @@ func (c *ReplicaMetricsCollector) podIsGone(ctx context.Context, namespace, podN
 		return false
 	}
 	return !found || !state.live
+}
+
+// podRevision reports the template revision the Pod was created from, "" when
+// the listing could not be read, does not contain the Pod, or the Pod carries
+// none -- an unknown, which the analyzer's revision check does not count.
+func (c *ReplicaMetricsCollector) podRevision(ctx context.Context, namespace, podName string) string {
+	state, found, listed := c.servingState(ctx, namespace, podName)
+	if !listed || !found {
+		return ""
+	}
+	return state.revision
 }
 
 // podReady reports whether the Pod is in the rotation.

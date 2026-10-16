@@ -63,7 +63,7 @@ kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
 
 <!-- guide:verify.source start -->
 ```bash
-# Print the policy namespace, limiter and acceptance each controller reports.
+# Print the policy namespace, limiter and acceptance each controller reports. Expect a line such as `wva-policy inventory/gpu-inventory true`, or `wva-policy inventory+quota/gpu-inventory,tenant-quota true` when a quota is declared beside it: the limiter types joined by +, then every entry's name.
 for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
     -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
   echo "== $ns"
@@ -108,8 +108,12 @@ reads the ConfigMap there.
 
 <!-- guide:cleanup.disable start -->
 ```bash
-# Scaling becomes unbounded again for every install that reads this policy.
-make disable-physical-limiter
+# Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again. WVA_LIMITER_TYPE=quota removes a quota instead, and WVA_LIMITER_TYPE=all every limiter (use it when uninstalling: it exits 0 even where nothing is declared).
+make disable-limiter
+# a quota instead:
+# make disable-limiter WVA_LIMITER_TYPE=quota
+# every limiter:
+# make disable-limiter WVA_LIMITER_TYPE=all
 ```
 <!-- guide:cleanup.disable end -->
 
@@ -121,9 +125,12 @@ make disable-physical-limiter
   and use a `ResourceQuota` for tenants you do not trust.
 - **It bounds only what the scaling manager asks for.** A higher
   `maxReplicaCount` or a second KEDA trigger bypasses it.
-- **Declare one kind, not both.** Only one limiter is built and a quota entry
-  wins, so `quota` next to `gpu-inventory` gives caps and no physical limiter.
-  The controller logs what it dropped.
+- **Both kinds bound together.** Declare `gpu-inventory` and `quota` and both
+  apply: a model must fit the GPUs that exist and its allowance. Enabling one
+  kind on a policy that already declares the other keeps the other.
+  `make disable-limiter` removes one kind only; with only the other
+  kind declared it removes nothing and exits non-zero. `WVA_LIMITER_TYPE=all`
+  removes every limiter and exits 0 even where none is declared.
 - **Budgets are per controller.** N controllers each enforce their own copy, so
   the cluster permits N times the figure.
 
@@ -198,7 +205,7 @@ in `WVA_CONTROLLER_IMAGE_REPOS`.
   A target namespace with no controller is NOT bound too, and nothing is written
   for it.
 - A skipped controller keeps the policy it read before.
-  `make disable-physical-limiter` does not write it either, and says so if it
+  `make disable-limiter` does not write it either, and says so if it
   still declares a limiter.
 - A policy that declares no limiter is left as it is, with `No limiter declared
   in <ns>/wva-scaling-policy-config; nothing to remove.`

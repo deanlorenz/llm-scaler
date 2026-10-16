@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -53,6 +54,10 @@ func (e *Engine) runV2AnalysisOnly(
 				"variant", va.Name, "scaleTargetKey", key)
 			continue
 		}
+		// Before the record is loaded and before Analyze, so a forgotten
+		// variant's capacity record is refiled from the scale target this
+		// cycle and nothing restored for it is installed.
+		e.forgetOnRequest(ctx, namespace, modelID, va.Name, scaleTarget)
 		// Get accelerator name from scale target nodeSelector/nodeAffinity or VA label
 		accelerator := accelerator.GetAcceleratorNameFromScaleTarget(va, scaleTarget)
 		gpuCount := scaleTarget.GetTotalGPUsPerReplica()
@@ -376,6 +381,33 @@ type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
 }
 
+// variantForgetter is the part of the saturation analyzer forgetOnRequest
+// needs, reached through an assertion like the others here.
+type variantForgetter interface {
+	ForgottenToken(namespace, variant string) string
+	ForgetVariant(namespace, modelID, variant, token string) int
+}
+
+// Pinned at compile time, for the same reason as presenceNoter.
+var _ variantForgetter = (*saturation.SaturationAnalyzer)(nil)
+
+// forgetOnRequest forgets one variant's learned state when its scale target
+// carries the ForgetLearnedState annotation with a token not yet acted on.
+func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
+	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
+	if token == "" {
+		return
+	}
+	f, ok := e.saturationV2Analyzer.(variantForgetter)
+	if !ok || f.ForgottenToken(namespace, variant) == token {
+		return
+	}
+	n := f.ForgetVariant(namespace, modelID, variant, token)
+	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
+		"namespace", namespace, "modelID", modelID, "variant", variant,
+		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n)
+}
+
 // presenceNoter is the part of the saturation analyzer notePresentVariants
 // needs, reached through an assertion for the same reason as
 // staleHistoryEvictor.
@@ -562,6 +594,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"decodeSaturation", history.DecodeSaturation,
 			"fleetShapes", history.FleetShapes,
 			"variantStamps", history.VariantStamps,
+			"stashedWindows", history.StashedWindows,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)
@@ -1552,11 +1585,15 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 }
 
 // logScalingDecisions emits one INFO "scaling-decision" line per model after
-// the optimizer has produced per-variant decisions.
+// the optimizer has produced per-variant decisions. borrowed, non-nil while
+// the cycle counts Kueue borrowing, is per "namespace/model" the GPUs the
+// decision draws from the cohorts' shared pools; every model's line then
+// carries it as "borrowed", 0 included.
 func logScalingDecisions(
 	ctx context.Context,
 	modelRequests []allocation.ModelScalingRequest,
 	decisions []domain.VariantDecision,
+	borrowed map[string]int,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -1624,11 +1661,15 @@ func logScalingDecisions(
 		if len(entries) == 0 {
 			continue
 		}
-		logger.Info("scaling-decision",
+		kv := []any{
 			"modelID", req.ModelID,
 			"namespace", req.Namespace,
 			"decisions", entries,
-		)
+		}
+		if borrowed != nil {
+			kv = append(kv, "borrowed", borrowed[req.Namespace+"/"+req.ModelID])
+		}
+		logger.Info("scaling-decision", kv...)
 	}
 }
 
@@ -1660,8 +1701,10 @@ func unattributedGPUs(byType map[string]int) (total int, keys []string) {
 // allowance, so a pool at its quota must read as no headroom left rather than as
 // a namespace nobody bounds.
 //
-// Where constraints cannot be had -- no limiter, no usage observation on a
-// basis a provider needs, every provider failed -- it publishes UNBOUNDED, the
+// A provider whose usage basis is unobserved, or that fails, is skipped and the
+// others still bound the pool (allocation.ComputeAvailableConstraints). Where
+// no constraints can be had at all -- no limiter, or every provider
+// unavailable -- it publishes UNBOUNDED, the
 // same posture the optimizing path takes for the models in those states, rather
 // than a fabricated figure or nothing: a fabricated one would cap a pool for a
 // reason nobody could find, and nothing would now hold it, since a pool grows
@@ -1674,31 +1717,27 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 		// Nothing bounds anything. Published, not merely implied by silence:
 		// the pool grows only on a snapshot, and this is the only place one
 		// would come from on a limiter-less cluster with nothing to optimize.
+		e.providerSkips.report(ctx, nil)
 		allocation.PublishUnboundedHeadroom(decision.WarmPoolGPUsVersion(), time.Now())
 		return
 	}
 	views := gpuUsageViews(nil)
-	if _, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. The optimizing path
-		// runs the models unbounded in this state; the pool is told the same,
-		// rather than held against a limit nobody could compute.
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views, nil)
+	// The optimizing path does not run on an idle fleet, so this is the cycle's
+	// one report of which providers bound.
+	e.providerSkips.report(ctx, skipped)
+	if len(constraints) == 0 {
+		// Every provider unavailable. The optimizing path runs the models
+		// unbounded in this state; the pool is told the same, rather than held
+		// against a limit nobody could compute.
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return
 	}
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-	}
-	if len(constraints) == 0 {
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now()) // every provider failed: same posture
-		return
-	}
-	allocation.PublishNamespaceHeadroom(constraints, time.Now())
+	now := time.Now()
+	// Nothing is being ordered, so the nodes' holes are as observed.
+	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, now)
+	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
+	allocation.PublishNamespaceHeadroomOnNodes(constraints, nodes, now)
 }
 
 // publishWarmPoolSupply records what BRIDGES are contributing to each variant.

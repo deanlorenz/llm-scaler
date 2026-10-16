@@ -196,23 +196,37 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			Expect(dm["mx-v"].TargetReplicas).To(Equal(21))
 		})
 
-		It("leaves an excluded namespace unbounded on a type the cluster quota does not list", func() {
+		// A cluster quota is a closed allowlist: a type it does not list is
+		// denied to every namespace, the excluded one included. A type it lists
+		// as unlimited bounds nothing.
+		It("denies an excluded namespace, as it denies a tenant, a type the cluster quota does not list", func() {
 			cons := constraintsOf(held, tenants, config.QuotaLimiterConfig{
 				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
 				ClusterQuotas: map[string]int{"H100": 16},
 			})
+			open := constraintsOf(held, tenants, config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"H100": 16, "A100": -1},
+			})
 			for _, rescale := range []bool{false, true} {
 				o := NewGreedyByScoreOptimizer()
 				o.Rescale = RescaleFlags{Cluster: rescale}
-				dm := targets(o, []ModelScalingRequest{model("ma", "team-a", 1, 2, 1), model("mx", "ns-x", 1, 20, 1)}, cons)
+				reqs := []ModelScalingRequest{model("ma", "team-a", 1, 2, 1), model("mx", "ns-x", 1, 20, 1)}
+				dm := targets(o, reqs, cons)
+				Expect(dm["ma-v"].TargetReplicas).To(Equal(1), "rescale=%v: the cluster quota does not list A100", rescale)
+				Expect(dm["mx-v"].TargetReplicas).To(Equal(1), "rescale=%v: the cluster quota does not list A100", rescale)
+
+				dm = targets(o, reqs, open)
 				Expect(dm["ma-v"].TargetReplicas).To(Equal(3))
-				Expect(dm["mx-v"].TargetReplicas).To(Equal(21), "rescale=%v: no cluster quota lists A100", rescale)
+				Expect(dm["mx-v"].TargetReplicas).To(Equal(21), "rescale=%v: the cluster quota leaves A100 unlimited", rescale)
 			}
+			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"A100": 1})).To(BeFalse())
+			Expect(FitsGPUBudget(open, "ns-x", map[string]int{"A100": 1000})).To(BeTrue())
 		})
 
 		It("bounds each accelerator type of an excluded namespace on its own", func() {
 			// team-a is capped on H100; ns-x runs on A100, which the cluster
-			// quota bounds (10 free), and on H100, which no cluster quota lists.
+			// quota bounds (10 free), and on H100, which it leaves unlimited.
 			h100Tenants := config.QuotaLimiterConfig{
 				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
 				Exclude:         []string{"ns-x"},
@@ -220,7 +234,10 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			}
 			cons := constraintsOf(map[string]map[string]int{
 				"team-a": {"H100": 1}, "ns-x": {"A100": 2},
-			}, h100Tenants, clusterQuota(12))
+			}, h100Tenants, config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"A100": 12, "H100": -1},
+			})
 			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{
 				modelOn("H100", "ma", "team-a", 1, 3, 1),
 				modelOn("A100", "mx", "ns-x", 2, 20, 1),
@@ -235,7 +252,9 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"A100": 11})).To(BeFalse())
 			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"H100": 100})).To(BeTrue())
 			budgets, _ := GPUBudgets(cons, "ns-x")
-			Expect(budgets).To(Equal(map[string]int{"A100": 10, "H100": -1}))
+			Expect(budgets).To(HaveLen(2))
+			Expect(budgets).To(HaveKeyWithValue("A100", 10))
+			Expect(isUnboundedBudget(budgets["H100"])).To(BeTrue(), "%v", budgets)
 		})
 
 		It("leaves an excluded namespace unbounded under an unlimited cluster quota", func() {
@@ -253,9 +272,9 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 		})
 
 		It("does not let an excluded namespace decide whether an unlimited tenant scales", func() {
-			// team-u's quota grants A100 without limit, and no provider gives a
-			// finite A100 budget. Such a tenant does not scale (quota-limiter.md,
-			// "Known limitations"), with or without an excluded namespace.
+			// team-u's quota grants A100 without limit, and no cluster bound is in
+			// force. Such a tenant scales to its demand, with or without an
+			// excluded namespace beside it.
 			unlimited := config.QuotaLimiterConfig{
 				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
 				Exclude:         []string{"ns-x"},
@@ -263,28 +282,28 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			}
 			cons := constraintsOf(map[string]map[string]int{"team-u": {"A100": 1}, "ns-x": {"A100": 1}}, unlimited)
 			alone := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{model("mu", "team-u", 1, 4, 1)}, cons)
-			Expect(alone["mu-v"].TargetReplicas).To(Equal(1))
+			Expect(alone["mu-v"].TargetReplicas).To(Equal(5))
 
 			idle := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{
 				model("mu", "team-u", 1, 4, 1), model("mx", "ns-x", 1, 0, 1),
 			}, cons)
-			Expect(idle["mu-v"].TargetReplicas).To(Equal(1), "beside an idle excluded namespace")
+			Expect(idle["mu-v"].TargetReplicas).To(Equal(5), "beside an idle excluded namespace")
 
 			busy := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{
 				model("mu", "team-u", 1, 4, 1), model("mx", "ns-x", 1, 4, 1),
 			}, cons)
-			Expect(busy["mu-v"].TargetReplicas).To(Equal(1), "beside a scaling excluded namespace")
+			Expect(busy["mu-v"].TargetReplicas).To(Equal(5), "beside a scaling excluded namespace")
 			Expect(busy["mx-v"].TargetReplicas).To(Equal(5))
 		})
 
-		It("still bounds a capped tenant that is missing from the usage map", func() {
-			// team-a is listed but absent from the namespaces the quota was
-			// fed. It is not excluded, so it is not uncapped: it is judged, as
-			// before #169, by the tenants' pool, which here has nothing free.
-			cons := constraintsOf(map[string]map[string]int{"team-b": {"A100": 6}, "ns-x": {"A100": 1}}, tenants)
-			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{model("ma", "team-a", 0, 5, 1)}, cons)
-			Expect(dm["ma-v"].TargetReplicas).To(Equal(0))
-			Expect(FitsGPUBudget(cons, "team-a", map[string]int{"A100": 1})).To(BeFalse())
+		It("still caps a listed tenant that holds nothing", func() {
+			// Exclusion is read from the quota, not from what a namespace holds:
+			// team-a holds no GPUs and is still capped by its own entry.
+			cons := constraintsOf(map[string]map[string]int{"team-a": {}, "team-b": {"A100": 6}, "ns-x": {"A100": 1}}, tenants)
+			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{model("ma", "team-a", 0, 20, 1)}, cons)
+			Expect(dm["ma-v"].TargetReplicas).To(Equal(8))
+			Expect(FitsGPUBudget(cons, "team-a", map[string]int{"A100": 8})).To(BeTrue())
+			Expect(FitsGPUBudget(cons, "team-a", map[string]int{"A100": 9})).To(BeFalse())
 		})
 	})
 
@@ -411,7 +430,7 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 
 			budgets, nsScoped := GPUBudgets(cons, "ns-x")
 			Expect(nsScoped).To(BeFalse())
-			Expect(budgets).To(Equal(map[string]int{"A100": -1}), "unbounded, not 0")
+			Expect(budgets).To(BeNil(), "no cluster bound: unbounded, not 0")
 		})
 
 		It("bounds an excluded namespace's wake by a cluster quota alone", func() {
@@ -435,35 +454,38 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			Expect(FitsGPUBudget(cons, "team-c", map[string]int{"A100": 1})).To(BeFalse())
 		})
 
-		It("wakes an excluded namespace on a type no quota names", func() {
+		It("wakes an excluded namespace on any type only when no cluster quota is in force", func() {
+			Expect(FitsGPUBudget(constraintsOf(full, tenants), "ns-x", map[string]int{"L40S": 4})).To(BeTrue())
 			cons := constraintsOf(full, tenants, clusterQuota(14)) // A100 full
-			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"L40S": 4})).To(BeTrue())
+			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"L40S": 4})).To(BeFalse(), "the cluster quota does not list L40S")
 			Expect(FitsGPUBudget(cons, "ns-x", map[string]int{"A100": 1})).To(BeFalse())
 		})
 
-		It("wakes an excluded namespace's model that names no accelerator onto an unbounded type", func() {
-			// The cluster quota lists only H100, and it is full.
+		It("wakes an excluded namespace's model that names no accelerator only where a type has room", func() {
+			// The cluster quota lists only H100, and it is full. The tenants'
+			// A100 does not open A100 to ns-x: the cluster quota denies it.
 			h100Full := config.QuotaLimiterConfig{
 				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
 				ClusterQuotas: map[string]int{"H100": 0},
 			}
 			anyGPU := map[string]int{constants.DefaultAcceleratorName: 8}
 
-			// A100 is named only in the tenants' per-type pool: no tenant is
-			// active, so the quota carries no per-namespace pools.
 			cons := constraintsOf(map[string]map[string]int{"ns-x": {}}, tenants, h100Full)
-			Expect(FitsGPUBudget(cons, "ns-x", anyGPU)).To(BeTrue(), "A100 is unbounded for ns-x")
+			Expect(FitsGPUBudget(cons, "ns-x", anyGPU)).To(BeFalse(), "no type the cluster quota lists has room")
 			budgets, _ := GPUBudgets(cons, "ns-x")
-			Expect(budgets).To(Equal(map[string]int{"A100": -1, "H100": 0}))
+			Expect(budgets).To(Equal(map[string]int{"H100": 0}))
 
-			// A100 is named only in a tenant's per-namespace pool: an unlimited
-			// entry adds nothing to the per-type pool.
+			// The same quota with room on an unlimited A100.
+			a100Open := config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"H100": 0, "A100": -1},
+			}
 			unlimited := config.QuotaLimiterConfig{
 				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
 				Exclude:         []string{"ns-x"},
 				NamespaceQuotas: map[string]map[string]int{"team-u": {"A100": -1}},
 			}
-			cons = constraintsOf(map[string]map[string]int{"team-u": {}, "ns-x": {}}, unlimited, h100Full)
+			cons = constraintsOf(map[string]map[string]int{"team-u": {}, "ns-x": {}}, unlimited, a100Open)
 			Expect(FitsGPUBudget(cons, "ns-x", anyGPU)).To(BeTrue(), "A100 is unbounded for ns-x")
 
 			// No provider names any type at all.
@@ -571,14 +593,16 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			Expect(dm["mx-v"].TargetReplicas).To(Equal(6))
 		})
 
-		It("reports an unlimited cluster quota as -1", func() {
+		It("reports an unlimited cluster quota as unbounded", func() {
 			cons := constraintsOf(empty, tenants, config.QuotaLimiterConfig{
 				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
 				ClusterQuotas: map[string]int{"A100": -1, "H100": 8},
 			})
 			budgets, nsScoped := GPUBudgets(cons, "ns-x")
 			Expect(nsScoped).To(BeFalse())
-			Expect(budgets).To(Equal(map[string]int{"A100": -1, "H100": 8}))
+			Expect(budgets).To(HaveLen(2))
+			Expect(budgets).To(HaveKeyWithValue("H100", 8))
+			Expect(isUnboundedBudget(budgets["A100"])).To(BeTrue(), "%v", budgets)
 		})
 	})
 })

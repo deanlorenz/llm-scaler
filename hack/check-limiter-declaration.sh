@@ -40,7 +40,7 @@ FAIL=0
 # the first function definition, which looks exactly like every function missing.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh limiter_policy.sh physical_limiter.sh; do
+for lib in common.sh limiter_policy.sh physical_limiter.sh verify.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 # common.sh logs in colour and dies on an unbound variable under `set -u`.
@@ -52,7 +52,7 @@ BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
 # exported, and with `WVA_QUOTA_SCOPE=cluster` in the environment this check
 # produced six FAILs all blaming the code. A check that depends on the caller's
 # shell reports on the shell.
-unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE
+unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_QUOTA_KUEUE_BORROW WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE
 WVA_NS="wva-system"
 # shellcheck disable=SC1090
 . "$WORK/limiter_policy.sh"
@@ -61,6 +61,9 @@ WVA_NS="wva-system"
 WVA_POLICY_NS="wva-policy"
 # shellcheck disable=SC1090
 . "$WORK/physical_limiter.sh"
+# verify.sh, for the install summary's limiter line. Functions only.
+# shellcheck disable=SC1090
+. "$WORK/verify.sh"
 
 # The tools, named before anything is asserted. Without this a missing jq made
 # every case that parses output fail, first among them "name is empty -- the
@@ -285,6 +288,55 @@ else
     ok "WVA_QUOTA_KUEUE takes only true or false"
 fi
 
+# WVA_QUOTA_KUEUE_BORROW=false opts the entry out of counting cohort borrowing:
+# the kueue block carries countBorrowable: false (config.KueueQuotaSource).
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.countBorrowable')" = "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=false did not emit kueue.countBorrowable: false: $got"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.enabled')" = "true" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=false lost kueue.enabled: $got"
+    ok "WVA_QUOTA_KUEUE_BORROW=false emits countBorrowable: false in the kueue block"
+fi
+
+# true (the default) writes nothing: the controller default counts borrowing.
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=true emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=true refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.countBorrowable // "absent"')" != "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=true emitted countBorrowable: false: $got"
+    ok "WVA_QUOTA_KUEUE_BORROW=true leaves countBorrowable to its default"
+fi
+
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=no emit quota
+if [ "$RC" -eq 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=no was accepted; emitted: $OUT"
+elif [ -n "$OUT" ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=no was refused but a partial entry was printed first: $OUT"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW takes only true or false"
+fi
+
+# Without the Kueue block there is nothing to put it on: ignored, and said so.
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=8' WVA_QUOTA_KUEUE_BORROW=false emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false without WVA_QUOTA_KUEUE refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0] | has("kueue")')" = "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE emitted a kueue block: $got"
+    case "$ERR" in
+        *WVA_QUOTA_KUEUE_BORROW*IGNORED*) ;;
+        *) fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE was dropped silently: $ERR" ;;
+    esac
+    ok "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE is ignored, with a warning"
+fi
+
 # ---------------------------------------------------------------------------
 # The refusals. Each one used to be a silently unbounded (or frozen) install.
 # ---------------------------------------------------------------------------
@@ -417,12 +469,89 @@ else
     [ "$(printf '%s\n' "$merged" | yq '.scaleUpThreshold')" = "0.85" ] \
         || fail "the merge lost scaleUpThreshold -- a rejected or truncated policy costs every default in it"
     [ "$(printf '%s\n' "$merged" | yq '.limiters | length')" = "1" ] \
-        || fail "the merge APPENDED instead of replacing; two limiters means the other is silently unenforced"
+        || fail "the merge APPENDED instead of replacing; the install's list is its whole limiter set"
     [ "$(printf '%s\n' "$merged" | yq '.limiters[0].name')" = "install-quota" ] \
         || fail "the merge did not replace the previous limiter: $merged"
     [ "$(printf '%s\n' "$merged" | yq '.limiters[0].namespaceQuotas.tenant-a.H200')" = "8" ] \
         || fail "the budget did not survive the merge: $merged"
     ok "the entry merges into the policy, replacing the old limiters and keeping the rest"
+fi
+
+# ---------------------------------------------------------------------------
+# WVA_LIMITER is a SET. Every limiter in it is built and a decision must fit all
+# of them, so a list declares each one, physical first.
+# ---------------------------------------------------------------------------
+
+# Normalised: physical first, each kind once, separators either commas or spaces.
+case_begin
+got="$(limiter_types_of 'quota,gpu-inventory' 2>&1)"; got2="$(limiter_types_of 'inventory quota quota' 2>&1)"
+if [ "$got" != "gpu-inventory quota" ] || [ "$got2" != "inventory quota" ]; then
+    fail "limiter_types_of did not normalise the set: [$got] [$got2]"
+elif [ "$(limiter_types_of '' 2>&1)" != none ] || [ "$(limiter_types_of none 2>&1)" != none ]; then
+    fail "an empty WVA_LIMITER, or none, is not the empty set"
+else
+    ok "a limiter list is normalised, physical first"
+fi
+
+# Refusals: two physical entries (the controller refuses them too), none beside
+# a limiter, and an unknown kind.
+for bad in 'gpu-inventory,inventory' 'none,quota' 'gpu-inventory,bogus'; do
+    case_begin
+    if ( limiter_types_of "$bad" ) >/dev/null 2>&1; then
+        fail "WVA_LIMITER='$bad' was accepted"
+    else
+        ok "WVA_LIMITER='$bad' is refused"
+    fi
+done
+
+# Both entries, and no IGNORED warning: WVA_QUOTAS belongs to the quota entry
+# beside the physical one, not to the physical one.
+case_begin
+OUT="$(WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H200=8' WVA_QUOTA_KUEUE=true \
+    limiter_set_yaml 'gpu-inventory quota' 2>"$WORK/err")"; RC=$?; ERR="$(cat "$WORK/err")"
+if [ "$RC" -ne 0 ]; then
+    fail "limiter_set_yaml refused a valid set: $ERR"
+else
+    [ "$(printf '%s\n' "$OUT" | yq '.[0].type')" = "gpu-inventory" ] \
+        || fail "the physical entry is not first: $OUT"
+    [ "$(printf '%s\n' "$OUT" | yq '.[1].name')" = "install-quota" ] \
+        || fail "the quota entry is missing: $OUT"
+    [ "$(printf '%s\n' "$OUT" | yq '.[1].kueue.enabled')" = "true" ] \
+        || fail "the quota entry lost its kueue block: $OUT"
+    printf '%s' "$ERR" | grep -q 'IGNORED' \
+        && fail "a composed set warned that WVA_QUOTAS or WVA_QUOTA_KUEUE is IGNORED; the quota takes them: $ERR"
+    ok "a set emits the physical entry first, then the quota, with no IGNORED warning"
+fi
+
+# The installer's own policy REPLACES the whole list with the set it declares.
+case_begin
+merged="$(
+    WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H200=8' \
+        policy_declared_limiters 'gpu-inventory,quota' 'scaleUpThreshold: 0.85
+limiters:
+  - type: gpu-inventory
+  - name: stale
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 1' >/dev/null 2>"$WORK/err"
+    printf '%s\n' "$POLICY_DECLARED"
+)"
+if [ "$(printf '%s\n' "$merged" | yq '.limiters | length')" != "2" ] \
+    || printf '%s' "$merged" | grep -q 'name: stale'; then
+    fail "the install did not replace its list with the declared set: [$merged] $(cat "$WORK/err")"
+else
+    ok "the install declares exactly its set, replacing the old list"
+fi
+
+# The install declares exactly the set WVA_LIMITER names: a Kueue-bounded quota
+# on a cluster-scoped install gets nothing added beside it.
+case_begin
+got="$(WVA_LIMITER=quota WVA_SCOPE=cluster WVA_QUOTA_KUEUE=true wva_limiter_set 2>&1)"
+if [ "$got" != "quota" ]; then
+    fail "wva_limiter_set (quota, Kueue, cluster scope) = [$got], want [quota]"
+else
+    ok "wva_limiter_set declares only the limiters WVA_LIMITER names"
 fi
 
 # ---------------------------------------------------------------------------
@@ -733,6 +862,113 @@ limiters:
         fail "disable left the limiters list in place: $wrote"
     else
         ok "disabling a fuller policy drops only the limiters list"
+    fi
+
+    # ENABLING COMPOSES. Every declared limiter is built and a decision must fit
+    # all of them, so publishing the physical limiter to a policy that already
+    # carries a quota keeps the quota, and the reverse. It used to REPLACE the
+    # list, because a quota entry then silenced a physical one anyway.
+    case_begin
+    run_pl_limiter gpu-inventory 'scaleUpThreshold: 0.85
+limiters:
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while adding the physical limiter beside a quota: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'name: tenant-q'; then
+        fail "enabling the physical limiter DROPPED the quota already declared: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'type: gpu-inventory'; then
+        fail "enabling the physical limiter did not declare it: $wrote"
+    elif [ "$(printf '%s' "$wrote" | grep -c 'type: gpu-inventory')" -ne 1 ]; then
+        fail "the physical limiter is declared more than once: $wrote"
+    else
+        ok "enabling the physical limiter keeps the quota beside it"
+    fi
+
+    case_begin
+    run_pl_limiter quota 'limiters:
+  - type: gpu-inventory
+  - name: old-quota
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 1'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while declaring a quota beside the physical limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'type: gpu-inventory'; then
+        fail "declaring a quota DROPPED the physical limiter already declared: $wrote"
+    elif printf '%s' "$wrote" | grep -q 'name: old-quota'; then
+        fail "declaring a quota kept the old quota entry beside it; one kind replaces its own kind: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'name: install-quota'; then
+        fail "declaring a quota did not write it: $wrote"
+    else
+        ok "declaring a quota replaces the old quota and keeps the physical limiter"
+    fi
+
+    # DISABLING REMOVES ONE KIND. The mirror of the composing enable:
+    # `make disable-physical-limiter` takes the physical entry out and keeps a
+    # quota beside it. It used to remove every limiter.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'scaleUpThreshold: 0.85
+limiters:
+  - type: gpu-inventory
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while removing the physical limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'name: tenant-q'; then
+        fail "disabling the physical limiter DROPPED the quota beside it: $wrote"
+    elif printf '%s' "$wrote" | grep -q 'gpu-inventory'; then
+        fail "disabling the physical limiter left it declared: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'scaleUpThreshold'; then
+        fail "disabling the physical limiter lost the rest of the policy: $wrote"
+    else
+        ok "disabling the physical limiter keeps the quota beside it"
+    fi
+
+    # The last entry going behaves as `none`: the default entry is patched out.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'limiters:
+  - type: gpu-inventory'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while removing the only limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q '^PATCHNULL\[default\]$'; then
+        fail "removing the last limiter did not patch data.default out, as none does: [$wrote]"
+    else
+        ok "removing the last limiter removes the default entry, as none does"
+    fi
+
+    # NOTHING OF THAT KIND: write nothing, and say what stays. Removing the
+    # physical limiter from a policy that holds only a quota reported "Removed
+    # the gpu-inventory limiter" -- the documented undo of a quota, which left
+    # the quota in force.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'limiters:
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    calls="$(cat "$CALLS")"
+    if [ "$PLRC" -ne 3 ]; then
+        fail "removing a kind the policy does not declare returned $PLRC, want 3 (nothing removed): $(tail -1 "$WORK/plerr")"
+    elif [ -n "$wrote" ] || printf '%s' "$calls" | grep -qE 'CALL\[(apply|patch)'; then
+        fail "removing a kind the policy does not declare wrote the policy anyway: [$wrote] calls: $calls"
+    elif ! grep -q 'no gpu-inventory entry.*nothing removed.*the quota limiter stays' "$WORK/plerr"; then
+        fail "removing a kind the policy does not declare did not say the quota stays: $(cat "$WORK/plerr")"
+    else
+        ok "removing a kind the policy does not declare writes nothing and says the other kind stays"
     fi
 fi
 
@@ -1104,11 +1340,73 @@ written="$(jq -r '.data.default' "$WORK/lim-patch" 2>/dev/null | yq -o=json -I=0
     && ok "wva_keep_live_limiters writes the kept limiter back into the freshly applied default, keeping the rest" \
     || fail "the kept limiter was not written back over the reset default: [$written]"
 
+# An upgrade with WVA_LIMITER unset over a live COMPOSED policy: both entries
+# are written back, physical first, the quota's settings intact. The live set
+# is what the prerequisite check asks node read for.
+COMPOSED_LIVE="$SHIPPED_POLICY
+limiters:
+  - type: gpu-inventory
+  - name: tenant-quota
+    type: quota
+    scope: cluster
+    quotas: { H200: 8 }"
+case_begin
+rm -f "$WORK/lim-patch"
+(
+    LIM_DEFAULT="$SHIPPED_POLICY"
+    kubectl() { lim_stub "$@"; }
+    log_warning() { :; }
+    unset WVA_LIMITER
+    LIM_DEFAULT="$COMPOSED_LIVE"; wva_live_limiters wva-system
+    LIM_DEFAULT="$SHIPPED_POLICY"; wva_keep_live_limiters wva-system "$WVA_LIVE_LIMITERS"
+) >/dev/null 2>&1
+written="$(jq -r '.data.default' "$WORK/lim-patch" 2>/dev/null | yq -o=json -I=0 '[.limiters[0].type, .limiters[1].type, .limiters[1].quotas.H200, .scaleDownBoundary]' 2>/dev/null)"
+[ "$written" = '["gpu-inventory","quota",8,0.7]' ] \
+    && ok "an upgrade without WVA_LIMITER writes a live gpu-inventory,quota policy back whole, physical first" \
+    || fail "the kept composed policy was not written back whole: [$written]"
+
+case_begin
+got="$(
+    LIM_DEFAULT="$COMPOSED_LIVE"
+    kubectl() { lim_stub "$@"; }
+    wva_live_limiter_set wva-system 2>/dev/null
+)"
+[ "$got" = "gpu-inventory quota" ] \
+    && ok "wva_live_limiter_set reads the live composed set as 'gpu-inventory quota'" \
+    || fail "wva_live_limiter_set read the live composed policy as [$got], want [gpu-inventory quota]"
+
+case_begin
+got="$(
+    LIM_DEFAULT=FORBIDDEN
+    kubectl() { lim_stub "$@"; }
+    log_warning() { echo "WARNED: $1" >&2; }
+    wva_live_limiter_set wva-system 2>"$WORK/live-set-err"
+)"
+if [ "$got" = none ] && grep -q 'WARNED: Could not read the live limiters' "$WORK/live-set-err"; then
+    ok "an unreadable live policy is none for the node check, and says so"
+else
+    fail "an unreadable live policy read as [$got] with [$(cat "$WORK/live-set-err")]"
+fi
+
+# The install summary names the limiters in force after the install: with
+# WVA_LIMITER unset that is the live set the install kept. It printed
+# "No GPU limiter: scaling is UNBOUNDED" over a kept gpu-inventory,quota policy.
+case_begin
+got="$(
+    LIM_DEFAULT="$COMPOSED_LIVE"
+    kubectl() { lim_stub "$@"; }
+    unset WVA_LIMITER
+    effective_limiter_summary
+)"
+[ "$got" = "gpu-inventory quota" ] \
+    && ok "the install summary reports the kept live limiters when WVA_LIMITER is unset" \
+    || fail "the install summary reported [$got] for a kept gpu-inventory,quota policy"
+
 # How many cases ran. Without it, deleting a refuse_quota line removes a case
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=59
+CASES_EXPECTED=79
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

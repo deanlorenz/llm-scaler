@@ -95,6 +95,19 @@ type ReplicaMetrics struct {
 	// query_type=pod_list.
 	Ready bool
 
+	// Revision is the pod template revision the Pod was created from: a
+	// LeaderWorkerSet's template-revision-hash, a Deployment's
+	// pod-template-hash, a StatefulSet's controller-revision-hash. "" when the
+	// Pod carries none or could not be read.
+	//
+	// A variant whose replicas report more than one is mid-rollout, whatever
+	// its scale target's status says: the saturation analyzer then holds every
+	// saturated reading back from the variant's windows, since it may be an
+	// old pod's (saturation.revisionsMixed). The status cannot say it for a
+	// LeaderWorkerSet whose controller has acted on some groups but not yet
+	// set UpdateInProgress, or is down.
+	Revision string
+
 	// StartSeconds is how long this replica took to become Ready: the Pod's
 	// Ready condition LastTransitionTime less its CreationTimestamp. Zero when
 	// the Pod is not ready, when either timestamp is missing, or when the

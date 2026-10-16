@@ -16,13 +16,22 @@
 #                         applied by the prereqs phase; denied, the controller
 #                         runs on its own ConfigMap and reports it unverified.
 #   clusterqueues,        Kueue quotas. Needed ONLY by a quota entry with
-#   resourceflavors       `kueue.enabled`; components/kueue-reader grants them,
-#                         applied by the prereqs phase like node-reader. The
-#                         namespaced half, localqueues, is below.
+#   resourceflavors,      `kueue.enabled`; components/kueue-reader grants them,
+#   cohorts               applied by the prereqs phase like node-reader. The
+#                         namespaced half, localqueues and workloads, is below;
+#                         cohort borrowing reads both in every namespace,
+#                         which the installer grants as its own ClusterRole
+#                         only when a policy counts borrowing
+#                         (pl_grant_kueue_borrow_read).
+#   leases, and the       in the KUEUE namespace, read by name for Kueue
+#   kueue-controller-     borrowing (liveness and version): a Role there that
+#   manager Deployment    the prereqs phase creates
+#                         (pl_grant_kueue_controller_read). Denied, borrowing
+#                         freezes as kueue-controller-down.
 #
 # Everything else — pods, services, configmaps, deployments, replicasets,
-# statefulsets, deployments/scale, inferencepools, scaledobjects,
-# leaderworkersets, servicemonitors, events — is namespaced and works identically
+# statefulsets, deployments/scale, jobs, resourcequotas, inferencepools,
+# scaledobjects, leaderworkersets, servicemonitors, events — is namespaced and works identically
 # through a Role. The grant is read-only apart from Events and Pods: KEDA
 # performs the scaling actuation, so WVA writes nothing to reach a replica
 # count, but lending a warm Pod is WVA's own action and needs patch on pods.
@@ -68,6 +77,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - resourcequotas
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
   - configmaps/status
   verbs:
   - get
@@ -77,6 +93,8 @@ rules:
   - events
   verbs:
   - create
+  - get
+  - list
   - patch
 - apiGroups:
   - apps
@@ -92,6 +110,12 @@ rules:
   - apps
   resources:
   - deployments/scale
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
   verbs:
   - get
 - apiGroups:
@@ -116,6 +140,17 @@ rules:
   verbs:
   - get
   - list
+# Workloads are read through an informer (the borrowing managed check, the
+# preemption check, the lender-waiting signal), so they need watch. Denied,
+# the reads fall back to a list and borrowing is withheld where they fail.
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - workloads
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:

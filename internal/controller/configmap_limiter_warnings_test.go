@@ -18,43 +18,56 @@ import (
 // ConfigMap's limiters are ignored whole; a warning about them would describe
 // a bound nothing enforces.
 func TestLimiterWarningsOnlyWhereLimitersAreRead(t *testing.T) {
+	// A namespace in exclude that nothing bounds: no cluster quota, and no
+	// physical limiter.
 	const excludeDefault = `limiters:
   - type: quota
     name: tenants
     scope: namespace
     exclude: [ns-x]
     namespaceQuotas: { team-a: { A100: 8 } }
-  - type: inventory
-    name: gpu
 `
-	for _, c := range []struct {
-		name      string
-		namespace string
-		isGlobal  bool
-		want      bool
+	// A second physical entry, which is not built.
+	const twoPhysical = `limiters:
+  - type: gpu-inventory
+    name: gpu
+  - type: inventory
+    name: gpu2
+`
+	for _, policy := range []struct {
+		yaml string
+		line string
 	}{
-		{"the global ConfigMap", rejectsSystemNS, true, true},
-		{"a namespace-local ConfigMap", "team-a", false, false},
+		{excludeDefault, "exclude [ns-x] have no GPU limit"},
+		{twoPhysical, config.IgnoredPhysicalLimitersMessage},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			f := newRejectsFixture(t)
-			var logged strings.Builder
-			ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
-				logged.WriteString(args + "\n")
-			}, funcr.Options{}))
-			cm := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Namespace: c.namespace, Name: config.ScalingPolicyConfigMapName()},
-				Data:       map[string]string{config.GlobalDefaultsKey: excludeDefault},
-			}
-			if err := f.r.handleScalingPolicyConfigMap(ctx, cm, c.namespace, c.isGlobal); err != nil {
-				t.Fatal(err)
-			}
-			out := logged.String()
-			for _, line := range []string{"[ns-x] have no GPU limit", "will NOT be enforced"} {
-				if got := strings.Contains(out, "WARNING: ") && strings.Contains(out, line); got != c.want {
-					t.Errorf("logged %q = %v, want %v:\n%s", line, got, c.want, out)
+		for _, c := range []struct {
+			name      string
+			namespace string
+			isGlobal  bool
+			want      bool
+		}{
+			{"the global ConfigMap", rejectsSystemNS, true, true},
+			{"a namespace-local ConfigMap", "team-a", false, false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				f := newRejectsFixture(t)
+				var logged strings.Builder
+				ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
+					logged.WriteString(args + "\n")
+				}, funcr.Options{}))
+				cm := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: c.namespace, Name: config.ScalingPolicyConfigMapName()},
+					Data:       map[string]string{config.GlobalDefaultsKey: policy.yaml},
 				}
-			}
-		})
+				if err := f.r.handleScalingPolicyConfigMap(ctx, cm, c.namespace, c.isGlobal); err != nil {
+					t.Fatal(err)
+				}
+				out := logged.String()
+				if got := strings.Contains(out, policy.line); got != c.want {
+					t.Errorf("logged %q = %v, want %v:\n%s", policy.line, got, c.want, out)
+				}
+			})
+		}
 	}
 }

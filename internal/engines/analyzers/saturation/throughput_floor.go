@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -165,14 +166,78 @@ type throughputReading struct {
 // measured 2.97x too high. Aged on "last read" instead, a bucket the floor
 // prices from every cycle stays, and one nothing reads still goes.
 func (a *SaturationAnalyzer) saturatedThroughputReading(key string) throughputReading {
+	return a.saturatedThroughputReadingUnder(key, "", true)
+}
+
+// saturatedThroughputReadingUnder is saturatedThroughputReading for a variant
+// running the engine arguments args (windowArgs): the key's own window has
+// been checked against them already, and a neighbouring bucket's window
+// written under other arguments is not borrowed (window_args.go). serving
+// is admission.serving for the row asking: only a serving row advances the
+// hold clock of a put-aside window, as only one runs a lower bound's.
+func (a *SaturationAnalyzer) saturatedThroughputReadingUnder(key, args string, serving bool) throughputReading {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
 		ra.Touch()
 		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len()}
 	}
-	rate, bucket, samples := a.nearestSaturatedThroughput(key)
+	// The key's own window from before the variant's arguments changed: a
+	// hold-only figure, with the same authority as a neighbouring bucket's
+	// (borrowed) -- the floor may hold the fleet on it, never grow it --
+	// until the new arguments measure their own. Dropped instead, the change
+	// switched off the one floor that can only add replicas, for as long as
+	// the new arguments took to saturate.
+	//
+	// For a bounded time: BorrowedK2Hold + BorrowedK2Relax of serving, the
+	// life a k2 lower bound gets, counted as its clock is (a gap past the
+	// tick gap counts as one tick gap). And read without Touch, so it ages
+	// from the change. Touched and unbounded, it held the fleet the old
+	// engine needed for as long as the load was steady: a change that
+	// doubled the service rate (--max-num-seqs 64 -> 256) left the replicas
+	// at half load, so none saturated, the new rate was never measured, and
+	// the read kept the old one alive -- 2x the replicas with no end date.
+	if args != "" {
+		if k, st, ok := a.previousThroughputLocked(key); ok {
+			// Only a serving row -- admitted, not mid-rollout -- counts: a
+			// bridge, a Pod that is not Ready or a rollout reads the window
+			// as it stands. Counted on every read, a rollout spent the hold
+			// the new arguments were to get, as the k2 bound's did before its
+			// clock was made serving-only.
+			if serving {
+				now := a.now()
+				if !st.heldTick.IsZero() {
+					st.heldFor += min(now.Sub(st.heldTick), max(a.borrowTickGap, BorrowedK2TickGap))
+				}
+				st.heldTick = now
+				a.throughputStash[k] = st
+			}
+			if st.heldFor <= BorrowedK2Hold+BorrowedK2Relax {
+				return throughputReading{rate: st.window.Median(), bucket: bucketOf(key), samples: st.window.Len(), borrowed: true}
+			}
+		}
+	}
+	rate, bucket, samples := a.nearestSaturatedThroughput(key, args)
 	return throughputReading{rate: rate, bucket: bucket, samples: samples, borrowed: rate > 0}
+}
+
+// previousThroughputLocked is key's throughput window put aside under other
+// arguments, the most recently read if there are several, with its stash key;
+// ok is false when there is none. Callers hold a.mu.
+func (a *SaturationAnalyzer) previousThroughputLocked(key string) (string, stashedThroughput, bool) {
+	prefix := key + "#"
+	var bestKey string
+	var best stashedThroughput
+	var bestUsed time.Time
+	for k, st := range a.throughputStash {
+		if !strings.HasPrefix(k, prefix) || st.window == nil || st.window.Len() == 0 {
+			continue
+		}
+		if used := st.window.Snapshot().LastUsed; bestKey == "" || used.After(bestUsed) {
+			bestKey, best, bestUsed = k, st, used
+		}
+	}
+	return bestKey, best, bestKey != ""
 }
 
 // nearestSaturatedThroughput finds the reading in the output-length bucket
@@ -199,7 +264,7 @@ func (a *SaturationAnalyzer) saturatedThroughputReading(key string) throughputRe
 // Ties between an equally distant shorter and longer bucket go to the shorter
 // one -- the under-hold, which occupancy corrects, rather than the over-hold,
 // which only the cap does.
-func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, string, int) {
+func (a *SaturationAnalyzer) nearestSaturatedThroughput(key, args string) (float64, string, int) {
 	prefix, bucket, suffix, ok := splitHistoryKey(key)
 	if !ok {
 		return 0, "", 0
@@ -213,7 +278,8 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 			if i < 0 || i >= len(outputBuckets) {
 				continue
 			}
-			if ra, found := a.saturatedThroughput[prefix+outputBuckets[i]+suffix]; found {
+			neighbour := prefix + outputBuckets[i] + suffix
+			if ra, found := a.saturatedThroughput[neighbour]; found && a.throughputWindowUsable(neighbour, args) {
 				// A borrowed bucket is still a bucket a decision reads, so it
 				// ages on this read like the key's own window does.
 				ra.Touch()

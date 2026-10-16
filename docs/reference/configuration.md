@@ -16,10 +16,12 @@ Every option `deploy/install.sh` reads. Each entry is read by something, and eve
 |----------|-------------|---------|
 | `ENVIRONMENT` | Deployment environment (`kubernetes` or `openshift`) | `kubernetes` |
 | `WVA_SCOPE` | `cluster` or `namespace`; see [Scope](../guides/install-cluster-wide/). The default is `namespace` everywhere, including `deploy/install.sh` run directly; it is no longer inferred from the platform. Cluster scope works and warns that it is WIP | `namespace` (`SCOPE=cluster` to change it) |
-| `WVA_LIMITER` | `none`, `gpu-inventory` or `quota` — declares the limiter in the scaling-policy ConfigMap. Unset on a re-run keeps the limiter already there; `none` removes it | unset (a fresh install has none) |
-| `WVA_QUOTAS` | Required by `WVA_LIMITER=quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
+| `WVA_LIMITER` | `none`, `gpu-inventory`, `quota`, or a list such as `gpu-inventory,quota` — declares the limiters in the scaling-policy ConfigMap. Every limiter in the list bounds scaling. `gpu-inventory` needs node read, which `make setup-prereqs` grants. Unset on a re-run keeps the limiters already there; `none` removes them | unset (a fresh install has none) |
+| `WVA_QUOTAS` | Required when `WVA_LIMITER` names `quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
 | `WVA_QUOTA_SCOPE` | `namespace` (each managed namespace gets the budget) or `cluster` (one budget across all of them) | `namespace` |
-| `WVA_QUOTA_KUEUE` | With `WVA_LIMITER=quota`: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue nominal quota and `WVA_QUOTAS` applies. Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
+| `WVA_QUOTA_KUEUE` | With a quota limiter: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue grant and `WVA_QUOTAS` applies. At namespace scope the grant counts cohort borrowing where it is safe ([the guide](../guides/kueue-borrowing/)). Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
+| `WVA_QUOTA_KUEUE_BORROW` | With `WVA_QUOTA_KUEUE=true`, `false` writes `countBorrowable: false` on the quota entry: the Kueue cap stays at nominal and no cohort borrowing is counted. Ignored, with a warning, without `WVA_QUOTA_KUEUE=true`. `make enable-physical-limiter` reads it too. A re-run keeps the rest of the entry's `kueue:` block. It also decides the cluster-wide Kueue Workload read of a namespace-scoped install: `make setup-prereqs` and `make enable-physical-limiter` grant it only while a policy counts borrowing, and revoke it on `false` | `true` |
+| `KUEUE_NAMESPACE` | Where Kueue runs. The prereqs phase puts the Role that reads the Kueue controller's Deployment and leader Lease there; the uninstall finds it by label wherever it is. Unset, the `kueue.controllerNamespace` the policy keeps is used, so a re-run need not repeat it: `KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<ns> make setup-prereqs` | the entry's `kueue.controllerNamespace`, else `kueue-system` |
 | `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when it differs from the one it runs in. The workloads' owner then does not administer the controller, which is where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold) | the controller's own namespace |
 | `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: the install picks the half left to do, `wva` when the caller cannot create cluster-scoped objects or the admin half is already in place. `make setup-prereqs` is the `prereqs` phase; see [deploy/](../../deploy/) | auto |
 | `WVA_PROJECT` | Repository root the script installs from | `$PWD` |
@@ -531,6 +533,27 @@ What the NetworkPolicy does not cover:
 - The client CA must be dedicated to KEDA: any certificate it signed is accepted.
   Pass `--external-scaler-client-san` to pin KEDA's identity.
 
+### Kueue borrowing timings
+
+Set on the quota entry's `kueue:` block in the scaling policy, beside
+`countBorrowable`. Each is a Go duration.
+
+| Key | What it does | Default |
+|---|---|---|
+| `placementTimeout` | A borrowed replica that stays unschedulable, or held at Kueue's admission gate, this long is released; a placed pod still loading its weights does not count. So is a queue's growth back into nominal it lent out that was placed without a node hole, timed from when it was ordered, and the model's cooldown (`borrowCooldown`) follows. The wait stretches up to three times while the cluster autoscaler reports `TriggeredScaleUp` on its pod. Also how long the utilization-share optimizer waits before it retries a receiver whose replica could not be placed. Unset, that wait is the timeout derived from the KEDA and pod settings, as before. | `5m` |
+| `borrowCooldown` | After a lender in a cohort waited for its capacity, nothing new is borrowed in the cohort for this long. After Kueue preempted one of a model's pods, or a borrowed unit of it was released at the placement timeout, the model borrows nothing new in that cohort for this long; a repeat during the backoff doubles it, up to four times (40m at the default), and one clean cooldown resets it. Published on `wva_kueue_borrow_cooldown_seconds`. | `10m` |
+| `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
+| `controllerNamespace` | Not a duration: the namespace of the `kueue-controller-manager` Deployment, whose image tag gives the Kueue version borrowing is checked against, and of its leader-election Lease, which tells whether Kueue runs (not renewed, or neither readable: borrowing freezes as `kueue-controller-down`). | `kueue-system` |
+| `assumeTestedVersion` | Not a duration: `true` counts a Kueue whose version cannot be read from its image tag as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down`. | `false` |
+| `borrowNamespaces` | A list of namespaces, not a duration: borrowing is counted only in these (a pilot); every other namespace is capped at nominal, withheld as `not-selected`. A re-run of the install or of `make enable-physical-limiter` keeps it, with the rest of the `kueue:` block ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)). | empty: all |
+
+The cooldowns and the placement-timeout releases still in flight are recorded
+under `borrowReleaseLedger` in the `wva-controller-status` ConfigMap, so a
+restart neither releases twice nor forgets a cooldown. The
+budget the controller used last cycle, per quota entry, namespace and
+accelerator, is under `limiterBudgets` in the same ConfigMap
+([what it holds](prometheus.md#kueue-borrowing-metrics)).
+
 ### Learned state across a restart
 
 Without `LEARNED_STATE_SNAPSHOT`, a restarted controller has forgotten every
@@ -540,40 +563,119 @@ so TTFT suffers after every upgrade or leader change until the fleet has
 saturated once more. With it on, the acting controller writes what it learned
 to the ConfigMap `wva-learned-state` at most once a minute, and the next
 controller reads it on its first cycle.
+If that read fails it is retried every minute; until it succeeds, for at
+most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
+strength and none is started or moved, so none started in that time
+replaces the stored one. After 10 minutes bounds start as usual, and a read
+that succeeds later keeps those over the stored ones.
 
 What is restored, and what is not:
 
 - a variant's measured capacity, saturated throughput and replica start
   estimate are restored **if it runs the same engine arguments** as when they
-  were learned, read completely: a deployment whose flags come from a
-  variable the controller cannot resolve restores nothing, because a changed
-  value would look identical. A new engine image with the same arguments
+  were learned. A deployment whose flags come from a variable the controller
+  cannot resolve gets back only its measured capacity and saturated
+  throughput (see below): a changed value would look identical, so its start
+  estimate and ITL baseline are not restored. A new engine image with the same arguments
   keeps them; only the ITL baseline, a latency figure, needs the same image
   too;
 - a variant whose arguments changed while the controller was down restores
-  only its old measured capacity, and only as a **lower-only, expiring
-  prior**: it is used where it is below what the variant would otherwise be
-  priced at, for 30 minutes at full strength, then relaxes to the variant's
-  own figure over 6 hours -- the same rule as a capacity borrowed from a
-  sibling. The 30 minutes start when an output-length bucket first uses it,
-  not at the restart; a prior no bucket uses goes after the bucket retention.
-  The prior is written back with its clock, so another restart inside those
-  hours resumes it. Nothing else is restored for it;
+  its old measured capacity only as a **lower-only, expiring figure**, and
+  its old saturated throughput only as a hold-only floor (below). The
+  capacity (`P2-prior` in the [cycle log](cycle-log.md)) is used where it
+  is below what the variant would otherwise be priced at, for 30 minutes of
+  serving at full strength, then relaxes to the variant's own figure over 6
+  hours of serving -- the same rule as a capacity borrowed from a sibling.
+  The 30 minutes start when an output-length bucket first uses it, not at the
+  restart; one no bucket uses goes after the bucket retention. Serving means a
+  Ready replica of the variant's own with requests on it: one idle at
+  `minReplicas` overnight does not use up the hold. It is written
+  back with its clock, so another restart inside those hours resumes it.
+  Its old saturated throughput comes back too, but only to hold the
+  throughput floor: it may keep the fleet, never grow it, for at most 30
+  minutes plus 6 hours of serving, until the new arguments measure their
+  own. A saturated throughput measured under the arguments it runs now is
+  restored as its own. Its start estimate and ITL baseline are not restored.
+  The same happens without a restart: a rollout that changes the arguments
+  while the controller runs turns the old capacity into the same lower-only
+  figure, and the old saturated throughput into the same hold-only floor
+  (below). A newer figure -- the variant saturated under the arguments it
+  then changes away from -- replaces it and restarts the 30 minutes; a
+  change that measured nothing new does not, so one figure is held for at
+  most 6.5 hours of serving however often the arguments change. The figure
+  is the one measured last, and it goes a bucket retention after it was last
+  used. The ITL line is fitted afresh under the new arguments;
+- a **rollback** to engine arguments a variant ran before gets back the
+  capacity and saturated throughput it measured under them, as its own, for
+  as long as they would have been retained (the bucket retention), across a
+  restart too. While any rollout is in progress -- an image-only one too --
+  nothing new is measured (`P1-obs-rollout` in the cycle log): a reading may
+  come from an old pod. The fleet is priced from what the variant already
+  holds, so a rollout that lowers capacity is priced on the figure from
+  before it until the new pods saturate after it ends. A replica that is
+  saturated below that figure is priced at its reading for that cycle only
+  (`P1-obs-unadmitted`), and nothing is kept of it -- so a bucket with no
+  figure at all is not priced at k1 while it shows full. A pod that is not
+  Ready -- an old one draining, a new one failing its readiness probe -- is
+  never priced at its reading. The ITL line takes no readings either. A lower-only figure
+  from a change of arguments waits for the rollout, and its 30 minutes start
+  when the rollout ends, however long it stalled. A LeaderWorkerSet held
+  part way by a partition learns nothing until it is let through. An undo or a restart in mid-rollout is a rollout
+  like any other. A LeaderWorkerSet scale-up is not a rollout; a template
+  change its controller has not acted on yet is not seen as one until a
+  group has moved;
+- across a change of arguments the old saturated throughput still holds the
+  throughput floor -- it may hold the fleet, never grow it -- until the new
+  arguments measure their own, for at most 6.5 hours of serving;
+- a variant whose engine configuration was not read completely (flags from an
+  `envFrom`) gets its own figures back after a restart if it runs the same
+  unread configuration, and lower-only figures otherwise;
+- each measured capacity and throughput is checked against the arguments it
+  was itself measured under, not only the variant's: one measured before a
+  rollout the controller saw, and written after it, is restored as the old
+  arguments' figure, so it too is only a lower-only figure;
 - a parallel size computed when the pod starts -- llm-d's wide-EP
   LeaderWorkerSet passes `--data-parallel-size $((LWS_GROUP_SIZE *
   DP_SIZE_LOCAL))` -- does not stop a variant restoring its own state: the
   expression is compared as written. It only keeps the variant from sharing a
   latency line with another (`wva_engine_config`'s `sharing_unresolved`);
 - the first restart after an upgrade that changes how the configuration is
-  identified (the `fingerprint_version` label of `wva_engine_config`) starts
-  every variant cold once;
+  identified (the `fingerprint_version` label of `wva_engine_config`), or
+  from a release that did not record the engine arguments, restores each
+  variant's measured capacity only as that lower-only figure
+  (`restores_total{outcome="differs"}`, or `"prior"`, and `P2-prior` in the
+  cycle log). With `differs`, its saturated throughput, start time and
+  latency baseline are not restored; with `prior`, as for any change of
+  arguments, the old saturated throughput holds the floor hold-only (above);
+- **rolling the controller back** to the previous release, which already
+  records engine arguments under the same `fingerprint_version` (3), restores
+  each variant whose configuration it can read whole, as an ordinary restart
+  does. It does not see what only this release writes: the windows set aside
+  under other arguments for a rollback, the new fields of a k2 lower bound,
+  or the record of a forget annotation acted on. A variant's previous
+  lower-only figure survives only because this release also writes it in the
+  form the previous one reads. Upgrading again restores what the previous
+  release wrote, whole. Only a rollback to a release that did not record
+  engine arguments, or that has another `fingerprint_version`, starts every
+  variant cold once, and upgrading from it restores lower-only figures. The
+  document keeps one key across releases on purpose: under a new key, the
+  older release would read the document it wrote before the upgrade and
+  install figures days stale as its own;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
-- a figure the new controller has already measured is never replaced.
+- a figure the new controller has already measured is never replaced;
+- a k2 borrow keeps its place across the restart: a borrow that has worn off
+  stays off, and the time the controller was down is not counted beyond a
+  few minutes' allowance for a missed cycle. This holds for a variant whose
+  engine configuration was not read completely too: a borrow can only make a
+  variant more conservative, for a bounded time, so it is restored without
+  the configuration check;
+- a variant forgotten on request (the `llm-d.ai/forget-learned-state`
+  annotation) stays forgotten, and the annotation is not acted on again.
 
 The log line `Learned state: snapshot restored` says how many variants are
-pending their first cycle; `learned state restored` or `learned state not
-restored` follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
+pending their first cycle; a `learned state restored` line (or, with nothing
+to keep, `learned state not restored`) follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
 `make setup-prereqs` installs; an install upgraded from before the store existed
 reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
@@ -612,8 +714,9 @@ on the scaling-policy ConfigMap's `default` entry:
   on the cluster.
 - `{type: quota, ...}` — enforce operator-declared per-accelerator caps, at
   cluster or namespace scope, declared inline.
+- both — every entry is built, and scaling must fit all of them.
 
 The engine rebuilds the limiter when the ConfigMap changes, with no restart,
 except in the startup-read case above, where `make enable-physical-limiter` and
-`make disable-physical-limiter` restart the controller for you. The schema,
+`make disable-limiter` restart the controller for you. The schema,
 scopes and validation rules are in the [quota limiter reference](quota-limiter.md).

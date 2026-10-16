@@ -79,6 +79,30 @@ outlier pod does not skew it. A variant with no ready replicas borrows capacity 
 deployment args or a compatible sibling variant. That is how the engine sizes a zero-replica
 variant.
 
+A **new** variant -- a canary, say -- has no compute ceiling of its own until one of its
+replicas saturates. Until then it may start from a sibling's: same model, namespace,
+hardware and capacity-relevant engine flags. Two rules keep that safe:
+
+- **Only lower.** A sibling's figure is used only where it is below the variant's own
+  estimate, so it can add replicas but never remove them. Too few replicas is the error
+  that hurts latency; too many costs money.
+- **It wears off.** A figure that is too low never corrects itself: lightly loaded replicas
+  never saturate, and saturation is the only time the ceiling is measured. So the borrowed
+  figure is held for 30 minutes of serving, then eases to the variant's own estimate over
+  6 hours of serving, which lets a replica saturate and measure for itself. Hours spent
+  parked at zero do not count (beyond a few minutes per pause, for a missed cycle), and
+  once worn off it does not come back unless a sibling measures more than 20% lower or the
+  variant's engine arguments change.
+
+The same two rules cover the variant's own figure after a rollout. When its engine arguments
+change -- a new image alone does not count -- what it measured before is no longer its
+capacity, but it is still the best evidence there is, so it becomes a figure of the same kind:
+used only where it is lower than the new estimate, and wearing off as the variant measures
+itself again. It is the variant's own, not a sibling's, so turning the borrow off keeps it.
+
+Operators can turn this off per model (`disableK2Borrow`), or make the engine forget what one
+variant has learned; see [scaling policy](../reference/scaling-policy.md#disablek2borrow).
+
 ### 2. Demand — the tokens the model needs to serve
 
 Demand is also in KV-cache tokens and sums three sources:

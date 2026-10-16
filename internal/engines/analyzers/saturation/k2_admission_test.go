@@ -215,10 +215,8 @@ func TestK2Admission_ABridgeDoesNotStartTheBorrowClock(t *testing.T) {
 		require.NoError(t, err)
 	}
 	clocks := func() int {
-		analyzer.mu.Lock()
-		defer analyzer.mu.Unlock()
 		n := 0
-		for k := range analyzer.k2BorrowedSince {
+		for k := range borrowClocks(analyzer) {
 			if ns, v, _, ok := splitVariantKey(k); ok && ns == "test-ns" && v == states[1].VariantName {
 				n++
 			}

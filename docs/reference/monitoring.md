@@ -200,7 +200,8 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 
 | metric | meaning |
 | --- | --- |
-| `wva_node_access_denied` | `1` = a GPU limiter is configured but nodes are unreadable. Every variant gets no budget and **will not scale up**. |
+| `wva_node_access_denied` | `1` = a GPU limiter is declared alone but nodes are unreadable. Every variant gets no budget and **will not scale up**. Beside a quota it stays `0`; see the next row. |
+| `wva_constraint_provider_skipped` | `1` = a declared limiter is left out of decisions (by `provider` and `reason`); the others still bound. The opposite failure: scaling may go past what it would allow. |
 | `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota can leave it flat: compare what the quota allows with what the model holds. |
 | `wva_variant_at_max_replicas` | `1` = the variant sits on its own `maxReplicaCount`. With utilization still above the scale-up threshold, raise `maxReplicaCount`; more GPUs will not help. |
 | `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |
@@ -402,6 +403,7 @@ Every reason the controller emits:
 | `ThroughputAnalyzerRestartRequired` | Warning | ConfigMap (global scaling policy, controller namespace) | the throughput analyzer was enabled or disabled in config, but analyzer registration is fixed at startup | restart the controller: `kubectl rollout restart -n "$NS" deploy/wva-controller-manager` |
 | `UtilizationShareGiving`, `UtilizationShareReceiving`, `UtilizationShareReceived`, `UtilizationShareCancelled`, `UtilizationShareRedirected` | Normal | Deployment / LeaderWorkerSet | a utilization-share transfer started, landed, was called off or redirected | none; [details](#events-on-the-models-scale-targets) |
 | `UtilizationShareReleaseAborted`, `UtilizationShareWrongPod`, `UtilizationShareFillTimedOut`, `UtilizationShareDonorNotSteerable` | Warning | Deployment / LeaderWorkerSet | a transfer did not land | [details](#events-on-the-models-scale-targets) |
+| `BorrowedCapacityReleased` | Warning (cause `placement-timeout`) | Deployment / LeaderWorkerSet | the scaling manager lowered the model to give borrowed Kueue GPUs back because borrowed replicas did not place in time. One per release | none, normally; [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
 
 At most one Event per model variant per cycle, except `ResourceConstrained`,
 which can join a `ScaledUp`. The API server keeps Events for about an hour

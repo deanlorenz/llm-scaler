@@ -20,9 +20,13 @@ import (
 	"fmt"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // Candidate is one inactive variant that could be woken, reduced to what
@@ -42,8 +46,16 @@ type Candidate struct {
 	// PodGPUs is each pod's GPUs in that replica, leader first; nil when no
 	// pod requests a GPU explicitly.
 	PodGPUs []int
+	// Tolerations are its pods' (scaletarget.PodTolerations), and DomainKey
+	// the node label all of a replica's pods must share a value of (an
+	// exclusive-topology LeaderWorkerSet): which nodes node fit may place it on.
+	Tolerations []corev1.Toleration
+	DomainKey   string
 	// Cost is the variant's declared cost, used to rank equally-feasible options.
 	Cost float64
+	// target is the variant's scale target, read to count its placed pods for
+	// the in-flight ledger; nil in tests.
+	target scaletarget.ScaleTargetAccessor
 }
 
 // SelectionOutcome explains what selection decided, for logging and metrics.
@@ -70,6 +82,13 @@ const (
 	OutcomeNoDecodeCandidate SelectionOutcome = "no-decode-candidate"
 	// OutcomeNoCapacity means nothing could be placed within the GPU budget.
 	OutcomeNoCapacity SelectionOutcome = "no-capacity"
+	// OutcomeNominalLentOut is OutcomeNoCapacity in a namespace whose queue
+	// lent part of its nominal quota to a peer it cannot reclaim from (its
+	// reclaimWithinCohort Never): the wake was checked against its guaranteed
+	// figure plus the cohort's free pool, not its whole nominal, so it does not
+	// wake into a pod Kueue would gate (B10). The same reason as
+	// nominal-lent-out on wva_model_scaling_blocked.
+	OutcomeNominalLentOut SelectionOutcome = "nominal-lent-out"
 	// OutcomePrefillRequired means a decode variant would fit, but no prefill
 	// could be placed alongside it and the policy requires one.
 	OutcomePrefillRequired SelectionOutcome = "prefill-required"
@@ -92,6 +111,26 @@ type SelectionInput struct {
 	// Constraints are the GPU/quota constraints to place within. Empty means
 	// unknown, which FitsGPUBudget treats as permissive.
 	Constraints []*allocation.ResourceConstraints
+	// Admitted is what earlier wakes already took against Constraints, by
+	// accelerator name, when Constraints are a remembered snapshot rather than
+	// this tick's: every fit check adds it to the set's own demand.
+	Admitted map[string]int
+	// Nodes is the per-node picture of free GPUs, with what earlier wakes in
+	// this tick took debited, when the physical limiter bounds the wake; nil
+	// fits by pools alone. A set fits only if each member's replica lands on a
+	// node: free GPUs as 4+4+8 hold one 8-GPU replica, not a P/D pair.
+	Nodes *allocation.NodeView
+	// Reclaimable is, per accelerator type, how the namespace's growth within
+	// its reclaiming queues' nominal splits (allocation.ReclaimableNominal),
+	// less what this tick's earlier wakes took of it: a replica no node holds
+	// still fits when Kueue admits it by preempting the borrowers filling
+	// those nodes (allocation.Reclaim).
+	Reclaimable map[string]allocation.Reclaim
+	// QueueFlavor is, per accelerator, the flavor Kueue admits the namespace's
+	// replicas on within its queues (allocation.QueueFlavorOf): node fit lands
+	// each pod only on nodes carrying its node labels, with its tolerations, as
+	// Kueue does. Nil, or nil for an accelerator, fits by the templates alone.
+	QueueFlavor func(accelerator string) *kueue.FlavorPlacement
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
 }
@@ -228,7 +267,42 @@ func cheapestFeasiblePair(in SelectionInput, decodes, prefills []Candidate) ([]C
 // fits reports whether the set can be placed within the GPU budget, testing the
 // combined demand rather than each member alone.
 func fits(in SelectionInput, set []Candidate) bool {
-	return allocation.FitsGPUBudget(in.Constraints, in.Namespace, demandOf(set))
+	demand := demandOf(set)
+	for accelerator, gpus := range in.Admitted {
+		demand[accelerator] += gpus
+	}
+	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demand) {
+		return false
+	}
+	ok, _ := in.Nodes.PlaceReplicasReclaiming(replicaShapes(in.Namespace, set, in.QueueFlavor), false, in.Reclaimable)
+	return ok
+}
+
+// replicaShapes is one replica of each candidate of set as the node view fits
+// it. A candidate whose accelerator is unresolved is left out, as demandOf
+// leaves it out of the budget: its placement is unknown, and unknown does not
+// block. flavorOf is SelectionInput.QueueFlavor.
+func replicaShapes(namespace string, set []Candidate, flavorOf func(string) *kueue.FlavorPlacement) []allocation.ReplicaShape {
+	out := make([]allocation.ReplicaShape, 0, len(set))
+	for _, c := range set {
+		if !constants.IsAcceleratorResolved(c.Accelerator) {
+			continue
+		}
+		out = append(out, shapeOf(namespace, c, flavorOf))
+	}
+	return out
+}
+
+// shapeOf is one replica of c as the node view fits it: on its queue's flavor
+// when flavorOf names one (W5), Kueue admitting every pod of a managed
+// namespace on it, within nominal too.
+func shapeOf(namespace string, c Candidate, flavorOf func(string) *kueue.FlavorPlacement) allocation.ReplicaShape {
+	s := allocation.ReplicaShape{Variant: namespace + "/" + c.VariantName, Accelerator: c.Accelerator,
+		PodGPUs: c.PodGPUs, GPUs: max(c.GPUsPerReplica, 1), Tolerations: c.Tolerations, DomainKey: c.DomainKey}
+	if flavorOf != nil {
+		s.Flavor = flavorOf(c.Accelerator)
+	}
+	return s
 }
 
 // demandOf sums one replica of each candidate, keyed by accelerator type. Two

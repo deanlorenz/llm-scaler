@@ -91,7 +91,9 @@ the condition in the second column.
 | Grant | Needed when | Created by | Without it |
 | --- | --- | --- | --- |
 | `wva-node-reader-role` (nodes: get, list, watch) | the governing policy declares the `gpu-inventory` limiter | `make setup-prereqs` (namespace scope); `make enable-physical-limiter` | with `gpu-inventory`, the controller goes **NotReady**. With no limiter it runs degraded: accelerators unresolved |
-| `wva-kueue-reader-role` (clusterqueues, resourceflavors: get, list; the managed Namespace: get) | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and uses the static quota alone. [Details](#the-kueue-grant) |
+| `wva-kueue-reader-role` (clusterqueues, cohorts, resourceflavors: get, list; the managed Namespace: get) | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and uses the static quota alone. [Details](#the-kueue-grant) |
+| `wva-kueue-borrow-reader-role` (Kueue workloads in **every** namespace: get, list, watch; localqueues: get, list) | a limiter policy the controller reads **counts cohort borrowing**: a Kueue quota entry whose `countBorrowable` is not `false` | `make setup-prereqs` (namespace scope), with the install's `WVA_LIMITER`/`WVA_QUOTA_KUEUE`; `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true`. Both revoke it when no policy counts borrowing | borrowing is withheld (`lenders-unreadable`); the nominal Kueue cap applies. [Details](#the-kueue-grant) |
+| Role `wva-kueue-controller-reader-<hash>` in the Kueue namespace (the `kueue-controller-manager` Deployment and its leader Lease, get by name) | a policy counts cohort borrowing | `make setup-prereqs` (namespace scope); `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true`. In `KUEUE_NAMESPACE`, else the entry's `kueue.controllerNamespace`, else `kueue-system` | borrowing freezes (`kueue-controller-down`) |
 | RoleBinding to `wva-policy-reader` in the policy namespace | a policy namespace exists and the controller reads policy from it | `make setup-prereqs` (tenant-owned shape, when it exists); `make enable-physical-limiter` | the controller **refuses to start** rather than run unbounded |
 | `wva-policy-namespace-reader-role` (namespaces: get, by name) | **Kubernetes**, for a controller that manages its own namespace | `make setup-prereqs` (namespace scope); `make enable-physical-limiter`; or [by hand](#grant-the-namespace-read-by-hand) | the controller cannot see `wva-policy` and uses its own ConfigMap. It logs `Could not read the managed Namespace` and sets `wva_policy_namespace_unverified` to 1 (alert `WVAPolicyNamespaceUnverified`) |
 
@@ -236,6 +238,14 @@ with `kubectl get networkpolicy wva-external-scaler -n <ns> -o yaml`.
 
 ### The Kueue grant
 
+- The borrowing read, Kueue Workloads in every namespace, reaches every
+  tenant's Workloads, pod templates included. So it is granted only while a
+  policy of the install counts borrowing, and revoked on
+  `WVA_QUOTA_KUEUE_BORROW=false`, on `make disable-limiter
+  WVA_LIMITER_TYPE=quota` and on uninstall. A tenant who turns borrowing on
+  later asks an admin to re-run `make setup-prereqs` with the same
+  `WVA_LIMITER` and `WVA_QUOTA_KUEUE`; `make deploy-wva` warns until then. A
+  cluster-scoped install always has the read, in its manager ClusterRole.
 - It reads `get` on the managed Namespace by name. A cluster-scoped controller
   the installer made already reads every Namespace, so nothing needs naming in
   `WVA_LIMITER_TARGETS`. `enable-physical-limiter` warns only when a controller

@@ -12,7 +12,7 @@
 #
 # Requires funcs: log_error.
 # Requires vars: none unconditionally; the quota path reads WVA_QUOTAS,
-# WVA_QUOTA_SCOPE, WVA_QUOTA_KUEUE, WVA_SCOPE, WVA_WATCH_NS and WVA_NS. The namespace a
+# WVA_QUOTA_SCOPE, WVA_QUOTA_KUEUE, WVA_QUOTA_KUEUE_BORROW, WVA_SCOPE, WVA_WATCH_NS and WVA_NS. The namespace a
 # namespace-scoped budget is keyed on is an ARGUMENT, never an environment
 # variable -- it is the highest-precedence input to the document, and one that
 # could arrive from an operator's exported shell would be unvalidatable.
@@ -38,19 +38,20 @@
 # So WVA_QUOTAS is required, and a missing or malformed one stops the install
 # before the ConfigMap is touched.
 limiter_entry_yaml() {
-    local ltype="$1" ns_key="${2:-}"
+    local ltype="$1" ns_key="${2:-}" beside_quota="${3:-}"
 
     if [ "$ltype" = "gpu-inventory" ] || [ "$ltype" = "inventory" ]; then
         # A budget handed to the PHYSICAL limiter is discarded, so say so rather
         # than drop it: the operator typed caps and got an entry carrying none,
-        # with nothing anywhere reporting the difference.
-        if [ -n "${WVA_QUOTAS:-}" ]; then
-            log_warning "WVA_QUOTAS is set, but the ${ltype} limiter takes no budget -- it bounds by the GPUs that physically exist. The caps you passed ('${WVA_QUOTAS}') are being IGNORED. Pass WVA_LIMITER=quota to declare them instead."
+        # with nothing anywhere reporting the difference. Not when a quota entry
+        # is declared beside it (limiter_set_yaml): the quota takes them.
+        if [ -n "${WVA_QUOTAS:-}" ] && [ "$beside_quota" != "beside-quota" ]; then
+            log_warning "WVA_QUOTAS is set, but the ${ltype} limiter takes no budget -- it bounds by the GPUs that physically exist. The caps you passed ('${WVA_QUOTAS}') are being IGNORED. Pass WVA_LIMITER=quota (or gpu-inventory,quota) to declare them instead."
         fi
         # Same for the Kueue reader: it is a property of a quota entry, and
         # validateLimiters rejects it on this type, so it is not emitted here.
-        if [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
-            log_warning "WVA_QUOTA_KUEUE=true is set, but the ${ltype} limiter reads no quotas, from Kueue or anywhere -- it is being IGNORED. Pass WVA_LIMITER=quota to bound by Kueue."
+        if [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] && [ "$beside_quota" != "beside-quota" ]; then
+            log_warning "WVA_QUOTA_KUEUE=true is set, but the ${ltype} limiter reads no quotas, from Kueue or anywhere -- it is being IGNORED. Pass WVA_LIMITER=quota (or gpu-inventory,quota) to bound by Kueue."
         fi
         # Physical capacity comes from the GPU operator, so there is nothing to
         # declare. A name is allowed but unused — NewLimiterFromConfig names the
@@ -64,7 +65,9 @@ limiter_entry_yaml() {
 
     local scope="${WVA_QUOTA_SCOPE:-namespace}"
     # Kueue bounds the entry when asked: per namespace and accelerator type the
-    # SMALLER of the Kueue nominal quota and the budget in WVA_QUOTAS applies.
+    # SMALLER of the Kueue grant (cohort borrowing included where it is safe;
+    # countBorrowable: false on the entry keeps nominal) and the budget in
+    # WVA_QUOTAS applies.
     # The budget is still required. Kueue's usual flavors carry no product
     # label, so its grant names no accelerator type; WVA_QUOTAS names the types
     # and -1 lets Kueue set the figure: WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.
@@ -74,6 +77,19 @@ limiter_entry_yaml() {
         true|false) ;;
         *) log_error "WVA_QUOTA_KUEUE must be 'true' or 'false', got '$kueue'" ;;
     esac
+    # WVA_QUOTA_KUEUE_BORROW=false keeps the Kueue cap at nominal: the entry
+    # then carries countBorrowable: false. Unset or true writes nothing, so the
+    # controller default (borrowing counted where it is safe) applies. It is a
+    # property of the kueue block, so without WVA_QUOTA_KUEUE=true it is
+    # ignored, with a warning.
+    local borrow="${WVA_QUOTA_KUEUE_BORROW:-true}"
+    case "$borrow" in
+        true|false) ;;
+        *) log_error "WVA_QUOTA_KUEUE_BORROW must be 'true' or 'false', got '$borrow'" ;;
+    esac
+    if [ -n "${WVA_QUOTA_KUEUE_BORROW:-}" ] && [ "$kueue" != "true" ]; then
+        log_warning "WVA_QUOTA_KUEUE_BORROW=${WVA_QUOTA_KUEUE_BORROW} is set, but WVA_QUOTA_KUEUE is not true, so there is no Kueue block to put it on -- it is being IGNORED."
+    fi
     case "$scope" in
         namespace|cluster) ;;
         *) log_error "WVA_QUOTA_SCOPE must be 'namespace' or 'cluster', got '$scope'" ;;
@@ -263,6 +279,9 @@ $types" in
     printf '%s\n' '- name: install-quota' '  type: quota' "  scope: ${scope}"
     if [ "$kueue" = "true" ]; then
         printf '%s\n' '  kueue:' '    enabled: true'
+        if [ "$borrow" = "false" ]; then
+            printf '%s\n' '    countBorrowable: false'
+        fi
     fi
     if [ "$scope" = "cluster" ]; then
         # Cluster scope caps the SUM across every namespace, so it is keyed by
@@ -273,6 +292,19 @@ $types" in
     fi
     printf '%s\n' '  namespaceQuotas:' "    ${key}:"
     printf '%s' "$types" | sed 's/^/  /'
+}
+
+# limiter_set_yaml <set> [ns_key] emits the `limiters:` list for a whole
+# limiter set (limiter_types_of), physical entry first, as YAML on stdout. Each
+# entry comes from limiter_entry_yaml, so every refusal there applies here too.
+# Pure, like limiter_entry_yaml.
+limiter_set_yaml() {
+    local set="$1" ns_key="${2:-}" t beside=""
+    limiter_set_has "$set" quota && beside="beside-quota"
+    for t in $set; do
+        [ "$t" = none ] && continue
+        limiter_entry_yaml "$t" "$ns_key" "$beside" || exit 1
+    done
 }
 
 # warn_unadvertised_accelerators says when WVA_QUOTAS names an accelerator no
@@ -331,21 +363,68 @@ warn_unadvertised_accelerators() {
     fi
 }
 
-# policy_with_limiters <policy yaml> <limiters yaml> -- the policy with its
-# limiters: list REPLACED by the given one, on stdout.
+# policy_with_limiters <policy yaml> <limiters yaml> [compose] -- the policy with
+# the given limiters declared, on stdout.
 #
-# Replaced, not merged: re-running the install with a different WVA_LIMITER must
-# not leave both declared, because EffectiveLimiterMode collapses the list to one
-# mode (quota wins) and the other entry is then silently unenforced.
+# By default the list is REPLACED: an install declares its whole limiter set in
+# WVA_LIMITER, so a re-run with a different set must not leave an entry from the
+# old one behind. With `compose` only the KINDS the given list declares are
+# replaced -- the physical entry, or the quota entries -- and the other kind is
+# kept: every declared limiter is built and they bound together, so publishing
+# a physical limiter to a policy that already carries a quota must not drop the
+# quota, nor the reverse.
 #
 # strenv, not env. `env()` parses the value as YAML and a multi-line document
 # makes it fail -- `Error: EOF`, with no mention of the variable -- which aborted
 # the install after it had already re-applied the shipped ConfigMap, leaving the
 # policy with no limiters at all. Paired with limiter_entry_yaml here so the
 # offline check exercises the same transform the install runs.
+#
+# A re-run KEEPS the whole kueue block of the quota entry it replaces, and
+# overlays only what the install variables set: enabled, and countBorrowable
+# when WVA_QUOTA_KUEUE_BORROW is given (true removes a kept false). Everything
+# else on the block -- borrowNamespaces, assumeTestedVersion,
+# controllerNamespace, borrowCooldown, placementTimeout, lenderDebounce,
+# refreshInterval, resources -- is written by hand into the live policy, and no
+# install variable carries it. Rebuilding the entry used to drop it: the pilot
+# list went, and borrowing was counted for every namespace; a digest-only
+# Kueue image lost assumeTestedVersion and borrowing stopped. The entry kept
+# from is the old quota entry of the same name that has a kueue block, else
+# the only old one that has. The old list is the policy own .limiters, or
+# LIMITERS_KEEP_FROM when set: the installer passes the list it read BEFORE its
+# apply reset the policy (WVA_LIVE_LIMITERS), since by the time it composes the
+# live policy carries none.
 policy_with_limiters() {
-    local out
-    out="$(printf '%s\n' "$1" | LIMITERS_YAML="$2" yq '.limiters = (strenv(LIMITERS_YAML) | from_yaml)')" || {
+    local out program keep_count=true
+    [ -n "${WVA_QUOTA_KUEUE_BORROW:-}" ] && keep_count=false
+    if [ "${3:-}" = "compose" ]; then
+        # Drop the current entries of each kind the new list declares, then
+        # append the new list.
+        program='(strenv(LIMITERS_YAML) | from_yaml) as $new
+            | ($new | map(select(.type == "gpu-inventory" or .type == "inventory")) | length) as $phys
+            | ($new | map(select(.type == "quota")) | length) as $quota
+            | .limiters = (((.limiters // []) | map(select(
+                ((.type == "gpu-inventory" or .type == "inventory") and $phys > 0)
+                or (.type == "quota" and $quota > 0) | not))) + $new)'
+    else
+        program='.limiters = (strenv(LIMITERS_YAML) | from_yaml)'
+    fi
+    # The kueue block of the entry being replaced, under what the install sets
+    # (see above). The * operator merges maps deeply and replaces lists, so a
+    # kept borrowNamespaces is the old list whole.
+    program='(.limiters // []) as $live
+        | ((strenv(KEEP_FROM) | select(. != "") | from_yaml) // $live) as $old
+        | ($old | map(select(.type == "quota" and .kueue != null))) as $oldq
+        | '"$program"'
+        | .limiters |= ((. // []) | map(
+            . as $e
+            | ((($oldq | map(select(.name == $e.name))) + ($oldq | map(select(($oldq | length) == 1)))) | .[0]) as $o
+            | [(select(.type == "quota" and .kueue != null and ($o | .kueue) != null)
+                | .kueue = (($o | .kueue) * $e.kueue)), .] | .[0]
+            | [(select(.type == "quota" and .kueue != null and strenv(KEEP_COUNT) != "true"
+                    and ($e.kueue.countBorrowable == null))
+                | del(.kueue.countBorrowable)), .] | .[0]))'
+    out="$(printf '%s\n' "$1" | LIMITERS_YAML="$2" KEEP_FROM="${LIMITERS_KEEP_FROM:-}" KEEP_COUNT="$keep_count" yq "$program")" || {
         log_error "could not merge the limiter entry into the policy. The entry was:
 $2"
     }
@@ -357,6 +436,35 @@ $2"
         log_error "merging the limiter entry produced an empty policy; refusing to write it"
     fi
     printf '%s\n' "$out"
+}
+
+# policy_counts_borrowing reads a policy's default entry on stdin and echoes yes
+# when it counts Kueue cohort borrowing -- some quota entry has kueue.enabled
+# and a countBorrowable that is not false (the controller default is true) --
+# and no when it does not. Fails, printing nothing, when the entry does not
+# parse: a policy nobody could read is not one that counts nothing. Pure, so
+# the hack checks execute it offline.
+#
+# It decides whether a controller gets the cluster-wide Workload and LocalQueue
+# read (pl_grant_kueue_borrow_read): that read reaches every tenant's Workloads,
+# so it is granted only to a controller whose policy needs it.
+policy_counts_borrowing() {
+    local n
+    n="$(yq '[.limiters[]? | select(.type == "quota" and .kueue.enabled == true and .kueue.countBorrowable != false)] | length' 2>/dev/null)" || return 1
+    case "$n" in
+        0) echo no ;;
+        ''|null|*[!0-9]*) return 1 ;;
+        *) echo yes ;;
+    esac
+}
+
+# policy_kueue_namespace reads a policy's default entry on stdin and echoes the
+# kueue.controllerNamespace of its first quota entry that sets one, or nothing.
+# The installer grants the Kueue controller read in that namespace when
+# KUEUE_NAMESPACE is not given, so a re-run does not put it back in
+# kueue-system for a Kueue installed elsewhere.
+policy_kueue_namespace() {
+    yq -r '[.limiters[]? | select(.type == "quota") | .kueue.controllerNamespace | select(. != null and . != "")] | .[0] // ""' 2>/dev/null || true
 }
 
 # policy_declared_limiters <limiter type> <current policy yaml> -- the policy with this
@@ -381,7 +489,7 @@ POLICY_DECLARED=""
 # The entry itself, so a caller can SHOW what it declared without rebuilding it.
 LIMITER_ENTRY_DECLARED=""
 policy_declared_limiters() {
-    local ltype="$1" current="$2" ns_key="${3:-}" entry
+    local ltype="$1" current="$2" ns_key="${3:-}" mode="${4:-}" set entry
     POLICY_DECLARED=""
     LIMITER_ENTRY_DECLARED=""
     # The type is an ARGUMENT, not read from the environment. The two callers
@@ -389,12 +497,15 @@ policy_declared_limiters() {
     # WVA_LIMITER_TYPE for the cluster policy -- and reading either here would
     # let one leak into the other's path: an admin with WVA_LIMITER exported in
     # their shell would silently redirect `make enable-physical-limiter`.
-    entry="$(limiter_entry_yaml "$ltype" "$ns_key")" || exit 1
+    # A list (`gpu-inventory,quota`) declares every limiter in it.
+    set="$(limiter_types_of "$ltype")" || exit 1
+    entry="$(limiter_set_yaml "$set" "$ns_key")" || exit 1
     if [ -z "$entry" ]; then
         log_error "the limiter entry came out empty; refusing to write it over the policy"
     fi
     LIMITER_ENTRY_DECLARED="$entry"
-    POLICY_DECLARED="$(policy_with_limiters "$current" "$entry")" || exit 1
+    # `compose` keeps the kinds this call does not declare (policy_with_limiters).
+    POLICY_DECLARED="$(policy_with_limiters "$current" "$entry" "$mode")" || exit 1
     if [ -z "$POLICY_DECLARED" ]; then
         log_error "the merged policy came out empty; refusing to write it"
     fi
@@ -445,6 +556,31 @@ wva_live_limiters() {
         ''|'[]'|null) return 0 ;;
     esac
     WVA_LIVE_LIMITERS="$lim"
+}
+
+# wva_live_limiter_set <namespace> echoes the limiter set the live policy in
+# <namespace> declares, in limiter_types_of's form (gpu-inventory first, then
+# quota; none for no limiter). What an install with WVA_LIMITER unset keeps,
+# and so what the controller will need permissions for. A policy that cannot
+# be read is none here, with a warning: the install phase refuses it later
+# (wva_live_limiters returns 2), and the prerequisite check must not guess.
+wva_live_limiter_set() {
+    local rc=0 types physical="" quota=""
+    wva_live_limiters "$1" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_warning "Could not read the live limiters in $1 (${WVA_LIVE_LIMITERS_ERR:-unreadable}); the controller's node-read check below assumes none."
+        echo none
+        return 0
+    fi
+    [ -n "${WVA_LIVE_LIMITERS:-}" ] || { echo none; return 0; }
+    types="$(printf '%s' "$WVA_LIVE_LIMITERS" | jq -r '.[].type // empty' 2>/dev/null)" || types=""
+    printf '%s\n' "$types" | grep -qxE 'gpu-inventory|inventory' && physical="gpu-inventory"
+    printf '%s\n' "$types" | grep -qx 'quota' && quota="quota"
+    if [ -z "$physical$quota" ]; then
+        echo none
+    else
+        printf '%s\n' "$(printf '%s %s' "$physical" "$quota" | sed 's/^ *//; s/ *$//')"
+    fi
 }
 
 # wva_keep_live_limiters <namespace> <limiters json> writes the given limiters:

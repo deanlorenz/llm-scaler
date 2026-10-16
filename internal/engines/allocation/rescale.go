@@ -9,6 +9,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
@@ -200,13 +201,8 @@ func apportionLeftover(out map[string]int, remainder map[string]float64, leftove
 // applyRescale runs the priority-weighted rescale pass for enabled, contended
 // (accelerator type, budget scope) groups. It returns the decisions it produced and
 // the set of model IDs it handled (which the caller excludes from the additive path).
-// Fills consume free GPUs from `available` / `availableByNS` / `uncapped` in place;
-// reclaims do not free budget this cycle (usage is CurrentReplicas-based), so fills
-// never over-subscribe.
-//
-// The models of uncapped namespaces (see uncappedBudget) form their own groups,
-// planned over the uncapped budget instead of `available`. Every fill, in any group,
-// draws the uncapped budget down, since every namespace spends a cluster quota.
+// Fills consume free GPUs from `available` / `availableByNS` in place; reclaims do not
+// free budget this cycle (usage is CurrentReplicas-based), so fills never over-subscribe.
 //
 // P/D models are handled: a model's GPU target is split across its roles by role
 // demand, and reclaim/fill run per role. Multi-accelerator models (variants spanning
@@ -217,16 +213,14 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	constraints []*ResourceConstraints,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
-	uncapped *uncappedBudget,
 ) ([]domain.VariantDecision, map[string]bool) {
 	logger := ctrl.LoggerFrom(ctx).WithName("rescale")
 	handled := make(map[string]bool)
 	var decisions []domain.VariantDecision
 
 	type groupKey struct {
-		accType  string
-		scope    string // namespace for namespace-scoped groups, "" for cluster
-		uncapped bool   // a cluster group of uncapped namespaces
+		accType string
+		scope   string // namespace for namespace-scoped groups, "" for cluster
 	}
 	groups := make(map[groupKey][]ModelScalingRequest)
 	for _, req := range requests {
@@ -244,10 +238,15 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 			continue
 		}
 		scope := ""
+		budgets := available
 		if nsScoped {
 			scope = req.Namespace
+			budgets = availableByNS[req.Namespace]
 		}
-		k := groupKey{accType, scope, uncapped.covers(req.Namespace)}
+		// Group under the budget's own spelling of the accelerator, so two models
+		// that spell one GPU differently compete for one budget instead of each
+		// being handed all of it, and the reads below find it.
+		k := groupKey{budgetKey(budgets, accType), scope}
 		groups[k] = append(groups[k], req)
 	}
 
@@ -256,18 +255,14 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	// the result — a stable order keeps a cycle reproducible for identical input.
 	keys := slices.Collect(maps.Keys(groups))
 	slices.SortFunc(keys, func(a, b groupKey) int {
-		return cmp.Or(cmp.Compare(a.accType, b.accType), cmp.Compare(a.scope, b.scope),
-			compareBool(a.uncapped, b.uncapped))
+		return cmp.Or(cmp.Compare(a.accType, b.accType), cmp.Compare(a.scope, b.scope))
 	})
 
 	for _, k := range keys {
 		reqs := groups[k]
-		free := available[k.accType]
-		switch {
-		case k.scope != "":
+		free := budgetOf(available, k.accType)
+		if k.scope != "" {
 			free = availableByNS[k.scope][k.accType]
-		case k.uncapped:
-			free = uncapped.free(k.accType)
 		}
 		// Skip unlimited/unknown budgets — there is nothing to redistribute.
 		if free < 0 || free == math.MaxInt {
@@ -308,57 +303,46 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		// The water-fill target above intentionally uses the full quota; fills pace
 		// toward it over cycles as physical GPUs free up.
 		fillable := free
+		// The group is keyed by the namespace allowlist's spelling; the cluster
+		// pool may spell the accelerator differently.
+		clusterKey := budgetKey(available, k.accType)
 		if k.scope != "" {
-			if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
+			if cur, ok := clusterBudgetFor(available, k.accType); ok && cur != math.MaxInt {
 				fillable = min(fillable, cur)
 			}
-		}
-		if !k.uncapped {
-			fillable = uncapped.clamp(k.accType, fillable)
 		}
 
 		freeThisCycle := fillable
 		for _, req := range reqs {
+			before := freeThisCycle
 			d := o.rescaleModelDecisions(ctx, req, constraints, k.accType, targets[modelKey(req)], &freeThisCycle)
 			decisions = append(decisions, d...)
 			handled[modelKey(req)] = true
+			// Recorded per model, as the group's debit below charges it.
+			if took := before - freeThisCycle; took > 0 {
+				if k.scope != "" {
+					o.spend(modelKey(req), k.scope, k.accType, took)
+					o.spend(modelKey(req), "", clusterKey, took)
+				} else {
+					o.spend(modelKey(req), "", k.accType, took)
+				}
+			}
 		}
 
 		if consumed := fillable - freeThisCycle; consumed > 0 {
-			uncapped.spend(k.accType, consumed)
-			switch {
-			case k.uncapped:
-				// An uncapped namespace spends only the uncapped budget, not
-				// the namespace quota's free GPUs that available holds.
-			case k.scope != "":
-				if availableByNS[k.scope] != nil {
-					availableByNS[k.scope][k.accType] -= consumed
-				}
+			if k.scope != "" {
+				debitBudget(availableByNS[k.scope], k.accType, consumed)
 				// A namespace fill also draws from the shared physical pool; debit the
 				// finite cluster budget too (mirroring allocateForModel). Bounded by
 				// fillable above, this can never drive the cluster budget negative.
-				if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
-					available[k.accType] -= consumed
-				}
-			default:
-				available[k.accType] -= consumed
+				debitBudget(available, clusterKey, consumed)
+			} else {
+				debitBudget(available, k.accType, consumed)
 			}
 		}
 	}
 
 	return decisions, handled
-}
-
-// compareBool orders false before true.
-func compareBool(a, b bool) int {
-	switch {
-	case a == b:
-		return 0
-	case !a:
-		return -1
-	default:
-		return 1
-	}
 }
 
 // rescaleModelDecisions drives one model to targetGPUs on accType: reclaim (shed
@@ -396,6 +380,8 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	tgtByRole := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
 
 	limited := make(gpuLimitTracker)
+	// grown is what each role's fill added, per variant, in the order added.
+	grown := map[string][]roleGrowth{}
 	for _, role := range roles {
 		rt, rc := tgtByRole[role], curByRole[role]
 		switch {
@@ -410,15 +396,24 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 			if gpuCapped {
 				want = *freeThisCycle
 			}
+			before := maps.Clone(targets)
 			*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
 			if gpuCapped {
 				markRoleGPULimited(records, role, stateMap, targets, limited)
 			}
+			for _, vc := range sortByCostEfficiencyAsc(variantsForRole(records, role)) {
+				if n := targets[vc.VariantName] - before[vc.VariantName]; n > 0 {
+					grown[role] = append(grown[role], roleGrowth{variant: vc.VariantName, n: n})
+				}
+			}
 		}
 	}
+	// With a node view the fills must also land on nodes, as the additive
+	// path's do: what does not place is given back to the cycle's free GPUs.
+	*freeThisCycle += o.fitRescaleToNodes(req, records, stateMap, targets, roles, grown, limited)
 
 	decisions := buildDecisionsWithOptimizer(req, stateMap, vcMap, targets, "rescale")
-	applyGPULimitAttribution(decisions, limited, constraints)
+	o.attributeGPULimits(decisions, limited, constraints)
 	for i := range decisions {
 		if decisions[i].Action == domain.ActionScaleDown {
 			decisions[i].SetDecisionReason(domain.ActionScaleDown, domain.DecisionReasonRescale,
@@ -426,6 +421,94 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		}
 	}
 	return decisions
+}
+
+// roleGrowth is n replicas a rescale fill added to variant.
+type roleGrowth struct {
+	variant string
+	n       int
+}
+
+// fitRescaleToNodes places a rescale fill's replicas (grown, per role) on the
+// cycle's node view, as fitPairToNodes places the additive path's: one replica
+// at a time, of the role furthest behind its share first, each pod best-fit,
+// until every role has its replicas or one does not place. A model filling
+// more than one role -- a P/D pair -- grows only if every such role placed at
+// least one replica: it never grows half a pair. What places is debited from
+// the view, charged to the model; what does not is taken back off targets, its
+// variant marked as held back by node fit, and its GPUs returned. Without a
+// node view it does nothing and returns 0.
+func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, records []variantRecord,
+	stateMap map[string]domain.VariantReplicaState, targets map[string]int, roles []string,
+	grown map[string][]roleGrowth, limited gpuLimitTracker) int {
+	if o.Nodes == nil || len(grown) == 0 {
+		return 0
+	}
+	fit := nodeFit{nodes: o.Nodes, namespace: req.Namespace, limited: limited}
+	filling := make([]string, 0, len(grown))
+	want := map[string]int{}
+	for _, role := range roles {
+		for _, g := range grown[role] {
+			want[role] += g.n
+		}
+		if want[role] > 0 {
+			filling = append(filling, role)
+		}
+	}
+	trial := o.Nodes.Clone()
+	placed := map[string]int{}        // per role
+	placedVariant := map[string]int{} // per variant
+	short := ""
+	for {
+		next := ""
+		for _, role := range filling {
+			if placed[role] >= want[role] {
+				continue
+			}
+			// The role with the smallest placed/want fraction, compared exactly.
+			if next == "" || placed[role]*want[next] < placed[next]*want[role] {
+				next = role
+			}
+		}
+		if next == "" {
+			break
+		}
+		// The role's replicas in the order its fill added them.
+		v, i := "", placed[next]
+		for _, g := range grown[next] {
+			if i < g.n {
+				v = g.variant
+				break
+			}
+			i -= g.n
+		}
+		if !trial.place(fit.replica(records, stateMap, v)) {
+			short = v
+			break
+		}
+		placed[next]++
+		placedVariant[v]++
+	}
+	if short != "" {
+		limited.markNodeFit(short)
+	}
+	if len(filling) > 1 && slices.ContainsFunc(filling, func(role string) bool { return placed[role] == 0 }) {
+		clear(placedVariant) // half a pair is no pair: nothing grows
+	} else {
+		defer o.Nodes.setOwner(o.Nodes.setOwner(modelKey(req)))
+		o.Nodes.adopt(trial)
+	}
+	// A variant belongs to one role and is grown once per fill.
+	refund := 0
+	for _, role := range filling {
+		for _, g := range grown[role] {
+			if back := g.n - placedVariant[g.variant]; back > 0 {
+				targets[g.variant] -= back
+				refund += back * gpusPerReplicaFromState(stateMap, g.variant)
+			}
+		}
+	}
+	return refund
 }
 
 // reclaimRole sheds up to deltaGPUs worth of a role's replicas, most-expensive-first,
@@ -516,7 +599,9 @@ func markRoleGPULimited(
 }
 
 // singleAccType returns the accelerator type shared by all variants, or false if
-// they span more than one (multi-accelerator, deferred) or none is set.
+// they span more than one (multi-accelerator, deferred) or none is set. Variants
+// that spell one accelerator differently share it (accelerator.SameName); the
+// first spelling is returned, and callers resolve it against their budget.
 func singleAccType(vcs []variantRecord) (string, bool) {
 	accType := ""
 	for _, vc := range vcs {
@@ -525,7 +610,7 @@ func singleAccType(vcs []variantRecord) (string, bool) {
 		}
 		if accType == "" {
 			accType = vc.AcceleratorName
-		} else if accType != vc.AcceleratorName {
+		} else if !accelerator.SameName(accType, vc.AcceleratorName) {
 			return "", false
 		}
 	}
@@ -542,7 +627,7 @@ func modelCurrentGPUs(req ModelScalingRequest, accType string) int {
 	stateMap := buildStateMap(req.VariantStates)
 	total := 0
 	for _, vc := range records {
-		if vc.AcceleratorName != accType {
+		if !accelerator.SameName(vc.AcceleratorName, accType) {
 			continue
 		}
 		total += stateMap[vc.VariantName].CurrentReplicas * gpusPerReplicaFromState(stateMap, vc.VariantName)
@@ -565,7 +650,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 
 		floorGPUs, maxGPUs, maxBounded := 0, 0, true
 		for _, vc := range records {
-			if vc.AcceleratorName != accType {
+			if !accelerator.SameName(vc.AcceleratorName, accType) {
 				continue
 			}
 			g := gpusPerReplicaFromState(stateMap, vc.VariantName)
@@ -649,7 +734,7 @@ func bestVariantForRole(records []variantRecord, stateMap map[string]domain.Vari
 func variantsOnType(vcs []variantRecord, accType string) []variantRecord {
 	out := make([]variantRecord, 0, len(vcs))
 	for _, vc := range vcs {
-		if vc.AcceleratorName == accType {
+		if accelerator.SameName(vc.AcceleratorName, accType) {
 			out = append(out, vc)
 		}
 	}

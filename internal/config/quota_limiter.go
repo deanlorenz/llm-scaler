@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -100,8 +101,11 @@ type QuotaLimiterConfig struct {
 // pending. The mapping is: a ClusterQueue's nominalQuota for a GPU extended
 // resource, per flavor, becomes a per-accelerator-type cap; a namespace is
 // granted the caps of every ClusterQueue one of its LocalQueues points at; the
-// cluster figure is the sum over all ClusterQueues. Borrowing limits and cohorts
-// are deliberately NOT counted — the bound wants the guaranteed figure.
+// cluster figure is the sum over all ClusterQueues. With CountBorrowable (the
+// default), a namespace-scope entry also counts what its queues can borrow from
+// their cohorts, where that is safe: the namespace's cap becomes its guaranteed
+// figure and the greedy optimizer may draw past it from the cohort's free pool
+// (the Kueue borrowing proposal, PR #161, Part B).
 //
 // A ClusterQueue shared by several namespaces is a per-namespace CEILING here,
 // not a partition: each namespace with a LocalQueue on it is bounded at the
@@ -123,6 +127,128 @@ type KueueQuotaSource struct {
 	// Empty means DefaultKueueRefreshInterval. Between reads the last snapshot is
 	// served, so a quota edit in Kueue takes up to this long to bind here.
 	RefreshInterval string `yaml:"refreshInterval,omitempty" json:"refreshInterval,omitempty"`
+
+	// CountBorrowable lets the entry count GPUs its ClusterQueue can borrow from
+	// its cohort, on top of the guaranteed figure. Absent means true: borrowing
+	// is on by default, and is counted only where it is safe (B1). false keeps
+	// exactly the nominal cap, as before borrowing was read.
+	CountBorrowable *bool `yaml:"countBorrowable,omitempty" json:"countBorrowable,omitempty"`
+
+	// PlacementTimeout is how long a borrowed replica may stay unplaced --
+	// unschedulable, or held at Kueue's admission gate -- before it is released
+	// (B5); a Go duration. Empty means DefaultPlacementTimeout. The same setting
+	// bounds how long the utilization-share optimizer holds a receiver whose
+	// replica could not be placed (HoldFill), so the two cannot drift apart.
+	PlacementTimeout string `yaml:"placementTimeout,omitempty" json:"placementTimeout,omitempty"`
+
+	// BorrowCooldown is how long nothing new is borrowed in a cohort after one
+	// of its lenders waited, and by a model after Kueue preempted one of its
+	// borrowed pods; a Go duration. Empty means DefaultBorrowCooldown.
+	BorrowCooldown string `yaml:"borrowCooldown,omitempty" json:"borrowCooldown,omitempty"`
+
+	// LenderDebounce is how long a lender must read as waiting, over at least
+	// two fresh reads, before it counts as waiting; a Go duration. Empty means
+	// DefaultLenderDebounce.
+	LenderDebounce string `yaml:"lenderDebounce,omitempty" json:"lenderDebounce,omitempty"`
+
+	// BorrowNamespaces, when set, limits counting borrowable capacity to these
+	// namespaces, so borrowing can be piloted on a few before the whole entry.
+	// Every other namespace caps at nominal, withheld with reason
+	// not-selected. Empty means every namespace the entry governs.
+	BorrowNamespaces []string `yaml:"borrowNamespaces,omitempty" json:"borrowNamespaces,omitempty"`
+
+	// ControllerNamespace is the namespace of the Kueue controller Deployment
+	// (kueue-controller-manager), whose image tag tells the Kueue version
+	// borrowing is checked against. Empty means kueue-system.
+	ControllerNamespace string `yaml:"controllerNamespace,omitempty" json:"controllerNamespace,omitempty"`
+
+	// AssumeTestedVersion counts borrowing under a Kueue controller whose image
+	// names no version (a digest-only reference), as if it were a tested one.
+	// Default false: such a version withholds borrowing
+	// (kueue-version-unknown). It applies only to a version that cannot be
+	// read from a readable Deployment, and never lifts kueue-controller-down.
+	AssumeTestedVersion bool `yaml:"assumeTestedVersion,omitempty" json:"assumeTestedVersion,omitempty"`
+}
+
+// KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
+// true when the list is empty or names ns.
+func (q QuotaLimiterConfig) KueueBorrowSelected(ns string) bool {
+	return q.Kueue == nil || len(q.Kueue.BorrowNamespaces) == 0 || slices.Contains(q.Kueue.BorrowNamespaces, ns)
+}
+
+// HasUnlimitedCap reports whether the entry's static caps, in its scope, leave
+// some accelerator type unlimited (QuotaUnlimited, -1): only an external
+// source then bounds that type.
+func (q QuotaLimiterConfig) HasUnlimitedCap() bool {
+	if q.Scope == QuotaScopeCluster {
+		for _, v := range q.ClusterQuotas {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+		return false
+	}
+	for _, perType := range q.NamespaceQuotas {
+		for _, v := range perType {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Defaults of the borrowing timings (the Kueue borrowing proposal, PR #161,
+// B5). The placement timeout and the cooldown are first guesses, to be
+// replaced by figures the live-Kueue e2e measures.
+const (
+	DefaultPlacementTimeout = 5 * time.Minute
+	DefaultBorrowCooldown   = 10 * time.Minute
+	DefaultLenderDebounce   = 60 * time.Second
+)
+
+// KueueBorrowTimings are the borrowing timings of one entry.
+type KueueBorrowTimings struct {
+	PlacementTimeout time.Duration
+	// PlacementTimeoutSet is true when the entry sets PlacementTimeout.
+	PlacementTimeoutSet bool
+	Cooldown            time.Duration
+	LenderDebounce      time.Duration
+}
+
+// BorrowTimings returns the entry's borrowing timings, each at its default
+// when unset or unparseable (Validate rejects the latter).
+func (q QuotaLimiterConfig) BorrowTimings() KueueBorrowTimings {
+	t := KueueBorrowTimings{PlacementTimeout: DefaultPlacementTimeout, Cooldown: DefaultBorrowCooldown, LenderDebounce: DefaultLenderDebounce}
+	if q.Kueue == nil {
+		return t
+	}
+	if d, ok := positiveDuration(q.Kueue.PlacementTimeout); ok {
+		t.PlacementTimeout, t.PlacementTimeoutSet = d, true
+	}
+	if d, ok := positiveDuration(q.Kueue.BorrowCooldown); ok {
+		t.Cooldown = d
+	}
+	if d, ok := positiveDuration(q.Kueue.LenderDebounce); ok {
+		t.LenderDebounce = d
+	}
+	return t
+}
+
+// positiveDuration parses s as a positive Go duration.
+func positiveDuration(s string) (time.Duration, bool) {
+	if s == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil && d > 0
+}
+
+// KueueCountsBorrowable reports whether this entry reads Kueue and would count
+// borrowable capacity: the Kueue block is enabled and countBorrowable is not
+// false.
+func (q QuotaLimiterConfig) KueueCountsBorrowable() bool {
+	return q.KueueEnabled() && (q.Kueue.CountBorrowable == nil || *q.Kueue.CountBorrowable)
 }
 
 // DefaultKueueRefreshInterval is how often Kueue quotas are re-read when the
@@ -163,13 +289,34 @@ func (k *KueueQuotaSource) validate(location string) error {
 			errs = append(errs, fmt.Errorf("%s.kueue.resources[%d]: resource name must not be empty", location, i))
 		}
 	}
-	if k.RefreshInterval != "" {
-		d, err := time.ParseDuration(k.RefreshInterval)
+	seen := make(map[string]bool, len(k.BorrowNamespaces))
+	for i, ns := range k.BorrowNamespaces {
+		switch {
+		case len(validation.IsDNS1123Label(ns)) > 0:
+			errs = append(errs, fmt.Errorf("%s.kueue.borrowNamespaces[%d]: %q is not a namespace name", location, i, ns))
+		case seen[ns]:
+			errs = append(errs, fmt.Errorf("%s.kueue.borrowNamespaces[%d]: %q is listed twice", location, i, ns))
+		}
+		seen[ns] = true
+	}
+	if k.ControllerNamespace != "" && len(validation.IsDNS1123Label(k.ControllerNamespace)) > 0 {
+		errs = append(errs, fmt.Errorf("%s.kueue.controllerNamespace: %q is not a namespace name", location, k.ControllerNamespace))
+	}
+	for _, f := range []struct{ name, value string }{
+		{"refreshInterval", k.RefreshInterval},
+		{"placementTimeout", k.PlacementTimeout},
+		{"borrowCooldown", k.BorrowCooldown},
+		{"lenderDebounce", k.LenderDebounce},
+	} {
+		if f.value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(f.value)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("%s.kueue.refreshInterval: %q is not a duration: %w", location, k.RefreshInterval, err))
+			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q is not a duration: %w", location, f.name, f.value, err))
 		case d <= 0:
-			errs = append(errs, fmt.Errorf("%s.kueue.refreshInterval: %q must be positive", location, k.RefreshInterval))
+			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q must be positive", location, f.name, f.value))
 		}
 	}
 	return errors.Join(errs...)
@@ -183,6 +330,13 @@ func (k *KueueQuotaSource) clone() *KueueQuotaSource {
 	out := *k
 	if k.Resources != nil {
 		out.Resources = slices.Clone(k.Resources)
+	}
+	if k.CountBorrowable != nil {
+		v := *k.CountBorrowable
+		out.CountBorrowable = &v
+	}
+	if k.BorrowNamespaces != nil {
+		out.BorrowNamespaces = slices.Clone(k.BorrowNamespaces)
 	}
 	return &out
 }
@@ -227,6 +381,160 @@ type ExternalQuotas struct {
 	// ObservedAt is when the source was last read successfully; zero when it
 	// never was, in which case the maps are empty and mean nothing.
 	ObservedAt time.Time
+	// Borrow is, per namespace Namespace governs, what borrowing in the
+	// source's cohorts would add. BoundBy ignores it; a quota entry that counts
+	// borrowing reads it beside NamespaceGuaranteed and NamespaceWithinNominal.
+	Borrow map[string][]ExternalBorrow
+	// NamespaceGuaranteed is Namespace at each queue's guaranteed figure
+	// instead of its nominal one, built by the same rules (typed and untyped
+	// grants, inactive queues), so it can stand in for Namespace in BoundBy for
+	// a namespace whose borrowing is counted. Where a queue's borrowing is
+	// withheld its guaranteed figure is its nominal, so the two agree.
+	NamespaceGuaranteed map[string]ExternalCaps
+	// NamespaceWithinNominal is Namespace at each queue's within-nominal figure
+	// (ExternalBorrow.WithinNominal): what scale-from-zero, the warm pool and
+	// rescale may spend (B7).
+	NamespaceWithinNominal map[string]ExternalCaps
+	// SharedPools are the cohorts' free pools, one per cohort, flavor and GPU
+	// resource, each spent once across every namespace in the cohort.
+	SharedPools []ExternalSharedPool
+	// BorrowStale is set when the read succeeded for the nominal figures but
+	// not for borrowing: a transient failure to list the Cohort objects. Every
+	// borrowing row then carries the stale reason, and a quota entry that counts
+	// borrowing treats the snapshot as stale -- it freezes, never shrinks.
+	BorrowStale bool
+	// KueueControllerDown is set when no Kueue leader is known to run (its
+	// leader Lease not renewed, or without one no ready replica, or neither
+	// readable: Forbidden or never found), while Kueue's API still answers: the
+	// figures are readable but stop moving. A quota entry that counts
+	// borrowing freezes, as on a stale snapshot, and reports every governed
+	// namespace withheld with reason kueue-controller-down.
+	KueueControllerDown bool
+	// ClassPriority is, per priority class ("<group>/<name>", or "none"; see
+	// kueue.TemplatePriorityClass), the highest spec.priority of an unfinished
+	// GPU Workload of that class. A lender on reclaimWithinCohort LowerPriority
+	// gets back what a model holds only when it outranks the model's own
+	// Workloads, whose priority is looked up here by the model's class.
+	ClassPriority map[string]int32
+	// NamespaceHighestPriority is, per namespace, the highest spec.priority of
+	// its unfinished GPU Workloads: the priority of a model whose pod template
+	// names no class, read cautiously. A namespace none of whose Workloads was
+	// read is absent.
+	NamespaceHighestPriority map[string]int32
+}
+
+// ExternalSharedPool is one cohort's free capacity of one flavor and GPU
+// resource, and where pods of that flavor may run.
+type ExternalSharedPool struct {
+	Cohort   string `json:"cohort"`
+	Flavor   string `json:"flavor"`
+	Resource string `json:"resource"`
+	// Accelerator is the product the flavor's node labels name; empty for a
+	// flavor without a product label.
+	Accelerator string              `json:"accelerator,omitempty"`
+	NodeLabels  map[string]string   `json:"nodeLabels,omitempty"`
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Free is the cohort's free pool; 0 when Reason is set.
+	Free   int    `json:"free"`
+	Reason string `json:"reason,omitempty"`
+	// WaitingLenders are the member queues that, in this read, wait for
+	// capacity they lent (kueue.LenderWaiting). Not debounced.
+	WaitingLenders []string `json:"waitingLenders,omitempty"`
+	// Lenders is every active member declaring this key, for the release of
+	// borrowed capacity to a lender that waits (B6).
+	Lenders []ExternalLender `json:"lenders,omitempty"`
+	// PendingGPUs is what the pending Workloads of every member queue request
+	// of this flavor and resource: demand Kueue may admit onto the free pool
+	// first, whichever namespace or controller it belongs to.
+	PendingGPUs int `json:"pendingGPUs,omitempty"`
+	// CoFree is the cohort's free pool of every other resource the flavor's
+	// resource group covers (CPU, memory, ...), in milli-units.
+	CoFree map[string]int64 `json:"coFree,omitempty"`
+	// CoUnbound are the co-resources charged on a flavor not known: the
+	// resource group covering them offers several flavors.
+	CoUnbound []string `json:"coUnbound,omitempty"`
+	// Borrowed is what the cohort's members borrow of this key (Kueue's
+	// status borrowed), BorrowerPriority the highest priority it is held at,
+	// nil when not every borrower's was read (kueue.SharedPool).
+	Borrowed         int    `json:"borrowed,omitempty"`
+	BorrowerPriority *int32 `json:"borrowerPriority,omitempty"`
+}
+
+// ExternalLender is one cohort member as a lender of one flavor and resource.
+type ExternalLender struct {
+	Queue string `json:"queue"`
+	// Waiting is the raw per-read predicate: a pending Workload that asks for
+	// this GPU resource and fits within the nominal it does not hold.
+	Waiting bool `json:"waiting,omitempty"`
+	// Reclaim is its reclaimWithinCohort policy (kueue.Reclaims).
+	Reclaim string `json:"reclaim,omitempty"`
+	// Unused is what it lends and does not use itself.
+	Unused int `json:"unused,omitempty"`
+	// Priority is the lowest priority of its unfinished GPU Workloads, pending
+	// or reserved; nil when none was read.
+	Priority *int32 `json:"priority,omitempty"`
+}
+
+// ExternalBorrow is one queue's borrowing figures for one flavor and GPU
+// resource, as granted to a namespace. Guaranteed plus Borrowable is how far the
+// queue could reach in its cohort; Reason, when set, says why Borrowable is 0.
+type ExternalBorrow struct {
+	Queue       string `json:"queue"`
+	Cohort      string `json:"cohort,omitempty"`
+	Flavor      string `json:"flavor"`
+	Resource    string `json:"resource"`
+	Accelerator string `json:"accelerator,omitempty"`
+	Nominal     int    `json:"nominal"`
+	Guaranteed  int    `json:"guaranteed"`
+	Borrowable  int    `json:"borrowable"`
+	// BorrowCap is the queue's borrowingLimit, QuotaUnlimited when unset.
+	BorrowCap int `json:"borrowCap"`
+	// WithinNominal is what the queue could reach without borrowing (B7).
+	WithinNominal int `json:"withinNominal"`
+	// LentOut is the part of a reclaiming queue's (reclaimWithinCohort Any)
+	// unused nominal its peers borrow now and Kueue would preempt them for,
+	// past PreemptAfter: growth into it needs no node hole.
+	LentOut int `json:"lentOut,omitempty"`
+	// PreemptAfter is how far a reclaiming queue grows before Kueue has to
+	// preempt for it: what it keeps unused plus what the cohort's free pool
+	// covers. Growth into it needs a node hole and debits the pool.
+	PreemptAfter int `json:"preemptAfter,omitempty"`
+	// PreemptKept is the part of PreemptAfter the queue keeps unused, which
+	// no cohort pool holds: growth into it takes nothing from the pool.
+	PreemptKept int `json:"preemptKept,omitempty"`
+	// SourceBorrowed is the source's own figure of what the queue borrows now,
+	// logged as a cross-check.
+	SourceBorrowed int    `json:"kueueBorrowed"`
+	Reason         string `json:"reason,omitempty"`
+	// PinRequired is set when a variant must pin a flavor's nodeLabels for its
+	// borrowing to be counted: the queue offers more than one flavor for the
+	// GPU.
+	PinRequired bool `json:"pinRequired,omitempty"`
+	// CoHeadroom is, per co-resource, how far the queue's usage of it may
+	// still grow: nominal plus borrowingLimit less usage, in milli-units;
+	// absent where borrowingLimit is unset. CoKept is what it keeps unlent and
+	// does not use.
+	CoHeadroom map[string]int64 `json:"coHeadroom,omitempty"`
+	CoKept     map[string]int64 `json:"coKept,omitempty"`
+}
+
+// Counted reports whether the row's borrowing is counted: no reason, or only
+// the reason that qualifies a guaranteed figure below nominal.
+func (b ExternalBorrow) Counted() bool {
+	return b.Reason == "" || b.Reason == BorrowReasonNominalLentOut
+}
+
+// BorrowReasonNominalLentOut is the one ExternalBorrow reason under which
+// borrowing is still counted: it qualifies the guaranteed figure, it does not
+// withhold. It mirrors kueue.ReasonNominalLentOut, which config cannot import.
+const BorrowReasonNominalLentOut = "nominal-lent-out"
+
+// Withheld returns b with borrowing not counted, for reason: the guaranteed
+// and within-nominal figures fall back to nominal, as when borrowing is off.
+func (b ExternalBorrow) Withheld(reason string) ExternalBorrow {
+	b.Guaranteed, b.WithinNominal, b.Borrowable, b.LentOut, b.PreemptAfter, b.Reason = b.Nominal, b.Nominal, 0, 0, 0, reason
+	b.PreemptKept = 0
+	return b
 }
 
 // BoundBy returns this entry bounded by an external snapshot: the static maps and
@@ -545,23 +853,28 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 				i, entry.Name, QuotaScopeCluster, QuotaScopeNamespace, entry.Scope))
 		}
 	}
-	warnings = append(warnings, e.unboundedExcludeWarnings()...)
 	return warnings, errors.Join(errs...)
 }
 
 // unboundedExcludeWarnings warns about the namespaces a namespace-scoped entry
-// excludes when no cluster-scoped entry bounds them. Only a cluster-scoped
-// entry bounds an excluded namespace, and only on the accelerator types it
-// sets a finite limit for. The types checked are the ones the namespace entry
-// names, matched by accelerator identity (accelerator.SameName), as the
-// limiter matches them at runtime.
+// excludes when no quota bounds them. Only the cluster-wide bounds apply to an
+// excluded namespace: a scope: cluster entry, and the physical limiter, which
+// the caller checks for (ScalingPolicy.LimiterWarnings), since these entries do
+// not hold it.
+//
+// A cluster-scoped entry is a closed allowlist, as the limiter reads it at
+// runtime: a type it does not list is denied, not unbounded. So with cluster
+// entries in force, a type is unbounded only when every one of them lists it,
+// and only as unlimited (-1). The types checked are the ones the namespace
+// entry and the cluster entries name, matched by accelerator identity
+// (accelerator.SameName).
 //
 // A cluster-scoped entry that reads Kueue bounds every type: its numbers come
 // from Kueue at runtime, so they cannot be checked here. A namespace that
 // another namespace-scoped entry does not exclude is capped by that entry
 // (it is a closed allowlist there), so it is not warned about.
 func (e *QuotaLimiterEntries) unboundedExcludeWarnings() []string {
-	var bounded []string
+	var cluster []QuotaLimiterConfig
 	for _, entry := range e.Limiters {
 		if entry.Scope != QuotaScopeCluster {
 			continue
@@ -569,14 +882,25 @@ func (e *QuotaLimiterEntries) unboundedExcludeWarnings() []string {
 		if entry.KueueEnabled() {
 			return nil
 		}
-		for accType, limit := range entry.ClusterQuotas {
-			if limit >= 0 {
-				bounded = append(bounded, accType)
+		cluster = append(cluster, entry)
+	}
+	unboundedType := func(accType string) bool {
+		for _, c := range cluster {
+			listed := false
+			for key, limit := range c.ClusterQuotas {
+				if !accelerator.SameName(key, accType) {
+					continue
+				}
+				if limit >= 0 {
+					return false
+				}
+				listed = true
+			}
+			if !listed {
+				return false // a closed allowlist denies it
 			}
 		}
-	}
-	isBounded := func(accType string) bool {
-		return slices.ContainsFunc(bounded, func(b string) bool { return accelerator.SameName(b, accType) })
+		return true
 	}
 	var warnings []string
 	for i, entry := range e.Limiters {
@@ -584,24 +908,31 @@ func (e *QuotaLimiterEntries) unboundedExcludeWarnings() []string {
 		if len(uncapped) == 0 {
 			continue
 		}
-		if len(bounded) == 0 {
+		if len(cluster) == 0 {
 			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit: "+
-				"no scope: cluster quota sets a finite limit, so the scaling manager does not bound them",
+				"no scope: cluster quota and no gpu-inventory limiter are declared, so the scaling manager does not bound them",
 				i, entry.Name, uncapped))
 			continue
 		}
-		unbounded := map[string]bool{}
+		var named []string
 		for _, perType := range entry.NamespaceQuotas {
-			for accType := range perType {
-				if !isBounded(accType) {
-					unbounded[accType] = true
-				}
+			named = slices.AppendSeq(named, maps.Keys(perType))
+		}
+		for _, c := range cluster {
+			named = slices.AppendSeq(named, maps.Keys(c.ClusterQuotas))
+		}
+		slices.Sort(named)
+		var unbounded []string
+		for _, accType := range named {
+			seen := slices.ContainsFunc(unbounded, func(u string) bool { return accelerator.SameName(u, accType) })
+			if !seen && unboundedType(accType) {
+				unbounded = append(unbounded, accType)
 			}
 		}
 		if len(unbounded) > 0 {
 			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit on %v: "+
-				"no scope: cluster quota sets a finite limit for those accelerator types",
-				i, entry.Name, uncapped, slices.Sorted(maps.Keys(unbounded))))
+				"every scope: cluster quota lists those accelerator types as unlimited (-1), and no gpu-inventory limiter is declared",
+				i, entry.Name, uncapped, unbounded))
 		}
 	}
 	return warnings
