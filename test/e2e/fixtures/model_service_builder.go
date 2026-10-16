@@ -322,6 +322,26 @@ func WithGPUs(resourceName string, count int64) ModelServiceOption {
 	}
 }
 
+// WithStartDelay holds every replica not Ready for delay after its container
+// starts, the way a large model's load does: a readiness probe on the server
+// port with that initial delay. The pod is scheduled and holds its GPUs the
+// whole time, so a scaling decision waits a full start before the replica
+// serves, and the controller measures a start of about delay. The simulator
+// itself starts in seconds, so the delay is the start the spec sees.
+func WithStartDelay(delay time.Duration) ModelServiceOption {
+	return func(d *appsv1.Deployment) {
+		for i := range d.Spec.Template.Spec.Containers {
+			d.Spec.Template.Spec.Containers[i].ReadinessProbe = &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{Port: intstrFromInt(defaultModelServiceContainerPort)},
+				},
+				InitialDelaySeconds: int32(delay / time.Second),
+				PeriodSeconds:       5,
+			}
+		}
+	}
+}
+
 // WithGPURequest sets the pod's nvidia.com/gpu request/limit, which is how WVA
 // derives GPUs-per-replica (scaletarget.GetTotalGPUsPerReplica). On a node of
 // another vendor use WithGPUs with the discovered resource name.

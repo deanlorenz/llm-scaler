@@ -90,6 +90,15 @@ func WithOptimizer(block map[string]any) QuotaOption {
 	}
 }
 
+// WithoutOptimizer removes the default entry's optimizer block, so today's
+// optimizer runs. SetNamespaceQuota merges into the policy it finds, so an
+// optimizer an earlier call wrote stays unless an option removes it.
+func WithoutOptimizer() QuotaOption {
+	return func(_, doc map[string]any) {
+		delete(doc, "optimizer")
+	}
+}
+
 // SetNamespaceQuota declares a namespace-scoped GPU quota and returns a restore
 // func.
 //
