@@ -4,8 +4,9 @@ How Kueue cohort borrowing is built, for contributors. Paths are under
 `internal/` unless noted. What an operator does and sees is in
 [the guide](../guides/kueue-borrowing/) and
 [the quota limiter reference](../reference/quota-limiter.md#cohort-borrowing);
-the design, with the formulas, is the Kueue borrowing and limiter
-composition proposal (in #161; Part B and its observability).
+the design, with the formulas, is the
+[Kueue borrowing and limiter composition proposal](../proposals/kueue-borrowing-and-limiter-composition.md)
+(Part B and its observability).
 
 This page covers borrowing only. How the declared limiters are built and
 composed, the node view, and the scale-from-zero snapshot (Part A) are on
@@ -48,7 +49,7 @@ with their source path and the Kueue version they were copied from.
   (the per-namespace conditions, the managed check); `kueue/pending.go`
   (lender requests); `kueue/workloads.go` (the informer and
   `WorkloadOwnerUIDField`); `kueue/version.go` (`ControllerVersion`: version
-  and liveness, `TestedKueueVersions`).
+  and liveness); `kueue/kueue_constants.go` (`TestedKueueVersions`).
 - **Config:** `config/quota_limiter.go` (`ExternalCaps`, `BoundBy`, the
   `kueue:` block, `KueueBorrowSelected`).
 - **The quota inventory:** `engines/allocation/quota_inventory.go` (pools,
@@ -154,7 +155,7 @@ preempt for it: what a lender lends but nobody borrows is not reclaimable
 capacity, and with a node down an exemption sized by unused nominal ordered a
 pod that stayed Pending forever. The wake applies the same cap.
 
-Round-3 rules on that exemption (`Reclaim`, `borrow_nominal.go`):
+The rules on that exemption (`Reclaim`, `borrow_nominal.go`):
 
 - **Whole replicas only, with nothing of `PreemptAfter` left**
   (`Reclaim.exempt`). Growth Kueue admits before it preempts needs a hole, so
@@ -229,8 +230,9 @@ cohort to new borrowing on the raw signal, and keeps it closed for
 
 **Backoff.** `BorrowGovernor` keeps a cooldown per (model, cohort), started by
 a preemption (`MarkPreempted`) or a placement-timeout release. A repeat while
-backing off doubles it from `borrowCooldown`, up to four times (cap 40m at the
-default); one clean cooldown resets it. The configured value is published on
+backing off doubles it from `borrowCooldown`, up to four times
+(`maxBackoffLevel`) and never past `maxBackoff` (40m) unless `borrowCooldown`
+itself is longer (`backoffFor`); one clean cooldown resets it. The configured value is published on
 `wva_kueue_borrow_cooldown_seconds`. The cooldowns and the releases in flight
 persist under `borrowReleaseLedger`.
 

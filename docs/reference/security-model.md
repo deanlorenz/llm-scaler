@@ -185,6 +185,9 @@ cluster-wide. The differences that matter for review:
 | get, list | clusterqueues, cohorts, localqueues, resourceflavors | cluster | Kueue's queues and flavors |
 | get, list, watch | workloads | cluster | reaches **every namespace's** Kueue Workloads: their pod sets (full pod templates), priority and admission, not only the managed models'. Watched through an informer that holds them in memory, started on the first borrowing check. At this scope the read is part of `manager-role` and is held whether or not borrowing is counted |
 | get, list | **events** | **every namespace** | read for the cluster autoscaler's `TriggeredScaleUp` on a borrowed pod; the grant reaches every Event in the cluster, whose messages can name objects and carry error text |
+| get, list | resourcequotas | **every namespace** | the GPU bound Kueue borrowing checks in each managed namespace |
+| get, list, watch | **deployments**, replicasets, statefulsets | **every namespace** | scale targets, the owners of GPU pods for the Kueue managed check, and the `kueue-controller-manager` Deployment (Kueue's version and whether it runs) |
+| get | leases, by name: `c1f6bfd2.kueue.x-k8s.io` | **every namespace** | Kueue's leader-election Lease, whether Kueue runs. `resourceNames` narrows the name, not the namespace |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
 already covers them. Leases, the leader-election Events and the history and
@@ -203,8 +206,10 @@ binding and the `metrics-reader` repoint are added as above.
 | `make dashboard` (OpenShift only; **not** part of a default install) | ServiceAccount `wva-grafana-datasource` with a **third legacy, non-expiring** token Secret (`wva-grafana-datasource-token`); RoleBinding to `view` on the namespace; a Role with get, list, **create** on `metrics.k8s.io` pods (the Thanos tenancy port checks `create` because Grafana POSTs) | the Grafana datasource, in the namespace the dashboard is created in. Whoever reads Secrets there can query that namespace's metrics and `view` its objects |
 
 "Targeted" is discovered by label unless you set `WVA_LIMITER_TARGETS` — see
-[Multi-tenancy](#multi-tenancy). `make disable-limiter` leaves these
-grants in place.
+[Multi-tenancy](#multi-tenancy). `make disable-limiter` leaves the node,
+cluster-scoped Kueue (`kueue-reader`) and policy reads in place. With
+`WVA_LIMITER_TYPE=quota` or `all` it revokes the two Kueue reads that go with
+a quota: the Kueue controller read and the cluster-wide borrowing read.
 
 ## What it writes
 
@@ -403,7 +408,7 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 | Owning the controller's Deployment (tenant-owned shape) | image, args, env and therefore every bound; and the pod runs as an SA with cluster-wide node read, Kueue read and the EPP token | by design — use the [out-of-reach shape](../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach) where the bound must hold |
 | The controller's own `wva-scaling-policy-config`, in the tenant-owned shape | thresholds, tiers, per-model entries; **and the limiters**, wherever no policy namespace resolves (including a namespace-scoped Kubernetes install without the Namespace read, which `wva_policy_namespace_unverified` flags) | by design where no policy is published; on Kubernetes a cluster admin re-runs `make setup-prereqs` so a published one is seen |
 | A `wva-scaling-policy-config` in their own namespace, **in any shape** — out-of-reach included | read as a namespace-local map that replaces the controller's thresholds, tiers, per-model entries and weights for their models. It cannot set limiters or the optimizer | by design — the out-of-reach shape protects the budget, not the per-model tuning |
-| `weightClass` / `weight` on their models' entries | under a shared utilization-share budget, a model set to `critical` (weight 4 in the default classes) takes **4x** the headroom of a `standard` one, from the other models' share | by design — keep weights in admin-owned policy, and treat a tenant-written namespace-local entry as their claim, not yours |
+| `weightClass` / `weight` on their models' entries | under a shared utilization-share budget, a model set to `critical` (weight 4 in the default classes) takes **4x** the headroom of a `standard` one, but only from models planned in the **same group**. A model whose namespace has its own `wva-scaling-policy-config` is kept out of the cluster-wide group and planned only in its namespace's quota group, so a weight there reorders that tenant's own models. A weight in the controller's own ConfigMap applies in the cluster-wide group too | by design — keep weights in admin-owned policy; a tenant-written namespace-local weight moves only that tenant's budget |
 | `minReplicaCount` on their ScaledObjects | under a shared utilization-share budget, a replica floor is held first, so a higher floor takes from the other models' share | by design |
 | `maxReplicaCount`, or a second KEDA trigger | bypasses the limiter: the HPA takes the maximum across triggers | by design — a `ResourceQuota` is the bound that holds |
 | A LocalQueue pointing at any ClusterQueue | the controller grants their namespace that ClusterQueue's quota only when its `namespaceSelector` admits the namespace, with Kueue's semantics (none admits nothing, `{}` admits all); a Namespace whose labels cannot be read gets nothing from a selector-bearing queue | closed by the selector. An install whose Kueue reader lacks `get namespaces` (set up before it was added) withholds every selector-bearing queue until a cluster admin re-runs `make setup-prereqs` |
@@ -411,6 +416,19 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 | A Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` | `make enable-physical-limiter` treats it as a controller only if it runs as the controller ServiceAccount (`WVA_CONTROLLER_SA`) and has a `manager` container from a controller image repository (`WVA_CONTROLLER_IMAGE_REPOS`; a namespace named in `WVA_LIMITER_TARGETS` relaxes the image check). Anything else is `SKIPPED`, granted nothing, and listed as NOT bound under the banner. A verified one gets its ServiceAccount node read (and Kueue read), a `kubectl rollout restart` of that named Deployment when it must re-resolve its policy namespace (it could not read its Namespace, or started before the policy namespace existed), and `limiters` in the ConfigMap its policy resolves to, the `wva.llmd.ai/policy-namespace` label honoured | signals, not proof: any tenant can satisfy them. Where tenants are not trusted, run their controllers out of reach and name exactly those namespaces in `WVA_LIMITER_TARGETS` |
 | Reaching `:9090` | register or overwrite trigger metadata; read decisions | closed by the shipped NetworkPolicy, above, where it was applied and the network plugin enforces it. Scaler mutual TLS closes it on any network only with `--external-scaler-client-san` pinning KEDA's identity, and only where an admin owns the controller's Deployment: in the tenant-owned shape the tenant owns its args, and so the TLS flags |
 | A ScaledObject whose `scalerAddress` names another install's scaler | KEDA relays its calls, and that controller registers and sizes the workload | **open**: both controls above authenticate KEDA, not the tenant. No per-namespace authorization exists |
+
+**A shared Prometheus shows every tenant's series.** Every controller's
+metrics carry the model namespace (`exported_namespace`), model and variant
+names, budgets and refusal reasons. Anyone who can query that Prometheus
+reads them for every tenant. Where that matters, give each tenant its own
+Prometheus, or put a label-enforcing proxy in front of a shared one.
+
+**Budgets are per controller.** Each controller charges a quota only with
+what its own models hold. A `scope: cluster` quota published in a shared
+policy therefore lets N controllers take N times the figure, and a
+namespace-scoped controller under `gpu-inventory` without a cluster-wide Pod
+list sees only its own namespace's GPUs. A bound that must hold across
+tenants needs one controller for it, or a `ResourceQuota`.
 
 ### Kueue borrowing
 
@@ -479,7 +497,11 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
   the lender's. The priorities are read from the Workloads, which a tenant
   sets through its own priority classes: a tenant that raises its serving
   Workloads' priority above a lender's makes that lender's capacity
-  uncountable for itself, never the reverse.
+  uncountable for itself, never the reverse. A priority class is read at the
+  highest `spec.priority` any GPU Workload of that class carries, cluster-wide.
+  So a tenant that runs one high-priority Workload under a class other
+  tenants also use closes `LowerPriority` lending to their models too. It can
+  only deny borrowing, never open it.
 - **In a cohort shared between tenants**, give every lender that must get
   capacity back from serving `reclaimWithinCohort: Any`.
 

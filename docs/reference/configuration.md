@@ -339,9 +339,9 @@ admin (counted from `kubectl kustomize config/overlays/<scope>/<platform>`):
 | `cluster-scoped/openshift` | 4 | 5 | the same, plus `cluster-monitoring-view` |
 
 Each overlay also carries namespaced Roles in the controller's namespace:
-4 Roles and 4 RoleBindings for namespace-scoped (`manager`, `leader-election`,
-`controller-status`, `utilization-share-history`), 3 and 3 for cluster-scoped (the
-same without `manager`, which is a ClusterRole there).
+5 Roles and 5 RoleBindings for namespace-scoped (`manager`, `leader-election`,
+`controller-status`, `utilization-share-history`, `learned-state`), 4 and 4 for
+cluster-scoped (the same without `manager`, which is a ClusterRole there).
 
 A namespace admin can still own a namespace-scoped controller: a cluster admin
 creates the cluster-scoped half once with `make setup-prereqs`
@@ -541,7 +541,7 @@ Set on the quota entry's `kueue:` block in the scaling policy, beside
 | Key | What it does | Default |
 |---|---|---|
 | `placementTimeout` | A borrowed replica that stays unschedulable, or held at Kueue's admission gate, this long is released; a placed pod still loading its weights does not count. So is a queue's growth back into nominal it lent out that was placed without a node hole, timed from when it was ordered, and the model's cooldown (`borrowCooldown`) follows. The wait stretches up to three times while the cluster autoscaler reports `TriggeredScaleUp` on its pod. Also how long the utilization-share optimizer waits before it retries a receiver whose replica could not be placed. Unset, that wait is the timeout derived from the KEDA and pod settings, as before. | `5m` |
-| `borrowCooldown` | After a lender in a cohort waited for its capacity, nothing new is borrowed in the cohort for this long. After Kueue preempted one of a model's pods, or a borrowed unit of it was released at the placement timeout, the model borrows nothing new in that cohort for this long; a repeat during the backoff doubles it, up to four times (40m at the default), and one clean cooldown resets it. Published on `wva_kueue_borrow_cooldown_seconds`. | `10m` |
+| `borrowCooldown` | After a lender in a cohort waited for its capacity, nothing new is borrowed in the cohort for this long. After Kueue preempted one of a model's pods, or a borrowed unit of it was released at the placement timeout, the model borrows nothing new in that cohort for this long; a repeat during the backoff doubles it, up to four times and never past 40m (unless `borrowCooldown` itself is longer, then that), and one clean cooldown resets it. Published on `wva_kueue_borrow_cooldown_seconds`. | `10m` |
 | `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
 | `controllerNamespace` | Not a duration: the namespace of the `kueue-controller-manager` Deployment, whose image tag gives the Kueue version borrowing is checked against, and of its leader-election Lease, which tells whether Kueue runs (not renewed, or neither readable: borrowing freezes as `kueue-controller-down`). | `kueue-system` |
 | `assumeTestedVersion` | Not a duration: `true` counts a Kueue whose version cannot be read from its image tag as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down`. | `false` |

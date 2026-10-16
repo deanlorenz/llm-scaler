@@ -47,21 +47,21 @@ The entries use the schema below, inline under the saturation `default` entry's
 The quota limiter is one of several limiters in the resource-limiting pipeline.
 It is intentionally narrow:
 
-- It does **not** discover physical inventory (that is `TypeInventory`'s job).
+- It does **not** discover physical inventory (that is the `gpu-inventory`
+  limiter's job).
 - It does **not** make scaling decisions (that is the optimizer's job).
 - It does **not** compose itself with other limiters. Every declared limiter is
   built separately, and the optimizer intersects their constraints. See
   [Interaction with the physical limiter](#interaction-with-the-physical-limiter).
 
-A `QuotaInventory` instance is tied to exactly one scope. Deployments that need
-both cluster-wide and per-namespace caps configure two limiter entries; a
-decision must fit both.
+Each entry has exactly one scope. Deployments that need both cluster-wide and
+per-namespace caps configure two limiter entries; a decision must fit both.
 
 ## Configuration
 
-The limiter is declared via a ConfigMap parsed into `QuotaLimiterEntries`. The
-top-level `limiters` key holds a list of entries; each entry has a `scope` of
-either `cluster` or `namespace`.
+The limiter is declared in the scaling-policy ConfigMap. The `limiters` key
+holds a list of entries; each entry has a `scope` of either `cluster` or
+`namespace`.
 
 > **Entry `type:`.** Within a quota entry the `type:` field must be `"quota"`.
 > (The saturation `limiters:` list also accepts one `{type: gpu-inventory}`
@@ -145,6 +145,10 @@ When the allocator evaluates a request for namespace `N` and type `T` in
    - With no cluster bound, the scaling manager does not limit `N`. Without a
      `gpu-inventory` limiter, free GPUs are not checked: if the cluster is
      full, new pods stay `Pending`.
+   - The utilization-share optimizer does not share `N` unless a finite
+     cluster bound covers its type: a `scope: cluster` quota, or a
+     `gpu-inventory` limiter with `physicalGroups: true`
+     ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
    - The controller logs a `WARNING` when `N` has no GPU limit on some type,
      and when an `exclude` entry is not a valid namespace name (it never
      matches). See [Validation](#validation).
@@ -419,6 +423,11 @@ freeze never shrinks a running model.
 | The Kueue read is fresh: the last read succeeded and is under twice `refreshInterval` old. A Cohort list that fails for a reason other than Forbidden reads as stale too, and so does one namespace's ResourceQuota read failing (other than Forbidden) for up to five refresh intervals | `stale` |
 | The Kueue controller is up: its leader-election Lease's `renewTime` is under twice its `leaseDuration` old, or, with no Lease, the `kueue-controller-manager` Deployment has a ready replica. A Deployment or Lease never found, or Forbidden (no Role in the Kueue namespace), counts as down. Only Kueue's default Lease, `c1f6bfd2.kueue.x-k8s.io`, is read: a Kueue built with another leader-election ID always reads as down | `kueue-controller-down` |
 
+`kueue-controller-down` freezes **borrowing only**, and is checked only when
+some ClusterQueue is in a cohort. Growth within the guaranteed figure is still
+ordered while Kueue is down. Kueue's webhook may then refuse those pods, or
+leave them gated, so they start only once Kueue is back.
+
 **Counted, but 0 this cycle**: borrowing is on, and there is nothing to draw.
 
 | Reason | Meaning |
@@ -578,8 +587,9 @@ borrowing model itself only where a borrowed unit never placed:
 - **Backoff.** After Kueue preempts one of a model's pods, or a borrowed unit
   of it is released at the placement timeout, the model borrows nothing new
   in that cohort for `borrowCooldown`. A repeat during the backoff doubles it,
-  up to four times `borrowCooldown` (40 minutes at the default); one clean
-  cooldown resets it. A preemption is seen only while the preempted pod
+  up to four times `borrowCooldown` and never past 40 minutes (a
+  `borrowCooldown` longer than that is used as is); one clean cooldown resets
+  it. A preemption is seen only while the preempted pod
   (Kueue's `TerminationTarget` condition) or its Workload still exists, so
   give serving pods a `terminationGracePeriodSeconds` of at least one engine
   cycle; a pod gone between two cycles is missed.
@@ -608,7 +618,7 @@ change.
 | `countBorrowable` | `true` | `false` caps every namespace at nominal, as before borrowing was counted |
 | `borrowNamespaces` | empty (all) | a pilot: borrowing is counted only in the listed namespaces; every other namespace is capped at nominal, withheld as `not-selected`, and costs no eligibility read |
 | `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced; also growth back into lent-out nominal placed without a node hole, timed from its order. A release starts the model's cooldown |
-| `borrowCooldown` | `10m` | how long a cohort borrows nothing new after a lender waited, and a model after a preemption or a placement-timeout release; doubled on a repeat, up to four times. Published on `wva_kueue_borrow_cooldown_seconds` |
+| `borrowCooldown` | `10m` | how long a cohort borrows nothing new after a lender waited, and a model after a preemption or a placement-timeout release; doubled on a repeat, up to four times and at most 40m (or `borrowCooldown`, if longer). Published on `wva_kueue_borrow_cooldown_seconds` |
 | `lenderDebounce` | `60s` | how long a lender must read as waiting, over at least two fresh reads, before its wait is published and alerted on. New borrowing stops at the first sighting regardless |
 | `controllerNamespace` | `kueue-system` | where the `kueue-controller-manager` Deployment and its leader Lease are read, for the Kueue version and whether Kueue runs |
 | `assumeTestedVersion` | `false` | `true` counts a Kueue whose version cannot be read as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down` |
@@ -646,8 +656,9 @@ cross-check, `reason`), the applied figures and the withheld reasons; at most
 guaranteed. The same figures are metrics and the `limiterBudgets` status key
 ([Prometheus](prometheus.md#kueue-borrowing-metrics)). When replicas drop,
 start at [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing).
-The design, with the formulas, is the Kueue borrowing and limiter
-composition proposal (in #161); the internals are on
+The design, with the formulas, is the
+[Kueue borrowing and limiter composition proposal](../proposals/kueue-borrowing-and-limiter-composition.md);
+the internals are on
 [Kueue borrowing internals](../developer-guide/kueue-borrowing.md).
 
 #### RBAC
@@ -746,6 +757,11 @@ The policy entry is rejected for any of:
 - Negative quota values other than `-1`.
 - A quota value above 1,048,576.
 - Empty accelerator type or namespace key.
+- In a `kueue:` block: an empty resource name; a `borrowNamespaces` entry that
+  is not a namespace name, or is listed twice; a `controllerNamespace` that is
+  not a namespace name; a `refreshInterval`, `placementTimeout`,
+  `borrowCooldown` or `lenderDebounce` that is not a positive duration.
+- A `kueue:` block on a `gpu-inventory` entry.
 
 Reserved names: `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and
 `lender-cannot-reclaim` are what a held-back decision is reported under when
@@ -754,8 +770,6 @@ this release, with a warning: the log line `WARNING: Quota limiter entry has a
 reserved name`, a count in `wva_errors_total` under that `error_type`, and the
 `limiterWarnings` key of the controller status. A later release rejects it.
 Rename the entry ([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
-- In a `kueue:` block, an empty resource name or a `refreshInterval` that is not
-  a positive duration; a `kueue:` block on a `gpu-inventory` entry.
 
 A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
 **warning**: `exclude` wins, and the ConfigMap is still accepted.
@@ -867,11 +881,11 @@ limiter is charged. See
 [GPU capacity accounting](../concepts/gpu-capacity-accounting.md) for the two
 measures.
 
-This matters. A quota is an allowance for the scaling manager alone. Charged the
-physical figure, a namespace with a 4-GPU quota next to an unrelated 4-GPU
-training job would read as fully spent while the scaling manager had placed
-nothing, and every scale-up would be refused. Whether the hardware is full is the
-physical limiter's question.
+This matters. A static quota is an allowance for the scaling manager alone.
+Charged the physical figure, a namespace with a 4-GPU quota next to an
+unrelated 4-GPU training job would read as fully spent while the scaling
+manager had placed nothing, and every scale-up would be refused. Whether the
+hardware is full is the physical limiter's question.
 
 So a quota does **not** bound the cluster: it can hand out capacity unmanaged
 workloads already took. For both guarantees, compose a physical limiter and a
@@ -943,9 +957,14 @@ borrowing it takes, so the scaling manager assumes its own borrowers go first.
   `ResourceConstrained` event is raised for it. Find it with
   `grep 'Kueue reclaim: a model of this controller grows'` in the log.
 
-A cluster-scope quota bounds the whole cluster, one cap per listed type. A
-namespace-scope quota bounds **only the namespaces it lists**, each by its own
-caps; a namespace it does not cover is not charged against it. `-1` is
+A cluster-scope quota caps a type across every namespace **one controller**
+manages, one cap per listed type. Each controller charges it only with what
+its own models hold, so N controllers that read the same cluster-scope quota
+(a shared `wva-policy`, for example) together allow N times the figure. A
+namespace-scope quota bounds **only the namespaces it governs**: those it
+lists, and with a `default` key every other namespace it does not exclude.
+Each is bounded by its own caps; a namespace it does not cover is not charged
+against it. `-1` is
 unlimited; `0` is a real cap of nothing, which denies the type.
 
 ## How the bound is applied
@@ -990,8 +1009,8 @@ Every namespace being decided about is bounded, so a namespace carrying a quota
 but currently running zero replicas is still constrained (its `default`
 fall-through and `exclude` rules apply).
 A namespace with neither an explicit quota nor a `default` fall-through is a
-real **deny-all**: it is present in `NamespacePools` with no listed types, and
-the optimizer allocates it nothing.
+real **deny-all**: it is bounded with no type listed, and the optimizer
+allocates it nothing.
 
 Remaining boundaries:
 
@@ -1169,11 +1188,14 @@ Combination matrix — **limiter-path** Node API access:
 | quotas only | `true` | **No.** The inventory log is skipped; a startup log notes the suppression. |
 
 The periodic observation of cluster GPU usage honours this too: it runs only
-when a physical limiter is declared.
+when a physical limiter is declared, or when the
+[utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
+is on in a cluster-scoped install (it places a receiver's pods into the holes
+donors open, so it needs the nodes, quota or not).
 
-So a quota-only deployment runs no periodic observation and lists no nodes or
-pods for one. The gate is re-checked every tick, because the limiter set
-reloads live.
+So a quota-only deployment without the utilization share runs no periodic
+observation and lists no nodes or pods for one. The gate is re-checked every
+tick, because the limiter set and the optimizer reload live.
 
 > **One caveat on "no Node API access".** The gate covers the *timer*, not
 > on-demand reads. The scale-from-zero engine observes usage at the moment it
