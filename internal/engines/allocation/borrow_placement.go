@@ -288,7 +288,9 @@ type flavorUse struct {
 }
 
 // queueFlavor is the flavor Kueue admits ns's replicas of acc on within its
-// guaranteed figure (W5): the one flavor its OWN queues offer acc on (N2) --
+// guaranteed figure (W5): the one flavor its OWN queues offer acc on with a
+// nominal quota (N2; a flavor listed at nominal 0 only to borrow on is not
+// one, NEW-3) --
 // every chunk of its cohorts serving acc on one of those flavors naming the
 // same node labels and tolerations. A cohort's chunks are its members'
 // flavors together: per-team pools, a's flavor pinned to pool=a and b's to

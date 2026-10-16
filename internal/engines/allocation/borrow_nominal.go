@@ -105,11 +105,15 @@ func rowsOfType(rows []config.ExternalBorrow, accType string) []config.ExternalB
 	return matched
 }
 
-// rowFlavors is the flavors rows name, sorted, each once; nil when none.
+// rowFlavors is the flavors rows name with a nominal quota, sorted, each once;
+// nil when none. A row of nominal 0 is a flavor the queue lists only to borrow
+// on (a-cq offering fb at 0 to reach team b's pool): Kueue admits nothing of
+// the queue's own nominal there, so it is not a flavor its guaranteed
+// replicas land on (queueFlavor, NEW-3).
 func rowFlavors(rows []config.ExternalBorrow) []string {
 	var out []string
 	for _, r := range rows {
-		if r.Flavor != "" && !slices.Contains(out, r.Flavor) {
+		if r.Flavor != "" && r.Nominal > 0 && !slices.Contains(out, r.Flavor) {
 			out = append(out, r.Flavor)
 		}
 	}

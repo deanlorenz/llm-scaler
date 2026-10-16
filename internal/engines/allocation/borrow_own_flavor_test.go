@@ -75,6 +75,42 @@ func TestGuaranteedReplicaFitsItsOwnQueuesFlavor(t *testing.T) {
 	}
 }
 
+// Review NEW-3: a queue that lists a peer's flavor at nominal 0, only to
+// borrow on it, does not offer it to its own guaranteed replicas. a-cq lists
+// fa at 16 and fb at 0 (to borrow b's pool); b-cq lists fb at 16. a's pool=a
+// node is full and b's is free: a's guaranteed replica is refused, not fitted
+// on pool b, where Kueue never admits it within nominal. Both read paths --
+// counted (NamespaceBorrow) and read only (NominalFigures) -- name fa alone.
+func TestZeroNominalFlavorIsNotTheQueuesOwn(t *testing.T) {
+	entry := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"a": {"H100": -1}},
+		Kueue:           &config.KueueQuotaSource{Enabled: true}}
+	q := NewQuotaInventoryWithSource(entry, &fakeQuotaSource{})
+	rows := []config.ExternalBorrow{
+		{Queue: "a-cq", Cohort: "c", Flavor: "fa", Resource: "nvidia.com/gpu", Accelerator: "H100", Nominal: 16, Guaranteed: 16, WithinNominal: 16},
+		{Queue: "a-cq", Cohort: "c", Flavor: "fb", Resource: "nvidia.com/gpu", Accelerator: "H100", Nominal: 0, Guaranteed: 0, WithinNominal: 0},
+	}
+	b, ok := q.namespaceBorrow("a", "H100", 16, rows, nil)
+	if !ok || !slices.Equal(b.Flavors, []string{"fa"}) {
+		t.Fatalf("counted flavors %v (ok %v), want [fa]: fb is listed at nominal 0", b.Flavors, ok)
+	}
+	if got := rowFlavors(rowsOfType(rows, "H100")); !slices.Equal(got, []string{"fa"}) {
+		t.Fatalf("read-only flavors %v, want [fa]", got)
+	}
+	physical := physicalH100(16)
+	physical.Pools["H100"] = ResourcePool{Limit: 16, Used: 8}
+	o := NewGreedyByScoreOptimizer()
+	o.Nodes = NewNodeView(map[string]decision.NodeGPU{
+		"na": h100Node(8, map[string]string{"pool": "a"}),
+		"nb": h100Node(0, map[string]string{"pool": "b"}),
+	})
+	ds := o.Optimize(context.Background(), []ModelScalingRequest{borrowModel("a", "m", 8, 0, 1, nil)},
+		[]*ResourceConstraints{physical, twoPoolCohort(b.Flavors)})
+	if got := addedGPUs(ds)["m"]; got != 0 {
+		t.Fatalf("a grew %d GPUs on pool b's node, want 0: Kueue admits a's guaranteed replica on fa (pool=a) only", got)
+	}
+}
+
 // The flavors reach NamespaceBorrow from the namespace's own rows.
 func TestNamespaceBorrowCarriesItsRowsFlavors(t *testing.T) {
 	entry := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
