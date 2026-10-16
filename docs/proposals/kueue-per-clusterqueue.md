@@ -203,9 +203,16 @@ the ordering `SharedPools` uses across models. Namespace figures
 (`NamespacePools`) are still built, as each namespace's share, for reporting
 and for the namespace ResourceQuota bound, which stays per namespace.
 
-Unbound variants keep today's per-namespace min, computed as now. That never
-over-orders, and unlike holding them at zero it does not block scale from zero
-for installs that rely on a namespace default.
+Unbound variants keep a per-namespace min, but taken after bound spending:
+the min, over the namespace's GPU queues, of what each queue still has once
+its bound variants' usage and this pass's bound orders are debited. Today's
+min computed as now would over-order next to bound variants: with LocalQueues
+on CQ-S (16) and CQ-B (8), a bound variant spends 16 on CQ-S and an unbound
+one still sees 8, so 24 are ordered, and if the unbound replica lands on
+CQ-S it finds nothing left. Debited, the unbound variant sees min(0, 8) = 0. With that, the fallback never
+over-orders, and unlike holding unbound variants at zero it does not block
+scale from zero for installs that rely on a namespace default. A test covers
+the CQ-S/CQ-B case.
 
 ### P/D roles and the share
 
@@ -307,7 +314,8 @@ is taken.
   co-resource, `namespaceSelector` excluding; LeaderWorkerSet with and
   without a leader template; a rollout with pods on two queues.
 - One test per motivation scenario, in 8-GPU units, asserting ordered
-  replicas: CQ-S 16 + CQ-B 8 serves two; prefill on CQ-P and decode on CQ-D
+  replicas: CQ-S 16 + CQ-B 8 serves two; a bound variant spending CQ-S
+  leaves an unbound one in the namespace 0; prefill on CQ-P and decode on CQ-D
   each sized on their own queue; a share transfer from CQ-D to CQ-P bounded by
   CQ-P; shared CQ-T orders one between A and B, and the second reports
   `queue-spent` without naming A; 64-CPU queue fits one 48-CPU replica.

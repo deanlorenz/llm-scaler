@@ -190,9 +190,11 @@ ordered -> created -> scheduled -> visible        (removed)
 - **ordered**: the decision was made. Holds node holes and pool draws.
 - **created**: the pods exist (`Current` rose). Still holds both: a gated or
   Pending pod holds no node in the snapshot.
-- **unplaced**: a pod is Unschedulable, or gated past a cycle. Holds its pool
-  draws, releases its node holes (today's `Unplaced` rule), and starts no new
-  hold for a target that does not grow the variant.
+- **unplaced**: a pod is Unschedulable, or gated past a cycle. Starts no new
+  hold for a target that does not grow the variant (today's `Unplaced` rule);
+  holes and draws it already holds keep holding until their clocks run out.
+  Releasing them early changes decisions and belongs to the one-clock
+  follow-up.
 - **scheduled**: every pod holds a node. Node holes go, on the snapshot-order
   rule: only for views whose snapshot was taken after the rise was seen. Pool
   draws stay, because the Kueue read may predate the admission.
@@ -241,10 +243,11 @@ returns `ErrStale` and the producer rebuilds its view. This replaces
 - A wake that read its view before the steady pass claimed gets `ErrStale`
   and re-decides on the fresh view: it cannot take the node the pass chose
   (WN5).
-- One variant has one claim per producer kind it is decided by. A wake and a
-  steady pass on the same variant do not stack: the steady pass's end-of-cycle
-  claim replaces the wake's for a variant the cycle covers, which is today's
-  `Commit` rule, now explicit rather than a side effect.
+- The steady pass's end-of-cycle commit is exempt from the `ErrStale`
+  check. For every variant the cycle covered it replaces whatever claim stands,
+  a wake's made since included, so a wake and a steady pass on one variant do
+  not stack. That is today's `Commit` rule, now explicit rather than a side
+  effect.
 
 ### Share promises
 
