@@ -103,6 +103,13 @@ type stashedThroughput struct {
 	heldTick time.Time
 }
 
+// heldMark is how long a put-aside throughput window had held the floor when
+// a rollback took it back, and when the window was last written then.
+type heldMark struct {
+	heldFor time.Duration
+	written time.Time
+}
+
 // k2WindowUnderLocked checks the k2 window of key against args (above): a
 // window written under other arguments is put aside and its figure becomes
 // the key's previous figure; one put aside under args is put back. Callers
@@ -150,11 +157,15 @@ func (a *SaturationAnalyzer) k2WindowUnderLocked(key, args string) {
 // previous figure in place of any older one, and restarts a running bound's
 // clock: the arguments changed. The restart is completed by the bound's next
 // serving cycle, which arms it afresh (rearmPending), so the time to then --
-// the rollout -- is not read as a gap. Callers hold a.mu.
+// the rollout -- is not read as a gap. The window the bound's own figure
+// already came from, not written since (lowerBound.figureWritten), is not a
+// newer figure, and leaves the clock where it stands. Callers hold a.mu.
 func (a *SaturationAnalyzer) notePreviousFigureLocked(key string, ra *capacity.RollingAverage) {
 	now := a.now()
 	lb := a.lowerBounds[key]
-	if lb != nil && lb.armed {
+	written := ra.LastWritten()
+	same := lb != nil && lb.armed && lb.own && !lb.figureWritten.IsZero() && written.Equal(lb.figureWritten)
+	if lb != nil && lb.armed && !same {
 		lb.since, lb.tick, lb.seen = now, now, now
 		lb.rearmPending = true
 	}
@@ -170,6 +181,7 @@ func (a *SaturationAnalyzer) notePreviousFigureLocked(key string, ra *capacity.R
 		a.lowerBounds[key] = lb
 	}
 	lb.prior, lb.priorSince, lb.priorAge, lb.priorUsed, lb.seen = v, now, ra.WriteAge(), now, now
+	lb.figureWritten = written
 }
 
 // throughputWindowUnderLocked checks the throughput window of key against
@@ -191,9 +203,17 @@ func (a *SaturationAnalyzer) throughputWindowUnderLocked(key, args string) {
 		return
 	default:
 		if !strings.HasPrefix(tag, legacyArgsPrefix) {
-			a.throughputStash[stashKey(key, tag)] = stashedThroughput{
+			st := stashedThroughput{
 				window: ra, sampledAt: a.throughputSampledAt[key], lastRead: a.throughputLastRead[key],
 			}
+			// The same window, not written since a rollback took it back,
+			// keeps the hold it had already given: a fresh one on every
+			// undo and redo held the fleet on the same service rate again.
+			if m, ok := a.throughputHeld[stashKey(key, tag)]; ok && m.written.Equal(ra.LastWritten()) {
+				st.heldFor = m.heldFor
+			}
+			delete(a.throughputHeld, stashKey(key, tag))
+			a.throughputStash[stashKey(key, tag)] = st
 		}
 		delete(a.saturatedThroughput, key)
 		delete(a.throughputSampledAt, key)
@@ -202,6 +222,9 @@ func (a *SaturationAnalyzer) throughputWindowUnderLocked(key, args string) {
 	}
 	if back, ok := a.throughputStash[stashKey(key, args)]; ok {
 		delete(a.throughputStash, stashKey(key, args))
+		if back.heldFor > 0 {
+			a.throughputHeld[stashKey(key, args)] = heldMark{heldFor: back.heldFor, written: back.window.LastWritten()}
+		}
 		a.saturatedThroughput[key] = back.window
 		a.throughputWindowArgs[key] = args
 		if !back.sampledAt.IsZero() {

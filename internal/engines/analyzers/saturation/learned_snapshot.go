@@ -189,6 +189,9 @@ type LowerBoundSnapshot struct {
 	PriorSince      time.Time `json:"priorSince,omitzero"`
 	PriorAgeSeconds float64   `json:"priorAgeSeconds,omitempty"`
 	PriorUsed       time.Time `json:"priorUsed,omitzero"`
+	// FigureWritten is lowerBound.figureWritten: kept, so a rollback and a
+	// re-roll across a restart do not re-arm the same figure either.
+	FigureWritten time.Time `json:"figureWritten,omitzero"`
 	// RearmPending is lowerBound.rearmPending: kept, so a restart between a
 	// change of arguments and the first serving cycle after it does not cost
 	// the new arguments part of their hold.
@@ -201,7 +204,7 @@ func (lb *lowerBound) snapshot() LowerBoundSnapshot {
 		Donor: lb.donor, Own: lb.own, DonorK2: lb.donorK2, Args: lb.args,
 		ArgsVersion: lb.argsVersion, Offered: lb.offered,
 		Prior: lb.prior, PriorSince: lb.priorSince, PriorAgeSeconds: lb.priorAge.Seconds(),
-		PriorUsed: lb.priorUsed, RearmPending: lb.rearmPending,
+		PriorUsed: lb.priorUsed, RearmPending: lb.rearmPending, FigureWritten: lb.figureWritten,
 	}
 }
 
@@ -1296,7 +1299,7 @@ func (a *SaturationAnalyzer) installLowerBoundLocked(k string, s LowerBoundSnaps
 	lb := &lowerBound{
 		armed: s.Armed && !since.IsZero(), since: since, tick: tick, seen: seen,
 		donor: s.Donor, own: s.Own, donorK2: s.DonorK2, args: s.Args, argsVersion: s.ArgsVersion,
-		offered: max(s.Offered, 0), rearmPending: s.RearmPending && s.Armed,
+		offered: max(s.Offered, 0), rearmPending: s.RearmPending && s.Armed, figureWritten: s.FigureWritten,
 	}
 	if s.Prior > 0 && !priorSince.IsZero() {
 		lb.prior, lb.priorSince, lb.priorUsed = s.Prior, priorSince, priorUsed

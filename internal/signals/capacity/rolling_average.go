@@ -341,3 +341,9 @@ func (r *RollingAverage) WriteGapExceeds(gap time.Duration) bool {
 func (r *RollingAverage) WriteAge() time.Duration {
 	return time.Since(r.lastWritten)
 }
+
+// LastWritten is when a value was last put in: the same window, not written
+// since, keeps the same LastWritten wherever it is moved.
+func (r *RollingAverage) LastWritten() time.Time {
+	return r.lastWritten
+}

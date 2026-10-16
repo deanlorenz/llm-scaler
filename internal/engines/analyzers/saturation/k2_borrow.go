@@ -170,6 +170,14 @@ type lowerBound struct {
 	// priorUsed is when the previous figure was last offered to a decision:
 	// it ages on it, as the window it stands in for ages on its last read.
 	priorUsed time.Time
+	// figureWritten is when the window the variant's own previous figure
+	// came from was last written, kept after the figure is cleared: a
+	// rollback puts that window back as the variant's own, and a re-roll
+	// sets the same window aside again. Not written since, it is the figure
+	// the bound already ran on, not a newer one, and does not restart it
+	// (notePreviousFigureLocked) -- each undo and redo otherwise re-armed a
+	// spent figure at full strength on no new measurement.
+	figureWritten time.Time
 	// rearmPending says a newer previous figure replaced the one the bound
 	// ran on, or the arguments changed under a running bound
 	// (notePreviousFigureLocked): its next serving cycle arms it afresh,
