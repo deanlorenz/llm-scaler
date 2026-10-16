@@ -433,6 +433,10 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 		// is nil (unbounded) and a namespace's allowance is what runs out.
 		if !anyBudgetLeft(active, available, availableByNS, bs) {
 			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
+			// The models still asking never reach their pick, which is what
+			// marks a variant the budget locked out: mark them here, or the
+			// model the last GPUs did not reach is held back in silence.
+			markBudgetExhausted(active)
 			break
 		}
 
@@ -752,6 +756,42 @@ func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS 
 		}
 	}
 	return false
+}
+
+// markBudgetExhausted marks, for each model in active, every variant that would
+// have grown had any budget been left: a variant serving a role that still has
+// demand, short of its own MaxReplicas ceiling. The pick marks these itself
+// when it runs (fairShareRolePickOn's gpuBlocked); the fair-share loop stops
+// before it runs once no model has budget left, so the models still asking
+// must be marked here. A variant an earlier cut already marked keeps that
+// cause. applyGPULimitAttribution then names the binding limiter
+// (bindingProvider).
+func markBudgetExhausted(active []*modelWork) {
+	for _, w := range active {
+		if w.e == nil {
+			continue
+		}
+		_, ps := initRoleState(w.e)
+		stateMap := buildStateMap(w.req.VariantStates)
+		for _, role := range w.roles {
+			if ps[role] <= 0 {
+				continue
+			}
+			for _, vc := range variantsForRole(w.records, role) {
+				if vc.PerReplicaCapacity <= 0 {
+					continue
+				}
+				if _, marked := w.limited[vc.VariantName]; marked {
+					continue
+				}
+				st := stateMap[vc.VariantName]
+				if st.MaxReplicas != nil && *st.MaxReplicas > 0 && w.targets[vc.VariantName] >= *st.MaxReplicas {
+					continue
+				}
+				w.limited.mark(vc.VariantName)
+			}
+		}
+	}
 }
 
 // stateVariants is the names of a request's variants, as its states list them.

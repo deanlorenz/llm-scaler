@@ -87,7 +87,7 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 		fresh := reclaimFor(constraints, ns, acc)
 		s.reclaim = Reclaim{After: fresh.After, Kept: fresh.Kept}
 		if k, ok := accelerator.FindKey(reclaim, acc); ok {
-			s.reclaim.GPUs = reclaim[k].GPUs
+			s.reclaim.GPUs, s.reclaim.needsHole = reclaim[k].GPUs, reclaim[k].needsHole
 		}
 		if k, ok := accelerator.FindKey(prior, acc); ok {
 			s.used += prior[k]

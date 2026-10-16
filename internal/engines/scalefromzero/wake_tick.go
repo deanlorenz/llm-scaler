@@ -99,6 +99,15 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 		place.nodes = e.tickNodeViewFor(ctx, place.constraints)
 	}
 	place.reclaimable = e.reclaimableLeft(group.namespace, place.reclaimable)
+	if allocation.DefaultBorrowCooldowns.CoolingDown(group.namespace, group.modelID, time.Now()) {
+		// The governor's safety net released a replica of this model that
+		// was ordered without a node hole and never placed, and its cooldown
+		// runs: the wake needs a real hole until it ends, as the steady-state
+		// pass's growth does (GreedyByScoreOptimizer.ReclaimBlocked). Without
+		// it the released wake was woken again at once, and Kueue preempted a
+		// peer for it every placement timeout (AR1).
+		place.reclaimable = allocation.RequireHoles(place.reclaimable)
+	}
 	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, place)
 	if len(selected) > 0 {
 		e.recordWake(ctx, group, place, selected)
@@ -107,20 +116,35 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 }
 
 // admitInFlight holds each woken replica's node hole in the in-flight ledger
-// until its pods hold a node, on its queue's flavor when flavorOf names one.
+// until its pods hold a node, on its queue's flavor when flavorOf names one --
+// then for the borrowing placement timeout when that is longer than the
+// ledger's TTL, as the steady-state engine holds a replica on a flavor.
 // Caller holds wakeMu.
 func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf func(string) *kueue.FlavorPlacement) {
 	now := time.Now()
+	var placementTimeout time.Duration
+	if e.config != nil {
+		placementTimeout = e.config.KueueBorrowTimings().PlacementTimeout
+	}
 	for _, c := range selected {
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
 			continue
 		}
-		var placed func() (int, bool)
+		var placed func() (allocation.Placed, bool)
 		if cl, acc := e.client, c.target; cl != nil && acc != nil {
-			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), cl, namespace, acc) }
+			placed = func() (allocation.Placed, bool) {
+				whole, partial, ok := variantmeta.PlacedGroups(context.Background(), cl, namespace, acc)
+				return allocation.Placed{Whole: whole, Partial: partial}, ok
+			}
 		}
 		key := namespace + "/" + c.VariantName
-		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)
+		shape := shapeOf(namespace, c, flavorOf)
+		var ttl time.Duration
+		if shape.Flavor != nil {
+			ttl = placementTimeout
+		}
+		allocation.DefaultInFlight.Commit(nil, []allocation.InFlightAdmission{{Key: key, Shape: shape, Want: 1,
+			Placed: placed, TTL: ttl}}, now)
 	}
 }
 

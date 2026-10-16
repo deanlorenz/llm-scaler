@@ -730,6 +730,15 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		allocation.ReservePromised(g.Nodes, promised)
 	}
 	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
+	if e.cycleFitted {
+		// The nodes the pass chose are held from a wake at once, not only
+		// once the cycle's targets are final (WN5). Its borrowed placements
+		// are on the flavors it placed them on.
+		if e.borrowing.inFlight != nil {
+			e.borrowing.passFlavors = g.PlacedFlavors()
+		}
+		e.admitPassInFlight(requests, decisions, scaleTargets, time.Now())
+	}
 	e.reportQuotaAloneAllocation(ctx, optimizer, requests, allocation.WithholdPromised(constraints, promised), decisions)
 	// The share plans on what the pass left for the models it does not plan,
 	// and plans its own models afresh: it overrides their targets, so what the

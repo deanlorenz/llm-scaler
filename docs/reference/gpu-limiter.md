@@ -278,6 +278,11 @@ cluster-wide, or drop `gpu-inventory` and bound with a quota limiter alone (a
 quota declared beside `gpu-inventory` leaves the physical limiter reading this
 count). Under quota limiters alone, or none, the undercount bounds nothing: the gauge stays 0 and the log says so once at info.
 
+The same denied list hides other namespaces' LeaderWorkerSet groups. A topology
+domain where only another namespace's group runs then looks free to an
+exclusive-topology LeaderWorkerSet, and its new group can be ordered there and
+stay Pending.
+
 ### A replica must fit one node
 
 The pool counts free GPUs per accelerator; a replica also needs its GPUs on one
@@ -299,11 +304,15 @@ the scaling manager asks for must also fit a node:
   two models never both count on one hole.
 - Each replica asked for keeps its hole after the cycle, from every later
   decision of the steady-state and scale-from-zero engines alike, until its
-  pods hold a node or **5 minutes** pass, whichever is first. This is the
+  pods hold a node or **5 minutes** pass, whichever is first (for a replica
+  on a Kueue flavor, the borrowing `placementTimeout` when that is longer).
+  This is the
   in-flight hold: a new pod holds nothing on a node until it is scheduled,
   which takes seconds, or minutes with an image pull or a preemption, and
   without the hold the next decision saw the hole free again. Two cold models
-  woke into one free 8-GPU node that way. Five minutes is about how long
+  woke into one free 8-GPU node that way. The hold starts as soon as the
+  steady-state pass picks the node, not when its cycle ends, and shrinks if
+  the rest of the cycle lowers the target. Five minutes is about how long
   placement takes; a pod still Pending after that waits for something else (a
   taint, an affinity, CPU or memory on the node), and the hole is released.
 - A scale-from-zero wake is checked the same way. Within one decision tick a
@@ -320,7 +329,13 @@ the scaling manager asks for must also fit a node:
 - A node with a `NoSchedule` or `NoExecute` taint holds a replica only if its
   pod template tolerates the taint. A LeaderWorkerSet with an exclusive
   topology (`leaderworkerset.sigs.k8s.io/exclusive-topology`) places all pods
-  of a replica in one domain of that label.
+  of a replica in one domain of that label, and a domain holds one replica: a
+  domain where any LeaderWorkerSet group's pod already runs, or where another
+  replica was just placed or is held, is skipped. Free GPUs left in such a
+  domain are not counted for a new group.
+- A LeaderWorkerSet group whose leader holds a node while its workers do
+  not (or do not exist yet) keeps holes for those workers only, in the
+  leader's domain, until the in-flight hold ends.
 
 What holds a node: every pod scheduled to it that has not finished, and a
 Pending pod the scheduler has nominated it for (after preempting pods there).
@@ -329,18 +344,27 @@ keeps its hole for it.
 
 Limits:
 
-- GPUs only. CPU, memory and node affinity beyond the accelerator are not
-  checked; a node counts when it carries the replica's accelerator, is
-  schedulable (not cordoned, Ready, not being removed by an autoscaler), and
-  its taints are tolerated. A LeaderWorkerSet's workers are judged by its
-  leader's tolerations.
+- GPUs only. CPU and memory are not checked; a node counts when it carries
+  the replica's accelerator, is schedulable (not cordoned, Ready, not being
+  removed by an autoscaler), its taints are tolerated, and its labels match
+  the pod templates' `nodeSelector` and required node affinity. That holds for
+  growth, wakes and in-flight holds alike. A LeaderWorkerSet's leader pod is
+  judged by the leader template's `nodeSelector` and affinity, its workers by
+  the worker template's. When the pod layout is unknown, so the leader cannot
+  be told from a worker, neither template's is judged. A LeaderWorkerSet's
+  workers are judged by its leader's tolerations. A node affinity term's
+  `matchFields` (which name nodes, not labels) is not judged: a term with
+  only `matchFields` admits every node, so such a replica can be ordered onto
+  a node it will not schedule to.
 - A replica whose pod layout is unknown and larger than any node (a
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the
   family, though only one of its products may have budget left.
 - The utilization share sizes its moves with its own node picture: its holes
   are net of what today's optimizer placed for other models and of the
-  in-flight holds, but the share does not read taints.
+  in-flight holds, and it counts a node as node fit does (accelerator by
+  product or family, taints the receivers tolerate). It does not read the
+  templates' `nodeSelector` or node affinity.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.

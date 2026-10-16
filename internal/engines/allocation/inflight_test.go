@@ -53,7 +53,7 @@ func TestALandedReplicaIsReleasedOnANewerSnapshot(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	placed, ok := 0, true
 	l.Admit("ns/m", ReplicaShape{Variant: "ns/m", Accelerator: famHBM3, GPUs: 8}, 2, 0,
-		func() (int, bool) { return placed, ok }, t0)
+		func() (Placed, bool) { return Placed{Whole: placed}, ok }, t0)
 	held := func(snapshotAt, now time.Time) int {
 		v := newNodeViewAt(h100Nodes(8, 8), snapshotAt)
 		l.holdOn(v, now)

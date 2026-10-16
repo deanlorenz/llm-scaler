@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
@@ -186,15 +185,6 @@ var _ = Describe("Kueue borrowing, stage 2", func() {
 		Expect(out[0].SharedPools[0].Free).To(Equal(8), "the governed gated pod is one of the pending Workloads: once")
 		out = DeductUnreserved([]*ResourceConstraints{q}, nil, map[string]map[string]int{"b": {"": 12}})
 		Expect(out[0].SharedPools[0].Free).To(Equal(4))
-	})
-
-	// B11: a never-read entry is reported as an unobserved skipped provider,
-	// and stays in the decision.
-	It("reports a never-read Kueue entry as skipped, unobserved", func() {
-		c := &ResourceConstraints{ProviderName: "tenant-quota", KueueNeverRead: true}
-		Expect(NeverReadSkips([]*ResourceConstraints{c, {ProviderName: "gpu"}})).To(ConsistOf(
-			HaveField("Cause", constants.ProviderSkipUnobserved)))
-		Expect(NeverReadSkips([]*ResourceConstraints{{ProviderName: "gpu"}})).To(BeEmpty())
 	})
 
 	// One reason per namespace (B1 table order): a frozen namespace shows the

@@ -36,6 +36,13 @@ func TestPodPlacements(t *testing.T) {
 		t.Errorf("an LWS whose worker template differs has placements %+v, want leader then worker", got)
 	}
 
+	// An unconstrained leader keeps its place: the worker's entry is second.
+	lws.Spec.LeaderWorkerTemplate.LeaderTemplate = &corev1.PodTemplateSpec{}
+	got = podPlacements(scaletarget.NewLWSAccessor(lws))
+	if len(got) != 2 || len(got[0].NodeSelector) != 0 || got[1].NodeSelector["zone"] != "z1" {
+		t.Errorf("an LWS with an unconstrained leader has placements %+v, want a zero leader then the worker", got)
+	}
+
 	lws.Spec.LeaderWorkerTemplate.LeaderTemplate = nil
 	if got = podPlacements(scaletarget.NewLWSAccessor(lws)); len(got) != 1 {
 		t.Errorf("an LWS without a leader template has placements %+v, want the worker's once", got)

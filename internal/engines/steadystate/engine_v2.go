@@ -1627,6 +1627,14 @@ func logScalingDecisions(
 		// with demand still climbing means raise maxReplicas, which is a
 		// different remedy from adding GPUs.
 		AtMax bool `json:"atMax,omitempty"`
+		// LimitedBy names what held a scale-up back this cycle -- a limiter
+		// entry, node-fit, or a borrowing rule -- as the ResourceConstrained
+		// Event and the limiter_name label of wva_decisions_limited_total
+		// name it. Absent when nothing did.
+		LimitedBy string `json:"limitedBy,omitempty"`
+		// LimitedByAlso names the limiters tied with LimitedBy: their pools
+		// left exactly as little.
+		LimitedByAlso []string `json:"limitedByAlso,omitempty"`
 	}
 
 	// maxReplicas per variant, from the request the optimizer was given. The
@@ -1652,13 +1660,17 @@ func logScalingDecisions(
 		if m, ok := maxByVariant[k][d.VariantName]; ok {
 			atMax = d.TargetReplicas >= m
 		}
-		grouped[k] = append(grouped[k], decisionEntry{
+		entry := decisionEntry{
 			Name:   d.VariantName,
 			Curr:   d.CurrentReplicas,
 			Tgt:    d.TargetReplicas,
 			Action: string(d.Action),
 			AtMax:  atMax,
-		})
+		}
+		if d.WasLimited {
+			entry.LimitedBy, entry.LimitedByAlso = d.LimitedBy, d.LimitedByAlso
+		}
+		grouped[k] = append(grouped[k], entry)
 		metrics.SetVariantAtMaxReplicas(d.Namespace, d.VariantName, atMax)
 	}
 

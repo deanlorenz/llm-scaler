@@ -15,6 +15,48 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
+// ReservedLimiterNames are the names that what held a decision back is
+// reported under -- the limiter_name label of wva_decisions_limited_total,
+// the ResourceConstrained Event and limitedBy in the scaling-decision line --
+// when it is not a quota entry: the physical limiter (whatever its entry is
+// named, it is reported as gpu-limiter), node fit, and the two Kueue
+// borrowing rules. A quota entry is reported under its own name, so one named
+// like these could not be told apart from them. The allocation package holds
+// the constants these mirror, and a test keeps the two in step.
+//
+// In this release such an entry is accepted with a warning
+// (ReservedLimiterNameWarnings, and Validate's warnings): rejecting it would
+// drop the "default" entry with every limiter in it, and a controller
+// starting on such a ConfigMap would refuse to start, stalling an upgrade. A
+// later release rejects it.
+var ReservedLimiterNames = []string{
+	"gpu-limiter",
+	"node-fit",
+	"pd-pair-borrows-whole",
+	"lender-cannot-reclaim",
+}
+
+// reservedNameWarning is the warning for a quota entry, at where, named name,
+// one of ReservedLimiterNames.
+func reservedNameWarning(where, name string) string {
+	return fmt.Sprintf("%s: quota entry name %q is reserved: decisions held back by something other than a quota entry "+
+		"are reported under it (reserved: %s). The entry applies as written in this release and is rejected in a later "+
+		"one; rename it", where, name, strings.Join(ReservedLimiterNames, ", "))
+}
+
+// ReservedLimiterNameWarnings returns one warning for each quota entry of a
+// limiters: list named one of ReservedLimiterNames, naming it by its index
+// in the list. Empty when none is.
+func ReservedLimiterNameWarnings(limiters []QuotaLimiterConfig) []string {
+	var out []string
+	for i, l := range limiters {
+		if l.Type == string(LimiterTypeQuota) && slices.Contains(ReservedLimiterNames, l.Name) {
+			out = append(out, reservedNameWarning(fmt.Sprintf("limiters[%d]", i), l.Name))
+		}
+	}
+	return out
+}
+
 // QuotaLimiterReservedNamespaceKey is the reserved key in the namespace-scoped
 // quotas map that matches any namespace not explicitly listed. A real namespace
 // named "default" cannot be configured directly via this key — list it in
@@ -772,7 +814,8 @@ type QuotaLimiterEntries struct {
 // is easy to locate.
 //
 // Validation rules (all from issue #1002):
-//   - Name is non-empty and unique across entries.
+//   - Name is non-empty and unique across entries. One of
+//     ReservedLimiterNames is a warning, not an error, in this release.
 //   - Type == "quota" (other limiter types may be added later).
 //   - Scope is one of the two QuotaScope values.
 //   - Per-type quota values are >= QuotaUnlimited (only -1 is allowed as negative).
@@ -799,6 +842,11 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		if prev, ok := seenNames[entry.Name]; ok {
 			errs = append(errs, fmt.Errorf("entry[%d]: duplicate limiter name %q (first seen at entry[%d])", i, entry.Name, prev))
 			continue
+		}
+		if slices.Contains(ReservedLimiterNames, entry.Name) {
+			// A warning, not an error, for this release: see
+			// ReservedLimiterNames.
+			warnings = append(warnings, reservedNameWarning(fmt.Sprintf("entry[%d]", i), entry.Name))
 		}
 		seenNames[entry.Name] = i
 

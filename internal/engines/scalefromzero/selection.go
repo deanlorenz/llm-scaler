@@ -51,6 +51,10 @@ type Candidate struct {
 	// exclusive-topology LeaderWorkerSet): which nodes node fit may place it on.
 	Tolerations []corev1.Toleration
 	DomainKey   string
+	// Placements is its pod templates' nodeSelector and required node
+	// affinity (variantmeta.PodPlacements): a node they exclude holds none
+	// of its pods.
+	Placements []domain.PodPlacement
 	// Cost is the variant's declared cost, used to rank equally-feasible options.
 	Cost float64
 	// target is the variant's scale target, read to count its placed pods for
@@ -86,8 +90,8 @@ const (
 	// lent part of its nominal quota to a peer it cannot reclaim from (its
 	// reclaimWithinCohort Never): the wake was checked against its guaranteed
 	// figure plus the cohort's free pool, not its whole nominal, so it does not
-	// wake into a pod Kueue would gate (B10). The same reason as
-	// nominal-lent-out on wva_model_scaling_blocked.
+	// wake into a pod Kueue would gate (B10). Reported as
+	// wake-nominal-lent-out on wva_model_scaling_blocked.
 	OutcomeNominalLentOut SelectionOutcome = "nominal-lent-out"
 	// OutcomePrefillRequired means a decode variant would fit, but no prefill
 	// could be placed alongside it and the policy requires one.
@@ -293,12 +297,13 @@ func replicaShapes(namespace string, set []Candidate, flavorOf func(string) *kue
 	return out
 }
 
-// shapeOf is one replica of c as the node view fits it: on its queue's flavor
-// when flavorOf names one (W5), Kueue admitting every pod of a managed
-// namespace on it, within nominal too.
+// shapeOf is one replica of c as the node view fits it: with its templates'
+// placement (WN3), and on its queue's flavor when flavorOf names one (W5),
+// Kueue admitting every pod of a managed namespace on it, within nominal too.
 func shapeOf(namespace string, c Candidate, flavorOf func(string) *kueue.FlavorPlacement) allocation.ReplicaShape {
 	s := allocation.ReplicaShape{Variant: namespace + "/" + c.VariantName, Accelerator: c.Accelerator,
-		PodGPUs: c.PodGPUs, GPUs: max(c.GPUsPerReplica, 1), Tolerations: c.Tolerations, DomainKey: c.DomainKey}
+		PodGPUs: c.PodGPUs, GPUs: max(c.GPUsPerReplica, 1), Tolerations: c.Tolerations, DomainKey: c.DomainKey,
+		Placements: c.Placements}
 	if flavorOf != nil {
 		s.Flavor = flavorOf(c.Accelerator)
 	}

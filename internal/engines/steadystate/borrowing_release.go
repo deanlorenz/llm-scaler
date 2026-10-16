@@ -72,6 +72,9 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 		NoHole: allocation.NoHoleOf(st.inFlight.Unreserved(now).InFlight),
 	}
 	st.governor.Observe(st.cycle)
+	// The wake reads the model cooldowns before it orders a replica without a
+	// node hole (AR1).
+	allocation.DefaultBorrowCooldowns.Publish(st.governor)
 	return allocation.BlockCohorts(constraints, st.governor.BlockedCohorts(now))
 }
 
@@ -216,6 +219,7 @@ func (e *Engine) restoreHeldReleases(ctx context.Context) bool {
 	}
 	st.holdChecked = true
 	if l := st.governor.Ledger(); len(l.TimeoutHeld) > 0 {
+		allocation.DefaultBorrowCooldowns.Publish(st.governor)
 		return true
 	}
 	st.governor, st.ledgerLoaded, st.lastLedger = nil, false, ""

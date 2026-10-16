@@ -385,16 +385,18 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 	})
 
 	Describe("configs without exclude", func() {
-		// The same decisions as before #169, WasLimited included: nothing is
-		// uncapped, so nothing may change.
+		// The same targets as before #169: nothing is uncapped, so nothing may
+		// grow. A model the budget stops is named by the limiter that held it
+		// (the fair share marks the models still asking when no budget is left).
 		cluster := config.QuotaLimiterConfig{
 			Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
 			ClusterQuotas: map[string]int{"H100": 8},
 		}
 
-		It("does not scale an unlimited tenant when nothing finite has room", func() {
+		It("does not scale an unlimited tenant when nothing finite has room, and names the cluster quota", func() {
 			// team-c may use A100 without limit and no H100; the cluster quota
-			// lists only H100. The fair share stops before it starts.
+			// lists only H100, so it allows no A100. The fair share stops before
+			// it starts, and the cluster quota is what held the model.
 			unlimited := config.QuotaLimiterConfig{
 				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
 				NamespaceQuotas: map[string]map[string]int{"team-c": {"A100": -1, "H100": 0}},
@@ -402,10 +404,11 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			cons := constraintsOf(map[string]map[string]int{"team-c": {"A100": 1}}, unlimited, cluster)
 			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{model("mc", "team-c", 1, 3, 1)}, cons)
 			Expect(dm["mc-v"].TargetReplicas).To(Equal(1))
-			Expect(dm["mc-v"].WasLimited).To(BeFalse())
+			Expect(dm["mc-v"].WasLimited).To(BeTrue())
+			Expect(dm["mc-v"].LimitedBy).To(Equal("cluster"))
 		})
 
-		It("does not mark a full tenant limited beside a cluster quota with room", func() {
+		It("names a full tenant's own quota beside a cluster quota with room", func() {
 			full := config.QuotaLimiterConfig{
 				Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
 				NamespaceQuotas: map[string]map[string]int{"team-a": {"H100": 2}},
@@ -413,8 +416,8 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 			cons := constraintsOf(map[string]map[string]int{"team-a": {"H100": 2}}, full, cluster)
 			dm := targets(NewGreedyByScoreOptimizer(), []ModelScalingRequest{modelOn("H100", "ma", "team-a", 2, 3, 1)}, cons)
 			Expect(dm["ma-v"].TargetReplicas).To(Equal(2))
-			Expect(dm["ma-v"].WasLimited).To(BeFalse())
-			Expect(dm["ma-v"].LimitedBy).To(BeEmpty())
+			Expect(dm["ma-v"].WasLimited).To(BeTrue())
+			Expect(dm["ma-v"].LimitedBy).To(Equal("tenants"), "its namespace quota is spent; the cluster quota has room")
 		})
 	})
 

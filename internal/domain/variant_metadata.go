@@ -80,11 +80,13 @@ type VariantMetadata struct {
 	// TopologyKey is the node label every pod of one replica must share a
 	// value of (an exclusive-topology LeaderWorkerSet), "" for none.
 	TopologyKey string
-	// Placements is the node placement each distinct pod template of one
-	// replica asks for, leader first: one entry for a Deployment, two for a
-	// LeaderWorkerSet with its own leader template. A node fits a pod of the
-	// replica only if it satisfies every entry. Nil when no template
-	// constrains its nodes.
+	// Placements is the node placement one replica's pods ask for: one entry
+	// when every pod is placed alike (a Deployment), or two, the leader's then
+	// the workers', for a LeaderWorkerSet whose leader template places
+	// differently from its worker template (an unconstrained one is a zero
+	// PodPlacement). Node fit judges the leader pod by the first and the
+	// workers by the second; where it cannot tell the pods apart it judges
+	// neither. Nil when no template constrains its nodes.
 	Placements []PodPlacement
 	// ReplicaRequests is what one replica's pods request in all of each
 	// resource, in milli-units (resource.Quantity's MilliValue): a container

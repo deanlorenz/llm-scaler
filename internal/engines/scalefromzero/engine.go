@@ -180,12 +180,17 @@ type Engine struct {
 	// tickReclaimed is, per namespace and type, the lent-out nominal this
 	// tick's wakes grew into without a node hole (placement.reclaimable).
 	tickReclaimed map[string]map[string]allocation.Reclaim
-	// lentOutBlocked is the models (modelGroup.key) this loop set
-	// nominal-lent-out on wva_model_scaling_blocked for (reportLentOutBlocked).
-	lentOutBlocked sync.Map
+	// wakeBlocked is the models (modelGroup.key) this loop set a refused-wake
+	// reason on wva_model_scaling_blocked for (reportWakeBlocked), each as
+	// the modelGroup it was set for, so pruneRefusals can clear it.
+	wakeBlocked sync.Map
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
 	layouts allocation.LayoutLog
+	// extraPools remembers, per model (modelGroup.key), the InferencePools
+	// its variants resolve to beyond the one used, as last logged
+	// (noteExtraPool), so the 100ms loop logs a change, not every tick.
+	extraPools sync.Map
 }
 
 // SetGPULimiter injects the limiter whose constraints bound a wake, so the
@@ -325,8 +330,9 @@ func (e *Engine) optimize(ctx context.Context) error {
 	logger.V(logging.DEBUG).Info("Grouped inactive variants by model", "models", len(groups))
 
 	// Keep the refusal bookkeeping to the models still under consideration; it
-	// would otherwise grow for the life of the process.
-	e.pruneRefusals(groups)
+	// would otherwise grow for the life of the process. A wake reason of a
+	// model that left them, or that serves again, is cleared here.
+	e.pruneRefusals(groups, coverage)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, e.maxConcurrency)
@@ -516,6 +522,8 @@ func (e *Engine) processInactiveModel(
 		logger.V(logging.DEBUG).Info("Scale-from-zero: skipping model, no pending requests in flow control queue",
 			"namespace", group.namespace,
 			"modelID", group.modelID)
+		// No demand left: a wake refused earlier is no longer being refused.
+		e.reportWakeBlocked(group, "")
 		return nil
 	}
 	if pendingRequestExist {
@@ -594,7 +602,8 @@ func (e *Engine) processInactiveModel(
 
 // wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a
 // namespace whose queue lent nominal it cannot reclaim is nominal-lent-out
-// (B10), the same reason wva_model_scaling_blocked then carries for the model.
+// (B10). A wake the limiters refuse is reported on wva_model_scaling_blocked
+// (wakeBlockedReason).
 func (e *Engine) wakeVerdict(ctx context.Context, group modelGroup, candidates []Candidate,
 	covered coverage) (placement, []Candidate, SelectionOutcome) {
 	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
@@ -603,26 +612,43 @@ func (e *Engine) wakeVerdict(ctx context.Context, group modelGroup, candidates [
 		// peer holds what the queue lent and need not give it back (B10).
 		outcome = OutcomeNominalLentOut
 	}
-	e.reportLentOutBlocked(group, len(selected) == 0 && outcome == OutcomeNominalLentOut)
+	reason := ""
+	if len(selected) == 0 {
+		reason = wakeBlockedReason(outcome)
+	}
+	e.reportWakeBlocked(group, reason)
 	return place, selected, outcome
 }
 
-// reportLentOutBlocked sets nominal-lent-out on wva_model_scaling_blocked for a
-// model at zero whose wake it refuses, every tick it is refused, and clears
-// only what it set once the model wakes or is refused for another reason:
-// the steady-state engine sets the same reason for a capped serving model,
-// and its series is not this loop's to delete.
-func (e *Engine) reportLentOutBlocked(group modelGroup, on bool) {
+// wakeBlockedReason is the wva_model_scaling_blocked reason for a refused
+// wake's outcome, or "" when the limiters did not refuse it.
+func wakeBlockedReason(outcome SelectionOutcome) string {
+	switch outcome {
+	case OutcomeNoCapacity, OutcomePrefillRequired:
+		return constants.ScalingBlockedWakeNoCapacity
+	case OutcomeNominalLentOut:
+		return constants.ScalingBlockedWakeNominalLentOut
+	}
+	return ""
+}
+
+// reportWakeBlocked sets reason (one of ScalingBlockedReasonsWakeCapacity) on
+// wva_model_scaling_blocked for a model at zero whose wake the limiters
+// refuse, every tick it is refused, and clears what it set once the model
+// wakes, is refused for another reason or has no demand left (reason "").
+// These reasons are this loop's alone, so clearing them deletes no other
+// producer's series.
+func (e *Engine) reportWakeBlocked(group modelGroup, reason string) {
 	key := group.key()
-	if on {
-		e.lentOutBlocked.Store(key, true)
+	if reason != "" {
+		e.wakeBlocked.Store(key, modelGroup{namespace: group.namespace, modelID: group.modelID})
 		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
-			constants.ScalingBlockedReasonsWakeBorrowing, []string{constants.ScalingBlockedNominalLentOut})
+			constants.ScalingBlockedReasonsWakeCapacity, []string{reason})
 		return
 	}
-	if _, set := e.lentOutBlocked.LoadAndDelete(key); set {
+	if _, set := e.wakeBlocked.LoadAndDelete(key); set {
 		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
-			constants.ScalingBlockedReasonsWakeBorrowing, nil)
+			constants.ScalingBlockedReasonsWakeCapacity, nil)
 	}
 }
 

@@ -441,6 +441,42 @@ Installer:
   # was: wva_learned_state_restores_total{outcome="rejected"}
   sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
   ```
+- **Rename a quota entry named `gpu-limiter`, `node-fit`,
+  `pd-pair-borrows-whole` or `lender-cannot-reclaim`.** These names are now
+  reserved for what a held-back decision is reported under when no quota
+  entry held it. In this release such an entry still loads and applies, with
+  a warning: the log line `WARNING: Quota limiter entry has a reserved name`
+  and the `limiterWarnings` key of the controller status. A later release
+  rejects it, and a rejected `default` entry stops the controller at start.
+  Check before upgrading. `limiterWarnings` is written only by the new
+  controller, so read the policy itself: the controller's own
+  `wva-scaling-policy-config`, and the one in `wva-policy` if that namespace
+  governs the install. Each line prints how many entry names it read before
+  the reserved ones, so a policy that was not read is not taken for a pass:
+  ```bash
+  for ns in <controller namespace> wva-policy; do
+    if ! entry=$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}'); then
+      echo "$ns: not read"; continue
+    fi
+    names=$(printf '%s\n' "$entry" | grep -E '^[[:space:]-]*name:' | sed -E 's/.*name:[[:space:]]*"?([^"[:space:]]*)"?.*/\1/')
+    reserved=$(printf '%s\n' "$names" | grep -xE 'gpu-limiter|node-fit|pd-pair-borrows-whole|lender-cannot-reclaim')
+    echo "$ns: $(printf '%s' "$names" | grep -c .) entry names read, $(printf '%s' "$reserved" | grep -c .) reserved"
+    printf '%s\n' "$reserved"
+  done
+  ```
+  `wva-policy: not read` is expected when no policy namespace exists. Only a
+  `quota` entry needs renaming; a `gpu-inventory` entry may keep any name.
+  Renaming an entry renames its `limiter_name` series and the name in its
+  Events: update any alert or query that selects it.
+- **A parked model refused a wake has new reasons on
+  `wva_model_scaling_blocked`.** `wake-no-capacity` when no serving set fits
+  the GPU budget or the nodes, and `wake-nominal-lent-out` when the
+  ClusterQueue lent its nominal to a peer it cannot reclaim from. A parked
+  model used to show `nominal-lent-out` for the second;
+  `nominal-lent-out` now marks only a capped serving model. Point any selector
+  on `reason="nominal-lent-out"` meant for parked models at
+  `reason="wake-nominal-lent-out"`
+  ([reasons](prometheus.md#wva_model_scaling_blocked)).
 - **Before rolling the controller back to an earlier release, remove the
   `llm-d.ai/forget-learned-state` annotation** from every scale target that
   carries it. The earlier release rewrites the learned-state snapshot without

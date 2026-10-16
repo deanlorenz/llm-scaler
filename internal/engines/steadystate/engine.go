@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,6 +154,10 @@ type Engine struct {
 	// admitInFlight needs once the decisions are final. Set by decideV2.
 	cycleFitted  bool
 	cyclePlanned map[string]bool
+	// inFlightMark is what this cycle's provisional admission of the pass's
+	// placements replaced in the in-flight ledger (admitPassInFlight), until
+	// admitInFlight commits the final targets; nil between cycles.
+	inFlightMark allocation.InFlightMark
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
@@ -937,12 +942,12 @@ func modeLabelForAnalyzer(analyzerName string) string {
 // constrainedMessage is a ResourceConstrained event's message: the decision's
 // reason and what held it back (LimitedBy) -- a limiter's name, or
 // allocation.NodeFitLimiterName when the pools held the GPUs but no node held
-// a whole replica.
+// a whole replica -- with every limiter tied with it (LimitedByAlso).
 func constrainedMessage(d *domain.VariantDecision) string {
 	if d.LimitedBy == "" {
 		return d.Reason()
 	}
-	return fmt.Sprintf("%s (limited by %s)", d.Reason(), d.LimitedBy)
+	return fmt.Sprintf("%s (limited by %s)", d.Reason(), strings.Join(append([]string{d.LimitedBy}, d.LimitedByAlso...), " and "))
 }
 
 // recordEvent ensures only one event is recorded per VA in an optimization cycle.
@@ -1320,8 +1325,9 @@ func (e *Engine) selectV2Optimizer(
 		})
 	// Published as wva_constraint_provider_skipped and logged when the set
 	// changes, so a bound that stopped applying is visible without a log line
-	// every cycle.
-	e.providerSkips.report(ctx, append(skipped, allocation.NeverReadSkips(constraints)...))
+	// every cycle. A Kueue entry never read is not among them: it is in the
+	// decision, its finite caps bound, and wva_kueue_never_read reports it.
+	e.providerSkips.report(ctx, skipped)
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints

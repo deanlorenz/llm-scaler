@@ -115,6 +115,18 @@ var _ = Describe("Kueue borrowing series", func() {
 			Equal(map[string]float64{"a,m,placement-timeout": 2, "b,m,placement-timeout": 1}))
 	})
 
+	It("gives every reason exactly one producer", func() {
+		owner := map[string]string{}
+		for producer, reasons := range constants.ScalingBlockedReasonOwners {
+			for _, r := range reasons {
+				Expect(owner).NotTo(HaveKey(r), "%s is owned by %s and %s: two owners flap", r, owner[r], producer)
+				owner[r] = producer
+			}
+		}
+		Expect(owner).To(HaveKeyWithValue("wake-no-capacity", "wake-capacity"))
+		Expect(owner).To(HaveKeyWithValue("nominal-lent-out", "borrowing"))
+	})
+
 	It("registers the borrowing reasons as one producer's set", func() {
 		Expect(constants.ScalingBlockedReasonsBorrowing).To(ConsistOf(
 			"lender-reclaimed", "borrow-unplaced", "nominal-lent-out"))

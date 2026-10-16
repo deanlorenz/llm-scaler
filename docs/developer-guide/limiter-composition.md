@@ -147,9 +147,26 @@ sparse debits; `adopt` commits a clone's debits.
   does not already judge) is tolerated by `ReplicaShape.Tolerations`
   (`scaletarget.PodTolerations`, the leader's template). With
   `ReplicaShape.DomainKey` (`scaletarget.ExclusiveTopology`) and more than one
-  pod, all pods land in one value of that label (`domainsOf`, tried in order).
-  `VariantReplicaState.Tolerations`/`TopologyKey` and `Candidate.Tolerations`/
-  `DomainKey` carry them from the scale target, which discovery already reads.
+  pod, all pods land in one value of that label (`domainsOf`, tried in order),
+  and a value holds one replica (`domainTaken`): one the view placed or held
+  a replica in (`NodeView.domains`, per owner, so `without` and
+  `ReleaseUncreated` free it with the owner's debits), or one a LeaderWorkerSet
+  group's pod is on (`decision.NodeGPU.LWSGroup`, set by `gpunodes.usageWalk`
+  from the `leaderworkerset.sigs.k8s.io/group-key` label; LWS's exclusive
+  anti-affinity matches any pod carrying it).
+  `ReplicaShape.Placements` (the templates' nodeSelector and required node
+  affinity) narrows the nodes further (`eligibleFor`) on every path: the
+  greedy pass (`nodeFit.replica`), the borrowing placer, a wake (`shapeOf`)
+  and the ledger's holes (`steadystate.admitInFlight`). Each pod is judged
+  on its own (`podFits`, `podTemplates`): with two entries
+  (`variantmeta.podPlacements`: leader, then workers, an unconstrained one as
+  a zero `PodPlacement`) pod 0 is judged by the first and the rest by the
+  second. A replica placed as one pod (layout unknown) and the rest of a
+  partial group (`holdPartial`) cannot be mapped, and are judged by neither
+  (`eligibleFit`).
+  `VariantReplicaState.Tolerations`/`TopologyKey`/`Placements` and
+  `Candidate.Tolerations`/`DomainKey`/`Placements` (`variantmeta.PodPlacements`)
+  carry them from the scale target, which discovery already reads.
 - Owners: every debit is charged to `NodeView.owner` (`setOwner`): the model
   (`modelKey`) for the greedy and rescale passes, `PromisedOwner` for
   `ReservePromised`, `InFlightOwner` for the ledger. `DebitsExcept` and
@@ -199,7 +216,10 @@ sparse debits; `adopt` commits a clone's debits.
   constraints (`PassLeft.Replay`), so each group's `Budget` and `ClusterFree`
   are net of them; `shareNodeInputs` subtracts `PassLeft.NodeDebits` (other
   models' placements and the in-flight holds) from the node snapshot
-  (`shareFreeNodesAfter`) before the share holds its own promises.
+  (`shareFreeNodesAfter`) before the share holds its own promises. A node
+  counts by the view's rule (`allocation.NodeAdmits`: `accelerator.SameName`,
+  schedulable, taints tolerated by every receiver role's
+  `scaletarget.PodTolerations`).
 - The utilization share's cluster budget is the cluster bounds alone
   (`clusterBudgets`, over `mergeConstraints`): a namespace-scoped quota is no
   budget over every namespace. A model of a namespace such a quota excludes is
@@ -221,16 +241,39 @@ of a `ReplicaShape` to hold a node, `base` placed when admitted, and later
 placed counts with when each was first seen. A count is applied only to a view
 whose snapshot (`NodeView.takenAt`, from `NodeGPUStore.Read`) was taken after
 it was seen; before, the snapshot does not show those pods on their nodes
-either. `settle` reads each entry's `placed` func (`variantmeta.PlacedReplicas`:
-scheduled or nominated pods, not deleting; LWS groups whole) outside the lock,
-and ends an entry at `want`.
+either. `settle` reads each entry's `placed` func (`variantmeta.PlacedGroups`:
+scheduled or nominated pods, not deleting; LWS groups whole, and apart from
+them each group only some of whose pods are placed, `domain.PartialReplica`)
+outside the lock, and ends an entry at `want`. `holdOn` holds a partial group
+first, by `holdPartial`: its unplaced pods only, in the topology domain of
+its placed pods' node, plus the placed pods' GPUs on that node when the count
+is newer than the view's snapshot.
 
-- Admission: the steady-state engine admits each decision's target after the
-  enforcer (`admitInFlight`, only when the cycle had a node view), skipping
-  the models the share plans (their fills are promises); placed-now is
-  `FilledReplicas` when the pods were listed. The scale-from-zero engine admits
+- Admission: the steady-state engine admits the pass's targets provisionally
+  right after `Optimize` (`admitPassInFlight` in `decideV2`,
+  `InFlightLedger.Provisional`, which returns the entries it replaced as an
+  `InFlightMark`), so a wake during the rest of the cycle does not take the
+  nodes the pass chose. After the enforcer and the borrowing releases,
+  `admitInFlight` commits the final targets (`Commit`: the marked entries set
+  back, then the final admissions, under one lock), skipping the models the
+  share plans (their fills are promises); placed-now is `FilledReplicas` when
+  the pods were listed. Only a cycle fitted to nodes admits (`cycleFitted`).
+  Only growth starts an entry: a target at or below the current replicas
+  updates an entry the variant has (`InFlightAdmission.ExistingOnly`), so a
+  replacement pod at Kueue's gate after a preemption holds no hole. That
+  applies when the variant has an unplaced replica (`InFlightAdmission.Unplaced`)
+  or the ledger has already sighted it in this process (`sighted`, set by
+  `Commit` and `Admit`, not by `Provisional`). On the first sighting after a
+  restart a variant with no unplaced replica starts its entry: the ledger is
+  not persisted, and a Pending pod's node stays held. The scale-from-zero engine admits
   each woken candidate at want 1 (`wake_tick.go`).
-- TTL: `InFlightTTL` (5 minutes), from the admission that raised `want`; an
+- TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
+  (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both
+  engines; from the steady-state engine three times it while
+  `BorrowCycle.ScaleUpPending`), from the
+  admission that raised `want`; an admission of the same replicas with another
+  TTL moves the end by the difference, so it shrinks once the entry leaves
+  its flavor; an
   equal or lower `want` keeps the clock, so a replica Pending for good is not
   held anew every cycle. An expired entry holds nothing and is dropped a TTL
   later.
