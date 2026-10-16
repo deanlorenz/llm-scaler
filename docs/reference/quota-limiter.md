@@ -412,6 +412,12 @@ replica start, or leave the feature off.
   `WorkloadPriorityClass` or `priorityClassName`) is strictly below the
   lender's, since Kueue reclaims only for a Workload that outranks the
   borrower; never under `Never`, and never when either priority is unknown.
+  A borrowing queue counts at the highest `spec.priority` of its Workloads
+  that hold reserved quota and request a GPU, the cautious side, since Kueue
+  does not say which of them holds the borrowed GPUs. So a `LowerPriority`
+  lender's capacity stays closed while such a queue borrows at a priority
+  the lender does not outrank, even when the borrowed GPUs are held by a
+  lower-priority Workload of that queue.
   One low-priority Workload elsewhere in the cohort opens nothing for the
   other models. A model held back only by such lending -- the GPUs are free,
   and no lender of them outranks it -- is limited by `lender-cannot-reclaim`,
@@ -436,6 +442,15 @@ rest of its growth must fit a node like any replica. Unused nominal that
 nobody borrows is no exemption: with a node down, growth into it is limited
 by `node-fit` instead of being ordered into a pod that stays Pending. A
 scale-from-zero wake is held to the same rule.
+
+Kueue preempts by priority, not by node, so the pod it takes may free no
+node. Growth placed without a hole therefore stays under `placementTimeout`:
+still unplaced that long after it was ordered, it is released like a
+borrowed replica. Only time after the order counts; a replica of the same
+variant stuck since before it does not hurry the release. The release backs
+the model off in every cohort its namespace's queues belong to, for
+`borrowCooldown` (doubling on a repeat): it borrows nothing new there, and
+its growth back into lent nominal must fit a node with a free hole.
 
 **Co-resources.** Kueue admits a pod only when every resource its flavor's
 resource group covers fits, not the GPU alone. Each covered resource is
@@ -533,7 +548,7 @@ change.
 |---|---|---|
 | `countBorrowable` | `true` | `false` caps every namespace at nominal, as before borrowing was counted |
 | `borrowNamespaces` | empty (all) | a pilot: borrowing is counted only in the listed namespaces; every other namespace is capped at nominal, withheld as `not-selected`, and costs no eligibility read |
-| `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced |
+| `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced; also growth back into lent-out nominal placed without a node hole, timed from its order. A release starts the model's cooldown |
 | `borrowCooldown` | `10m` | how long a cohort borrows nothing new after a lender waited, and a model after a preemption or a placement-timeout release; doubled on a repeat, up to four times. Published on `wva_kueue_borrow_cooldown_seconds` |
 | `lenderDebounce` | `60s` | how long a lender must read as waiting, over at least two fresh reads, before its wait is published and alerted on. New borrowing stops at the first sighting regardless |
 | `controllerNamespace` | `kueue-system` | where the `kueue-controller-manager` Deployment and its leader Lease are read, for the Kueue version and whether Kueue runs |
