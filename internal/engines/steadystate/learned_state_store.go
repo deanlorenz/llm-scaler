@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -410,6 +411,19 @@ func learnedStateDigest(s saturation.LearnedState) string {
 		lb.Tick, lb.Seen, lb.PriorUsed = time.Time{}, time.Time{}, time.Time{}
 		s.LowerBounds[k] = lb
 	}
+	// A fitted ITL line is republished every cycle a variant fits one: its
+	// learnedAt moves every cycle and its A and B drift in their last digits
+	// with every refit, so kept in, any decode fleet rewrote the document
+	// every minute. Left out, and rounded to three significant figures, a
+	// line that really moved is still written; one that only refitted is
+	// written with the refresh.
+	for k, l := range s.ITLLines {
+		l.LearnedAt, l.A, l.B = time.Time{}, sig3(l.A), sig3(l.B)
+		s.ITLLines[k] = l
+	}
+	for k, b := range s.ITLBaseline {
+		s.ITLBaseline[k] = sig3(b)
+	}
 	for k, m := range s.Forgotten {
 		m.Seen = time.Time{}
 		s.Forgotten[k] = m
@@ -426,6 +440,15 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// sig3 rounds x to three significant figures, for the digest only.
+func sig3(x float64) float64 {
+	v, err := strconv.ParseFloat(strconv.FormatFloat(x, 'g', 3, 64), 64)
+	if err != nil {
+		return x
+	}
+	return v
 }
 
 // encodeLearnedState encodes the document, leaving out the least recently used
