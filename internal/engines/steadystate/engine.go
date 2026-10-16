@@ -1583,6 +1583,7 @@ func (e *Engine) optimizeV2(
 		g.Rescale = e.resolveRescaleFlags(requests)
 		g.BorrowBlocked = e.borrowBlocked()
 		g.BorrowBlockedIn = e.borrowBlockedIn()
+		g.ReclaimBlocked = e.reclaimBlocked()
 		g.BorrowCredit = e.borrowing.credit
 		g.ReclaimCredit = e.borrowing.reclaimCredit
 	}

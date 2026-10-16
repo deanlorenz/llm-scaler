@@ -72,6 +72,12 @@ type GreedyByScoreOptimizer struct {
 	// repeated preemptions or placement timeouts (BorrowGovernor.BorrowBlockedIn).
 	BorrowBlockedIn func(namespace, modelID, cohort string) bool
 
+	// ReclaimBlocked, when set, reports whether a model's growth into nominal
+	// lent out may not skip the node hole this cycle: its cooldown after a
+	// replica ordered without one never placed and was released
+	// (BorrowGovernor.CoolingDown, M3). Its growth then needs a real hole.
+	ReclaimBlocked func(namespace, modelID string) bool
+
 	// BorrowCredit, when set, is the borrowed draws still in flight
 	// (BorrowInFlight.Entries) on cohorts open this cycle: the pools were
 	// debited them, and a variant's targets restart from its current
@@ -244,6 +250,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	if bs != nil {
 		bs.blocked = o.BorrowBlocked
 		bs.blockedIn = o.BorrowBlockedIn
+		bs.reclaimBlocked = o.ReclaimBlocked
 		bs.setCredit(o.BorrowCredit)
 		bs.setReclaimCredit(o.ReclaimCredit)
 	}

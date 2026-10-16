@@ -135,6 +135,7 @@ func (b *BorrowInFlight) RecordAt(draws []BorrowDraw, now time.Time) {
 			d.Target = max(d.Target, prev.Target)
 			d.OrderedAt = prev.OrderedAt
 			d.ClosesRestricted = d.ClosesRestricted || prev.ClosesRestricted
+			d.NoHole = d.NoHole || prev.NoHole
 		}
 		if d.GPUs <= 0 || d.Replicas <= 0 {
 			continue

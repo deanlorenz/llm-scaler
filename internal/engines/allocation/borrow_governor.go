@@ -117,6 +117,10 @@ type BorrowCycle struct {
 	// be read this cycle: a model there may have been preempted unseen, so
 	// none of them grows on borrowed capacity.
 	PreemptionUnknown map[string]bool
+	// NoHole is, per "namespace/variant", the replicas ordered without a
+	// node hole that the shared record holds in flight or lagging (NoHoleOf):
+	// kept under the placement timeout like borrowed ones (M3).
+	NoHole map[string]NoHoleReplicas
 }
 
 type lenderWatch struct {
@@ -153,6 +157,9 @@ type BorrowGovernor struct {
 	// cohort after a preemption or a placement-timeout release, and how many
 	// times it doubled (B12).
 	backoff map[string]BackoffEntry
+	// noHole is, per "namespace/variant", the replicas ordered without a node
+	// hole the governor still watches (observeNoHole, noHoleRelease).
+	noHole  map[string]NoHoleReplicas
 	started bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
@@ -166,7 +173,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		cohortCooldown: map[string]time.Time{}, modelCooldown: map[string]time.Time{},
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
 		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{},
-		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{},
+		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{}, noHole: map[string]NoHoleReplicas{},
 	}
 }
 
@@ -528,6 +535,7 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 		}
 	}
 	g.observePast(c)
+	g.observeNoHole(c, states)
 	chunks, _ := mergeSharedPools(c.Constraints)
 	seen := map[LenderKey]bool{}
 	// listed is every pool of the cycle, fresh holds the value false for a
@@ -703,6 +711,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.rawWaiting)
 		clear(g.timeoutHeld)
 		clear(g.pastSince)
+		clear(g.noHole)
 		g.started = false
 		return
 	}
@@ -725,7 +734,9 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 // (B5): the unplaced replicas a borrowing namespace holds past its guaranteed
 // figure, for a P/D model with the partner replicas that keep the pair's ratio
 // (releaseUnit). Growth within guaranteed -- a reclaiming queue's growth into
-// nominal it lent out -- is exempt, since Kueue reclaims for it. "Past
+// nominal it lent out -- is exempt, since Kueue reclaims for it, except the
+// replicas ordered without a node hole, which noHoleRelease watches the same
+// way (M3): Kueue's preemption may free no node for them. "Past
 // guaranteed" counts the replicas the namespace holds, gated ones included
 // (heldPast): a replica Kueue gates while its queue already reserves its whole
 // guaranteed figure -- the replacement of a preempted borrowed pod -- has
@@ -756,48 +767,143 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			continue
 		}
 		for _, st := range req.VariantStates {
-			key := req.Namespace + "/" + st.VariantName
 			if st.UnplacedReplicas <= 0 {
 				continue
 			}
-			typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
-			if !ok {
-				continue
-			}
 			timeout := g.settings.PlacementTimeout
-			if c.ScaleUpPending[key] {
+			if c.ScaleUpPending[req.Namespace+"/"+st.VariantName] {
 				timeout *= 3
 			}
-			expired := expiredUnplaced(st, g.pastSince[req.Namespace+"/"+typeKey], timeout, c.Now)
-			if expired == 0 {
+			rel := g.borrowedRelease(c, req, st, states, heldPast, timeout)
+			if rel == nil {
+				rel = g.noHoleRelease(c, req, st, states, timeout)
+			}
+			if rel == nil {
 				continue
 			}
-			borrowed := heldPast[req.Namespace][typeKey]
-			gpr := max(st.GPUsPerReplica, 1)
-			if borrowed < gpr {
-				continue // within guaranteed: Kueue reclaims for it
-			}
-			k := min(expired, st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
-			unit, gpus := releaseUnit(req, st.VariantName, k, borrowed, states)
-			if unit == nil || !unitFits(unit, req.Namespace, states) {
-				continue
-			}
-			below := max(0, gpus-borrowed)
-			for _, v := range slices.Sorted(maps.Keys(unit)) {
-				k := req.Namespace + "/" + v
-				s := states[k].state
-				to := s.CurrentReplicas - unit[v]
-				g.timeoutHeld[k] = stickyRelease{to: to}
-				out = append(out, BorrowRelease{Namespace: req.Namespace, ModelID: req.ModelID, Variant: v,
-					From: s.CurrentReplicas, To: to, Cause: ReleasePlacementTimeout, GuaranteedGPUs: below})
-				below = 0
-			}
-			heldPast[req.Namespace][typeKey] -= gpus
+			out = append(out, rel...)
 			g.markBackoffAfter(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false, timeout)
 			break // one release per model per cycle: the counts above are now stale
 		}
 	}
 	return out
+}
+
+// borrowedRelease is the release of st's unplaced replicas the namespace holds
+// past its guaranteed figure, past timeout (timeoutReleases); nil when none.
+// What it releases is taken off heldPast.
+func (g *BorrowGovernor) borrowedRelease(c BorrowCycle, req ModelScalingRequest, st domain.VariantReplicaState,
+	states map[string]variantRef, heldPast map[string]map[string]int, timeout time.Duration) []BorrowRelease {
+	typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
+	if !ok {
+		return nil
+	}
+	expired := expiredUnplaced(st, g.pastSince[req.Namespace+"/"+typeKey], timeout, c.Now)
+	if expired == 0 {
+		return nil
+	}
+	borrowed := heldPast[req.Namespace][typeKey]
+	gpr := max(st.GPUsPerReplica, 1)
+	if borrowed < gpr {
+		return nil // within guaranteed: Kueue reclaims for it (the no-hole net aside)
+	}
+	k := min(expired, st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
+	unit, gpus := releaseUnit(req, st.VariantName, k, borrowed, states)
+	if unit == nil || !unitFits(unit, req.Namespace, states) {
+		return nil
+	}
+	heldPast[req.Namespace][typeKey] -= gpus
+	return g.pinUnit(req, unit, states, max(0, gpus-borrowed))
+}
+
+// noHoleRelease is the safety net under the node-hole exemption (M3): st's
+// unplaced replicas that were ordered without a node hole -- growth Kueue was
+// to admit by preempting borrowers (BorrowDraw.NoHole), the steady-state
+// engine's or a wake's -- released like borrowed ones once unplaced past
+// timeout. Kueue preempts by priority, not by node: the borrower it takes may
+// be a pod that was itself Pending, and then no node frees and the replica
+// would wait for good. Nil when none of st's replicas is tracked so, or none
+// expired; the release takes no more replicas than are tracked.
+func (g *BorrowGovernor) noHoleRelease(c BorrowCycle, req ModelScalingRequest, st domain.VariantReplicaState,
+	states map[string]variantRef, timeout time.Duration) []BorrowRelease {
+	key := req.Namespace + "/" + st.VariantName
+	h := g.noHole[key]
+	if h.Replicas <= 0 {
+		return nil
+	}
+	expired := expiredUnplaced(st, time.Time{}, timeout, c.Now)
+	k := min(expired, st.UnplacedReplicas, h.Replicas, st.CurrentReplicas-minOf(st))
+	if k <= 0 {
+		return nil
+	}
+	unit, gpus := releaseUnit(req, st.VariantName, k, -1, states)
+	if unit == nil || !unitFits(unit, req.Namespace, states) {
+		return nil
+	}
+	h.Replicas -= unit[st.VariantName]
+	g.noHole[key] = h
+	return g.pinUnit(req, unit, states, gpus)
+}
+
+// pinUnit keeps a released unit's lowered targets in force until it lands
+// (timeoutHeld) and returns its release records; guaranteed is the GPUs it
+// takes below the namespace's guaranteed figure, on the first record.
+func (g *BorrowGovernor) pinUnit(req ModelScalingRequest, unit map[string]int, states map[string]variantRef, guaranteed int) []BorrowRelease {
+	var out []BorrowRelease
+	for _, v := range slices.Sorted(maps.Keys(unit)) {
+		k := req.Namespace + "/" + v
+		s := states[k].state
+		to := s.CurrentReplicas - unit[v]
+		g.timeoutHeld[k] = stickyRelease{to: to}
+		out = append(out, BorrowRelease{Namespace: req.Namespace, ModelID: req.ModelID, Variant: v,
+			From: s.CurrentReplicas, To: to, Cause: ReleasePlacementTimeout, GuaranteedGPUs: guaranteed})
+		guaranteed = 0
+	}
+	return out
+}
+
+// NoHoleReplicas is what one variant's replicas ordered without a node hole
+// hold (BorrowDraw.NoHole): how many, and their GPUs.
+type NoHoleReplicas struct {
+	Replicas, GPUs int
+}
+
+// NoHoleOf is, per "namespace/variant", the replicas the entries ordered
+// without a node hole (BorrowDraw.NoHole), in flight or lagging: what the
+// governor keeps under the placement timeout (BorrowCycle.NoHole).
+func NoHoleOf(entries []BorrowDraw) map[string]NoHoleReplicas {
+	var out map[string]NoHoleReplicas
+	for _, d := range entries {
+		if !d.NoHole || d.GPUs <= 0 || d.Replicas <= 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]NoHoleReplicas{}
+		}
+		k := d.Namespace + "/" + d.Variant
+		h := out[k]
+		out[k] = NoHoleReplicas{Replicas: h.Replicas + d.Replicas, GPUs: h.GPUs + d.GPUs}
+	}
+	return out
+}
+
+// observeNoHole keeps track of the replicas ordered without a node hole: what
+// the record holds this cycle, and what it held before for a variant that
+// still has unplaced replicas -- the record forgets an entry once a read shows
+// it, while its pod may still wait for a node no preemption frees.
+func (g *BorrowGovernor) observeNoHole(c BorrowCycle, states map[string]variantRef) {
+	for k, h := range g.noHole {
+		if _, recorded := c.NoHole[k]; recorded {
+			continue
+		}
+		if s, ok := states[k]; !ok || s.state.UnplacedReplicas <= 0 || h.Replicas <= 0 {
+			delete(g.noHole, k)
+		}
+	}
+	for k, h := range c.NoHole {
+		prev := g.noHole[k]
+		g.noHole[k] = NoHoleReplicas{Replicas: max(prev.Replicas, h.Replicas), GPUs: max(prev.GPUs, h.GPUs)}
+	}
 }
 
 // expiredUnplaced is how many of a variant's unplaced replicas (UnplacedAt:

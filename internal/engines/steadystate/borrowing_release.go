@@ -67,6 +67,9 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 	st.cycle = allocation.BorrowCycle{
 		Now: now, Constraints: constraints, Requests: requests,
 		ScaleUpPending: e.scaleUpPending(ctx, requests, now), PreemptionUnknown: unknown,
+		// Replicas ordered without a node hole, the wakes' included: under
+		// the placement timeout like borrowed ones (M3).
+		NoHole: allocation.NoHoleOf(st.inFlight.Unreserved(now).InFlight),
 	}
 	st.governor.Observe(st.cycle)
 	return allocation.BlockCohorts(constraints, st.governor.BlockedCohorts(now))
@@ -98,6 +101,19 @@ func (e *Engine) borrowBlockedIn() func(namespace, modelID, cohort string) bool 
 	}
 	return func(namespace, modelID, cohort string) bool {
 		return g.BorrowBlockedIn(namespace, modelID, cohort, now)
+	}
+}
+
+// reclaimBlocked is the greedy optimizer's per-model block on growth that
+// skips the node hole -- the model's cooldown after the safety net released a
+// replica ordered without one (M3) -- nil when the cycle borrows nothing.
+func (e *Engine) reclaimBlocked() func(namespace, modelID string) bool {
+	g, now := e.borrowing.governor, e.borrowing.cycle.Now
+	if g == nil || now.IsZero() {
+		return nil
+	}
+	return func(namespace, modelID string) bool {
+		return g.CoolingDown(namespace, modelID, now)
 	}
 }
 

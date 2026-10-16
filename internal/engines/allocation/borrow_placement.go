@@ -48,6 +48,10 @@ type BorrowDraw struct {
 	Reclaim bool
 	// Accelerator is the type a Reclaim entry was placed for.
 	Accelerator string
+	// NoHole marks a Reclaim entry whose replica was ordered without a node
+	// hole, Kueue's preemption of borrowers to free one: the governor keeps
+	// it under the placement timeout (BorrowCycle.NoHole, M3).
+	NoHole bool
 	// ClosesRestricted marks a draw by a model that some LowerPriority lender
 	// of its chunk does not outrank (K2-2): while it is in flight, or lags a
 	// read, the chunk's restricted part stays closed to every model, as the
@@ -124,6 +128,9 @@ type borrowState struct {
 	// blockedIn reports a model that may not draw on one cohort's pools this
 	// pass (its backed-off cooldown there); nil blocks none.
 	blockedIn func(namespace, modelID, cohort string) bool
+	// reclaimBlocked reports a model whose growth may not skip the node hole
+	// this pass (ReclaimBlocked); nil blocks none.
+	reclaimBlocked func(namespace, modelID string) bool
 }
 
 // newBorrowState builds the pass's borrowing state, or nil when no constraint
@@ -791,6 +798,12 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			share = Reclaim{After: lent.after, GPUs: lent.lentOut + own}
 		}
 		reclaim := share.exempt(g)
+		if reclaim && bs.reclaimBlocked != nil && bs.reclaimBlocked(p.namespace, p.modelID) {
+			// Backed off: a replica of the model ordered without a hole
+			// never placed (the governor's safety net, M3). Until the
+			// cooldown ends its growth needs a real hole.
+			reclaim = false
+		}
 		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
 			return p.refuse(variant, false), false
 		}
@@ -828,6 +841,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 				if fromOwn == took.GPUs {
 					d.CreditReplicas = 1
 				}
+				d.NoHole = !onNode
 				bs.reclaims = append(bs.reclaims, d)
 			}
 		}

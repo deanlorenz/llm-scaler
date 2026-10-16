@@ -106,6 +106,10 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 			past = max(0, s.used+g-s.limit) - max(0, s.used-s.limit)
 		}
 		s.used += g
+		// Placed without needing a node hole (PlaceReplicasReclaiming): the
+		// governor watches it under the placement timeout (NoHole, M3). One
+		// that did find a hole places, and the watch never fires.
+		noHole := past == 0 && s.reclaim.exempt(g)
 		took := s.reclaim.take(g - past)
 		s.reclaim.After -= took.After
 		s.reclaim.GPUs -= took.GPUs
@@ -127,7 +131,7 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 		}
 		if took.GPUs > 0 {
 			d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: r.Variant, GPUs: took.GPUs, Replicas: 1, Target: 1,
-				Reclaim: true, Accelerator: r.Accelerator, Wake: true}
+				Reclaim: true, Accelerator: r.Accelerator, Wake: true, NoHole: noHole}
 			if len(s.chunks) > 0 {
 				d.Cohort, d.Flavor, d.Resource = s.chunks[0].Cohort, s.chunks[0].Flavor, s.chunks[0].Resource
 			}
