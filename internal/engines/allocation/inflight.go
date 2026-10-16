@@ -16,7 +16,9 @@ import (
 // Pending longer than this is not waiting for the hole it was admitted to --
 // it is unschedulable for another reason (a taint, an affinity, CPU or memory
 // on the node), or the hole went to someone else -- and holding the hole
-// longer would only keep it from a replica that could use it.
+// longer would only keep it from a replica that could use it. A replica on a
+// Kueue flavor is held at least as long as the borrowing governor waits for
+// it to place (InFlightAdmission.TTL, the placement timeout).
 const InFlightTTL = 5 * time.Minute
 
 // InFlightOwner is the owner the in-flight ledger's holes are charged to on a
@@ -65,6 +67,8 @@ type inFlightEntry struct {
 	// nothing, until the variant reaches want or wants more, so an
 	// unschedulable replica is not admitted again every cycle.
 	expires time.Time
+	// ttl is how long a rise of want holds (InFlightAdmission.TTL).
+	ttl time.Duration
 	// placed counts the variant's replicas holding a node, ok false when it
 	// cannot tell.
 	placed func() (Placed, bool)
@@ -122,6 +126,11 @@ type InFlightAdmission struct {
 	Want      int
 	PlacedNow int
 	Placed    func() (Placed, bool)
+	// TTL is how long the replicas a rise of Want admits are held, at least
+	// InFlightTTL: the steady-state engine holds a replica on a Kueue flavor
+	// for the borrowing placement timeout when that is longer, since the
+	// governor waits that long before it releases the replica.
+	TTL time.Duration
 	// ExistingOnly admits only to an entry the variant already has: a
 	// target that does not grow the variant updates the growth still in
 	// flight and starts no hold of its own.
@@ -193,17 +202,19 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time) {
 		delete(l.entries, key)
 		return
 	}
+	ttl := max(a.TTL, InFlightTTL)
 	e, ok := l.entries[key]
 	switch {
 	case !ok && a.ExistingOnly:
 		return
 	case !ok:
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
-			expires: now.Add(InFlightTTL), placed: placed}
+			expires: now.Add(ttl), ttl: ttl, placed: placed}
 		return
 	case want > e.want:
-		e.expires = now.Add(InFlightTTL)
+		e.expires = now.Add(ttl)
 	}
+	e.ttl = max(e.ttl, ttl)
 	if shape.Flavor == nil && e.shape.Flavor != nil && want <= e.want {
 		// The replicas admitted on a borrowed flavor's nodes are the same
 		// ones once the borrowed draw resolves (their pods exist, gated by
@@ -274,7 +285,7 @@ func (l *InFlightLedger) settle(now time.Time) {
 		if !ok {
 			continue
 		}
-		if now.Sub(e.expires) > InFlightTTL {
+		if now.Sub(e.expires) > max(e.ttl, InFlightTTL) {
 			delete(l.entries, k)
 			continue
 		}

@@ -224,7 +224,9 @@ is newer than the view's snapshot.
   updates an entry the variant has (`InFlightAdmission.ExistingOnly`), so a
   replacement pod at Kueue's gate after a preemption holds no hole. The scale-from-zero engine admits
   each woken candidate at want 1 (`wake_tick.go`).
-- TTL: `InFlightTTL` (5 minutes), from the admission that raised `want`; an
+- TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
+  (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both
+  engines), from the admission that raised `want`; an
   equal or lower `want` keeps the clock, so a replica Pending for good is not
   held anew every cycle. An expired entry holds nothing and is dropped a TTL
   later.

@@ -116,10 +116,16 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 }
 
 // admitInFlight holds each woken replica's node hole in the in-flight ledger
-// until its pods hold a node, on its queue's flavor when flavorOf names one.
+// until its pods hold a node, on its queue's flavor when flavorOf names one --
+// then for the borrowing placement timeout when that is longer than the
+// ledger's TTL, as the steady-state engine holds a replica on a flavor.
 // Caller holds wakeMu.
 func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf func(string) *kueue.FlavorPlacement) {
 	now := time.Now()
+	var placementTimeout time.Duration
+	if e.config != nil {
+		placementTimeout = e.config.KueueBorrowTimings().PlacementTimeout
+	}
 	for _, c := range selected {
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
 			continue
@@ -132,7 +138,13 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf 
 			}
 		}
 		key := namespace + "/" + c.VariantName
-		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)
+		shape := shapeOf(namespace, c, flavorOf)
+		var ttl time.Duration
+		if shape.Flavor != nil {
+			ttl = placementTimeout
+		}
+		allocation.DefaultInFlight.Commit(nil, []allocation.InFlightAdmission{{Key: key, Shape: shape, Want: 1,
+			Placed: placed, TTL: ttl}}, now)
 	}
 }
 

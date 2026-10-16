@@ -77,6 +77,7 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 	var out []allocation.InFlightAdmission
 	states := map[string]domain.VariantReplicaState{}
 	flavors := e.borrowedFlavors(now)
+	placementTimeout := e.borrowSettings().PlacementTimeout
 	for _, req := range requests {
 		if planned[utils.GetNamespacedKey(req.Namespace, req.ModelID)] {
 			continue
@@ -111,11 +112,15 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 		shape := allocation.ReplicaShape{Variant: key, Accelerator: d.AcceleratorName,
 			PodGPUs: st.PodGPUs, GPUs: max(st.GPUsPerReplica, 1), Tolerations: st.Tolerations, DomainKey: st.TopologyKey,
 			Placements: st.Placements}
+		var ttl time.Duration
 		if f, ok := flavors[key]; ok {
-			shape.Flavor = f
+			// On a Kueue flavor the governor waits the placement timeout
+			// before it releases an unplaced replica: its hole is held as
+			// long, when that is longer than the ledger's own TTL.
+			shape.Flavor, ttl = f, placementTimeout
 		}
 		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
-			PlacedNow: placedNow, Placed: placed, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas})
+			PlacedNow: placedNow, Placed: placed, TTL: ttl, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas})
 	}
 	return out
 }
