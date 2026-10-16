@@ -83,6 +83,10 @@ type QuotaInventory struct {
 	// Refresh (SetManagedNamespaces): only they are evaluated for borrowing.
 	// nil, never set, evaluates every namespace Kueue grants borrowing in.
 	managedNS map[string]bool
+	// managedUsage is what the managed variants hold per namespace and type,
+	// set before each Refresh (SetManagedUsage): the Kueue figures are charged
+	// against it (chargeNonManaged). nil, never set, charges nothing.
+	managedUsage map[string]map[string]int
 	// neverRead is set while the entry reads Kueue, leaves some type
 	// unlimited in its static caps, and has never read Kueue successfully:
 	// that type is unbounded (KueueNeverRead).
@@ -289,6 +293,12 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 				"snapshotAge", time.Since(ext.ObservedAt).Round(time.Second).String())
 		}
 	}
+	// The snapshot as read, for the change log; ext from here on carries each
+	// queue's non-managed charge, taken before the static entry bounds it (KU1).
+	raw := ext
+	q.mu.RLock()
+	ext = chargeNonManaged(ext, q.managedUsage)
+	q.mu.RUnlock()
 	effective := q.static
 	if !ext.ObservedAt.IsZero() {
 		effective = q.static.BoundBy(ext)
@@ -327,7 +337,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		Read bool // never-read and read-but-empty must not fingerprint alike
 		N    map[string]config.ExternalCaps
 		C    config.ExternalCaps
-	}{!ext.ObservedAt.IsZero(), ext.Namespace, ext.Cluster})
+	}{!raw.ObservedAt.IsZero(), raw.Namespace, raw.Cluster})
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -341,7 +351,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 				msg = "external quota source grants no GPUs; the static quota entry applies as written"
 			}
 			logger.Info(msg,
-				"externalNamespaceQuotas", ext.Namespace, "externalClusterQuotas", ext.Cluster,
+				"externalNamespaceQuotas", raw.Namespace, "externalClusterQuotas", raw.Cluster,
 				"effectiveNamespaceQuotas", effective.NamespaceQuotas, "effectiveClusterQuotas", effective.ClusterQuotas)
 			if unapplied := q.static.UnappliedUntyped(ext); len(unapplied) > 0 {
 				// A real grant the limiter cannot budget under: the source could
@@ -798,13 +808,15 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 	}
 	reach, unlimited := 0, false
 	for _, r := range matched {
+		// Each queue's reach less its non-managed charge (KU1): what Kueue
+		// has reserved for other workloads is not the variants' to reach.
 		switch {
 		case !r.Counted():
-			reach += r.Nominal
+			reach += max(0, r.Nominal-r.Charge)
 		case r.BorrowCap < 0:
 			unlimited = true
 		default:
-			reach += r.Nominal + r.BorrowCap
+			reach += max(0, r.Nominal+r.BorrowCap-r.Charge)
 		}
 		if r.Counted() {
 			b.LentOut += r.LentOut

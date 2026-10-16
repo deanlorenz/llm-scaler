@@ -606,6 +606,7 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					PinRequired:    f.PinRequired,
 					CoHeadroom:     maps.Clone(f.CoHeadroom),
 					CoKept:         maps.Clone(f.CoKept),
+					Reserved:       t.Queues[name].Resources[f.ResourceKey].Reserved,
 				}
 				if len(names) > 1 {
 					// KU2: which queue a replica is admitted through is not

@@ -71,9 +71,11 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 		for accType := range entry.NamespaceQuotas[ns] {
 			nominal, f := 0, NominalFigures{}
 			for _, r := range rowsOfType(rows, accType) {
-				nominal += r.Nominal
-				f.WithinNominal += r.WithinNominal
-				f.Guaranteed += r.Guaranteed
+				// Charged with the queue's non-managed charge, as the
+				// namespace's pool is (KU1).
+				nominal += max(0, r.Nominal-r.Charge)
+				f.WithinNominal += max(0, r.WithinNominal-r.Charge)
+				f.Guaranteed += max(0, r.Guaranteed-r.Charge)
 				if r.Counted() {
 					f.LentOut += r.LentOut
 					f.PreemptAfter += r.PreemptAfter
