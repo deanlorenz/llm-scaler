@@ -1375,7 +1375,7 @@ test-e2e-kueue-borrow-with-setup: ## Deploy e2e infra + Kueue, then run the live
 # per 16-GPU node) does not have, so they are outside the full tier and run
 # here. docs/developer-guide/testing.md lists them.
 # REQUIRE_WHOLENODE_E2E=true (the default here) turns their skips -- no such
-# nodes, no Prometheus, no Kueue -- into failures. About two and a half hours.
+# nodes, no Prometheus, no Kueue -- into failures. About 70 minutes on a 22-CPU box.
 USHARE_WHOLENODE_CLUSTER_GPU_TYPE ?= nvidia
 USHARE_WHOLENODE_CLUSTER_GPUS     ?= 8
 USHARE_WHOLENODE_CLUSTER_NODES    ?= 6

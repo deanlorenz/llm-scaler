@@ -363,7 +363,7 @@ make test-e2e-ushare-wholenode            # FOCUS=... narrows it
 - `REQUIRE_WHOLENODE_E2E=true` (the target's default) turns every skip -- too
   few 8-GPU nodes, no Prometheus, no Kueue -- into a failure. The target passes
   `-ginkgo.fail-on-empty`. Check `Ran N of M Specs`.
-- About two and a half hours (`USHARE_WHOLENODE_TIMEOUT=200m`). No CI job runs
+- About 70 minutes on a 22-CPU workstation; the budget is `USHARE_WHOLENODE_TIMEOUT=200m`. No CI job runs
   them yet.
 - Each spec closes every GPU it does not use with `registry.k8s.io/pause` pods
   (`fixtures.FillNodeGPUs`) and creates its models in an order that decides
