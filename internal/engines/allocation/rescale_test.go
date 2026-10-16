@@ -91,7 +91,7 @@ var _ = Describe("distributeGPUsByWeight", func() {
 		// 4 GPUs with role demand 6:2 must split 3:1 — a 50/50 split (2:2) or a
 		// swapped/ignored weight map would fail here.
 		out := distributeGPUsByWeight(4, []string{"decode", "prefill"},
-			map[string]int{"prefill": 6, "decode": 2}, nil, nil)
+			map[string]int{"prefill": 6, "decode": 2}, nil, nil, nil)
 		Expect(out["prefill"]).To(Equal(3))
 		Expect(out["decode"]).To(Equal(1))
 	})
@@ -99,13 +99,13 @@ var _ = Describe("distributeGPUsByWeight", func() {
 	It("falls back to the fallback weights when all weights are zero", func() {
 		out := distributeGPUsByWeight(4, []string{"decode", "prefill"},
 			map[string]int{"prefill": 0, "decode": 0},
-			map[string]int{"prefill": 3, "decode": 1}, nil)
+			map[string]int{"prefill": 3, "decode": 1}, nil, nil)
 		Expect(out["prefill"]).To(Equal(3))
 		Expect(out["decode"]).To(Equal(1))
 	})
 
 	It("gives a single role the whole total", func() {
-		out := distributeGPUsByWeight(5, []string{"both"}, map[string]int{"both": 0}, nil, nil)
+		out := distributeGPUsByWeight(5, []string{"both"}, map[string]int{"both": 0}, nil, nil, nil)
 		Expect(out["both"]).To(Equal(5))
 	})
 
@@ -116,7 +116,8 @@ var _ = Describe("distributeGPUsByWeight", func() {
 		out := distributeGPUsByWeight(2, []string{"decode", "prefill"},
 			map[string]int{"prefill": 0, "decode": 0}, // demand
 			map[string]int{"prefill": 0, "decode": 0}, // current
-			map[string]int{"prefill": 1, "decode": 1}) // floor
+			map[string]int{"prefill": 1, "decode": 1}, // floor
+			nil) // ceiling
 		Expect(out["prefill"]).To(Equal(1), "prefill floor honored")
 		Expect(out["decode"]).To(Equal(1), "decode floor honored")
 	})
@@ -127,9 +128,23 @@ var _ = Describe("distributeGPUsByWeight", func() {
 		out := distributeGPUsByWeight(6, []string{"decode", "prefill"},
 			map[string]int{"prefill": 3, "decode": 1},
 			map[string]int{"prefill": 0, "decode": 0},
-			map[string]int{"prefill": 1, "decode": 1})
+			map[string]int{"prefill": 1, "decode": 1}, nil)
 		Expect(out["prefill"]).To(Equal(4))
 		Expect(out["decode"]).To(Equal(2))
+	})
+
+	It("caps a role at its ceiling and re-splits the excess", func() {
+		// 40 GPUs by demand 560:80 is 35:5; prefill can reach only 16, so
+		// decode takes the other 24. A ceiling below the floor is the floor.
+		out := distributeGPUsByWeight(40, []string{"decode", "prefill"},
+			map[string]int{"prefill": 560, "decode": 80}, nil, nil,
+			map[string]int{"prefill": 16})
+		Expect(out).To(Equal(map[string]int{"prefill": 16, "decode": 24}))
+
+		out = distributeGPUsByWeight(40, []string{"decode", "prefill"},
+			map[string]int{"prefill": 560, "decode": 80}, nil,
+			map[string]int{"prefill": 20}, map[string]int{"prefill": 16, "decode": 8})
+		Expect(out).To(Equal(map[string]int{"prefill": 20, "decode": 8}), "both capped: the rest is unassigned")
 	})
 })
 

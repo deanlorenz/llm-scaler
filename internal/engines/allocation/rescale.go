@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -348,8 +349,9 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 }
 
 // rescaleModelDecisions drives one model to targetGPUs on accType: reclaim (shed
-// most-expensive-first, respecting minReplicas) or fill (add most-cost-efficient
-// first, gated on *freeThisCycle). Reclaim decisions are tagged DecisionReasonRescale.
+// whole replicas most-expensive-first, respecting each role's floor) or fill (add
+// most-cost-efficient first, gated on *freeThisCycle). Reclaim decisions are
+// tagged DecisionReasonRescale.
 func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	ctx context.Context,
 	req ModelScalingRequest,
@@ -393,8 +395,12 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
-		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
+		uncapped := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, nil)
+		ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
+		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, ceilByRole)
 		roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
+		// Each role's share is at or above the floor reserved in the split.
+		reclaimWholeReplicas(ctx, satNamed, records, stateMap, roles, tgtByRole, curByRole, targets)
 	}
 
 	limited := make(gpuLimitTracker)
@@ -402,29 +408,25 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	grown := map[string][]roleGrowth{}
 	for _, role := range roles {
 		rt, rc := tgtByRole[role], curByRole[role]
-		hold := satNamed.Holds[role]
-		switch {
-		case rt < rc && !hold.NoScaleDown:
-			// rt is at or above the release floor reserved in the split.
-			reclaimRole(ctx, req.CompositeSignal, records, role, stateMap, targets, rc-rt)
-		case rt > rc && !hold.NoScaleUp:
-			want := rt - rc
-			// The role's rescale target needs more GPUs than this cycle can
-			// free (reclaims only free capacity for the NEXT cycle), so the
-			// fill lands short. That is scarcity, not a user ceiling.
-			gpuCapped := want > *freeThisCycle
-			if gpuCapped {
-				want = *freeThisCycle
-			}
-			before := maps.Clone(targets)
-			*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
-			if gpuCapped {
-				markRoleGPULimited(records, role, stateMap, targets, limited)
-			}
-			for _, vc := range sortByCostEfficiencyAsc(variantsForRole(records, role)) {
-				if n := targets[vc.VariantName] - before[vc.VariantName]; n > 0 {
-					grown[role] = append(grown[role], roleGrowth{variant: vc.VariantName, n: n})
-				}
+		if rt <= rc || satNamed.Holds[role].NoScaleUp {
+			continue
+		}
+		want := rt - rc
+		// The role's rescale target needs more GPUs than this cycle can
+		// free (reclaims only free capacity for the NEXT cycle), so the
+		// fill lands short. That is scarcity, not a user ceiling.
+		gpuCapped := want > *freeThisCycle
+		if gpuCapped {
+			want = *freeThisCycle
+		}
+		before := maps.Clone(targets)
+		*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
+		if gpuCapped {
+			markRoleGPULimited(records, role, stateMap, targets, limited)
+		}
+		for _, vc := range sortByCostEfficiencyAsc(variantsForRole(records, role)) {
+			if n := targets[vc.VariantName] - before[vc.VariantName]; n > 0 {
+				grown[role] = append(grown[role], roleGrowth{variant: vc.VariantName, n: n})
 			}
 		}
 	}
@@ -531,8 +533,79 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 	return refund
 }
 
+// reclaimWholeReplicas sheds the roles whose share tgt is below what they have
+// cur, in whole replicas. Each role's cut alone is rounded down to its replica
+// size, so on 8-GPU pods a model target of 24 from 32, split as a cut of 4 from
+// each role, shed nothing and the model kept all 32: the 8 GPUs the water-fill
+// gave another model never reached it. The cuts are summed instead and shed as
+// whole replicas: first what fits within each role's own cut, then what is
+// left of the sum, from the role with the most of its cut still unshed first,
+// each role no further than its cut rounded up to one replica. A role counts
+// toward the sum only what it can actually give: a cut no replica can meet (a
+// variant with no capacity reading, the cheapest held at one) made the other
+// role pay for it, and a role with a share does not count its last replica, so
+// the second pass never takes it: with two equal variants the cheapest-at-one
+// rule does not protect a role's one pod, and a role with demand went to zero.
+// The second pass runs only when every role cut has one replica size. The model
+// sheds no more than the summed
+// cut, a role under a scale-down hold is not cut at all, and reclaimRole keeps
+// every variant at its minReplicas. It mutates targets.
+func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
+	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
+	cut := make(map[string]int, len(roles))
+	total := 0
+	trialCtx := ctrl.LoggerInto(ctx, logr.Discard())
+	for _, role := range roles {
+		if tgt[role] < cur[role] && !e.Holds[role].NoScaleDown {
+			cut[role] = cur[role] - tgt[role]
+			// A role with a share keeps its last replica, so that is not
+			// something it can give either.
+			keep := 0
+			if tgt[role] > 0 {
+				keep = max(roleReplicaStepGPUs(records, role, stateMap), 1)
+			}
+			can := reclaimRole(trialCtx, e, records, role, stateMap, maps.Clone(targets), max(cur[role]-keep, 0))
+			total += min(cut[role], can)
+		}
+	}
+	if total == 0 {
+		return
+	}
+	shed := make(map[string]int, len(roles))
+	for _, role := range roles {
+		if cut[role] > 0 {
+			shed[role] = reclaimRole(ctx, e, records, role, stateMap, targets, cut[role])
+			total -= shed[role]
+		}
+	}
+	// With more than one replica size in a role, the per-role rounding of the
+	// first pass and the summed second pass can disagree between adjacent
+	// targets, so a larger target left fewer GPUs; such a model is rounded
+	// per role only, as before.
+	for _, role := range roles {
+		if cut[role] > 0 && !uniformReplicaGPUs(records, role, stateMap) {
+			return
+		}
+	}
+	order := slices.Clone(roles)
+	slices.SortStableFunc(order, func(a, b string) int {
+		return cmp.Compare(cut[b]-shed[b], cut[a]-shed[a])
+	})
+	for _, role := range order {
+		left := cut[role] - shed[role]
+		if total <= 0 || left <= 0 {
+			continue
+		}
+		limit := ceilToReplica(left, roleReplicaStepGPUs(records, role, stateMap))
+		n := reclaimRole(ctx, e, records, role, stateMap, targets, min(total, limit))
+		shed[role] += n
+		total -= n
+	}
+}
+
 // reclaimRole sheds up to deltaGPUs worth of a role's replicas, most-expensive-first,
-// respecting minReplicas and the cheapest-at-1 protection, via scaleDownVariantSet.
+// respecting minReplicas and the cheapest-at-1 protection, via scaleDownVariantSet,
+// and returns the GPUs it shed.
 func reclaimRole(
 	ctx context.Context,
 	e NamedAnalyzerResult,
@@ -541,7 +614,7 @@ func reclaimRole(
 	stateMap map[string]domain.VariantReplicaState,
 	targets map[string]int,
 	deltaGPUs int,
-) {
+) int {
 	remaining := deltaGPUs
 	sorted := sortVariantsForScaleDown(e, variantsForRole(variants, role))
 	scaleDownVariantSet(ctx, sorted, targets, stateMap,
@@ -556,6 +629,7 @@ func reclaimRole(
 			remaining -= n * gpusPerReplicaFromState(stateMap, vc.VariantName)
 		},
 	)
+	return deltaGPUs - remaining
 }
 
 // fillRole adds up to wantGPUs worth of a role's replicas, most-cost-efficient-first,
@@ -872,6 +946,23 @@ func roleReplicaStepGPUs(variants []variantRecord, role string, stateMap map[str
 	return least
 }
 
+// uniformReplicaGPUs reports whether every variant of role that can be sized
+// (a capacity reading and a GPU count) takes the same GPUs per replica.
+func uniformReplicaGPUs(variants []variantRecord, role string, stateMap map[string]domain.VariantReplicaState) bool {
+	size := 0
+	for _, vc := range variantsForRole(variants, role) {
+		g := gpusPerReplicaFromState(stateMap, vc.VariantName)
+		if vc.PerReplicaCapacity <= 0 || g <= 0 {
+			continue
+		}
+		if size != 0 && g != size {
+			return false
+		}
+		size = g
+	}
+	return true
+}
+
 // ceilToReplica rounds gpus up to a whole number of g-GPU replicas; g <= 0
 // leaves it as is.
 func ceilToReplica(gpus, g int) int {
@@ -881,6 +972,37 @@ func ceilToReplica(gpus, g int) int {
 	return (gpus + g - 1) / g * g
 }
 
+// roleShareCeilings is the most of a model's GPU target each role may be given
+// in the split: the GPUs its maxReplicas allow (none when any of its variants
+// has no maximum), and, when the split is by demand, no more than the larger of
+// its demand dem and its share uncapped, the split made without ceilings.
+// The demand bound limits only what a role takes of the share another role at
+// its maximum could not hold: without it, that share went to the other role as
+// pods beyond its demand. A role's own share is never lowered by it, so with no
+// role at its maximum the split is the uncapped one. When no role has demand
+// the split falls back to what the roles hold, and only the maxReplicas
+// ceilings apply.
+func roleShareCeilings(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	accType string, roles []string, dem, uncapped map[string]int) map[string]int {
+	byDemand := false
+	for _, role := range roles {
+		byDemand = byDemand || dem[role] > 0
+	}
+	out := make(map[string]int, len(roles))
+	for _, role := range roles {
+		if c := roleCeilingGPUs(variantsForRole(variantsOnType(records, accType), role), stateMap); c > 0 {
+			out[role] = c
+		}
+		if byDemand {
+			bound := max(dem[role], uncapped[role])
+			if c, ok := out[role]; !ok || bound < c {
+				out[role] = bound
+			}
+		}
+	}
+	return out
+}
+
 // distributeGPUsByWeight splits total GPUs across roles: each role is first reserved
 // its floor (minReplicas GPUs), then the remainder is split proportional to weight
 // (falling back to `fallback` when all weights are zero), rounded by largest remainder
@@ -888,7 +1010,17 @@ func ceilToReplica(gpus, g int) int {
 // undercut by the split — e.g. a cold-start P/D model with zero demand and zero current
 // on both roles must still keep each role's floor, not dump everything on one role. The
 // caller reserves the model-level floor before splitting, so total >= sum of role floors.
-func distributeGPUsByWeight(total int, roles []string, weight, fallback, floor map[string]int) map[string]int {
+//
+// A role is never given more than its ceiling (absent is unbounded, and a
+// ceiling below the floor is the floor): what
+// its share would have exceeded re-splits over the other roles by the same
+// weights, as computeRescaleTargets re-splits a capped model's excess. Uncapped,
+// a role at its maxReplicas took a share it could not fill, and the other role
+// was reclaimed to pay for it: prefill at its max of two 8-GPU pods with demand
+// for 70 was given 35 GPUs of a 40-GPU target and decode 5, and decode went
+// from 2 pods to 1 with 64 GPUs free. When every role reaches its ceiling the rest of total
+// is left unassigned, so the roles sum to less than total.
+func distributeGPUsByWeight(total int, roles []string, weight, fallback, floor, ceiling map[string]int) map[string]int {
 	out := make(map[string]int, len(roles))
 	if len(roles) <= 1 {
 		if len(roles) == 1 {
@@ -897,15 +1029,19 @@ func distributeGPUsByWeight(total int, roles []string, weight, fallback, floor m
 		return out
 	}
 
-	// Reserve each role's own floor up front.
 	sumFloor := 0
 	for _, r := range roles {
-		out[r] = floor[r]
 		sumFloor += floor[r]
 	}
 	remaining := total - sumFloor
-	if remaining <= 0 {
-		return out // total only covers the floors; each role keeps exactly its floor
+	// capOf is each role's ceiling, never below its floor; unbounded is the
+	// floor plus everything above the floors, which no share exceeds.
+	capOf := make(map[string]int, len(roles))
+	for _, r := range roles {
+		capOf[r] = floor[r] + max(remaining, 0)
+		if c, ok := ceiling[r]; ok {
+			capOf[r] = max(min(c, capOf[r]), floor[r])
+		}
 	}
 
 	w, sum := weight, 0
@@ -919,18 +1055,27 @@ func distributeGPUsByWeight(total int, roles []string, weight, fallback, floor m
 		}
 	}
 	if sum == 0 {
-		out[roles[0]] += remaining // nothing to weight by: deterministic fallback
+		// Nothing to weight by: deterministic fallback, in role order, each
+		// role up to its ceiling.
+		for _, r := range roles {
+			out[r] = floor[r]
+		}
+		for _, r := range roles {
+			give := min(max(remaining, 0), capOf[r]-out[r])
+			out[r] += give
+			remaining -= give
+		}
 		return out
 	}
-	remainder := make(map[string]float64, len(roles))
-	assigned := 0
+
+	// The floors are reserved first and the rest is water-filled by weight
+	// under each role's ceiling, rounded by largest remainder: the model-level
+	// split, applied to the roles.
+	in := make([]rescaleInput, 0, len(roles))
 	for _, r := range roles {
-		exact := float64(remaining) * float64(w[r]) / float64(sum)
-		whole := int(math.Floor(exact))
-		out[r] += whole
-		assigned += whole
-		remainder[r] = exact - float64(whole)
+		in = append(in, rescaleInput{ID: r, Priority: 1, Demand: float64(w[r]), FloorGPUs: floor[r], CapGPUs: capOf[r]})
 	}
-	apportionLeftover(out, remainder, remaining-assigned, nil)
+	split, _ := computeRescaleTargets(in, total)
+	maps.Copy(out, split)
 	return out
 }
