@@ -658,7 +658,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=110
+CASES_EXPECTED=112
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi
