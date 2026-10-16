@@ -23,6 +23,8 @@ func TestOnlyGrowthStartsAHold(t *testing.T) {
 	gated.VariantStates[0].CurrentReplicas = 2
 	gated.VariantStates[0].FilledReplicas = 1
 	gated.VariantStates[0].HeldKnown = true
+	// The replacement pod has waited at Kueue's gate past a cycle.
+	gated.VariantStates[0].UnplacedReplicas = 1
 	at := func(target int) []domain.VariantDecision {
 		return []domain.VariantDecision{{VariantName: "m-v", Namespace: "gated", AcceleratorName: "A100", TargetReplicas: target}}
 	}

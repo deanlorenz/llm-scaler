@@ -71,7 +71,10 @@ func (e *Engine) admitPassInFlight(requests []allocation.ModelScalingRequest, de
 // whose target does not grow it past its current replicas is admitted only
 // to an entry it already has -- growth ordered earlier whose pods hold no
 // node yet -- so a pod of it at Kueue's gate after a preemption holds no
-// hole a growing peer could use.
+// hole a growing peer could use. The first cycle after a restart, a variant
+// none of whose replicas is unplaced starts its entry all the same: the
+// ledger is not persisted, and its Pending pods' nodes stay held
+// (allocation.InFlightAdmission.ExistingOnly).
 func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) []allocation.InFlightAdmission {
 	var out []allocation.InFlightAdmission
@@ -120,7 +123,8 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 			shape.Flavor, ttl = f, placementTimeout
 		}
 		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
-			PlacedNow: placedNow, Placed: placed, TTL: ttl, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas})
+			PlacedNow: placedNow, Placed: placed, TTL: ttl, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas,
+			Unplaced: st.UnplacedReplicas > 0})
 	}
 	return out
 }

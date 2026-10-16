@@ -52,6 +52,10 @@ const InFlightOwner = "in-flight"
 type InFlightLedger struct {
 	mu      sync.Mutex
 	entries map[string]*inFlightEntry
+	// sighted is every variant key a committed admission named in this
+	// process (InFlightAdmission.ExistingOnly). The ledger is not persisted,
+	// so after a restart no variant is sighted yet.
+	sighted map[string]bool
 }
 
 // inFlightEntry is one variant's replicas in flight.
@@ -97,7 +101,7 @@ type placedAt struct {
 
 // NewInFlightLedger returns an empty ledger.
 func NewInFlightLedger() *InFlightLedger {
-	return &InFlightLedger{entries: map[string]*inFlightEntry{}}
+	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]bool{}}
 }
 
 // DefaultInFlight is the process-wide ledger both engines share.
@@ -115,7 +119,7 @@ func (l *InFlightLedger) Admit(key string, shape ReplicaShape, want, placedNow i
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.admitLocked(InFlightAdmission{Key: key, Shape: shape, Want: want, PlacedNow: placedNow, Placed: placed}, now)
+	l.admitLocked(InFlightAdmission{Key: key, Shape: shape, Want: want, PlacedNow: placedNow, Placed: placed}, now, true)
 }
 
 // InFlightAdmission is one variant's admission to the ledger, as Admit takes
@@ -131,10 +135,20 @@ type InFlightAdmission struct {
 	// for the borrowing placement timeout when that is longer, since the
 	// governor waits that long before it releases the replica.
 	TTL time.Duration
-	// ExistingOnly admits only to an entry the variant already has: a
-	// target that does not grow the variant updates the growth still in
-	// flight and starts no hold of its own.
+	// ExistingOnly marks a target that does not grow the variant: it updates
+	// the growth still in flight and starts no hold of its own -- when the
+	// variant has a replica that cannot place (Unplaced), or once this
+	// process has sighted the variant. On the first sighting, with every
+	// replica placeable, it starts a hold as growth does: the ledger is not
+	// persisted, and after a restart the replica a Pending pod was ordered
+	// for before it is growth no entry remembers. Without that hold a wake
+	// took the node the Pending pod was about to land on.
 	ExistingOnly bool
+	// Unplaced is set when the variant has a replica that cannot place: a
+	// pod Unschedulable, or held at Kueue's admission gate past a cycle --
+	// a preempted borrower's replacement. A hole would only keep that
+	// replica's node from a peer that can use it.
+	Unplaced bool
 }
 
 // InFlightMark is the entries a provisional admission (Provisional)
@@ -166,7 +180,8 @@ func (l *InFlightLedger) Provisional(adms []InFlightAdmission, now time.Time) In
 		mark[a.Key] = prev
 	}
 	for _, a := range adms {
-		l.admitLocked(a, now)
+		// Not a sighting: Commit sets the entry back and admits again.
+		l.admitLocked(a, now, false)
 	}
 	return mark
 }
@@ -191,13 +206,18 @@ func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now
 		l.entries[k] = prev
 	}
 	for _, a := range adms {
-		l.admitLocked(a, now)
+		l.admitLocked(a, now, true)
 	}
 }
 
-// admitLocked is Admit under the lock.
-func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time) {
+// admitLocked is Admit under the lock. sight records the variant as sighted
+// (InFlightAdmission.ExistingOnly); a provisional admission does not.
+func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight bool) {
 	key, shape, want, placedNow, placed := a.Key, a.Shape, a.Want, a.PlacedNow, a.Placed
+	sighted := l.sighted[key]
+	if sight {
+		l.sighted[key] = true
+	}
 	if want <= placedNow {
 		delete(l.entries, key)
 		return
@@ -205,7 +225,7 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time) {
 	ttl := max(a.TTL, InFlightTTL)
 	e, ok := l.entries[key]
 	switch {
-	case !ok && a.ExistingOnly:
+	case !ok && a.ExistingOnly && (a.Unplaced || sighted):
 		return
 	case !ok:
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
@@ -254,6 +274,7 @@ func (l *InFlightLedger) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	clear(l.entries)
+	clear(l.sighted)
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has
