@@ -58,6 +58,11 @@ import (
 //     scaling manager lowers A's target so the gated replacements go, and A
 //     borrows nothing during the cooldown even after b's GPUs are free again
 //     -- then grows back once it ends.
+//  6. PR-C: queue b is set back to Never and asks for its nominal again;
+//     Kueue never reclaims for it, so it waits. With
+//     releaseToNonReclaimingLenders unset A keeps its 4; once the option is
+//     set the scaling manager lowers A to 2 (cause lender-waiting) and Kueue
+//     admits b.
 //
 // Steps 1-3 each hold A at nominal by one condition alone, so each fails if
 // that condition's handling is removed.
@@ -587,6 +592,76 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 			}
 			Skip(skipped)
 		}
+	})
+
+	// PR-C: a lender Kueue never reclaims for (Never) waits for what A
+	// borrowed. By default nothing is handed back; with
+	// releaseToNonReclaimingLenders the scaling manager lowers A by what the
+	// lender waits for, and Kueue admits the lender.
+	It("hands a waiting Never lender what A borrowed, only once releaseToNonReclaimingLenders is on", func() {
+		By("A borrows the cohort's free 2 again, every pod placed")
+		Eventually(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(reach)))
+			expectAllPlaced(g, reach)
+			g.Expect(queueStatus(g, queueA).Borrowed).To(Equal(reach - nominal))
+		}, borrowCooldown+scaleSettle, poll).Should(Succeed())
+
+		By("Queue b cannot reclaim (Never), and asks for its nominal: Kueue admits none of it")
+		Expect(fixtures.SetKueueReclaim(ctx, crClient, queueB, fixtures.KueueReclaimNever)).To(Succeed())
+		asked := time.Now()
+		scaleDeployment(nsB, lender, nominal)
+		Eventually(func(g Gomega) {
+			b := queueStatus(g, queueB)
+			g.Expect(b.Pending).To(Equal(nominal), "b's pods wait: the cohort is full and b cannot reclaim")
+			g.Expect(b.Reserved).To(BeZero())
+		}, kueueSettle, poll).Should(Succeed())
+
+		By("releaseToNonReclaimingLenders unset: A keeps what it borrowed, the lender keeps waiting")
+		Consistently(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(reach)))
+			g.Expect(queueStatus(g, queueB).Pending).To(Equal(nominal))
+		}, lenderDebounce+45*time.Second, 5*time.Second).Should(Succeed())
+		Expect(controllerLogsSince(asked)).NotTo(ContainSubstring(`"cause": "lender-waiting"`),
+			"nothing is handed back to a lender Kueue does not reclaim for by default")
+
+		By("Opting in: releaseToNonReclaimingLenders: true")
+		Expect(fixtures.SetKueueQuotaOption(ctx, k8sClient, cfg.WVANamespace, scalingPolicyConfigMapName(),
+			"releaseToNonReclaimingLenders", true)).To(Succeed())
+		optedIn := time.Now()
+
+		var lowered time.Time
+		Eventually(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)),
+				"A still holds what the waiting lender lent")
+			lowered = time.Now()
+		}, scaleSettle, poll).Should(Succeed(), "the scaling manager never handed the waiting lender its capacity")
+		measure("opted in to A's target lowered for the lender", lowered.Sub(optedIn))
+
+		By("Kueue admits the lender; A keeps its guaranteed 2, every pod placed")
+		Eventually(func(g Gomega) {
+			b := queueStatus(g, queueB)
+			g.Expect(b.Reserved).To(Equal(nominal), "the lender's own workload is admitted")
+			g.Expect(b.Pending).To(BeZero())
+			a := queueStatus(g, queueA)
+			g.Expect(a.Reserved).To(Equal(nominal))
+			g.Expect(a.Borrowed).To(BeZero())
+			expectAllPlaced(g, nominal)
+		}, scaleSettle, poll).Should(Succeed())
+		measure("opted in to lender admitted (release cycle)", time.Since(optedIn))
+
+		Expect(controllerLogsSince(optedIn)).To(MatchRegexp(
+			`Releasing borrowed capacity.*"cause": ?"lender-waiting".*"lenderClusterQueue": ?"` + queueB + `"`))
+		Eventually(func(g Gomega) {
+			g.Expect(releaseEvents(g, nsA, depA, corev1.EventTypeNormal)).To(
+				ContainElement(ContainSubstring("to ClusterQueue "+queueB)),
+				"the Deployment carries a Normal %s Event naming the lender", borrowReleasedReason)
+		}, time.Minute, 2*time.Second).Should(Succeed())
+
+		By("Exactly the lender's 2: A neither drops below its guaranteed 2 nor grows back")
+		Consistently(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)))
+			g.Expect(gatedPods(g)).To(BeEmpty())
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
 	})
 })
 
