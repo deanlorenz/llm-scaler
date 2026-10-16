@@ -76,10 +76,22 @@
 #                                   what the optimizer recorded in each
 #   two_model_pool.sh status        what exists, and what holds accelerators
 #   two_model_pool.sh teardown      remove everything this created
+#   two_model_pool.sh node-data     whether the controller has the node data a
+#                                   mixed-size share run needs, and the exact
+#                                   admin commands when it does not;
+#                                   `node-data grant` makes the pod-list grant
+#   two_model_pool.sh share-arms    REPEATS x (reset, run) for today, shadow
+#                                   and share, a report per repeat, then
+#                                   report-repeats; TEARDOWN_ON_EXIT=1 tears
+#                                   down on every exit path
+#   two_model_pool.sh report-repeats  per-burst TTFT, spread across repeats,
+#                                   transfers by outcome from the controller
+#                                   log, GPU-seconds, and what it shows
 #
 # Env: BENCHMARK_NAMESPACE (required); STACK_A/STACK_B and MODEL_A/MODEL_B must
 # match the scenario spec; the load shape below. KUBECONFIG/KUBE_CONTEXT as
-# usual.
+# usual. BENCH_SIM=1 stands simulator stacks up instead of the harness's (a
+# kind dry run of the whole flow, no GPUs): see sim_standup.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -212,6 +224,41 @@ MAX_DECODE="${MAX_DECODE:-$MAX_REPLICAS}"
 # the other two arms.
 FLOOR_REPLICAS="${FLOOR_REPLICAS:-2}"
 GPUS_PER_REPLICA="${GPUS_PER_REPLICA:-1}"
+# PER MODEL, for a group of mixed replica sizes (two-model-mixed-sizes: a 2-GPU
+# MoE beside a 1-GPU model). Empty reads each stack's size from the scenario --
+# its nvidia.com/gpu request, else tensor x dataLocal -- and falls back to
+# GPUS_PER_REPLICA. Set, it must agree with the scenario: preflight and standup
+# refuse a disagreement, because a run priced on one size and deployed at
+# another prices GPUs nobody held. One global figure counted a 3 x 2-GPU model
+# as 3 GPUs, and preflight placed half its peak.
+GPUS_PER_REPLICA_A="${GPUS_PER_REPLICA_A:-}"
+GPUS_PER_REPLICA_B="${GPUS_PER_REPLICA_B:-}"
+# Per-model ceilings, defaulting to MAX_REPLICAS. The standup registers both at
+# the larger; every arm then sets each model's own on its ScaledObject.
+MAX_REPLICAS_A="${MAX_REPLICAS_A:-$MAX_REPLICAS}"
+MAX_REPLICAS_B="${MAX_REPLICAS_B:-$MAX_REPLICAS}"
+# The node every model replica is pinned to (kubernetes.io/hostname), or empty
+# for none. A 1-GPU donor set can fund a 2-GPU replica only on ONE node, and on
+# a shared cluster the scheduler otherwise spreads the small model's pods.
+# Preflight checks that node alone has the GPUs the run peaks at.
+BENCH_NODE="${BENCH_NODE:-}"
+# Whether the share arms need node data (a gpu-inventory limiter beside the
+# quota, node read and a cluster-wide pod list for the controller): auto means
+# when the two models' replicas differ in size, required always, off never.
+NODE_DATA="${NODE_DATA:-auto}"
+# Which repeat this arm belongs to: its results go under $OUT_ROOT/rep<N>/.
+# Empty keeps $OUT_ROOT/<arm>, as every earlier run had it.
+REPEAT="${REPEAT:-}"
+# BENCH_SIM=1: simulator stacks on a kind cluster in place of the harness's
+# standup (see sim_standup). Everything after the standup is the real path.
+BENCH_SIM="${BENCH_SIM:-0}"
+SIM_IMAGE="${SIM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:v0.9.0}"
+# The load Pod's two containers, each. Defaults are the measured ones (see
+# render_load_container); a kind dry run has nothing like that much memory.
+LOAD_CPU="${LOAD_CPU:-2}"
+LOAD_MEMORY="${LOAD_MEMORY:-8Gi}"
+LOAD_CPU_LIMIT="${LOAD_CPU_LIMIT:-4}"
+LOAD_MEMORY_LIMIT="${LOAD_MEMORY_LIMIT:-32Gi}"
 POOL_NAME="${POOL_NAME:-twomodel}"
 POOL_REPLICAS="${POOL_REPLICAS:-2}"
 # A pool with replicas == reserve can never warm anything: the reserve is what
@@ -311,13 +358,127 @@ esac
 # MAX_PREFILL + MAX_DECODE replicas, not MAX_REPLICAS. Counting it as one role
 # halved the peak of a two-P/D-stack run, and preflight then passed on a
 # cluster with room for half the fleet.
+#
+# Aggregated models are priced each at its OWN size and ceiling: a 2-GPU model
+# at 3 replicas beside a 1-GPU model at 4 peaks at 10, not 2 x 3 x 1.
 peak_gpus() {
     local models=2 per_model="$MAX_REPLICAS"
     [ "$PD_SINGLE_STACK" != 1 ] || models=1
     if scenario_is_pd; then
         per_model=$(( MAX_PREFILL + MAX_DECODE ))
+        echo $(( models * per_model * GPUS_PER_REPLICA ))
+        return
     fi
-    echo $(( models * per_model * GPUS_PER_REPLICA ))
+    echo $(( MAX_REPLICAS_A * $(model_gpus a) + MAX_REPLICAS_B * $(model_gpus b) ))
+}
+
+# The larger of the two models' ceilings: what the standup registers both
+# ScaledObjects at, before each arm sets each model's own.
+max_ceiling() {
+    if [ "$MAX_REPLICAS_A" -gt "$MAX_REPLICAS_B" ]; then echo "$MAX_REPLICAS_A"; else echo "$MAX_REPLICAS_B"; fi
+}
+
+# scenario_stack_field <stack> <yq path under the stack entry>: one value from
+# the scenario's entry for that stack, or nothing (no scenario, no yq, no such
+# stack or field). A program in double quotes, so no apostrophe can open it.
+scenario_stack_field() {
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    [ -f "$file" ] && command -v yq >/dev/null 2>&1 || return 0
+    STACK="$1" yq -r ".scenario[] | select(.name == strenv(STACK)) | $2 // \"\"" "$file" 2>/dev/null \
+        | tr -d '\r' | grep -v '^null$' | head -1
+}
+
+# scenario_shared_field <yq path under shared>: the scenario-wide default a
+# stack inherits.
+scenario_shared_field() {
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    [ -f "$file" ] && command -v yq >/dev/null 2>&1 || return 0
+    yq -r ".shared.$1 // \"\"" "$file" 2>/dev/null | tr -d '\r' | grep -v '^null$' | head -1
+}
+
+# scenario_tp <stack>: the stack's tensor-parallel size, inherited from the
+# shared block, 1 when neither says.
+scenario_tp() {
+    local v
+    v="$(scenario_stack_field "$1" '.modelservice.decode.parallelism.tensor')"
+    [ -n "$v" ] || v="$(scenario_shared_field 'modelservice.decode.parallelism.tensor')"
+    echo "${v:-1}"
+}
+
+scenario_data_local() {
+    local v
+    v="$(scenario_stack_field "$1" '.modelservice.decode.parallelism.dataLocal')"
+    [ -n "$v" ] || v="$(scenario_shared_field 'modelservice.decode.parallelism.dataLocal')"
+    echo "${v:-1}"
+}
+
+# scenario_gpus <stack>: the GPUs one replica of the stack requests -- its
+# nvidia.com/gpu request, else tensor x dataLocal as the harness renders it --
+# or nothing when the scenario does not say.
+scenario_gpus() {
+    local v
+    v="$(scenario_stack_field "$1" '.modelservice.decode.resources.requests["nvidia.com/gpu"]')"
+    if [ -z "$v" ] && [ -n "$(scenario_stack_field "$1" '.name')" ]; then
+        v=$(( $(scenario_tp "$1") * $(scenario_data_local "$1") ))
+    fi
+    printf '%s' "$v"
+}
+
+# model_gpus <a|b>: the GPUs one replica of that model holds. The override when
+# set, else the scenario's, else GPUS_PER_REPLICA. A single-stack P/D run has
+# no stacks to read and keeps GPUS_PER_REPLICA.
+model_gpus() {
+    local v stack
+    if [ "$1" = a ]; then v="$GPUS_PER_REPLICA_A"; stack="$STACK_A"; else v="$GPUS_PER_REPLICA_B"; stack="$STACK_B"; fi
+    if [ -z "$v" ] && [ "$PD_SINGLE_STACK" != 1 ]; then
+        v="$(scenario_gpus "$stack")"
+    fi
+    echo "${v:-$GPUS_PER_REPLICA}"
+}
+
+# mixed_sizes: whether the two models' replicas differ in GPUs.
+mixed_sizes() { [ "$PD_SINGLE_STACK" != 1 ] && [ "$(model_gpus a)" != "$(model_gpus b)" ]; }
+
+# node_data_needed: whether the share arms need node data. A 2-GPU replica is
+# funded from 1-GPU donors only when node data shows them on one node; without
+# it the receiver reports no-compatible-donor and the run measures that.
+node_data_needed() {
+    case "$NODE_DATA" in
+        required) return 0 ;;
+        off) return 1 ;;
+        *) mixed_sizes ;;
+    esac
+}
+
+# scenario_size_problems: one line per way the scenario and the run disagree
+# about a stack -- a stack the scenario does not have, a model it does not
+# serve, a GPU request that is not TP x dataLocal, an override that is not the
+# scenario's size. Nothing when they agree, or when there is no scenario to
+# read (single-stack P/D).
+scenario_size_problems() {
+    [ "$PD_SINGLE_STACK" != 1 ] || return 0
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    [ -f "$file" ] && command -v yq >/dev/null 2>&1 || return 0
+    local role stack model want_model req tp dl override
+    for role in a b; do
+        if [ "$role" = a ]; then stack="$STACK_A"; want_model="$MODEL_A"; override="$GPUS_PER_REPLICA_A"
+        else stack="$STACK_B"; want_model="$MODEL_B"; override="$GPUS_PER_REPLICA_B"; fi
+        if [ -z "$(scenario_stack_field "$stack" '.name')" ]; then
+            echo "STACK_$(printf '%s' "$role" | tr a-z A-Z)=$stack is not a stack of $BENCH_SPEC (its stacks: $(yq -r '[.scenario[].name] | join(", ")' "$file" 2>/dev/null | tr -d '\r'))"
+            continue
+        fi
+        model="$(scenario_stack_field "$stack" '.model.name')"
+        [ -z "$model" ] || [ "$model" = "$want_model" ] || \
+            echo "stack $stack serves $model, but MODEL_$(printf '%s' "$role" | tr a-z A-Z)=$want_model: the loader would ask it for a model it does not serve"
+        req="$(scenario_stack_field "$stack" '.modelservice.decode.resources.requests["nvidia.com/gpu"]')"
+        tp="$(scenario_tp "$stack")"; dl="$(scenario_data_local "$stack")"
+        if [ -n "$req" ] && [ "$req" -ne $(( tp * dl )) ] 2>/dev/null; then
+            echo "stack $stack requests $req GPU(s) per replica but runs tensor $tp x dataLocal $dl = $(( tp * dl )) rank(s): the engine would hold GPUs no rank uses, or never start"
+        fi
+        if [ -n "$override" ] && [ "$override" != "$(scenario_gpus "$stack")" ]; then
+            echo "GPUS_PER_REPLICA_$(printf '%s' "$role" | tr a-z A-Z)=$override, but stack $stack takes $(scenario_gpus "$stack") per replica: the run would be priced on a size it does not deploy"
+        fi
+    done
 }
 
 # quota_cap prints the GPUs the standup quota allows the models -- WVA_QUOTAS,
@@ -361,6 +522,15 @@ PY
 }
 
 pool_gpus() { echo $(( POOL_REPLICAS * GPUS_PER_REPLICA )); }
+
+case "$REPEAT" in
+    ""|[1-9]|[1-9][0-9]) ;;
+    *) die "REPEAT=$REPEAT: a repeat number from 1 to 99, or empty" ;;
+esac
+
+# Where this repeat's arms live: $OUT_ROOT, or $OUT_ROOT/rep<N> with REPEAT.
+share_root() { printf '%s' "$OUT_ROOT${REPEAT:+/rep$REPEAT}"; }
+arm_dir() { printf '%s/%s' "$(share_root)" "$1"; }
 
 arm_max_replicas() { echo "$MAX_REPLICAS"; }
 
@@ -513,6 +683,31 @@ placeable_slots() {
     rm -f "${TMPDIR:-/tmp}/wva-pods.$$"
 }
 
+# node_free_gpus [node]: free accelerators on that node -- allocatable less
+# what Running or Pending pods BOUND to it request -- or, with no node, the
+# most on any one node. Only schedulable, Ready nodes; nothing when there is
+# no such node or the cluster cannot be read.
+node_free_gpus() {
+    local want="${1:-}" nodes_f pods_f
+    nodes_f="$(mktemp)"; pods_f="$(mktemp)"
+    kc get nodes -o json > "$nodes_f" 2>/dev/null || { rm -f "$nodes_f" "$pods_f"; return 0; }
+    kc get pods -A -o json > "$pods_f" 2>/dev/null || echo '{"items":[]}' > "$pods_f"
+    jq -r --slurpfile p "$pods_f" --arg want "$want" '
+        [ .items[]
+          | select(.spec.unschedulable != true)
+          | select([.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0)
+          | select($want == "" or .metadata.name == $want)
+          | .metadata.name as $n
+          | (.status.allocatable["nvidia.com/gpu"] // "0" | tonumber) as $ag
+          | select($ag > 0)
+          | ([$p[0].items[] | select(.status.phase=="Running" or .status.phase=="Pending")
+              | select(.spec.nodeName == $n)
+              | [.spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add] | add // 0) as $used
+          | $ag - $used ]
+        | if length == 0 then empty else max end' "$nodes_f" 2>/dev/null
+    rm -f "$nodes_f" "$pods_f"
+}
+
 verb_preflight() {
     need_ns
     local rc=0
@@ -574,6 +769,48 @@ verb_preflight() {
     fi
     if [ "$FLOOR_REPLICAS" -gt "$(floor_ceiling)" ]; then
         warn "FLOOR_REPLICAS=${FLOOR_REPLICAS} is above a role's ceiling ($(floor_ceiling)): the floor arm will refuse to start"
+    fi
+    if ! scenario_is_pd; then
+        info "  model A ($STACK_A, $MODEL_A): $(model_gpus a) GPU(s) per replica (tensor $(scenario_tp "$STACK_A")), 1..${MAX_REPLICAS_A} replicas"
+        info "  model B ($STACK_B, $MODEL_B): $(model_gpus b) GPU(s) per replica (tensor $(scenario_tp "$STACK_B")), 1..${MAX_REPLICAS_B} replicas"
+    fi
+    local size_problems
+    size_problems="$(scenario_size_problems)"
+    if [ -n "$size_problems" ]; then
+        printf '%s\n' "$size_problems" | while IFS= read -r l; do warn "$l"; done
+        rc=1
+    fi
+    # Mixed sizes need node data for the share arms, and that needs an admin
+    # once: said here, before anything is stood up, so the run is not found
+    # missing it at the first arm.
+    if node_data_needed; then
+        case ",${WVA_LIMITER:-}," in
+            *,gpu-inventory,*|*,inventory,*) info "the share arms need node data; WVA_LIMITER=${WVA_LIMITER} declares gpu-inventory beside the quota" ;;
+            *) warn "the two models' replicas differ in size ($(model_gpus a) and $(model_gpus b) GPUs), so the share arms need node data:"
+               warn "  stand up with WVA_LIMITER=gpu-inventory,quota (now '${WVA_LIMITER:-}'); the share arms refuse a policy without it." ;;
+        esac
+        info "  after standup an admin grants the controller node read and a cluster-wide pod list once; 'node-data' prints the exact commands"
+    fi
+    # ONE node holds the whole run: the donor set that funds a 2-GPU replica
+    # from two 1-GPU ones exists only on one node, and BENCH_NODE pins every
+    # model replica there. Checked here because the cluster-wide free count says
+    # nothing about one node.
+    if [ -n "$BENCH_NODE" ]; then
+        local node_free
+        node_free="$(node_free_gpus "$BENCH_NODE")"
+        if [ -z "$node_free" ]; then
+            warn "BENCH_NODE=$BENCH_NODE: no such schedulable, Ready node with accelerators"
+            rc=1
+        elif [ "$node_free" -lt "$want" ]; then
+            warn "BENCH_NODE=$BENCH_NODE has ${node_free} free accelerator(s) and the run peaks at ${want}: pick a node with at least ${want} free"
+            rc=1
+        else
+            ok "BENCH_NODE=$BENCH_NODE has ${node_free} free accelerator(s); the run peaks at ${want}"
+        fi
+    else
+        local best
+        best="$(node_free_gpus)"
+        [ -n "$best" ] && info "  the node with the most free accelerators has ${best}; BENCH_NODE=<node> pins the run to one"
     fi
 
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
@@ -747,6 +984,23 @@ verb_standup() {
     need_ns
     [ -f "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" ] || \
         die "no scenario at hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    # The sizes the run is priced on are the sizes it deploys, and the limiter
+    # the share arms need is declared at install: both refused HERE, before an
+    # hour of standup, not at the first arm.
+    local size_problems
+    size_problems="$(scenario_size_problems)"
+    [ -z "$size_problems" ] || die "the scenario and this run disagree:
+$size_problems"
+    if node_data_needed; then
+        case ",${WVA_LIMITER:-}," in
+            *,gpu-inventory,*|*,inventory,*) : ;;
+            *) die "the models' replicas differ in size ($(model_gpus a) and $(model_gpus b) GPUs), so the share arms need node data, and WVA_LIMITER='${WVA_LIMITER:-}' declares no gpu-inventory limiter. Stand up with WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=<n>', or NODE_DATA=off to run without it (the small model can then never fund the large one)." ;;
+        esac
+    fi
+    if [ "$BENCH_SIM" = 1 ]; then
+        sim_standup
+        return
+    fi
     # BOTH halves. `--spec` resolves a SPECIFICATION
     # (config/specification/<name>.yaml.j2) and never a scenario, so a scenario
     # shipped without one is invisible to the CLI: it reports
@@ -792,13 +1046,14 @@ verb_standup() {
         BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$GATEWAY_PROVIDER_NAMESPACE" \
         BENCHMARK_DECODE_CPU="$DECODE_CPU" \
         BENCHMARK_DECODE_MEMORY="$DECODE_MEMORY" \
+        BENCHMARK_DECODE_NODE="$BENCH_NODE" \
         BENCHMARK_ALLOW_EPP_REUSE="$allow_reuse" \
         BENCHMARK_NAMESPACE="$NS" \
         BENCHMARK_SPEC="$BENCH_SPEC" \
         BENCHMARK_MODEL_ID= \
         BENCHMARK_DECODE_REPLICAS="$MIN_REPLICAS" \
         BENCHMARK_KEDA_MIN_REPLICAS="$MIN_REPLICAS" \
-        BENCHMARK_KEDA_MAX_REPLICAS="$MAX_REPLICAS" \
+        BENCHMARK_KEDA_MAX_REPLICAS="$(max_ceiling)" \
         BENCHMARK_SKIP_SMOKETEST=true \
         make --no-print-directory benchmark-standup ) || die "standup failed"
     # The smoketest is skipped because it cannot pass here -- its readiness poll
@@ -999,6 +1254,203 @@ if [ "$PD_SINGLE_STACK" = 1 ]; then
     decode_deploy_for() { role_deploys | awk '$2 == "decode" { print $1; exit }'; }
 fi
 
+# ---------------------------------------------------------------------------
+# BENCH_SIM=1: the whole flow on a kind cluster, with simulators for engines
+# ---------------------------------------------------------------------------
+# A dry run of everything after the standup -- the real controller install and
+# ScaledObject registration (benchmark-deploy-wva), reset, the share arms, the
+# loader, the sampler, collection and every report -- against
+# llm-d-inference-sim engines that hold EMULATED accelerators. What it cannot
+# show is anything about latency: the simulator's TTFT is a setting.
+#
+# Each stack is a Deployment `<stack>-decode` (role decode, the GPUs per
+# replica the scenario gives the stack), a Service `<stack>-sim` the loader
+# drives directly -- there is no gateway or EPP -- and a PodMonitor so the
+# controller reads the simulator's vLLM metrics. Refused on anything but kind:
+# the simulators request accelerators, and on a real cluster they would hold
+# them doing nothing.
+SIM_TTFT="${SIM_TTFT:-200ms}"
+SIM_ITL="${SIM_ITL:-20ms}"
+SIM_MAX_NUM_SEQS="${SIM_MAX_NUM_SEQS:-4}"
+# The node label the simulators are pinned by, the way the e2e pins them:
+# nvidia.com/gpu.product=<value>. Empty pins nothing.
+SIM_GPU_PRODUCT="${SIM_GPU_PRODUCT:-}"
+
+if [ "$BENCH_SIM" = 1 ]; then
+    gateway_host() { printf 'sim:8000'; }
+    stack_backend() { k get svc "$1-sim" -o name >/dev/null 2>&1 && printf '%s' "$1-sim"; }
+    decode_deploy_for() { k get deploy "$1-decode" -o name >/dev/null 2>&1 && printf '%s' "$1-decode"; }
+    base_url_for_stack() {
+        local ip
+        ip="$(gateway_ip "$2-sim")" || ip="$2-sim.$NS.svc.cluster.local."
+        printf 'http://%s:8000' "$ip"
+    }
+    epp_deploys() { :; }
+fi
+
+# sim_manifest <a|b>: one simulator stack, as YAML.
+sim_manifest() {
+    local role="$1" stack model gpus sel=""
+    if [ "$role" = a ]; then stack="$STACK_A"; model="$MODEL_A"; else stack="$STACK_B"; model="$MODEL_B"; fi
+    gpus="$(model_gpus "$role")"
+    if [ -n "$SIM_GPU_PRODUCT" ] || [ -n "$BENCH_NODE" ]; then
+        sel="      nodeSelector:"
+        [ -z "$SIM_GPU_PRODUCT" ] || sel="$sel
+        nvidia.com/gpu.product: \"$SIM_GPU_PRODUCT\""
+        [ -z "$BENCH_NODE" ] || sel="$sel
+        kubernetes.io/hostname: \"$BENCH_NODE\""
+    fi
+    cat <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${stack}-decode
+  namespace: $NS
+  labels:
+    app.kubernetes.io/part-of: wva-two-model-sim
+spec:
+  replicas: $MIN_REPLICAS
+  selector:
+    matchLabels:
+      app: ${stack}-decode
+  template:
+    metadata:
+      labels:
+        app: ${stack}-decode
+        app.kubernetes.io/part-of: wva-two-model-sim
+        llm-d.ai/role: decode
+        llm-d.ai/inferenceServing: "true"
+        llm-d.ai/model: ${stack}
+    spec:
+$sel
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: vllm
+          image: $SIM_IMAGE
+          imagePullPolicy: IfNotPresent
+          # --model is a name the simulator does not know, so it tokenizes on
+          # its own: given a Hugging Face id it wants a tokenizer sidecar and
+          # exits without one. The real id is the name it serves, and the name
+          # ScaledObject planning registers.
+          args:
+            - --model
+            - "sim-${stack}"
+            - --served-model-name
+            - "$model"
+            - --port
+            - "8000"
+            - --time-to-first-token=$SIM_TTFT
+            - --inter-token-latency=$SIM_ITL
+            - --mode=random
+            - --max-num-seqs
+            - "$SIM_MAX_NUM_SEQS"
+            - --max-model-len
+            - "32768"
+          ports:
+            - name: modelserver
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              nvidia.com/gpu: "$gpus"
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              nvidia.com/gpu: "$gpus"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${stack}-sim
+  namespace: $NS
+  labels:
+    app.kubernetes.io/part-of: wva-two-model-sim
+spec:
+  selector:
+    app: ${stack}-decode
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+YAML
+}
+
+# sim_monitor: the model-server PodMonitor every install asks for
+# (config/modelserver-metrics: decode and prefill pods, port `modelserver`).
+# Its CRD arrives with the monitoring stack the controller install brings.
+sim_monitor() {
+    kc apply -n "$NS" -k "$ROOT/config/modelserver-metrics" >/dev/null
+}
+
+# sim_cluster_problem: why this cluster is not one a simulator may hold
+# accelerators on, or nothing. Every node's providerID starts kind:// on kind.
+sim_cluster_problem() {
+    local ids
+    ids="$(kc get nodes -o jsonpath='{range .items[*]}{.spec.providerID}{"\n"}{end}' 2>&1)" || {
+        echo "could not read the nodes to tell whether this is a kind cluster: $ids"; return; }
+    [ -n "$ids" ] || { echo "no nodes"; return; }
+    if printf '%s\n' "$ids" | grep -qv '^kind://'; then
+        echo "BENCH_SIM=1 runs on kind only: the simulators request accelerators, and on this cluster (providerIDs: $(printf '%s' "$ids" | sort -u | tr '\n' ' ')) they would hold real ones doing nothing"
+    fi
+}
+
+sim_standup() {
+    local why
+    why="$(sim_cluster_problem)"
+    [ -z "$why" ] || die "$why"
+    kc create namespace "$NS" --dry-run=client -o yaml | kc apply -f - >/dev/null || die "could not create namespace $NS"
+    k create configmap "$STANDUP_RECORD" --from-literal=spec="sim:$BENCH_SPEC" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null \
+        || die "could not record the standup in ConfigMap $STANDUP_RECORD"
+    local role
+    for role in a b; do
+        info "simulator stack for model $role: $(model_gpus "$role") GPU(s) per replica"
+        sim_manifest "$role" | k apply -f - >/dev/null || die "could not apply the simulator stack for model $role"
+    done
+    for role in "$STACK_A" "$STACK_B"; do
+        k rollout status "deploy/${role}-decode" --timeout=600s >/dev/null || die "${role}-decode did not become ready"
+    done
+    # The install refuses model servers nothing scrapes, once it can tell: when
+    # the PodMonitor CRD exists already (a second standup), the monitors go
+    # first. On a fresh cluster the install brings the CRD, and they follow it.
+    if kc get crd podmonitors.monitoring.coreos.com >/dev/null 2>&1; then
+        sim_monitor || die "could not apply config/modelserver-metrics"
+    fi
+    ok "simulator stacks are up; installing the controller the way the real standup does"
+    ( cd "$ROOT" && \
+        BENCHMARK_NAMESPACE="$NS" \
+        BENCHMARK_KEDA_MIN_REPLICAS="$MIN_REPLICAS" \
+        BENCHMARK_KEDA_MAX_REPLICAS="$(max_ceiling)" \
+        make --no-print-directory benchmark-deploy-wva ) || die "benchmark-deploy-wva failed"
+    sim_monitor || die "could not apply config/modelserver-metrics (is the PodMonitor CRD installed?)"
+    verb_status
+    ok "simulator stacks stood up. Run 'verify' before any load."
+}
+
+sim_teardown() {
+    local sos d
+    k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found --timeout=120s >/dev/null 2>&1
+    k delete configmap wva-two-model-load --ignore-not-found --timeout=60s >/dev/null 2>&1
+    # The ScaledObjects first: left behind, KEDA would scale the Deployments
+    # back up while they are being deleted.
+    for d in "$STACK_A-decode" "$STACK_B-decode"; do
+        sos="$(k get scaledobject -o json 2>/dev/null | jq -r --arg d "$d" \
+            '.items[] | select(.spec.scaleTargetRef.name == $d) | .metadata.name')"
+        for so in $sos; do k delete scaledobject "$so" --ignore-not-found >/dev/null 2>&1; done
+    done
+    k delete podmonitor wva-modelserver-metrics --ignore-not-found --timeout=60s >/dev/null 2>&1
+    k delete deploy,svc -l app.kubernetes.io/part-of=wva-two-model-sim --ignore-not-found --timeout=120s >/dev/null 2>&1 \
+        || warn "could not delete every simulator object; check below"
+    k delete configmap "$STANDUP_RECORD" --ignore-not-found --timeout=60s >/dev/null 2>&1
+    verb_status
+    ok "teardown done (simulator stacks). The controller stays; it holds no accelerators."
+}
+
 # The EPP Deployment behind each stack: the route's backendRef names the pool
 # (`<shortName>-router`), and the chart names its EPP `<shortName>-router-epp`.
 epp_deploys() {
@@ -1052,6 +1504,10 @@ verify_flow_control() {
     # SKIP_FLOW_CONTROL_CHECK=1 is the deliberate way past.
     if [ "${SKIP_FLOW_CONTROL_CHECK:-0}" = "1" ]; then
         warn "SKIP_FLOW_CONTROL_CHECK=1: not checking that WVA's scheduler-queue signal exists"
+        return 0
+    fi
+    if [ "$BENCH_SIM" = 1 ]; then
+        warn "BENCH_SIM=1: the simulator stacks have no EPP, so there is no flow-control queue to check"
         return 0
     fi
     local url; url="$(prometheus_base_url)"
@@ -1296,6 +1752,124 @@ set_share_policy() {
         die "could not write the policy for arm $arm"
 }
 
+# ---------------------------------------------------------------------------
+# Node data: what lets 1-GPU donors fund a 2-GPU replica
+# ---------------------------------------------------------------------------
+# The utilization-share optimizer combines several small donor pods into one
+# larger replica only when node data shows them on one node. A namespace-scoped
+# controller has node data only with a gpu-inventory limiter in its policy, and
+# then it needs two cluster-scoped reads no namespace owner can grant
+# themselves: nodes (the install's prerequisites phase grants it) and pods in
+# every namespace (nothing in the installer does). Without the pod list it
+# counts only its own namespace's GPUs, so another team's pods on the node read
+# as free. Without node data at all a mixed-size run measures
+# `no-compatible-donor`, which is the documented limit and not the experiment.
+CONTROLLER_SA="${CONTROLLER_SA:-wva-controller-manager}"
+
+# can_i_sa <verb> <resource> [--all-namespaces]: yes | no | unknown, asked as
+# the controller's ServiceAccount. unknown when this identity may not
+# impersonate it -- never folded into no or yes.
+can_i_sa() {
+    local out rc=0
+    out="$(kc auth can-i "$@" --as "system:serviceaccount:${WVA_NS}:${CONTROLLER_SA}" 2>&1)" || rc=$?
+    case "$out" in
+        yes*) echo yes ;;
+        no*) if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
+        *) echo unknown ;;
+    esac
+}
+
+# node_data_admin_steps: the exact commands an admin runs, once.
+node_data_admin_steps() {
+    cat <<EOF
+  # 1. Node read for the controller. The install's prerequisites phase grants
+  #    it (ClusterRole/ClusterRoleBinding wva-node-reader-*); as a cluster admin:
+  make setup-prereqs ENVIRONMENT=kubernetes SCOPE=namespace NAMESPACE=${NS} WVA_NS=${WVA_NS}
+  # 2. List on pods in every namespace. Nothing in the installer grants it:
+  kubectl create clusterrole wva-pod-lister-${WVA_NS} --verb=list --resource=pods
+  kubectl create clusterrolebinding wva-pod-lister-${WVA_NS} --clusterrole=wva-pod-lister-${WVA_NS} --serviceaccount=${WVA_NS}:${CONTROLLER_SA}
+  # (or, from this repo as that admin: BENCHMARK_NAMESPACE=${NS} bash hack/benchmark/two_model_pool.sh node-data grant)
+  # 3. Restart the controller so it re-checks node access at once:
+  kubectl rollout restart deployment/wva-controller-manager -n ${WVA_NS}
+  # Remove both after the benchmark:
+  kubectl delete clusterrolebinding wva-pod-lister-${WVA_NS}; kubectl delete clusterrole wva-pod-lister-${WVA_NS}
+EOF
+}
+
+# node_data_problems: one line per thing missing for node data, or nothing.
+# Each read that cannot be made is a problem too: not knowing is not passing.
+node_data_problems() {
+    local policy nodes pods status ready
+    policy="$(kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' 2>&1)" || {
+        echo "could not read the scaling policy in $WVA_NS: $policy"; return; }
+    printf '%s\n' "$policy" | grep -Eq '^[[:space:]-]*type:[[:space:]]*(gpu-inventory|inventory)[[:space:]]*$' || \
+        echo "the policy in $WVA_NS declares no gpu-inventory limiter (stand up with WVA_LIMITER=gpu-inventory,quota)"
+    nodes="$(can_i_sa list nodes)"
+    if [ "$nodes" = unknown ]; then
+        # The controller's readiness gate refuses to serve a gpu-inventory
+        # policy it cannot back with a node list, so Ready answers it.
+        ready="$(kc -n "$WVA_NS" get deploy wva-controller-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+        [ "${ready:-0}" -ge 1 ] 2>/dev/null && nodes=yes
+    fi
+    case "$nodes" in
+        no) echo "the controller ($WVA_NS/$CONTROLLER_SA) may not list nodes" ;;
+        unknown) echo "could not tell whether the controller may list nodes (no impersonation, and the controller is not Ready)" ;;
+    esac
+    pods="$(can_i_sa list pods --all-namespaces)"
+    if [ "$pods" = unknown ]; then
+        # What the controller found itself: podListDenied is present in its
+        # status ConfigMap while its cluster-wide pod list is refused.
+        status="$(kc -n "$WVA_NS" get configmap wva-controller-status -o json 2>/dev/null)"
+        if [ -n "$status" ]; then
+            if jq -e '.data | has("podListDenied")' <<<"$status" >/dev/null 2>&1; then pods=no; else pods=yes; fi
+        fi
+    fi
+    case "$pods" in
+        no) echo "the controller ($WVA_NS/$CONTROLLER_SA) may not list pods in every namespace, so GPUs other namespaces hold on the node read as free" ;;
+        unknown) echo "could not tell whether the controller may list pods in every namespace (no impersonation, no status ConfigMap)" ;;
+    esac
+}
+
+# check_node_data: refuses a share arm that needs node data and lacks it, with
+# the admin steps. Every share arm, not only share: the arms are compared under
+# one policy, and today's optimizer reads the gpu-inventory limiter too.
+check_node_data() {
+    node_data_needed || return 0
+    local problems
+    problems="$(node_data_problems)"
+    [ -n "$problems" ] || { ok "node data: gpu-inventory in the policy, node read and a cluster-wide pod list for the controller"; return 0; }
+    warn "this run needs node data (NODE_DATA=$NODE_DATA; replicas of $(model_gpus a) and $(model_gpus b) GPUs), and:"
+    printf '%s\n' "$problems" | sed 's/^/      /' >&2
+    warn "an admin runs, once:"
+    node_data_admin_steps >&2
+    return 1
+}
+
+verb_node_data() {
+    need_ns
+    if [ "${1:-}" = grant ]; then
+        # Step 2 only: step 1 is the install's prerequisites phase, which owns
+        # the node-reader names. Idempotent: create-or-apply.
+        kc create clusterrole "wva-pod-lister-${WVA_NS}" --verb=list --resource=pods \
+            --dry-run=client -o yaml | kc apply -f - >/dev/null || die "could not create ClusterRole wva-pod-lister-${WVA_NS} (a cluster-admin action)"
+        kc create clusterrolebinding "wva-pod-lister-${WVA_NS}" --clusterrole="wva-pod-lister-${WVA_NS}" \
+            --serviceaccount="${WVA_NS}:${CONTROLLER_SA}" --dry-run=client -o yaml | kc apply -f - >/dev/null \
+            || die "could not create ClusterRoleBinding wva-pod-lister-${WVA_NS} (a cluster-admin action)"
+        ok "granted ${WVA_NS}/${CONTROLLER_SA} list on pods in every namespace (ClusterRole/ClusterRoleBinding wva-pod-lister-${WVA_NS})"
+    fi
+    local problems
+    problems="$(node_data_problems)"
+    if [ -z "$problems" ]; then
+        ok "node data: gpu-inventory in the policy, node read and a cluster-wide pod list for the controller"
+        return 0
+    fi
+    warn "node data is missing:"
+    printf '%s\n' "$problems" | sed 's/^/      /' >&2
+    warn "an admin runs, once:"
+    node_data_admin_steps >&2
+    return 1
+}
+
 # The policy is intent; the controller's mode gauge is the fact. Wait until
 # Prometheus shows the mode this arm needs. On a namespace-scoped install whose
 # policy lives in another namespace the policy is read once, at start, and this
@@ -1330,10 +1904,38 @@ capture_share_metrics() {
         "sum by (reason) (count_over_time((wva_model_scaling_blocked{$sel} == 1)[${window}s:${step}s])) * $step" \
         "count_over_time((max(wva_utilization_share_replicas_to_move{$sel}) > 0)[${window}s:${step}s]) * $step" \
         "min by (mode) (min_over_time(wva_utilization_share_mode{$sel}[${window}s]))" \
+        "sum by (model_name, reason) (count_over_time((wva_model_scaling_blocked{$sel} == 1)[${window}s:${step}s])) * $step" \
+        "sum by (variant_name, limiter_name) (increase(wva_decisions_limited_total{$sel}[${window}s]))" \
         > "$out.tmp" && [ -s "$out.tmp" ] && mv "$out.tmp" "$out" || {
             rm -f "$out.tmp"
             warn "could not read the optimizer's metrics for this arm; the report will say so"
         }
+}
+
+# What the controller logged over one arm, and the namespace's events, kept
+# with the arm's results. The report counts transfers by outcome from this log:
+# the counter's increase() missed a series' first sample in the run the
+# well-lit path reports, and the log names every transfer, donor set and fill.
+# A capture that comes back smaller than one already kept does not replace it.
+capture_share_log() {
+    local out_dir="$1" since="$2" tmp
+    tmp="$(mktemp)"
+    kc -n "$WVA_NS" logs deploy/wva-controller-manager --since-time="$since" > "$tmp" 2>&1 || \
+        warn "could not read the controller log for this arm; the report will count transfers from the metric alone"
+    if [ ! -s "$out_dir/controller.log" ] || [ "$(wc -c < "$tmp")" -gt "$(wc -c < "$out_dir/controller.log")" ]; then
+        mv "$tmp" "$out_dir/controller.log"
+    else
+        rm -f "$tmp"
+    fi
+    # A restart inside the arm loses everything before it from the live log.
+    local restarts
+    restarts="$(kc -n "$WVA_NS" get pods -l control-plane=controller-manager -o json 2>/dev/null | jq -r '
+        [.items[].status.containerStatuses[]?.restartCount] | add // 0' 2>/dev/null)"
+    if [ "${restarts:-0}" -gt 0 ] 2>/dev/null; then
+        kc -n "$WVA_NS" logs deploy/wva-controller-manager --previous > "$out_dir/controller.previous.log" 2>&1 || true
+        warn "the controller has restarted ${restarts} time(s); its previous log is in controller.previous.log"
+    fi
+    k get events --sort-by=.lastTimestamp > "$out_dir/events.txt" 2>&1 || true
 }
 
 verb_verify() {
@@ -1365,9 +1967,30 @@ verb_verify() {
     epps="$(k get deploy -o name 2>/dev/null | grep -c -- '-epp' || true)"
     local want_epps=2
     [ "$PD_SINGLE_STACK" != 1 ] || want_epps=1
+    # The simulator stacks have no gateway and no EPP: the loader drives each
+    # simulator's Service directly.
+    [ "$BENCH_SIM" != 1 ] || want_epps=0
     [ "${epps:-0}" -ge "$want_epps" ] || \
         die "expected an EPP per model and found ${epps:-0}. The standup rendered fewer stacks than this run drives."
-    ok "$epps EPP deployment(s), one per model"
+    [ "$want_epps" -eq 0 ] || ok "$epps EPP deployment(s), one per model"
+    # WHAT WAS DEPLOYED IS WHAT THE RUN IS PRICED ON. The standup renders the
+    # engines' resources from a scenario copy, and that copy has been
+    # re-rendered under us before (the 32B CPU/memory figures came back over an
+    # override). A replica holding other than the GPUs the run counts makes
+    # every GPU-second and every quota bound in the report wrong.
+    if ! scenario_is_pd; then
+        local role held want_g
+        for role in a b; do
+            if [ "$role" = a ]; then d="$(decode_deploy_for "$STACK_A")"; else d="$(decode_deploy_for "$STACK_B")"; fi
+            [ -n "$d" ] || continue
+            held="$(k get deploy "$d" -o json 2>/dev/null | jq -r '
+                [.spec.template.spec.containers[]?.resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0' 2>/dev/null)"
+            want_g="$(model_gpus "$role")"
+            [ -z "$held" ] || [ "$held" = "$want_g" ] || \
+                die "$d requests $held GPU(s) per replica, but the run counts model $role at $want_g. Fix the scenario or GPUS_PER_REPLICA_$(printf '%s' "$role" | tr a-z A-Z) and stand up again."
+            [ -z "$held" ] || ok "  $d: $held GPU(s) per replica, as the run counts it"
+        done
+    fi
     # Every role serving, prefill included: a P/D model with no ready prefill
     # serves through decode alone, and the run would measure an aggregated model.
     local rd role
@@ -1839,11 +2462,21 @@ set_arm_ceiling() {
         [.items[] | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null)) | .metadata.name] | .[]')"
     # Per role: a prefill ScaledObject gets MAX_PREFILL, every other MAX_DECODE.
     # Both default to the arm's ceiling, so an aggregated run is unchanged.
-    local role_ceiling
+    local role_ceiling model
     for so in $sos; do
         role_ceiling="$ceiling"
         if [ "$MAX_PREFILL" != "$MAX_REPLICAS" ] || [ "$MAX_DECODE" != "$MAX_REPLICAS" ]; then
             role_ceiling="$(role_max "$(so_role "$so")")"
+        fi
+        # Per model, when the two models' ceilings differ: the ScaledObject
+        # says which model it registers (its trigger's modelID).
+        if [ "$MAX_REPLICAS_A" != "$MAX_REPLICAS" ] || [ "$MAX_REPLICAS_B" != "$MAX_REPLICAS" ]; then
+            model="$(k get scaledobject "$so" -o json 2>/dev/null | jq -r '
+                [.spec.triggers[]?.metadata.modelID // empty] | first // ""' 2>/dev/null)"
+            if [ "$model" = "$MODEL_A" ]; then role_ceiling="$MAX_REPLICAS_A"
+            elif [ "$model" = "$MODEL_B" ]; then role_ceiling="$MAX_REPLICAS_B"
+            else warn "ScaledObject $so registers model '${model:-<none>}', neither MODEL_A nor MODEL_B; it keeps ceiling $role_ceiling"
+            fi
         fi
         k patch scaledobject "$so" --type=merge \
             -p "{\"spec\":{\"maxReplicaCount\":$role_ceiling}}" >/dev/null || \
@@ -1856,7 +2489,7 @@ set_arm_ceiling() {
     if scenario_is_pd; then
         info "arm '$arm': each model's prefill may reach ${MAX_PREFILL} replicas and its decode ${MAX_DECODE}; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
     else
-        info "arm '$arm': each model may reach ${ceiling} replicas; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+        info "arm '$arm': model A may reach ${MAX_REPLICAS_A} replicas of $(model_gpus a) GPU(s), model B ${MAX_REPLICAS_B} of $(model_gpus b); the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
     fi
     echo "$ceiling"
 }
@@ -2053,6 +2686,11 @@ for l in m.splitlines():
         except Exception: pass
 print('%s %.0f' % ('$pod', tot))
 " 2>/dev/null >> "$out" && break
+            # An engine image with no python3 (the simulator's) is read
+            # through the API server's pod proxy instead.
+            k get --raw "/api/v1/namespaces/$NS/pods/$pod:$port/proxy/metrics" --request-timeout=10s 2>/dev/null \
+                | awk -v pod="$pod" '/^vllm:prompt_tokens_total/ { t += $NF; seen = 1 }
+                    END { if (seen) printf "%s %.0f\n", pod, t; else exit 1 }' >> "$out" && break
         done
     done
     [ -s "$out" ] || warn "could not read per-engine work from any Pod; the distribution guard will not run"
@@ -2119,6 +2757,10 @@ verb_run() {
     esac
     local bad
     bad="$(check_sampler_settings)" || die "$bad"
+    # The controller log is cut from here: what the optimizer did in THIS arm,
+    # policy rewrite and preload included, and nothing of the arm before.
+    local run_started
+    run_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local have_pool=0
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 && have_pool=1
     if [ "$arm" = "pool" ] && [ "$have_pool" -eq 0 ]; then
@@ -2142,6 +2784,7 @@ verb_run() {
     # Set it, then wait for the controller to SAY it runs that mode: an arm
     # whose policy was never read measures the previous arm under a new name.
     if is_share_arm "$arm"; then
+        check_node_data || die "arm $arm refused: the share arms of this run need node data (above). NODE_DATA=off runs without it, and then measures the small model never funding the large one."
         set_share_policy "$arm"
         wait_share_mode "$(share_arm_mode "$arm")" || \
             die "the controller is not running the optimizer mode arm $arm needs, so this arm would measure the wrong thing"
@@ -2163,11 +2806,13 @@ verb_run() {
 
     local ceiling; ceiling="$(set_arm_ceiling "$arm")"
 
-    local out_dir="$OUT_ROOT/$arm"
+    local out_dir
+    out_dir="$(arm_dir "$arm")"
     mkdir -p "$out_dir"
-    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s}\n' \
+    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s,"max_replicas_a":%s,"max_replicas_b":%s,"gpus_per_replica_a":%s,"gpus_per_replica_b":%s}\n' \
         "$arm" "$ceiling" "$floor" "$([ "$arm" = pool ] && echo "$POOL_REPLICAS" || echo 0)" "$GPUS_PER_REPLICA" \
         "$MAX_PREFILL" "$MAX_DECODE" "$MIN_PREFILL" "$MIN_DECODE" \
+        "$MAX_REPLICAS_A" "$MAX_REPLICAS_B" "$(model_gpus a)" "$(model_gpus b)" \
         > "$out_dir/budget.json"
     # The policy this arm ran under, kept with its results: the report refuses
     # two share arms whose limiters differ.
@@ -2299,7 +2944,12 @@ verb_run() {
         if stalled="$(sampler_stalled "$out_dir/gpus.jsonl")"; then
             break
         fi
-        pod="$(k get pods -l "job-name=$RUN_JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+        # THIS run's Pod, by its start barrier. The Job's name repeats -- every
+        # repeat of an arm has the same one -- and a deleted Job's Pod lives
+        # on: it holds its results open for an hour. Selected by Job name
+        # alone, repeat 2 of an arm found repeat 1's Pod 20 s after starting,
+        # read its RESULTS-WRITTEN lines and copied its results as its own.
+        pod="$(k get pods -l "job-name=$RUN_JOB,wva-two-model-run=$start_at" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
         if [ -n "$pod" ]; then
             # Bounded. A log stream that stalls on the API server otherwise
             # holds this loop open past its budget: MEASURED, the loop's
@@ -2399,6 +3049,7 @@ verb_run() {
     RUN_JOB=""
     if is_share_arm "$arm"; then
         capture_share_metrics "$out_dir/share.json" "$(( start_at + total ))" "$total"
+        capture_share_log "$out_dir" "$run_started"
     fi
     # The timed capture above is the one that matters. This only fills in when
     # it did not run at all -- it never overwrites, because a late capture is
@@ -2450,6 +3101,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: wva-two-model-load
+        wva-two-model-run: "$start_at"
     spec:
       restartPolicy: Never
       # ndots:1, against the cluster default of 5. Belt and braces beside the
@@ -2539,11 +3191,11 @@ render_load_container() {
               value: /hf/$role
           resources:
             requests:
-              cpu: "2"
-              memory: "8Gi"
+              cpu: "$LOAD_CPU"
+              memory: "$LOAD_MEMORY"
             limits:
-              cpu: "4"
-              memory: "32Gi"
+              cpu: "$LOAD_CPU_LIMIT"
+              memory: "$LOAD_MEMORY_LIMIT"
           volumeMounts:
             - name: profiles
               mountPath: /profiles
@@ -2596,25 +3248,106 @@ verb_report() {
 # judged against it on the same TTFT and accelerator-second tables as the pool
 # arms, and then on what the optimizer itself recorded.
 verb_report_share() {
-    local a="$OUT_ROOT/today"
+    local root; root="$(share_root)"
+    local a="$root/today"
     [ -s "$a/meta.json" ] || die "no today results in $a -- the today arm is the baseline the share arms are compared against"
     local extra=() n
     for n in shadow share; do
-        [ -s "$OUT_ROOT/$n/meta.json" ] && extra+=(--arm "$n=$OUT_ROOT/$n")
+        [ -s "$root/$n/meta.json" ] && extra+=(--arm "$n=$root/$n")
     done
-    [ "${#extra[@]}" -gt 0 ] || die "only the today arm has results in $OUT_ROOT; run the shadow and/or share arm first"
+    [ "${#extra[@]}" -gt 0 ] || die "only the today arm has results in $root; run the shadow and/or share arm first"
     {
         python3 "$HERE/two_model_report.py" \
             --nopool "$a" "${extra[@]}" --baseline-name today \
             --model-a "$MODEL_A" --model-b "$MODEL_B" \
-            --json "$OUT_ROOT/report.json" || exit 1
+            ${REPORT_ARGS:-} \
+            --json "$root/report.json" || exit 1
         echo
-        python3 "$HERE/two_model_share_report.py" --out-root "$OUT_ROOT" || exit 1
-    } | tee "$OUT_ROOT/report.md"
+        python3 "$HERE/two_model_share_report.py" --out-root "$root" || exit 1
+    } | tee "$root/report.md"
     [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
-    python3 "$HERE/two_model_plots.py" --json "$OUT_ROOT/report.json" --out "$OUT_ROOT" \
-        && ok "report.md, report.json and the SVG plots are in $OUT_ROOT" \
-        || warn "the plots failed; the report itself is in $OUT_ROOT/report.md"
+    python3 "$HERE/two_model_plots.py" --json "$root/report.json" --out "$root" \
+        && ok "report.md, report.json and the SVG plots are in $root" \
+        || warn "the plots failed; the report itself is in $root/report.md"
+}
+
+# The repeats side by side: per-burst TTFT by model and arm, the spread across
+# repeats, transfers by outcome from each arm's controller log, refused
+# scale-ups and GPU-seconds, and a plain summary of what the run shows.
+verb_report_repeats() {
+    python3 "$HERE/two_model_share_repeats.py" --out-root "$OUT_ROOT" \
+        --model-a "$MODEL_A" --model-b "$MODEL_B" \
+        --json "$OUT_ROOT/repeats.json" > "$OUT_ROOT/repeats.md.tmp" \
+        || { cat "$OUT_ROOT/repeats.md.tmp" >&2; rm -f "$OUT_ROOT/repeats.md.tmp"; die "the repeats report failed"; }
+    mv "$OUT_ROOT/repeats.md.tmp" "$OUT_ROOT/repeats.md"
+    cat "$OUT_ROOT/repeats.md"
+    ok "repeats.md and repeats.json are in $OUT_ROOT"
+}
+
+# ---------------------------------------------------------------------------
+# share-arms: every arm of every repeat, in one command
+# ---------------------------------------------------------------------------
+# REPEATS (2) x the arms in SHARE_ARMS (today shadow share), each after a
+# reset, each in its own process so its own traps stay its own. Odd repeats
+# run the arms in the order given and even repeats in reverse, so a drift over
+# the hours of a run does not land on one arm. A report per repeat, then
+# report-repeats. Stops at the first arm that fails.
+#
+# TEARDOWN_ON_EXIT=1 tears the stacks down on EVERY exit path -- done, failed,
+# interrupted, the terminal closed -- and then prints what still holds an
+# accelerator in the namespace. On a shared cluster that is the point: a run
+# that dies at 3 a.m. must not hold 7 GPUs until somebody looks.
+SHARE_ARMS_RC=""
+share_arms_finish() {
+    local rc="${SHARE_ARMS_RC:-$?}"
+    trap - EXIT INT TERM HUP
+    info "share-arms finishing (rc=$rc) at $(date -u +%H:%M:%SZ)"
+    if [ "${TEARDOWN_ON_EXIT:-0}" = "1" ]; then
+        bash "$HERE/two_model_pool.sh" teardown || warn "teardown reported a problem"
+    fi
+    # Read until it is 0 after a teardown: pods still in their grace period
+    # hold their GPUs, and a count taken at once reports them as a leak.
+    local held waited=0
+    while :; do
+        held="$(k get pods -o json 2>/dev/null | jq -r '[.items[] | select(.status.phase=="Running" or .status.phase=="Pending")
+            | ([.spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add)] | add // 0' 2>/dev/null)"
+        [ "${TEARDOWN_ON_EXIT:-0}" = "1" ] && [ "${held:-0}" != 0 ] && [ "$waited" -lt "${TEARDOWN_WAIT:-300}" ] || break
+        sleep 10
+        waited=$(( waited + 10 ))
+    done
+    if [ "${held:-0}" = 0 ]; then
+        ok "no pod in $NS holds or waits for an accelerator"
+    else
+        warn "${held} accelerator(s) still held or requested in $NS$([ "${TEARDOWN_ON_EXIT:-0}" = 1 ] && echo ' after teardown: a LEAK, look now' || echo ' (TEARDOWN_ON_EXIT is off)')"
+    fi
+    exit "$rc"
+}
+
+verb_share_arms() {
+    need_ns
+    local repeats="${REPEATS:-2}" arms="${SHARE_ARMS:-today shadow share}" r arm order a
+    case "$repeats" in [1-9]) ;; *) die "REPEATS=$repeats: 1 to 9" ;; esac
+    for arm in $arms; do is_share_arm "$arm" || die "SHARE_ARMS may name today, shadow and share only (got '$arm')"; done
+    trap share_arms_finish EXIT
+    trap 'SHARE_ARMS_RC=130; exit 130' INT TERM HUP
+    # Refused before the first reset, not at the first arm: a mixed-size run
+    # without node data would spend an hour to find out.
+    check_node_data || die "the share arms need node data first (above)"
+    for r in $(seq 1 "$repeats"); do
+        order="$arms"
+        if [ $(( r % 2 )) -eq 0 ]; then
+            order=""; for a in $arms; do order="$a${order:+ $order}"; done
+        fi
+        for arm in $order; do
+            info "== repeat $r, arm $arm: reset at $(date -u +%H:%M:%SZ)"
+            bash "$HERE/two_model_pool.sh" reset || { SHARE_ARMS_RC=1; die "reset failed before repeat $r arm $arm"; }
+            info "== repeat $r, arm $arm: run at $(date -u +%H:%M:%SZ)"
+            REPEAT="$r" bash "$HERE/two_model_pool.sh" run "$arm" || { SHARE_ARMS_RC=1; die "repeat $r arm $arm failed"; }
+        done
+        REPEAT="$r" bash "$HERE/two_model_pool.sh" report-share || warn "the report of repeat $r refused or failed; its arms stand, see $OUT_ROOT/rep$r/report.md"
+    done
+    verb_report_repeats || { SHARE_ARMS_RC=1; die "the repeats report failed"; }
+    SHARE_ARMS_RC=0
 }
 
 verb_status() {
@@ -2642,6 +3375,9 @@ verb_teardown() {
     # and no BENCH_SPEC there is nothing safe to guess.
     local recorded spec
     recorded="$(k get configmap "$STANDUP_RECORD" -o jsonpath='{.data.spec}' 2>/dev/null || true)"
+    case "$recorded" in
+        sim:*) warn "tearing down the simulator stacks in $NS"; sim_teardown; return ;;
+    esac
     if [ -n "$recorded" ]; then
         if [ -n "$BENCH_SPEC_GIVEN" ] && [ "$BENCH_SPEC" != "$recorded" ]; then
             die "BENCH_SPEC=$BENCH_SPEC, but $NS was stood up with $recorded (ConfigMap $STANDUP_RECORD). Unset BENCH_SPEC, or set it to $recorded."
@@ -2677,6 +3413,9 @@ case "${1:-}" in
     run)         shift; verb_run "$@" ;;
     report)      shift; verb_report "$@" ;;
     report-share) shift; verb_report_share "$@" ;;
+    report-repeats) shift; verb_report_repeats "$@" ;;
+    share-arms)  shift; verb_share_arms "$@" ;;
+    node-data)   shift; verb_node_data "$@" ;;
     status)      shift; verb_status "$@" ;;
     teardown)    shift; verb_teardown "$@" ;;
     residency)   shift; need_ns; pool_residency ;;

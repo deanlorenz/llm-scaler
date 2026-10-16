@@ -773,11 +773,13 @@ BENCHMARK_ENGINE_CACHE_SEED ?= auto
 # with less spare CPU than the scenario asks. BENCHMARK_RENDER_DRAIN renders the
 # drain hook and grace into every engine before it first starts, so the
 # workload patch after the standup finds nothing to roll and no model starts
-# twice; false leaves it to that patch, as before.
+# twice; false leaves it to that patch, as before. BENCHMARK_DECODE_NODE pins
+# every engine role to one node (kubernetes.io/hostname).
 BENCHMARK_GATEWAY_SKIP_INSTALL ?= false
 BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
 BENCHMARK_DECODE_CPU ?=
 BENCHMARK_DECODE_MEMORY ?=
+BENCHMARK_DECODE_NODE ?=
 BENCHMARK_RENDER_DRAIN ?= true
 # How long one kubectl request in a benchmark recipe may take before it fails
 # with a reason. kubectl has none by default, and a get of model-pvc hung for
@@ -1797,11 +1799,17 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# install, which is why the ordering never mattered there.
 	@$(MAKE) --no-print-directory benchmark-scenarios
 	@cd $(BENCHMARK_REPO_DIR) && git reset --hard origin/$(BENCHMARK_REPO_REF) 2>/dev/null || true
+	@# THE COPY BELOW IS THE ONE THE STANDUP DEPLOYS, so the engine resources are
+	@# rendered into it as well. benchmark-scenarios rendered them into the copy
+	@# it installed, and the git reset above put the upstream file back over any
+	@# scenario upstream also ships (guides/pd-disaggregation): a P/D run logged
+	@# "2 CPU / 8Gi" and deployed the scenario's 32 CPU / 128Gi.
 	@if [ -f "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml" ]; then \
 		echo "Copying local scenario: hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml -> $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"; \
 		mkdir -p "$(BENCHMARK_REPO_DIR)/config/scenarios/$$(dirname $(BENCHMARK_SPEC))"; \
 		sed -e 's/__WARM_REPLICAS__/$(WARM_REPLICAS)/g' -e 's/^\([ 	]*\)gpuMemoryUtilization:.*/\1gpuMemoryUtilization: $(GPU_MEM_UTIL)/' "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml" \
 		   > "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"; \
+		python3 hack/benchmark/render-engine-resources.py "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml" --model "$(BENCHMARK_MODEL_ID)" || exit 1; \
 	fi
 	@if [ -f "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml.j2" ]; then \
 		echo "Copying local specification: hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml.j2 -> $(BENCHMARK_REPO_DIR)/config/specification/$(BENCHMARK_SPEC).yaml.j2"; \
@@ -1940,6 +1948,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@BENCHMARK_GATEWAY_SKIP_INSTALL="$(BENCHMARK_GATEWAY_SKIP_INSTALL)" \
 		BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$(BENCHMARK_GATEWAY_PROVIDER_NAMESPACE)" \
 		BENCHMARK_DECODE_CPU="$(BENCHMARK_DECODE_CPU)" BENCHMARK_DECODE_MEMORY="$(BENCHMARK_DECODE_MEMORY)" \
+		BENCHMARK_DECODE_NODE="$(BENCHMARK_DECODE_NODE)" \
 		BENCHMARK_RENDER_DRAIN="$(BENCHMARK_RENDER_DRAIN)" \
 		bash hack/benchmark/scenario_overrides.sh "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"
 	@# Node-local weights, last of the scenario edits: the script refuses a
@@ -2705,6 +2714,18 @@ benchmark-two-model-report: ## Two-model pool run: compare every arm that ran ag
 .PHONY: benchmark-two-model-report-share
 benchmark-two-model-report-share: ## Two-model run: compare the shadow and share arms against today, and what the optimizer recorded
 	@$(TWO_MODEL) report-share
+
+.PHONY: benchmark-two-model-node-data
+benchmark-two-model-node-data: ## Two-model run: does the controller have the node data a mixed-size share run needs; prints the admin commands when not
+	@$(TWO_MODEL) node-data
+
+.PHONY: benchmark-two-model-share-arms
+benchmark-two-model-share-arms: ## Two-model run: REPEATS (2) x reset+run of today, shadow and share, a report per repeat, then report-repeats; TEARDOWN_ON_EXIT=1 tears down on every exit
+	@$(TWO_MODEL) share-arms
+
+.PHONY: benchmark-two-model-report-repeats
+benchmark-two-model-report-repeats: ## Two-model run: per-burst TTFT, spread across repeats, transfers from the controller log, GPU-seconds
+	@$(TWO_MODEL) report-repeats
 
 .PHONY: benchmark-two-model-status
 benchmark-two-model-status: ## Two-model pool run: what exists, and what holds accelerators
