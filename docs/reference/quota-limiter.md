@@ -897,9 +897,17 @@ unmanaged training job holds 8 gives serving 8, not 16.
   reserved, so it does not lower the charge. Serving that holds 8 admitted and
   8 gated GPUs beside a training job's 8 is held at 8. It is then 8 past its
   figure, and the [placement timeout](../guides/kueue-borrowing/) releases the
-  gated replica. The gated pods are the ones the last cycle that counts
-  borrowing listed. Without counted borrowing (`countBorrowable: false`) they
-  are not listed, and the charge is low by up to their GPUs.
+  gated replica.
+  - The gated pods are the ones the **previous** cycle listed: the quota is
+    read before the cycle lists its pods. A replica gated since the last
+    cycle is charged one cycle late.
+  - **Limit:** gated pods are listed, and gated replicas released, only where
+    borrowing is counted: a namespace in a cohort, with `countBorrowable` not
+    `false`. Elsewhere (`countBorrowable: false`, or a queue in no cohort) a
+    gated replica still lowers the charge by its GPUs, and nothing releases
+    it. Kueue keeps it pending; it goes when demand lowers the target, or by
+    hand: `kubectl get pods -n <ns>` shows it with the
+    `kueue.x-k8s.io/admission` scheduling gate.
 - A variant Kueue does not manage at all (no `queue-name`) holds GPUs Kueue
   never reserved. They are subtracted from the charge all the same, so beside
   an unmanaged training job the charge reads low by up to what that variant
@@ -927,7 +935,9 @@ borrowing it takes, so the scaling manager assumes its own borrowers go first.
 - Only new growth counts. A replica the pass orders again while the first
   order is still in flight was yielded for once already.
 - A borrower gives back whole units: one replica, or a whole P/D pair at the
-  model's prefill:decode ratio. No variant goes below its `minReplicas`.
+  model's prefill:decode ratio. No variant goes below its `minReplicas`. A
+  pair that would give back more than one replica past what is reclaimed
+  (3P:4D for 8 GPUs) is not given; that model keeps its target.
 - The lowered decision carries a `kueue-reclaim` step. It is not a limited
   decision: `wva_decisions_limited_total` does not count it, and no
   `ResourceConstrained` event is raised for it. Find it with
