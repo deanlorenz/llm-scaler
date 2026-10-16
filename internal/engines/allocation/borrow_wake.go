@@ -150,12 +150,20 @@ func WakeDraws(constraints []*ResourceConstraints, ns, modelID string, reps []Wa
 // the record holds none for its variant and chunk yet: the wake loop
 // re-decides a woken model every tick until its pods exist, and must not
 // count the same replica twice.
+//
+// A reclaim entry recorded (growth into nominal Kueue preempts borrowers for)
+// is also queued, once, for the next steady-state pass to yield for
+// (TakeWakeReclaims): that pass lowers this controller's own borrowers in the
+// cohort, as it does for a reclaim it orders itself (yieldReclaimed).
 func (b *BorrowInFlight) RecordWake(draws []BorrowDraw, now time.Time) {
 	if b == nil {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// Unyielded past InFlightTTL: no pass took it (borrowing not counted in
+	// between), and its replica has landed or gone.
+	b.wakeReclaims = slices.DeleteFunc(b.wakeReclaims, func(d BorrowDraw) bool { return now.Sub(d.OrderedAt) > InFlightTTL })
 	for _, d := range draws {
 		k := keyOfDraw(d)
 		if _, ok := b.entries[k]; ok || d.GPUs <= 0 || d.Replicas <= 0 {
@@ -164,7 +172,28 @@ func (b *BorrowInFlight) RecordWake(draws []BorrowDraw, now time.Time) {
 		d.OrderedAt, d.ResolvedAt = now, time.Time{}
 		d.Wake = true
 		b.entries[k] = d
+		if d.Reclaim {
+			b.wakeReclaims = append(b.wakeReclaims, d)
+		}
 	}
+}
+
+// TakeWakeReclaims returns the wakes' reclaim entries no steady-state pass
+// has yielded for yet, ordered at most InFlightTTL before now, and forgets
+// them: each is yielded for in one pass only, however long its replica takes
+// to land (GreedyByScoreOptimizer.WakeReclaims). Nil when there are none.
+func (b *BorrowInFlight) TakeWakeReclaims(now time.Time) []BorrowDraw {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := slices.DeleteFunc(b.wakeReclaims, func(d BorrowDraw) bool { return now.Sub(d.OrderedAt) > InFlightTTL })
+	b.wakeReclaims = nil
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // WithoutVariants is u less the entries of ns's variants in own: a model's

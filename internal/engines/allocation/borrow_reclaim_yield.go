@@ -45,15 +45,19 @@ const ReclaimYieldLogMessage = "Kueue reclaim: a model of this controller grows 
 // minReplicas, so a serving model reaches 0 only when its minReplicas is 0. A reclaim from borrowers this controller does not
 // manage changes nothing. It returns, per "namespace/variant", the replicas
 // it took off; nil when none.
+//
+// A scale-from-zero wake's reclaim (wakeReclaims) is yielded for the same
+// way, in the first pass after the wake recorded it: the wake decides alone
+// and lowers no other model's target.
 func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, requests []ModelScalingRequest) map[string]int {
-	if bs == nil || len(bs.reclaims) == 0 {
+	if bs == nil || (len(bs.reclaims) == 0 && len(bs.wakeReclaims) == 0) {
 		return nil
 	}
 	var lowered map[string]int
 	type key struct{ cohort, acc string }
 	need := map[key]int{}
 	reclaimant := map[key]map[string]bool{}
-	for _, d := range bs.reclaims {
+	for _, d := range slices.Concat(bs.reclaims, bs.wakeReclaims) {
 		fresh := d.GPUs - d.CreditGPUs
 		if fresh <= 0 || d.Cohort == "" {
 			continue

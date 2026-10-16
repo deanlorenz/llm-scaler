@@ -48,6 +48,9 @@ type borrowingState struct {
 	// wakes' included, each its variant's to re-place
 	// (GreedyByScoreOptimizer.ReclaimCredit, NEW-1).
 	reclaimCredit []allocation.BorrowDraw
+	// wakeYield is the wakes' reclaims this cycle's pass yields for, taken
+	// from the record once (GreedyByScoreOptimizer.WakeReclaims).
+	wakeYield []allocation.BorrowDraw
 	// passFlavors is the Kueue flavor this cycle's pass placed each variant's
 	// replicas on (GreedyByScoreOptimizer.PlacedFlavors).
 	passFlavors map[string]*kueue.FlavorPlacement
@@ -138,7 +141,7 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
 	st.cycle, st.gated, st.cohortsByNS, st.credit, st.reclaimCredit = allocation.BorrowCycle{}, nil, nil, nil, nil
-	st.gatedCycle = allocation.BorrowCycle{}
+	st.gatedCycle, st.wakeYield = allocation.BorrowCycle{}, nil
 	if st.inFlight == nil {
 		st.inFlight = allocation.DefaultBorrowInFlight
 	}
@@ -176,6 +179,9 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	// yet on its own entry (reclaimCredit, NEW-1), a woken variant's too.
 	constraints = allocation.DeductReclaimed(constraints, u.InFlight)
 	st.reclaimCredit = st.inFlight.Reclaims()
+	// A wake's reclaim takes borrowed GPUs from this controller's own
+	// borrowers as a pass's does: this pass yields for it, once.
+	st.wakeYield = st.inFlight.TakeWakeReclaims(now)
 	// A namespace whose gated pods could not be listed may hold any number of
 	// them: its cohorts borrow nothing new this cycle (G3).
 	unreadableCohorts := cohortsOf(constraints, unreadable)

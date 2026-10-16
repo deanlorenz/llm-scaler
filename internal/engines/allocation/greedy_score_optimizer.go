@@ -99,6 +99,14 @@ type GreedyByScoreOptimizer struct {
 	// preempting a borrower for nothing in between.
 	ReclaimCredit []BorrowDraw
 
+	// WakeReclaims, when set, is the scale-from-zero wakes' growth into
+	// nominal their queue lent out that no pass has yielded for yet
+	// (BorrowInFlight.TakeWakeReclaims): Kueue preempts borrowers to admit
+	// it, so the pass lowers this controller's own borrowers in the cohort
+	// as it does for a reclaim it orders itself (yieldReclaimed). Each is
+	// handed to one pass only.
+	WakeReclaims []BorrowDraw
+
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
 	// reclaims is what the last non-shadow pass grew into by Kueue's
@@ -271,6 +279,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		bs.reclaimBlocked = o.ReclaimBlocked
 		bs.setCredit(o.BorrowCredit)
 		bs.setReclaimCredit(o.ReclaimCredit)
+		bs.wakeReclaims = o.WakeReclaims
 	}
 	if !o.quiet {
 		o.draws, o.flavors, o.reclaims = nil, nil, nil

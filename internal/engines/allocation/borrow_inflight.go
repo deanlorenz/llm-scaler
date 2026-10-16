@@ -44,6 +44,9 @@ type BorrowInFlight struct {
 	admitted []AdmittedGPUs
 	blocked  map[string]bool
 	cycleAt  time.Time
+	// wakeReclaims is the wakes' reclaim entries (RecordWake) no steady-state
+	// pass has yielded for yet (TakeWakeReclaims).
+	wakeReclaims []BorrowDraw
 }
 
 // DefaultBorrowInFlight is the process-wide record both engines share.
@@ -107,6 +110,7 @@ func (b *BorrowInFlight) Reset() {
 	defer b.mu.Unlock()
 	clear(b.entries)
 	b.lagging, b.gated, b.admitted, b.blocked, b.cycleAt = nil, nil, nil, nil, time.Time{}
+	b.wakeReclaims = nil
 }
 
 // Record adds a pass's draws, ordered now. A variant that borrows again from
