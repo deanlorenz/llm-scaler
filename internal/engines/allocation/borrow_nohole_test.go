@@ -66,6 +66,67 @@ func TestNoHoleReplicaReleasedAfterPlacementTimeout(t *testing.T) {
 	}
 }
 
+// Review round 4 (MAJOR-1): the safety net's clock counted every unplaced
+// replica of the variant. Whole-node decode, one node down: r1 was admitted
+// within guaranteed and has been Unschedulable for 10 minutes; r2 grows into
+// nominal lent out without a hole. The next cycle released r2 at once on r1's
+// clock, the model backed off, and the borrower Kueue preempted was preempted
+// for nothing. Only unplaced time after the order counts: no release until
+// the placement timeout after it. A NoHole replica that never places is still
+// released then; once it places, r1 alone does not keep the entry.
+func TestNoHoleClockStartsAtTheOrder(t *testing.T) {
+	t0 := time.Unix(50_000, 0)
+	settings := DefaultBorrowSettings()
+	world := govWorld{g: 32, used: 24}
+	r1 := t0.Add(-10 * time.Minute)
+	r2 := t0.Add(30 * time.Second)
+	cycle := func(at time.Time, pods map[string]time.Time, recorded bool) BorrowCycle {
+		c := BorrowCycle{Now: at, Constraints: world.constraints(),
+			Requests: []ModelScalingRequest{unplacedPods(govModel("x", 3, 8), pods)}}
+		if recorded {
+			c.NoHole = NoHoleOf([]BorrowDraw{{Namespace: "b", Variant: "x-v", GPUs: 8, Replicas: 1, Reclaim: true, NoHole: true}})
+		}
+		return c
+	}
+	release := func(g *BorrowGovernor, c BorrowCycle) int {
+		g.Observe(c)
+		ds := decisionsOf(c.Requests)
+		g.Releases(c, ds)
+		return ds[0].TargetReplicas
+	}
+	for _, tc := range []struct {
+		name   string
+		placed bool // r2 places before the timeout
+		want   int  // x's target past the timeout after the order
+	}{
+		{"r2 never places: released past the timeout after the order", false, 2},
+		{"r2 places: r1 alone, within guaranteed, is left alone", true, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewBorrowGovernor(settings)
+			// The order, in flight: r2's pod does not exist yet.
+			if got := release(g, cycle(t0, map[string]time.Time{"r1": r1}, true)); got != 3 {
+				t.Fatalf("x's target is %d at the order, want 3", got)
+			}
+			// A read shows r2, Pending; the record forgets the entry.
+			both := map[string]time.Time{"r1": r1, "r2": r2}
+			for _, at := range []time.Time{t0.Add(time.Minute), t0.Add(settings.PlacementTimeout - time.Second)} {
+				if got := release(g, cycle(at, both, false)); got != 3 {
+					t.Fatalf("x's target is %d at %v after the order, want 3: released on r1's clock",
+						got, at.Sub(t0))
+				}
+			}
+			pods := both
+			if tc.placed {
+				pods = map[string]time.Time{"r1": r1}
+			}
+			if got := release(g, cycle(r2.Add(settings.PlacementTimeout+time.Minute), pods, false)); got != tc.want {
+				t.Fatalf("x's target is %d past the timeout after the order, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // The placer marks a reclaimed replica NoHole only when no node held it.
 func TestReclaimDrawMarksNoHole(t *testing.T) {
 	for _, tc := range []struct {

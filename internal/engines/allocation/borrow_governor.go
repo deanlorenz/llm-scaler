@@ -831,7 +831,10 @@ func (g *BorrowGovernor) noHoleRelease(c BorrowCycle, req ModelScalingRequest, s
 	if h.Replicas <= 0 {
 		return nil
 	}
-	expired := expiredUnplaced(st, time.Time{}, timeout, c.Now)
+	// Only unplaced time after the order counts: a replica unplaced since
+	// before it -- one admitted within guaranteed, Unschedulable for a node
+	// that is down -- must not release the new growth at once.
+	expired := expiredUnplaced(st, h.Since, timeout, c.Now)
 	k := min(expired, st.UnplacedReplicas, h.Replicas, st.CurrentReplicas-minOf(st))
 	if k <= 0 {
 		return nil
@@ -863,9 +866,11 @@ func (g *BorrowGovernor) pinUnit(req ModelScalingRequest, unit map[string]int, s
 }
 
 // NoHoleReplicas is what one variant's replicas ordered without a node hole
-// hold (BorrowDraw.NoHole): how many, and their GPUs.
+// hold (BorrowDraw.NoHole): how many, their GPUs, and since when: the
+// earliest order (BorrowDraw.OrderedAt), or when the governor first saw them.
 type NoHoleReplicas struct {
 	Replicas, GPUs int
+	Since          time.Time
 }
 
 // NoHoleOf is, per "namespace/variant", the replicas the entries ordered
@@ -882,28 +887,60 @@ func NoHoleOf(entries []BorrowDraw) map[string]NoHoleReplicas {
 		}
 		k := d.Namespace + "/" + d.Variant
 		h := out[k]
-		out[k] = NoHoleReplicas{Replicas: h.Replicas + d.Replicas, GPUs: h.GPUs + d.GPUs}
+		since := h.Since
+		if !d.OrderedAt.IsZero() && (since.IsZero() || d.OrderedAt.Before(since)) {
+			since = d.OrderedAt
+		}
+		out[k] = NoHoleReplicas{Replicas: h.Replicas + d.Replicas, GPUs: h.GPUs + d.GPUs, Since: since}
 	}
 	return out
 }
 
 // observeNoHole keeps track of the replicas ordered without a node hole: what
 // the record holds this cycle, and what it held before for a variant that
-// still has unplaced replicas -- the record forgets an entry once a read shows
-// it, while its pod may still wait for a node no preemption frees.
+// still has a replica unplaced since the order -- the record forgets an entry
+// once a read shows it, while its pod may still wait for a node no preemption
+// frees. An entry is stamped when first seen (Since: the order, or now) and
+// keeps that stamp; replicas unplaced since before it are not its own, so
+// they neither keep it nor run its clock (noHoleRelease).
 func (g *BorrowGovernor) observeNoHole(c BorrowCycle, states map[string]variantRef) {
 	for k, h := range g.noHole {
 		if _, recorded := c.NoHole[k]; recorded {
 			continue
 		}
-		if s, ok := states[k]; !ok || s.state.UnplacedReplicas <= 0 || h.Replicas <= 0 {
+		if s, ok := states[k]; !ok || h.Replicas <= 0 || !unplacedSince(s.state, h.Since) {
 			delete(g.noHole, k)
 		}
 	}
 	for k, h := range c.NoHole {
-		prev := g.noHole[k]
-		g.noHole[k] = NoHoleReplicas{Replicas: max(prev.Replicas, h.Replicas), GPUs: max(prev.GPUs, h.GPUs)}
+		prev, watched := g.noHole[k]
+		since := prev.Since
+		if !watched {
+			since = c.Now
+			if !h.Since.IsZero() && h.Since.Before(since) {
+				since = h.Since
+			}
+		}
+		g.noHole[k] = NoHoleReplicas{Replicas: max(prev.Replicas, h.Replicas), GPUs: max(prev.GPUs, h.GPUs), Since: since}
 	}
+}
+
+// unplacedSince reports whether any of st's unplaced replicas became so at or
+// after since. A state without per-replica times reports its newest one
+// (UnplacedSince).
+func unplacedSince(st domain.VariantReplicaState, since time.Time) bool {
+	if st.UnplacedReplicas <= 0 {
+		return false
+	}
+	if len(st.UnplacedAt) == 0 {
+		return !st.UnplacedSince.IsZero() && !st.UnplacedSince.Before(since)
+	}
+	for _, at := range st.UnplacedAt {
+		if !at.IsZero() && !at.Before(since) {
+			return true
+		}
+	}
+	return false
 }
 
 // expiredUnplaced is how many of a variant's unplaced replicas (UnplacedAt:
