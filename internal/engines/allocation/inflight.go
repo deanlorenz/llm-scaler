@@ -231,6 +231,16 @@ func (l *InFlightLedger) Provisional(adms []InFlightAdmission, now time.Time) In
 // the lower target asks, on the clock it had before -- a replica the pass
 // asked again and a release took back does not restart its hold. A nil mark
 // only admits.
+//
+// A wake that admits a variant mark covers between Provisional and Commit
+// is set back with the rest: its admission is discarded, and the cycle's
+// final admission for the variant, made from the states read before the
+// wake, stands. For a variant the cycle kept at zero that ends the wake's
+// hold: the woken replica's node is free to other decisions until its pod
+// lands, and no later cycle holds it again (ExistingOnly). The end-of-cycle
+// admission always replaced an earlier one this way for the variants the
+// cycle decided; it is left so because a wake and a pass rarely decide one
+// variant within one cycle.
 func (l *InFlightLedger) Commit(mark InFlightMark, adms []InFlightAdmission, now time.Time) {
 	if l == nil {
 		return

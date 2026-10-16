@@ -280,7 +280,15 @@ func (v *NodeView) Clone() *NodeView {
 }
 
 // adopt takes another view's debits: the commit of a tentative placement made
-// on a Clone of v. What the clone added is charged to v's owner.
+// on a Clone of v. What the clone added -- its debits and the topology domains
+// it took -- is charged to v's owner as of the adopt, not as of the Clone: a
+// caller may set the owner after cloning, just before it adopts (rescale), and
+// a clone records no owner of its own. The domains are charged with the
+// debits, so without and ReleaseUncreated take both back together. c must be a
+// Clone of v from which v has released nothing since (without,
+// ReleaseUncreated): a domain v gave back in between would be taken again
+// here, under the adopting owner. Every caller adopts the clone it has just
+// placed on.
 func (v *NodeView) adopt(c *NodeView) {
 	if v == nil || c == nil {
 		return

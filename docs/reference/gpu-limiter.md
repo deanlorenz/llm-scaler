@@ -275,6 +275,11 @@ cluster-wide, or drop `gpu-inventory` and bound with a quota limiter alone (a
 quota declared beside `gpu-inventory` leaves the physical limiter reading this
 count). Under quota limiters alone, or none, the undercount bounds nothing: the gauge stays 0 and the log says so once at info.
 
+The same denied list hides other namespaces' LeaderWorkerSet groups. A topology
+domain where only another namespace's group runs then looks free to an
+exclusive-topology LeaderWorkerSet, and its new group can be ordered there and
+stay Pending.
+
 ### A replica must fit one node
 
 The pool counts free GPUs per accelerator; a replica also needs its GPUs on one
@@ -344,7 +349,10 @@ Limits:
   judged by the leader template's `nodeSelector` and affinity, its workers by
   the worker template's. When the pod layout is unknown, so the leader cannot
   be told from a worker, neither template's is judged. A LeaderWorkerSet's
-  workers are judged by its leader's tolerations.
+  workers are judged by its leader's tolerations. A node affinity term's
+  `matchFields` (which name nodes, not labels) is not judged: a term with
+  only `matchFields` admits every node, so such a replica can be ordered onto
+  a node it will not schedule to.
 - A replica whose pod layout is unknown and larger than any node (a
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the
