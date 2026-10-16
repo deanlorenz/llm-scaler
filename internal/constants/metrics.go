@@ -890,8 +890,28 @@ const (
 	// ScalingBlockedNominalLentOut indicates the model was capped this cycle
 	// while part of its namespace's nominal quota is held by a peer its
 	// ClusterQueue cannot reclaim from (reclaimWithinCohort: Never), so its
-	// guaranteed figure sits below nominal.
+	// guaranteed figure sits below nominal. A parked model refused a wake for
+	// the same cause carries ScalingBlockedWakeNominalLentOut instead.
 	ScalingBlockedNominalLentOut = "nominal-lent-out"
+)
+
+// Scale-from-zero refusal reasons (values for the `reason` label of
+// WVAModelScalingBlocked): a model at zero with requests queued was not woken
+// because the limiters left no room for it. Set every tick the wake is
+// refused, and cleared once it wakes, is refused for another reason, or its
+// queue empties.
+const (
+	// ScalingBlockedWakeNoCapacity indicates a wake was refused because no
+	// serving set fit the GPU budget or the nodes (the scale-from-zero
+	// outcomes no-capacity and prefill-required). The log line "Scale-from-zero:
+	// no variant woken for a model with pending requests" names the budgets it
+	// was measured against and the demand.
+	ScalingBlockedWakeNoCapacity = "wake-no-capacity"
+	// ScalingBlockedWakeNominalLentOut is ScalingBlockedWakeNoCapacity in a
+	// namespace whose ClusterQueue lent part of its nominal quota to a peer it
+	// cannot reclaim from: the wake was checked against its guaranteed figure
+	// plus the cohort's free pool, not its whole nominal.
+	ScalingBlockedWakeNominalLentOut = "wake-nominal-lent-out"
 )
 
 // ScalingBlockedReasonsBorrowing are decided by the steady-state engine from
@@ -902,12 +922,24 @@ var ScalingBlockedReasonsBorrowing = []string{
 	ScalingBlockedNominalLentOut,
 }
 
-// ScalingBlockedReasonsWakeBorrowing is what the scale-from-zero loop decides
-// from cohort borrowing: a wake refused within nominal because the queue lent
-// nominal it cannot reclaim. It sets the reason every tick it refuses, and
-// clears only what it set.
-var ScalingBlockedReasonsWakeBorrowing = []string{
-	ScalingBlockedNominalLentOut,
+// ScalingBlockedReasonsWakeCapacity are decided by the scale-from-zero loop
+// when the limiters refuse a wake. They are its own, not the steady-state
+// engine's nominal-lent-out: two producers sharing one reason delete each
+// other's series.
+var ScalingBlockedReasonsWakeCapacity = []string{
+	ScalingBlockedWakeNoCapacity,
+	ScalingBlockedWakeNominalLentOut,
+}
+
+// ScalingBlockedReasonOwners is every producer's reason set, by producer. No
+// reason may appear in two of them: SetModelScalingBlockedReasons deletes
+// every reason its caller owns that does not hold.
+var ScalingBlockedReasonOwners = map[string][]string{
+	"policy":            ScalingBlockedReasonsPolicy,
+	"wake":              ScalingBlockedReasonsWake,
+	"wake-capacity":     ScalingBlockedReasonsWakeCapacity,
+	"utilization-share": ScalingBlockedReasonsUtilizationShare,
+	"borrowing":         ScalingBlockedReasonsBorrowing,
 }
 
 // Kueue cohort borrowing metrics

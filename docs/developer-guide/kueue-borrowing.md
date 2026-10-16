@@ -69,7 +69,10 @@ with their source path and the Kueue version they were copied from.
   counted-but-0 reasons, `LimiterBudgets`, `MarkPreemptionsUnreadable`);
   `engines/steadystate/borrowing_signals.go`.
 - **Wakes:** `engines/scalefromzero/candidates.go` (the within-nominal check,
-  `nominal-lent-out`) and `wake_tick.go`.
+  `nominal-lent-out`) and `wake_tick.go`. A refused wake is reported as
+  `wake-no-capacity` or `wake-nominal-lent-out` (`engine.go`,
+  `reportWakeBlocked`), reasons the scale-from-zero loop alone owns
+  (`constants.ScalingBlockedReasonOwners`).
 - **Status:** `controllerstatus/limiter_budgets.go` (`limiterBudgets`, withheld
   and changed entries kept first under the cap) and `controllerstatus/publisher.go`
   (`borrowReleaseLedger`).

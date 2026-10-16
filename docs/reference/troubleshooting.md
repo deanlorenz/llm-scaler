@@ -18,7 +18,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | symptom | first signal | likely causes | runbook |
 | --- | --- | --- | --- |
 | will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load; `limitedBy` in it names a limiter that held it back | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
-| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason="no-wake-signal"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch | [will not wake](#a-model-will-not-wake-from-zero) |
+| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
@@ -79,8 +79,23 @@ a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 
 **Symptom**: the workload stays at 0 replicas while requests are pending.
 
-Work through these in order. Do not run `hack/verify_scale_from_zero.sh` during
-an incident: it parks the model first.
+First check whether a limiter refused the wake: the model sees its queue,
+and nothing fits.
+
+```bash
+$LOGS | grep 'Scale-from-zero: no variant woken' | grep '"modelID": "<model>"' | tail -3
+```
+
+While the wake is refused, `wva_model_scaling_blocked{reason="wake-no-capacity"}`
+is set for the model. The log line's `reason` is the outcome (`no-capacity`,
+`prefill-required`, `nominal-lent-out`), `gpuBudgets` what the wake was measured
+against, and `demand` what it asked for. Free GPUs or raise the quota, as in
+[GPUs held](#gpus-held-or-quota-spent). `wake-nominal-lent-out` in its place
+means the ClusterQueue lent its nominal to a peer it cannot reclaim from: see
+[past nominal](#a-model-runs-past-its-kueue-nominal-quota).
+
+With no such line and no such reason, work through these in order. Do not run
+`hack/verify_scale_from_zero.sh` during an incident: it parks the model first.
 
 1. **The InferencePool.**
    ```bash
@@ -544,8 +559,9 @@ Two more labels you may meet:
 
 - `nominal-lent-out` is not a withheld reason. It qualifies a guaranteed
   figure below nominal: a peer holds part of the queue's nominal and need not
-  give it back. On `wva_model_scaling_blocked`, it marks a model that cannot
-  wake for that reason. To get the nominal back, set `reclaimWithinCohort:
+  give it back. On `wva_model_scaling_blocked`, it marks a serving model
+  capped for that reason, and `wake-nominal-lent-out` a parked model that
+  cannot wake for it. To get the nominal back, set `reclaimWithinCohort:
   Any` on the queue.
 - `borrow-namespaces-split` is a warning in the log: two Kueue entries govern
   one cohort and only one sets `borrowNamespaces`. Nothing is withheld; set

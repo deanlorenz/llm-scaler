@@ -525,8 +525,8 @@ entries of all but one: two that borrow at once can count the same free GPU.
   never borrowed capacity, and not guaranteed alone either (under Kueue's
   default `Never`, an idle queue's guaranteed is 0). A wake blocked because
   the queue's nominal is lent to a peer that need not give it back reports
-  `nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking into a
-  gated pod.
+  `wake-nominal-lent-out` (on `wva_model_scaling_blocked`) instead of waking
+  into a gated pod.
 - **The utilization-share optimizer** keeps borrowed GPUs a group already
   holds, as no debt, and starts no new borrowing.
 
