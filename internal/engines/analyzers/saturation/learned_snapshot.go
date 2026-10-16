@@ -619,7 +619,9 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	// reading it -- the common case, and a k2 raise caused by the restart. A
 	// running bound is exported unarmed with its start cleared, where the
 	// live path restarts its clock: the arguments changed, and the first
-	// serving cycle after a restore arms it afresh.
+	// serving cycle after a restore arms it afresh. Not when the window is
+	// the one the bound already ran its course on (a rollback and re-roll),
+	// which the live path does not restart either (notePreviousFigureLocked).
 	for k, tag := range setAsideByArgs(s.K2, s.K2Args, s.K2Stash, s.Args) {
 		w := s.K2Stash[stashKey(k, tag)]
 		ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize)
@@ -635,9 +637,11 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		if lb.PriorUsed.Before(w.LastWritten) {
 			lb.PriorUsed = w.LastWritten
 		}
-		if lb.Armed {
+		same := lb.Own && !lb.FigureWritten.IsZero() && lb.FigureWritten.Equal(w.LastWritten)
+		if lb.Armed && !same {
 			lb.Armed, lb.Since, lb.Tick = false, time.Time{}, time.Time{}
 		}
+		lb.FigureWritten = w.LastWritten
 		// The legacy clock goes with it: a build that reads only
 		// K2BorrowedSince and PriorK2 (main, #151) would otherwise run the new
 		// previous figure on the old borrow's clock and relax it early.

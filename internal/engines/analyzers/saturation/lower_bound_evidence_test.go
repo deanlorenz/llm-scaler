@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -295,5 +296,39 @@ func TestARollbackAndReRollKeepTheServiceRatesHold(t *testing.T) {
 	a.throughputWindowUnderLocked(key, argsB)
 	if got := a.throughputStash[stashKey(key, argsA)].heldFor; got != 7*time.Hour {
 		t.Errorf("the re-roll gave the same window a fresh hold: held %v, want 7h", got)
+	}
+}
+
+// The same across a restart: a document written after the re-roll's
+// arguments reached the store, but before a cycle read the window under them,
+// does not restore the spent figure armed afresh.
+func TestARestartInsideAReRollDoesNotReArmTheSameFigure(t *testing.T) {
+	a, store, clock := waProcess(mtParams(256, "vllm:v1"))
+	waRun(t, a, clock, 4000, 6)
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	for range 7 * 60 {
+		waRun(t, a, clock, 1000, 0)
+	}
+	if got := waRun(t, a, clock, 1000, 0); got.PerReplicaCapacity < 12000 {
+		t.Fatalf("precondition: the bound has run its course, got %v", got.PerReplicaCapacity)
+	}
+	waSetParams(store, mtParams(256, "vllm:v1"))
+	if got := waRun(t, a, clock, 1000, 0); got.PerReplicaCapacity != 4000 {
+		t.Fatalf("precondition: the rollback gets its own window back, got %v", got.PerReplicaCapacity)
+	}
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	raw, err := json.Marshal(a.ExportLearnedState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc LearnedState
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	b, _, clockB := waProcess(mtParams(64, "vllm:v1"))
+	*clockB = *clock
+	b.RestoreLearnedState(doc)
+	if got := waRun(t, b, clockB, 1000, 0); got.PerReplicaCapacity < 12000 {
+		t.Errorf("a restart inside the re-roll re-armed the spent figure: priced at %v", got.PerReplicaCapacity)
 	}
 }
