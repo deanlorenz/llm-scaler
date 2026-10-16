@@ -92,7 +92,9 @@ const (
 	// lender lends is not counted (it could never get it back), so the pool
 	// counted is 0 although Kueue's is not. The namespace stays counted at its
 	// guaranteed figure and borrows nothing new. What a LowerPriority lender
-	// lends is counted only for the models it outranks (Reclaims).
+	// lends is counted only for the models it outranks (Reclaims). An entry
+	// with kueue.releaseToNonReclaimingLenders counts all of it and hands it
+	// back itself, so it never shows this reason.
 	ReasonLenderCannotReclaim Reason = "lender-cannot-reclaim"
 )
 

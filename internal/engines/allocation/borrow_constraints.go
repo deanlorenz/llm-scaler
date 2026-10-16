@@ -130,6 +130,12 @@ type SharedPoolChunk struct {
 	// lender that does not outrank it stays closed (drawable, M1).
 	Borrowed         int
 	BorrowerPriority *int32
+	// ReleaseToNonReclaiming is set when the entry that read the chunk opts
+	// in to kueue.releaseToNonReclaimingLenders (PR-C): Free then counts what
+	// lenders Kueue does not reclaim for lend, and the governor hands it back
+	// when such a lender waits. Off, it is not counted and a waiting lender
+	// only closes the cohort to new borrowing.
+	ReleaseToNonReclaiming bool
 	// restrictedClosed is set, for the rest of the pass, once a model that
 	// some Restricted lender does not outrank drew on the chunk (K2-2), and
 	// before the pass when such a model's draw is still in flight
@@ -503,6 +509,10 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	}
 	slices.Sort(prev.CoUnbound)
 	prev.Stale = prev.Stale || p.Stale
+	// Released only when every entry reading the cohort opts in: one that
+	// does not counts none of that lending (its Free is the smaller), and a
+	// release it never asked for would lower its models.
+	prev.ReleaseToNonReclaiming = prev.ReleaseToNonReclaiming && p.ReleaseToNonReclaiming
 	prev.restrictedClosed = prev.restrictedClosed || p.restrictedClosed
 	// The borrowed figure: the larger, at the higher priority, unknown when
 	// either read holds borrowing at a priority it did not read.
