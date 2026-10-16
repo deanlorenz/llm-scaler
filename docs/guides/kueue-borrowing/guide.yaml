@@ -110,6 +110,33 @@ pilot:
       kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.data.limiterBudgets}' \
         | jq -c '.entries[] | select(.reason == "not-selected") | {namespace, accelerator}'
 
+lenders:
+  set:
+    note: >-
+      Opt in (experimental): count what lenders Kueue does not reclaim for lend, and
+      give it back when they wait. Same policy ConfigMap as the pilot.
+    run: |
+      STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
+      POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
+      POLICY_NS=${POLICY_NS:-<wva-namespace>}
+      POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
+      POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
+      kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
+        | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true) | .kueue.releaseToNonReclaimingLenders) = true' \
+        > policy-default.yaml
+      kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
+        -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
+  check:
+    note: >-
+      No namespace reads lender-cannot-reclaim any more; each release to a waiting
+      lender is logged, and recorded on the model's scale target.
+    run: |
+      kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.data.limiterBudgets}' \
+        | jq -c '.entries[] | select(.reason == "lender-cannot-reclaim") | {namespace, accelerator}'
+      kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
+        | grep 'Releasing borrowed capacity' | grep 'lender-waiting' | tail -5
+      kubectl get events -n <namespace> --field-selector reason=BorrowedCapacityReleased
+
 reasons:
   read:
     note: Every namespace and accelerator whose borrowing is withheld, frozen, or counted at 0, with its reason.

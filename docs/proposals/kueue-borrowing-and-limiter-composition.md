@@ -11,11 +11,11 @@
   (`feat/limiters-compose`). Part B and its observability shipped as PR-B,
   [#180](https://github.com/ev-shindin/llm-scaling-manager/pull/180)
   (`feat/kueue-borrowing`). Counting capacity of lenders that Kueue does not
-  reclaim for is a later, opt-in PR-C ([Appendix](#appendix-pr-c)).
+  reclaim for is the opt-in PR-C ([Appendix](#appendix-pr-c)).
 - **Opt-out:** `countBorrowable: false` on the quota entry gives the Kueue cap
   without borrowing. Part A still applies.
 - **Status:** built: Part A (#164) and Part B (#180), from revision 11. PR-C
-  is open. The operator pages are
+  is built (`feat/kueue-borrow-release-v2`), opt-in and experimental. The operator pages are
   [the quota limiter](../reference/quota-limiter.md#cohort-borrowing) and
   [the GPU limiter](../reference/gpu-limiter.md).
 
@@ -354,9 +354,11 @@ borrowed resource on a flavor it allows, and fits its unused nominal. When the
 allowed flavors are unknown it counts on all of them.
 
 - **The first sighting stops new borrowing** in the cohort. The debounce (2
-  fresh reads and 60 seconds) applies only to releases and the alert.
+  fresh reads and 60 seconds) applies only to the alert and the cohort
+  cooldown.
 - **Kueue's preemption gives capacity back**; every counted lender can
-  reclaim. A partner or group left without its preempted half is released by
+  reclaim (with PR-C's opt-in, the scaling manager gives back what lenders
+  Kueue does not reclaim for, at the first sighting). A partner or group left without its preempted half is released by
   the placement timeout.
 - **Backoff.** After a preemption or a placement-timeout release, the model
   borrows nothing new in that cohort for `borrowCooldown` (default 10
@@ -390,7 +392,7 @@ guaranteed, or demand fell. Read these first:
 | `WVAKueueVersionUnknown` | `wva_kueue_controller_version_known` (version read, or `assumeTestedVersion`; published only while some entry counts borrowing) is 0; quiet while `kueue-controller-down` holds |
 | `WVAKueueVersionUntested` | borrowing is withheld as `kueue-version-untested` for 30 minutes (info) |
 | `WVAKueueBorrowDrift` | computed borrowed differs from Kueue's for 15 minutes (warning) |
-| `WVAKueueLenderWaitingPastCooldown` | a lender waits past `wva_kueue_borrow_cooldown_seconds` while this controller borrows |
+| `WVAKueueLenderWaitingPastCooldown` | a lender waits past `wva_kueue_borrow_cooldown_seconds`, plus `wva_kueue_borrow_release_latency_seconds` under PR-C's opt-in, while this controller borrows |
 | `WVAKueuePodsUnplaced` | managed pods unplaced past the placement timeout |
 | `WVAKueueBorrowThrashing` | more than 3.5 loss events (releases plus preemptions; a pair or group is one) per model per hour; series start at 0 |
 
@@ -403,7 +405,8 @@ only stops growth.
 
 ## Shipping
 
-Built as planned: #164 merged Part A and #180 merged PR-B. PR-C is open.
+Built as planned: #164 merged Part A and #180 merged PR-B. PR-C is built
+on `feat/kueue-borrow-release-v2`.
 
 - **#164** carries Part A. No Kueue code. It enforces from its release.
 - **PR-B** is based on #164 and carries Part B and Observability, one commit
@@ -414,8 +417,9 @@ Built as planned: #164 merged Part A and #180 merged PR-B. PR-C is open.
   installs Kueue from `registry.k8s.io`, runs a two-queue cohort, checks drift,
   and scales the Kueue controller to 0 for 60 s to show no growth past
   guaranteed. `REQUIRE_KUEUE_E2E=true` turns its skips into failures.
-- **PR-B's developer page** lands with PR-B. **PR-C**
-  (`feat/kueue-borrow-release`) is opened after PR-B.
+- **PR-B's developer page** lands with PR-B. **PR-C** was rebuilt on main
+  after PR-B (`feat/kueue-borrow-release-v2`), one commit per step: config,
+  counting, giving back, observability, e2e, docs.
 
 ## Open questions
 
@@ -438,6 +442,27 @@ larger than the need is still released; for whole-node models the alternative
 is releasing nothing. The release lands after KEDA's scale-down window, and the
 lender-waiting alert scales with that latency. It makes the scaling manager
 Kueue's reclaim agent, which is why it is off by default.
+
+**As built** (operator page:
+[lenders Kueue does not reclaim for](../reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for)):
+
+- The release fires on the **raw** lender-waiting signal, the first fresh read
+  that shows the lender waiting, not the debounced one: the same signal that
+  closes the cohort. One release in flight per lender is the damping.
+- "What it lent" is `min(Unused, the pool's Kueue borrowed figure)`, and
+  "pending" is the sum of its pending Workloads that each fit its unused
+  nominal. Units are taken until the GPUs given back on the lender's flavor
+  cover `min(pending, lent)`: `ceil(need / unit)` for a uniform fleet.
+- Units follow the reclaim yield's rule (a replica, a P/D pair at the role
+  ratio), counted from the cycle's targets after every other release, so
+  nothing is given twice. A model a `LowerPriority` lender outranks is left
+  to Kueue. Each model released backs off in that cohort as after a
+  preemption.
+- A release clears on the first fresh read after it lands, or after twice the
+  expected latency (the borrowing models' scale-down window, HPA sync, KEDA
+  poll, grace; `wva_kueue_borrow_release_latency_seconds`) or the actuation
+  window, whichever is longer. The ledger is versioned (1), written only beside
+  a release, and nothing is released until it is read.
 
 ## Appendix: decided by the owner
 

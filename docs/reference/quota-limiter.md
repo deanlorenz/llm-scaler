@@ -220,6 +220,7 @@ limiters:
       # countBorrowable: false        # default true; see "Cohort borrowing" below
       # borrowNamespaces: [team-a]    # pilot; empty = every governed namespace
       # assumeTestedVersion: true     # default false; see kueue-version-unknown
+      # releaseToNonReclaimingLenders: true  # default false; experimental, see "Lenders Kueue does not reclaim for"
     namespaceQuotas:                  # optional: the static caps below still apply
       team-a:
         H100: 8
@@ -435,8 +436,8 @@ leave them gated, so they start only once Kueue is back.
 
 | Reason | Meaning |
 |---|---|
-| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for (see *the shared pool*). The namespace stays counted, at its guaranteed figure |
-| `lender-waiting` | a lender waits for capacity it lent: what is borrowed stays, and nothing new is borrowed in the cohort |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for (see *the shared pool*). The namespace stays counted, at its guaranteed figure. Never shown with `releaseToNonReclaimingLenders` |
+| `lender-waiting` | a lender waits for capacity it lent: nothing new is borrowed in the cohort. What is borrowed stays, unless `releaseToNonReclaimingLenders` hands it back to a lender Kueue does not reclaim for |
 | `cohort-pool-empty` | the free pool holds no GPUs, after what is in flight and gated |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed |
 | `preemptions-unreadable` | Kueue's preemptions in the namespace could not be read this cycle, so none of its models grows on borrowed capacity |
@@ -498,7 +499,9 @@ replica start, or leave the feature off.
   unused nominal is theirs. What the borrowers hold is taken from the counted
   part, the cautious side, since Kueue does not say whose lending a borrowed
   GPU is. When the pool counts nothing only for this reason, the reason is
-  `lender-cannot-reclaim`.
+  `lender-cannot-reclaim`. With `releaseToNonReclaimingLenders: true` every
+  lender's unused nominal counts, for every model, and this reason is not
+  shown (see *Lenders Kueue does not reclaim for*).
 
 Kueue's [documented example](https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/)
 holds: team-a (`nominalQuota` 9, `borrowingLimit` 1) with an idle, reclaiming
@@ -585,8 +588,9 @@ borrowing model itself only where a borrowed unit never placed:
   large to admit, does not count. The **first sighting** stops new borrowing
   in the cohort (reason `lender-waiting`); it stays stopped while the lender
   waits and for `borrowCooldown` after. What is borrowed stays until Kueue
-  preempts it: the scaling manager never hands borrowed replicas back to a
-  lender itself. The wait is published once it has lasted `lenderDebounce`
+  preempts it: by default the scaling manager never hands borrowed replicas
+  back to a lender itself (with `releaseToNonReclaimingLenders` it does, to a
+  lender Kueue does not reclaim for; see below). The wait is published once it has lasted `lenderDebounce`
   over two fresh reads (`wva_kueue_lender_waiting_seconds`, alert
   `WVAKueueLenderWaitingPastCooldown`).
 - **Backoff.** After Kueue preempts one of a model's pods, or a borrowed unit
@@ -598,10 +602,11 @@ borrowing model itself only where a borrowed unit never placed:
   (Kueue's `TerminationTarget` condition) or its Workload still exists, so
   give serving pods a `terminationGracePeriodSeconds` of at least one engine
   cycle; a pod gone between two cycles is missed.
-- **The ledger.** The cooldowns and the placement-timeout releases in flight
-  are kept under `borrowReleaseLedger` in the `wva-controller-status`
-  ConfigMap, so a restart neither releases twice nor forgets a cooldown.
-  Figures or entry counts past sane bounds are dropped on load.
+- **The ledger.** The cooldowns, the placement-timeout releases and the
+  releases to lenders in flight are kept under `borrowReleaseLedger` in the
+  `wva-controller-status` ConfigMap, so a restart or a new leader neither
+  releases twice nor forgets a cooldown. Figures or entry counts past sane
+  bounds are dropped on load; a ledger a newer version wrote is discarded.
 - **A frozen read freezes everything** (`stale`, `kueue-controller-down`):
   nothing new is borrowed and nothing is given back until reads recover.
 - **A failed ResourceQuota read freezes one namespace.** When one namespace's
@@ -612,9 +617,43 @@ borrowing model itself only where a borrowed unit never placed:
   After five refresh intervals of failing it is withheld as
   `resourcequota-unreadable` and capped at nominal, until a read passes.
 
-Counting the capacity of lenders that do not reclaim, and handing it back to
-them when they wait, is not in this release; it is planned as a later, opt-in
-change.
+##### Lenders Kueue does not reclaim for
+
+`releaseToNonReclaimingLenders: true` on the `kueue:` block is **opt-in and
+experimental**. It makes the scaling manager Kueue's reclaim agent for lenders
+Kueue never preempts for: `reclaimWithinCohort: Never`, and `LowerPriority`
+when the lender does not outrank the borrowing model.
+
+- **Counting.** Their unused nominal is counted in the shared pool, for every
+  model. `lender-cannot-reclaim` is no longer shown.
+- **Giving back.** When such a lender waits, in the first fresh read that
+  shows it, the scaling manager lowers the borrowing models in one cycle:
+  - by whole units -- a replica, a P/D pair at the model's role ratio, a
+    LeaderWorkerSet group -- until the GPUs given back cover what the
+    lender's pending Workloads ask, bounded by what it lent out. A unit
+    larger than the need still goes (a whole-node model has no smaller one);
+  - lowest Kueue priority first (a priority class not read last), then the
+    lowest scaling priority, then the most expensive;
+  - never below `minReplicas`, and never below the namespace's guaranteed
+    figure;
+  - a model a `LowerPriority` lender outranks is left to Kueue, which
+    preempts it.
+- **One at a time.** One release per lender is in flight until its replicas
+  are gone and a fresh Kueue read follows, or until twice the expected release
+  time has passed. Its targets are held until then, in the ledger.
+- **Latency.** A release lands after the model's KEDA scale-down window, the
+  HPA sync, the KEDA poll and the pods' termination grace
+  (`wva_kueue_borrow_release_latency_seconds`). The lender-waiting alert waits
+  that much longer.
+- **What you see.** The model carries `released-to-lender` on
+  `wva_model_scaling_blocked` while the release is in flight, its scale
+  target a Normal `BorrowedCapacityReleased` Event naming the lender, and
+  `wva_borrow_releases_total{cause="lender-waiting"}` counts it. The model
+  borrows nothing new in that cohort for `borrowCooldown`.
+
+It needs `countBorrowable`; the entry is refused with `countBorrowable: false`.
+Kueue still decides who is admitted: a release only lowers targets, as a
+demand fall would.
 
 **Settings**, on the entry's `kueue:` block:
 
@@ -627,6 +666,7 @@ change.
 | `lenderDebounce` | `60s` | how long a lender must read as waiting, over at least two fresh reads, before its wait is published and alerted on. New borrowing stops at the first sighting regardless |
 | `controllerNamespace` | `kueue-system` | where the `kueue-controller-manager` Deployment and its leader Lease are read, for the Kueue version and whether Kueue runs |
 | `assumeTestedVersion` | `false` | `true` counts a Kueue whose version cannot be read as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down` |
+| `releaseToNonReclaimingLenders` | `false` | experimental: `true` counts what lenders Kueue does not reclaim for lend, and gives it back when they wait (see *Lenders Kueue does not reclaim for*). Needs `countBorrowable` |
 
 **Two entries over one pool.** When two Kueue entries govern namespaces in the
 same cohort and only one sets `borrowNamespaces`, the controller logs the

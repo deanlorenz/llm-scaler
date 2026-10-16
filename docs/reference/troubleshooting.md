@@ -24,7 +24,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
-| replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
+| replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced\|released-to-lender"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, a waiting lender was handed it back (opt-in), demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a lender's replica Pending after Kueue preempted | the lender's new pod `Pending` with no node; a borrower's Workload evicted with reason `Preempted`; later `reason="borrow-unplaced"` | Kueue preempts by priority, not by node: the GPUs it freed form no node the replica fits | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
 | Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `reason` in `limiterBudgets`; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold (withheld), Kueue cannot be trusted right now (frozen), or there is nothing to draw (counted, but 0) | [borrowing is withheld](#borrowing-is-withheld) |
@@ -423,7 +423,8 @@ See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
 **Symptom**: a model on a Kueue quota, usually one that counts borrowing, went
 from, say, 6 to 4 replicas, and nobody lowered it.
 
-There are four causes. Check them in this order; the first that matches is
+There are four causes, five with `releaseToNonReclaimingLenders`. Check them
+in this order; the first that matches is
 the answer.
 
 | cause | how to tell |
@@ -431,6 +432,7 @@ the answer.
 | 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
 | 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places. On an entry that counts no borrowing (`countBorrowable: false`, a queue in no cohort), a replica Kueue held at its admission gate, waiting for quota, past `placementTimeout` is released too: its Event has cause `kueue-gate`, and `wva_borrow_releases_total{cause="kueue-gate"}` counts it. If Kueue was preempting lower-priority work in the queue for it, raise `placementTimeout` above that work's termination grace period |
 | 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. When a wake from zero grew it, the borrower gives it back in the next cycle. Expected; the borrower borrows again when the cohort has free GPUs |
+| 3b. Handed back to a waiting lender | `reason="released-to-lender"` while it is in flight; a Normal `BorrowedCapacityReleased` Event with cause `lender-waiting` naming the lender's ClusterQueue; `wva_borrow_releases_total{cause="lender-waiting"}`. Only with `releaseToNonReclaimingLenders` on: a lender Kueue does not reclaim for waited for what this model borrowed. Expected; the model borrows nothing new in that cohort for `borrowCooldown` |
 | 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
 
 Commands, in the same order:
@@ -587,7 +589,7 @@ borrowed is taken away.
 
 | reason | what it means | what to do |
 | --- | --- | --- |
-| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. A `LowerPriority` lender with no GPU Workloads at all (idle) has no priority to compare, so it counts as cannot-reclaim too, even though its capacity is free. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. A `LowerPriority` lender with no GPU Workloads at all (idle) has no priority to compare, so it counts as cannot-reclaim too, even though its capacity is free. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender; or, experimental, set `releaseToNonReclaimingLenders: true` on the quota entry so the scaling manager counts that capacity and gives it back when the lender waits |
 | `lender-waiting` | a lender waits for capacity it lent. What is borrowed stays until Kueue preempts it; nothing new is borrowed in the cohort, until `borrowCooldown` after the wait ends | nothing: Kueue reclaims for the lender. If it lasts, see [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown) |
 | `cohort-pool-empty` | the cohort's free pool holds no GPUs, after what is in flight and held at Kueue's gate | nothing: the cohort is in use |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed | raise the one that binds, if borrowing is wanted |
@@ -762,12 +764,29 @@ stands in for a version that cannot be read.
 
 **Fires when** a lender ClusterQueue has waited for capacity it lent longer than
 `wva_kueue_borrow_cooldown_seconds` (the configured `borrowCooldown`), while a
-namespace this controller governs still borrows in its cohort.
+namespace this controller governs still borrows in its cohort. With
+`releaseToNonReclaimingLenders` on, it waits also for
+`wva_kueue_borrow_release_latency_seconds`, the time a release takes to land.
 
-The scaling manager counts only what Kueue would reclaim for its lender, so
-Kueue is expected to preempt for it. New borrowing in the cohort stopped at
-the first sighting (reason `lender-waiting`); the scaling manager never hands
-borrowed replicas back to a lender itself.
+By default the scaling manager counts only what Kueue would reclaim for its
+lender, so Kueue is expected to preempt for it. New borrowing in the cohort
+stopped at the first sighting (reason `lender-waiting`), and the scaling
+manager hands nothing back itself.
+
+With `releaseToNonReclaimingLenders` on, it hands a lender Kueue does not
+reclaim for (`Never`, or `LowerPriority` below the model) what it waits for.
+Check that it did:
+
+```bash
+$LOGS | grep 'Releasing borrowed capacity' | grep 'lender-waiting'
+kubectl get events -n <borrowing ns> --field-selector reason=BorrowedCapacityReleased
+```
+
+No such line: no model of this controller could give a unit without going
+below `minReplicas` or its namespace's guaranteed figure, or the lender is
+waiting for capacity another borrower holds. A line, but the lender still
+waits: the release has not landed (the model's scale-down window), or the
+GPUs went to someone else first.
 
 ```bash
 kubectl get workloads.kueue.x-k8s.io -n <lender namespace> \
@@ -785,7 +804,10 @@ A long wait usually means:
   flavor, or CPU or memory short).
 
 To free capacity by hand, lower the borrowing model's `maxReplicaCount` on its
-ScaledObject, or set `countBorrowable: false` on the quota entry.
+ScaledObject, or set `countBorrowable: false` on the quota entry. For a lender
+on `Never` or a `LowerPriority` lender below the model, the opt-in
+`releaseToNonReclaimingLenders: true` does it for you
+([quota limiter](quota-limiter.md#lenders-kueue-does-not-reclaim-for)).
 
 ## Metrics stale or missing
 

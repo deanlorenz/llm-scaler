@@ -11,8 +11,9 @@ the design, with the formulas, is the
 This page covers borrowing only. How the declared limiters are built and
 composed, the node view, and the scale-from-zero snapshot (Part A) are on
 [How the limiter set is built](limiter-composition.md). Counting and handing
-back the capacity of lenders that do not reclaim is a later, opt-in change,
-not built here.
+back the capacity of lenders that do not reclaim, behind
+`kueue.releaseToNonReclaimingLenders` (PR-C), is under
+[Release to lenders Kueue does not reclaim for](#release-to-lenders-kueue-does-not-reclaim-for).
 
 ## What is read
 
@@ -63,9 +64,11 @@ with their source path and the Kueue version they were copied from.
   the in-flight node ledger's borrowed shape in `engines/allocation/inflight.go`
   and `engines/steadystate/inflight.go` (`borrowedFlavors`).
 - **Giving back:** `engines/allocation/borrow_governor.go` (`BorrowGovernor`,
-  `namespaceBorrowed`, the ledger); `engines/steadystate/borrowing.go`,
-  `borrowing_release.go` (the placement-timeout release, the persisted
-  ledger, cluster-autoscaler events), `preemption_watch.go`.
+  `namespaceBorrowed`, the ledger); `engines/allocation/borrow_lender_release.go`
+  (the opt-in release to lenders Kueue does not reclaim for);
+  `engines/steadystate/borrowing.go`, `borrowing_release.go` (the
+  placement-timeout release, the persisted ledger, cluster-autoscaler events),
+  `borrowing_lender_release.go` (the release latency), `preemption_watch.go`.
 - **Reasons and signals:** `engines/allocation/borrow_report.go` (the
   counted-but-0 reasons, `LimiterBudgets`, `MarkPreemptionsUnreadable`);
   `engines/steadystate/borrowing_signals.go`.
@@ -107,7 +110,10 @@ when the model's own Workload priority is strictly below the lender's, as
 Kueue reclaims only for a Workload that outranks the borrower. `Never` does
 not reclaim. Only reclaiming lenders' lent nominal enters the pool. When the pool
 is 0 while non-reclaiming lenders hold unused nominal, the reason is
-`lender-cannot-reclaim`.
+`lender-cannot-reclaim`. `reclaimablePools` takes a `release` flag
+(`QuotaLimiterConfig.KueueReleasesToNonReclaiming`): set, every lender's
+unused nominal enters the pool unrestricted, so `drawable` is `Free` and the
+reason never shows.
 
 **Co-resources.** For each resource the GPU flavor's resource group covers,
 free capacity is computed with the same formula and divided by the variant's
@@ -300,6 +306,57 @@ only one sets `borrowNamespaces`, the controller logs the warning
 lock is held across I/O; Namespace labels come from one LIST per refresh; the
 bounded log line is emitted only on change.
 
+## Release to lenders Kueue does not reclaim for
+
+Behind `kueue.releaseToNonReclaimingLenders`, off by default. The chunk
+carries `SharedPoolChunk.ReleaseToNonReclaiming` (ANDed when two entries read
+one cohort). `BorrowGovernor.Releases` runs `lenderReleases` after the
+placement-timeout releases and their pins:
+
+- **Trigger.** A lender in a fresh, opted-in chunk with `Waiting` set (the raw
+  per-read signal) whose policy Kueue does not reclaim under
+  (`kueue.Reclaims(policy, nil, nil)` false), with no `LenderRelease` in
+  flight. Nothing while `BorrowCycle.LedgerUnread`.
+- **Need.** `min(LenderState.PendingGPUs, Unused, chunk.Borrowed)`.
+  `PendingGPUs` (`kueue.lenderWaitsFor`) sums the pending Workloads that each
+  fit the lender's unused nominal, at most that nominal.
+- **Candidates and order.** Models in a namespace of the cohort with GPUs past
+  guaranteed on a type the chunk serves, no release of any cause in flight
+  (`modelPinned`), not outranked by a `LowerPriority` lender
+  (`modelKueuePriority`). Sorted by Kueue priority (unread last), scaling
+  priority, cost descending.
+- **Units.** `yieldUnit`, the reclaim yield's rule, over the decisions'
+  targets: one replica, or a P/D pair at the gcd role ratio, never below
+  `minReplicas`. `unitTakes` refuses a unit past `borrowedLeft`:
+  `namespaceBorrowed` with gated GPUs taken out, less what the cycle's
+  decisions already lower, so a yield or a timeout pin is never given twice.
+  Units are taken until the GPUs on the chunk's flavor cover the need; the last
+  may overshoot.
+- **In flight.** `LenderRelease` per `LenderKey`: units and targets, GPUs,
+  `ReleasedAt`, `LandedAt`. `observeLenderReleases` stamps `LandedAt` once every
+  variant holds no more than its target, and clears the entry on the first
+  fresh read after it, when the lender leaves a fresh read, or after
+  `lenderTimeout` (the larger of `ReleaseActuation` and twice
+  `ReleaseLatency`). `applyLenderPins` keeps the targets, also in cycles that
+  count no borrowing (`HoldReleases`, which drops a landed entry).
+- **Ledger.** `BorrowLedger.LenderReleases`; `Version` is written only beside
+  them, so the off path persists what it did before. `UnmarshalBorrowLedger`
+  refuses a newer version (`ErrBorrowLedgerVersion`); `restoreLenderReleases`
+  drops entries out of bounds. The publisher carries the key over to a new
+  term.
+- **Latency.** `steadystate.releaseLatency`: the slowest
+  `allocation.ReleaseBound` over the borrowing variants' ScaledObjects and pod
+  templates. It sets `BorrowSettings.ReleaseLatency` and
+  `wva_kueue_borrow_release_latency_seconds`.
+- **Signals.** `VariantBorrowStatus.LenderRelease` (`released-to-lender`),
+  cause `lender-waiting` on the counter and the Event, the model's backoff in
+  the cohort (`markBackoff`, as a preemption).
+
+Tests: `engines/allocation/borrow_release_count_test.go`,
+`borrow_lender_release_test.go`; `engines/steadystate/borrowing_lender_release_test.go`,
+`borrowing_lender_signals_test.go`; promtool cases 6, 6b and 7 in
+`test/alerts/testdata/kueue-alerts.test.yaml`.
+
 ## Testing
 
 - **Unit**: `make test`. The envtest suites run under WSL; see
@@ -338,7 +395,10 @@ bounded log line is emitted only on change.
   down -- each hold the only one in force; once Kueue is back it grows into
   the cohort with every pod placed; after Kueue preempts the borrowed pods the
   model drops back, borrows
-  nothing during the cooldown and grows again after it.
+  nothing during the cooldown and grows again after it. Last, with the lender
+  back on `Never` and waiting, nothing is handed back until
+  `releaseToNonReclaimingLenders` is set; then the model drops to its
+  guaranteed figure and Kueue admits the lender.
   `deploy/ci-pr-checks/install-kueue.sh` installs Kueue from `registry.k8s.io`
   and refuses a non-kind context unless `KUEUE_ALLOW_NON_KIND=true`.
   `REQUIRE_KUEUE_E2E=true` turns its runtime skips into failures; keep

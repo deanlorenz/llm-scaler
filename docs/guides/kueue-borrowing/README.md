@@ -336,6 +336,59 @@ Each namespace shows one reason, in three groups:
 What each reason means and what to do:
 [Borrowing is withheld](../../reference/troubleshooting.md#borrowing-is-withheld).
 
+## Optional: give capacity back to lenders Kueue does not reclaim for
+
+By default a lender on `reclaimWithinCohort: Never`, or a `LowerPriority`
+lender below your model, lends nothing that counts (`lender-cannot-reclaim`):
+Kueue would never take it back for that lender.
+
+`releaseToNonReclaimingLenders: true` counts it, and makes the scaling
+manager give it back when the lender waits: it lowers the borrowing models,
+lowest priority first, never below `minReplicas` or the namespace's
+guaranteed figure. It is **experimental and off by default**: the scaling
+manager becomes the lender's reclaim agent. Turn it on only where the lender's
+owners agree that serving may borrow their quota.
+
+<!-- guide:lenders.set start -->
+```bash
+# Opt in (experimental): count what lenders Kueue does not reclaim for lend, and give it back when they wait. Same policy ConfigMap as the pilot.
+STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
+POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
+POLICY_NS=${POLICY_NS:-<wva-namespace>}
+POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
+POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
+kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
+  | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true) | .kueue.releaseToNonReclaimingLenders) = true' \
+  > policy-default.yaml
+kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
+  -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
+```
+<!-- guide:lenders.set end -->
+
+Applied like the pilot: on the next cycle, or after a restart for a
+namespace-scoped controller whose policy lives elsewhere. A re-install keeps
+the setting.
+
+<!-- guide:lenders.check start -->
+```bash
+# No namespace reads lender-cannot-reclaim any more; each release to a waiting lender is logged, and recorded on the model's scale target.
+kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '.entries[] | select(.reason == "lender-cannot-reclaim") | {namespace, accelerator}'
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager --tail=-1 \
+  | grep 'Releasing borrowed capacity' | grep 'lender-waiting' | tail -5
+kubectl get events -n <namespace> --field-selector reason=BorrowedCapacityReleased
+```
+<!-- guide:lenders.check end -->
+
+A release lands only after the model's KEDA scale-down window; the
+lender-waiting alert waits that much longer. The model shows
+`released-to-lender` while it lands, and borrows nothing new in that cohort
+for `borrowCooldown`. How it chooses what to give back:
+[the quota limiter](../../reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for).
+
+To stop, set the key to `false` or remove it. Nothing is evicted; the
+lending stops counting, as before.
+
 ## Cleanup
 
 <!-- guide:cleanup.stop start -->
@@ -380,7 +433,7 @@ To drop the Kueue cap too, **replace** the entry rather than only dropping
 
 Every setting on the entry's `kueue:` block (`placementTimeout`,
 `borrowCooldown`, `lenderDebounce`, `controllerNamespace`,
-`assumeTestedVersion`, `borrowNamespaces`):
+`assumeTestedVersion`, `borrowNamespaces`, `releaseToNonReclaimingLenders`):
 [cohort borrowing](../../reference/quota-limiter.md#cohort-borrowing). The
 signals and alerts: [Prometheus](../../reference/prometheus.md#kueue-borrowing-metrics).
 How it is built and tested: [Kueue borrowing internals](../../developer-guide/kueue-borrowing.md).

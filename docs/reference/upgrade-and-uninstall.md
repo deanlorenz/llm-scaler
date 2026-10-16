@@ -218,11 +218,20 @@ they enable. Do this, in order:
 >    `hierarchy-unknown` (Cohorts), `kueue-controller-down` (the Role in the
 >    Kueue namespace). [What each reason means](troubleshooting.md#borrowing-is-withheld).
 >
-> Counting the capacity of lenders that do **not** reclaim
+> The capacity of lenders that do **not** reclaim
 > (`reclaimWithinCohort: Never`, or `LowerPriority` that does not outrank the
-> borrowers), and handing it back to them, is not in this release: it moves to
-> a later release, as an opt-in. Here such a lender's capacity is not counted
-> (`lender-cannot-reclaim`).
+> borrowers) is not counted by default (`lender-cannot-reclaim`). Counting it,
+> and handing it back when they wait, is an opt-in, experimental setting:
+> `kueue.releaseToNonReclaimingLenders: true`
+> ([how it works](quota-limiter.md#lenders-kueue-does-not-reclaim-for)). Nothing
+> changes until you set it. Set, it adds `released-to-lender` on
+> `wva_model_scaling_blocked`, cause `lender-waiting` on
+> `wva_borrow_releases_total` and the `BorrowedCapacityReleased` Event, and
+> the gauge `wva_kueue_borrow_release_latency_seconds`, which
+> `WVAKueueLenderWaitingPastCooldown` adds to its threshold. The release
+> ledger in `wva-controller-status` gains a `version` field; a controller
+> older than this release that finds one in it ignores the fields it does not
+> know, so a rollback hands nothing back but keeps the cooldowns.
 
 **Before you upgrade**, list the limiter types every policy declares, and
 every Kueue-backed entry with its borrowing settings. A cluster admin runs
