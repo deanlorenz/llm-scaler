@@ -552,8 +552,9 @@ func overQuota(allowlists []map[string]ResourcePool, name string) int {
 // clusterAllowlists is the pools of every provider that bounds the whole
 // cluster (clusterBounds).
 func clusterAllowlists(constraints []*ResourceConstraints) []map[string]ResourcePool {
-	var out []map[string]ResourcePool
-	for _, c := range clusterBounds(constraints) {
+	bounds := clusterBounds(constraints)
+	out := make([]map[string]ResourcePool, 0, len(bounds))
+	for _, c := range bounds {
 		out = append(out, c.Pools)
 	}
 	return out
