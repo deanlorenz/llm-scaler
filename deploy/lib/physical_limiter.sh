@@ -838,15 +838,15 @@ pl_warn_shared_cohort_borrowers() {
 # pl_kueue_borrowers_besides echoes `<namespace>/<deployment> <managed>` for
 # every OTHER controller the installer granted the Kueue borrowing read
 # (ClusterRoleBinding wva-kueue-borrow-reader-rolebinding-*), skipping the
-# controller in namespace $1. <managed> is `-` when its Deployment cannot be
-# read. Prints nothing when the bindings cannot be listed. A cluster-scoped
-# controller reads Workloads through its manager ClusterRole and is not found
-# here.
+# controllers in the namespaces given as arguments: the ones the caller already
+# lists. <managed> is `-` when its Deployment cannot be read. Prints nothing
+# when the bindings cannot be listed. A cluster-scoped controller reads
+# Workloads through its manager ClusterRole and is not found here.
 pl_kueue_borrowers_besides() {
-    local self="$1" ns rows row
+    local ns rows row
     kc_capture get clusterrolebindings -o json || return 0
     for ns in $(printf '%s' "$KC_OUT" | jq -r '.items[]? | select(.metadata.name | startswith("wva-kueue-borrow-reader-rolebinding-")) | .subjects[0].namespace // empty' 2>/dev/null | sort -u); do
-        [ "$ns" != "$self" ] || continue
+        case " $* " in *" $ns "*) continue ;; esac
         rows="$(printf '%s\n' "$ns" | pl_controller_targets 2>/dev/null)" || rows=""
         row="$(printf '%s\n' "$rows" | awk '$1 != "!" && NF >= 4 { print $1 "/" $2 " " $4; exit }')"
         printf '%s\n' "${row:-$ns/wva-controller-manager -}"
@@ -1411,7 +1411,7 @@ enable_physical_limiter() {
     # controller without node access must refuse — a self-inflicted outage across
     # the cluster, arriving as NotReady pods rather than as an error from this
     # command.
-    local targets="" restart_list="" bound="" pods_blind="" pods_unknown="" borrowers=""
+    local targets="" restart_list="" bound="" pods_blind="" pods_unknown="" borrowers="" run_ns=""
     while read -r ns deploy sa cm_ns src restart managed <&3; do
         [ -n "$ns" ] || continue
         if [ "$limiter" = "gpu-inventory" ]; then
@@ -1433,6 +1433,7 @@ enable_physical_limiter() {
             # the only policy the controller reads its limiters from.
             pl_published_kueue "$cm_ns" "$limiter"
             [ "$PL_BORROW_WANTED" = yes ] && borrowers="${borrowers}${ns}/${deploy} ${managed}"$'\n'
+            run_ns="$run_ns $ns"
         fi
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
             pl_grant_kueue_read "$ns" "$sa" "$managed" \
@@ -1525,6 +1526,12 @@ enable_physical_limiter() {
         log_warning "    Without it the gpu-inventory limiter counts only the GPUs its own namespace holds: GPUs other namespaces hold on the same nodes read as FREE, and scale-ups are admitted onto full nodes. This command grants node read, not that."
         log_warning "    Each such controller says so at runtime: wva_pod_access_denied=1, and podListDenied in its wva-controller-status ConfigMap."
         log_warning "    Remedy: grant its ServiceAccount list on pods in every namespace, or bound it with a quota limiter instead (WVA_LIMITER_TYPE=quota) -- a quota beside gpu-inventory leaves the physical limiter reading the same undercount."
+    fi
+    # Borrowers granted by earlier runs too: onboarding one tenant per run, the
+    # run alone never holds two.
+    if [ -n "$borrowers" ]; then
+        # shellcheck disable=SC2086 # one word per namespace
+        borrowers="${borrowers}$(pl_kueue_borrowers_besides $run_ns)"
     fi
     pl_warn_shared_cohort_borrowers "$borrowers"
     log_info "  Policy in:   $(echo $targets | tr ' ' ',') (ConfigMap wva-scaling-policy-config, data.default.limiters)"

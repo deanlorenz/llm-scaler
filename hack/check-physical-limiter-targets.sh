@@ -162,6 +162,9 @@ case "$1" in
         [ ! -f "$KDEPLOYS/lq-$ns" ] || cat "$KDEPLOYS/lq-$ns" ;;
       clusterqueues.kueue.x-k8s.io)
         [ ! -f "$KDEPLOYS/cq-$name" ] || cat "$KDEPLOYS/cq-$name" ;;
+      # The live ClusterRoleBindings: $KDEPLOYS/crbs.json, else none.
+      clusterrolebindings)
+        if [ -f "$KDEPLOYS/crbs.json" ]; then cat "$KDEPLOYS/crbs.json"; else echo '{"items":[]}'; fi ;;
       *) : ;;
     esac ;;
   *) : ;;
@@ -1069,10 +1072,29 @@ else
         ok "with the cohorts unreadable every borrower is named; with no borrowing nothing is"
     fi
 fi
+# 184-3: onboarding one tenant per run, the run alone never holds two
+# borrowers. A controller an earlier run granted (its binding is live) in the
+# same cohort is named too.
+case_begin
+printf '%s' '{"items":[{"metadata":{"name":"wva-kueue-borrow-reader-rolebinding-x"},"subjects":[{"kind":"ServiceAccount","name":"wva-controller-manager","namespace":"tenant-i"}]}]}' > "$DEPLOYS/crbs.json"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-h'
+if [ "$RC" -ne 0 ]; then
+    fail "enable for one borrowing tenant failed: $(tail -6 "$WORK/out")"
+elif ! grep -q 'KUEUE COHORT pool IS BORROWED FROM BY MORE THAN ONE CONTROLLER: tenant-h/wva-controller-manager, tenant-i/wva-controller-manager\.' "$WORK/out"; then
+    fail "a borrower granted by an earlier run in the same cohort was not named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+else
+    run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-i'
+    if grep -qi 'cohort.*more than one\|borrowing is granted to' "$WORK/out"; then
+        fail "the run's own controller, granted earlier, was counted twice: $(grep -i 'cohort' "$WORK/out" | head -2)"
+    else
+        ok "a borrower an earlier run granted in the same cohort is named; the run's own earlier grant is not counted twice"
+    fi
+fi
+rm -f "$DEPLOYS/crbs.json"
 rm -f "$DEPLOYS"/lq-* "$DEPLOYS"/cq-* "$DEPLOYS/tenant-h.json" "$DEPLOYS/tenant-i.json"
 
 case_begin
-CASES_EXPECTED=63
+CASES_EXPECTED=64
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else
