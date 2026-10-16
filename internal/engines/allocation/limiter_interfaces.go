@@ -137,8 +137,9 @@ type ResourceConstraints struct {
 	// NamespaceNominal is, per active namespace a Kueue-reading provider reads
 	// cohort borrowing for and does NOT count it (withheld, not selected), and
 	// per accelerator type (NamespacePools' spelling), its queues' nominal
-	// figures (NominalFigures): the nominal a peer holds that Kueue reclaims
-	// for it, and what it can reach without borrowing. Set even when no
+	// figures (NominalFigures): what of its nominal peers borrow that Kueue
+	// reclaims for it (reclaimWithinCohort Any), and what it can reach
+	// without borrowing. Set even when no
 	// namespace counts borrowing. A counted namespace carries the same figures
 	// in NamespaceBorrow.
 	NamespaceNominal map[string]map[string]NominalFigures

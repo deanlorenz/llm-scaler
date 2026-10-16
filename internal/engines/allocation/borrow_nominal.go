@@ -2,9 +2,11 @@ package allocation
 
 // A queue's nominal figures beside its borrowing (the Kueue borrowing
 // proposal, PR #161, B3, B7 and B10), for every namespace a Kueue-reading
-// entry reads, counted or not: what of its nominal a peer holds that Kueue
-// reclaims for it (growth into it needs no node hole: Kueue preempts the
-// borrowers whose pods fill those nodes), and what it can reach without
+// entry reads, counted or not: what of its unused nominal peers borrow now
+// that Kueue reclaims for it -- reclaimWithinCohort Any only -- past what the
+// cohort's free pool covers (growth into it needs no node hole: Kueue
+// preempts the borrowers whose pods fill those nodes; N1), and what it can
+// reach without
 // borrowing (a queue that cannot reclaim reaches only what it kept plus the
 // cohort's free pool).
 
