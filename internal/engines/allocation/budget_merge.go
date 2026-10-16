@@ -502,7 +502,8 @@ func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...s
 				}
 			}
 			if accelerator.ClosesFamily(cluster, name) && accelerator.ListsProduct(pools, name) {
-				inner[name] = tighterBudget(inner[name], closedFamilyBudget(slices.Concat(pools, cluster), name))
+				// The joint bound reads every holder's own figure too.
+				inner[name] = closedFamilyBudget(slices.Concat(pools, cluster), name)
 			}
 		}
 		clampProducts(inner)
