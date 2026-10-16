@@ -373,8 +373,12 @@ below zero. For example, a cluster quota of 20
 with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
 fill 4.
 
-A tenant claims only whole replicas. With 8-GPU replicas, a tenant with 4 free
-GPUs claims none of them, so the cluster group can still fill a free node.
+A tenant claims only whole replicas of the variant it grows. A tenant grows
+its most cost-efficient variant that is below its `maxReplicas`. With 8-GPU
+replicas, a tenant with 4 free GPUs claims none of them, so the cluster group
+can still fill a free node. This holds even when the tenant also has a 1-GPU
+variant: it does not grow that variant, so it claims nothing for it. It claims
+the 4 GPUs only when it grows the 1-GPU variant and can place them.
 
 This stops the cluster group from counting GPUs a tenant may also fill. It does
 not bound the tenants against each other: each tenant's group is bounded only by

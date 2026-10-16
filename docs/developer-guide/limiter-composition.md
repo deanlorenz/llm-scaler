@@ -227,7 +227,9 @@ sparse debits; `adopt` commits a clone's debits.
   bound covers its type. The cluster group's budget and `ClusterFree` are what
   that bound leaves after the namespace groups' claims, in whole replicas; then
   `splitClusterFree` divides each finite cluster key between every group that
-  draws on it, also in whole replicas of each group's smallest variant.
+  draws on it. Both round to whole replicas of the smallest variant each group
+  grows (`growStepGPUs`, over `ShareGroup.Grow`), since a group's fills place
+  only those; a group that grows nothing falls back to its smallest variant.
 - `gpunodes.usageWalk` counts a Pending pod on its `Status.NominatedNodeName`
   (`occupiedNode`), in every view.
 
