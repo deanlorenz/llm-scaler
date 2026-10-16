@@ -385,7 +385,12 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// forms no group, and left out of the claims its whole free quota was idle
 	// fill for the cluster group. Only a formed group knows its replica size,
 	// so only its claim is rounded to whole replicas.
+	//
+	// A claim covers the namespace's whole free quota, its warm pools'
+	// headroom included, so the cluster group carves only the pools of
+	// namespaces that made none (poolCarve, claimedNS).
 	claimed := map[string]int{}
+	claimedNS := map[string]map[string]bool{}
 	for _, ns := range slices.Sorted(maps.Keys(availableByNS)) {
 		for _, acc := range slices.Sorted(maps.Keys(availableByNS[ns])) {
 			nsFree, ok := freeOf(key{acc, ns})
@@ -398,6 +403,10 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				}
 			}
 			claimed[budgetKey(available, acc)] += nsFree
+			if claimedNS[ns] == nil {
+				claimedNS[ns] = map[string]bool{}
+			}
+			claimedNS[ns][acc] = true
 		}
 	}
 
@@ -427,7 +436,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, k.acc, k.scope)
+		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, claimedNS, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
@@ -760,7 +769,12 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 // no limiter, and uncapped, a pool wanting more than its tenant may hold
 // shrank every tenant's share of the cluster group. A namespace no namespace
 // quota caps, or with an unlimited quota of the type, is carved in full.
-func poolCarve(unheld, availableByNS map[string]map[string]int, acc, scope string) int {
+//
+// The cluster group skips the pools of a namespace that claimed its free
+// quota of the type (claimed, keyed by namespace and that namespace's budget
+// key): the claim already took the pool's headroom out of the cluster budget,
+// and carving it again counted it twice.
+func poolCarve(unheld, availableByNS map[string]map[string]int, claimed map[string]map[string]bool, acc, scope string) int {
 	carveOf := func(ns string, byType map[string]int) int {
 		want := max(0, byType[budgetKey(byType, acc)])
 		budget := availableByNS[ns]
@@ -774,6 +788,9 @@ func poolCarve(unheld, availableByNS map[string]map[string]int, acc, scope strin
 	}
 	sum := 0
 	for ns, byType := range unheld {
+		if budget, capped := availableByNS[ns]; capped && claimed[ns][budgetKey(budget, acc)] {
+			continue
+		}
 		sum += carveOf(ns, byType)
 	}
 	return sum
