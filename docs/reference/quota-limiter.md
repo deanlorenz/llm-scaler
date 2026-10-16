@@ -901,13 +901,20 @@ unmanaged training job holds 8 gives serving 8, not 16.
   - The gated pods are the ones the **previous** cycle listed: the quota is
     read before the cycle lists its pods. A replica gated since the last
     cycle is charged one cycle late.
-  - **Limit:** gated pods are listed, and gated replicas released, only where
-    borrowing is counted: a namespace in a cohort, with `countBorrowable` not
-    `false`. Elsewhere (`countBorrowable: false`, or a queue in no cohort) a
-    gated replica still lowers the charge by its GPUs, and nothing releases
-    it. Kueue keeps it pending; it goes when demand lowers the target, or by
-    hand: `kubectl get pods -n <ns>` shows it with the
-    `kueue.x-k8s.io/admission` scheduling gate.
+  - Gated pods are listed in every namespace of a Kueue entry, whether it
+    counts borrowing or not (`countBorrowable: false`, a queue in no cohort).
+  - Where no borrowing is counted, a replica Kueue still holds at its gate
+    after `placementTimeout` is released all the same, when the namespace
+    holds more than its Kueue figure: Kueue admits nothing past that figure,
+    and with nothing borrowed it preempts nothing for it either. The wait
+    stretches up to three times while the cluster autoscaler reports
+    `TriggeredScaleUp` on the pod. The release lowers the target by whole
+    units (a replica, a P/D pair) and never below `minReplicas`, as for a
+    borrowed replica. It raises the same `BorrowedCapacityReleased` Event
+    (cause `placement-timeout`; the message says the replica was held at
+    Kueue's admission gate), counts on `wva_borrow_releases_total`, and the
+    decision says `borrow-unplaced`. A replica Kueue admitted that waits for
+    a node (`Unschedulable`) is not released this way.
 - A variant Kueue does not manage at all (no `queue-name`) holds GPUs Kueue
   never reserved. They are subtracted from the charge all the same, so beside
   an unmanaged training job the charge reads low by up to what that variant
@@ -934,6 +941,9 @@ borrowing it takes, so the scaling manager assumes its own borrowers go first.
 
 - Only new growth counts. A replica the pass orders again while the first
   order is still in flight was yielded for once already.
+- A wake from zero is treated the same. When the wake grows a model into
+  nominal its queue lent out, the next steady-state cycle lowers this scaling
+  manager's own borrower in that cohort, once per wake.
 - A borrower gives back whole units: one replica, or a whole P/D pair at the
   model's prefill:decode ratio. No variant goes below its `minReplicas`. A
   pair that would give back more than one replica past what is reclaimed

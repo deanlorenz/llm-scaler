@@ -200,7 +200,28 @@ nominated. The warm pool reads whole units per node from
 **Placement clocks.** `VariantMetadata.UnplacedAt` is keyed by pod name, or
 for a LeaderWorkerSet by group index, a group counting from its newest
 unplaced pod. Unplaced means `PodScheduled=False` with reason `Unschedulable`,
-or the Kueue gate held longer than a fixed 30 s. The timeout and the share
+or the Kueue gate held longer than a fixed 30 s. `VariantMetadata.GatedAt` is
+the part of `UnplacedAt` held at the gate (`variantmeta.countGated`).
+
+**Gated replicas outside borrowing.** A namespace-scope Kueue entry sets
+`ResourceConstraints.KueueBacked`. The engine lists the gated pods of every
+namespace such an entry carries (`allocation.KueueNamespaces`), borrowing
+counted or not, and records them with `BorrowInFlight.SetCycle`, so the KU1
+charge (`admittedUsage`) sees them everywhere. A cycle that counts no
+borrowing runs the governor through `governGated` (its own `gatedCycle`, so
+`publishBorrowSignals` still treats the cycle as not borrowing). Both kinds of
+cycle release through `timeoutReleases`: for a namespace no constraint counts
+(`uncountedHeldPast`: pool `Used` past `Limit`), `gatedRelease` runs
+`borrowedRelease` over `GatedAt` alone, clocked by `uncountedSince`, and marks
+the release `AtGate` for its Event. Counted namespaces keep `pastSince` and
+`UnplacedAt` as before (`TestGatedReplicaOutsideBorrowingIsChargedAndReleased`).
+
+**A wake's reclaim yields.** `BorrowInFlight.RecordWake` queues each reclaim
+entry; the next steady-state cycle that counts borrowing takes the queue
+(`TakeWakeReclaims`, at most `InFlightTTL` old) and hands it to the pass as
+`GreedyByScoreOptimizer.WakeReclaims`. `yieldReclaimed` counts those beside the
+pass's own reclaims, so the rules are one (`TestWakeReclaimLowersOwnBorrowerOnce`).
+Taking empties the queue: a reclaim is yielded for once. The timeout and the share
 optimizer's `HoldFill` share one setting when `placementTimeout` is set; unset,
 `HoldFill` keeps its derived wait.
 

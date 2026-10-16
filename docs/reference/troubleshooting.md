@@ -418,8 +418,8 @@ See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
 
 ## Replicas dropped under Kueue borrowing
 
-**Symptom**: a model on a Kueue quota that counts borrowing went from, say, 6
-to 4 replicas, and nobody lowered it.
+**Symptom**: a model on a Kueue quota, usually one that counts borrowing, went
+from, say, 6 to 4 replicas, and nobody lowered it.
 
 There are four causes. Check them in this order; the first that matches is
 the answer.
@@ -427,8 +427,8 @@ the answer.
 | cause | how to tell |
 | --- | --- |
 | 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
-| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places |
-| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. Expected; the borrower borrows again when the cohort has free GPUs |
+| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places. On an entry that counts no borrowing (`countBorrowable: false`, a queue in no cohort), a replica Kueue held at its admission gate past `placementTimeout` is released too; its Event says it was held at Kueue's admission gate |
+| 3. Another model here reclaimed the nominal it borrowed | `$LOGS \| grep 'Kueue reclaim: a model of this controller grows'` names the variant (`replicasByVariant`). A model of a lending namespace in the same cohort grew into nominal its queue lent out, and Kueue preempts a borrowed replica to admit it, so the borrower gives the replica back in the same cycle. When a wake from zero grew it, the borrower gives it back in the next cycle. Expected; the borrower borrows again when the cohort has free GPUs |
 | 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
 
 Commands, in the same order:
@@ -436,7 +436,7 @@ Commands, in the same order:
 ```bash
 kubectl get workloads.kueue.x-k8s.io -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Evicted")].reason}{"\n"}{end}'
 kubectl get events -n <ns> --field-selector reason=BorrowedCapacityReleased
-$LOGS | grep -E 'Releasing borrowed capacity|Kueue preempted a pod' | tail
+$LOGS | grep -E "Releasing borrowed capacity|Releasing replicas held at Kueue|Kueue preempted a pod" | tail
 kubectl get pods -n <ns> --field-selector status.phase=Pending
 ```
 
