@@ -1533,6 +1533,12 @@ wva_scaler_tls_after_keda() {
 # ScaledObject at 13:40:27 and got a plaintext answer on the TLS address, and
 # the new Pod took the lease at 13:40:37.
 #
+# Waiting is not enough on its own. On kind, with the old Pod already gone,
+# KEDA still failed on the TLS address for about two minutes with "first record
+# does not look like a TLS handshake": the error its pooled connection last got
+# from the plaintext Pod, while it waits to reconnect. wva_scaler_ensure_wired
+# covers that.
+#
 # An EndpointSlice or Lease the caller may not read is not waited on; the names
 # of what was skipped are in WVA_SCALER_SOLE_SKIPPED.
 wva_scaler_sole_server_state() {
