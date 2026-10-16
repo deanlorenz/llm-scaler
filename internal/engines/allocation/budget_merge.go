@@ -501,7 +501,7 @@ func mergeNamespaceConstraints(constraints []*ResourceConstraints, declared ...s
 					inner[name] = tighterBudget(inner[name], budget)
 				}
 			}
-			if accelerator.ClosesFamily(cluster, name) && listsProductOf(pools, name) {
+			if accelerator.ClosesFamily(cluster, name) && accelerator.ListsProduct(pools, name) {
 				inner[name] = tighterBudget(inner[name], closedFamilyBudget(slices.Concat(pools, cluster), name))
 			}
 		}
@@ -528,19 +528,6 @@ func closedFamilyBudget(allowlists []map[string]ResourcePool, name string) int {
 		return -1
 	}
 	return avail
-}
-
-// listsProductOf reports whether one of the allowlists lists a product of the
-// family called name.
-func listsProductOf(allowlists []map[string]ResourcePool, name string) bool {
-	return slices.ContainsFunc(allowlists, func(pools map[string]ResourcePool) bool {
-		for key := range pools {
-			if accelerator.IsProductOf(key, name) {
-				return true
-			}
-		}
-		return false
-	})
 }
 
 // namespaceHolders groups every provider's allowlist for each namespace it
