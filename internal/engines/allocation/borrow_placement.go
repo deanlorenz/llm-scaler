@@ -611,12 +611,16 @@ func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantBy
 // fillGuaranteed places, for the first role of picked that can, as many of
 // its kByRole replicas as fit the guaranteed budget alone, at least one, and
 // none on borrowed capacity; kByRole is then that role's count and 0 for the
-// others. It reports false, committing nothing, when no role places one
-// replica that way.
+// others. A role is filled only while the other roles have a replica that is
+// not borrowed to pair with (guaranteedPartners). It reports false,
+// committing nothing, when no role places one replica that way.
 func (p *modelPlacer) fillGuaranteed(picked []string, kByRole map[string]int, variantByRole map[string]string,
 	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
 	for _, role := range picked {
 		v := variantByRole[role]
+		if !p.guaranteedPartners(picked, role, variantByRole, stateMap) {
+			continue
+		}
 		r := p.replica(variants, stateMap, v)
 		g := gpusPerReplicaFromState(stateMap, v)
 		n := 0
@@ -639,6 +643,33 @@ func (p *modelPlacer) fillGuaranteed(picked []string, kByRole map[string]int, va
 		return true
 	}
 	return false
+}
+
+// guaranteedPartners reports whether every role of picked other than role
+// has a replica that is not borrowed -- its replicas so far less those its
+// draws in flight hold (BorrowCredit) -- to pair with role's replicas placed
+// alone on guaranteed capacity (N-m2). Without one, the role filled alone
+// pairs only with borrowed replicas: once Kueue reclaims them it serves
+// nothing, a prefill with no decode.
+func (p *modelPlacer) guaranteedPartners(picked []string, role string, variantByRole map[string]string,
+	stateMap map[string]domain.VariantReplicaState) bool {
+	for _, other := range picked {
+		if other == role {
+			continue
+		}
+		v := variantByRole[other]
+		borrowed := 0
+		for _, gpus := range p.bs.credit[p.namespace+"/"+v] {
+			borrowed += gpus
+		}
+		if g := gpusPerReplicaFromState(stateMap, v); g > 0 {
+			borrowed = ceilDiv(borrowed, g)
+		}
+		if p.targets[v]-borrowed < 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // replica is one replica of variant v as the placer fits it: the view's
