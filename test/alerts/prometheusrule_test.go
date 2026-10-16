@@ -264,10 +264,15 @@ func alertExpr(t *testing.T, name string) string {
 // lengthens borrowCooldown must not page early.
 func TestKueueLenderWaitingComparesAgainstTheCooldownGauge(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueLenderWaitingPastCooldown")
-	assert.ElementsMatch(t, []string{"wva_kueue_lender_waiting_seconds", "wva_kueue_borrow_cooldown_seconds"}, ExtractMetricNames(expr))
+	assert.ElementsMatch(t, []string{"wva_kueue_lender_waiting_seconds", "wva_kueue_borrow_cooldown_seconds",
+		"wva_kueue_borrow_release_latency_seconds"}, ExtractMetricNames(expr))
 	assert.NotRegexp(t, `>\s*[0-9]+\s*$`, expr, "no hardcoded threshold")
-	assert.Contains(t, expr, "> on () group_left () max (wva_kueue_borrow_cooldown_seconds)",
+	assert.Contains(t, expr, "> on () group_left () (max (wva_kueue_borrow_cooldown_seconds)",
 		"one cooldown, matched against every lender series")
+	// PR-C: with releaseToNonReclaimingLenders a release lands only after the
+	// KEDA scale-down window; the threshold adds that latency, and is the
+	// cooldown alone where the latency gauge is absent.
+	assert.Contains(t, expr, "+ (max (wva_kueue_borrow_release_latency_seconds) or vector(0))")
 }
 
 // O1: drift above 0 for 15 minutes is a warning; an unknown controller version

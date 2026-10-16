@@ -80,6 +80,11 @@ func (e *Engine) publishBorrowSignals(constraints []*allocation.ResourceConstrai
 	// force, published while some entry counts borrowing.
 	metrics.PublishKueueBorrowCooldown(e.borrowSettings().Cooldown.Seconds(),
 		e.Config != nil && e.Config.KueueCountsBorrowable())
+	// What the same alert adds to the cooldown while releases to waiting
+	// lenders are on: how long one takes to land. The last figure measured
+	// is kept through cycles that count no borrowing.
+	metrics.PublishKueueReleaseLatency(st.releaseLatency.Seconds(),
+		e.Config != nil && e.Config.KueueReleasesToNonReclaiming() && st.releaseLatency > 0)
 	metrics.PublishKueueNeverRead(kueueNeverRead(constraints))
 }
 
@@ -100,11 +105,12 @@ func kueueNeverRead(constraints []*allocation.ResourceConstraints) []string {
 func (e *Engine) borrowReasons(req allocation.ModelScalingRequest, constraints []*allocation.ResourceConstraints,
 	decisions []domain.VariantDecision, now time.Time) []string {
 	st := &e.borrowing
-	var unplaced, reclaimed, lentOut bool
+	var unplaced, reclaimed, lentOut, released bool
 	counted := countsBorrowing(constraints, req.Namespace)
 	for _, v := range req.VariantStates {
 		s := st.governor.VariantStatus(req.Namespace, v.VariantName)
 		unplaced = unplaced || s.TimeoutRelease || (s.Unplaced && counted)
+		released = released || s.LenderRelease
 	}
 	if until, ok := st.reclaimedUntil[req.Namespace+"/"+req.ModelID]; ok && now.Before(until) {
 		reclaimed = true
@@ -125,6 +131,7 @@ func (e *Engine) borrowReasons(req allocation.ModelScalingRequest, constraints [
 		{constants.ScalingBlockedBorrowUnplaced, unplaced},
 		{constants.ScalingBlockedLenderReclaimed, reclaimed},
 		{constants.ScalingBlockedNominalLentOut, lentOut},
+		{constants.ScalingBlockedReleasedToLender, released},
 	} {
 		if r.on {
 			out = append(out, r.reason)
@@ -280,6 +287,14 @@ func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now t
 // the scaling manager lowered it to give borrowed capacity back, and why. The
 // recorder aggregates repeats.
 func (e *Engine) borrowReleasedEvent(r allocation.BorrowRelease, acc scaletarget.ScaleTargetAccessor) {
+	if r.Cause == allocation.ReleaseLenderWaiting {
+		e.shareEvent(acc, corev1.EventTypeNormal, constants.K8SEventBorrowedCapacityReleased,
+			fmt.Sprintf("Released borrowed Kueue capacity to ClusterQueue %s: replicas lowered from %d to %d (cause %s). "+
+				"It waits for capacity it lent in cohort %s, and Kueue does not reclaim it "+
+				"(releaseToNonReclaimingLenders is on); this model borrows nothing new there for the cooldown",
+				r.Lender.Lender, r.From, r.To, r.Cause, r.Lender.Cohort))
+		return
+	}
 	if r.AtGate {
 		e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,
 			fmt.Sprintf("Released replicas held at Kueue's admission gate: replicas lowered from %d to %d (cause %s). "+

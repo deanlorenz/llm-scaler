@@ -914,6 +914,11 @@ const (
 	// guaranteed figure sits below nominal. A parked model refused a wake for
 	// the same cause carries ScalingBlockedWakeNominalLentOut instead.
 	ScalingBlockedNominalLentOut = "nominal-lent-out"
+	// ScalingBlockedReleasedToLender indicates the scaling manager lowered
+	// the model to hand borrowed capacity back to a waiting lender Kueue does
+	// not reclaim for (kueue.releaseToNonReclaimingLenders). Present while
+	// the release is in flight, until it lands.
+	ScalingBlockedReleasedToLender = "released-to-lender"
 )
 
 // Scale-from-zero refusal reasons (values for the `reason` label of
@@ -941,6 +946,7 @@ var ScalingBlockedReasonsBorrowing = []string{
 	ScalingBlockedLenderReclaimed,
 	ScalingBlockedBorrowUnplaced,
 	ScalingBlockedNominalLentOut,
+	ScalingBlockedReleasedToLender,
 }
 
 // ScalingBlockedReasonsWakeCapacity are decided by the scale-from-zero loop
@@ -1038,6 +1044,14 @@ const (
 	// in seconds, while a quota entry counts Kueue borrowing; the threshold
 	// the lender-waiting alert compares against. Absent otherwise.
 	WVAKueueBorrowCooldownSeconds = "wva_kueue_borrow_cooldown_seconds"
+
+	// WVAKueueBorrowReleaseLatencySeconds is a gauge: how long a release of
+	// borrowed capacity to a waiting lender takes to land -- the borrowing
+	// models' slowest KEDA scale-down window, plus the HPA sync, the KEDA poll
+	// and the termination grace -- while a quota entry sets
+	// kueue.releaseToNonReclaimingLenders. The lender-waiting alert adds it
+	// to the cooldown. Absent otherwise.
+	WVAKueueBorrowReleaseLatencySeconds = "wva_kueue_borrow_release_latency_seconds"
 
 	// WVAKueueBorrowedGPUs is a gauge: per cohort and flavor, the GPUs the
 	// namespaces this controller governs hold past their guaranteed figures,

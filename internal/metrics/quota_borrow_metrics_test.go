@@ -129,7 +129,7 @@ var _ = Describe("Kueue borrowing series", func() {
 
 	It("registers the borrowing reasons as one producer's set", func() {
 		Expect(constants.ScalingBlockedReasonsBorrowing).To(ConsistOf(
-			"lender-reclaimed", "borrow-unplaced", "nominal-lent-out"))
+			"lender-reclaimed", "borrow-unplaced", "nominal-lent-out", "released-to-lender"))
 		for _, other := range [][]string{constants.ScalingBlockedReasonsPolicy, constants.ScalingBlockedReasonsWake,
 			constants.ScalingBlockedReasonsUtilizationShare} {
 			for _, r := range constants.ScalingBlockedReasonsBorrowing {

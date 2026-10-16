@@ -197,7 +197,7 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 		e.persistBorrowLedger(ctx)
 		return
 	}
-	initLossSeries(st.cycle)
+	initLossSeries(st.cycle, e.Config != nil && e.Config.KueueReleasesToNonReclaiming())
 	initGatedSeries(st.cycle)
 	e.applyReleases(ctx, st.governor.Releases(st.cycle, decisions), scaleTargets)
 	e.persistBorrowLedger(ctx)
@@ -256,8 +256,13 @@ func (e *Engine) applyReleases(ctx context.Context, releases []allocation.Borrow
 
 // initLossSeries creates, at 0, the loss counters of every model in a
 // namespace the cycle counts borrowing for, so the first release or
-// preemption of each is an increase the thrashing alert sees.
-func initLossSeries(cycle allocation.BorrowCycle) {
+// preemption of each is an increase the thrashing alert sees; with
+// releaseToLenders, the lender-waiting release counter too.
+func initLossSeries(cycle allocation.BorrowCycle, releaseToLenders bool) {
+	causes := []string{string(allocation.ReleasePlacementTimeout)}
+	if releaseToLenders {
+		causes = append(causes, string(allocation.ReleaseLenderWaiting))
+	}
 	borrowing := map[string]bool{}
 	for _, c := range cycle.Constraints {
 		if c == nil {
@@ -269,7 +274,7 @@ func initLossSeries(cycle allocation.BorrowCycle) {
 	}
 	for _, r := range cycle.Requests {
 		if borrowing[r.Namespace] {
-			metrics.InitBorrowLossSeries(r.Namespace, r.ModelID, string(allocation.ReleasePlacementTimeout))
+			metrics.InitBorrowLossSeries(r.Namespace, r.ModelID, causes...)
 		}
 	}
 }

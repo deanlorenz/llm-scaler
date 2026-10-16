@@ -24,6 +24,7 @@ var (
 	kueueNeverRead      *prometheus.GaugeVec
 	kueueVersionKnown   *prometheus.GaugeVec
 	kueueCooldown       *prometheus.GaugeVec
+	kueueReleaseLatency *prometheus.GaugeVec
 	kueueBorrowedGPUs   *prometheus.GaugeVec
 )
 
@@ -71,7 +72,9 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 		Name: constants.WVABorrowReleasesTotal,
 		Help: "Releases of borrowed Kueue capacity by a model, one per model and cycle whatever the number of " +
 			"variants lowered, so a P/D pair counts once; by cause: placement-timeout (a borrowed replica did " +
-			"not place in time). 0 from the first cycle that counts borrowing for the model.",
+			"not place in time), kueue-gate (a replica held at Kueue's admission gate in a namespace that counts " +
+			"no borrowing), lender-waiting (handed back to a waiting lender Kueue does not reclaim for, with " +
+			"kueue.releaseToNonReclaimingLenders). 0 from the first cycle that counts borrowing for the model.",
 	}, withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelCause))
 	kueueBorrowDrift = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowDriftGPUs,
@@ -98,23 +101,31 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 		Help: "The borrowCooldown in force, in seconds, while a quota entry counts Kueue borrowing. " +
 			"The lender-waiting alert compares wva_kueue_lender_waiting_seconds against it.",
 	}, withInstance())
+	kueueReleaseLatency = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: constants.WVAKueueBorrowReleaseLatencySeconds,
+		Help: "How long a release of borrowed capacity to a waiting lender takes to land, in seconds: the " +
+			"borrowing models' slowest KEDA scale-down window plus the HPA sync, the KEDA poll and the " +
+			"termination grace. Published while a quota entry sets kueue.releaseToNonReclaimingLenders; " +
+			"the lender-waiting alert adds it to the cooldown.",
+	}, withInstance())
 	kueueBorrowedGPUs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowedGPUs,
 		Help: "GPUs the namespaces this controller governs hold past their guaranteed figures, per Kueue " +
 			"cohort and flavor, as the last cycle counted them. Absent where nothing is borrowed.",
 	}, withInstance(constants.LabelCohort, constants.LabelFlavor))
 	for name, c := range map[string]prometheus.Collector{
-		constants.WVAKueueControllerVersionKnown: kueueVersionKnown,
-		constants.WVAKueueBorrowCooldownSeconds:  kueueCooldown,
-		constants.WVAKueueBorrowedGPUs:           kueueBorrowedGPUs,
-		constants.WVAKueueBorrowDriftGPUs:        kueueBorrowDrift,
-		constants.WVAKueueNeverRead:              kueueNeverRead,
-		constants.WVAQuotaLimitGPUs:              quotaLimitGPUs,
-		constants.WVAQuotaBorrowWithheld:         quotaBorrowWithheld,
-		constants.WVAKueueUnplacedPods:           kueueUnplacedPods,
-		constants.WVAKueuePreemptedPodsTotal:     kueuePreemptedPods,
-		constants.WVAKueueLenderWaitingSeconds:   kueueLenderWaiting,
-		constants.WVABorrowReleasesTotal:         borrowReleases,
+		constants.WVAKueueControllerVersionKnown:      kueueVersionKnown,
+		constants.WVAKueueBorrowCooldownSeconds:       kueueCooldown,
+		constants.WVAKueueBorrowReleaseLatencySeconds: kueueReleaseLatency,
+		constants.WVAKueueBorrowedGPUs:                kueueBorrowedGPUs,
+		constants.WVAKueueBorrowDriftGPUs:             kueueBorrowDrift,
+		constants.WVAKueueNeverRead:                   kueueNeverRead,
+		constants.WVAQuotaLimitGPUs:                   quotaLimitGPUs,
+		constants.WVAQuotaBorrowWithheld:              quotaBorrowWithheld,
+		constants.WVAKueueUnplacedPods:                kueueUnplacedPods,
+		constants.WVAKueuePreemptedPodsTotal:          kueuePreemptedPods,
+		constants.WVAKueueLenderWaitingSeconds:        kueueLenderWaiting,
+		constants.WVABorrowReleasesTotal:              borrowReleases,
 	} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register %s: %w", name, err)
@@ -190,9 +201,25 @@ func PublishKueueBorrowDrift(byQueue map[string]int) {
 }
 
 var (
-	kueueCooldownSeries     seriesSet
-	kueueBorrowedGPUsSeries seriesSet
+	kueueCooldownSeries       seriesSet
+	kueueReleaseLatencySeries seriesSet
+	kueueBorrowedGPUsSeries   seriesSet
 )
+
+// PublishKueueReleaseLatency sets wva_kueue_borrow_release_latency_seconds
+// while some entry hands capacity back to waiting lenders, and removes it when
+// on is false.
+func PublishKueueReleaseLatency(seconds float64, on bool) {
+	if kueueReleaseLatency == nil {
+		return
+	}
+	kueueReleaseLatencySeries.publish([]*prometheus.GaugeVec{kueueReleaseLatency},
+		func(set func(*prometheus.GaugeVec, prometheus.Labels, float64)) {
+			if on {
+				set(kueueReleaseLatency, prometheus.Labels{}, seconds)
+			}
+		})
+}
 
 // versionKnownBy holds, per Kueue reader (by its quota entry), whether the
 // controller's version counts as known to it, for the readers whose entry
