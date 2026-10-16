@@ -365,6 +365,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, nil, "")
+	e.metricsEmitter.RecordLearnedStateSnapshotSize(len(raw), budget, dropped)
 	st.seen, st.lastDigest, st.lastWriteDone = true, digest, now
 	if dropped > 0 {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",

@@ -486,6 +486,15 @@ across a restart, are otherwise visible only in the logs.
   - `differs`: a snapshot from an older release whose configuration differs; only the measured capacity was kept, as a lower-only figure.
 - **Use Case**: After a restart, `incomplete` or `differs` well above `whole` and `args` means the snapshot was mostly kept as lower-only figures -- flags the controller cannot resolve, or an upgrade that changed how configurations are identified. Many `prior` means many rollouts while the controller was down ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
 
+### `wva_learned_state_snapshot_bytes`, `wva_learned_state_snapshot_budget_bytes`, `wva_learned_state_snapshot_dropped_entries`
+- **Type**: Gauge
+- **Description**: The size of the learned-state snapshot document last written, the bound it had to fit (700 KiB, less what other versions' documents take of the ConfigMap), and how many entries that write left out to fit it, least recently used first. Set on each successful write; absent until the first.
+- **Use Case**: A fleet of a few hundred variants can reach the bound. Each write then leaves out the windows of the variants idle longest, which a restart prices at derived or k1 until they saturate again:
+  ```promql
+  max(wva_learned_state_snapshot_dropped_entries) > 0
+    or max(wva_learned_state_snapshot_bytes / wva_learned_state_snapshot_budget_bytes) > 0.9
+  ```
+
 ### `wva_learned_state_snapshot_errors_total`
 - **Type**: Counter
 - **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.

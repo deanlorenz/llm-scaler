@@ -4,18 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -126,4 +133,57 @@ func TestTheSizeBoundKeepsABoundWhoseFigureIsInUse(t *testing.T) {
 	entries := learnedStateEntries(s)
 	require.Len(t, entries, 2)
 	assert.Equal(t, "k2|ns|v|m|H100|1|both|b2|q5", entries[0].key, "the bound in use went before an hour-old window")
+}
+
+// gaugeValue reads one unlabelled gauge.
+func gaugeValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
+	t.Helper()
+	mfs, err := registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == name && len(mf.GetMetric()) == 1 {
+			return mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("no %s", name)
+	return 0
+}
+
+// The snapshot's size, its bound and what a write left out are published, so
+// a fleet at the bound -- each write dropping the windows of the variants idle
+// longest -- is seen before a restart prices them at derived or k1.
+func TestTheSnapshotSizeAndWhatItLeftOutArePublished(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	require.NoError(t, metrics.InitMetrics(registry))
+	ctx := context.Background()
+	now := time.Now()
+	state := saturation.LearnedState{K2: map[string]capacity.RollingAverageSnapshot{}}
+	for i := range 50 {
+		state.K2[fmt.Sprintf("ns|v|m|H100|1|both|b%03d|q5", i)] = capacity.RollingAverageSnapshot{
+			Values: []float64{4000}, LastUsed: now.Add(-time.Duration(50-i) * time.Minute), LastWritten: now,
+		}
+	}
+	c := fake.NewClientBuilder().Build()
+	e := snapshotEngine(t, c, &stateSpy{state: state})
+	e.metricsEmitter = metrics.NewMetricsEmitter()
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	full := gaugeValue(t, registry, constants.WVALearnedStateSnapshotBytes)
+	assert.Positive(t, full)
+	assert.Equal(t, float64(learnedStateMaxBytes), gaugeValue(t, registry, constants.WVALearnedStateSnapshotBudgetBytes))
+	assert.Zero(t, gaugeValue(t, registry, constants.WVALearnedStateSnapshotDroppedEntries))
+
+	// Another version's document leaves this one just short of its size.
+	other := learnedStateMaxData - int(full) + 100
+	squeezed := fake.NewClientBuilder().WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: learnedStateConfigMap, Namespace: config.SystemNamespace()},
+		Data:       map[string]string{"v0": strings.Repeat("x", other-2)},
+	}).Build()
+	e2 := snapshotEngine(t, squeezed, &stateSpy{state: state})
+	e2.metricsEmitter = metrics.NewMetricsEmitter()
+	e2.restoreLearnedState(ctx, now)
+	e2.writeLearnedState(ctx, now)
+	assert.Positive(t, gaugeValue(t, registry, constants.WVALearnedStateSnapshotDroppedEntries),
+		"a write that left entries out did not say so")
+	assert.Less(t, gaugeValue(t, registry, constants.WVALearnedStateSnapshotBytes), full)
 }
