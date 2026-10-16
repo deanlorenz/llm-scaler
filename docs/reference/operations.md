@@ -265,6 +265,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
+| `utilizationShareNote` | present while the settings in force differ from the block as written. Today: a namespace-scoped controller with no quota on its namespace ignores `physicalGroups`. The mode is not `invalid` |
 | `leader` | the pod that wrote it |
 | `controllerInstance` | the `controller_instance` metrics label, when set |
 | `clusterQuotaPerController` | present while a namespace-scoped controller enforces a `scope: cluster` quota: it is charged only its own variants' GPUs, so the quota caps this controller, not the cluster |

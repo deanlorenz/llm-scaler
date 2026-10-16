@@ -22,7 +22,8 @@
 #                               A namespace the controller does not read is refused.
 #   --physical-groups           (shadow) also plan GPUs bounded only by the
 #                               physical inventory; needed when the limiter is
-#                               gpu-inventory and there is no quota
+#                               gpu-inventory and there is no quota. Refused for
+#                               a namespace-scoped controller, which ignores it
 #   --restart                   restart the controller when it logs no reload of
 #                               the policy, then require the reload after start
 #
@@ -37,6 +38,10 @@ set -euo pipefail
 
 # shellcheck source=lib/pod_writer.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pod_writer.sh"
+# For PL_DEPLOY_ROWS: which namespace the controller manages, read the way
+# make enable-physical-limiter reads it.
+# shellcheck source=lib/physical_limiter.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/physical_limiter.sh"
 
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-30s}"
 CONTROLLER_DEPLOY="${CONTROLLER_DEPLOY:-wva-controller-manager}"
@@ -357,13 +362,28 @@ confirm_by_status() {
 # replica only the leader reconciles and decides, and `kubectl logs deploy/X`
 # reads one pod, which may be a standby.
 SELECTOR=""
+DEPLOY_JSON=""
+controller_deploy() {
+    [ -n "$DEPLOY_JSON" ] && return 0
+    kread DEPLOY_JSON get deploy "$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" -o json \
+        || die "could not read the controller $CONTROLLER_NS/$CONTROLLER_DEPLOY: $DEPLOY_JSON"
+}
 controller_selector() {
-    local d
     [ -n "$SELECTOR" ] && return 0
-    kread d get deploy "$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" -o json \
-        || die "could not read the controller $CONTROLLER_NS/$CONTROLLER_DEPLOY: $d"
-    SELECTOR="$(printf '%s' "$d" | jq -r '.spec.selector.matchLabels // {} | to_entries | map(.key + "=" + .value) | join(",")')"
+    controller_deploy
+    SELECTOR="$(printf '%s' "$DEPLOY_JSON" | jq -r '.spec.selector.matchLabels // {} | to_entries | map(.key + "=" + .value) | join(",")')"
     [ -n "$SELECTOR" ] || die "the controller Deployment has no matchLabels selector to find its pods by"
+}
+
+# controller_managed_ns -- the namespace the controller manages, or * when it
+# is cluster-scoped: its --watch-namespace, resolved as PL_DEPLOY_ROWS resolves
+# it (lib/physical_limiter.sh).
+controller_managed_ns() {
+    local rows
+    controller_deploy
+    rows="$(printf '{"items":[%s]}' "$DEPLOY_JSON" | jq -r --arg ns "$CONTROLLER_NS" "$PL_DEPLOY_ROWS")" \
+        || die "could not read which namespace $CONTROLLER_NS/$CONTROLLER_DEPLOY manages"
+    printf '%s' "$rows" | head -1 | cut -f4
 }
 
 # LOGS -- every controller pod's log [since <arg>]. Fails loudly: an unreadable
@@ -551,7 +571,9 @@ verb_check() {
                 ok "limiters: gpu-inventory and quota, both in force; the share's cluster budget is the GPUs that exist, and each namespace-scope quota bounds its namespace"
             fi ;;
         inventory)
-            if [ "${state#* }" = physical ]; then
+            if [ "${state#* }" = physical ] && [ "$(controller_managed_ns)" != "*" ]; then
+                warn "limiter: gpu-inventory, and the block sets physicalGroups, but this controller is namespace-scoped and ignores it (utilizationShareNote in $STATUS_CM): the optimizer plans nothing here. Bound the namespace with a quota"
+            elif [ "${state#* }" = physical ]; then
                 ok "limiter: gpu-inventory, and the block plans physical groups"
             else
                 warn "limiter: gpu-inventory and no quota. The optimizer plans nothing here until the block sets physicalGroups: run shadow with --physical-groups (PHYSICAL_GROUPS=true)"
@@ -599,8 +621,13 @@ verb_check() {
 }
 
 verb_shadow() {
-    local state kind physical=""
+    local state kind physical="" managed
     read_policy
+    if [ "$PHYSICAL" -eq 1 ]; then
+        managed="$(controller_managed_ns)"
+        [ "$managed" = "*" ] \
+            || die "--physical-groups is refused: the controller manages only $managed (namespace-scoped), and a namespace-scoped controller ignores physicalGroups: every such controller would plan the same free GPUs of the cluster. Bound the namespace with a quota limiter instead, or run the share from a cluster-scoped controller"
+    fi
     [ "$POLICY_FOUND" -eq 1 ] || die "no scaling policy in $POLICY_NS: there is no limiter, so there is no budget to share"
     state="$(block_state)"
     case "${state% *}" in

@@ -231,6 +231,10 @@ type UtilizationShare struct {
 	MaxHeadroomReplicas int
 	Shadow              bool
 	PhysicalGroups      bool
+	// Note is why the settings in force differ from the block as written,
+	// for example a physicalGroups a namespace-scoped controller ignores; ""
+	// when they do not.
+	Note string
 	// Stabilization is utilizationShare.stabilization in force.
 	Stabilization ShareStabilization
 	// Classes are the weight classes in force.
@@ -529,23 +533,52 @@ func (c *Config) UtilizationShare() (settings UtilizationShare, selected bool, e
 	if err != nil {
 		return UtilizationShare{}, false, err
 	}
-	if settings.PhysicalGroups && c.infrastructure.watchNamespace != "" {
-		return UtilizationShare{}, false, PhysicalGroupsNamespaceScopedError(c.infrastructure.watchNamespace)
+	if ns := c.infrastructure.watchNamespace; settings.PhysicalGroups && ns != "" {
+		// A namespace-scoped controller never plans a physical group. Where a
+		// quota bounds its namespace the setting has no effect anyway (the
+		// quota group plans it), so a leftover physicalGroups in a shared
+		// policy changes nothing. Where nothing but the inventory bounds it,
+		// the setting would take effect, so it is ignored -- not the whole
+		// block -- and the note says so.
+		settings.PhysicalGroups = false
+		if !c.quotaBoundsNamespaceLocked(ns) {
+			settings.Note = PhysicalGroupsIgnoredMessage(ns)
+		}
 	}
 	return settings, true, nil
 }
 
-// PhysicalGroupsNamespaceScopedError is why utilizationShare.physicalGroups is
-// refused on a controller that manages one namespace. A physical group plans
-// every free GPU of a type on the cluster, and each such controller would plan
-// the same free GPUs: the first to place a replica keeps them, and the share
-// never gives them back to the others. A namespace quota bounds a tenant
-// instead; physicalGroups belongs on a cluster-scoped controller.
-func PhysicalGroupsNamespaceScopedError(watchNamespace string) error {
-	return fmt.Errorf("utilizationShare.physicalGroups is refused on a namespace-scoped controller (it manages %s): "+
-		"a physical group plans every free GPU of a type on the cluster, and every namespace-scoped controller "+
-		"would plan the same ones. Bound the namespace with a quota limiter and drop physicalGroups, or set it "+
-		"on a cluster-scoped controller", watchNamespace)
+// quotaBoundsNamespaceLocked reports whether a quota entry in force bounds
+// namespace: a scope: cluster quota, or a scope: namespace quota that does not
+// exclude it. Caller holds c.mu.
+func (c *Config) quotaBoundsNamespaceLocked(namespace string) bool {
+	return slices.ContainsFunc(c.effectiveLimitersLocked(), func(l QuotaLimiterConfig) bool {
+		if l.Type != string(LimiterTypeQuota) {
+			return false
+		}
+		return l.Scope == QuotaScopeCluster || !slices.Contains(l.Exclude, namespace)
+	})
+}
+
+// PhysicalGroupsIgnoredMessage is the note when a namespace-scoped controller
+// ignores utilizationShare.physicalGroups because no quota bounds its
+// namespace. A physical group plans every free GPU of a type on the cluster,
+// and every namespace-scoped controller reading the same policy would plan the
+// same free GPUs: the first to place a replica keeps them, and the share never
+// gives them back to the others. The optimizer keeps running without it.
+func PhysicalGroupsIgnoredMessage(watchNamespace string) string {
+	return fmt.Sprintf("utilizationShare.physicalGroups is ignored: this controller is namespace-scoped "+
+		"(it manages %s) and no quota bounds its namespace. A physical group plans every free GPU of a type "+
+		"on the cluster, and every namespace-scoped controller would plan the same ones. The optimizer runs "+
+		"without physical groups. Bound the namespace with a quota limiter, or set physicalGroups on a "+
+		"cluster-scoped controller", watchNamespace)
+}
+
+// UtilizationShareNote is why the settings in force differ from the optimizer
+// block as written, or "" when they do not. Thread-safe.
+func (c *Config) UtilizationShareNote() string {
+	us, _, _ := c.UtilizationShare()
+	return us.Note
 }
 
 // IgnoredOptimizerNamespaces lists the namespaces whose namespace-local

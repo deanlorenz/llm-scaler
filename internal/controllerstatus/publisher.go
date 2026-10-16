@@ -70,6 +70,11 @@
 //	                       it: GPUs other namespaces hold on the same nodes
 //	                       count as free. Mirrors wva_pod_access_denied;
 //	                       absent otherwise.
+//	utilizationShareNote   present while the optimizer's settings in force
+//	                       differ from its block as written: a namespace-scoped
+//	                       controller with no quota on its namespace ignores
+//	                       physicalGroups and says so here. The mode is not
+//	                       invalid; absent otherwise.
 //
 // limiter and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -145,6 +150,11 @@ const (
 	// a cluster-wide Pod list while a physical limiter reads it. Absent when
 	// it is not.
 	KeyPodListDenied = "podListDenied"
+	// KeyUtilizationShareNote carries why the optimizer's settings in force
+	// differ from its block as written (config.UtilizationShare.Note), for
+	// example a physicalGroups a namespace-scoped controller ignores. Absent
+	// when they do not.
+	KeyUtilizationShareNote = "utilizationShareNote"
 )
 
 // PodListDeniedMessage is the KeyPodListDenied value.
@@ -561,6 +571,7 @@ func observe(d map[string]string, cfg *config.Config) {
 	mode, err := cfg.UtilizationShareMode()
 	d[KeyUtilizationShare] = mode
 	d[KeyUtilizationShareError] = errText(err)
+	setOrDelete(d, KeyUtilizationShareNote, cfg.UtilizationShareNote())
 	if cfg.ClusterQuotaPerController() {
 		d[KeyClusterQuotaPerController] = config.ClusterQuotaPerControllerMessage
 	} else {
@@ -581,6 +592,24 @@ func (p *Publisher) SetPodListDenied(denied bool) {
 			delete(d, KeyPodListDenied)
 		}
 	})
+}
+
+// SetUtilizationShareNote records why the optimizer's settings in force differ
+// from its block as written; "" removes the key.
+func (p *Publisher) SetUtilizationShareNote(note string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { setOrDelete(d, KeyUtilizationShareNote, note) })
+}
+
+// setOrDelete sets key to value, or removes it when value is empty.
+func setOrDelete(d map[string]string, key, value string) {
+	if value == "" {
+		delete(d, key)
+		return
+	}
+	d[key] = value
 }
 
 func errText(err error) string {

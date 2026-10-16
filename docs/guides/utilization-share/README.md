@@ -152,12 +152,15 @@ cluster. Three things differ:
 - **Add `PHYSICAL_GROUPS=true` to the shadow step.** Without
   `physicalGroups: true` the optimizer plans no group and moves nothing. The
   check warns about this.
-- **A namespace-scoped controller refuses `physicalGroups`.** Every such
-  controller would plan the same free GPUs of the whole cluster. Its mode reads
-  `invalid` and today's optimizer runs. The self-managed controllers all read
-  `wva-policy`, so `physicalGroups` there turns the optimizer off for every one
-  of them; give each a namespace quota instead. A cluster-scoped controller
-  reads its own ConfigMap, so write the block there.
+- **A namespace-scoped controller ignores `physicalGroups`.** Every such
+  controller would plan the same free GPUs of the whole cluster. Where a quota
+  bounds its namespace, the setting changes nothing anyway. Under
+  `gpu-inventory` alone, the optimizer keeps running without physical groups,
+  so it plans nothing. It logs a warning and sets `utilizationShareNote` in
+  `wva-controller-status`. The mode stays `shadow` or `active`. The script
+  refuses `PHYSICAL_GROUPS=true` for such a controller. Give each tenant a
+  namespace quota instead. A cluster-scoped controller reads its own
+  ConfigMap, so write the block there.
 - **Spare GPUs are shared with everything on the cluster.** A GPU a donor
   releases can be taken by a pod the scaling manager did not place. That
   transfer ends `release-taken`.

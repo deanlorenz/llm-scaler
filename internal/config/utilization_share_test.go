@@ -324,7 +324,9 @@ optimizer:
 
 	// Every namespace-scoped controller planning a physical group plans the
 	// same free GPUs of the whole cluster; the first to place keeps them.
-	It("refuses physicalGroups on a namespace-scoped controller, and keeps it on a cluster-scoped one", func() {
+	// Only the physical group is ignored, never the whole block: the optimizer
+	// keeps running, and the note says why.
+	It("ignores physicalGroups on a namespace-scoped controller under gpu-inventory alone, and keeps it on a cluster-scoped one", func() {
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(`
 limiters:
   - type: gpu-inventory
@@ -337,14 +339,80 @@ optimizer:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(selected).To(BeTrue())
 		Expect(us.PhysicalGroups).To(BeTrue())
+		Expect(c.UtilizationShareNote()).To(BeEmpty())
 
 		SetWatchNamespaceForTest(c, "team-a")
-		_, selected, err = c.UtilizationShare()
-		Expect(selected).To(BeFalse())
-		Expect(err).To(MatchError(ContainSubstring("physicalGroups is refused on a namespace-scoped controller (it manages team-a)")))
+		us, selected, err = c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeTrue())
+		Expect(us.PhysicalGroups).To(BeFalse())
+		Expect(us.Note).To(ContainSubstring("physicalGroups is ignored: this controller is namespace-scoped (it manages team-a)"))
+		Expect(c.UtilizationShareNote()).To(Equal(us.Note))
 		mode, modeErr := c.UtilizationShareMode()
-		Expect(mode).To(Equal(constants.UtilizationShareModeInvalid))
-		Expect(modeErr).To(HaveOccurred())
+		Expect(mode).To(Equal(constants.UtilizationShareModeActive))
+		Expect(modeErr).NotTo(HaveOccurred())
+	})
+
+	// A shared wva-policy with a leftover physicalGroups: true must not change
+	// what any tenant controller under a quota does.
+	DescribeTable("a leftover physicalGroups changes nothing where a quota bounds the namespace",
+		func(limiters string) {
+			SetWatchNamespaceForTest(c, "team-a")
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(limiters + `
+optimizer:
+  type: utilizationShare
+`)})
+			want, selected, err := c.UtilizationShare()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(selected).To(BeTrue())
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(limiters + `
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    physicalGroups: true
+`)})
+			got, selected, err := c.UtilizationShare()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(selected).To(BeTrue())
+			Expect(got).To(Equal(want))
+			mode, _ := c.UtilizationShareMode()
+			Expect(mode).To(Equal(constants.UtilizationShareModeActive))
+		},
+		Entry("namespace quota", `
+limiters:
+  - type: quota
+    name: tenants
+    scope: namespace
+    namespaceQuotas:
+      team-a:
+        H100: 8
+  - type: gpu-inventory
+`),
+		Entry("cluster quota", quotaLimiters),
+	)
+
+	It("ignores physicalGroups where the namespace quota excludes the controller's namespace", func() {
+		SetWatchNamespaceForTest(c, "team-a")
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(`
+limiters:
+  - type: quota
+    name: tenants
+    scope: namespace
+    namespaceQuotas:
+      default:
+        H100: 8
+    exclude: [team-a]
+  - type: gpu-inventory
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    physicalGroups: true
+`)})
+		us, selected, err := c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeTrue())
+		Expect(us.PhysicalGroups).To(BeFalse())
+		Expect(us.Note).To(ContainSubstring("physicalGroups is ignored"))
 	})
 
 	It("keeps a namespace-scoped controller's share without physicalGroups", func() {

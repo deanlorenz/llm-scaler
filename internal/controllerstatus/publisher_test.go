@@ -16,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
@@ -279,6 +281,40 @@ func TestClusterQuotaOnANamespaceScopedControllerIsPublished(t *testing.T) {
 	q.RecordClusterPolicy(cluster, "wva-system", "wva-scaling-policy-config", "1", nil)
 	if got, found := q.Data()[key]; found {
 		t.Errorf("%s = %q on a cluster-scoped controller, want it absent", key, got)
+	}
+}
+
+// A namespace-scoped controller under the inventory alone ignores a
+// physicalGroups from a shared policy: the optimizer keeps running (the mode is
+// not invalid) and the note says why. A quota on the namespace drops the note.
+func TestIgnoredPhysicalGroupsIsANoteNotAnInvalidMode(t *testing.T) {
+	const key = "utilizationShareNote" // spelled out: the data contract
+	policy := func(limiters string) *config.ScalingPolicy {
+		var p config.ScalingPolicy
+		doc := limiters + "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    physicalGroups: true\n"
+		if err := yaml.Unmarshal([]byte(doc), &p); err != nil {
+			t.Fatal(err)
+		}
+		return &p
+	}
+	cfg := config.NewTestConfig()
+	config.SetWatchNamespaceForTest(cfg, "team-a")
+	p, _ := newTestPublisher(t, &writes{})
+	cfg.UpdateClusterPolicy(policy("limiters:\n  - type: gpu-inventory\n"))
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "1", nil)
+	d := p.Data()
+	if d[KeyUtilizationShare] != constants.UtilizationShareModeActive || d[KeyUtilizationShareError] != "" {
+		t.Errorf("utilizationShare = %q, error = %q; want active and no error", d[KeyUtilizationShare], d[KeyUtilizationShareError])
+	}
+	if !strings.Contains(d[key], "physicalGroups is ignored") {
+		t.Errorf("%s = %q under gpu-inventory alone, want the note", key, d[key])
+	}
+
+	cfg.UpdateClusterPolicy(policy("limiters:\n  - type: quota\n    name: tenants\n    scope: namespace\n" +
+		"    namespaceQuotas:\n      team-a:\n        H100: 8\n  - type: gpu-inventory\n"))
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "2", nil)
+	if got, found := p.Data()[key]; found {
+		t.Errorf("%s = %q under a namespace quota, want it absent", key, got)
 	}
 }
 
