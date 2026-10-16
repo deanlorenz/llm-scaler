@@ -39,9 +39,10 @@ const ReclaimYieldLogMessage = "Kueue reclaim: a model of this controller grows 
 // borrowers in namespace order, each up to what it holds past guaranteed,
 // counting first what the pass already scales it down by; the rest lowers
 // its models, in model order, one unit at a time (yieldUnit): a replica of a
-// single-role model, a whole pair at the model's role ratio of a P/D one. No
-// variant goes below its minReplicas, so a serving model reaches 0 only when
-// its minReplicas is 0. A reclaim from borrowers this controller does not
+// single-role model, a whole pair at the model's role ratio of a P/D one. A
+// unit that would give back more than one replica past what is still
+// reclaimed is not given: that model is skipped. No variant goes below its
+// minReplicas, so a serving model reaches 0 only when its minReplicas is 0. A reclaim from borrowers this controller does not
 // manage changes nothing. It returns, per "namespace/variant", the replicas
 // it took off; nil when none.
 func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, requests []ModelScalingRequest) map[string]int {
@@ -106,14 +107,23 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, reques
 			for _, m := range models {
 				for freed < take {
 					unit := yieldUnit(decisions, ns, m, states, paired[ns+"/"+m])
-					gpus := 0
+					gpus, largest := 0, 0
 					for i, n := range unit {
+						g := max(1, decisions[i].GPUsPerReplica)
+						largest = max(largest, g)
 						if accelerator.SameName(decisions[i].AcceleratorName, k.acc) {
-							gpus += n * max(1, decisions[i].GPUsPerReplica)
+							gpus += n * g
 						}
 					}
 					if gpus == 0 {
 						break // nothing of this model left to give back on k.acc
+					}
+					if gpus-(take-freed) > largest {
+						// The model's smallest unit overshoots what is still
+						// reclaimed by more than one replica (a 3P:4D pair
+						// for 8 GPUs): giving it back would drop far more
+						// than Kueue preempts. The next model, if any.
+						break
 					}
 					for _, i := range slices.Sorted(maps.Keys(unit)) {
 						d := &decisions[i]

@@ -82,9 +82,16 @@ func TestReclaimYieldKeepsRatioAndMinimum(t *testing.T) {
 		t.Errorf("2P:2D yielded to %dP:%dD, want 1P:1D: a whole pair goes", ds[1].TargetReplicas, ds[0].TargetReplicas)
 	}
 	ds, reqs = pd(1, 2)
-	yieldState(8, 24).yieldReclaimed(ds, reqs)
+	yieldState(16, 24).yieldReclaimed(ds, reqs)
 	if ds[0].TargetReplicas != 0 || ds[1].TargetReplicas != 0 {
-		t.Errorf("1P:2D yielded to %dP:%dD, want 0P:0D: its one pair goes whole", ds[1].TargetReplicas, ds[0].TargetReplicas)
+		t.Errorf("1P:2D yielded to %dP:%dD for 16 GPUs, want 0P:0D: its one pair goes whole", ds[1].TargetReplicas, ds[0].TargetReplicas)
+	}
+	// A unit far larger than the reclaim is not given: 3P:4D's smallest
+	// pair is 7 replicas, 56 GPUs, for 8 reclaimed.
+	ds, reqs = pd(3, 4)
+	yieldState(8, 56).yieldReclaimed(ds, reqs)
+	if ds[0].TargetReplicas != 4 || ds[1].TargetReplicas != 3 {
+		t.Errorf("3P:4D yielded to %dP:%dD for 8 GPUs, want 3P:4D: its pair overshoots by 48", ds[1].TargetReplicas, ds[0].TargetReplicas)
 	}
 	single := []domain.VariantDecision{{Namespace: "b", ModelID: "y", VariantName: "y-v", AcceleratorName: "H100",
 		GPUsPerReplica: 8, CurrentReplicas: 1, TargetReplicas: 1}}
