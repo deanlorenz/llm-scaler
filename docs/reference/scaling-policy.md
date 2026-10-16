@@ -85,16 +85,33 @@ only the decode of a P/D model with `pd-gpu`, and the untagged prefill parks,
 scales and wakes under `pd-gpu` too, not under `default`. `default` applies only
 when no variant of the model names a tier.
 
-**A bad value is skipped, not fatal.** This covers two fields:
+**A bad value is skipped, not fatal.** This covers these fields:
 
 - `scaleToZero.retentionPeriod` that is not a duration (for example
   `5 minutes`) or is shorter than 30s (for example `0s` or `10s`). A retention
   that short would park a model between two requests and wake it on the next.
 - `shapeChangeHoldSeconds` below zero.
+- A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
+  `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
+  `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
+  `priority` multiplies the model's weight in the fair share (priority x
+  demand), so a finite value such as 5 weighs it five times as heavily.
+- An analyzer `score` below zero. It is read as 1, as before; the change is
+  that it is now reported.
+- A `priority` or analyzer `score` above 1000000. A weight a million times
+  another model's already takes the whole contended budget; a larger value
+  only risks overflowing the fair-share arithmetic that every model in the GPU
+  budget shares.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in
 value (10m for the retention). Everything else in the entry still applies.
+
+An analyzer's fields are the exception. The `analyzers` list is never merged
+with the layer below; an entry that sets it replaces it whole. So a skipped
+analyzer `score` is 1, and a skipped analyzer `scaleUpThreshold` or
+`scaleDownBoundary` uses the same policy's own band.
 
 You can see a skipped value in these places:
 

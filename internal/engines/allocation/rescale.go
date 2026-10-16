@@ -92,7 +92,9 @@ func computeRescaleTargets(in []rescaleInput, budget int) (targets map[string]in
 		if hr < 0 {
 			hr = 0
 		}
-		w := m.Priority * m.Demand
+		// Bounded, so the sum of the weights stays finite: an infinite weight
+		// made every share Inf/Inf = NaN.
+		w := min(m.Priority*m.Demand, maxShareWeight)
 		if w > 0 && hr > 0 {
 			act = append(act, active{m.ID, w, hr})
 		}

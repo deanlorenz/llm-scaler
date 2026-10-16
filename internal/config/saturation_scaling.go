@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -790,6 +791,25 @@ func TruncateIgnoredValue(v string) string {
 	return fmt.Sprintf("%s...(%d more bytes)", v[:cut], len(v)-cut)
 }
 
+// errNotFinite is the reason ResetUnusableFields gives for a NaN or infinite
+// number.
+var errNotFinite = errors.New("must be a finite number")
+
+// MaxPrecedence is the largest priority or analyzer score a policy may set.
+// Both multiply a model's weight in the fair share (priority x score x
+// demand), and a weight a million times another's already takes the whole
+// contended budget, so the bound loses nothing; it keeps the product finite: a
+// priority of 1e308 overflowed it to +Inf, and with rescale on the NaN share
+// that followed corrupted the GPU target of every model in the budget.
+const MaxPrecedence = 1e6
+
+// errAboveMaxPrecedence is the reason ResetUnusableFields gives for a priority
+// or score above MaxPrecedence.
+var errAboveMaxPrecedence = fmt.Errorf("must be at most %g", float64(MaxPrecedence))
+
+// isNonFinite reports whether v is NaN or infinite.
+func isNonFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
+
 // IgnoredField is one setting ResetUnusableFields cleared.
 type IgnoredField struct {
 	// Field is the YAML path of the setting, e.g. "scaleToZero.retentionPeriod".
@@ -825,8 +845,62 @@ func (f IgnoredField) String() string {
 //   - shapeChangeHoldSeconds below zero. Merge copies any non-zero value, so a
 //     negative one replaced the default entry's hold, and the getters then
 //     honour only positive values: the operator's hold was silently lost.
+//   - A number that is not finite (YAML .nan, .inf), in priority, the
+//     capacity thresholds, the scaling band, and each analyzer's score and
+//     band. NaN passes every range check in Validate, since each comparison
+//     is false, and an infinite priority or score put the model last in the
+//     greedy-by-score fair share, not first, and with rescale on drew
+//     replicas away from other models (#171).
+//   - An analyzer score below zero, which AnalyzerScore read as 1 without a
+//     word.
+//   - A priority or analyzer score above MaxPrecedence.
 func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 	var ignored []IgnoredField
+	notFinite := func(field string, v float64) {
+		ignored = append(ignored, IgnoredField{
+			Field: field, Value: strconv.FormatFloat(v, 'g', -1, 64), Reason: errNotFinite,
+		})
+	}
+	nonFinite := func(field string, v *float64) {
+		if isNonFinite(*v) {
+			notFinite(field, *v)
+			*v = 0
+		}
+	}
+	nonFinitePtr := func(field string, v **float64) {
+		if *v != nil && isNonFinite(**v) {
+			notFinite(field, **v)
+			*v = nil
+		}
+	}
+	nonFinite("priority", &c.Priority)
+	aboveMax := func(field string, v *float64) {
+		if *v > MaxPrecedence {
+			ignored = append(ignored, IgnoredField{
+				Field: field, Value: strconv.FormatFloat(*v, 'g', -1, 64), Reason: errAboveMaxPrecedence,
+			})
+			*v = 0
+		}
+	}
+	aboveMax("priority", &c.Priority)
+	nonFinite("kvCacheThreshold", &c.KvCacheThreshold)
+	nonFinite("queueLengthThreshold", &c.QueueLengthThreshold)
+	nonFinite("scaleUpThreshold", &c.ScaleUpThreshold)
+	nonFinite("scaleDownBoundary", &c.ScaleDownBoundary)
+	for i := range c.Analyzers {
+		a := &c.Analyzers[i]
+		at := fmt.Sprintf("analyzers[%d].", i)
+		nonFinite(at+"score", &a.Score)
+		if a.Score < 0 {
+			ignored = append(ignored, IgnoredField{
+				Field: at + "score", Value: strconv.FormatFloat(a.Score, 'g', -1, 64), Reason: errors.New("must be >= 0"),
+			})
+			a.Score = 0
+		}
+		aboveMax(at+"score", &a.Score)
+		nonFinitePtr(at+"scaleUpThreshold", &a.ScaleUpThreshold)
+		nonFinitePtr(at+"scaleDownBoundary", &a.ScaleDownBoundary)
+	}
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
 			ignored = append(ignored, IgnoredField{
@@ -912,7 +986,7 @@ func (c ScalingPolicy) IgnoredPhysicalLimiters() []int {
 func (c ScalingPolicy) AnalyzerScore(analyzerName string) float64 {
 	for _, aw := range c.Analyzers {
 		if aw.EffectiveType() == analyzerName {
-			if aw.Score > 0 {
+			if aw.Score > 0 && !math.IsInf(aw.Score, 0) {
 				return aw.Score
 			}
 			return 1.0
