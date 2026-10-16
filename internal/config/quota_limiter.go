@@ -553,34 +553,47 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 // excludes when no cluster-scoped entry bounds them. Only a cluster-scoped
 // entry bounds an excluded namespace, and only on the accelerator types it
 // sets a finite limit for. The types checked are the ones the namespace entry
-// names.
+// names, matched by accelerator identity (accelerator.SameName), as the
+// limiter matches them at runtime.
+//
+// A cluster-scoped entry that reads Kueue bounds every type: its numbers come
+// from Kueue at runtime, so they cannot be checked here. A namespace that
+// another namespace-scoped entry does not exclude is capped by that entry
+// (it is a closed allowlist there), so it is not warned about.
 func (e *QuotaLimiterEntries) unboundedExcludeWarnings() []string {
-	bounded := map[string]bool{}
+	var bounded []string
 	for _, entry := range e.Limiters {
 		if entry.Scope != QuotaScopeCluster {
 			continue
 		}
+		if entry.KueueEnabled() {
+			return nil
+		}
 		for accType, limit := range entry.ClusterQuotas {
 			if limit >= 0 {
-				bounded[accType] = true
+				bounded = append(bounded, accType)
 			}
 		}
 	}
+	isBounded := func(accType string) bool {
+		return slices.ContainsFunc(bounded, func(b string) bool { return accelerator.SameName(b, accType) })
+	}
 	var warnings []string
 	for i, entry := range e.Limiters {
-		if entry.Scope != QuotaScopeNamespace || len(entry.Exclude) == 0 {
+		uncapped := e.uncappedExcludes(entry)
+		if len(uncapped) == 0 {
 			continue
 		}
 		if len(bounded) == 0 {
 			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit: "+
 				"no scope: cluster quota sets a finite limit, so the scaling manager does not bound them",
-				i, entry.Name, entry.Exclude))
+				i, entry.Name, uncapped))
 			continue
 		}
 		unbounded := map[string]bool{}
 		for _, perType := range entry.NamespaceQuotas {
 			for accType := range perType {
-				if !bounded[accType] {
+				if !isBounded(accType) {
 					unbounded[accType] = true
 				}
 			}
@@ -588,10 +601,29 @@ func (e *QuotaLimiterEntries) unboundedExcludeWarnings() []string {
 		if len(unbounded) > 0 {
 			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): the namespaces in exclude %v have no GPU limit on %v: "+
 				"no scope: cluster quota sets a finite limit for those accelerator types",
-				i, entry.Name, entry.Exclude, slices.Sorted(maps.Keys(unbounded))))
+				i, entry.Name, uncapped, slices.Sorted(maps.Keys(unbounded))))
 		}
 	}
 	return warnings
+}
+
+// uncappedExcludes returns the namespaces entry excludes that every other
+// namespace-scoped entry excludes too. Those are the ones no namespace quota
+// caps. Nil for an entry that is not namespace-scoped.
+func (e *QuotaLimiterEntries) uncappedExcludes(entry QuotaLimiterConfig) []string {
+	if entry.Scope != QuotaScopeNamespace {
+		return nil
+	}
+	var out []string
+	for _, ns := range entry.Exclude {
+		capped := slices.ContainsFunc(e.Limiters, func(other QuotaLimiterConfig) bool {
+			return other.Scope == QuotaScopeNamespace && !other.IsExcluded(ns)
+		})
+		if !capped {
+			out = append(out, ns)
+		}
+	}
+	return out
 }
 
 // validateTypeQuotaMap checks per-accelerator-type entries: type name

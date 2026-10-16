@@ -185,6 +185,27 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 			Expect(validate(tenants("NS-X"), bounded)).To(ConsistOf(ContainSubstring(`"NS-X" is not a valid namespace name`)))
 			Expect(validate(tenants("ns-x"), bounded)).To(BeEmpty())
 		})
+
+		It("does not warn when a cluster quota reads its numbers from Kueue", func() {
+			kueue := QuotaLimiterConfig{Name: "cluster", Type: "quota", Scope: QuotaScopeCluster,
+				Kueue: &KueueQuotaSource{Enabled: true}}
+			Expect(validate(tenants("ns-x"), kueue)).To(BeEmpty())
+		})
+
+		It("matches accelerator names as the limiter does at runtime", func() {
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"a100": 20, "NVIDIA-H100-80GB-HBM3": 16}))).To(BeEmpty())
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"NVIDIA-A100-SXM4-80GB": 20}))).To(ConsistOf(
+				ContainSubstring("on [H100]")))
+		})
+
+		It("does not warn about a namespace another namespace quota caps", func() {
+			capsX := QuotaLimiterConfig{Name: "b", Type: "quota", Scope: QuotaScopeNamespace,
+				Exclude: []string{"ns-y"}, NamespaceQuotas: map[string]map[string]int{"ns-x": {"A100": 4}}}
+			Expect(validate(tenants("ns-x"), capsX)).To(BeEmpty())
+			// Both entries exclude ns-y, so each says so; neither names ns-x.
+			Expect(validate(tenants("ns-x", "ns-y"), capsX)).To(And(HaveLen(2),
+				HaveEach(And(ContainSubstring("exclude [ns-y] have no GPU limit"), Not(ContainSubstring("ns-x"))))))
+		})
 	})
 
 	It("accumulates multiple errors instead of failing fast", func() {
