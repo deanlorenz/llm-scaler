@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -93,4 +95,26 @@ func TestTheLoopStoppingWritesTheLatestState(t *testing.T) {
 	unread.flushLearnedState()
 	kept, _ := storedDoc(t, c)
 	assert.Equal(t, []float64{5000}, kept.State.K2["ns|v|m|H100|1|both|short|q5"].Values, "a controller that never read the snapshot overwrote it")
+}
+
+// A snapshot the operator deleted, and the controller has since found gone
+// and forgotten, is not created again by the loop stopping: the restart that
+// follows a delete-and-restart reset starts cold.
+func TestTheLoopStoppingDoesNotRecreateADeletedSnapshot(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	spy := &stateSpy{state: sampleState(4000)}
+	e := snapshotEngine(t, c, spy)
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	_, cm := storedDoc(t, c)
+	require.NoError(t, c.Delete(ctx, cm))
+	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
+	require.False(t, e.learnedState.seen, "precondition: the deletion was found")
+
+	e.flushLearnedState()
+	got := &corev1.ConfigMap{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: cm.Namespace, Name: cm.Name}, got)
+	assert.True(t, apierrors.IsNotFound(err), "the loop stopping created the deleted snapshot again: %v", err)
 }

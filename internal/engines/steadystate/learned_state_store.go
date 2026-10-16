@@ -380,8 +380,14 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 // clocks out, so they are written only on the refresh, and the next leader
 // read the time since then as a pause, holding bounds at full strength
 // longer. Best effort, on its own short context: the loop's is cancelled.
+//
+// It only updates a snapshot this controller has read or written (seen),
+// never creates one. A snapshot found deleted was forgotten, and a flush that
+// created it from what was relearned in the seconds since undid the deletion
+// -- a benchmark reset by deleting it and restarting started warm. A store
+// that has not written yet loses at most its first interval.
 func (e *Engine) flushLearnedState() {
-	if e.Config == nil || !e.Config.LearnedStateSnapshotEnabled() || !e.learnedState.restored {
+	if e.Config == nil || !e.Config.LearnedStateSnapshotEnabled() || !e.learnedState.restored || !e.learnedState.seen {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), learnedStateFlushTimeout)
