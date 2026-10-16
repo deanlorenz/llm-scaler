@@ -282,6 +282,18 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 				ContainSubstring("on [H100 (bare name), NVIDIA-H100-SXM5-80GB]")), "the cluster quota leaves SXM5 unlimited")
 		})
 
+		// The planner bounds a bare family in a namespace that lists the family
+		// and a product of it by the products the namespace may use, when the
+		// cluster quota lists the family only through products.
+		It("reads a family a holding quota lists beside a product as the planner does", func() {
+			holder := QuotaLimiterConfig{Name: "others", Type: "quota", Scope: QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"ns-x": {"H100": -1, "NVIDIA-H100-SXM5-80GB": 0}}}
+			Expect(validate(tenants("ns-x"), holder, cluster(map[string]int{"NVIDIA-H100-80GB-HBM3": 8, "NVIDIA-H100-SXM5-80GB": -1}))).To(BeEmpty(),
+				"a bare H100 in ns-x can only be HBM3, which the cluster quota holds to 8")
+			Expect(validate(tenants("ns-x"), holder, cluster(map[string]int{"NVIDIA-H100-80GB-HBM3": -1, "NVIDIA-H100-SXM5-80GB": 8}))).To(ConsistOf(
+				ContainSubstring("on [H100 (bare name), NVIDIA-H100-80GB-HBM3]")), "the cluster quota leaves HBM3 unlimited")
+		})
+
 		It("does not warn about a namespace another namespace quota caps", func() {
 			capsX := QuotaLimiterConfig{Name: "b", Type: "quota", Scope: QuotaScopeNamespace,
 				Exclude: []string{"ns-y"}, NamespaceQuotas: map[string]map[string]int{"ns-x": {"A100": 4}}}

@@ -1183,6 +1183,14 @@ func (b excludeBounds) unbounded(name string, caps []map[string]int) bool {
 			return false
 		}
 	}
+	if accelerator.ClosesFamily(b.cluster, name) && accelerator.ListsProduct(caps, name) {
+		// Every holder lists the family as -1, one lists a product of it too,
+		// and the cluster quotas list the family only through products: the
+		// family's GPUs are those products, each at what every holder and
+		// cluster quota allows it, as the planner reads it.
+		_, unlimited, _ := accelerator.ClusterAllowlistsBound(slices.Concat(caps, b.cluster), name, quotaBound)
+		return unlimited
+	}
 	return true
 }
 
