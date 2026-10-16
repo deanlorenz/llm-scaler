@@ -679,6 +679,21 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.StashedWindows++
 		}
 	}
+	// A held mark describes a window a rollback took back, and is read only
+	// when that window is set aside again under the same arguments: once the
+	// window is gone or carries other arguments, nothing reads it.
+	for key := range a.throughputHeld {
+		live := false
+		for k, tag := range a.throughputWindowArgs {
+			if _, ok := a.saturatedThroughput[k]; ok && stashKey(k, tag) == key {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(a.throughputHeld, key)
+		}
+	}
 	// A lower bound goes with its variant: when nothing has read it, ticked
 	// it or found the variant present for VariantTimeout. Not on its age, and
 	// not on a park: its clock counts serving time only, so a bound a parked

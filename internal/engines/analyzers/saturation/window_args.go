@@ -91,6 +91,16 @@ func windowArgs(params *capacity.EngineParams) string {
 // stashKey is where a window written under args is put aside for key.
 func stashKey(key, args string) string { return key + "#" + args }
 
+// sameFigure says whether a window last written at written is still the
+// figure a bound recorded as written at figure: not written since. Not an
+// equality: a restore clamps a window clock written slightly ahead of this
+// leader's to its now (notFuture), and leaves the bound's record of it, so
+// the same window then reads as written BEFORE its figure -- which only an
+// unwritten window can be -- and was taken for a newer one.
+func sameFigure(figure, written time.Time) bool {
+	return !figure.IsZero() && !written.IsZero() && !written.After(figure)
+}
+
 // stashedThroughput is a throughput window put aside with what travels with it.
 type stashedThroughput struct {
 	window    *capacity.RollingAverage
@@ -164,7 +174,7 @@ func (a *SaturationAnalyzer) notePreviousFigureLocked(key string, ra *capacity.R
 	now := a.now()
 	lb := a.lowerBounds[key]
 	written := ra.LastWritten()
-	same := lb != nil && lb.armed && lb.own && !lb.figureWritten.IsZero() && written.Equal(lb.figureWritten)
+	same := lb != nil && lb.armed && lb.own && sameFigure(lb.figureWritten, written)
 	if lb != nil && lb.armed && !same {
 		lb.since, lb.tick, lb.seen = now, now, now
 		lb.rearmPending = true

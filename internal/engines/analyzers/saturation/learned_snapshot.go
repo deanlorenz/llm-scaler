@@ -637,7 +637,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		if lb.PriorUsed.Before(w.LastWritten) {
 			lb.PriorUsed = w.LastWritten
 		}
-		same := lb.Own && !lb.FigureWritten.IsZero() && lb.FigureWritten.Equal(w.LastWritten)
+		same := lb.Own && sameFigure(lb.FigureWritten, w.LastWritten)
 		if lb.Armed && !same {
 			lb.Armed, lb.Since, lb.Tick = false, time.Time{}, time.Time{}
 		}
