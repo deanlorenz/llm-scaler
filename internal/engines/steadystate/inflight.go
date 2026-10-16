@@ -48,8 +48,16 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 // cycle's final one, as one step (allocation.InFlightLedger.Commit).
 func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
-	allocation.DefaultInFlight.Commit(e.inFlightMark, e.inFlightAdmissions(requests, decisions, planned, scaleTargets, now), now)
+	adms := e.inFlightAdmissions(requests, decisions, planned, scaleTargets, now)
+	allocation.DefaultInFlight.Commit(e.inFlightMark, adms, now)
 	e.inFlightMark = nil
+	// The first fitted cycle after a restart ends the restored holds it does
+	// not admit: they count no pods, and their variant is gone or not asking.
+	named := make(map[string]bool, len(adms))
+	for _, a := range adms {
+		named[a.Key] = true
+	}
+	allocation.DefaultInFlight.DropRestoredExcept(named)
 }
 
 // admitPassInFlight admits the pass's placements to the in-flight ledger

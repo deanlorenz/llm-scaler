@@ -63,6 +63,9 @@ type InFlightLedger struct {
 	// not named for sightedFor is dropped (Commit): a deleted variant does
 	// not stay, and every cycle names the variants it decides.
 	sighted map[string]time.Time
+	// restored is the entries RestoreInFlight restored that no committed
+	// admission has updated since (DropRestoredExcept).
+	restored map[string]bool
 }
 
 // sightedFor is how long a variant stays sighted with no committed admission
@@ -152,7 +155,7 @@ type placedAt struct {
 
 // NewInFlightLedger returns an empty ledger.
 func NewInFlightLedger() *InFlightLedger {
-	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}}
+	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}, restored: map[string]bool{}}
 }
 
 // DefaultInFlight is the process-wide ledger both engines share.
@@ -282,6 +285,8 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight b
 	_, sighted := l.sighted[key]
 	if sight {
 		l.sighted[key] = now
+		// Admitted again: the entry has its own count now.
+		delete(l.restored, key)
 	}
 	if want <= placedNow {
 		delete(l.entries, key)
@@ -349,6 +354,7 @@ func (l *InFlightLedger) Reset() {
 	defer l.mu.Unlock()
 	clear(l.entries)
 	clear(l.sighted)
+	clear(l.restored)
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has

@@ -29,7 +29,7 @@ func restarted(t *testing.T, l *InFlightLedger, persistAt, now time.Time) *InFli
 		t.Fatal(err)
 	}
 	fresh := NewInFlightLedger()
-	fresh.RestoreInFlight(p, now)
+	fresh.RestoreInFlight(p, now, InFlightTTL)
 	return fresh
 }
 
@@ -160,7 +160,7 @@ func TestAnExpiredOrCorruptPersistedLedgerIsIgnored(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		fresh := NewInFlightLedger()
-		if restored, dropped := fresh.RestoreInFlight(p, t0); restored != 0 || dropped != 1 {
+		if restored, dropped := fresh.RestoreInFlight(p, t0, InFlightTTL); restored != 0 || dropped != 1 {
 			t.Errorf("%s: restored %d, dropped %d; want 0 and 1", name, restored, dropped)
 		}
 	}
@@ -171,7 +171,7 @@ func TestAnExpiredOrCorruptPersistedLedgerIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := NewInFlightLedger()
-	fresh.RestoreInFlight(p, t0)
+	fresh.RestoreInFlight(p, t0, InFlightTTL)
 	if fresh.Holds(heldVariant, t0.Add(InFlightTTL)) {
 		t.Fatal("a restored hold outlasts its TTL from the restore")
 	}
@@ -224,14 +224,64 @@ func TestThePersistedLedgerStaysBounded(t *testing.T) {
 		t.Fatalf("the persisted ledger is %d bytes, past its %d-byte bound", len(raw), maxInFlightBytes)
 	}
 
-	// Read back past the bound: no more than maxInFlightPersisted restored.
+	// Read back past the bound: no more than maxInFlightPersisted restored,
+	// the holds that end last, as MarshalInFlight keeps them -- not the first
+	// keys by name. Entries out of bounds are dropped before the bound, so
+	// they do not take a valid entry's place.
 	over := PersistedInFlight{Version: InFlightFormat, Entries: map[string]PersistedInFlightEntry{}}
 	for i := range n {
 		over.Entries[fmt.Sprintf("ns/v%04d", i)] = PersistedInFlightEntry{GPUs: 8, Want: 2, Placed: 1,
-			Expires: t0.Add(time.Minute), TTLSeconds: 300}
+			Expires: t0.Add(time.Minute + time.Duration(i)*time.Millisecond), TTLSeconds: 300}
 	}
-	restored, dropped := NewInFlightLedger().RestoreInFlight(over, t0)
-	if restored != maxInFlightPersisted || dropped != n-maxInFlightPersisted {
-		t.Fatalf("restored %d and dropped %d of %d, want %d and %d", restored, dropped, n, maxInFlightPersisted, n-maxInFlightPersisted)
+	for i := range 10 {
+		over.Entries[fmt.Sprintf("ns/a-bad%d", i)] = PersistedInFlightEntry{GPUs: 8, Want: 1, Placed: 1,
+			Expires: t0.Add(time.Hour), TTLSeconds: 300}
+	}
+	back := NewInFlightLedger()
+	restored, dropped := back.RestoreInFlight(over, t0, InFlightTTL)
+	if restored != maxInFlightPersisted || dropped != n-maxInFlightPersisted+10 {
+		t.Fatalf("restored %d and dropped %d of %d, want %d and %d", restored, dropped, n+10, maxInFlightPersisted, n-maxInFlightPersisted+10)
+	}
+	if !back.Holds(fmt.Sprintf("ns/v%04d", n-1), t0) || back.Holds("ns/v0000", t0) {
+		t.Fatal("a ledger read back past its bound kept the first keys by name, not the holds that end last")
+	}
+}
+
+// A persisted TTL is cut to the longest hold the engine starts: an edited
+// ledger cannot pin a node for a day.
+func TestARestoredHoldIsCutToTheLongestTTL(t *testing.T) {
+	t0 := time.Unix(100_000, 0)
+	p := PersistedInFlight{Version: InFlightFormat, Entries: map[string]PersistedInFlightEntry{
+		heldVariant: {GPUs: 8, Want: 2, Placed: 1, Expires: t0.Add(20 * time.Hour), TTLSeconds: 86400}}}
+	l := NewInFlightLedger()
+	l.RestoreInFlight(p, t0, 15*time.Minute)
+	if !l.Holds(heldVariant, t0.Add(14*time.Minute)) || l.Holds(heldVariant, t0.Add(15*time.Minute)) {
+		t.Fatal("a restored hold with a day's TTL was not cut to the 15-minute maximum")
+	}
+}
+
+// A restored entry counts no pods. The first fitted cycle after the restart
+// ends those it does not admit: a variant deleted while the controller was
+// down, or no longer asking, would otherwise hold its node until the hold
+// expires. One the cycle admits, or a wake admitted since, stays.
+func TestTheFirstCycleEndsTheRestoredHoldsItDoesNotAdmit(t *testing.T) {
+	t0 := time.Unix(100_000, 0)
+	shape := ReplicaShape{Accelerator: famHBM3, PodGPUs: []int{8}, GPUs: 8}
+	before := NewInFlightLedger()
+	for _, k := range []string{heldVariant, "ns/gone", "cold/woken"} {
+		before.Admit(k, shape, 2, 1, nil, t0)
+	}
+	after := restarted(t, before, t0.Add(time.Minute), t0.Add(2*time.Minute))
+	// A wake admits cold/woken before the first cycle.
+	after.Commit(nil, []InFlightAdmission{{Key: "cold/woken", Shape: shape, Want: 2, PlacedNow: 1}}, t0.Add(2*time.Minute))
+	first := []InFlightAdmission{{Key: heldVariant, Shape: shape, Want: 2, PlacedNow: 1, ExistingOnly: true, Unplaced: true}}
+	after.Commit(nil, first, t0.Add(2*time.Minute))
+	after.DropRestoredExcept(map[string]bool{heldVariant: true})
+	at := t0.Add(2 * time.Minute)
+	if after.Holds("ns/gone", at) {
+		t.Fatal("a restored hold the first cycle did not admit still holds its node")
+	}
+	if !after.Holds(heldVariant, at) || !after.Holds("cold/woken", at) {
+		t.Fatal("control: a restored hold the cycle admitted, or a wake updated, was ended")
 	}
 }

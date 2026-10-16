@@ -65,7 +65,10 @@ func (e *Engine) restoreInFlight(ctx context.Context, now time.Time) {
 		logger.Error(err, "Ignoring an unreadable in-flight node ledger")
 		return
 	}
-	restored, dropped := allocation.DefaultInFlight.RestoreInFlight(p, now)
+	// No hold the engine starts outlasts three placement timeouts (a Kueue
+	// flavor's while a cluster-autoscaler scale-up is pending).
+	maxTTL := max(allocation.InFlightTTL, 3*e.borrowSettings().PlacementTimeout)
+	restored, dropped := allocation.DefaultInFlight.RestoreInFlight(p, now, maxTTL)
 	if dropped > 0 {
 		logger.Info("Warning: dropped in-flight node ledger entries out of bounds; this controller did not write them",
 			"dropped", dropped)

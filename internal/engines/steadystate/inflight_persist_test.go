@@ -15,6 +15,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
@@ -79,6 +80,42 @@ func TestTheEngineRestoresThePersistedInFlightLedger(t *testing.T) {
 	}
 	if _, ok := p.Entries["ns/m-v"]; !ok {
 		t.Fatalf("the restored hold was not persisted again: %+v", p)
+	}
+}
+
+// The first fitted cycle after a restart ends the restored holds it does not
+// admit (allocation.InFlightLedger.DropRestoredExcept): a variant deleted
+// while the controller was down keeps no node held.
+//
+// DefaultInFlight is process-wide: no t.Parallel.
+func TestTheFirstCycleEndsARestoredHoldOfAVariantItDoesNotDecide(t *testing.T) {
+	allocation.DefaultInFlight.Reset()
+	t.Cleanup(allocation.DefaultInFlight.Reset)
+	now := time.Now()
+	before := allocation.NewInFlightLedger()
+	for _, k := range []string{"ns/m-v", "ns/gone-v"} {
+		before.Admit(k, allocation.ReplicaShape{Variant: k, Accelerator: "A100", GPUs: 8}, 3, 2, nil, now)
+	}
+	raw, err := before.MarshalInFlight(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := allocation.UnmarshalInFlight(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation.DefaultInFlight.RestoreInFlight(p, now, allocation.InFlightTTL)
+
+	m := growingA100("ns", "m", 8)
+	m.VariantStates[0].CurrentReplicas, m.VariantStates[0].FilledReplicas, m.VariantStates[0].HeldKnown = 3, 2, true
+	m.VariantStates[0].UnplacedReplicas = 1
+	at3 := []domain.VariantDecision{{VariantName: "m-v", Namespace: "ns", AcceleratorName: "A100", TargetReplicas: 3}}
+	(&Engine{}).admitInFlight([]allocation.ModelScalingRequest{m}, at3, nil, nil, now.Add(time.Second))
+	if allocation.DefaultInFlight.Holds("ns/gone-v", now.Add(time.Second)) {
+		t.Fatal("a restored hold of a variant the first cycle does not decide still holds its node")
+	}
+	if !allocation.DefaultInFlight.Holds("ns/m-v", now.Add(time.Second)) {
+		t.Fatal("control: the restored hold of an Unschedulable replica the cycle decides was ended")
 	}
 }
 
