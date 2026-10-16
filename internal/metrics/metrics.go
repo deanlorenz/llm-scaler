@@ -316,28 +316,28 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateRelaxed = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateBorrowRelaxed,
-			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising toward 1 over the next 6 hours. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
+			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes of serving), rising toward 1 over the next 6 hours of serving; an idle, parked or mid-rollout variant holds its place. Present only while the variant borrows k2: when the relaxation completes the borrow ends, and this series goes with it, so it never reads 1.",
 		},
 		learnedRelaxedLabels,
 	)
 	learnedStateK2Source = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateK2Source,
-			Help: "1 for the source of the k2 a variant is priced on, as the cycle log names it: P1-obs (measured this cycle), P2-hist (the variant's own earlier measurement), P2-borrow (a sibling's), P3-k2 (derived from engine flags) or P4-k1 (no k2: the KV cache, or the stored estimate for an engine that publishes no cache config); k1-bound when the k2 is at or above k1, so the KV cache prices the replica. Taken from the lower-median replica, the one the cycle log's reason names. Absent when no replica of the variant reported this cycle.",
+			Help: "1 for the source of the k2 a variant is priced on, as the cycle log names it: P1-obs (measured this cycle), P2-hist (the variant's own earlier measurement), P2-borrow (a sibling's, lower than the variant's own), P2-prior (the variant's own, measured under engine arguments it no longer runs, lower than what it would get now), P3-k2 (derived from engine flags), P4-k1 (no k2: the KV cache, or the stored estimate for an engine that publishes no cache config) or P1-obs-unadmitted (a saturated warm-pool bridge, or a saturated Ready replica of a variant mid-rollout, priced at its reading for one cycle, never recorded); k1-bound when the k2 is at or above k1, so the KV cache prices the replica. Taken from the lower-median replica, the one the cycle log's reason names. Absent when no replica of the variant reported this cycle.",
 		},
 		learnedK2Labels,
 	)
 	learnedStateK2Age = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateK2AgeSeconds,
-			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow; absent for P3-k2, P4-k1 and k1-bound, where no measured k2 prices the replica. Keeps its last value through a cycle whose collection or analysis failed.",
+			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow, the window the previous figure came from for P2-prior; absent for P3-k2, P4-k1, P1-obs-unadmitted and k1-bound, where no measured k2 prices the replica. Keeps its last value through a cycle whose collection or analysis failed.",
 		},
 		learnedK2Labels,
 	)
 	learnedStateRestores = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: constants.WVALearnedStateRestoresTotal,
-			Help: "Variants whose learned state was restored from the snapshot after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: installed, or rejected because the variant's engine configuration differed from the one it was learned under or could not be read completely.",
+			Help: "Variants whose restored learned state was checked against their engine configuration after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: whole (the configuration matched; everything installed), args (the arguments matched on another engine image; everything but the ITL baseline installed), prior (the arguments differed; only the k2 and throughput windows installed, as lower-only figures and a hold-only service rate), incomplete (the configuration could not be read completely; only the k2 and throughput windows installed, as the variant's own under the same unread configuration, and otherwise as lower-only figures and a hold-only service rate; nothing when the document recorded no arguments) or differs (a document from before the arguments were recorded, whose configuration differs; only the k2 windows installed, as lower-only figures).",
 		},
 		[]string{constants.LabelOutcome},
 	)
@@ -348,7 +348,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		},
 		[]string{constants.LabelOperation},
 	)
-	for _, o := range []string{LearnedStateRestoreInstalled, LearnedStateRestoreRejected} {
+	for _, o := range LearnedStateRestoreOutcomes {
 		learnedStateRestores.WithLabelValues(o)
 	}
 	for _, o := range []string{LearnedStateOpRead, LearnedStateOpWrite} {
@@ -2077,11 +2077,13 @@ func (m *MetricsEmitter) DeleteEngineConfigForModel(namespace, modelID string) {
 // snapshot store, as the counters label them. Each is published at zero from
 // registration, so rate() over a fresh controller reads 0 rather than nothing.
 const (
-	LearnedStateRestoreInstalled = "installed"
-	LearnedStateRestoreRejected  = "rejected"
-	LearnedStateOpRead           = "read"
-	LearnedStateOpWrite          = "write"
+	LearnedStateOpRead  = "read"
+	LearnedStateOpWrite = "write"
 )
+
+// LearnedStateRestoreOutcomes are the outcomes a restore is counted under,
+// as the analyzer names them (saturation.RestoreOutcome).
+var LearnedStateRestoreOutcomes = []string{"whole", "args", "prior", "incomplete", "differs"}
 
 // RecordLearnedStateBorrows publishes what a variant borrowed this cycle, and
 // removes whatever it published before that is not borrowed now -- a borrow
@@ -2249,15 +2251,14 @@ func (m *MetricsEmitter) DeleteLearnedStateBorrowsForModel(namespace, modelID st
 }
 
 // AddLearnedStateRestores counts restored variants by outcome.
-func (m *MetricsEmitter) AddLearnedStateRestores(installed, rejected int) {
+func (m *MetricsEmitter) AddLearnedStateRestores(byOutcome map[string]int) {
 	if learnedStateRestores == nil {
 		return
 	}
-	if installed > 0 {
-		learnedStateRestores.WithLabelValues(LearnedStateRestoreInstalled).Add(float64(installed))
-	}
-	if rejected > 0 {
-		learnedStateRestores.WithLabelValues(LearnedStateRestoreRejected).Add(float64(rejected))
+	for outcome, n := range byOutcome {
+		if n > 0 {
+			learnedStateRestores.WithLabelValues(outcome).Add(float64(n))
+		}
 	}
 }
 

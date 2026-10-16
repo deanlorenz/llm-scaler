@@ -552,9 +552,10 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
                      "(P1-obs=observed, P2-hist=historical average, P2-borrow=a compatible "
                      "sibling's lower figure, relaxing to this variant's own, P3-k2=derived from deployment "
                      "args, P4-k1=no signal, memory-bound only; P1-obs-invalid, "
-                     "P1-obs-downstream and P1-obs-unadmitted mark an observation that was NOT "
-                     "recorded -- above the KV ceiling, a prefill saturation while decode was "
-                     "saturated, or a warm-pool bridge or not-Ready pod -- and are "
+                     "P1-obs-downstream, P1-obs-unadmitted and P1-obs-rollout mark an observation "
+                     "that was NOT recorded -- above the KV ceiling, a prefill saturation while "
+                     "decode was saturated, a warm-pool bridge or not-Ready pod, or a variant "
+                     "mid-rollout to other engine arguments -- and are "
                      "followed by the tier it fell through to). Time is HH:MM:SS on the run date "
                      "above.")
         lines.append("")

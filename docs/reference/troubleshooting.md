@@ -29,6 +29,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
+| one variant held larger than its load needs | `k2-decision` keeps `P2-hist`, `P2-prior` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-prior`: the variant's own k2 from before its engine arguments changed; expected after a rollout that changes them, held for 30 minutes of serving, then relaxed over 6 hours of serving. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist` or `P2-prior`: [reset one variant](#reset-one-variants-learned-state) (`disableK2Borrow` does not affect `P2-prior`). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
 | misses its SLO, or is never judged | `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
@@ -393,8 +394,8 @@ from the deployment-derived capacity until the model saturates again; that is
 higher than the measured figure, so the fleet is smaller and TTFT worse for a
 while after every upgrade or leader change. `LEARNED_STATE_SNAPSHOT=true`
 carries the measured state across ([configuration](configuration.md#learned-state-across-a-restart)).
-With it on, `wva_learned_state_restores_total{outcome}` counts the variants
-restored and rejected, `wva_learned_state_snapshot_errors_total{operation}` the
+With it on, `wva_learned_state_restores_total{outcome}` counts the variants by
+how their state was restored, `wva_learned_state_snapshot_errors_total{operation}` the
 failed reads and writes, and the log says why (logger `learned-state`):
 
 - `Learned state: no snapshot to restore` -- the first start with the store,
@@ -406,25 +407,50 @@ failed reads and writes, and the log says why (logger `learned-state`):
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the
     controller was down. Capacity, throughput and start time are kept;
-  - `learned state not restored: the variant's engine arguments changed; its
-    k2 is kept as a lower-only prior for the buckets it was measured in` --
-    its flags changed while the controller was down. The old capacity is used
-    only where it is lower, and expires (30 minutes from a bucket's first use,
-    then a 6-hour relaxation);
-  - `learned state not restored: the variant's engine arguments changed, and
-    no k2 window was recent enough, on the hardware it runs now, to keep as a
-    prior` -- the same, with nothing to keep: the windows were old, or were
-    measured on another accelerator or GPU count;
+  - `learned state restored as lower-only figures: the variant's engine
+    arguments changed, so its k2 windows become previous figures (P2-prior)
+    for the buckets they were measured in` -- its flags changed while the
+    controller was down. The old capacity is used only where it is lower, and
+    expires (30 minutes of serving from a bucket's first use, then a 6-hour
+    relaxation). The old service rate comes back too, and holds the
+    throughput floor hold-only -- it may keep the fleet, never grow it -- for
+    the same 30 minutes plus 6 hours of serving at most, until the new flags
+    measure their own. A saturated throughput already measured under the
+    flags it runs now -- a rollback made while the controller was down -- is
+    kept as its own;
+  - `learned state restored under the unread configuration: ...` -- a flag
+    such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
+    `envFrom`. Its windows are its own only if the variant runs the same
+    unread configuration, and lower-only figures otherwise (with the old
+    service rate holding the floor hold-only, as above).
+    `wva_engine_config`'s `unresolved` label names the flag;
+  - `learned state restored as lower-only figures: the document recorded no
+    engine arguments and its configuration differs, ...` -- a snapshot
+    written by an older release. Expect it for every variant after an upgrade
+    from a release that did not record engine arguments, or one with another
+    `fingerprint_version` label on `wva_engine_config`. Only the k2 is kept;
+    the old service rate is not;
+  - `learned state restored as a hold-only service rate: no k2 window was
+    recent enough, ...` -- a lower-only case where no k2 could be kept, but
+    the old saturated throughput could: it holds the throughput floor,
+    hold-only, until the new arguments measure their own. Nothing to do;
+  - `learned state not restored: the variant's engine configuration changed,
+    and no k2 window was recent enough, on the hardware it runs now, to keep
+    as a lower-only figure` -- one of the two lower-only cases above, with
+    nothing to keep: the windows were old, or were measured on another
+    accelerator or GPU count;
   - `learned state not restored: the variant's engine configuration could not
-    be read completely, so it could not be checked` -- a flag such as
-    `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an `envFrom`.
-    Nothing is restored for that variant, by design. `wva_engine_config`'s
-    `unresolved` label names the flag;
-  - `learned state not restored: the variant's engine configuration differs
-    from the one it was learned under` -- a snapshot written by an older
-    release. Expect it for every variant after an upgrade of the scaling
-    manager that changes the `fingerprint_version` label of
-    `wva_engine_config` -- this release moves it from 2 to 3, once.
+    be read completely, and no k2 window was recent enough, on the hardware
+    it runs now, to keep` -- the unread-configuration case with nothing to
+    keep, for the same reasons. Nothing to do; the variant learns again;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, and the snapshot recorded no engine arguments to check
+    its windows against` -- an unread configuration and a snapshot from a
+    release that did not record arguments: nothing can be matched, so nothing
+    is kept. To restore it next time, make the configuration readable: give
+    flags literal values in the container's `args` or `env` rather than from
+    an `envFrom` or another source the controller cannot resolve
+    (`wva_engine_config`'s `unresolved` label names them).
 
   Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
   `incomplete` or `differs`.
@@ -432,7 +458,12 @@ failed reads and writes, and the log says why (logger `learned-state`):
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
   `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
-  the stored state is not overwritten meanwhile.
+  the stored state is not overwritten meanwhile. For the first 10 minutes
+  lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
+  starts; after that they start as usual, and a read that succeeds later
+  keeps those over the stored ones -- a borrow the snapshot had as spent
+  runs its hold and relaxation again. Fix the Role within 10 minutes to
+  avoid it.
 - `Learned state: snapshot not restored` -- the document names no writer, or
   a controller in another namespace wrote it (a ConfigMap copied by hand).
 - `Learned state: the snapshot was over its size bound` -- the least recently
@@ -449,7 +480,62 @@ The running controller notices within a minute or two and forgets everything
 it learned too, rather than writing it straight back (`Learned state: the
 snapshot was deleted; everything learned is forgotten`). Every model then
 prices from the derived capacity until it saturates again, as after a restart
-with no store.
+with no store. To forget one variant instead, see the next section.
+
+## Reset one variant's learned state
+
+Use this when one variant is priced from its own history you no longer trust:
+it holds more replicas than its load needs, and `k2-decision` shows `P2-hist`
+or `P2-prior` for it. It forgets that variant only; every other variant keeps
+what it has learned.
+
+- `P2-hist` is the variant's own measured k2.
+- `P2-prior` is its own k2 from before its engine arguments changed. It is
+  expected after a rollout that changes them, and wears off by itself: held
+  for 30 minutes of serving, then relaxed over 6 hours of serving. Forget it
+  only to end it sooner; `disableK2Borrow` does not affect it.
+- `P2-borrow` is a sibling's figure. Forgetting ends a running borrow, but the
+  variant can borrow again on new evidence. To stop borrowing, set
+  [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model instead.
+
+1. Annotate the variant's scale target -- the Deployment or LeaderWorkerSet
+   itself, not its pod template, so nothing restarts. The value is any string;
+   a timestamp is convenient:
+
+   ```bash
+   kubectl annotate deployment <name> -n <namespace> --overwrite \
+     llm-d.ai/forget-learned-state="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
+2. Check the controller log on the variant's next cycle:
+   `Learned state forgotten for one variant, on request`, with the variant and
+   the number of `entries` dropped.
+
+What is forgotten: the variant's measured k2 and throughput, its ITL line
+(including one it lent to siblings), its replica start estimate, and its
+capacity record. Also its previous k2 (`P2-prior`), the old service rate that
+holds the throughput floor after a change of arguments, and the windows set
+aside under earlier arguments for a rollback. The variant then prices as a new variant would until it
+saturates again: from its deployment-derived figure, or from a lower measured
+k2 of a compatible sibling where one exists (the k2 borrow), which orders more
+replicas, not fewer. Expect more replicas or a higher price for a while,
+depending on which figure was wrong.
+
+A k2 borrow the variant was running is ended, not dropped: it does not start
+again unless the sibling's figure or the variant's configuration changes. A
+dropped one would have started again at full strength on the next cycle.
+
+- **Acted on once per value.** Leaving the annotation in place does nothing
+  more, across controller restarts too when `LEARNED_STATE_SNAPSHOT` is on.
+  To forget again, set a new value.
+- **A variant parked at zero** is forgotten on the first cycle it is analysed
+  again, once it has a replica.
+- **To stop a variant borrowing** a sibling's figure rather than forget what it
+  has, set [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model.
+- **Remove the annotation before rolling the controller back** to a release
+  without this feature. That release rewrites the snapshot without the
+  record of which value was acted on, so upgrading again with the annotation
+  still in place forgets the variant a second time.
 
 ## The controller is not Ready or crash-looping
 
