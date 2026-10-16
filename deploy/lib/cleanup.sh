@@ -340,6 +340,19 @@ cleanup() {
     # deploy — so on the default path, twenty lines after saying "Leaving
     # Prometheus, the scaler backend and EPP in place", the summary claimed it had
     # removed them.
+    # Where KEDA actually runs, as the install reads it: KEDA_NAMESPACE when
+    # given, else the namespace serving the external-metrics APIService. The
+    # keda-system default named a namespace KEDA does not use where the platform
+    # runs it elsewhere (openshift-keda).
+    local keda_ns=""
+    if [ "$SCALER_BACKEND" = "keda" ]; then
+        if declare -F wva_scaler_keda_run_ns >/dev/null; then
+            wva_scaler_keda_run_ns
+            keda_ns="$WVA_SCALER_KEDA_RUN_NS"
+        else
+            keda_ns="$KEDA_NAMESPACE"
+        fi
+    fi
     echo "Removed components:"
     [ "$DEPLOY_WVA" = "true" ] && echo "✓ WVA Controller (its namespaced objects, and the ClusterRoles and ClusterRoleBindings suffixed for $WVA_NS)"
     if [ "${UNDEPLOY_SHARED:-false}" = "true" ]; then
@@ -349,7 +362,7 @@ cleanup() {
     else
         echo ""
         echo "Left in place (shared; pass UNDEPLOY_SHARED=true to remove):"
-        echo "  - Prometheus, the scaler backend (KEDA), EPP"
+        echo "  - Prometheus, the scaler backend (KEDA${keda_ns:+, in $keda_ns}), EPP"
     fi
 
     if [ "$DELETE_NAMESPACES" = "true" ]; then
@@ -359,8 +372,7 @@ cleanup() {
         # so an uninstall claimed to have "preserved" namespaces that had never
         # existed on that cluster — which reads as "I found these and left them".
         local ns preserved=()
-        for ns in "$NAMESPACE" "$WVA_NS" "$MONITORING_NAMESPACE" \
-            $([ "$SCALER_BACKEND" = "keda" ] && echo "$KEDA_NAMESPACE"); do
+        for ns in "$NAMESPACE" "$WVA_NS" "$MONITORING_NAMESPACE" $keda_ns; do
             [ -n "$ns" ] || continue
             # Deduped: in a namespace-scoped install NAMESPACE and WVA_NS are the
             # same namespace, so the list printed it twice and read as though two

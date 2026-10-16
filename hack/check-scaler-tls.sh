@@ -1028,14 +1028,21 @@ fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
 ok '! grep -q "rollout restart" "$WORK/warnings"' "first write with no KEDA operator running asks for a restart: $(cat "$WORK/warnings")"
 
-echo "== an admin uninstall that removed KEDA's side says to restart KEDA"
+echo "== an admin uninstall that removed KEDA's side says to restart KEDA, only when a ScaledObject used the TLS address"
 reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
 run wva_scaler_tls_undeploy STUB_CM=absent
+# KEDA opens a connection for the TLS address only when a ScaledObject dials it.
+ok '[ ! -f "$STORE/clustertriggerauthentications.keda.sh__$CTA.json" ] && ! grep -q "rollout restart" "$WORK/warnings"' "uninstall, no ScaledObject ever on the TLS address: restart advice printed anyway: $(cat "$WORK/warnings")"
+reset_store
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+run wva_scaler_tls_undeploy STUB_CM=absent
 # After the reinstall, not before: a restart with the ClusterTriggerAuthentication
 # gone rebuilds the pooled TLS address with empty auth parameters, in plaintext.
-ok 'grep -q "After you install this scaler here again, restart it:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "Before installing" "$WORK/warnings"' "uninstall: no restart-after-reinstall notice: $(cat "$WORK/warnings")"
+ok 'grep -q "install this scaler in $NS again, restart it after the install:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "Before installing" "$WORK/warnings"' "uninstall with a ScaledObject on the TLS address: no restart-after-reinstall notice: $(cat "$WORK/warnings")"
 
 echo "== undeploy removes KEDA's copy where the marker says it went"
 reset_store

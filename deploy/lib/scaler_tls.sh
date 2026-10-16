@@ -1899,7 +1899,16 @@ wva_scaler_tls_undeploy() {
             fi ;;
         foreign) log_warning "ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); left in place." ;;
     esac
+    # KEDA opens a connection for the TLS address only when a ScaledObject on
+    # it dials, and then keeps it, with this client certificate, until its
+    # operator restarts. So the advice applies only when one does now (or they
+    # cannot be listed). One that moved off TLS earlier also left one behind;
+    # the reinstall says so when it writes KEDA's side again.
     if [ "$removed" = true ]; then
-        log_warning "KEDA's side of the scaler TLS is removed, but KEDA's operator keeps the connection it built with it until it restarts. After you install this scaler here again, restart it:  $(wva_scaler_keda_restart_cmd)  (a restart before the reinstall rebuilds the connection without TLS)"
+        local tls_rows tls_rc=0
+        tls_rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || tls_rc=$?
+        if [ "$tls_rc" != 0 ] || [ -n "$tls_rows" ]; then
+            log_warning "KEDA's side of the scaler TLS is removed, but ScaledObjects used the TLS address$([ "$tls_rc" != 0 ] && printf ' (or they cannot be listed)'), so KEDA's operator keeps a connection with the old client certificate until it restarts. If you install this scaler in $WVA_NS again, restart it after the install:  $(wva_scaler_keda_restart_cmd)"
+        fi
     fi
 }
