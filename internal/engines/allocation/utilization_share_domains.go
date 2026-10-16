@@ -57,13 +57,14 @@ func (in SharePlanInput) receiverFit(rc string, grow ShareVariant) ShareReplicaF
 // replica (NodeView.place): largest first, each into the node with the
 // smallest free count that holds it and that its template admits. A group
 // with an exclusive topology lands in one domain, each tried in turn, and
-// only in one that holds no group yet (ShareNode.Group, ShareNode.Claimed);
-// a node without the label is in none. It spends what it placed and claims
-// the domain a group took, and reports whether every pod fitted; it spends
-// nothing when not. Where no donor is needed it places as the node-aware set
-// search does.
+// only in one that holds no group yet (ShareNode.Groups, and ShareNode.Claimed
+// for its own label key); a node without the label is in none. It spends what
+// it placed and claims the domain a group took, and reports whether every pod
+// fitted; it spends nothing when not. Where no donor is needed it places as
+// the node-aware set search does.
 func ShareFitPods(nodes map[string]ShareNode, r ShareReplicaFit) bool {
 	v := shareNodeView(nodes)
+	before := maps.Clone(v.domains)
 	if !v.place(replicaFit{pods: r.PodGPUs, domain: r.DomainKey, templates: r.Placements}) {
 		return false
 	}
@@ -73,22 +74,38 @@ func ShareFitPods(nodes map[string]ShareNode, r ShareReplicaFit) bool {
 		nodes[v.slots[i].name] = info
 	}
 	for id := range v.domains {
-		key, value, _ := strings.Cut(id, "\x00")
-		claimDomain(nodes, key, value)
+		if _, had := before[id]; !had {
+			key, value, _ := strings.Cut(id, "\x00")
+			claimDomain(nodes, key, value)
+		}
 	}
 	return true
 }
 
+// shareClaimOwner is the owner of a domain a share picture's claim holds on
+// its node view (shareNodeView).
+const shareClaimOwner = "share-claimed"
+
 // shareNodeView is a node view of the share's picture: each node holding its
-// free GPUs, its labels, and a group when its domain holds one. The
-// accelerator and taints were judged when the picture was built
-// (shareFreeNodesAfter), so the view judges neither.
+// free GPUs, its labels, and a group when a group's pod is on it. A claimed
+// domain is taken on the view under its own label key, as NodeView.domains
+// takes a domain the view placed a group in, so a claim on one key refuses no
+// domain of another. The accelerator and taints were judged when the picture
+// was built (shareFreeNodesAfter), so the view judges neither.
 func shareNodeView(nodes map[string]ShareNode) *NodeView {
 	snap := make(map[string]decision.NodeGPU, len(nodes))
 	for n, info := range nodes {
-		snap[n] = decision.NodeGPU{Capacity: info.Free, Labels: info.Labels, LWSGroup: info.Group || info.Claimed}
+		snap[n] = decision.NodeGPU{Capacity: info.Free, Labels: info.Labels, LWSGroup: len(info.Groups) > 0}
 	}
-	return NewNodeView(snap)
+	v := NewNodeView(snap)
+	for _, info := range nodes {
+		for _, key := range info.Claimed {
+			if value := info.Labels[key]; value != "" {
+				v.domains[domainID(key, value)] = shareClaimOwner
+			}
+		}
+	}
+	return v
 }
 
 // ClaimShareDomains marks, per topology label key of taken, the nodes of each
@@ -102,22 +119,22 @@ func ClaimShareDomains(nodes map[string]ShareNode, taken map[string][]string) {
 	}
 }
 
-// claimDomain marks the nodes of value of label key Claimed.
+// claimDomain marks the nodes of value of label key claimed for key.
 func claimDomain(nodes map[string]ShareNode, key, value string) {
 	if key == "" || value == "" {
 		return
 	}
 	for n, info := range nodes {
-		if info.Labels[key] == value {
-			info.Claimed = true
+		if info.Labels[key] == value && !slices.Contains(info.Claimed, key) {
+			info.Claimed = append(slices.Clone(info.Claimed), key)
 			nodes[n] = info
 		}
 	}
 }
 
-// domainClaimed reports whether a node of names is Claimed.
-func domainClaimed(nodes map[string]ShareNode, names []string) bool {
-	return slices.ContainsFunc(names, func(n string) bool { return nodes[n].Claimed })
+// domainClaimed reports whether a node of names is claimed for label key.
+func domainClaimed(nodes map[string]ShareNode, names []string, key string) bool {
+	return slices.ContainsFunc(names, func(n string) bool { return slices.Contains(nodes[n].Claimed, key) })
 }
 
 // sharePodFit is one receiver pod as the donor-set search places it: its
@@ -150,19 +167,21 @@ func sharePodNodes(nodes map[string]ShareNode, names []string, r ShareReplicaFit
 	return out
 }
 
-// freesGroups reports whether every node of names a LeaderWorkerSet group's
-// pod is on (ShareNode.Group) has that pod leaving with a group the search
-// took: the domain then holds no group but the receiver's once the set lands.
+// freesGroups reports whether every LeaderWorkerSet group with a pod on a
+// node of names (ShareNode.Groups) leaves with a donor group the search took
+// (ShareUnit.Group): the domain then holds no group but the receiver's once
+// the set lands. Judged per group, not per node: a node shared by a donor
+// group's pod and another group's is not freed by the donor alone.
 func (s *shareNodeSearch) freesGroups(names []string) bool {
-	freed := map[string]bool{}
+	leaving := map[string]bool{}
 	for r := range s.used {
-		if u := s.in.DonorUnits[r.donor][r.unit]; u.Group {
-			for _, p := range u.Pods {
-				freed[p.Node] = true
-			}
+		if u := s.in.DonorUnits[r.donor][r.unit]; u.Group != "" {
+			leaving[u.Group] = true
 		}
 	}
-	return !slices.ContainsFunc(names, func(n string) bool { return s.in.Nodes[n].Group && !freed[n] })
+	return !slices.ContainsFunc(names, func(n string) bool {
+		return slices.ContainsFunc(s.in.Nodes[n].Groups, func(g string) bool { return !leaving[g] })
+	})
 }
 
 // TakenDomains is, per topology label key, the values of it in which the view

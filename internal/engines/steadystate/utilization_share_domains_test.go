@@ -58,11 +58,11 @@ func TestTheIdleFillPlacesOneGroupPerExclusiveRack(t *testing.T) {
 // so the fit refuses its domain to a new group.
 func TestTheShareNodePictureMarksGroupNodes(t *testing.T) {
 	snap := map[string]decision.NodeGPU{
-		"n1": {Accelerator: "A100", Capacity: 8, Used: 8, LWSGroup: true},
+		"n1": {Accelerator: "A100", Capacity: 8, Used: 8, LWSGroup: true, LWSGroups: []string{"ns/z-0"}},
 		"n2": {Accelerator: "A100", Capacity: 8},
 	}
 	nodes := shareFreeNodes(snap, "A100", 0)
-	if !nodes["n1"].Group || nodes["n2"].Group {
+	if len(nodes["n1"].Groups) != 1 || nodes["n1"].Groups[0] != "ns/z-0" || len(nodes["n2"].Groups) != 0 {
 		t.Fatalf("group marks %v, want n1 only", nodes)
 	}
 }

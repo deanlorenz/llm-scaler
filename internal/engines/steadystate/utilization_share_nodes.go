@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -203,7 +204,10 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 			GPUs: resources.PodGPURequests(&p)}
 	}
 	if lws {
-		u := allocation.ShareUnit{Group: true}
+		u := allocation.ShareUnit{}
+		if hash := pods[0].Labels[lwsv1.GroupUniqueHashLabelKey]; hash != "" {
+			u.Group = pods[0].Namespace + "/" + hash
+		}
 		for _, p := range pods {
 			u.Pods = append(u.Pods, toPod(p))
 		}
@@ -242,7 +246,7 @@ func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, r
 	nodes := map[string]allocation.ShareNode{}
 	for name, n := range snap {
 		if !slices.ContainsFunc(tolerations, func(t []corev1.Toleration) bool { return !allocation.NodeAdmits(n, accelerator, t) }) {
-			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels, Group: n.LWSGroup}
+			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels, Groups: n.LWSGroups}
 		}
 	}
 	// The reserved GPUs are taken in one piece from the freest node, then the

@@ -50,4 +50,6 @@ func TestDiscoverUsageWithNodesMarksLeaderWorkerSetGroups(t *testing.T) {
 	assert.True(t, nodes["n1"].LWSGroup, "a group's GPU pod marks its node")
 	assert.True(t, nodes["n2"].LWSGroup, "a group's pod without GPUs marks its node too")
 	assert.False(t, nodes["n3"].LWSGroup, "a pod of no group marks nothing")
+	assert.Equal(t, []string{"x/abc"}, nodes["n1"].LWSGroups, "the node names its group, by namespace and hash")
+	assert.Empty(t, nodes["n3"].LWSGroups)
 }

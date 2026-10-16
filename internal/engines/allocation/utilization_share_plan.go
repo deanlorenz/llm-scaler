@@ -182,15 +182,16 @@ func (h ShareHeadroom) spareReplicas(r ShareRole) int {
 type ShareNode struct {
 	Free   int
 	Labels map[string]string
-	// Group is set when a LeaderWorkerSet group's pod is on the node
-	// (decision.NodeGPU.LWSGroup). A donor set that takes every such group
+	// Groups is the LeaderWorkerSet groups with a pod on the node
+	// (decision.NodeGPU.LWSGroups). A donor set that takes every such group
 	// of a domain frees it for the receiver's group.
-	Group bool
-	// Claimed is set when this cycle already placed an exclusive-topology
-	// group in the node's domain -- the optimizer's pass or an in-flight hold
-	// (NodeView.TakenDomains), or the share itself (ShareFitPods, a donor
-	// set) -- so no other group lands there.
-	Claimed bool
+	Groups []string
+	// Claimed is the topology label keys for which this cycle already placed
+	// an exclusive-topology group in the node's domain -- the optimizer's pass
+	// or an in-flight hold (NodeView.TakenDomains), or the share itself
+	// (ShareFitPods, a donor set) -- so no other group lands in that domain.
+	// Per key, as NodeView.domains: a claim on "zone" refuses no "rack".
+	Claimed []string
 }
 
 // SharePod is one donor pod: its name (namespace/name), node and GPUs.
@@ -202,9 +203,10 @@ type SharePod struct {
 // ShareUnit is what one donor replica frees when it goes: its pods.
 type ShareUnit struct {
 	Pods []SharePod
-	// Group is set for a LeaderWorkerSet group: once it goes, its pods'
-	// nodes hold no pod of it (ShareNode.Group).
-	Group bool
+	// Group names a LeaderWorkerSet group as ShareNode.Groups does; "" for
+	// a unit that is no group. Once it goes, its pods' nodes hold no pod of
+	// it.
+	Group string
 }
 
 // GPUs is the unit's total.
@@ -1597,7 +1599,7 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 	key, exclusive := fit.domainKey()
 	for _, d := range shareDomains(in.Nodes, key) {
 		in1 := shareNodesInDomain(in.Nodes, key, d)
-		if exclusive && domainClaimed(in.Nodes, in1) {
+		if exclusive && domainClaimed(in.Nodes, in1, key) {
 			continue
 		}
 		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey, keep: lim.keep,

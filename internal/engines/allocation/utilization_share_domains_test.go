@@ -55,7 +55,7 @@ func TestTheShareDoesNotFillARackHoldingAGroup(t *testing.T) {
 	gang := ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "rack"}
 	nodes := oneRack()
 	n4 := nodes["n4"]
-	n4.Group, n4.Free = true, 0
+	n4.Groups, n4.Free = []string{"ns/z-0"}, 0
 	nodes["n4"] = n4
 	if ShareFitPods(nodes, gang) {
 		t.Fatal("the share placed a group into a rack another group runs in")
@@ -68,6 +68,23 @@ func TestTheShareDoesNotFillARackHoldingAGroup(t *testing.T) {
 	}
 	if !ShareFitPods(claimed, ShareReplicaFit{PodGPUs: []int{8}, DomainKey: "rack"}) {
 		t.Fatal("control: a one-pod replica is not bound to a domain, as in the node view")
+	}
+}
+
+// A claim holds per label key, as NodeView.domains does: a model exclusive on
+// "zone" in z1 refuses another zone group there, but not a group exclusive on
+// "rack" in an empty rack of z1, which the node view places there.
+func TestAShareClaimHoldsOnlyForItsOwnLabelKey(t *testing.T) {
+	nodes := map[string]ShareNode{}
+	for _, n := range []string{"n1", "n2", "n3", "n4"} {
+		nodes[n] = ShareNode{Free: 8, Labels: map[string]string{"zone": "z1", "rack": "r1"}}
+	}
+	ClaimShareDomains(nodes, map[string][]string{"zone": {"z1"}})
+	if !ShareFitPods(nodes, ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "rack"}) {
+		t.Fatal("a claim on zone z1 refused a rack group in an empty rack of z1")
+	}
+	if ShareFitPods(nodes, ShareReplicaFit{PodGPUs: []int{8, 8}, DomainKey: "zone"}) {
+		t.Fatal("control: a second zone group was placed in the claimed zone")
 	}
 }
 
@@ -113,16 +130,16 @@ func TestTheShareJudgesALeaderAndItsWorkersByTheirOwnTemplates(t *testing.T) {
 // the set takes: once it goes, the rack holds no other group. A rack where a
 // group's pod stays is refused, as the node view refuses it.
 func TestADonorSetFreesARackOnlyWithItsGroup(t *testing.T) {
-	plan := func(donorIsGroup bool) SharePlan {
+	plan := func(donorGroup string, n1Groups, n2Groups []string) SharePlan {
 		nodes := map[string]ShareNode{
-			"n1": {Labels: map[string]string{"rack": "r1"}, Group: true},
-			"n2": {Labels: map[string]string{"rack": "r1"}, Group: true},
+			"n1": {Labels: map[string]string{"rack": "r1"}, Groups: n1Groups},
+			"n2": {Labels: map[string]string{"rack": "r1"}, Groups: n2Groups},
 		}
 		// Four 4-GPU donor pods: none holds a receiver pod pod-for-pod, so
 		// only the node-aware set search funds it.
 		units := []ShareUnit{{Pods: []SharePod{
 			{Name: "ns/a-0-0", Node: "n1", GPUs: 4}, {Name: "ns/a-0-1", Node: "n1", GPUs: 4},
-			{Name: "ns/a-0-2", Node: "n2", GPUs: 4}, {Name: "ns/a-0-3", Node: "n2", GPUs: 4}}, Group: donorIsGroup}}
+			{Name: "ns/a-0-2", Node: "n2", GPUs: 4}, {Name: "ns/a-0-3", Node: "n2", GPUs: 4}}, Group: donorGroup}}
 		in := SharePlanInput{
 			Roles: []ShareRole{
 				{Key: "A", Weight: 1, Need: 4, Ceiling: 64, ReplicaGPUs: 16},
@@ -144,10 +161,16 @@ func TestADonorSetFreesARackOnlyWithItsGroup(t *testing.T) {
 		}
 		return p
 	}
-	if p := plan(true); len(p.Started) != 1 {
+	a, z := []string{"ns/a-0"}, []string{"ns/z-0"}
+	if p := plan("ns/a-0", a, a); len(p.Started) != 1 {
 		t.Fatalf("a donor group leaving its rack did not fund the receiver's group there: %+v", p.Started)
 	}
-	if p := plan(false); len(p.Started) != 0 {
+	if p := plan("", z, z); len(p.Started) != 0 {
 		t.Fatalf("the share funded a group into a rack where another group's pod stays: %+v", p.Started)
+	}
+	// TP4 workers packed two per node: n1 holds a pod of the donor group and
+	// one of model Z's group. The donor leaving does not free n1.
+	if p := plan("ns/a-0", []string{"ns/a-0", "ns/z-0"}, a); len(p.Started) != 0 {
+		t.Fatalf("the share funded a group into a rack where another group shares a node with the donor: %+v", p.Started)
 	}
 }
