@@ -650,15 +650,19 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOption
 		}
 		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
 		for _, l := range p.Lenders {
-			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting,
-				Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority, PendingGPUs: l.PendingGPUs})
+			ls := kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, Reclaim: l.Reclaim, Unused: l.Unused,
+				Priority: l.Priority, Kept: l.Kept, PendingGPUs: l.PendingGPUs, PendingPriority: l.PendingPriority}
+			if l.PendingSince != nil {
+				ls.PendingSince = *l.PendingSince
+			}
+			lenders = append(lenders, ls)
 		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: pools.free[poolKey(p)],
 			Lenders: lenders, ReadAt: ext.ObservedAt,
 			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree), CoUnbound: slices.Clone(p.CoUnbound),
 			Restricted: slices.Clone(pools.restricted[poolKey(p)]), ClassPriority: maps.Clone(ext.ClassPriority),
-			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority, ReleaseToNonReclaiming: release,
+			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority, ReleaseToNonReclaiming: release, RawFree: p.Free,
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
 			},

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -144,6 +145,16 @@ type QueueState struct {
 	// borrows holds the cohort's GPUs at up to that priority
 	// (SharedPool.BorrowerPriority).
 	BorrowerPriority *int32
+	// LowestReserved is the lowest spec.priority of the queue's reserved
+	// Workloads that request a GPU; nil when none was read. With
+	// WithinClusterQueue set, Kueue admits a pending Workload of higher
+	// priority by preempting one of them (preemptsWithin).
+	LowestReserved *int32
+	// WithinClusterQueue is spec.preemption.withinClusterQueue; empty or
+	// Never when the queue never preempts its own Workloads.
+	WithinClusterQueue string
+	// QueueingStrategy is spec.queueingStrategy; empty for BestEffortFIFO.
+	QueueingStrategy string
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -280,6 +291,9 @@ type Topology struct {
 	// LendersUnreadable is set when the Workloads were not read cluster-wide,
 	// or the read failed: no lender's wait can be seen.
 	LendersUnreadable bool
+	// Now is when the read was made: a pending Workload whose requeueAt is
+	// later is not in line yet (lenderNext). Zero reads every one as in line.
+	Now time.Time
 }
 
 // QueueFigures is what one ClusterQueue could reach for one flavor and GPU
@@ -393,11 +407,23 @@ type LenderState struct {
 	// reclaims for it from a borrowed Workload of lower priority. Nil when
 	// none was read.
 	Priority *int32
-	// PendingGPUs is what its pending Workloads that each fit its unused
-	// nominal (lenderPendingOn's rule) ask of this key in all, at most that
-	// unused nominal: what it waits for, and what a release to it is bounded
-	// by (kueue.releaseToNonReclaimingLenders). 0 for an inactive queue.
+	// Kept is the part of its nominal it keeps (lendingLimit) and does not
+	// use, max(0, G - U): Kueue admits that much of its own Workloads without
+	// anything handed back.
+	Kept int
+	// PendingGPUs is the smallest of its pending Workloads that Kueue could
+	// admit next within its nominal of this key (lenderNext: queue order, the
+	// same fit rule as Waiting, none in requeue backoff, none it admits by
+	// preempting its own, the head alone under StrictFIFO): the least that
+	// unblocks it, what a release to it is sized by
+	// (kueue.releaseToNonReclaimingLenders). 0 for an inactive queue.
 	PendingGPUs int
+	// PendingPriority is the highest priority among those Workloads: Kueue
+	// preempts for the lender at its head's priority. Nil when none counts.
+	PendingPriority *int32
+	// PendingSince is when the longest-waiting of those Workloads started to
+	// wait; zero when none counts or none says.
+	PendingSince time.Time
 }
 
 // Borrowing is the result of ComputeBorrowing.
@@ -441,6 +467,21 @@ func (r QueueResource) lent() (lent, kept int) {
 func (r QueueResource) unused() int {
 	_, kept := r.lent()
 	return max(0, r.Nominal-max(r.Reserved, kept))
+}
+
+// keptFree is what the queue keeps (G, never lent) and does not use,
+// max(0, G - U): with unused, everything of its nominal it does not use.
+func (r QueueResource) keptFree() int {
+	_, kept := r.lent()
+	return max(0, kept-r.Reserved)
+}
+
+// admits reports whether a Workload of n GPUs fits the queue's nominal: what
+// it lends unused plus what it keeps unused, unused() + keptFree(), which is
+// max(0, N - U). The one fit rule of the lender signal (lenderPendingOn) and
+// of a release to a lender (lenderNext).
+func (r QueueResource) admits(n int64) bool {
+	return n <= int64(r.unused()+r.keptFree())
 }
 
 // ComputeBorrowing derives, from one read, what each ClusterQueue could reach
@@ -560,9 +601,10 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
 				ls := LenderState{Queue: q.Name, Waiting: waiting,
-					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority}
+					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority, Kept: r.keptFree()}
 				if !q.Inactive {
-					ls.PendingGPUs = lenderWaitsFor(q, key, t.Flavors[key.Flavor].NodeLabels)
+					d := lenderNext(q, key, t.Flavors[key.Flavor].NodeLabels, t.Now)
+					ls.PendingGPUs, ls.PendingPriority, ls.PendingSince = d.gpus, d.priority, d.since
 				}
 				p.Lenders = append(p.Lenders, ls)
 			}

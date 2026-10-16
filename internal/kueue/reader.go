@@ -202,6 +202,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	topo := Topology{
 		Queues:  make(map[string]QueueState),
 		Flavors: make(map[string]FlavorPlacement, len(flavors)),
+		Now:     r.opts.now(),
 	}
 	for i := range flavors {
 		flavorType[flavors[i].GetName()] = flavorAcceleratorType(&flavors[i])
@@ -349,6 +350,9 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			}
 			if p, ok := pending.borrowerPriority[name]; ok {
 				q.BorrowerPriority = &p
+			}
+			if p, ok := pending.lowestReserved[name]; ok {
+				q.LowestReserved = &p
 			}
 			topo.Queues[name] = q
 		}
@@ -534,8 +538,17 @@ func externalLenders(ls []LenderState) []config.ExternalLender {
 	}
 	out := make([]config.ExternalLender, 0, len(ls))
 	for _, l := range ls {
-		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting,
-			Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority, PendingGPUs: l.PendingGPUs})
+		e := config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, Reclaim: l.Reclaim, Unused: l.Unused,
+			Priority: l.Priority, Kept: l.Kept, PendingGPUs: l.PendingGPUs}
+		if l.PendingPriority != nil {
+			p := *l.PendingPriority
+			e.PendingPriority = &p
+		}
+		if !l.PendingSince.IsZero() {
+			at := l.PendingSince
+			e.PendingSince = &at
+		}
+		out = append(out, e)
 	}
 	return out
 }
@@ -718,6 +731,8 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 	if reclaim, _, _ := unstructured.NestedString(cq.Object, "spec", "preemption", "reclaimWithinCohort"); reclaim != "" {
 		q.Reclaim = reclaim
 	}
+	q.WithinClusterQueue, _, _ = unstructured.NestedString(cq.Object, "spec", "preemption", "withinClusterQueue")
+	q.QueueingStrategy, _, _ = unstructured.NestedString(cq.Object, "spec", "queueingStrategy")
 	if policy, _, _ := unstructured.NestedString(cq.Object, "spec", "stopPolicy"); policy == "Hold" || policy == "HoldAndDrain" {
 		q.Inactive = true
 	}

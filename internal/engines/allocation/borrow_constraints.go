@@ -136,6 +136,11 @@ type SharedPoolChunk struct {
 	// when such a lender waits. Off, it is not counted and a waiting lender
 	// only closes the cohort to new borrowing.
 	ReleaseToNonReclaiming bool
+	// RawFree is the cohort's free pool as Kueue's read gives it
+	// (kueue.SharedPool.Free), before anything here takes from it: what Kueue
+	// admits a waiting lender from with nothing handed back. A release to a
+	// lender is sized net of it.
+	RawFree int
 	// restrictedClosed is set, for the rest of the pass, once a model that
 	// some Restricted lender does not outrank drew on the chunk (K2-2), and
 	// before the pass when such a model's draw is still in flight
@@ -493,6 +498,7 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 // (mergeSharedPools).
 func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	prev.Free = min(prev.Free, p.Free)
+	prev.RawFree = min(prev.RawFree, p.RawFree)
 	prev.PendingGPUs = max(prev.PendingGPUs, p.PendingGPUs)
 	for res, n := range p.CoFree {
 		if have, ok := prev.CoFree[res]; !ok || n < have {
@@ -536,8 +542,18 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		}
 		o := &prev.Lenders[i]
 		o.Waiting = o.Waiting || l.Waiting
-		// What a release hands it: the smaller figure, releasing less.
+		// What a release hands it, the side releasing less: the smaller
+		// demand, the larger part it keeps, the higher priority (more is left
+		// to Kueue's reclaim), the later start of its wait.
 		o.PendingGPUs = min(o.PendingGPUs, l.PendingGPUs)
+		o.Kept = max(o.Kept, l.Kept)
+		if l.PendingPriority != nil && (o.PendingPriority == nil || *l.PendingPriority > *o.PendingPriority) {
+			p := *l.PendingPriority
+			o.PendingPriority = &p
+		}
+		if l.PendingSince.After(o.PendingSince) {
+			o.PendingSince = l.PendingSince
+		}
 	}
 	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
 	// Restricted GPUs: the cautious side is the larger figure and the lower

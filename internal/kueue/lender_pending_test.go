@@ -1,6 +1,9 @@
 package kueue
 
 import (
+	"slices"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -30,19 +33,71 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		Entry("the largest Workload that fits is what it waits for", lender(pendingGPU(2, 0), pendingGPU(5, 0), pendingGPU(9, 0)), 5),
 	)
 
-	// PR-C: a release to a waiting lender is bounded by everything it waits
-	// for that fits, not the largest Workload alone, and never past its
-	// unused nominal.
-	DescribeTable("what a release to it can serve",
-		func(q QueueState, want int) {
-			Expect(lenderWaitsFor(q, gpuKey, nil)).To(Equal(want))
+	// PR-C review (KC1, KC4, KC5): a release to a waiting lender is sized by
+	// the least that unblocks it -- the smallest Workload Kueue could admit
+	// next -- at the priority Kueue would preempt for it with, leaving out
+	// what handing capacity back would not admit.
+	now := time.Unix(90000, 0)
+	at := func(w PendingWorkload, since time.Time) PendingWorkload {
+		w.Since = since
+		return w
+	}
+	requeued := func(w PendingWorkload, until time.Time) PendingWorkload {
+		w.RequeueAt = &until
+		return w
+	}
+	strict := func(q QueueState) QueueState {
+		q.QueueingStrategy = QueueingStrictFIFO
+		return q
+	}
+	p := func(n int32) *int32 { return &n }
+	preempting := func(q QueueState, policy string, lowest int32) QueueState {
+		q.WithinClusterQueue, q.LowestReserved = policy, p(lowest)
+		return q
+	}
+	DescribeTable("what a release to it is sized by",
+		func(q QueueState, gpus int, prio *int32) {
+			d := lenderNext(q, gpuKey, nil, now)
+			Expect(d.gpus).To(Equal(gpus))
+			Expect(d.priority).To(Equal(prio))
 		},
-		Entry("CPU and other resources ask nothing", lender(cpu, amd), 0),
-		Entry("each Workload that fits counts, one too large does not", lender(pendingGPU(2, 0), pendingGPU(1, 0), pendingGPU(9, 0)), 3),
-		Entry("never past the unused nominal", lender(pendingGPU(3, 0), pendingGPU(4, 0)), 5),
+		Entry("CPU and other resources ask nothing", lender(cpu, amd), 0, nil),
+		Entry("the smallest Workload that fits, at the highest priority of those that fit",
+			lender(pendingGPU(4, 5), pendingGPU(2, 1), pendingGPU(9, 99)), 2, p(5)),
+		Entry("one in requeue backoff is not in line yet",
+			lender(requeued(pendingGPU(2, 0), now.Add(time.Minute)), pendingGPU(4, 0)), 4, p(0)),
+		Entry("one whose backoff is over is in line again",
+			lender(requeued(pendingGPU(2, 0), now.Add(-time.Minute)), pendingGPU(4, 0)), 2, p(0)),
+		Entry("StrictFIFO: a head that does not fit blocks those behind it",
+			strict(lender(at(pendingGPU(9, 0), now.Add(-time.Hour)), at(pendingGPU(2, 0), now))), 0, nil),
+		Entry("StrictFIFO: the head alone counts",
+			strict(lender(at(pendingGPU(4, 0), now.Add(-time.Hour)), at(pendingGPU(2, 0), now))), 4, p(0)),
+		Entry("StrictFIFO: the head is the highest priority, whatever its age",
+			strict(lender(at(pendingGPU(4, 0), now.Add(-time.Hour)), at(pendingGPU(2, 9), now))), 2, p(9)),
+		Entry("a Workload it admits by preempting its own lower priority ones is not the cohort's to serve",
+			preempting(lender(pendingGPU(2, 50), pendingGPU(4, 10)), WithinLowerPriority, 10), 4, p(10)),
+		Entry("LowerOrNewerEqualPriority preempts at equal priority too",
+			preempting(lender(pendingGPU(4, 10)), WithinLowerOrNewerEqualPriority, 10), 0, nil),
 	)
 
-	p := func(n int32) *int32 { return &n }
+	It("fits a Workload by the same rule as the waiting signal: unused plus kept", func() {
+		r := QueueResource{Nominal: 32, LendingLimit: ptr(16), Reserved: 4}
+		Expect(r.unused()).To(Equal(16))
+		Expect(r.keptFree()).To(Equal(12))
+		Expect(r.admits(28)).To(BeTrue(), "N - U = 28")
+		Expect(r.admits(29)).To(BeFalse())
+	})
+
+	It("carries the part it keeps unused: Kueue admits that much without a release", func() {
+		l := member("lender", QueueResource{Nominal: 32, LendingLimit: ptr(16)})
+		l.PendingWorkloads = []PendingWorkload{pendingGPU(16, 0)}
+		b := ComputeBorrowing(topology(l, member("a", QueueResource{Nominal: 0, Reserved: 16, Borrowed: 16})), false)
+		Expect(b.Pools).To(HaveLen(1))
+		got := b.Pools[0].Lenders[slices.IndexFunc(b.Pools[0].Lenders, func(s LenderState) bool { return s.Queue == "lender" })]
+		Expect(got.Kept).To(Equal(16))
+		Expect(got.PendingGPUs).To(Equal(16))
+	})
+
 	lenderOf := func(qs ...QueueState) LenderState {
 		b := ComputeBorrowing(topology(qs...), false)
 		Expect(b.Pools).To(HaveLen(1))
@@ -61,7 +116,7 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		l.LenderPriority = p(50)
 		got := lenderOf(l, borrower)
 		Expect(got).To(Equal(LenderState{Queue: "lender", Waiting: true, Reclaim: ReclaimLowerPriority,
-			Unused: 5, Priority: p(50), PendingGPUs: 2}), "the 9-GPU Workload does not fit the 5 unused")
+			Unused: 5, Priority: p(50), PendingGPUs: 2, PendingPriority: p(1000)}), "the 9-GPU Workload does not fit the 5 unused")
 	})
 
 	It("carries no priority when none of its Workloads was read", func() {

@@ -539,10 +539,19 @@ type ExternalLender struct {
 	// Priority is the lowest priority of its unfinished GPU Workloads, pending
 	// or reserved; nil when none was read.
 	Priority *int32 `json:"priority,omitempty"`
-	// PendingGPUs is what its pending Workloads that fit its unused nominal
-	// ask of this key, at most that unused nominal: what a release to it
-	// (releaseToNonReclaimingLenders) is bounded by.
+	// Kept is what it keeps of its nominal (lendingLimit) and does not use:
+	// Kueue admits that much of its own without anything handed back.
+	Kept int `json:"kept,omitempty"`
+	// PendingGPUs is the smallest pending Workload Kueue could admit next
+	// within its nominal (kueue.LenderState.PendingGPUs): what a release to
+	// it (releaseToNonReclaimingLenders) is sized by.
 	PendingGPUs int `json:"pendingGPUs,omitempty"`
+	// PendingPriority is the highest priority among those Workloads, the
+	// one Kueue preempts for it at; nil when none counts.
+	PendingPriority *int32 `json:"pendingPriority,omitempty"`
+	// PendingSince is when the longest-waiting of them started to wait; nil
+	// when none counts.
+	PendingSince *time.Time `json:"pendingSince,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU

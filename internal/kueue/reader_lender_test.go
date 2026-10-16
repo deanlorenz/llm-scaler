@@ -2,10 +2,12 @@ package kueue
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,6 +37,8 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 	}
 	// snap is the last read's snapshot.
 	var snap config.ExternalQuotas
+	// lenderPatch, when set, edits team-b's ClusterQueue before a read.
+	var lenderPatch func(*unstructured.Unstructured)
 	read := func(lenderPolicy string, extra ...client.Object) config.ExternalLender {
 		objs := docsExample(v, "cohortName")
 		a, b := objs[1].(*unstructured.Unstructured), objs[2].(*unstructured.Unstructured)
@@ -50,6 +54,9 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		b.Object["status"].(map[string]interface{})["pendingWorkloads"] = int64(1)
 		if lenderPolicy != "" {
 			Expect(unstructured.SetNestedField(b.Object, lenderPolicy, "spec", "preemption", "reclaimWithinCohort")).To(Succeed())
+		}
+		if lenderPatch != nil {
+			lenderPatch(b)
 		}
 		m := cohortMapper(v).(*meta.DefaultRESTMapper)
 		m.Add(schema.GroupVersionKind{Group: Group, Version: v, Kind: KindWorkload}, meta.RESTScopeNamespace)
@@ -119,6 +126,48 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		Expect(l.Waiting).To(BeTrue())
 		Expect(l.Reclaim).To(Equal("LowerPriority"))
 		Expect(l.Priority).To(HaveValue(Equal(int32(600))), "the finished Workload at 0 is not the lender's")
+	})
+
+	// PR-C review (KC5): what a release to the lender is sized by leaves out
+	// a Workload in requeue backoff and one the lender admits by preempting
+	// its own; the waiting signal that stops new borrowing is unchanged.
+	It("sizes a release by the Workloads Kueue would admit next, read from the ClusterQueue and the Workloads", func() {
+		l := read("", workload("team-b", "train", 0, gpus("4"), ""))
+		Expect(l.Waiting).To(BeTrue())
+		Expect(l.PendingGPUs).To(Equal(4))
+		Expect(l.PendingPriority).To(HaveValue(Equal(int32(0))))
+		created := workload("team-b", "train", 0, gpus("4"), "")
+		created.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second)))
+		Expect(read("", created).PendingSince).To(HaveValue(BeTemporally("==", created.GetCreationTimestamp().Time)))
+
+		backoff := workload("team-b", "train", 0, gpus("4"), "")
+		Expect(unstructured.SetNestedField(backoff.Object, time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"status", "requeueState", "requeueAt")).To(Succeed())
+		l = read("", backoff)
+		Expect(l.Waiting).To(BeTrue(), "the raw signal still stops new borrowing")
+		Expect(l.PendingGPUs).To(BeZero(), "Kueue does not try it before requeueAt")
+		Expect(l.PendingPriority).To(BeNil())
+
+		own := func() *unstructured.Unstructured { return workload("team-b", "low", 1, gpus("2"), "team-b-cq") }
+		l = read("", workload("team-b", "train", 100, gpus("4"), ""), own())
+		Expect(l.PendingGPUs).To(Equal(4), "withinClusterQueue unset: Kueue does not preempt the lender's own")
+		lenderPatch = func(b *unstructured.Unstructured) {
+			Expect(unstructured.SetNestedField(b.Object, WithinLowerPriority, "spec", "preemption", "withinClusterQueue")).To(Succeed())
+		}
+		defer func() { lenderPatch = nil }()
+		l = read("", workload("team-b", "train", 100, gpus("4"), ""), own())
+		Expect(l.PendingGPUs).To(BeZero(), "Kueue admits it by preempting team-b's own priority-1 Workload")
+
+		lenderPatch = func(b *unstructured.Unstructured) {
+			Expect(unstructured.SetNestedField(b.Object, QueueingStrictFIFO, "spec", "queueingStrategy")).To(Succeed())
+		}
+		old := workload("team-b", "huge", 0, gpus("6"), "")
+		old.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-time.Hour)))
+		younger := workload("team-b", "train", 0, gpus("4"), "")
+		younger.SetCreationTimestamp(metav1.NewTime(time.Now()))
+		l = read("", old, younger)
+		Expect(l.Waiting).To(BeTrue())
+		Expect(l.PendingGPUs).To(BeZero(), "StrictFIFO: the older 6-GPU head does not fit and blocks the 4")
 	})
 
 	It("reads each class's priority and each namespace's highest, from unfinished GPU Workloads", func() {
