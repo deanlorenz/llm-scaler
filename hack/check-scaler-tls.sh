@@ -1456,6 +1456,20 @@ REWIRES="$(grep -c "^patch scaledobject app-so -n apps --type json" "$WORK/patch
 ok '[ "$REWIRES" = 2 ] && ! grep -q "/spec/triggers/1/" "$WORK/patches"' "bounded re-wire: $REWIRES re-wire patches (want 2, trigger 0 only): $(cat "$WORK/patches")"
 ok 'grep -q "has not wired the scaler.s metric onto the HPA" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "kubectl patch scaledobject app-so -n apps --type json -p" "$WORK/stderr"' "bounded re-wire: no warning naming it with the fix: warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
 
+echo "== verify: an HPA without the scaler's external metric is flagged, with the fix"
+reset_store
+put_deploy openssl
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+run wva_verify_scaler_wiring STUB_UNWIRED=hpa
+ok '[ "$RC" = 1 ] && grep -q "did not wire the scaler.s metric onto the HPA" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "verify, HPA on the CPU default: exit $RC (want 1), warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 1 ] && grep -q "apps/app-so" "$WORK/stderr"' "verify, empty externalMetricNames: exit $RC (want 1)"
+run wva_verify_scaler_wiring
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/warnings" ] && [ ! -s "$WORK/patches" ]' "verify, wired: exit $RC, warnings $(cat "$WORK/warnings"), patched '$(cat "$WORK/patches")' (verify writes nothing)"
+so_fixture app-so "other-scaler.elsewhere.svc:9090"
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/warnings" ]' "verify, a ScaledObject naming another scaler: flagged: $(cat "$WORK/warnings")"
+
 # ---------------------------------------------------------------- an unreadable controller and an explicit mode
 probe_addr_mode() { echo "mode=$(wva_scaler_address_mode "$NS")"; }
 # probe_so_addr sources scaledobject.sh, as the make targets do, and prints

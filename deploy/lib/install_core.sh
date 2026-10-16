@@ -624,7 +624,7 @@ main() {
 
     if [ "$verified" != true ]; then
         echo ""
-        log_warning "Deployment on $ENVIRONMENT FINISHED WITH ERRORS — the WVA controller is not ready."
+        log_warning "Deployment on $ENVIRONMENT FINISHED WITH ERRORS — the WVA controller is not ready, or KEDA has not wired a ScaledObject to it (see the warnings above)."
         log_warning "Everything above was created; nothing is scaling. Diagnose with the commands printed above, then re-run this script (it is idempotent)."
         return 1
     fi

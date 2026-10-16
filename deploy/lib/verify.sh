@@ -324,6 +324,7 @@ verify_deployment() {
         fi
         wva_verify_scaler_networkpolicy
         wva_verify_scaler_tls
+        wva_verify_scaler_wiring || all_good=false
     elif [ "$SCALER_BACKEND" = "none" ]; then
         log_info "Scaler backend skipped (SCALER_BACKEND=none) — assuming external metrics API is pre-installed"
     fi
@@ -528,6 +529,34 @@ wva_verify_scaler_tls() {
     else
         log_info "  Every ScaledObject naming this scaler uses $(wva_scaler_address "$WVA_NS" tls) and authenticationRef $(wva_scaler_keda_auth_name)."
     fi
+}
+
+# wva_verify_scaler_wiring names every ScaledObject naming this scaler whose
+# HPA KEDA built without the scaler's external metric, or whose
+# status.externalMetricNames lacks it (wva_scaler_so_wiring). Such a
+# ScaledObject reads Ready and Active, while its HPA scales on the CPU default
+# and WVA's decisions reach nothing. KEDA wires a new or changed ScaledObject
+# within about half a minute, so this waits up to WVA_VERIFY_WIRE_WAIT seconds
+# (default 60) before it calls one unwired. Returns 1 when one is.
+wva_verify_scaler_wiring() {
+    declare -F wva_scaler_so_wiring >/dev/null || return 0
+    local rows rc=0
+    rows="$(wva_scaler_plaintext_scaledobjects any)" || rc=$?
+    [ "$rc" = 0 ] && [ -n "$rows" ] || return 0
+    if wva_scaler_wait_wired "$rows" "${WVA_VERIFY_WIRE_WAIT:-60}"; then
+        [ -z "$WVA_SCALER_WIRE_UNKNOWN" ] \
+            || log_info "  Could not read these ScaledObjects or their HPAs, so whether KEDA wired the scaler's metric is not checked: $(printf '%s' "$WVA_SCALER_WIRE_UNKNOWN" | paste -sd' ' -)"
+        return 0
+    fi
+    log_warning "=================================================================="
+    log_warning "KEDA did not wire the scaler's metric onto the HPA of these ScaledObjects. They read Ready, but the HPA scales on the CPU default and WVA's decisions reach nothing:"
+    printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+    log_warning "  KEDA asks for the metric spec only when the spec changes, and a call that failed then (the scaler moving or restarting) is not retried. Change it again:"
+    printf '%s' "$WVA_SCALER_UNWIRED" | while IFS= read -r row; do
+        [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")" >&2
+    done
+    log_warning "=================================================================="
+    return 1
 }
 
 # wva_summary_scaledobjects echoes <namespace>/<name> of every ScaledObject,
