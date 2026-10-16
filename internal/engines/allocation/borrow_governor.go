@@ -231,6 +231,9 @@ type BorrowGovernor struct {
 	// lenderRel is the releases to waiting lenders in flight, one per lender
 	// (borrow_lender_release.go).
 	lenderRel map[LenderKey]*LenderRelease
+	// lenderRestored is the lenderRel entries Restore loaded: a unit of one
+	// whose variant is gone clears (observeLenderReleases).
+	lenderRestored map[LenderKey]bool
 	// report is what the last Releases saw of the waiting lenders it did not
 	// serve (LenderReport).
 	report  LenderReport
@@ -248,7 +251,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
 		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{}, uncountedSince: map[string]time.Time{}, gatedPins: map[string]bool{},
 		rawWaiting: map[string]bool{}, backoff: map[string]BackoffEntry{}, noHole: map[string]NoHoleReplicas{},
-		noHoleRestored: map[string]bool{}, lenderRel: map[LenderKey]*LenderRelease{},
+		noHoleRestored: map[string]bool{}, lenderRel: map[LenderKey]*LenderRelease{}, lenderRestored: map[LenderKey]bool{},
 	}
 }
 
@@ -689,10 +692,10 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 	// timed out.
 	for k := range g.lenderRel {
 		if _, ok := listed[k.flavorKey()]; !ok && !anyStale {
-			delete(g.lenderRel, k)
+			g.dropLenderRelease(k)
 		}
 	}
-	g.observeLenderReleases(chunks, states, c.Now)
+	g.observeLenderReleases(chunks, c.Requests, states, c.Now)
 	g.started = true
 }
 
@@ -803,17 +806,17 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints), uncountedHeldPast(c.Constraints))
 	// The placement-timeout pins first: what they lower is already lowered
 	// when the lender release counts what is left to give (borrowedLeft).
-	g.applyPins(decisions, byVariant)
+	g.applyPins(decisions, byVariant, states)
 	out = append(out, g.lenderReleases(c, states, decisions)...)
 	return out
 }
 
 // applyPins keeps every release in flight in force on decisions.
-func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant map[string]int) {
+func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant map[string]int, states map[string]variantRef) {
 	for k, r := range g.timeoutHeld {
 		lowerTo(decisions, byVariant, k, r.to, "borrow-unplaced")
 	}
-	g.applyLenderPins(decisions, byVariant)
+	g.applyLenderPins(decisions, byVariant, states)
 }
 
 // HoldReleases keeps the releases in flight in force in a cycle that counts
@@ -856,6 +859,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.noHole)
 		clear(g.noHoleRestored)
 		clear(g.lenderRel)
+		clear(g.lenderRestored)
 		g.started = false
 		if len(g.timeoutHeld) == 0 {
 			return
@@ -872,14 +876,14 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 	// it lands or times out.
 	for k, e := range g.lenderRel {
 		if unitsLanded(e.Units, states) || now.Sub(e.ReleasedAt) > g.lenderTimeout() {
-			delete(g.lenderRel, k)
+			g.dropLenderRelease(k)
 		}
 	}
 	byVariant := map[string]int{}
 	for i := range decisions {
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
-	g.applyPins(decisions, byVariant)
+	g.applyPins(decisions, byVariant, states)
 }
 
 // timeoutReleases releases borrowed units unplaced past the placement timeout
@@ -1041,7 +1045,7 @@ func (g *BorrowGovernor) GatedReleases(c BorrowCycle, decisions []domain.Variant
 	for i := range decisions {
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
-	g.applyPins(decisions, byVariant)
+	g.applyPins(decisions, byVariant, states)
 	return out
 }
 

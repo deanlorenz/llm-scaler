@@ -455,11 +455,159 @@ func TestLenderReleaseSizing(t *testing.T) {
 		}
 	})
 
-	t.Run("a model released starts its cooldown in the lender's cohort", func(t *testing.T) {
+	// WP6: the cooldown runs from the landing, when the model gave the GPUs
+	// back, not from the decision; until then the pin holds it.
+	t.Run("a model released starts its cooldown in the lender's cohort when the release lands", func(t *testing.T) {
 		gov := NewBorrowGovernor(settings)
-		cycleOf(gov, t0, relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true}, govModel("x", 6, 8))
-		if !gov.BorrowBlockedIn("b", "x", "c", t0.Add(time.Second)) {
-			t.Error("x may borrow in cohort c right after handing its capacity back")
+		w := relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true}
+		cycleOf(gov, t0, w, govModel("x", 6, 8))
+		if gov.BorrowBlockedIn("b", "x", "c", t0.Add(time.Second)) {
+			t.Error("x's cooldown started before its replica was gone")
+		}
+		landed := t0.Add(6 * time.Minute)
+		w.used = 40
+		w.borrowed = 32 // Kueue has not taken it in yet: the entry stays
+		cycleOf(gov, landed, w, govModel("x", 5, 8))
+		if !gov.BorrowBlockedIn("b", "x", "c", landed.Add(settings.Cooldown-time.Second)) {
+			t.Error("x may borrow in cohort c within a cooldown of its release landing")
+		}
+		if gov.BorrowBlockedIn("b", "x", "other", landed.Add(time.Second)) {
+			t.Error("x's cooldown reaches a cohort the lender is not in")
+		}
+	})
+}
+
+// PR #203 review KC2, KC3, WP3, WP7 and the ledger minors: when a release
+// in flight clears, and what a restored one may pin.
+func TestLenderReleaseLanding(t *testing.T) {
+	t0 := time.Unix(50000, 0)
+	settings := DefaultBorrowSettings()
+	key := LenderKey{Cohort: "c", Lender: "lender", Flavor: "h100", Resource: "nvidia.com/gpu"}
+
+	t.Run("a landing alone clears nothing: a read that lags it releases nothing again", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		w := relWorld{g: 16, used: 48, l: waitingLender(16, 32), release: true}
+		cycleOf(gov, t0, w, govModel("x", 6, 8))
+		landed := t0.Add(3 * time.Minute)
+		w.readAt = landed.Add(-5 * time.Second)
+		cycleOf(gov, landed, w, govModel("x", 4, 8)) // lands
+		w.readAt = landed.Add(15 * time.Second) // fresh, after the landing, Kueue's figure not updated yet
+		if rel, _ := cycleOf(gov, landed.Add(20*time.Second), w, govModel("x", 4, 8)); len(rel) != 0 {
+			t.Fatalf("released %+v on a read that lags the landing", rel)
+		}
+		if gov.lenderRel[key] == nil {
+			t.Fatal("the release cleared before Kueue took it in")
+		}
+		w.used, w.readAt = 32, landed.Add(30*time.Second) // borrowed 32 -> 16
+		gov.Observe(BorrowCycle{Now: landed.Add(35 * time.Second), Constraints: w.constraints(),
+			Requests: []ModelScalingRequest{govModel("x", 4, 8)}})
+		if gov.lenderRel[key] != nil {
+			t.Error("the release is still in flight after Kueue's borrowed figure fell by its 16")
+		}
+	})
+
+	t.Run("a release another borrower took stops releases to that lender while it waits", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		w := relWorld{g: 16, used: 48, l: waitingLender(16, 32), release: true}
+		cycleOf(gov, t0, w, govModel("x", 6, 8))
+		landed := t0.Add(3 * time.Minute)
+		w.borrowed = 32 // x's 16 went, someone else's 16 came: Kueue's figure stands
+		w.readAt = landed
+		cycleOf(gov, landed, w, govModel("x", 4, 8))
+		w.readAt = landed.Add(kueueSchedulingInterval + time.Second)
+		rel, ds := cycleOf(gov, w.readAt, w, govModel("x", 4, 8))
+		if len(rel) != 0 || lowered(ds)["x-v"] != 0 {
+			t.Errorf("released %+v, lowered %v; want nothing more, and no pin left", rel, lowered(ds))
+		}
+		if b, ok := blockedOf(gov, "lender"); !ok || b.Reason != LenderTaken {
+			t.Errorf("report %+v, want the lender reported %s", gov.LenderReport(), LenderTaken)
+		}
+		later := w.readAt.Add(gov.lenderTimeout() + time.Hour)
+		w.readAt = later
+		if rel, _ := cycleOf(gov, later, w, govModel("x", 4, 8)); len(rel) != 0 {
+			t.Errorf("released %+v while the lender still waits for what another borrower took", rel)
+		}
+		stopped := w
+		stopped.l.Waiting = false
+		cycleOf(gov, later.Add(time.Minute), stopped, govModel("x", 4, 8))
+		if gov.lenderRel[key] != nil {
+			t.Error("the taken release outlived the lender's wait")
+		}
+	})
+
+	t.Run("a pair half landed at the timeout keeps its pins until it lands", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		w := relWorld{g: 0, used: 48, l: waitingLender(24, 48), release: true}
+		pd := func(p, d int) ModelScalingRequest {
+			return pdFleet(pdRole{"p", "prefill", p}, pdRole{"d", "decode", d})
+		}
+		if _, ds := cycleOf(gov, t0, w, pd(2, 4)); lowered(ds)["p"] != 1 || lowered(ds)["d"] != 2 {
+			t.Fatalf("lowered %v, want one 1P:2D pair", lowered(ds))
+		}
+		late := t0.Add(gov.lenderTimeout() + time.Minute)
+		w.readAt = late
+		w.borrowed = 48
+		_, ds := cycleOf(gov, late, w, pd(1, 4)) // prefill gone, decodes still scaling down
+		if lowered(ds)["d"] != 2 {
+			t.Errorf("lowered %v past the timeout, want the decodes still pinned at 2: no prefill without its decodes", lowered(ds))
+		}
+		gone := t0.Add(2*gov.lenderTimeout() + time.Minute)
+		w.readAt = gone
+		if _, ds := cycleOf(gov, gone, w, pd(1, 4)); lowered(ds)["d"] != 0 {
+			t.Errorf("lowered %v past twice the timeout, want the pins gone", lowered(ds))
+		}
+	})
+
+	t.Run("a restored release naming a deleted variant clears", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		gov.Restore(BorrowLedger{LenderReleases: []LenderRelease{{LenderKey: key, GPUs: 8, BorrowedBefore: 32, ReleasedAt: t0,
+			Units: []ReleasedUnit{{Namespace: "b", Model: "gone", Variant: "gone-v", To: 0}}}}})
+		rel, ds := cycleOf(gov, t0.Add(time.Minute), relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true}, govModel("x", 6, 8))
+		if len(rel) != 1 || lowered(ds)["x-v"] != 1 {
+			t.Errorf("released %+v, want x handed to the lender: the restored release named a variant that is gone", rel)
+		}
+	})
+
+	t.Run("a restored pin is never below minReplicas", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		gov.Restore(BorrowLedger{LenderReleases: []LenderRelease{{LenderKey: key, GPUs: 32, BorrowedBefore: 32, ReleasedAt: t0,
+			Units: []ReleasedUnit{{Namespace: "b", Model: "x", Variant: "x-v", To: 2}}}}})
+		_, ds := cycleOf(gov, t0.Add(time.Minute), relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true},
+			withMin(govModel("x", 6, 8), 4))
+		if got := ds[0].TargetReplicas; got != 4 {
+			t.Errorf("x's target is %d, want 4: the restored pin of 2 clamped to minReplicas", got)
+		}
+	})
+
+	t.Run("duplicate and out-of-bounds restored entries are dropped and counted", func(t *testing.T) {
+		good := LenderRelease{LenderKey: key, GPUs: 200000, ReleasedAt: t0, Units: []ReleasedUnit{{Namespace: "b", Variant: "x-v", To: 4}}}
+		dup := good
+		huge := good
+		huge.Lender, huge.GPUs = "other", 2*maxLedgerGPUs
+		taken := LenderRelease{LenderKey: LenderKey{Cohort: "c", Lender: "taken", Flavor: "h100", Resource: "nvidia.com/gpu"},
+			GPUs: 8, ReleasedAt: t0, Taken: true}
+		gov := NewBorrowGovernor(settings)
+		if dropped := gov.Restore(BorrowLedger{LenderReleases: []LenderRelease{good, dup, huge, taken}}); dropped != 2 {
+			t.Errorf("dropped %d, want the duplicate and the 2M-GPU entry", dropped)
+		}
+		if got := gov.Ledger().LenderReleases; len(got) != 2 {
+			t.Errorf("kept %+v, want the 200000-GPU entry and the taken one", got)
+		}
+	})
+
+	t.Run("HoldReleases drops a release that landed and keeps one that has not", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		cycleOf(gov, t0, relWorld{g: 16, used: 48, l: waitingLender(16, 32), release: true}, govModel("x", 6, 8))
+		ds := decisionsOf([]ModelScalingRequest{govModel("x", 6, 8)})
+		gov.HoldReleases(t0.Add(time.Minute), []ModelScalingRequest{govModel("x", 6, 8)}, ds)
+		if ds[0].TargetReplicas != 4 {
+			t.Fatalf("x's target is %d in a cycle that counts no borrowing, want the pin at 4", ds[0].TargetReplicas)
+		}
+		ds = decisionsOf([]ModelScalingRequest{govModel("x", 4, 8)})
+		ds[0].TargetReplicas = 6 // the demand floor raises it again
+		gov.HoldReleases(t0.Add(2*time.Minute), []ModelScalingRequest{govModel("x", 4, 8)}, ds)
+		if ds[0].TargetReplicas != 6 || gov.lenderRel[key] != nil {
+			t.Errorf("x's target is %d after the release landed, want the pin gone", ds[0].TargetReplicas)
 		}
 	})
 }
@@ -569,13 +717,14 @@ func TestLenderReleaseInFlight(t *testing.T) {
 		// Landed: x holds 4. The read in this cycle predates the landing.
 		landed := t0.Add(2 * time.Minute)
 		w4 := w
-		w4.used = 48
+		w4.used, w4.borrowed = 48, 48 // Kueue's figure lags the landing
 		w4.readAt = landed.Add(-time.Second)
 		if rel, _ := cycleOf(gov, landed, w4, govModel("x", 4, 8), govModel("y", 2, 8)); len(rel) != 0 {
-			t.Fatalf("released %+v in the cycle it landed, before a fresh read", rel)
+			t.Fatalf("released %+v in the cycle it landed, before Kueue took it in", rel)
 		}
 		// A fresh read after the landing, Kueue's borrowed figure down by the
 		// 16 handed back, the lender waiting for its next Workload: the next.
+		w4.borrowed = 0
 		w4.readAt = landed.Add(20 * time.Second)
 		rel, ds = cycleOf(gov, landed.Add(30*time.Second), w4, govModel("x", 4, 8), govModel("y", 2, 8))
 		if len(rel) != 1 || lowered(ds)["x-v"] != 2 {

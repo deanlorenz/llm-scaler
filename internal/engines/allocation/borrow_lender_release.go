@@ -62,8 +62,10 @@ type ReleasedUnit struct {
 // LenderRelease is a release in flight to one waiting lender: the variants it
 // lowered, the GPUs it hands back, and when. No further release goes to that
 // lender while it exists. It lands once every variant holds no more than its
-// target (LandedAt), and clears on the first fresh read of the lender after
-// that, or once it outlived the release timeout (lenderTimeout).
+// target (LandedAt), which starts each model's cooldown in the lender's
+// cohort. It clears once a fresh read shows the lender no longer waiting, or
+// Kueue's borrowed figure fallen by at least GPUs (Kueue took the GPUs in),
+// or once it outlived the release timeout (lenderTimeout).
 type LenderRelease struct {
 	LenderKey
 	Units []ReleasedUnit `json:"units"`
@@ -74,6 +76,16 @@ type LenderRelease struct {
 	BorrowedBefore int        `json:"borrowedBefore,omitempty"`
 	ReleasedAt     time.Time  `json:"releasedAt"`
 	LandedAt       *time.Time `json:"landedAt,omitempty"`
+	// Taken is set when the release landed, yet a read past Kueue's
+	// admission lag still shows the lender waiting and Kueue's borrowed
+	// figure not fallen by GPUs: another borrower took what was handed back
+	// (LenderTaken). The entry then pins nothing and stays, so nothing more
+	// is released to the lender, until the lender stops waiting.
+	Taken bool `json:"taken,omitempty"`
+	// TimedOut is set when the release outlived lenderTimeout with a P/D
+	// model only partly landed: that model's pins alone are kept, so its
+	// pair is never left half lowered, until it lands or a second timeout.
+	TimedOut bool `json:"timedOut,omitempty"`
 }
 
 // lenderTimeout is how long a lender release may stay in flight before it is
@@ -107,60 +119,165 @@ func (g *BorrowGovernor) modelPinned(req ModelScalingRequest) bool {
 	})
 }
 
+// poolRead is what one cycle's read of a pool says about its lender
+// releases (observeLenderReleases).
+type poolRead struct {
+	at       time.Time
+	fresh    bool
+	borrowed int
+	present  map[string]bool
+	waiting  map[string]bool
+}
+
 // observeLenderReleases advances the lender releases in flight on one
-// cycle's states and reads: a release lands once every variant holds no
-// more than its target; it clears on a fresh read of its lender after that,
-// when its lender is gone from a fresh read of its pool, or once it outlived
-// lenderTimeout. A stale read changes nothing.
-func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, states map[string]variantRef, now time.Time) {
+// cycle's states and reads. A stale read changes nothing about a lender; the
+// states still land a release.
+//
+//   - A release lands once every variant holds no more than its target;
+//     that starts each released model's cooldown in the lender's cohort.
+//   - It clears on a fresh read that shows its lender gone or no longer
+//     waiting, or Kueue's borrowed figure fallen by at least the GPUs it
+//     handed back (KC2): a landing alone does not clear it, so a read that
+//     lags the landing releases nothing a second time.
+//   - Landed, with a fresh read past Kueue's admission lag still showing the
+//     lender waiting and the borrowed figure not fallen, it is Taken
+//     (KC3): another borrower took what it handed back. It pins nothing
+//     more, and nothing more goes to that lender while it waits.
+//   - Past lenderTimeout it goes, except the pins of a P/D model only partly
+//     landed, kept until it lands or a second timeout (WP3).
+//   - A restored entry's unit whose variant is gone while its namespace is
+//     read goes (WP7); an entry left without units goes.
+func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, requests []ModelScalingRequest,
+	states map[string]variantRef, now time.Time) {
 	if len(g.lenderRel) == 0 {
 		return
 	}
-	type read struct {
-		at      time.Time
-		fresh   bool
-		lenders map[string]bool
-	}
-	reads := map[string]read{}
+	reads := map[string]poolRead{}
 	for _, ch := range chunks {
-		r := read{at: ch.ReadAt, fresh: !ch.Stale, lenders: map[string]bool{}}
+		r := poolRead{at: ch.ReadAt, fresh: !ch.Stale, borrowed: ch.Borrowed, present: map[string]bool{}, waiting: map[string]bool{}}
 		for _, l := range ch.Lenders {
-			r.lenders[l.Queue] = true
+			r.present[l.Queue] = true
+			r.waiting[l.Queue] = r.waiting[l.Queue] || l.Waiting
 		}
 		reads[ch.key()] = r
+	}
+	readNS := map[string]bool{}
+	for _, req := range requests {
+		readNS[req.Namespace] = true
 	}
 	for k, e := range g.lenderRel {
 		if e.ReleasedAt.After(now) {
 			e.ReleasedAt = now // a restored stamp from the future
 		}
-		if now.Sub(e.ReleasedAt) > g.lenderTimeout() {
-			delete(g.lenderRel, k)
-			continue
+		if g.lenderRestored[k] {
+			e.Units = slices.DeleteFunc(e.Units, func(u ReleasedUnit) bool {
+				_, ok := states[u.Namespace+"/"+u.Variant]
+				return !ok && readNS[u.Namespace] // deleted: it never lands
+			})
+			if len(e.Units) == 0 && !e.Taken {
+				g.dropLenderRelease(k)
+				continue
+			}
 		}
-		if e.LandedAt == nil && unitsLanded(e.Units, states) {
+		if e.LandedAt == nil && len(e.Units) > 0 && unitsLanded(e.Units, states) {
 			at := now
 			e.LandedAt = &at
+			for _, m := range releasedModels(e.Units, states, requests) {
+				g.markBackoff(m, []string{k.Cohort}, at, true)
+			}
 		}
-		r, ok := reads[k.flavorKey()]
-		if !ok || !r.fresh {
-			continue
+		if r, ok := reads[k.flavorKey()]; ok && r.fresh {
+			switch {
+			case !r.present[k.Lender] || !r.waiting[k.Lender]:
+				g.dropLenderRelease(k) // it waits for nothing now
+				continue
+			case !e.Taken && e.GPUs > 0 && r.borrowed <= e.BorrowedBefore-e.GPUs:
+				g.dropLenderRelease(k) // Kueue took it in
+				continue
+			case !e.Taken && e.LandedAt != nil && r.at.After(e.LandedAt.Add(kueueSchedulingInterval)):
+				e.Taken, e.Units = true, nil
+			}
 		}
-		if !r.lenders[k.Lender] || (e.LandedAt != nil && r.at.After(*e.LandedAt)) {
-			delete(g.lenderRel, k)
+		if e.Taken {
+			continue // stays while the lender waits
+		}
+		age := now.Sub(e.ReleasedAt)
+		switch {
+		case age <= g.lenderTimeout():
+		case e.TimedOut && (age > 2*g.lenderTimeout() || unitsLanded(e.Units, states)):
+			g.dropLenderRelease(k)
+		case !e.TimedOut:
+			if half := halfLanded(e.Units, states); len(half) > 0 {
+				e.Units, e.TimedOut = half, true
+			} else {
+				g.dropLenderRelease(k)
+			}
 		}
 	}
 }
 
+// dropLenderRelease forgets a lender release.
+func (g *BorrowGovernor) dropLenderRelease(k LenderKey) {
+	delete(g.lenderRel, k)
+	delete(g.lenderRestored, k)
+}
+
 // unitsLanded reports whether every released variant is read and holds no
-// more than its target.
+// more than its target (never read below its minReplicas).
 func unitsLanded(units []ReleasedUnit, states map[string]variantRef) bool {
 	for _, u := range units {
 		s, ok := states[u.Namespace+"/"+u.Variant]
-		if !ok || heldOf(s.state) > u.To {
+		if !ok || heldOf(s.state) > max(u.To, minOf(s.state)) {
 			return false
 		}
 	}
 	return true
+}
+
+// halfLanded is the units of every model some of whose released variants
+// landed while others did not: a P/D pair half lowered.
+func halfLanded(units []ReleasedUnit, states map[string]variantRef) []ReleasedUnit {
+	byModel := map[string][]ReleasedUnit{}
+	for _, u := range units {
+		byModel[u.Namespace+"/"+u.Model] = append(byModel[u.Namespace+"/"+u.Model], u)
+	}
+	var out []ReleasedUnit
+	for _, m := range slices.Sorted(maps.Keys(byModel)) {
+		us := byModel[m]
+		landed := 0
+		for _, u := range us {
+			if unitsLanded([]ReleasedUnit{u}, states) {
+				landed++
+			}
+		}
+		if landed > 0 && landed < len(us) {
+			out = append(out, us...)
+		}
+	}
+	return out
+}
+
+// releasedModels is the "namespace/model" keys of a release's units: the
+// unit's own, or, for a unit that names none, the model whose request holds
+// the variant.
+func releasedModels(units []ReleasedUnit, states map[string]variantRef, requests []ModelScalingRequest) []string {
+	byVariant := map[string]string{}
+	for _, req := range requests {
+		for _, st := range req.VariantStates {
+			byVariant[req.Namespace+"/"+st.VariantName] = req.ModelID
+		}
+	}
+	set := map[string]bool{}
+	for _, u := range units {
+		m := u.Model
+		if m == "" {
+			m = byVariant[u.Namespace+"/"+u.Variant]
+		}
+		if m != "" {
+			set[u.Namespace+"/"+m] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(set))
 }
 
 // kueueSchedulingInterval is how long a Workload may wait before its wait
@@ -289,6 +406,9 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 				continue
 			}
 			if e := g.lenderRel[key]; e != nil {
+				if e.Taken {
+					g.report.Blocked = append(g.report.Blocked, LenderReleaseBlock{Lender: key, Reason: LenderTaken, Need: l.PendingGPUs})
+				}
 				continue
 			}
 			if !g.releaseDue(key, l, ch.ReadAt) || kueueReclaimsAll(l, ch) {
@@ -385,7 +505,7 @@ func (g *BorrowGovernor) budgetOf(c BorrowCycle, ch *SharedPoolChunk, cohorts ma
 		b.free += freeing * max(1, d.GPUsPerReplica)
 	}
 	for k, e := range g.lenderRel {
-		if k.flavorKey() == ch.key() && e.LandedAt != nil {
+		if k.flavorKey() == ch.key() && e.LandedAt != nil && !e.Taken {
 			b.free += e.GPUs
 		}
 	}
@@ -475,22 +595,17 @@ func (g *BorrowGovernor) releaseTo(c BorrowCycle, key LenderKey, ch *SharedPoolC
 	}
 	entry := &LenderRelease{LenderKey: key, GPUs: released, BorrowedBefore: ch.Borrowed, ReleasedAt: c.Now}
 	out := make([]BorrowRelease, 0, len(touched))
-	models := map[string]bool{}
 	for _, i := range slices.Sorted(maps.Keys(touched)) {
 		d := &decisions[i]
 		lenderStep(d, key)
 		entry.Units = append(entry.Units, ReleasedUnit{Namespace: d.Namespace, Model: d.ModelID, Variant: d.VariantName, To: d.TargetReplicas})
 		out = append(out, BorrowRelease{Namespace: d.Namespace, ModelID: d.ModelID, Variant: d.VariantName,
 			From: d.CurrentReplicas, To: d.TargetReplicas, Cause: ReleaseLenderWaiting, Lender: key})
-		models[d.Namespace+"/"+d.ModelID] = true
 	}
 	slices.SortFunc(entry.Units, func(a, b ReleasedUnit) int {
 		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.Variant, b.Variant))
 	})
 	g.lenderRel[key] = entry
-	for _, m := range slices.Sorted(maps.Keys(models)) {
-		g.markBackoff(m, []string{key.Cohort}, c.Now, true)
-	}
 	return out, released
 }
 
@@ -709,25 +824,35 @@ func lenderStep(d *domain.VariantDecision, key LenderKey) {
 	})
 }
 
+// maxLedgerGPUs bounds the GPUs, and Kueue's borrowed figure, one persisted
+// lender release may name: no cluster this controller runs on holds a
+// million GPUs, so a larger figure is not one it wrote.
+const maxLedgerGPUs = 1_000_000
+
 // restoreLenderReleases adds the persisted lender releases the governor does
-// not hold. An entry naming no complete lender, no unit, a unit that names no
-// variant or a target out of bounds, no release time, or more GPUs than any
-// controller holds is dropped and counted.
+// not hold. An entry naming no complete lender, no unit (unless Taken, which
+// pins nothing), more units than maxLedgerUnits, a unit that names no variant
+// or a target out of bounds, no release time, GPUs out of bounds, or the same
+// lender as an earlier entry is dropped and counted. What it adds is marked
+// restored: a unit whose variant is gone clears (observeLenderReleases).
 func (g *BorrowGovernor) restoreLenderReleases(entries []LenderRelease, dropped *int) {
 	if len(entries) > maxLedgerItems {
 		*dropped += len(entries) - maxLedgerItems
 		entries = entries[:maxLedgerItems]
 	}
+	seen := map[LenderKey]bool{}
 	for _, e := range entries {
 		k := e.LenderKey
 		if k.Cohort == "" || k.Lender == "" || k.Flavor == "" || k.Resource == "" || e.ReleasedAt.IsZero() ||
-			len(e.Units) == 0 || len(e.Units) > maxLedgerUnits || e.GPUs < 0 || e.GPUs > maxLedgerReplicas ||
+			(len(e.Units) == 0 && !e.Taken) || len(e.Units) > maxLedgerUnits ||
+			e.GPUs < 0 || e.GPUs > maxLedgerGPUs || e.BorrowedBefore < 0 || e.BorrowedBefore > maxLedgerGPUs ||
 			slices.ContainsFunc(e.Units, func(u ReleasedUnit) bool {
 				return u.Namespace == "" || u.Variant == "" || u.To < 0 || u.To > maxLedgerReplicas
-			}) {
+			}) || seen[k] {
 			*dropped++
 			continue
 		}
+		seen[k] = true
 		if _, held := g.lenderRel[k]; held {
 			continue
 		}
@@ -738,6 +863,7 @@ func (g *BorrowGovernor) restoreLenderReleases(entries []LenderRelease, dropped 
 			cp.LandedAt = &at
 		}
 		g.lenderRel[k] = &cp
+		g.lenderRestored[k] = true
 	}
 }
 
@@ -762,11 +888,19 @@ func (g *BorrowGovernor) persistLenderReleases() []LenderRelease {
 	return out
 }
 
-// applyLenderPins keeps every lender release in flight in force on decisions.
-func (g *BorrowGovernor) applyLenderPins(decisions []domain.VariantDecision, byVariant map[string]int) {
+// applyLenderPins keeps every lender release in flight in force on decisions,
+// never below a variant's minReplicas: a restored target below it (a ledger
+// from before minReplicas was raised) is clamped.
+func (g *BorrowGovernor) applyLenderPins(decisions []domain.VariantDecision, byVariant map[string]int,
+	states map[string]variantRef) {
 	for _, e := range g.lenderRel {
 		for _, u := range e.Units {
-			lowerTo(decisions, byVariant, u.Namespace+"/"+u.Variant, u.To, LenderReleasePinReason)
+			k := u.Namespace + "/" + u.Variant
+			to := u.To
+			if s, ok := states[k]; ok {
+				to = max(to, minOf(s.state))
+			}
+			lowerTo(decisions, byVariant, k, to, LenderReleasePinReason)
 		}
 	}
 }
