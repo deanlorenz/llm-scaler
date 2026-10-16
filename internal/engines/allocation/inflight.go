@@ -77,9 +77,48 @@ type inFlightEntry struct {
 	// cannot tell.
 	placed func() (Placed, bool)
 	// partial is the replicas part of whose pods hold a node, as last
-	// counted, and partialAt when that list was first seen as it is.
-	partial   []domain.PartialReplica
-	partialAt time.Time
+	// counted, each placed pod with when it was first seen.
+	partial []partialSeen
+}
+
+// partialSeen is one partial replica as last counted, and per placed pod
+// (PlacedGPUs) when it was first seen placed.
+type partialSeen struct {
+	domain.PartialReplica
+	at []time.Time
+}
+
+// mergePartial is cur, the partial replicas counted now, each placed pod
+// keeping when it was first seen in old -- matched by node and GPUs -- and a
+// pod not in old seen now. A replica one more of whose pods placed thus has
+// only that pod newer than an earlier snapshot.
+func mergePartial(old []partialSeen, cur []domain.PartialReplica, now time.Time) []partialSeen {
+	if len(cur) == 0 {
+		return nil
+	}
+	used := make([]bool, len(old))
+	out := make([]partialSeen, 0, len(cur))
+	for _, c := range cur {
+		s := partialSeen{PartialReplica: c, at: make([]time.Time, len(c.PlacedGPUs))}
+		var gpus []int
+		var at []time.Time
+		for i := range old {
+			if !used[i] && old[i].Node == c.Node {
+				used[i] = true
+				gpus, at = slices.Clone(old[i].PlacedGPUs), slices.Clone(old[i].at)
+				break
+			}
+		}
+		for j, g := range c.PlacedGPUs {
+			s.at[j] = now
+			if k := slices.Index(gpus, g); k >= 0 {
+				s.at[j] = at[k]
+				gpus, at = slices.Delete(gpus, k, k+1), slices.Delete(at, k, k+1)
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Placed is what a variant's pods hold, as an in-flight entry counts them
@@ -322,9 +361,7 @@ func (l *InFlightLedger) settle(now time.Time) {
 		if last := e.base; n > last && (len(e.seen) == 0 || n > e.seen[len(e.seen)-1].n) {
 			e.seen = append(e.seen, placedAt{n: n, at: now})
 		}
-		if !slices.EqualFunc(p.Partial, e.partial, samePartial) {
-			e.partial, e.partialAt = p.Partial, now
-		}
+		e.partial = mergePartial(e.partial, p.Partial, now)
 	}
 }
 
@@ -362,17 +399,12 @@ func (l *InFlightLedger) holdOn(v *NodeView, now time.Time) {
 		for n := placed + 1; n <= e.want; n++ {
 			v.setOwner(inFlightReplicaOwner(k, n))
 			if i := n - placed - 1; i < len(e.partial) {
-				v.holdPartial(r, e.partial[i], e.partialAt.After(v.takenAt))
+				v.holdPartial(r, e.partial[i])
 				continue
 			}
 			v.place(r)
 		}
 	}
-}
-
-// samePartial reports whether two partial replicas count the same.
-func samePartial(a, b domain.PartialReplica) bool {
-	return a.Node == b.Node && slices.Equal(a.PlacedGPUs, b.PlacedGPUs)
 }
 
 // holdPartial holds, for one replica part of whose pods hold a node (p), the
@@ -381,11 +413,11 @@ func samePartial(a, b domain.PartialReplica) bool {
 // group's own domain, so it is not refused as taken), or anywhere r may land
 // when r has no topology key or the node is not in the view. Held whole, the
 // replica found no hole once its leader held one node, and the node its
-// workers need was free to anyone (WN2). unseen is set when the count is
-// newer than the view's snapshot: the placed pods' GPUs are then held on
-// their node too, as far as it has them free. Nothing is held when the rest
-// fit nowhere.
-func (v *NodeView) holdPartial(r replicaFit, p domain.PartialReplica, unseen bool) {
+// workers need was free to anyone (WN2). A placed pod first seen after the
+// view's snapshot was taken is not in it: its GPUs are held on its node too,
+// as far as it has them free. One the snapshot shows is not charged again.
+// Nothing is held when the rest fit nowhere.
+func (v *NodeView) holdPartial(r replicaFit, p partialSeen) {
 	if v == nil || len(r.pods) == 0 {
 		return
 	}
@@ -397,8 +429,11 @@ func (v *NodeView) holdPartial(r replicaFit, p domain.PartialReplica, unseen boo
 	}
 	rest = slices.DeleteFunc(rest, func(g int) bool { return g <= 0 })
 	node, known := v.slotOf(p.Node)
-	if known && unseen {
-		for _, g := range p.PlacedGPUs {
+	if known {
+		for j, g := range p.PlacedGPUs {
+			if !p.at[j].After(v.takenAt) {
+				continue
+			}
 			if f := v.free(node); f > 0 && g > 0 {
 				v.charge(node, min(g, f))
 			}
