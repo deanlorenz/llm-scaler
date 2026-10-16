@@ -316,6 +316,29 @@ var _ = Describe("Reader", func() {
 		Expect(snap.Borrow["team-b"][0].Reason).NotTo(Equal(string(ReasonMultiQueueNamespace)))
 	})
 
+	It("decides a multi-queue namespace per accelerator type (186-2)", func() {
+		// cq-h grants 16 H100, cq-a 16 A100, both to team-a: each type has one
+		// queue, so each keeps that queue's figure, and neither type's
+		// borrowing is withheld as multi-queue-namespace.
+		c := newFakeClient(v,
+			flavor(v, "h100", map[string]interface{}{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"}),
+			flavor(v, "a100", map[string]interface{}{"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}),
+			clusterQueue(v, "cq-h", flavorQuotas("h100", quota("nvidia.com/gpu", "16"))),
+			clusterQueue(v, "cq-a", flavorQuotas("a100", quota("nvidia.com/gpu", "16"))),
+			localQueue(v, "team-a", "h", "cq-h"),
+			localQueue(v, "team-a", "a", "cq-a"),
+		)
+		snap, err := NewReader(c, Options{}).Quotas(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snap.Namespace["team-a"].ByType).To(Equal(map[string]int{
+			"NVIDIA-H100-80GB-HBM3": 16, "NVIDIA-A100-SXM4-80GB": 16,
+		}))
+		Expect(snap.Borrow["team-a"]).To(HaveLen(2))
+		for _, r := range snap.Borrow["team-a"] {
+			Expect(r.Reason).NotTo(Equal(string(ReasonMultiQueueNamespace)), "queue %s", r.Queue)
+		}
+	})
+
 	It("reads the API version the cluster serves", func() {
 		const old = "v1beta1"
 		c := newFakeClient(old,

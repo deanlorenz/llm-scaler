@@ -120,6 +120,79 @@ func TestKueueChargePerNamespaceInSharedQueue(t *testing.T) {
 	}
 }
 
+// multiQueueSnapshot is a read granting ns every row, one per queue, with the
+// namespace figures each type's queues give: one queue's figure, or the
+// smallest of several (the reader's minCaps).
+func multiQueueSnapshot(ns string, rows ...config.ExternalBorrow) config.ExternalQuotas {
+	caps := config.ExternalCaps{ByType: map[string]int{}}
+	for _, r := range rows {
+		if n, seen := caps.ByType[r.Accelerator]; seen {
+			caps.ByType[r.Accelerator] = min(n, r.Nominal)
+			continue
+		}
+		caps.ByType[r.Accelerator] = r.Nominal
+	}
+	return config.ExternalQuotas{
+		Namespace: map[string]config.ExternalCaps{ns: caps}, NamespaceGuaranteed: map[string]config.ExternalCaps{ns: caps},
+		NamespaceWithinNominal: map[string]config.ExternalCaps{ns: caps},
+		Borrow:                 map[string][]config.ExternalBorrow{ns: rows}, ObservedAt: time.Now(),
+	}
+}
+
+// queueRow is one queue's row of nominal n GPUs of acc, reserved r, in no
+// cohort; withheld as multi-queue-namespace when ambiguous.
+func queueRow(queue, acc string, n, r int, ambiguous bool) config.ExternalBorrow {
+	row := config.ExternalBorrow{Queue: queue, Flavor: queue + "-flavor", Resource: "nvidia.com/gpu", Accelerator: acc,
+		Nominal: n, Guaranteed: n, WithinNominal: n, BorrowCap: config.QuotaUnlimited, Reason: string(kueue.ReasonNoCohort),
+		Reserved: r}
+	if ambiguous {
+		row = row.Withheld(string(kueue.ReasonMultiQueueNamespace))
+	}
+	return row
+}
+
+// 186-2: a namespace on several GPU queues is decided per accelerator type.
+//   - cq-h grants 16 H100 and cq-a 16 A100; the namespace holds 8 H100. Each
+//     type has one queue, so its 8 H100 count in cq-h: Kueue has 8 left there.
+//     Before, a namespace on two queues counted its GPUs in none, so cq-h's
+//     charge read 8 and its headroom 16 - 8 - 8 = 0.
+//   - cq-1 and cq-2 both grant 16 H100; the namespace holds 8, in cq-2. Which
+//     queue a replica goes through is not read: min_q(N_q - R_q) + M =
+//     min(16, 8) + 8 = 16, headroom 8. Before, the larger charge (8) came off
+//     the smaller figure and the headroom read 0.
+func TestMultiQueueNamespaceChargedPerType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		snap config.ExternalQuotas
+	}{
+		{"one queue per type", multiQueueSnapshot("serving",
+			queueRow("cq-h", "H100", 16, 8, false), queueRow("cq-a", "A100", 16, 0, false))},
+		{"two queues grant H100", multiQueueSnapshot("serving",
+			queueRow("cq-1", "H100", 16, 0, true), queueRow("cq-2", "H100", 16, 8, true))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+				NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1, "A100": -1}},
+				Kueue:           &config.KueueQuotaSource{Enabled: true}}
+			src := &fakeQuotaSource{}
+			src.push(tc.snap, nil)
+			inv := NewQuotaInventoryWithSource(e, src)
+			inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+			c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil,
+				map[string]map[string]int{"serving": {"H100": 8}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ds := NewGreedyByScoreOptimizer().Optimize(context.Background(),
+				[]ModelScalingRequest{borrowModel("serving", "m", 8, 1, 2, nil)}, []*ResourceConstraints{c})
+			if got := addedGPUs(ds)["m"]; got != 8 {
+				t.Fatalf("ordered %d GPUs, want 8: Kueue has 8 H100 left for the namespace (pool %+v)",
+					got, c.NamespacePools["serving"])
+			}
+		})
+	}
+}
+
 // KU1: the charge goes in before the static entry bounds the figure, so a
 // static cap tighter than what Kueue leaves is not charged a second time.
 func TestKueueChargeBeforeStaticBound(t *testing.T) {

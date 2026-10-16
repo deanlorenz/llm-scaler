@@ -35,11 +35,12 @@ const (
 	// replica could be held back by the co-resource while the GPU figure says
 	// it fits. Decided on the engine side.
 	ReasonCoResourceBound Reason = "co-resource-bound"
-	// ReasonMultiQueueNamespace: the namespace has LocalQueues on more than one
-	// ClusterQueue that declares a GPU resource. Which of them a variant's
-	// replica is admitted through is not read, so its GPUs are not summed over
-	// the queues: the namespace is capped at the smallest single queue's figure
-	// per accelerator type, and borrows nothing.
+	// ReasonMultiQueueNamespace: more than one of the namespace's GPU
+	// ClusterQueues grants this accelerator type (or the row's flavor is
+	// untyped). Which of them a variant's replica is admitted through is not
+	// read, so the namespace is capped at the smallest single queue's figure
+	// of the type, and borrows none of it. A type only one of its queues
+	// grants is not affected.
 	ReasonMultiQueueNamespace Reason = "multi-queue-namespace"
 )
 

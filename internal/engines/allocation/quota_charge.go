@@ -14,6 +14,7 @@ package allocation
 
 import (
 	"maps"
+	"math"
 	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -52,91 +53,226 @@ var _ ManagedUsageSetter = (*QuotaInventory)(nil)
 // Per namespace, ClusterQueue, flavor and GPU resource, the charge is Kueue's
 // Reserved less the GPUs that namespace's managed variants hold in that queue
 // (namespaceCharge): another namespace sharing the queue is charged like any
-// other workload. The managed usage of a
-// namespace granted exactly one GPU queue is counted in that queue; a
-// namespace granted several (multi-queue-namespace) counts in none, which
-// charges its GPUs to every one of them, the cautious side. Managed usage is
-// what the variants' replicas hold, gated pods included, so a replica Kueue
-// has not admitted yet is counted as admitted: until it is, the charge of the
-// queue it waits in is low by at most its GPUs.
+// other workload. Managed usage is what the variants' replicas hold, gated
+// pods included, so a replica Kueue has not admitted yet is counted as
+// admitted: until it is, the charge of the queue it waits in is low by at
+// most its GPUs.
 //
-// A namespace granted several queues is charged, per type, the largest of
-// their charges. ext is returned as is when managed is nil (never set) or
-// carries no rows.
+// Which of a namespace's queues a type's GPUs are counted in is decided per
+// accelerator type. A type one of its queues grants is counted there, and
+// that queue's charge comes off the namespace's figure of the type. A type
+// several of its queues grant (an untyped flavor grants every type) is
+// ambiguous: which queue a replica is admitted through is not read, so the
+// namespace's figure of it is the smallest of the queues' figures, each less
+// what Kueue reserved in it plus what the namespace holds of the type,
+// min_q(N_q - R_q) + M -- the headroom is then what the fullest queue has
+// left. ext is returned as is when managed is nil (never set) or carries no
+// rows.
 func chargeNonManaged(ext config.ExternalQuotas, managed map[string]map[string]int) config.ExternalQuotas {
 	if managed == nil || len(ext.Borrow) == 0 {
 		return ext
 	}
 	out := ext
 	out.Borrow = make(map[string][]config.ExternalBorrow, len(ext.Borrow))
-	byNS := map[string]config.ExternalCaps{}
+	out.Namespace = maps.Clone(ext.Namespace)
+	out.NamespaceGuaranteed = maps.Clone(ext.NamespaceGuaranteed)
+	out.NamespaceWithinNominal = maps.Clone(ext.NamespaceWithinNominal)
 	for ns, rows := range ext.Borrow {
-		charge := namespaceCharge(rows, managed[ns])
-		charged := slices.Clone(rows)
-		perQueue := map[string]config.ExternalCaps{}
-		untyped := map[string]map[string]int{} // per queue, per resource: as clusterQueueCapsAt sums untyped lines
-		for i := range charged {
-			r := &charged[i]
-			r.Charge = charge[r.Queue][r.Flavor+"/"+r.Resource]
-			c := perQueue[r.Queue]
-			if r.Accelerator != "" {
-				c.ByType = addTypedCharge(c.ByType, r.Accelerator, r.Charge)
-			} else {
-				if untyped[r.Queue] == nil {
-					untyped[r.Queue] = map[string]int{}
-				}
-				untyped[r.Queue][r.Resource] += r.Charge
-			}
-			perQueue[r.Queue] = c
-		}
-		for q, byRes := range untyped {
-			c := perQueue[q]
-			for _, n := range byRes {
-				c.Untyped, c.HasUntyped = max(c.Untyped, n), true
-			}
-			perQueue[q] = c
-		}
+		charged := namespaceCharge(rows, managed[ns])
 		out.Borrow[ns] = charged
-		byNS[ns] = largestCharge(slices.Collect(maps.Values(perQueue)))
+		chargeFigure(out.Namespace, ns, charged, func(r config.ExternalBorrow) int { return r.Nominal })
+		chargeFigure(out.NamespaceGuaranteed, ns, charged, func(r config.ExternalBorrow) int { return r.Guaranteed })
+		chargeFigure(out.NamespaceWithinNominal, ns, charged, func(r config.ExternalBorrow) int { return r.WithinNominal })
 	}
-	out.Namespace = chargeCaps(ext.Namespace, byNS)
-	out.NamespaceGuaranteed = chargeCaps(ext.NamespaceGuaranteed, byNS)
-	out.NamespaceWithinNominal = chargeCaps(ext.NamespaceWithinNominal, byNS)
 	return out
 }
 
-// namespaceCharge is, per queue of one namespace's rows and per "flavor/
-// resource", the queue's charge as that namespace sees it: what Kueue
-// reserved in the queue less what this namespace's own variants hold there
-// (held). Another namespace's GPUs in a shared queue are charged like any
-// other workload's: Kueue admits them against the same nominal, so they are
-// not this namespace's to spend.
-func namespaceCharge(rows []config.ExternalBorrow, held map[string]int) map[string]map[string]int {
-	var queues []string
-	rowsOf := map[string][]config.ExternalBorrow{} // per queue, one row per flavor and resource
+// nsQueues is one namespace's rows grouped by ClusterQueue, in the order the
+// rows name the queues, one row per flavor and resource.
+type nsQueues struct {
+	names []string
+	rows  map[string][]config.ExternalBorrow
+}
+
+func queuesOfRows(rows []config.ExternalBorrow) nsQueues {
+	qs := nsQueues{rows: map[string][]config.ExternalBorrow{}}
 	for _, r := range rows {
-		if !slices.Contains(queues, r.Queue) {
-			queues = append(queues, r.Queue)
+		if !slices.Contains(qs.names, r.Queue) {
+			qs.names = append(qs.names, r.Queue)
 		}
-		if !slices.ContainsFunc(rowsOf[r.Queue], func(o config.ExternalBorrow) bool {
+		if !slices.ContainsFunc(qs.rows[r.Queue], func(o config.ExternalBorrow) bool {
 			return o.Flavor == r.Flavor && o.Resource == r.Resource
 		}) {
-			rowsOf[r.Queue] = append(rowsOf[r.Queue], r)
+			qs.rows[r.Queue] = append(qs.rows[r.Queue], r)
 		}
 	}
-	charge := map[string]map[string]int{}
-	for _, q := range queues {
-		var left map[string]int
-		if len(queues) == 1 {
-			left = maps.Clone(held)
+	return qs
+}
+
+// granting is the queues that grant a replica of accType: a row naming that
+// accelerator, or an untyped row, which admits any type.
+func (qs nsQueues) granting(accType string) []string {
+	var out []string
+	for _, q := range qs.names {
+		if slices.ContainsFunc(qs.rows[q], func(r config.ExternalBorrow) bool {
+			return r.Accelerator == "" || accelerator.SameName(r.Accelerator, accType)
+		}) {
+			out = append(out, q)
 		}
+	}
+	return out
+}
+
+// untypedQueues is the queues with an untyped row.
+func (qs nsQueues) untypedQueues() []string {
+	var out []string
+	for _, q := range qs.names {
+		if slices.ContainsFunc(qs.rows[q], func(r config.ExternalBorrow) bool { return r.Accelerator == "" }) {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// namespaceCharge returns one namespace's rows, each carrying the queue's
+// charge as that namespace sees it (Charge): what Kueue reserved in the queue
+// on the row's flavor and resource less what this namespace's own variants
+// hold there (held). Another namespace's GPUs in a shared queue are charged
+// like any other workload's: Kueue admits them against the same nominal, so
+// they are not this namespace's to spend.
+//
+// A type one queue grants is held in that queue. A type several queues grant
+// is held, for the charge, in each of them, and its rows' charge is not
+// clamped at 0: R_q - M may be negative, so that min_q(N_q - Charge_q) is
+// min_q(N_q - R_q) + M (chargeFigure).
+func namespaceCharge(rows []config.ExternalBorrow, held map[string]int) []config.ExternalBorrow {
+	qs := queuesOfRows(rows)
+	ambiguous := map[string]bool{}
+	left := map[string]map[string]int{} // per queue, the managed GPUs counted in it
+	for _, t := range slices.Sorted(maps.Keys(held)) {
+		if held[t] <= 0 {
+			continue
+		}
+		g := qs.granting(t)
+		ambiguous[t] = len(g) > 1
+		for _, q := range g {
+			if left[q] == nil {
+				left[q] = map[string]int{}
+			}
+			left[q][t] += held[t]
+		}
+	}
+	untypedAmbiguous := len(qs.untypedQueues()) > 1
+	charge := map[string]map[string]int{} // per queue, per "flavor/resource"
+	for _, q := range qs.names {
 		charge[q] = map[string]int{}
-		for _, r := range typedFirst(rowsOf[q]) {
-			taken := takeManaged(left, r, rowsOf[q], r.Reserved)
-			charge[q][r.Flavor+"/"+r.Resource] = max(0, r.Reserved-taken)
+		for _, r := range typedFirst(qs.rows[q]) {
+			amb := r.Accelerator == "" && untypedAmbiguous
+			if r.Accelerator != "" {
+				amb = len(qs.granting(r.Accelerator)) > 1
+			}
+			if r.Accelerator == "" {
+				// An untyped line holds the types no typed line of its queue
+				// names: ambiguous when one of them is.
+				for t, n := range left[q] {
+					if n > 0 && ambiguous[t] && !slices.ContainsFunc(qs.rows[q], func(o config.ExternalBorrow) bool {
+						return o.Accelerator != "" && accelerator.SameName(o.Accelerator, t)
+					}) {
+						amb = true
+					}
+				}
+			}
+			limit := r.Reserved
+			if amb {
+				limit = math.MaxInt
+			}
+			c := r.Reserved - takeManaged(left[q], r, qs.rows[q], limit)
+			if !amb {
+				c = max(0, c)
+			}
+			charge[q][r.Flavor+"/"+r.Resource] = c
 		}
 	}
-	return charge
+	out := slices.Clone(rows)
+	for i := range out {
+		out[i].Charge = charge[out[i].Queue][out[i].Flavor+"/"+out[i].Resource]
+	}
+	return out
+}
+
+// chargeFigure charges namespace ns's grant in caps (nominal, guaranteed or
+// within nominal, x reading that figure off a row) with its queues' charges,
+// each figure clamped at 0. Per type: one granting queue's charge comes off
+// the grant; several granting queues (ambiguous) give the smallest of their
+// figures less their charges. A namespace caps does not hold, or a type no
+// queue grants, is left as is.
+func chargeFigure(caps map[string]config.ExternalCaps, ns string, rows []config.ExternalBorrow, x func(config.ExternalBorrow) int) {
+	c, ok := caps[ns]
+	if !ok {
+		return
+	}
+	qs := queuesOfRows(rows)
+	chargeOnly := func(r config.ExternalBorrow) int { return r.Charge }
+	left := func(r config.ExternalBorrow) int { return x(r) - r.Charge }
+	c.ByType = maps.Clone(c.ByType)
+	for t, n := range c.ByType {
+		switch g := qs.granting(t); len(g) {
+		case 0:
+		case 1:
+			c.ByType[t] = max(0, n-lineSum(qs.rows[g[0]], t, chargeOnly))
+		default:
+			least := math.MaxInt
+			for _, q := range g {
+				least = min(least, lineSum(qs.rows[q], t, left))
+			}
+			c.ByType[t] = max(0, least)
+		}
+	}
+	if c.HasUntyped {
+		switch uq := qs.untypedQueues(); len(uq) {
+		case 0:
+		case 1:
+			c.Untyped = max(0, c.Untyped-untypedSum(qs.rows[uq[0]], chargeOnly))
+		default:
+			least := math.MaxInt
+			for _, q := range uq {
+				least = min(least, untypedSum(qs.rows[q], left))
+			}
+			c.Untyped = max(0, least)
+		}
+	}
+	caps[ns] = c
+}
+
+// lineSum is v summed over one queue's lines of accType: its rows naming the
+// accelerator, or, when none does, its untyped rows (untypedSum).
+func lineSum(rows []config.ExternalBorrow, accType string, v func(config.ExternalBorrow) int) int {
+	n, typed := 0, false
+	for _, r := range rows {
+		if r.Accelerator != "" && accelerator.SameName(r.Accelerator, accType) {
+			n += v(r)
+			typed = true
+		}
+	}
+	if typed {
+		return n
+	}
+	return untypedSum(rows, v)
+}
+
+// untypedSum is v over one queue's untyped rows: summed per resource, the
+// largest resource's sum, as clusterQueueCapsAt reads untyped lines.
+func untypedSum(rows []config.ExternalBorrow, v func(config.ExternalBorrow) int) int {
+	byRes := map[string]int{}
+	for _, r := range rows {
+		if r.Accelerator == "" {
+			byRes[r.Resource] += v(r)
+		}
+	}
+	if len(byRes) == 0 {
+		return 0
+	}
+	return slices.Max(slices.Collect(maps.Values(byRes)))
 }
 
 // typedFirst is rows with the ones naming an accelerator first, each group in
@@ -189,65 +325,4 @@ func takeManaged(left map[string]int, r config.ExternalBorrow, rows []config.Ext
 		taken += n
 	}
 	return taken
-}
-
-// addTypedCharge adds n under the key of caps naming the same accelerator as
-// accType, or under accType itself.
-func addTypedCharge(caps map[string]int, accType string, n int) map[string]int {
-	if caps == nil {
-		caps = map[string]int{}
-	}
-	key := accType
-	if k, ok := accelerator.FindKey(caps, accType); ok {
-		key = k
-	}
-	caps[key] += n
-	return caps
-}
-
-// largestCharge is, per type, the largest of the queues' charges, and the
-// largest untyped one.
-func largestCharge(cs []config.ExternalCaps) config.ExternalCaps {
-	var out config.ExternalCaps
-	for _, c := range cs {
-		for t, n := range c.ByType {
-			k, ok := accelerator.FindKey(out.ByType, t)
-			if !ok {
-				out.ByType = addTypedCharge(out.ByType, t, n)
-				continue
-			}
-			out.ByType[k] = max(out.ByType[k], n)
-		}
-		if c.HasUntyped {
-			out.Untyped, out.HasUntyped = max(out.Untyped, c.Untyped), true
-		}
-	}
-	return out
-}
-
-// chargeCaps returns caps with each namespace's grant less its charge, each
-// figure clamped at 0. A namespace with no charge is left as is.
-func chargeCaps(caps map[string]config.ExternalCaps, charge map[string]config.ExternalCaps) map[string]config.ExternalCaps {
-	if caps == nil {
-		return nil
-	}
-	out := make(map[string]config.ExternalCaps, len(caps))
-	for ns, c := range caps {
-		ch, ok := charge[ns]
-		if !ok {
-			out[ns] = c
-			continue
-		}
-		c.ByType = maps.Clone(c.ByType)
-		for t, n := range c.ByType {
-			if k, found := accelerator.FindKey(ch.ByType, t); found {
-				c.ByType[t] = max(0, n-ch.ByType[k])
-			}
-		}
-		if c.HasUntyped && ch.HasUntyped {
-			c.Untyped = max(0, c.Untyped-ch.Untyped)
-		}
-		out[ns] = c
-	}
-	return out
 }

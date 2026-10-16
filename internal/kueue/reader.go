@@ -609,9 +609,12 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					Reserved:       t.Queues[name].Resources[f.ResourceKey].Reserved,
 					CoUnused:       coUnused(t.Queues[name], f.Flavor),
 				}
-				if len(names) > 1 {
-					// KU2: which queue a replica is admitted through is not
-					// read, so none of the queues' borrowing is counted.
+				if ambiguousType(row.Accelerator, names, b, flavorType) {
+					// KU2: more than one of the namespace's queues grants
+					// this type, and which one a replica is admitted
+					// through is not read, so none of their borrowing of
+					// it is counted. A type one queue alone grants
+					// borrows as usual.
 					row = row.Withheld(PrecedenceOf(row.Reason, string(ReasonMultiQueueNamespace)))
 				}
 				rows = append(rows, row)
@@ -620,6 +623,30 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 		out[ns] = rows
 	}
 	return out
+}
+
+// ambiguousType reports whether more than one of a namespace's GPU queues
+// (names) grants a replica of accelerator acc: a flavor naming that
+// accelerator, or an untyped one, which admits any type. An untyped row (acc
+// "") of a namespace on several GPU queues is ambiguous: what it grants is not
+// known per type. A namespace on one queue is never ambiguous.
+func ambiguousType(acc string, names []string, b Borrowing, flavorType map[string]string) bool {
+	if len(names) < 2 {
+		return false
+	}
+	if acc == "" {
+		return true
+	}
+	granting := 0
+	for _, name := range names {
+		if slices.ContainsFunc(b.Queues[name], func(f QueueFigures) bool {
+			t := flavorType[f.Flavor]
+			return t == "" || accelerator.SameName(t, acc)
+		}) {
+			granting++
+		}
+	}
+	return granting > 1
 }
 
 // cohorts lists the Cohort objects. A failed list never reports "no Cohort

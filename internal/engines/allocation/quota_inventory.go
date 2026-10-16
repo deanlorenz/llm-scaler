@@ -808,17 +808,21 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 	if guaranteed < 0 {
 		return b, true
 	}
-	reach, unlimited := 0, false
+	var queues []string
+	queueReach, queueUnlimited := map[string]int{}, map[string]bool{}
 	for _, r := range matched {
+		if !slices.Contains(queues, r.Queue) {
+			queues = append(queues, r.Queue)
+		}
 		// Each queue's reach less its non-managed charge (KU1): what Kueue
 		// has reserved for other workloads is not the variants' to reach.
 		switch {
 		case !r.Counted():
-			reach += max(0, r.Nominal-r.Charge)
+			queueReach[r.Queue] += max(0, r.Nominal-r.Charge)
 		case r.BorrowCap < 0:
-			unlimited = true
+			queueUnlimited[r.Queue] = true
 		default:
-			reach += max(0, r.Nominal+r.BorrowCap-r.Charge)
+			queueReach[r.Queue] += max(0, r.Nominal+r.BorrowCap-r.Charge)
 		}
 		if r.Counted() {
 			b.LentOut += r.LentOut
@@ -827,6 +831,19 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 		}
 		if r.Reason == config.BorrowReasonNominalLentOut && r.Nominal > r.Guaranteed {
 			b.NominalLentOut += r.Nominal - r.Guaranteed
+		}
+	}
+	// One queue's reach; for a type several of the namespace's queues grant
+	// (multi-queue-namespace), the smallest queue's: a replica is admitted
+	// through one of them, which is not read (KU2).
+	reach, unlimited := 0, true
+	for _, name := range queues {
+		switch {
+		case queueUnlimited[name]:
+		case unlimited:
+			reach, unlimited = queueReach[name], false
+		default:
+			reach = min(reach, queueReach[name])
 		}
 	}
 	bound := func(c int) {
