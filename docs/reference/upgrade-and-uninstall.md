@@ -326,6 +326,12 @@ What changes without a config change:
   quota that lists only products. With `{NVIDIA-H100-80GB-HBM3: 8,
   NVIDIA-H100-SXM5-80GB: 24}` it could get 32 H100s, and a wake from zero
   passed on them. It now gets 8, the HBM3 GPUs.
+- **`LimitedBy` names the cluster quotas when only their joint bound holds.**
+  With two quotas that list products of one family in different numbers, a
+  decision held at what fits under both used to name the physical limiter
+  first and the quotas beside it. It now names the quotas. The
+  `wva_decisions_limited_total` metric and the `ResourceConstrained` event
+  carry the new name. No GPU figure changes.
 - **Two utilization-share namespace groups on one GPU type split the free
   cluster GPUs** rather than each counting all of them.
 - **A limiter that cannot be consulted in a cycle is skipped; the others still

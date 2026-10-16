@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
@@ -306,6 +307,7 @@ func bindingProviders(constraints []*ResourceConstraints, namespace, accType str
 			names = append(names, provider)
 		}
 	}
+	joint, jointBinders := jointClusterBound(constraints, accType)
 	for _, c := range constraints {
 		if c == nil {
 			continue
@@ -323,6 +325,10 @@ func bindingProviders(constraints []*ResourceConstraints, namespace, accType str
 		if !isClusterBound(c) {
 			continue
 		}
+		if jointBinders[c] {
+			consider(joint, c.ProviderName)
+			continue
+		}
 		if avail, bounds := clusterBound(c.Pools, accType); bounds && avail != math.MaxInt {
 			consider(avail, c.ProviderName)
 		}
@@ -331,6 +337,60 @@ func bindingProviders(constraints []*ResourceConstraints, namespace, accType str
 		return nil
 	}
 	return names
+}
+
+// jointClusterBound is the bound the cluster bounds put on the family accType
+// together (accelerator.ClusterAllowlistsBound), and the bounds that hold it,
+// when it is tighter than any of them alone: on each product of accType a
+// cluster bound lists, those at the tightest figure for it. Cluster quotas of
+// {NVIDIA-H100-80GB-HBM3: 32, NVIDIA-H100-PCIE-80GB: 8} and
+// {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 32} each allow 40 H100s,
+// and a physical pool of 40 does too, but only 16 fit under both quotas: they
+// bind, the physical pool does not. Nil binders when the joint bound is no
+// tighter than the tightest bound alone.
+func jointClusterBound(constraints []*ResourceConstraints, accType string) (int, map[*ResourceConstraints]bool) {
+	cluster := clusterBounds(constraints)
+	allowlists := make([]map[string]ResourcePool, 0, len(cluster))
+	alone := math.MaxInt
+	for _, c := range cluster {
+		allowlists = append(allowlists, c.Pools)
+		if avail, bounds := clusterBound(c.Pools, accType); bounds {
+			alone = min(alone, avail)
+		}
+	}
+	joint, bounds := clusterBoundAll(allowlists, accType)
+	if !bounds || joint >= alone {
+		return 0, nil
+	}
+	binders := map[*ResourceConstraints]bool{}
+	for _, product := range distinctSpellings(familyProducts(allowlists, accType)) {
+		tightest := math.MaxInt
+		for _, c := range cluster {
+			if avail, bounds := clusterBound(c.Pools, product); bounds {
+				tightest = min(tightest, avail)
+			}
+		}
+		for _, c := range cluster {
+			if avail, bounds := clusterBound(c.Pools, product); bounds && avail == tightest && tightest != math.MaxInt {
+				binders[c] = true
+			}
+		}
+	}
+	return joint, binders
+}
+
+// familyProducts is every product of the family called name that one of the
+// allowlists lists. Unordered, and it may repeat names.
+func familyProducts(allowlists []map[string]ResourcePool, name string) []string {
+	var out []string
+	for _, pools := range allowlists {
+		for key := range pools {
+			if accelerator.IsProductOf(key, name) {
+				out = append(out, key)
+			}
+		}
+	}
+	return out
 }
 
 // passHeadroom is what an optimizer pass left of the budgets: the cluster

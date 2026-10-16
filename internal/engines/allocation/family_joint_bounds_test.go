@@ -9,6 +9,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 )
 
@@ -48,6 +49,55 @@ func jbClusterQuota(t *testing.T, name string, quotas, used map[string]int) *Res
 		t.Fatal(err)
 	}
 	return rc
+}
+
+// jbDecisions runs one pass, with rescale on for every scope when rescale is
+// set.
+func jbDecisions(constraints []*ResourceConstraints, rescale bool, reqs ...ModelScalingRequest) map[string]domain.VariantDecision {
+	o := NewGreedyByScoreOptimizer()
+	if rescale {
+		o.Rescale = RescaleFlags{Cluster: true, ByNamespace: map[string]bool{"x": true}}
+	}
+	out := map[string]domain.VariantDecision{}
+	for _, d := range o.Optimize(context.Background(), reqs, constraints) {
+		out[d.VariantName] = d
+	}
+	return out
+}
+
+// Two cluster quotas that swap their products: cq0 allows 32 HBM3 and 8 PCIe,
+// cq1 8 HBM3 and 32 PCIe. Each alone allows 40 H100s, as the 40 installed do,
+// but only 8 of each product fit under both: 16. The quotas together held the
+// decision back, and LimitedBy names them, not the physical pool.
+func TestJointClusterQuotaBoundNamesTheQuotas(t *testing.T) {
+	build := func(installed map[string]int) []*ResourceConstraints {
+		return []*ResourceConstraints{
+			jbPhysical(t, installed),
+			jbClusterQuota(t, "cq0", map[string]int{famHBM3: 32, famPCIe: 8}, nil),
+			jbClusterQuota(t, "cq1", map[string]int{famHBM3: 8, famPCIe: 32}, nil),
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		installed map[string]int
+		by        string
+		also      []string
+	}{
+		{"40 installed: the quotas bind together", map[string]int{famHBM3: 24, famPCIe: 16}, "cq0", []string{"cq1"}},
+		{"16 installed: the physical pool binds alone", map[string]int{famHBM3: 8, famPCIe: 8}, PhysicalLimiterName, nil},
+	} {
+		c := build(tc.installed)
+		if got := bindingProviders(c, "x", "H100"); !slices.Equal(got, append([]string{tc.by}, tc.also...)) {
+			t.Errorf("%s: binding providers = %v, want %s then %v", tc.name, got, tc.by, tc.also)
+		}
+		for _, rescale := range []bool{false, true} {
+			d := jbDecisions(c, rescale, famWanting("x", "bare", "H100", 6, 8))["bare-v"]
+			if d.TargetReplicas != 2 || !d.WasLimited || d.LimitedBy != tc.by || !slices.Equal(d.LimitedByAlso, tc.also) {
+				t.Errorf("%s, rescale=%v: target %d, limited %v by %q also %v; want 2, limited by %q also %v",
+					tc.name, rescale, d.TargetReplicas, d.WasLimited, d.LimitedBy, d.LimitedByAlso, tc.by, tc.also)
+			}
+		}
+	}
 }
 
 // A namespace that lists the family and denies one of its products may use
