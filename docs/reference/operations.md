@@ -266,8 +266,11 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `limiterWarnings` | what is wrong with the limiters in force though they still apply, joined by `; `: a quota entry with a [reserved name](quota-limiter.md#validation), which a later release rejects. Empty when none |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
+| `utilizationShareNote` | present while the settings in force differ from the block as written. Today: a namespace-scoped controller with no quota on its namespace ignores `physicalGroups`. The mode is not `invalid` |
 | `leader` | the pod that wrote it |
 | `controllerInstance` | the `controller_instance` metrics label, when set |
+| `clusterQuotaPerController` | present while a namespace-scoped controller enforces a `scope: cluster` quota: it is charged only its own variants' GPUs, so the quota caps this controller, not the cluster. With one controller on the cluster that is the same cap |
+| `podListDenied` | present while a namespace-scoped controller under `gpu-inventory` cannot list Pods in every namespace (`wva_pod_access_denied`). If other namespaces run GPU pods on the same nodes, their GPUs read as free; if none do, nothing is miscounted. LeaderWorkerSet group detection reads the same Pod list, so while this is present it sees only this namespace's Pods too |
 | `formatVersion` | `1`; bumped only for an incompatible change to these keys |
 
 Only the leader writes it, and only when a value changes. A failed write is

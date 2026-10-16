@@ -1052,6 +1052,50 @@ wva_append_install_kueue_reader_scope_patch() {
     wva_append_kueue_reader_scope_patch "$kustomization" "$ns" $WVA_KUEUE_READER_NAMES
 }
 
+# wva_kueue_reader_unneeded reports whether this install's controller needs no
+# Kueue reader: it declares no limiter (WVA_LIMITER=none), and no policy it
+# reads configures a Kueue quota source (wva_kueue_source_configured: a
+# cluster policy it resolves to may). WVA_LIMITER unset keeps the live
+# limiter, which may read Kueue, and a policy that cannot be read may too:
+# either keeps the reader.
+wva_kueue_reader_unneeded() {
+    [ -n "${WVA_LIMITER:-}" ] || return 1
+    [ "$(limiter_types_of "$WVA_LIMITER" 2>/dev/null)" = none ] || return 1
+    declare -F wva_kueue_source_configured >/dev/null || return 1
+    [ -z "$(wva_kueue_source_configured 2>/dev/null)" ]
+}
+
+# wva_append_kueue_reader_delete drops the namespace-scoped Kueue reader --
+# ClusterRole wva-kueue-reader-role-<suffix> and its binding -- from the render
+# of kustomization $1 for install namespace $2. Must come after
+# wva_append_crb_name_patches: it targets the renamed objects.
+#
+# Kustomize cannot make a component conditional, so the overlay always lists
+# components/kueue-reader and an install with no limiter dropped it here. It
+# only stops CREATING the read: one an earlier install made stays, and
+# `make enable-physical-limiter` grants it again when a Kueue quota is
+# published (pl_grant_kueue_read).
+wva_append_kueue_reader_delete() {
+    local kustomization="$1" suffix kind name
+    suffix="$(wva_ns_suffix "$2")"
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    for kind in ClusterRole ClusterRoleBinding; do
+        name="wva-kueue-reader-role-${suffix}"
+        [ "$kind" = ClusterRole ] || name="wva-kueue-reader-rolebinding-${suffix}"
+        cat >> "$kustomization" <<PATCH
+- patch: |-
+    \$patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ${kind}
+    metadata:
+      name: ${name}
+  target:
+    kind: ${kind}
+    name: ${name}
+PATCH
+    done
+}
+
 # wva_managed_policy_label echoes the wva.llmd.ai/policy-namespace label on
 # namespace $1, or nothing when it is absent or cannot be read. Only ever ADDS
 # a name to the grant below, so an unreadable label costs the controller the
@@ -1265,6 +1309,10 @@ EOF
         wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
         wva_append_policy_namespace_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" \
             "${WVA_WATCH_NS:-$WVA_NS}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$WVA_NS}")"
+        if wva_kueue_reader_unneeded; then
+            log_info "WVA_LIMITER=none and no policy this controller reads uses Kueue: the Kueue reader (ClusterRole wva-kueue-reader-role-$(wva_ns_suffix "$WVA_NS")) is not created"
+            wva_append_kueue_reader_delete "$tmp_overlay/kustomization.yaml" "$WVA_NS"
+        fi
     fi
 
     # Grant the Prometheus that will actually scrape the controller, not the one

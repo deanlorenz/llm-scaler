@@ -3,6 +3,7 @@ package gpunodes
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,6 +265,47 @@ func TestResetPodAccessDeniedLogsTheNextDenialAgain(t *testing.T) {
 	}
 	if got := podAccessDenied(t, registry); got != 1 {
 		t.Errorf("%s = %v after another denied list, want 1", constants.WVAPodAccessDenied, got)
+	}
+}
+
+// TestPodAccessDeniedReachesTheHook: the controller publishes a denied
+// cluster-wide Pod list in its status ConfigMap, beside the gauge. The hook is
+// told every value the gauge takes: 1 while a physical limiter reads the
+// undercount, 0 once the list succeeds or the reset clears it.
+func TestPodAccessDeniedReachesTheHook(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	if err := metrics.InitMetrics(registry); err != nil {
+		t.Fatal(err)
+	}
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	node := gpuNode()
+	node.Status.Allocatable = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}
+	cached := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	forbidden := true
+	reader := fake.NewClientBuilder().WithScheme(s).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if forbidden {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", nil)
+			}
+			return c.List(ctx, list, opts...)
+		}}).Build()
+	var told []bool
+	d := NewK8sWithGpuOperator(cached).WithPodReader(reader).
+		WithPodAccessDeniedHook(func(denied bool) { told = append(told, denied) })
+
+	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	forbidden = false
+	if _, _, err := d.DiscoverUsageByNamespace(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d.ResetPodAccessDenied()
+	if want := []bool{true, false, false}; !slices.Equal(told, want) {
+		t.Errorf("hook told %v, want %v (denied, listed, reset)", told, want)
 	}
 }
 

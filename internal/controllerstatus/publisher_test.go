@@ -16,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
@@ -241,6 +243,92 @@ func TestRecordPolicy(t *testing.T) {
 	p.RecordPolicy(nil, "policy-ns", "wva-scaling-policy-config", "45", nil, nil)
 	if got := p.Data()[KeyPolicyIgnored]; got != "" {
 		t.Errorf("policyIgnored after a clean load = %q, want empty", got)
+	}
+}
+
+// A namespace-scoped controller is charged only what its own variants hold, so
+// a scope: cluster quota caps that controller, not the cluster. The status says
+// so while it applies, and drops the key when it no longer does.
+func TestClusterQuotaOnANamespaceScopedControllerIsPublished(t *testing.T) {
+	const key = "clusterQuotaPerController" // spelled out: the data contract
+	clusterQuota := &config.ScalingPolicy{Limiters: []config.QuotaLimiterConfig{{
+		Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8},
+	}}}
+	namespaceQuota := &config.ScalingPolicy{Limiters: []config.QuotaLimiterConfig{{
+		Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"team-a": {"H100": 8}},
+	}}}
+
+	cfg := config.NewTestConfig()
+	config.SetWatchNamespaceForTest(cfg, "team-a")
+	p, _ := newTestPublisher(t, &writes{})
+	cfg.UpdateClusterPolicy(clusterQuota)
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "1", nil)
+	if got := p.Data()[key]; !strings.Contains(got, "caps this controller, not the cluster") ||
+		!strings.Contains(got, "If it is the only controller reading this policy, that is the same cap") {
+		t.Errorf("%s = %q on a namespace-scoped controller under a cluster quota, want the warning", key, got)
+	}
+
+	cfg.UpdateClusterPolicy(namespaceQuota)
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "2", nil)
+	if got, found := p.Data()[key]; found {
+		t.Errorf("%s = %q under a namespace quota, want it absent", key, got)
+	}
+
+	// A cluster-scoped controller's cluster quota caps the cluster.
+	cluster := config.NewTestConfig()
+	cluster.UpdateClusterPolicy(clusterQuota)
+	q, _ := newTestPublisher(t, &writes{})
+	q.RecordClusterPolicy(cluster, "wva-system", "wva-scaling-policy-config", "1", nil)
+	if got, found := q.Data()[key]; found {
+		t.Errorf("%s = %q on a cluster-scoped controller, want it absent", key, got)
+	}
+}
+
+// A namespace-scoped controller under the inventory alone ignores a
+// physicalGroups from a shared policy: the optimizer keeps running (the mode is
+// not invalid) and the note says why. A quota on the namespace drops the note.
+func TestIgnoredPhysicalGroupsIsANoteNotAnInvalidMode(t *testing.T) {
+	const key = "utilizationShareNote" // spelled out: the data contract
+	policy := func(limiters string) *config.ScalingPolicy {
+		var p config.ScalingPolicy
+		doc := limiters + "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    physicalGroups: true\n"
+		if err := yaml.Unmarshal([]byte(doc), &p); err != nil {
+			t.Fatal(err)
+		}
+		return &p
+	}
+	cfg := config.NewTestConfig()
+	config.SetWatchNamespaceForTest(cfg, "team-a")
+	p, _ := newTestPublisher(t, &writes{})
+	cfg.UpdateClusterPolicy(policy("limiters:\n  - type: gpu-inventory\n"))
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "1", nil)
+	d := p.Data()
+	if d[KeyUtilizationShare] != constants.UtilizationShareModeActive || d[KeyUtilizationShareError] != "" {
+		t.Errorf("utilizationShare = %q, error = %q; want active and no error", d[KeyUtilizationShare], d[KeyUtilizationShareError])
+	}
+	if !strings.Contains(d[key], "physicalGroups is ignored") {
+		t.Errorf("%s = %q under gpu-inventory alone, want the note", key, d[key])
+	}
+
+	cfg.UpdateClusterPolicy(policy("limiters:\n  - type: quota\n    name: tenants\n    scope: namespace\n" +
+		"    namespaceQuotas:\n      team-a:\n        H100: 8\n  - type: gpu-inventory\n"))
+	p.RecordClusterPolicy(cfg, "wva-policy", "wva-scaling-policy-config", "2", nil)
+	if got, found := p.Data()[key]; found {
+		t.Errorf("%s = %q under a namespace quota, want it absent", key, got)
+	}
+}
+
+func TestPodListDeniedIsPublishedWhileItHolds(t *testing.T) {
+	p, _ := newTestPublisher(t, &writes{})
+	p.SetPodListDenied(true)
+	if got := p.Data()["podListDenied"]; !strings.Contains(got, "cannot list Pods cluster-wide") ||
+		!strings.Contains(got, "if none do, nothing is miscounted") {
+		t.Errorf("podListDenied = %q while denied, want the warning", got)
+	}
+	p.SetPodListDenied(false)
+	if got, found := p.Data()["podListDenied"]; found {
+		t.Errorf("podListDenied = %q once listed, want it absent", got)
 	}
 }
 

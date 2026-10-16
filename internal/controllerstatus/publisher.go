@@ -64,6 +64,22 @@
 //	limiterBudgets         the GPU budget the steady-state engine used in its
 //	                       last cycle, JSON (LimiterBudgets); absent until a
 //	                       cycle with a limiter. See KeyLimiterBudgets.
+//	clusterQuotaPerController
+//	                       present while a namespace-scoped controller
+//	                       enforces a scope: cluster quota: the warning
+//	                       (config.ClusterQuotaPerControllerMessage). That
+//	                       quota caps this controller only; absent otherwise.
+//	podListDenied          present while the GPU usage walk of a
+//	                       namespace-scoped controller is refused a
+//	                       cluster-wide Pod list and a physical limiter reads
+//	                       it: GPUs other namespaces hold on the same nodes
+//	                       count as free. Mirrors wva_pod_access_denied;
+//	                       absent otherwise.
+//	utilizationShareNote   present while the optimizer's settings in force
+//	                       differ from its block as written: a namespace-scoped
+//	                       controller with no quota on its namespace ignores
+//	                       physicalGroups and says so here. The mode is not
+//	                       invalid; absent otherwise.
 //
 // limiter, limiterWarnings and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -132,7 +148,26 @@ const (
 	// a model's cooldown. The steady-state engine writes it and reads it back
 	// on start.
 	KeyBorrowReleaseLedger = "borrowReleaseLedger"
+	// KeyClusterQuotaPerController carries the warning that a scope: cluster
+	// quota caps this namespace-scoped controller only. Derived from the
+	// applied configuration; absent when it does not apply.
+	KeyClusterQuotaPerController = "clusterQuotaPerController"
+	// KeyPodListDenied carries the warning that the GPU usage walk is refused
+	// a cluster-wide Pod list while a physical limiter reads it. Absent when
+	// it is not.
+	KeyPodListDenied = "podListDenied"
+	// KeyUtilizationShareNote carries why the optimizer's settings in force
+	// differ from its block as written (config.UtilizationShare.Note), for
+	// example a physicalGroups a namespace-scoped controller ignores. Absent
+	// when they do not.
+	KeyUtilizationShareNote = "utilizationShareNote"
 )
+
+// PodListDeniedMessage is the KeyPodListDenied value.
+const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so GPU usage counts only its own " +
+	"namespace (wva_pod_access_denied). If other namespaces run GPU pods on the same nodes, their GPUs read as " +
+	"free to the physical limiter; if none do, nothing is miscounted. Grant list on pods cluster-wide, or bound " +
+	"this controller with a quota limiter alone."
 
 // persistedKeys are the keys a new term carries over from the ConfigMap it
 // finds, rather than overwriting with this process's empty start: state, not
@@ -545,6 +580,45 @@ func observe(d map[string]string, cfg *config.Config) {
 	mode, err := cfg.UtilizationShareMode()
 	d[KeyUtilizationShare] = mode
 	d[KeyUtilizationShareError] = errText(err)
+	setOrDelete(d, KeyUtilizationShareNote, cfg.UtilizationShareNote())
+	if cfg.ClusterQuotaPerController() {
+		d[KeyClusterQuotaPerController] = config.ClusterQuotaPerControllerMessage
+	} else {
+		delete(d, KeyClusterQuotaPerController)
+	}
+}
+
+// SetPodListDenied records whether the GPU usage walk is refused a
+// cluster-wide Pod list while a physical limiter reads it.
+func (p *Publisher) SetPodListDenied(denied bool) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) {
+		if denied {
+			d[KeyPodListDenied] = PodListDeniedMessage
+		} else {
+			delete(d, KeyPodListDenied)
+		}
+	})
+}
+
+// SetUtilizationShareNote records why the optimizer's settings in force differ
+// from its block as written; "" removes the key.
+func (p *Publisher) SetUtilizationShareNote(note string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { setOrDelete(d, KeyUtilizationShareNote, note) })
+}
+
+// setOrDelete sets key to value, or removes it when value is empty.
+func setOrDelete(d map[string]string, key, value string) {
+	if value == "" {
+		delete(d, key)
+		return
+	}
+	d[key] = value
 }
 
 func errText(err error) string {

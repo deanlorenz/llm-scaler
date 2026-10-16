@@ -2,11 +2,13 @@ package allocation
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // A namespace-scoped quota that excludes a namespace bounds that namespace not
@@ -194,6 +196,53 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}
 	})
 
+	// A tenant that forms no share group still grows into its own free quota
+	// through today's optimizer. Its claim was made only by a group formed
+	// this cycle, so a tenant disabled for sharing, or one whose model spans
+	// two accelerator types, left its headroom to the cluster group's idle
+	// fill: ns-x was budgeted 2+8 instead of 2+4.
+	It("protects the headroom of a tenant that forms no group", func() {
+		clusterQuota := config.QuotaLimiterConfig{
+			Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+			ClusterQuotas: map[string]int{"A100": 20},
+		}
+		cons := constraintsOf(map[string]map[string]int{
+			"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 2},
+		}, namespaceQuota, clusterQuota)
+		// team-b's model spans A100 and H100: a fixed consumer, in no group.
+		mixedEntry := withSatEntry(&satEntryFixture{
+			ModelID: "mb", Namespace: "team-b", TotalDemand: 1000,
+			VariantCapacities: []vcFixture{
+				{VariantName: "mb-v", AcceleratorName: "A100", Cost: 5, ReplicaCount: 2, PerReplicaCapacity: 1000},
+				{VariantName: "mb-h100", AcceleratorName: "H100", Cost: 5, ReplicaCount: 0, PerReplicaCapacity: 1000},
+			},
+		}, ModelScalingRequest{
+			ModelID: "mb", Namespace: "team-b",
+			VariantStates: []domain.VariantReplicaState{
+				{VariantName: "mb-v", CurrentReplicas: 2, GPUsPerReplica: 1, MinReplicas: ptrInt(1)},
+				{VariantName: "mb-h100", CurrentReplicas: 0, GPUsPerReplica: 1, MinReplicas: ptrInt(0)},
+			},
+		})
+		mixedEntry.CompositeSignal.ScaleUpThreshold = 0.8
+		for name, c := range map[string]struct {
+			reqs []ModelScalingRequest
+			opts ShareGroupOptions
+		}{
+			"team-b disabled for sharing": {fleet(2), ShareGroupOptions{ClusterIsQuota: true,
+				NamespaceEnabled: func(ns string) bool { return !strings.HasPrefix(ns, "team-b") }}},
+			"team-b on mixed accelerators": {[]ModelScalingRequest{
+				shareReq("ma", "team-a", 1000, 2), mixedEntry, shareReq("mx", "ns-x", 100, 2)},
+				ShareGroupOptions{ClusterIsQuota: true}},
+		} {
+			groups, _ := build(c.reqs, cons, c.opts)
+			Expect(groups).NotTo(HaveKey("team-b"), name)
+			Expect(groups).To(HaveKey(""), name)
+			// The cluster quota's free 20-6 = 14, less team-a's 6 and team-b's 4.
+			Expect(groups[""].Budget).To(Equal(2+4), name)
+			Expect(groups[""].ClusterFree).To(Equal(4), name)
+		}
+	})
+
 	// Every group's idle fill is charged to the cluster quota, so the groups
 	// together must not plan more than it has free. a6d6e1828 gave the cluster
 	// group the cluster quota's whole free count beside the tenants' own:
@@ -285,6 +334,69 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			Expect(idle).To(Equal(map[string]int{"": c.clusterIdle, "team-a": c.teamIdle}),
 				"team-a limit %d", c.teamALimit)
 		}
+	})
+
+	// A tenant that forms no group claims too (MT6), and its claim is rounded
+	// to whole replicas the same way: of its own models' replica size, else of
+	// the cluster group's. Unrounded, team-a's 4 free GPUs -- no 8-GPU replica
+	// -- left the cluster group 4 of its one free node, which it cannot place.
+	It("rounds the claim of a tenant that forms no group to whole replicas", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 12, Used: 8}},
+			}},
+		}
+		for name, c := range map[string]struct {
+			reqs []ModelScalingRequest
+			opts ShareGroupOptions
+		}{
+			"team-a disabled for sharing": {[]ModelScalingRequest{node("ma", "team-a", 1), node("mx", "ns-x", 1)},
+				ShareGroupOptions{ClusterIsQuota: true, NamespaceEnabled: func(ns string) bool { return ns != "team-a" }}},
+			"team-a with no model": {[]ModelScalingRequest{node("mx", "ns-x", 1)}, ShareGroupOptions{ClusterIsQuota: true}},
+		} {
+			groups, _ := build(c.reqs, cons, c.opts)
+			Expect(groups).NotTo(HaveKey("team-a"), name)
+			Expect(groups).To(HaveKey(""), name)
+			Expect(groups[""].ClusterFree).To(Equal(8), name)
+		}
+	})
+
+	// A claim rounded down to whole replicas leaves part of the namespace's
+	// free quota unclaimed. A warm pool there can grow into that remainder,
+	// so the cluster group carves it: team-a has 12 free, claims one 8-GPU
+	// replica, and its pool wanting 8 may still take the other 4.
+	It("carves the part of a claimed namespace's pool that rounding left unclaimed", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 16}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 20, Used: 8}},
+			}},
+		}
+		reqs := []ModelScalingRequest{node("ma", "team-a", 1), node("mx", "ns-x", 1)}
+		groups, _ := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true,
+			PoolUnheld: map[string]map[string]int{"team-a": {"A100": 8}}})
+		Expect(groups).To(HaveKey(""))
+		Expect(groups[""].PoolCarve).To(Equal(4))
+		Expect(groups["team-a"].PoolCarve).To(Equal(8))
+	})
+
+	// config.quotaBoundsNamespaceLocked counts a namespace a scope: namespace
+	// entry does not list (and no `default` covers) as bounded, so a
+	// namespace-scoped controller there gets no physicalGroups note. That holds
+	// only while such a namespace is in the quota's pools with nothing in
+	// them, and no physical group plans it.
+	It("plans no physical group for a namespace the namespace quota does not list", func() {
+		listed := config.QuotaLimiterConfig{
+			Name: "tenants", Type: "quota", Scope: config.QuotaScopeNamespace,
+			NamespaceQuotas: map[string]map[string]int{"team-a": {"A100": 8}},
+		}
+		cons := constraintsOf(map[string]map[string]int{"team-a": {"A100": 2}, "team-z": {"A100": 2}}, listed)
+		Expect(cons[0].NamespacePools).To(HaveKeyWithValue("team-z", BeEmpty()))
+		inventory := &ResourceConstraints{Pools: map[string]ResourcePool{"A100": {Limit: 32, Used: 4}}}
+		groups, _ := build([]ModelScalingRequest{shareReq("mz", "team-z", 4000, 2)},
+			append(cons, inventory), ShareGroupOptions{PhysicalGroups: true})
+		Expect(groups).To(BeEmpty())
 	})
 
 	It("reports nothing unshared without a namespace quota", func() {

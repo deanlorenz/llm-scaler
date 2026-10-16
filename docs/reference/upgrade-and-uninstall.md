@@ -392,6 +392,17 @@ Installer:
 
 #### Other changes that need an action
 
+- **A namespace-scoped controller ignores `utilizationShare.physicalGroups`.**
+  Only a cluster-scoped controller plans physical groups. Under a quota the
+  setting changed nothing before and changes nothing now. Under `gpu-inventory`
+  alone, a namespace-scoped controller now plans no group: it logs a warning
+  and sets `utilizationShareNote` in `wva-controller-status`. The optimizer
+  mode is unchanged. Check every tenant controller that reads a shared policy:
+  ```bash
+  kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data.utilizationShareNote}{"\n"}'
+  ```
+  If it prints a note, give the namespace a quota, or remove `physicalGroups`
+  from the shared policy.
 - **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
   now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
   `wva-controller-manager-token` is deleted. Only the admin phase does both.

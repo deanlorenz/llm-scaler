@@ -95,6 +95,14 @@ case "$1" in
         as="$*"; as="${as##*system:serviceaccount:}"; as="${as%%:*}"
         case " ${KCANI_WATCH_NS:-} " in *" $as "*) echo yes; exit 0 ;; esac
         echo no; exit 1 ;;
+      # KCANI_LIST_PODS: namespaces whose controller account may list Pods in
+      # every namespace; KCANI_LIST_PODS=unknown answers nothing (no
+      # impersonation). Every other account may not.
+      "auth can-i list pods --all-namespaces --as system:serviceaccount:"*)
+        as="$*"; as="${as##*system:serviceaccount:}"; as="${as%%:*}"
+        [ "${KCANI_LIST_PODS:-}" != unknown ] || exit 1
+        case " ${KCANI_LIST_PODS:-} " in *" $as "*) echo yes; exit 0 ;; esac
+        echo no; exit 1 ;;
     esac
     exit 0 ;;
   create)
@@ -146,6 +154,28 @@ case "$1" in
         [ -z "${KCR_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io is forbidden' >&2; exit 1; }
         if [ -f "$KDEPLOYS/clusterrole-$name.yaml" ]; then cat "$KDEPLOYS/clusterrole-$name.yaml"; exit 0; fi
         echo "Error from server (NotFound): clusterroles.rbac.authorization.k8s.io \"$name\" not found" >&2; exit 1 ;;
+      # The ClusterQueue names of <ns>'s LocalQueues, one per line, from
+      # $KDEPLOYS/lq-<ns>; the cohort of ClusterQueue <name> from
+      # $KDEPLOYS/cq-<name>. KLQ_FORBIDDEN makes every LocalQueue read Forbidden.
+      localqueues.kueue.x-k8s.io)
+        [ -z "${KLQ_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): localqueues.kueue.x-k8s.io is forbidden' >&2; exit 1; }
+        [ ! -f "$KDEPLOYS/lq-$ns" ] || cat "$KDEPLOYS/lq-$ns" ;;
+      clusterqueues.kueue.x-k8s.io)
+        [ ! -f "$KDEPLOYS/cq-$name" ] || cat "$KDEPLOYS/cq-$name" ;;
+      # The parent of Cohort <name>, from $KDEPLOYS/cohort-<name>; NotFound
+      # without that file.
+      cohorts.kueue.x-k8s.io)
+        if [ -f "$KDEPLOYS/cohort-$name" ]; then cat "$KDEPLOYS/cohort-$name"; else
+          echo "Error from server (NotFound): cohorts.kueue.x-k8s.io \"$name\" not found" >&2; exit 1; fi ;;
+      # One live ClusterRoleBinding: listed in KCRB_LIVE, else NotFound.
+      clusterrolebinding)
+        case " ${KCRB_LIVE:-} " in
+          *" $name "*) echo "clusterrolebinding.rbac.authorization.k8s.io/$name" ;;
+          *) echo "Error from server (NotFound): clusterrolebindings.rbac.authorization.k8s.io \"$name\" not found" >&2; exit 1 ;;
+        esac ;;
+      # The live ClusterRoleBindings: $KDEPLOYS/crbs.json, else none.
+      clusterrolebindings)
+        if [ -f "$KDEPLOYS/crbs.json" ]; then cat "$KDEPLOYS/crbs.json"; else echo '{"items":[]}'; fi ;;
       *) : ;;
     esac ;;
   *) : ;;
@@ -983,8 +1013,134 @@ else
     fail "pl_policy_resolution for an unlabelled self-managed controller gave '$got', want 'wva-policy wellknown'"
 fi
 
+# ---------------------------------------------------------------------------
+# MT1: a namespace-scoped controller counts GPU usage from a Pod list, and
+# this command grants node read, not that list. Without it, GPUs other
+# namespaces hold on the same nodes read as free. Published silently before.
 case_begin
-CASES_EXPECTED=59
+run_enable
+if [ "$RC" -ne 0 ]; then
+    fail "enable failed: $(tail -6 "$WORK/out")"
+elif ! sed -n '/limiter is now in force/,$p' "$WORK/out" | grep -q 'cannot list Pods cluster-wide: tenant-g/wva-controller-manager\.'; then
+    fail "the self-managed tenant-g cannot list Pods cluster-wide and gpu-inventory was published to it without a warning after the banner: $(grep -i 'pods' "$WORK/out" | head -3)"
+elif grep 'cannot list Pods cluster-wide' "$WORK/out" | grep -q 'tenant-a/'; then
+    fail "a cluster-scoped controller (its manager ClusterRole lists Pods) was named as unable to: $(grep 'cannot list Pods' "$WORK/out")"
+else
+    ok "gpu-inventory published to a namespace-scoped controller without a cluster-wide Pod list is warned about, by name"
+fi
+case_begin
+run_enable KCANI_LIST_PODS=tenant-g
+if grep -q 'cannot list Pods cluster-wide\|may list Pods cluster-wide' "$WORK/out"; then
+    fail "a controller that may list Pods cluster-wide was warned about: $(grep 'Pods cluster-wide' "$WORK/out")"
+else
+    run_enable KCANI_LIST_PODS=unknown
+    if ! grep -q 'Could not check .* may list Pods cluster-wide: tenant-g/wva-controller-manager\.' "$WORK/out"; then
+        fail "a Pod list that could not be checked was not reported as unchecked: $(grep -i 'pods' "$WORK/out" | head -3)"
+    else
+        ok "a controller that may list Pods is not warned about, and one that cannot be checked is said to be unchecked"
+    fi
+fi
+
+# MT4: two controllers granted Kueue borrowing whose namespaces share a cohort
+# each spend the same free GPUs. Named per cohort when it can be read.
+selfmanaged_json() {
+    jq -n --arg img "$IMG" --arg name "$1" '
+        {metadata: {name: $name, labels: {"app.kubernetes.io/name": "workload-variant-autoscaler"}},
+         spec: {template: {spec: {serviceAccountName: "wva-controller-manager", containers: [
+           {name: "manager", image: $img, args: ["--watch-namespace=$(POD_NAMESPACE)"],
+            env: [{name: "POD_NAMESPACE", valueFrom: {fieldRef: {fieldPath: "metadata.namespace"}}}]}]}}}}'
+}
+put_ns tenant-h "$(selfmanaged_json wva-controller-manager)"
+put_ns tenant-i "$(selfmanaged_json wva-controller-manager)"
+printf 'cq-h\n' > "$DEPLOYS/lq-tenant-h"
+printf 'cq-i\n' > "$DEPLOYS/lq-tenant-i"
+printf 'cq-g\n' > "$DEPLOYS/lq-tenant-g"
+printf 'pool' > "$DEPLOYS/cq-cq-h"
+printf 'pool' > "$DEPLOYS/cq-cq-i"
+printf 'other' > "$DEPLOYS/cq-cq-g"
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-g tenant-h tenant-i'
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a borrowing Kueue quota failed: $(tail -6 "$WORK/out")"
+elif ! grep -q 'KUEUE COHORT pool IS BORROWED FROM BY MORE THAN ONE CONTROLLER: tenant-h/wva-controller-manager, tenant-i/wva-controller-manager\.' "$WORK/out"; then
+    fail "two borrowing controllers in cohort pool were not named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+elif grep -q 'KUEUE COHORT other' "$WORK/out"; then
+    fail "a cohort with one borrowing controller was warned about: $(grep 'KUEUE COHORT other' "$WORK/out")"
+elif ! grep -q 'Keep one borrowing controller per cohort' "$WORK/out"; then
+    fail "the shared-cohort warning gives no remedy: $(grep -i 'cohort' "$WORK/out" | head -4)"
+else
+    ok "Kueue borrowing granted to two controllers sharing a cohort is warned about, naming the cohort and both"
+fi
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-g tenant-h tenant-i' KLQ_FORBIDDEN=1
+if ! grep -q 'borrowing is granted to 3 controllers (tenant-g/wva-controller-manager, tenant-h/wva-controller-manager, tenant-i/wva-controller-manager), and the cohort of' "$WORK/out"; then
+    fail "with the cohorts unreadable, the borrowers were not all named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+else
+    run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-g tenant-h tenant-i'
+    if grep -qi 'cohort.*more than one\|borrowing is granted to' "$WORK/out"; then
+        fail "WVA_QUOTA_KUEUE_BORROW=false grants no borrowing, and still warned: $(grep -i 'cohort' "$WORK/out" | head -2)"
+    else
+        ok "with the cohorts unreadable every borrower is named; with no borrowing nothing is"
+    fi
+fi
+# 184-3: onboarding one tenant per run, the run alone never holds two
+# borrowers. A controller an earlier run granted (its binding is live) in the
+# same cohort is named too.
+case_begin
+printf '%s' '{"items":[{"metadata":{"name":"wva-kueue-borrow-reader-rolebinding-x"},"subjects":[{"kind":"ServiceAccount","name":"wva-controller-manager","namespace":"tenant-i"}]}]}' > "$DEPLOYS/crbs.json"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-h'
+if [ "$RC" -ne 0 ]; then
+    fail "enable for one borrowing tenant failed: $(tail -6 "$WORK/out")"
+elif ! grep -q 'KUEUE COHORT pool IS BORROWED FROM BY MORE THAN ONE CONTROLLER: tenant-h/wva-controller-manager, tenant-i/wva-controller-manager\.' "$WORK/out"; then
+    fail "a borrower granted by an earlier run in the same cohort was not named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+else
+    run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-i'
+    if grep -qi 'cohort.*more than one\|borrowing is granted to' "$WORK/out"; then
+        fail "the run's own controller, granted earlier, was counted twice: $(grep -i 'cohort' "$WORK/out" | head -2)"
+    else
+        ok "a borrower an earlier run granted in the same cohort is named; the run's own earlier grant is not counted twice"
+    fi
+fi
+rm -f "$DEPLOYS/crbs.json"
+
+# A revoked Workload read: the controller keeps the Workloads its informer
+# cached, so the admin is told to restart it -- and only when there was a
+# grant to revoke.
+revoke_tenant_a() { pl_sync_kueue_borrow_read tenant-a wva-controller-manager no; }
+case_begin
+run_enable PL_FN=revoke_tenant_a "KCRB_LIVE=wva-kueue-borrow-reader-rolebinding-$(wva_ns_suffix tenant-a)"
+if [ "$RC" -ne 0 ]; then
+    fail "revoking a granted Workload read failed: $(tail -4 "$WORK/out")"
+elif ! grep -q 'RESTART THE CONTROLLER in tenant-a' "$WORK/out"; then
+    fail "a revoked Workload read did not say to restart the controller: $(tail -4 "$WORK/out")"
+else
+    run_enable PL_FN=revoke_tenant_a
+    if grep -q 'RESTART THE CONTROLLER' "$WORK/out"; then
+        fail "a revoke with nothing granted asked for a restart: $(grep RESTART "$WORK/out")"
+    else
+        ok "a revoked Workload read says to restart the controller; nothing to revoke says nothing"
+    fi
+fi
+# Hierarchical cohorts: ClusterQueues in sibling cohorts under one parent
+# borrow from each other through it, so their borrowers share that tree.
+case_begin
+printf 'child-h' > "$DEPLOYS/cq-cq-h"
+printf 'child-i' > "$DEPLOYS/cq-cq-i"
+printf 'root' > "$DEPLOYS/cohort-child-h"
+printf 'root' > "$DEPLOYS/cohort-child-i"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1 'WVA_LIMITER_TARGETS=tenant-g tenant-h tenant-i'
+if ! grep -q 'KUEUE COHORT root IS BORROWED FROM BY MORE THAN ONE CONTROLLER: tenant-h/wva-controller-manager, tenant-i/wva-controller-manager\.' "$WORK/out"; then
+    fail "two borrowers in sibling cohorts under one parent were not named: $(grep -i 'cohort' "$WORK/out" | head -4)"
+elif grep -q 'KUEUE COHORT other' "$WORK/out"; then
+    fail "a cohort with no parent and one borrower was warned about: $(grep 'KUEUE COHORT other' "$WORK/out")"
+else
+    ok "borrowers in sibling cohorts under one parent are named by the parent"
+fi
+rm -f "$DEPLOYS"/cohort-*
+rm -f "$DEPLOYS"/lq-* "$DEPLOYS"/cq-* "$DEPLOYS/tenant-h.json" "$DEPLOYS/tenant-i.json"
+
+case_begin
+CASES_EXPECTED=66
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

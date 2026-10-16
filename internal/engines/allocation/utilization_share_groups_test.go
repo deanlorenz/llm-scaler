@@ -126,9 +126,11 @@ var _ = Describe("BuildShareGroups", func() {
 		Expect(with.PoolCarve).To(Equal(3))
 	})
 
-	It("carves a namespace's pools from its own group and from the cluster group", func() {
+	It("carves a capped namespace's pools from its own group, and the cluster group only the rest", func() {
 		// team-a has its own quota; team-b does not; team-c has a quota and
-		// no model, so no group. Every pool spends the cluster quota.
+		// no model, so no group. team-a and team-c claim their free quota from
+		// the cluster group, pools included, so only team-b's pool is carved
+		// there.
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "team-b", 3000, 4)}
 		cons := []*ResourceConstraints{
 			{Pools: map[string]ResourcePool{"A100": {Limit: 32, Used: 8}}},
@@ -142,7 +144,49 @@ var _ = Describe("BuildShareGroups", func() {
 		for _, g := range BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true, PoolUnheld: unheld}) {
 			carve[g.Scope] = g.PoolCarve
 		}
-		Expect(carve).To(Equal(map[string]int{"team-a": 1, "": 7}))
+		Expect(carve).To(Equal(map[string]int{"team-a": 1, "": 2}))
+	})
+
+	// A capped namespace's claim already takes its pool's headroom out of the
+	// cluster budget; carving the pool there too counted it twice.
+	It("counts a capped namespace's pool once in the cluster group", func() {
+		reqs := []ModelScalingRequest{shareReq("B", "team-b", 1000, 0)}
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 24, Used: 0}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 8, Used: 0}},
+			}},
+		}
+		groups := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true,
+			PoolUnheld: map[string]map[string]int{"team-a": {"A100": 8}}})
+		Expect(groups).To(HaveLen(1))
+		Expect(groups[0].Scope).To(BeEmpty())
+		Expect(groups[0].PoolCarve).To(BeZero())
+		Expect(groups[0].Budget).To(Equal(16), "24 free less team-a's claim of 8, its pool inside it")
+	})
+
+	// No limiter bounds a warm pool's growth, so a pool in a capped namespace
+	// wanting more than its tenant may hold shrank the cluster group by all of
+	// it. Its carve stops at that namespace's free quota.
+	It("caps a pool's carve at its namespace's free quota", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "team-b", 3000, 4)}
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 64, Used: 8}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 8, Used: 4}},
+				"team-c": {"A100": {Limit: 8, Used: 2}},
+			}},
+		}
+		// team-a wants 12 and may hold 4 more; team-c wants 20 and may hold 6
+		// more; team-b has no namespace quota, so its 3 is carved whole. In
+		// the cluster group team-a's and team-c's claims already hold their
+		// pools, so only team-b's is carved there.
+		unheld := map[string]map[string]int{"team-a": {"A100": 12}, "team-b": {"A100": 3}, "team-c": {"A100": 20}}
+		carve := map[string]int{}
+		for _, g := range BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true, PoolUnheld: unheld}) {
+			carve[g.Scope] = g.PoolCarve
+		}
+		Expect(carve).To(Equal(map[string]int{"team-a": 4, "": 3}))
 	})
 
 	It("skips a disabled namespace-quota group and keeps the others", func() {

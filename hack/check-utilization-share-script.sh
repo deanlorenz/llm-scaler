@@ -24,6 +24,10 @@ mkdir -p "$WORK/lib"
 if [ -f "$ROOT/deploy/lib/pod_writer.sh" ]; then
     tr -d '\r' < "$ROOT/deploy/lib/pod_writer.sh" > "$WORK/lib/pod_writer.sh"
 fi
+# And lib/physical_limiter.sh, for the managed-namespace program.
+if [ -f "$ROOT/deploy/lib/physical_limiter.sh" ]; then
+    tr -d '\r' < "$ROOT/deploy/lib/physical_limiter.sh" > "$WORK/lib/physical_limiter.sh"
+fi
 
 # shellcheck disable=SC1090
 . "$WORK/us.sh"
@@ -252,7 +256,11 @@ case "$args" in
            '{metadata:{labels:(if $l == "" then {} else {"wva.llmd.ai/policy-namespace":$l} end)}}' ;;
     esac ;;
   *" get deploy "*)
-    echo '{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}}}}' ;;
+    # deploy.json, when present, is the controller Deployment (a manager
+    # container with --watch-namespace makes it namespace-scoped); else one
+    # with no manager container, which reads as cluster-scoped.
+    if [ -e "$S/deploy.json" ]; then cat "$S/deploy.json"; else
+      echo '{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}}}}'; fi ;;
   *" logs "*)
     [ -e "$S/logs.forbidden" ] && { echo 'Error from server (Forbidden): pods/log is forbidden' >&2; exit 1; }
     case "$args" in *" -l "*) ;; *) [ -e "$S/standby" ] && exit 0 ;; esac
@@ -325,6 +333,22 @@ vcase "shadow: writes shadow true and confirms the reload" \
 fresh "$INV_POLICY"; run shadow --physical-groups
 vcase "shadow --physical-groups: plans the inventory" \
     eval '[ $RC -eq 0 ] && [ "$(pol .optimizer.utilizationShare.physicalGroups)" = true ]'
+
+# A namespace-scoped controller ignores physicalGroups (every such controller
+# would plan the same free GPUs), so the script does not write it for one.
+NS_SCOPED_DEPLOY='{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}},"template":{"spec":{"containers":[{"name":"manager","image":"x","args":["--watch-namespace=team-a"]}]}}}}'
+fresh "$INV_POLICY"; printf '%s' "$NS_SCOPED_DEPLOY" > "$STATE/deploy.json"; run shadow --physical-groups
+vcase "shadow --physical-groups: refused for a namespace-scoped controller, writes nothing" \
+    eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "--physical-groups is refused: the controller manages only team-a"'
+
+fresh "$INV_POLICY
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    shadow: true
+    physicalGroups: true"; printf '%s' "$NS_SCOPED_DEPLOY" > "$STATE/deploy.json"; run check
+vcase "check: a namespace-scoped controller ignores the physical groups the block sets" \
+    eval 'says "this controller is namespace-scoped and ignores it" && ! says "the block plans physical groups"'
 
 fresh "$INV_POLICY"; run shadow
 vcase "shadow on inventory without the flag: warns it plans nothing" \
@@ -634,7 +658,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=110
+CASES_EXPECTED=112
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi
