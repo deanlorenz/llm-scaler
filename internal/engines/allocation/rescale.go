@@ -847,8 +847,11 @@ func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.Va
 	order := slices.Clone(roles)
 	slices.SortStableFunc(order, func(a, b string) int { return cmp.Compare(cut[b], cut[a]) })
 	for _, role := range order {
-		if leftover <= 0 || cut[role] <= 0 {
-			continue
+		// A role whose share landed on whole pods (no cut) still takes what
+		// its demand asks for: the leftover is also what a role at its
+		// maxReplicas could not place.
+		if leftover <= 0 {
+			break
 		}
 		limit := max(dem[role]-tgt[role], ceilToReplica(cut[role], roleReplicaStepGPUs(records, role, stateMap)))
 		extra := fillRole(records, role, stateMap, trial, min(leftover, limit))

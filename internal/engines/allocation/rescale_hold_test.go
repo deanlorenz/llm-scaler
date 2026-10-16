@@ -195,6 +195,34 @@ func TestRescaleGivesNoRolePodsBeyondItsDemand(t *testing.T) {
 	}
 }
 
+// TestRescaleGivesTheLeftoverToARoleWithNoCut: a role whose share landed on
+// whole pods still takes what a role at its maxReplicas could not place.
+// Prefill is at its max of one 8-GPU pod with demand for three; decode has
+// one pod and demand for five. At a model target of 51 decode's share was 32,
+// four pods exactly, so it took nothing of prefill's 11 and stayed a pod short.
+func TestRescaleGivesTheLeftoverToARoleWithNoCut(t *testing.T) {
+	one := 1
+	req := pdRescaleRequest(nil)
+	req.CompositeSignal.Result.RoleDemand = map[string]float64{domain.RolePrefill: 300, domain.RoleDecode: 500}
+	req.CompositeSignal.RoleCapacities = map[string]domain.RoleCapacity{
+		domain.RolePrefill: {Role: domain.RolePrefill, TotalDemand: 300, TotalSupply: 100},
+		domain.RoleDecode:  {Role: domain.RoleDecode, TotalDemand: 500, TotalSupply: 100},
+	}
+	for i := range req.CompositeSignal.Result.VariantCapacities {
+		req.CompositeSignal.Result.VariantCapacities[i].ReplicaCount = 1
+	}
+	for i := range req.VariantStates {
+		req.VariantStates[i].CurrentReplicas = 1
+		req.VariantStates[i].GPUsPerReplica = 8
+	}
+	req.VariantStates[0].MaxReplicas = &one
+	for _, target := range []int{48, 50, 51, 52} {
+		got := rescaleTargets(req, target, 64)
+		assert.Equal(t, 1, got["p"], "target %d: prefill is at its max", target)
+		assert.Equal(t, 5, got["d"], "target %d: decode reaches its demand of five pods", target)
+	}
+}
+
 // TestRescaleReclaimsNoMoreThanTheReleaseBound: a role is reclaimed only as
 // far as the composite's release bound allows, and the water-fill reserves
 // what it keeps. With a bound worth 150 at 100 per GPU, prefill sheds at most
