@@ -61,6 +61,16 @@ Read the review first; the implementation design says what was built.
   capacity from lenders Kueue would reclaim for, where Kueue governs the pods
   and a GPU bound is declared. Counting other lenders (PR-C) is an open,
   opt-in follow-up.
+- **[One claims ledger](claims-ledger.md)** — proposed. What a replica that is
+  ordered but not yet visible holds is kept in six stores today, each with its
+  own keys and clocks; the limiter fixes in #183–#187 were gaps between them.
+  One entry per replica claim, one lifecycle and timeout, persisted, read by
+  both engines through one view; Kueue borrowing moves to its own package.
+- **[Model Kueue per ClusterQueue](kueue-per-clusterqueue.md)** — proposed.
+  Bind each variant to its ClusterQueue through its pod template's
+  `kueue.x-k8s.io/queue-name` label and compute every Kueue figure per queue.
+  Replaces #186's per-namespace min and `multi-queue-namespace`, and makes a
+  shared queue one budget instead of a ceiling each namespace sees in full.
 - **[Utilization-share optimizer](utilization-share-optimizer.md)** — built:
   shadow mode and actuation (stages 1 and 2); the short window for urgent
   transfers (stage 3) is design. Spend the whole quota: every model gets what it
