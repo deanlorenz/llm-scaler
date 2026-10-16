@@ -203,6 +203,8 @@ const (
 	// conflictAttempts is how many times one flush re-reads and retries after
 	// a resourceVersion conflict or a create that lost a race.
 	conflictAttempts = 3
+	// defaultShutdownFlush bounds the last write of a term (Start).
+	defaultShutdownFlush = 2 * time.Second
 )
 
 // Publisher holds the controller status and writes it to the
@@ -217,6 +219,8 @@ type Publisher struct {
 	debounce time.Duration
 	retryMin time.Duration
 	retryMax time.Duration
+	// shutdownFlush bounds the write Start makes when its context ends.
+	shutdownFlush time.Duration
 
 	mu      sync.Mutex
 	desired map[string]string
@@ -250,14 +254,15 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 		}
 	}
 	return &Publisher{
-		writer:    writer,
-		reader:    reader,
-		namespace: namespace,
-		debounce:  defaultDebounce,
-		retryMin:  defaultRetryMin,
-		retryMax:  defaultRetryMax,
-		notify:    make(chan struct{}, 1),
-		now:       time.Now,
+		writer:        writer,
+		reader:        reader,
+		namespace:     namespace,
+		debounce:      defaultDebounce,
+		retryMin:      defaultRetryMin,
+		retryMax:      defaultRetryMax,
+		shutdownFlush: defaultShutdownFlush,
+		notify:        make(chan struct{}, 1),
+		now:           time.Now,
 		desired: map[string]string{
 			KeyFormatVersion:         FormatVersion,
 			KeyPolicyNamespace:       config.SystemNamespace(),
@@ -445,11 +450,13 @@ func (p *Publisher) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			p.flushOnShutdown(ctx, logger, carried)
 			return nil
 		case <-p.notify:
 		case <-retry:
 		}
 		if !sleep(ctx, p.debounce) {
+			p.flushOnShutdown(ctx, logger, carried)
 			return nil
 		}
 		err := error(nil)
@@ -472,6 +479,23 @@ func (p *Publisher) Start(ctx context.Context) error {
 		p.reportRecovered(logger)
 		timer.Stop()
 		retry, backoff = nil, p.retryMin
+	}
+}
+
+// flushOnShutdown writes what changed since the last write once more when the
+// term ends, bounded by shutdownFlush: a change the debounce still held --
+// the in-flight ledger's last cycle, say -- would otherwise be lost to the
+// next leader. Only after the persisted keys were carried over: a write
+// without them would erase them. A failure is logged and dropped.
+func (p *Publisher) flushOnShutdown(ctx context.Context, logger logr.Logger, carried bool) {
+	if !carried {
+		return
+	}
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.shutdownFlush)
+	defer cancel()
+	if err := p.flush(fctx); err != nil {
+		logger.Info("Could not write the controller status on shutdown; the last change is lost to the next leader",
+			"error", err.Error())
 	}
 }
 
