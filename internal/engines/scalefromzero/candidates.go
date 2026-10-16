@@ -338,6 +338,11 @@ func (e *Engine) placementForModel(ctx context.Context, namespace string, own ma
 	// the node fit lands them only where it does (W5), as the steady placer
 	// fits a guaranteed replica.
 	p.queueFlavor = allocation.QueueFlavorOf(constraints, namespace)
+	// The whole reclaimable is credited, not what this tick's earlier wakes
+	// left of it (reclaimableLeft, which the node fit uses): decideWake
+	// withholds those wakes' whole demand from the same bounds, which nets
+	// the part of the credit they used. Crediting only what is left counted
+	// it twice (TestSecondWakeInATickSharesTheLentOutCreditOnce).
 	constraints = allocation.CreditReclaimable(
 		allocation.WithinNominalNow(constraints, unreserved, record.Blocked(now)), p.reclaimable)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
