@@ -151,6 +151,37 @@ preempt for it: what a lender lends but nobody borrows is not reclaimable
 capacity, and with a node down an exemption sized by unused nominal ordered a
 pod that stayed Pending forever. The wake applies the same cap.
 
+Round-3 rules on that exemption (`Reclaim`, `borrow_nominal.go`):
+
+- **Whole replicas only, with nothing of `PreemptAfter` left**
+  (`Reclaim.exempt`). Growth Kueue admits before it preempts needs a hole, so
+  a 16-GPU replica that takes 8 of `PreemptAfter` first is fitted to a node
+  whole.
+- **The kept part never leaves the pool.** `PreemptKept`, the part of
+  `PreemptAfter` a queue keeps unused (`max(0, G - U)`), is taken first and
+  debits no cohort pool; only the rest of `PreemptAfter` does.
+- **Recorded whole in `DefaultBorrowInFlight`.** A `Reclaim` entry carries
+  `GPUs` (preempted for), `After` and `Kept`. `DeductReclaimed` lowers
+  `LentOut`, `PreemptAfter` and `PreemptKept`; `DeductUnreservedAt` takes the
+  pool part of `After` off the entry's chunk, for the wake and the next cycle.
+- **A variant re-places its own entry.** `BorrowInFlight.Reclaims` goes to
+  the optimizer as `ReclaimCredit`, so a replica whose pods are not created
+  yet keeps its target. Without the credit it flapped 3/2/3.
+- **The governor watches what skipped the hole.** An entry ordered without a
+  hole is marked `NoHole`. The governor keeps it under `placementTimeout` like
+  a borrowed replica (`BorrowCycle.NoHole`, `noHoleRelease`): if it never
+  places it is released as `borrow-unplaced`, and the model backs off. While
+  backed off, `ReclaimBlocked` makes its growth need a real hole. Kueue
+  preempts by priority, not by node, so the preempted borrower may free no
+  node the replica fits.
+
+The restricted (LowerPriority) part of a chunk stays closed across cycles,
+not just for one pass, while the chunk holds borrowing at a priority its
+lender does not outrank. Two things count: a draw in flight marked
+`ClosesRestricted`, and the read's `SharedPool.Borrowed` at
+`BorrowerPriority`, the highest reserved-Workload priority of the borrowing
+queues. A borrower whose priority was not read closes it.
+
 The share planner plans after the pass on what it left
 (`PassLeft.NodeDebits`): the borrowed placements are charged to their models
 on the same view, so the idle fill does not place into a hole a borrowed

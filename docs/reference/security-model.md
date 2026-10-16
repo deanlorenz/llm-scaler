@@ -430,6 +430,13 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
   `countBorrowable: false` (`WVA_QUOTA_KUEUE_BORROW=false`) all go without
   it. Without the read, borrowing is withheld (`lenders-unreadable`) and the
   nominal cap applies.
+- **The grant follows the commands, not the ConfigMap.** It is decided when
+  `make setup-prereqs` or `make enable-physical-limiter` runs. Editing the
+  policy ConfigMap by hand to `countBorrowable: false` afterwards stops the
+  borrowing, but the cluster-wide Workload read stays granted until one of
+  those commands runs again. To take the read away, re-run
+  `make setup-prereqs` with the install's variables, or
+  `make disable-limiter WVA_LIMITER_TYPE=quota`.
 - **The cluster autoscaler's Events are trusted.** A `TriggeredScaleUp` Event
   on an unplaced pod stretches its placement timeout up to three times. The
   Event's source is not verified, so anyone who may create Events in the

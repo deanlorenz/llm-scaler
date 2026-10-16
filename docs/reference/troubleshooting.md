@@ -24,6 +24,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
+| a lender's replica Pending after Kueue preempted | the lender's new pod `Pending` with no node; a borrower's Workload evicted with reason `Preempted`; later `reason="borrow-unplaced"` | Kueue preempts by priority, not by node: the GPUs it freed form no node the replica fits | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; `wva_constraint_provider_skipped{reason="unobserved"}`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
 | Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `reason` in `limiterBudgets`; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold (withheld), Kueue cannot be trusted right now (frozen), or there is nothing to draw (counted, but 0) | [borrowing is withheld](#borrowing-is-withheld) |
 | scaled past nominal | a model holds more GPUs than its ClusterQueue's `nominalQuota`; `used` above `guaranteed` in `limiterBudgets`; `wva_kueue_borrowed_gpus > 0` | expected: borrowing is on by default for a Kueue-backed namespace quota | [past nominal](#a-model-runs-past-its-kueue-nominal-quota) |
@@ -374,7 +375,7 @@ the answer.
 | cause | how to tell |
 | --- | --- |
 | 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
-| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout` |
+| 2. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout`. A replica a lender grew into its own lent-out nominal, ordered without a free node because Kueue was to preempt a borrower for it, is released the same way when it never places |
 | 3. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
 
 Commands, in the same order:
@@ -405,6 +406,17 @@ What to do:
   long while the autoscaler reports `TriggeredScaleUp` on the pod. If new nodes
   take longer than that on your cluster, raise `placementTimeout`, or borrowed
   replicas are given back while their node is still coming.
+- **A lender's replica stays Pending after Kueue preempted a borrower**:
+  Kueue picks the borrowers to preempt by priority, not by node. A lender
+  growing into the nominal it lent out gets its quota back, but the GPUs
+  freed may not form a node its replica fits: two 4-GPU borrowers preempted
+  on two different nodes free no 8-GPU node, and a borrower that was itself
+  `Pending` frees none. The scaling manager orders such a replica without a
+  free node, so it watches it under the placement timeout: if it never
+  places, it is released (`borrow-unplaced`), and the model's growth into
+  lent-out nominal needs a free node until `borrowCooldown` ends. To avoid it,
+  keep borrowed replicas whole-node in a cohort of whole-node lenders, or
+  leave a node free for the lender.
 - **A prefill stays unplaced after a partner was released**: when a P/D
   model's last prefill does not place, the scaling manager releases a decode
   to free GPUs for it. The freed GPUs may sit on nodes the prefill cannot use,
@@ -486,7 +498,7 @@ is frozen at its guaranteed figure instead, until it scales down.
 | reason | what it means | what to do |
 | --- | --- | --- |
 | `not-selected` | the entry's `borrowNamespaces` is set and does not list this namespace | add it to `borrowNamespaces`, or remove the list to borrow everywhere ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)) |
-| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install whose admin phase predates the grant or whose policy did not count borrowing when it ran, a Forbidden, a failed list), so it could not see a lender wait. A read revoked while the controller runs shows here within about 5 minutes | **(cluster admin)** re-run the admin phase with the install's `WVA_LIMITER` and `WVA_QUOTA_KUEUE`: it grants the cluster-wide Workload read when that policy counts borrowing. `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must then say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
+| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install whose admin phase predates the grant or whose policy did not count borrowing when it ran, a Forbidden, a failed list), so it could not see a lender wait. A read revoked while the controller runs shows here within about 5 minutes. Granted again, borrowing resumes at the next check, while the Workload cache may still hold what it last listed before the revoke: up to about 30 more seconds, until its watch re-lists, a lender's Workload created in the gap is not seen | **(cluster admin)** re-run the admin phase with the install's `WVA_LIMITER` and `WVA_QUOTA_KUEUE`: it grants the cluster-wide Workload read when that policy counts borrowing. `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must then say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
 | `not-kueue-managed` | a GPU pod in the namespace is not backed by a Workload with quota reserved, owned by a kind a Kueue integration manages; or the controller may not read the pod's owner | find it: `kubectl get workloads.kueue.x-k8s.io -n <ns>` against `kubectl get pods -n <ns>`. Put the workload behind a LocalQueue (`kueue.x-k8s.io/queue-name`), or move it out of the namespace. For a Forbidden owner read, re-run the admin phase |
 | `resourcequota-unreadable` | the namespace's ResourceQuotas cannot be read: Forbidden, or failing for five refresh intervals | `kubectl auth can-i list resourcequotas -n <ns> --as=<controller SA>`; re-run the admin phase |
 | `no-gpu-bound` | nothing checks that borrowed GPUs exist: no `gpu-inventory` limiter, and no GPU `ResourceQuota` at most nominal plus `borrowingLimit` | declare one ([prerequisites](../guides/kueue-borrowing/#prerequisites)) |
