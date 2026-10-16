@@ -336,6 +336,32 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}
 	})
 
+	// A tenant that forms no group claims too (MT6), and its claim is rounded
+	// to whole replicas the same way: of its own models' replica size, else of
+	// the cluster group's. Unrounded, team-a's 4 free GPUs -- no 8-GPU replica
+	// -- left the cluster group 4 of its one free node, which it cannot place.
+	It("rounds the claim of a tenant that forms no group to whole replicas", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 12, Used: 8}},
+			}},
+		}
+		for name, c := range map[string]struct {
+			reqs []ModelScalingRequest
+			opts ShareGroupOptions
+		}{
+			"team-a disabled for sharing": {[]ModelScalingRequest{node("ma", "team-a", 1), node("mx", "ns-x", 1)},
+				ShareGroupOptions{ClusterIsQuota: true, NamespaceEnabled: func(ns string) bool { return ns != "team-a" }}},
+			"team-a with no model": {[]ModelScalingRequest{node("mx", "ns-x", 1)}, ShareGroupOptions{ClusterIsQuota: true}},
+		} {
+			groups, _ := build(c.reqs, cons, c.opts)
+			Expect(groups).NotTo(HaveKey("team-a"), name)
+			Expect(groups).To(HaveKey(""), name)
+			Expect(groups[""].ClusterFree).To(Equal(8), name)
+		}
+	})
+
 	It("reports nothing unshared without a namespace quota", func() {
 		reqs := []ModelScalingRequest{shareReq("mx", "ns-x", 100, 2)}
 		for name, cons := range map[string][]*ResourceConstraints{

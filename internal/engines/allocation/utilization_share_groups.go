@@ -383,24 +383,37 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// today's optimizer just the same. A namespace disabled for sharing
 	// (NamespaceEnabled), or whose models span several accelerator types,
 	// forms no group, and left out of the claims its whole free quota was idle
-	// fill for the cluster group. Only a formed group knows its replica size,
-	// so only its claim is rounded to whole replicas.
+	// fill for the cluster group. A claim is rounded to whole replicas of the
+	// smallest replica the namespace can place on the type: its group's, else
+	// its models' (claimSteps) -- a namespace that formed no group still has
+	// models -- else the cluster group's of that type, the best guess for a
+	// namespace with no model yet. With no replica size known anywhere it is
+	// not rounded.
 	//
 	// A claim covers the namespace's whole free quota, its warm pools'
 	// headroom included, so the cluster group carves only the pools of
 	// namespaces that made none (poolCarve, claimedNS).
 	claimed := map[string]int{}
 	claimedNS := map[string]map[string]bool{}
+	steps := claimSteps(requests, availableByNS)
 	for _, ns := range slices.Sorted(maps.Keys(availableByNS)) {
 		for _, acc := range slices.Sorted(maps.Keys(availableByNS[ns])) {
 			nsFree, ok := freeOf(key{acc, ns})
 			if !ok {
 				continue
 			}
+			step := 0
 			if g := groups[key{acc, ns}]; g != nil {
-				if step := smallestReplicaGPUs(g); step > 0 {
-					nsFree -= nsFree % step
-				}
+				step = smallestReplicaGPUs(g)
+			}
+			if step <= 0 {
+				step = steps[ns][acc]
+			}
+			if g := groups[key{budgetKey(available, acc), ""}]; step <= 0 && g != nil {
+				step = smallestReplicaGPUs(g)
+			}
+			if step > 0 {
+				nsFree -= nsFree % step
 			}
 			claimed[budgetKey(available, acc)] += nsFree
 			if claimedNS[ns] == nil {
@@ -444,6 +457,33 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		out = append(out, *g)
 	}
 	splitClusterFree(out, available)
+	return out
+}
+
+// claimSteps is, per namespace in availableByNS and per its budget key, the
+// fewest GPUs one replica of any of the namespace's models' variants on that
+// type takes: whole replicas of it are what the namespace can place there,
+// whether or not its models formed a share group. Absent when no model of the
+// namespace has a variant on the type.
+func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[string]int) map[string]map[string]int {
+	out := map[string]map[string]int{}
+	for _, req := range requests {
+		budgets, ok := availableByNS[req.Namespace]
+		if !ok {
+			continue
+		}
+		stateMap := buildStateMap(req.VariantStates)
+		for _, vc := range recordsForRequest(req) {
+			k := budgetKey(budgets, vc.AcceleratorName)
+			gpus := gpusPerReplicaFromState(stateMap, vc.VariantName)
+			if out[req.Namespace] == nil {
+				out[req.Namespace] = map[string]int{}
+			}
+			if cur := out[req.Namespace][k]; cur == 0 || gpus < cur {
+				out[req.Namespace][k] = gpus
+			}
+		}
+	}
 	return out
 }
 
