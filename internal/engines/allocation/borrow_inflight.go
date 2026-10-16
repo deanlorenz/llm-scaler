@@ -418,23 +418,33 @@ func DeductUnreservedAt(constraints []*ResourceConstraints, u Unreserved) []*Res
 }
 
 // lagCoveredByGated is draws with each lagging one's GPUs less what its
-// namespace's gated and admitted pods already charge: a draw resolves into
-// pods at Kueue's gate, or admitted past it, which those deductions count,
-// and must not be counted twice. Only what is left -- pods never seen at the
-// gate, admitted before a read shows them -- lags. In flight draws are as
-// they are.
+// namespace's gated and admitted pods of the same accelerator already charge:
+// a draw resolves into pods at Kueue's gate, or admitted past it, which those
+// deductions count, and must not be counted twice. Only what is left -- pods
+// never seen at the gate, admitted before a read shows them -- lags. A gated
+// pod of another accelerator -- another variant's -- covers nothing (N-m3).
+// A pod whose node selector names none (""), or a draw whose flavor names
+// none, may be either's, and covers as before. In flight draws are as they
+// are.
 func lagCoveredByGated(draws []BorrowDraw, gated map[string]map[string]int, admitted []AdmittedGPUs) []BorrowDraw {
 	if (len(gated) == 0 && len(admitted) == 0) || !slices.ContainsFunc(draws, func(d BorrowDraw) bool { return !d.ResolvedAt.IsZero() }) {
 		return draws
 	}
-	cover := map[string]int{}
-	for ns, byAcc := range gated {
-		for _, n := range byAcc {
-			cover[ns] += n
+	type cover struct {
+		ns, acc string
+		gpus    int
+	}
+	var covers []*cover
+	for _, ns := range slices.Sorted(maps.Keys(gated)) {
+		for _, acc := range slices.Sorted(maps.Keys(gated[ns])) {
+			covers = append(covers, &cover{ns, acc, gated[ns][acc]})
 		}
 	}
 	for _, a := range admitted {
-		cover[a.Namespace] += a.GPUs
+		covers = append(covers, &cover{a.Namespace, a.Accelerator, a.GPUs})
+	}
+	sameAcc := func(a, b string) bool {
+		return a == "" || b == "" || accelerator.SameName(a, b)
 	}
 	out := slices.Clone(draws)
 	for i := range out {
@@ -442,11 +452,32 @@ func lagCoveredByGated(draws []BorrowDraw, gated map[string]map[string]int, admi
 		if d.ResolvedAt.IsZero() {
 			continue
 		}
-		c := min(cover[d.Namespace], d.GPUs)
-		d.GPUs -= c
-		cover[d.Namespace] -= c
+		acc := drawAccelerator(*d)
+		for _, c := range covers {
+			if d.GPUs <= 0 {
+				break
+			}
+			if c.ns != d.Namespace || c.gpus <= 0 || !sameAcc(c.acc, acc) {
+				continue
+			}
+			n := min(c.gpus, d.GPUs)
+			d.GPUs -= n
+			c.gpus -= n
+		}
 	}
 	return out
+}
+
+// drawAccelerator is the accelerator a draw's pods run on: the one it was
+// placed for, else its flavor's; "" when neither names one.
+func drawAccelerator(d BorrowDraw) string {
+	if d.Accelerator != "" {
+		return d.Accelerator
+	}
+	if d.Placement != nil {
+		return d.Placement.AcceleratorType
+	}
+	return ""
 }
 
 // DeductReclaimed returns copies of constraints whose namespaces' LentOut
