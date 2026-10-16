@@ -68,7 +68,8 @@ One line per model, after the optimizer chose each variant's replica target.
 ```text
 2026-10-14T09:12:03.540Z  INFO  scaling-decision  {"modelID": "my-model", "namespace": "default",
   "decisions": [{"name":"primary","curr":1,"tgt":2,"action":"scale-up"},
-                {"name":"v2","curr":3,"tgt":3,"action":"no-change","atMax":true}]}
+                {"name":"v2","curr":3,"tgt":3,"action":"no-change","atMax":true},
+                {"name":"v3","curr":1,"tgt":1,"action":"no-change","limitedBy":"team-quota"}]}
 ```
 
 | Field | Description |
@@ -80,6 +81,7 @@ One line per model, after the optimizer chose each variant's replica target.
 | `decisions[].tgt` | Target replica count chosen by the optimizer |
 | `decisions[].action` | `scale-up`, `scale-down`, or `no-change` |
 | `decisions[].atMax` | `true` when the target is the variant's `maxReplicaCount`; absent otherwise. Same as `wva_variant_at_max_replicas` |
+| `decisions[].limitedBy` | what held the variant's scale-up back this cycle: a limiter entry's name, `gpu-limiter` for the physical limiter, `node-fit`, `pd-pair-borrows-whole` or `lender-cannot-reclaim`. Absent when nothing did. The same name as the `ResourceConstrained` Event and the `limiter_name` label of `wva_decisions_limited_total` |
 
 ### `throughput-demand-floor`
 

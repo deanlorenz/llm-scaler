@@ -296,6 +296,38 @@ func TestLogScalingDecisions_AtMaxReplicas(t *testing.T) {
 	assert.Nil(t, got["unbounded"], "no MaxReplicas means no ceiling to sit on")
 }
 
+// A troubleshooting runbook starts from scaling-decision: a variant a limiter
+// held back must say which, as the ResourceConstrained Event does; one that is
+// not limited (the utilization share clears WasLimited) carries no name.
+func TestLogScalingDecisions_LimitedBy(t *testing.T) {
+	ctx, logs := zapObserverCtx(t)
+	requests := []allocation.ModelScalingRequest{{ModelID: "model-a", Namespace: "ns"}}
+	decisions := []domain.VariantDecision{
+		{ModelID: "model-a", Namespace: "ns", VariantName: "held", CurrentReplicas: 1, TargetReplicas: 1,
+			Action: domain.ActionNoChange, WasLimited: true, LimitedBy: "team-quota"},
+		{ModelID: "model-a", Namespace: "ns", VariantName: "overridden", CurrentReplicas: 1, TargetReplicas: 2,
+			Action: domain.ActionScaleUp, LimitedBy: "team-quota"},
+		{ModelID: "model-a", Namespace: "ns", VariantName: "free", CurrentReplicas: 1, TargetReplicas: 2,
+			Action: domain.ActionScaleUp},
+	}
+
+	logScalingDecisions(ctx, requests, decisions, nil)
+
+	require.Equal(t, 1, logs.Len())
+	raw, err := json.Marshal(logs.All()[0].ContextMap()["decisions"])
+	require.NoError(t, err)
+	var entries []map[string]any
+	require.NoError(t, json.Unmarshal(raw, &entries))
+	require.Len(t, entries, 3)
+	got := map[string]any{}
+	for _, e := range entries {
+		got[e["name"].(string)] = e["limitedBy"]
+	}
+	assert.Equal(t, "team-quota", got["held"])
+	assert.Nil(t, got["overridden"], "not limited: no name")
+	assert.Nil(t, got["free"])
+}
+
 func TestLogScalingDecisions_NoDecisionsSkipsModel(t *testing.T) {
 	ctx, logs := zapObserverCtx(t)
 
