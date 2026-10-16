@@ -88,9 +88,10 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 		Name: constants.WVAKueueControllerVersionKnown,
 		Help: "Per controller, while some quota entry counts Kueue borrowing: 1 when every such entry knows " +
 			"the Kueue controller's version -- its image names one, or kueue.assumeTestedVersion vouches for it -- " +
-			"and 0 when one does not (a digest-only image, or a Deployment it cannot read, without " +
-			"assumeTestedVersion); borrowing is then withheld as kueue-version-unknown. Absent while no entry " +
-			"counts borrowing.",
+			"and 0 when one does not. 0 has two causes, without assumeTestedVersion: an image that names no " +
+			"version (digest-only), which withholds borrowing as kueue-version-unknown; or a Deployment that " +
+			"cannot be read, the controller down, which freezes borrowing as kueue-controller-down. Absent while " +
+			"no entry counts borrowing.",
 	}, withInstance())
 	kueueCooldown = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowCooldownSeconds,

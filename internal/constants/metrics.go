@@ -1008,8 +1008,9 @@ const (
 	// Deployment was read and its image names a version, 0 when not (a
 	// digest-only image, or a Deployment that cannot be read). Published on
 	// each Kueue read that checks the controller (a cluster with a cohort).
-	// While 0, borrowing is withheld (kueue-version-unknown) or frozen
-	// (kueue-controller-down). No labels beyond the controller instance.
+	// While 0, borrowing is withheld (kueue-version-unknown, a digest-only
+	// image) or frozen (kueue-controller-down, a Deployment that cannot be
+	// read). No labels beyond the controller instance.
 	WVAKueueControllerVersionKnown = "wva_kueue_controller_version_known"
 
 	// WVAKueueBorrowCooldownSeconds is a gauge: the borrowCooldown in force,
