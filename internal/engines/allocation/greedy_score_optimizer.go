@@ -352,6 +352,11 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	}
 
 	allDecisions = append(allDecisions, rescaleDecisions...)
+	// A reclaim the pass ordered takes borrowed GPUs a managed model holds:
+	// that model gives them back in the same pass (KU3).
+	if lowered := bs.yieldReclaimed(allDecisions); len(lowered) > 0 && !o.quiet {
+		logger.Info(ReclaimYieldLogMessage, "replicasByVariant", lowered)
+	}
 
 	// The warm pool's headroom, from what this pass left: every replica it
 	// ordered is debited, from the budgets and from the nodes.
