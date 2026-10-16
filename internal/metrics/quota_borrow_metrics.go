@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,9 +86,11 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 	}, withInstance(constants.LabelLimiterName))
 	kueueVersionKnown = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueControllerVersionKnown,
-		Help: "1 when the Kueue controller's Deployment was read and its image names a version, 0 when not " +
-			"(a digest-only image, or a Deployment that cannot be read). While 0, Kueue borrowing is withheld " +
-			"(kueue-version-unknown) or frozen (kueue-controller-down).",
+		Help: "Per controller, while some quota entry counts Kueue borrowing: 1 when every such entry knows " +
+			"the Kueue controller's version -- its image names one, or kueue.assumeTestedVersion vouches for it -- " +
+			"and 0 when one does not (a digest-only image, or a Deployment it cannot read, without " +
+			"assumeTestedVersion); borrowing is then withheld as kueue-version-unknown. Absent while no entry " +
+			"counts borrowing.",
 	}, withInstance())
 	kueueCooldown = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowCooldownSeconds,
@@ -214,6 +217,30 @@ func PublishKueueVersionKnown(source string, known, counting bool) {
 	} else {
 		delete(versionKnownBy.m, source)
 	}
+	publishVersionKnownLocked()
+}
+
+// PruneKueueVersionKnown keeps, of the readers' answers, only those of the
+// quota entries in live -- the entries that count Kueue borrowing in the
+// limiter just built (R2-2). An entry removed from the config, or no longer
+// counting borrowing, publishes nothing after the rebuild: its last answer
+// would otherwise hold wva_kueue_controller_version_known at 0, paging,
+// until the process restarts.
+func PruneKueueVersionKnown(live []string) {
+	versionKnownBy.Lock()
+	defer versionKnownBy.Unlock()
+	for source := range versionKnownBy.m {
+		if !slices.Contains(live, source) {
+			delete(versionKnownBy.m, source)
+		}
+	}
+	publishVersionKnownLocked()
+}
+
+// publishVersionKnownLocked sets wva_kueue_controller_version_known from
+// versionKnownBy, deleting it when no reader is left. Callers hold
+// versionKnownBy.
+func publishVersionKnownLocked() {
 	if kueueVersionKnown == nil {
 		return
 	}

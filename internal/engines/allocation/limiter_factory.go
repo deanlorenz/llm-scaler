@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // NewLimiterFromConfig constructs every GPU limiter Config.EffectiveLimiterTypes
@@ -43,6 +44,17 @@ import (
 func NewLimiterFromConfig(cfg *config.Config, kubeClient client.Client) (Limiter, error) {
 	var constituents []Limiter
 	types := cfg.EffectiveLimiterTypes()
+	// The version series answers for the entries counting borrowing in the
+	// limiter built now, and for no other (R2-2).
+	var counting []string
+	if types.HasQuota() {
+		for _, entry := range cfg.EffectiveQuotaEntries() {
+			if entry.KueueEnabled() && countsBorrowing(entry) {
+				counting = append(counting, entry.Name)
+			}
+		}
+	}
+	metrics.PruneKueueVersionKnown(counting)
 	physical := types.HasPhysical()
 	if physical {
 		constituents = append(constituents, newInventoryLimiter(kubeClient, types.HasQuota()))
@@ -105,7 +117,7 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 	}
 	// As QuotaInventory.countsBorrowing reads the entry: the version series
 	// pages only for an entry that counts borrowing (R2).
-	opts.CountsBorrowing = entry.KueueCountsBorrowable() && entry.Scope == config.QuotaScopeNamespace
+	opts.CountsBorrowing = countsBorrowing(entry)
 	opts.Entry = entry.Name
 	key, _ := json.Marshal(opts)
 	kueueReaders.Lock()
@@ -117,6 +129,13 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 		memory: &borrowMemory{}}
 	kueueReaders.byEntry[entry.Name] = s
 	return s
+}
+
+// countsBorrowing is whether entry's Kueue reader counts borrowing, as
+// QuotaInventory.countsBorrowing reads the entry: the entries the version
+// series answers for.
+func countsBorrowing(entry config.QuotaLimiterConfig) bool {
+	return entry.KueueCountsBorrowable() && entry.Scope == config.QuotaScopeNamespace
 }
 
 // LimiterSignature is a deterministic fingerprint of the config inputs that
