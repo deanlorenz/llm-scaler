@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -546,7 +548,15 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 			delete(s.VariantSeenAt, k)
 			delete(s.ITLBaseline, k)
 			delete(s.StartSeconds, k)
+			maps.DeleteFunc(s.ITLBaselineStash, func(sk string, _ float64) bool { return strings.HasPrefix(sk, k+"#") })
 		}})
+	}
+	// A put-aside ITL baseline goes with its variant's liveness; one whose
+	// variant left none goes first, as a spent bound does.
+	for k := range s.ITLBaselineStash {
+		if base, _, _ := strings.Cut(k, "#"); s.VariantSeenAt[base].IsZero() {
+			out = append(out, learnedStateEntry{spare: true, key: "itlstash|" + k, drop: func() { delete(s.ITLBaselineStash, k) }})
+		}
 	}
 	for k, l := range s.ITLLines {
 		out = append(out, learnedStateEntry{at: l.LearnedAt, key: "itl|" + k, drop: func() { delete(s.ITLLines, k) }})

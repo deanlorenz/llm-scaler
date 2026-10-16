@@ -93,11 +93,15 @@ import (
 // LearnedState is the analyzer's learned state in a form that survives a
 // process: plain values and their clocks, keyed by the analyzer's own keys.
 type LearnedState struct {
-	K2            map[string]capacity.RollingAverageSnapshot `json:"k2,omitempty"`
-	Throughput    map[string]ThroughputSnapshot              `json:"throughput,omitempty"`
-	ITLBaseline   map[string]float64                         `json:"itlBaseline,omitempty"`
-	StartSeconds  map[string]float64                         `json:"startSeconds,omitempty"`
-	VariantSeenAt map[string]time.Time                       `json:"variantSeenAt,omitempty"`
+	K2          map[string]capacity.RollingAverageSnapshot `json:"k2,omitempty"`
+	Throughput  map[string]ThroughputSnapshot              `json:"throughput,omitempty"`
+	ITLBaseline map[string]float64                         `json:"itlBaseline,omitempty"`
+	// ITLBaselineStash is itlBaselineStash: a variant's ITL baseline put
+	// aside under the arguments it was learned under, for a rollback to
+	// them. Keyed like the ITL baseline plus "#" and the arguments.
+	ITLBaselineStash map[string]float64   `json:"itlBaselineStash,omitempty"`
+	StartSeconds     map[string]float64   `json:"startSeconds,omitempty"`
+	VariantSeenAt    map[string]time.Time `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
 	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
@@ -463,23 +467,24 @@ func finitePositive(v float64) bool { return v > 0 && !math.IsInf(v, 0) && !math
 func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	a.mu.Lock()
 	s := LearnedState{
-		K2:              make(map[string]capacity.RollingAverageSnapshot, len(a.computeCapacityHistory)),
-		Throughput:      make(map[string]ThroughputSnapshot, len(a.saturatedThroughput)),
-		ITLBaseline:     a.itlTracker.Baselines(),
-		StartSeconds:    make(map[string]float64, len(a.startSeconds)),
-		VariantSeenAt:   make(map[string]time.Time, len(a.variantSeenAt)),
-		Accelerators:    make(map[string]AcceleratorSnapshot, len(a.lastAccelerator)),
-		ITLLines:        make(map[string]LineSnapshot, len(a.itlLines)),
-		K2BorrowedSince: map[string]time.Time{},
-		LowerBounds:     make(map[string]LowerBoundSnapshot, len(a.lowerBounds)),
-		K2Args:          maps.Clone(a.k2WindowArgs),
-		ThroughputArgs:  maps.Clone(a.throughputWindowArgs),
-		K2Stash:         make(map[string]capacity.RollingAverageSnapshot, len(a.k2Stash)),
-		ThroughputStash: make(map[string]ThroughputSnapshot, len(a.throughputStash)),
-		Forgotten:       make(map[string]ForgetMarkSnapshot, len(a.forgotten)),
-		Config:          map[string]string{},
-		Args:            map[string]string{},
-		PriorK2:         map[string]PriorK2Snapshot{},
+		K2:               make(map[string]capacity.RollingAverageSnapshot, len(a.computeCapacityHistory)),
+		Throughput:       make(map[string]ThroughputSnapshot, len(a.saturatedThroughput)),
+		ITLBaseline:      a.itlTracker.Baselines(),
+		ITLBaselineStash: maps.Clone(a.itlBaselineStash),
+		StartSeconds:     make(map[string]float64, len(a.startSeconds)),
+		VariantSeenAt:    make(map[string]time.Time, len(a.variantSeenAt)),
+		Accelerators:     make(map[string]AcceleratorSnapshot, len(a.lastAccelerator)),
+		ITLLines:         make(map[string]LineSnapshot, len(a.itlLines)),
+		K2BorrowedSince:  map[string]time.Time{},
+		LowerBounds:      make(map[string]LowerBoundSnapshot, len(a.lowerBounds)),
+		K2Args:           maps.Clone(a.k2WindowArgs),
+		ThroughputArgs:   maps.Clone(a.throughputWindowArgs),
+		K2Stash:          make(map[string]capacity.RollingAverageSnapshot, len(a.k2Stash)),
+		ThroughputStash:  make(map[string]ThroughputSnapshot, len(a.throughputStash)),
+		Forgotten:        make(map[string]ForgetMarkSnapshot, len(a.forgotten)),
+		Config:           map[string]string{},
+		Args:             map[string]string{},
+		PriorK2:          map[string]PriorK2Snapshot{},
 	}
 	for k, ra := range a.computeCapacityHistory {
 		s.K2[k] = ra.Snapshot()
@@ -585,6 +590,12 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		mergeAbsent(s.Throughput, p.state.Throughput)
 		mergeAbsent(s.VariantSeenAt, p.state.VariantSeenAt)
 		mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
+		if len(p.state.ITLBaselineStash) > 0 {
+			if s.ITLBaselineStash == nil {
+				s.ITLBaselineStash = map[string]float64{}
+			}
+			mergeAbsent(s.ITLBaselineStash, p.state.ITLBaselineStash)
+		}
 		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
 		mergeAbsent(s.K2Args, p.state.K2Args)
 		mergeAbsent(s.ThroughputArgs, p.state.ThroughputArgs)
@@ -696,6 +707,7 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.Throughput, func(k string, _ ThroughputSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.VariantSeenAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.ITLBaselineStash, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.K2Args, func(k, _ string) bool { return of(k) })
 	maps.DeleteFunc(s.ThroughputArgs, func(k, _ string) bool { return of(k) })
@@ -828,6 +840,16 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			if args, ok := s.ThroughputArgs[k]; ok {
 				p.state.ThroughputArgs[k] = args
 			}
+		}
+	}
+	// A put-aside baseline waits with its variant's other entries: installed
+	// now, the sweep before the variant's first cycle took it as stale.
+	for k, b := range s.ITLBaselineStash {
+		if p := pending(k); p != nil {
+			if p.state.ITLBaselineStash == nil {
+				p.state.ITLBaselineStash = map[string]float64{}
+			}
+			p.state.ITLBaselineStash[k] = b
 		}
 	}
 	for k, seen := range s.VariantSeenAt {
@@ -1070,6 +1092,7 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 		out.Outcome = RestoredDiffers
 		out.Priors, _ = a.installPreviousK2Locked(p.state, legacyArgsPrefix+p.expect, rec)
 	}
+	a.installITLStashLocked(p, out.Installed)
 	return out, true
 }
 
@@ -1221,6 +1244,30 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		}
 	}
 	return kept
+}
+
+// installITLStashLocked installs a variant's put-aside ITL baselines, which
+// name the arguments they were learned under and need no configuration check.
+// When the variant's own entries were not installed (its arguments differ, or
+// its configuration could not be matched), its stored baseline is put aside
+// too, under the arguments the document recorded, so a rollback to them gets
+// it back: only a full fit rewrites a baseline, which a balanced fleet rarely
+// spans. Callers hold a.mu.
+func (a *SaturationAnalyzer) installITLStashLocked(p *pendingVariant, installed bool) {
+	for k, b := range p.state.ITLBaselineStash {
+		if _, live := a.itlBaselineStash[k]; !live && finitePositive(b) {
+			a.itlBaselineStash[k] = b
+		}
+	}
+	if installed || p.expectArgs == "" {
+		return
+	}
+	for k, b := range p.state.ITLBaseline {
+		sk := stashKey(k, p.expectArgs)
+		if _, live := a.itlBaselineStash[sk]; !live && finitePositive(b) {
+			a.itlBaselineStash[sk] = b
+		}
+	}
 }
 
 // boundPriorsLocked counts the variant's lower bounds holding a previous
