@@ -213,7 +213,10 @@ Scale-from-zero: no variant woken for a model with pending requests
 ```
 
 Other `reason` values: `no-decode-candidate` (no inactive decode/`both` variant
-to wake) and `no-capacity` (nothing fit the GPU budget). Each is logged once per
+to wake), `no-capacity` (nothing fit the GPU budget) and `nominal-lent-out`
+(Kueue borrowing: nothing fit because the queue's nominal quota is lent to a
+peer it cannot reclaim from; on `wva_model_scaling_blocked` as
+`wake-nominal-lent-out`). Each is logged once per
 change of verdict, not per poll. A model already serving is not a refusal and is
 not reported.
 
@@ -226,26 +229,28 @@ against the same GPU/quota limiters the optimizer uses (see
 variants woken together: prefill and decode can each fit alone while the pair
 does not.
 
-The check is **best-effort**. When the GPU budget cannot be known it is skipped
-rather than denying the wake, because refusing a queued request over a missing
-measurement is the worse failure. It is skipped when:
+The check is **best-effort**, per limiter. A limiter that cannot answer is
+skipped and the others still check the wake, the same rule the optimizer
+follows ([security model](security-model.md#fail-open-and-fail-closed)).
+Refusing a queued request over a missing measurement is the worse failure.
 
-| condition | why |
+| condition | what the wake is checked against |
 | --- | --- |
-| no limiter is configured | declaring no `limiters:` list means nothing bounds scaling, so there is nothing to place against. This is the shipped default |
-| no usage snapshot yet | the saturation engine is the sole producer of GPU usage; until it completes one cycle there is no denominator. This is the state on the first cycle after a restart — exactly when a request may be queued |
-| a provider failed to compute constraints | a partial view would deny any accelerator type the surviving providers happen not to mention, turning "could not reach this provider" into "cannot place this variant" |
-| — | *(An unresolved accelerator does not skip the check: that candidate simply contributes no demand, and the rest of the set is still checked. A variant with no nodeSelector/nodeAffinity GPU key cannot be charged to any pool, so it is not counted rather than denied.)* |
+| no limiter is configured (the shipped default) | nothing: the wake is not checked |
+| a limiter's usage is not observed: for `gpu-inventory`, no node-usage snapshot under 5 minutes old (the engine reads the nodes itself at the moment it decides, so this is rare); for a quota, no completed saturation cycle since the start | the other limiters; this one is skipped |
+| a limiter fails to compute its figures (for `gpu-inventory`, usually the Node API) | the other limiters; this one is skipped |
+| every limiter skipped, and this namespace was checked successfully in the last 5 minutes | that last answer, with each wake since then debited from it (best-effort: per namespace and per accelerator name as the wake declared it) |
+| every limiter skipped, no answer in the last 5 minutes | nothing: the wake goes ahead unchecked and is counted in `wva_scale_from_zero_wake_unchecked_total` |
+| a variant's accelerator does not resolve | the rest of the set: that variant adds no demand, since it cannot be charged to any pool |
 
 > **The GPU budget can still over-state free capacity**, for the GPU-aware
-> optimizer and scale-from-zero alike: usage on an unresolved accelerator is
-> charged to no pool, and the physical `Limit` counts every *installed* GPU, not
-> what is available. Both, with fixes and status, are in
-> [GPU Capacity Accounting](../concepts/gpu-capacity-accounting.md). In short:
-> make the accelerator resolvable with a `nodeSelector`/`nodeAffinity` GPU key
-> (otherwise the scaling manager emits an `AcceleratorNotResolved` event, and
-> resolves a RUNNING variant from the nodes its pods landed on), and declare an
-> explicit quota limiter if you need a hard ceiling.
+> optimizer and scale-from-zero alike: a quota charges usage on an unresolved
+> accelerator to no cap, and a cordoned node's GPUs still count toward the
+> physical pool. These and the other cases are in
+> [GPU Capacity Accounting](../concepts/gpu-capacity-accounting.md#where-the-numbers-can-still-be-wrong).
+> In short: make the accelerator resolvable with a `nodeSelector`/`nodeAffinity`
+> GPU key (otherwise the scaling manager emits an `AcceleratorNotResolved`
+> event, and resolves a RUNNING variant from the nodes its pods landed on).
 
 The usage snapshot is published independently of the optimizer branch, so
 scale-from-zero can check placement on a cycle the optimizer never reached.
@@ -353,8 +358,8 @@ reports `invalid`) and the controller logs
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
-quota is a finite bound too: with `physicalGroups: true` they are shared over
-it. Without a finite bound, their models stay on the default optimizer, and
+quota is a finite bound too: with `physicalGroups: true` on a cluster-scoped
+controller they are shared over it. Without a finite bound, their models stay on the default optimizer, and
 the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.

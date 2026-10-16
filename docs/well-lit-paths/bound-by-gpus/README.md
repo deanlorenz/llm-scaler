@@ -65,6 +65,20 @@ cluster.
   the guide checks `reason=AcceleratorNotResolved` first.
 - On **Kubernetes**, a namespace-scoped controller needs `get` on its own
   Namespace, which `make setup-prereqs` grants ([older installs](#details-older-installs)).
+- A **namespace-scoped** controller also needs `list` on Pods **cluster-wide**.
+  Neither `make setup-prereqs` nor `make enable-physical-limiter` grants it.
+  Without it the controller counts only the GPUs its own namespace holds, so
+  GPUs other tenants hold on the same nodes read as free and it orders
+  replicas that stay Pending. It reports this (`wva_pod_access_denied` = 1 and
+  an error log), but keeps scaling. Grant the list, or bound that controller
+  with a quota instead ([details](../../reference/gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)).
+- **A scheduler that packs GPU pods**, when replicas of different sizes share
+  nodes. The scaling manager plans each pod into the smallest hole that holds
+  it. The default kube-scheduler scores `LeastAllocated` and spreads instead,
+  so a 4-GPU pod can land on the free 8-GPU node a planned 8-GPU replica
+  needed, which then stays Pending. Score GPU nodes with `MostAllocated` and a
+  GPU resource weight ([how](../../reference/gpu-limiter.md#the-scheduler-must-pack)).
+  With one replica size, or one replica per node, this does not matter.
 
 ### What the command restarts
 
@@ -99,10 +113,10 @@ denies are in [capping what each tenant may take](../tenant-gpu-quotas/).
 The guide's [Verification](../../guides/admin-gpu-bounding/README.md#verification)
 has the commands. Read them like this:
 
-- `GPU limiter (re)built from config` with `type` `inventory` (after a restart,
-  `GPU limiter constructed` with that `type`), and no `Invalid saturation
-  scaling`. `GPU limiter constructed` alone proves nothing: every controller
-  prints it at start, `type` `none` included.
+- `GPU limiter (re)built from config` with `limiterTypes` `inventory` (after
+  a restart, `GPU limiter constructed` with that `limiterTypes`), and no
+  `Invalid saturation scaling`. `GPU limiter constructed` alone proves nothing:
+  every controller prints it at start, `limiterTypes` `none` included.
 - `wva_model_scaling_blocked` carries the reason as a label. A model that
   wanted more and did not get it is a normal, visible outcome here.
 - `scaling-decision` lines show what the optimizer decided, with a reason code
@@ -116,7 +130,7 @@ Admin-owned controllers read their own ConfigMap by design; see
 - End-to-end: `test/e2e/limiter_test.go` (labelled `full`), and
   `test/e2e/warm_pool_quota_test.go` for the refusal when a pool asks for
   accelerators the quota will not give.
-- The accounting, and three ways a GPU budget can over-state free capacity,
+- The accounting, and where a GPU budget can still over-state free capacity,
   are in [gpu-capacity-accounting.md](../../concepts/gpu-capacity-accounting.md).
 
 ### Tuning it

@@ -296,8 +296,9 @@ What changes without a config change:
 - **The warm pool's headroom is published after the optimizer's pass**, net
   of the replicas the pass ordered. Before, it was the figure from before the
   pass, so a pool could grow into GPUs just ordered for a model.
-- **A namespace-scope quota bounds only the namespaces it lists.** A namespace
-  it excludes is no longer bounded by the sum of the other tenants' caps: it is
+- **A namespace-scope quota bounds only the namespaces it governs**: those it
+  lists, and with a `default` key every other namespace it does not exclude.
+  A namespace it excludes is no longer bounded by the sum of the other tenants' caps: it is
   bounded by the cluster bounds (the physical limiter or a cluster-scope quota),
   and unbounded when there are none.
 - **A namespace allowance that is unlimited (`-1`) for every type now scales**
@@ -351,7 +352,21 @@ frozen, with the reasons the box lists, and the nominal cap applies.
 (`countBorrowable: false`, or `WVA_QUOTA_KUEUE_BORROW=false`), and wait for
 models to drop back under nominal. Turning it off evicts nothing: a lowered
 cap only stops growth, and models move back as they scale down (lower a
-model's `maxReplicaCount` to hurry it). Then install the older release. It
+model's `maxReplicaCount` to hurry it). Check that none is still past it: no
+entry may show `used` above `guaranteed`.
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
+  | jq -c '(.entries | length), (.entries[] | select(.guaranteed >= 0 and .used > .guaranteed) | {namespace, accelerator, guaranteed, used})'
+```
+
+The first line is the number of entries; it must be above 0, or the check
+read nothing. No line after it means every namespace is back within nominal.
+If the utilization-share
+optimizer is on, also set `shadow: true` and wait one cycle before the
+downgrade, so it removes its marks from the pods
+([why](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade)).
+Then install the older release. It
 ignores the `borrowReleaseLedger` and `limiterBudgets` keys in
 `wva-controller-status`. The RBAC borrowing added stays behind; it grants
 reads only. Remove it by re-applying the older release's roles, or leave it.

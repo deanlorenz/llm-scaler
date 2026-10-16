@@ -373,10 +373,12 @@ model cannot grow while others hold GPUs.
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
 | A Kueue-backed namespace stops below its ClusterQueue's `nominalQuota`; a non-zero `charge` on its rows in the `Kueue borrowing applied` log line | other workloads Kueue admitted in the queue (a training job, another namespace on a shared queue) hold that much of it, and the figure is charged with it. Expected: Kueue would hold more replicas pending. See [What a quota is charged](quota-limiter.md#what-a-quota-is-charged) |
-| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`). `GPU constraint provider bounds scaling again` ends it |
+| `GPU constraint provider skipped; the other limiters still bound scaling` in the log, `wva_constraint_provider_skipped == 1` | a declared limiter is left out of decisions; the others still bound, but nothing checks what it would deny. `reason`: `unobserved`: its GPU usage is not observed yet. A Kueue-backed quota entry that has never read Kueue is not skipped: it still bounds with its finite caps, and shows as `wva_kueue_never_read` instead (see [never read](#a-kueue-backed-quota-was-never-read)). Other reasons: `failed` (it could not compute, e.g. a Kueue read or a node list failed; the log line says why), `node_read_denied` (`gpu-inventory` beside a quota, no node read: grant it with `make setup-prereqs`), `no_constraints` (the limiter answered with no figures at all; the shipped limiters always answer, so report it as a bug with the log line). `GPU constraint provider bounds scaling again` ends it |
 | `Physical limiter: replicas are not fitted to nodes this cycle` | the physical limiter bounds scaling but no node snapshot younger than 2 minutes exists, so replicas are fitted to the pool only, as before node fit; `reason` says why. Usually the GPU usage observation is failing (the same cause skips the provider soon after). `Physical limiter: replicas are fitted to nodes again` ends it. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
-| A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (up to 5 minutes, the in-flight hold): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
+| A model with free GPUs in `wva_available_gpus` does not grow; `ResourceConstrained` on its ScaledObject ends `(limited by node-fit)`; `wva_decisions_limited_total{limiter_name="node-fit"}` rising | the free GPUs are split across nodes in holes smaller than one replica (or one pod of it), on nodes tainted against it, or held for a replica still starting (the in-flight hold: up to 5 minutes, or a Kueue flavor's `placementTimeout` when longer, tripled while a cluster-autoscaler scale-up is pending): with the physical limiter a replica must fit one node. A P/D model needs a node for a prefill **and** a decode replica. Nothing to fix in the scaling manager; free a node, or use smaller replicas. See [A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node) |
 | A new group of an exclusive-topology LeaderWorkerSet stays Pending (`FailedScheduling` on pod affinity), and `wva_pod_access_denied` is 1 | a namespace-scoped controller that may not list Pods cluster-wide sees only its own namespace's Pods, so it misses other namespaces' LeaderWorkerSet groups. A topology domain where only such a group runs looks free, and a group is ordered into it. Grant `list` on `pods` cluster-wide. See [When policy demands a limiter the controller cannot serve](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve) |
+| `ResourceConstrained` ends `(limited by pd-pair-borrows-whole)`; `wva_decisions_limited_total{limiter_name="pd-pair-borrows-whole"}` rising | Kueue borrowing: the model's next P/D pair would put one role on guaranteed and the other on borrowed capacity, and a pair borrows only whole. The GPUs are there; the rule holds the pair back, because Kueue could reclaim one half alone. It grows once a whole pair fits borrowed capacity, or guaranteed capacity holds both roles. See [Cohort borrowing](quota-limiter.md#cohort-borrowing) |
+| A Job's pods fail to create (`FailedCreate`, `exceeded quota`) in a namespace where serving pods wait at Kueue's admission gate | a `ResourceQuota` counts gated pods, Kueue does not. A serving replica ordered past what Kueue admits holds the namespace's `ResourceQuota` while it waits, and the Job Kueue did admit cannot create its pods. Find the gated pods with `kubectl get pods -n <ns> -o jsonpath='{range .items[?(@.spec.schedulingGates)]}{.metadata.name}{"\n"}{end}'`, and lower the serving model's `maxReplicaCount` so it stops ordering past Kueue's grant |
 | `Upgrade note (transitional): this policy declares a physical GPU limiter and quotas, and both now bound scaling` | expected once after upgrading a policy that declares both kinds: the listed variants get a different target than the quota alone gave them, because the GPUs that exist now bound them too. Nothing to fix unless the physical bound is not wanted; then drop the `gpu-inventory` entry. Logged only when the set of variants changes, and removed in the next release |
 
 A **fully** spent quota shows the same signals: a model the last GPUs did not
@@ -533,7 +535,8 @@ guaranteed figure) while its cohort has idle GPUs;
 ```bash
 kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
   | jq -c '.entries[] | select(.reason) | {namespace, accelerator, reason}'
-$LOGS | grep 'Kueue borrowing applied' | tail -1
+# the line reads "applied", or "frozen at the last figures" while stale or Kueue is down
+$LOGS | grep -E 'Kueue borrowing applied|borrowing frozen at the last figures' | tail -1
 ```
 
 Each namespace shows one reason: the first in this table that applies. Every
@@ -709,7 +712,7 @@ too high or too low.
 ```bash
 kubectl get clusterqueue <cluster_queue> -o jsonpath='{.status.flavorsReservation}'
 kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' | jq -c '.entries[]'
-$LOGS | grep 'Kueue borrowing applied' | tail -1     # kueueBorrowed per queue row
+$LOGS | grep -E 'Kueue borrowing applied|borrowing frozen at the last figures' | tail -1     # kueueBorrowed per queue row
 ```
 
 Usual causes: a Kueue feature borrowing does not detect (`waitForPodsReady`
@@ -1516,6 +1519,26 @@ same way when its demand rises. Otherwise:
   up) but does not shield them from another model's need.
 
 See the [scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
+
+### A role is held by floors or by a release that failed
+
+Read the role's reason first:
+
+```promql
+wva_model_scaling_blocked{reason=~"floor-pinned|floors-exceed-quota|donors-at-floor|release-timeout|release-taken|release-shape-mismatch"} == 1
+```
+
+| reason | means | what to do |
+| --- | --- | --- |
+| `floor-pinned` | the model's `minReplicaCount` holds at least one replica more than it needs; the share cannot give those GPUs to others | lower `minReplicaCount` if the floor is not deliberate |
+| `floors-exceed-quota` | the floors of the group's models add up to more than its budget; every model of the group shows it | lower a floor or raise the quota |
+| `donors-at-floor` | the role is short, and no other role holds more than its floor to give | lower another model's `minReplicaCount`, or raise the quota |
+| `release-timeout` | the role, as a donor, did not scale down within the release timeout; the release was aborted and it backs off before it is asked again | check the donor's ScaledObject scale-down window, its pods' termination grace, and that KEDA acts on it |
+| `release-taken` | the role's last fill timed out: the GPUs its donors released were taken by a pod the scaling manager did not place. Cleared after one release timeout | look for other workloads scheduling onto that accelerator; a `ResourceQuota` or a dedicated node pool keeps them off |
+| `release-shape-mismatch` | the role's last fill timed out: enough GPUs were free in total, but on no node enough for its largest pod. Cleared after one release timeout | the GPUs are fragmented; free a whole node, or use smaller replicas |
+
+The reasons and their timing are in
+[utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
 
 ### A model shows `no-compatible-donor`
 
