@@ -137,6 +137,11 @@ type QueueState struct {
 	// Workload from a borrowed one of lower priority: the lowest it runs is
 	// the cautious stand-in for what it will ask for next.
 	LenderPriority *int32
+	// BorrowerPriority is the highest spec.priority of the queue's reserved
+	// Workloads that request a GPU; nil when none was read. A queue that
+	// borrows holds the cohort's GPUs at up to that priority
+	// (SharedPool.BorrowerPriority).
+	BorrowerPriority *int32
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -355,6 +360,16 @@ type SharedPool struct {
 	// CoUnbound are the co-resources a member charges on a flavor not known
 	// here: the resource group covering it offers several flavors (K2a).
 	CoUnbound []string
+	// Borrowed is what the cohort's members borrow of this key, by Kueue's
+	// own status figure (QueueResource.Borrowed), and BorrowerPriority the
+	// highest priority it is held at: the highest BorrowerPriority of the
+	// members that borrow, nil when one of them has none read (M1, NEW-4).
+	// Kueue does not say whose lending a borrowed GPU is; a LowerPriority
+	// lender that does not outrank that priority cannot take back what is
+	// held at it, so its restricted lending stays closed while it is
+	// borrowed (allocation.SharedPoolChunk.drawable).
+	Borrowed         int
+	BorrowerPriority *int32
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -504,10 +519,21 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				p.Free = cohortFree(qs, key)
 				p.CoFree, p.CoUnbound = cohortCoFree(qs, key.Flavor)
 			}
+			unknownBorrower := false
 			for _, q := range qs {
 				r, declares := q.Resources[key]
 				if !declares {
 					continue
+				}
+				if r.Borrowed > 0 {
+					p.Borrowed = addCapped(p.Borrowed, r.Borrowed)
+					switch {
+					case q.BorrowerPriority == nil:
+						unknownBorrower = true
+					case p.BorrowerPriority == nil || *q.BorrowerPriority > *p.BorrowerPriority:
+						bp := *q.BorrowerPriority
+						p.BorrowerPriority = &bp
+					}
 				}
 				// An inactive queue still lends (cohortFree counts it), but
 				// never waits. A pending Workload counts only on the flavors
@@ -525,6 +551,9 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				}
 				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
 					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority})
+			}
+			if unknownBorrower {
+				p.BorrowerPriority = nil // held at a priority not read: the cautious side
 			}
 			slices.Sort(p.WaitingLenders)
 			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })

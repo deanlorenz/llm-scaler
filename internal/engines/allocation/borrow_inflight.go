@@ -134,6 +134,7 @@ func (b *BorrowInFlight) RecordAt(draws []BorrowDraw, now time.Time) {
 			d.Replicas += prev.Replicas
 			d.Target = max(d.Target, prev.Target)
 			d.OrderedAt = prev.OrderedAt
+			d.ClosesRestricted = d.ClosesRestricted || prev.ClosesRestricted
 		}
 		if d.GPUs <= 0 || d.Replicas <= 0 {
 			continue
@@ -388,6 +389,10 @@ func DeductUnreservedAt(constraints []*ResourceConstraints, u Unreserved) []*Res
 				p := &cc.SharedPools[i]
 				if p.Cohort == d.Cohort && p.Flavor == d.Flavor && p.Resource == d.Resource && !readAfter(p, d.ResolvedAt) {
 					p.Free = max(0, p.Free-d.GPUs)
+					// A draw by a model some LowerPriority lender does not
+					// outrank keeps the restricted part closed until a
+					// read shows it borrowed (SharedPoolChunk.Borrowed, M1).
+					p.restrictedClosed = p.restrictedClosed || d.ClosesRestricted
 				}
 			}
 		}

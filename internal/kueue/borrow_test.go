@@ -257,6 +257,20 @@ var _ = Describe("ComputeBorrowing", func() {
 			"keeps: lends 2 of 8, uses 1 of the 6 it keeps; uses: lends all 8, uses 5")
 	})
 
+	It("reports what the cohort borrows of a pool and the highest priority it is held at (M1)", func() {
+		a := member("a", QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8})
+		a.BorrowerPriority = priorityOf(1000)
+		b := member("b", QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8})
+		b.BorrowerPriority = priorityOf(100)
+		p := ComputeBorrowing(topology(member("lender", QueueResource{Nominal: 32}), a, b), false).Pools[0]
+		Expect(p.Borrowed).To(Equal(16))
+		Expect(p.BorrowerPriority).To(Equal(priorityOf(1000)))
+
+		b.BorrowerPriority = nil
+		p = ComputeBorrowing(topology(member("lender", QueueResource{Nominal: 32}), a, b), false).Pools[0]
+		Expect(p.BorrowerPriority).To(BeNil(), "a borrower whose priority was not read: unknown, the cautious side")
+	})
+
 	It("a borrower's own usage past its kept part leaves the pool", func() {
 		t := topology(
 			member("lender", QueueResource{Nominal: 8}),

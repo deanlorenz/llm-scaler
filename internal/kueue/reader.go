@@ -340,6 +340,9 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			if p, ok := pending.lenderPriority[name]; ok {
 				q.LenderPriority = &p
 			}
+			if p, ok := pending.borrowerPriority[name]; ok {
+				q.BorrowerPriority = &p
+			}
 			topo.Queues[name] = q
 		}
 	} else {
@@ -481,7 +484,7 @@ func externalLenders(ls []LenderState) []config.ExternalLender {
 func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSharedPool {
 	out := make([]config.ExternalSharedPool, 0, len(b.Pools))
 	for _, p := range b.Pools {
-		out = append(out, config.ExternalSharedPool{
+		e := config.ExternalSharedPool{
 			Cohort:         p.Cohort,
 			Flavor:         p.Flavor,
 			Resource:       p.Resource,
@@ -495,7 +498,13 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			PendingGPUs:    p.PendingGPUs,
 			CoFree:         maps.Clone(p.CoFree),
 			CoUnbound:      slices.Clone(p.CoUnbound),
-		})
+			Borrowed:       p.Borrowed,
+		}
+		if p.BorrowerPriority != nil {
+			bp := *p.BorrowerPriority
+			e.BorrowerPriority = &bp
+		}
+		out = append(out, e)
 	}
 	return out
 }

@@ -118,8 +118,17 @@ type SharedPoolChunk struct {
 	// priority Kueue gives a Workload of that class, as read from the
 	// Workloads. A model's priority is looked up here.
 	ClassPriority map[string]int32
+	// Borrowed is what the cohort's members borrow of the chunk's key in the
+	// read (Kueue's status borrowed), and BorrowerPriority the highest
+	// priority it is held at -- nil, while Borrowed is not 0, when a
+	// borrower's priority was not read (kueue.SharedPool). A Restricted
+	// lender that does not outrank it stays closed (drawable, M1).
+	Borrowed         int
+	BorrowerPriority *int32
 	// restrictedClosed is set, for the rest of the pass, once a model that
-	// some Restricted lender does not outrank drew on the chunk (K2-2): Kueue
+	// some Restricted lender does not outrank drew on the chunk (K2-2), and
+	// before the pass when such a model's draw is still in flight
+	// (BorrowDraw.ClosesRestricted, DeductUnreservedAt; M1): Kueue
 	// does not say whose lending a borrowed GPU is, and preempts the lowest
 	// priority first when any lender reclaims. Were a model it outranks to
 	// draw the restricted part after, an Any lender's reclaim would take that
@@ -237,11 +246,24 @@ func (c *SharedPoolChunk) drawable(class string, fallback *int32) int {
 	}
 	free := c.Free
 	for _, r := range c.Restricted {
-		if c.restrictedClosed || !known || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, &prio) {
+		if c.restrictedClosed || c.heldAbove(r) || !known || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, &prio) {
 			free -= r.GPUs
 		}
 	}
 	return max(0, free)
+}
+
+// heldAbove reports whether the read shows the chunk's key borrowed at a
+// priority the LowerPriority lender r does not outrank, or at one not read
+// (M1, NEW-4). The K2-2 closure then holds across cycles, not for one pass:
+// a model drawing r's lending now would be the one an Any lender's reclaim
+// preempts first, and r could never take back what the higher priority
+// holds.
+func (c *SharedPoolChunk) heldAbove(r PriorityLend) bool {
+	if c.Borrowed <= 0 {
+		return false
+	}
+	return c.BorrowerPriority == nil || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, c.BorrowerPriority)
 }
 
 // key identifies a chunk across providers that read the same cohort.
@@ -447,6 +469,18 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	}
 	slices.Sort(prev.CoUnbound)
 	prev.Stale = prev.Stale || p.Stale
+	prev.restrictedClosed = prev.restrictedClosed || p.restrictedClosed
+	// The borrowed figure: the larger, at the higher priority, unknown when
+	// either read holds borrowing at a priority it did not read.
+	unknown := (prev.Borrowed > 0 && prev.BorrowerPriority == nil) || (p.Borrowed > 0 && p.BorrowerPriority == nil)
+	switch {
+	case unknown:
+		prev.BorrowerPriority = nil
+	case p.BorrowerPriority != nil && (prev.BorrowerPriority == nil || *p.BorrowerPriority > *prev.BorrowerPriority):
+		bp := *p.BorrowerPriority
+		prev.BorrowerPriority = &bp
+	}
+	prev.Borrowed = max(prev.Borrowed, p.Borrowed)
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt
 	}

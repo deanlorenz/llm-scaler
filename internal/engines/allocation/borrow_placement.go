@@ -48,6 +48,11 @@ type BorrowDraw struct {
 	Reclaim bool
 	// Accelerator is the type a Reclaim entry was placed for.
 	Accelerator string
+	// ClosesRestricted marks a draw by a model that some LowerPriority lender
+	// of its chunk does not outrank (K2-2): while it is in flight, or lags a
+	// read, the chunk's restricted part stays closed to every model, as the
+	// pass that drew it closed it (DeductUnreservedAt, M1).
+	ClosesRestricted bool
 	// Wake marks an entry a scale-from-zero wake recorded (WakeDraws): its
 	// variant may not be among the steady-state engine's yet, and the target
 	// it decides is not the wake's, so only its replicas existing, or
@@ -878,9 +883,11 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		if fromOwn > 0 {
 			bs.credit[p.namespace+"/"+variant][c.key()] -= fromOwn
 		}
-		if c.drawable(p.class, borrow.priority) < c.Free {
+		closes := c.drawable(p.class, borrow.priority) < c.Free
+		if closes {
 			// A model some LowerPriority lender does not outrank drew here:
-			// its restricted part closes for every model this pass (K2-2).
+			// its restricted part closes for every model this pass (K2-2),
+			// and in later cycles while the draw is in flight (M1).
 			c.restrictedClosed = true
 		}
 		c.Free -= need - fromOwn
@@ -892,7 +899,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		d := BorrowDraw{
 			Namespace: p.namespace, ModelID: p.modelID, Variant: variant,
 			Cohort: c.Cohort, Flavor: c.Flavor, Resource: c.Resource,
-			GPUs: need, Replicas: 1, Target: target, Placement: &c.FlavorPlacement,
+			GPUs: need, Replicas: 1, Target: target, Placement: &c.FlavorPlacement, ClosesRestricted: closes,
 		}
 		if fromOwn > 0 {
 			d.CreditGPUs, d.CreditReplicas = fromOwn, 1
@@ -938,6 +945,7 @@ func (bs *borrowState) drawsByVariant() []BorrowDraw {
 		out[i].CreditGPUs += d.CreditGPUs
 		out[i].CreditReplicas += d.CreditReplicas
 		out[i].Target = max(out[i].Target, d.Target)
+		out[i].ClosesRestricted = out[i].ClosesRestricted || d.ClosesRestricted
 	}
 	return out
 }

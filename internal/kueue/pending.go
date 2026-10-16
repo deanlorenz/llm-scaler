@@ -110,6 +110,9 @@ type pendingRead struct {
 	// highestByNamespace is, per namespace, the highest spec.priority of its
 	// unfinished GPU Workloads.
 	highestByNamespace map[string]int32
+	// borrowerPriority is, per ClusterQueue, the highest spec.priority of its
+	// reserved GPU Workloads (QueueState.BorrowerPriority).
+	borrowerPriority map[string]int32
 }
 
 // readPending reads the Workloads for the lender-waiting signal and the
@@ -130,7 +133,7 @@ type pendingRead struct {
 // once until a read passes. Callers must hold r.mu.
 func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Unstructured) (out pendingRead, unreadable bool) {
 	out = pendingRead{byQueue: map[string][]PendingWorkload{}, lenderPriority: map[string]int32{},
-		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}}
+		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}, borrowerPriority: map[string]int32{}}
 	fail := func(err error) (pendingRead, bool) {
 		if !r.warnedPending && ctx.Err() == nil {
 			r.warnedPending = true
@@ -187,6 +190,7 @@ func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Uns
 		if workloadReserved(w) {
 			if cq, _, _ := unstructured.NestedString(w.Object, "status", "admission", "clusterQueue"); cq != "" {
 				lowest(out.lenderPriority, cq, priority)
+				highest(out.borrowerPriority, cq, priority)
 			}
 			continue
 		}

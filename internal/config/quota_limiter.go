@@ -453,6 +453,11 @@ type ExternalSharedPool struct {
 	// CoUnbound are the co-resources charged on a flavor not known: the
 	// resource group covering them offers several flavors.
 	CoUnbound []string `json:"coUnbound,omitempty"`
+	// Borrowed is what the cohort's members borrow of this key (Kueue's
+	// status borrowed), BorrowerPriority the highest priority it is held at,
+	// nil when not every borrower's was read (kueue.SharedPool).
+	Borrowed         int    `json:"borrowed,omitempty"`
+	BorrowerPriority *int32 `json:"borrowerPriority,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.
