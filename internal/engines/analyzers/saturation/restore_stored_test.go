@@ -1,9 +1,15 @@
 package saturation
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -35,5 +41,60 @@ func TestARestoreCountsTheWindowsTheDocumentHeld(t *testing.T) {
 	key := rrKey(a, "variant-a")
 	if r := restore(map[string]capacity.RollingAverageSnapshot{key: rrWindow(4000).Snapshot()}); r.Stored != 1 {
 		t.Errorf("a document with one window for the variant: want stored 1, got %+v", r)
+	}
+}
+
+// The restart line tells a variant that had no k2 window to keep from one
+// whose windows were too old, or measured on other hardware, to keep -- for a
+// changed configuration and for one not read completely alike.
+func TestTheRestartLineSaysWhetherTheSnapshotHeldAWindow(t *testing.T) {
+	unread := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 64, Unresolved: []string{"max-num-seqs"}}
+	for _, tc := range []struct {
+		name   string
+		params *capacity.EngineParams
+		window bool
+		want   string
+	}{
+		{"changed, none held", mtParams(64, "vllm:v1"), false,
+			"configuration changed, and the snapshot held no k2 window of the variant's own to keep"},
+		{"changed, one too old", mtParams(64, "vllm:v1"), true,
+			"configuration changed, and no k2 window was recent enough"},
+		{"unread, none held", unread, false,
+			"could not be read completely, and the snapshot held no k2 window of the variant's own to keep"},
+		{"unread, one too old", unread, true,
+			"could not be read completely, and no k2 window was recent enough"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged []string
+			ctx := ctrl.LoggerInto(context.Background(),
+				funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
+			a, _, _ := waProcess(tc.params)
+			doc := LearnedState{
+				Config:        map[string]string{"test-ns/variant-a": mtParams(256, "vllm:v1").Fingerprint()},
+				Args:          map[string]string{"test-ns/variant-a": mtParams(256, "vllm:v1").ArgsFingerprint()},
+				VariantSeenAt: map[string]time.Time{a.itlWindowKey("test-ns", "test-model", "variant-a", "H100", 1): time.Now()},
+			}
+			if tc.window {
+				// Last used two months ago: past any bucket retention.
+				old := rrWindow(4000).Snapshot()
+				old.LastUsed = time.Now().Add(-60 * 24 * time.Hour)
+				old.LastWritten = old.LastUsed
+				doc.K2 = map[string]capacity.RollingAverageSnapshot{rrKey(a, "variant-a"): old}
+			}
+			a.RestoreLearnedState(doc)
+			in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50)}, mtOneVariant)
+			if _, err := a.Analyze(ctx, in); err != nil {
+				t.Fatalf("Analyze: %v", err)
+			}
+			for _, l := range logged {
+				if strings.Contains(l, "learned state") && strings.Contains(l, "variant-a") {
+					if !strings.Contains(l, tc.want) {
+						t.Errorf("restart line %q does not say %q", l, tc.want)
+					}
+					return
+				}
+			}
+			t.Fatalf("no restart line for variant-a in %d lines", len(logged))
+		})
 	}
 }

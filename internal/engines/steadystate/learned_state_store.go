@@ -146,8 +146,9 @@ func learnedStateIdentity() string {
 // write) at Error once per change of its error, and its recovery once.
 //
 // Per operation: every write is preceded by a read, and the read may work
-// where the write does not -- the manager Role reads ConfigMaps, only the
-// learned-state Role writes this one. Kept in one slot, each minute's read
+// where the write does not -- in most installs the manager Role reads
+// ConfigMaps in the controller's namespace, and only the learned-state Role
+// writes this one. Kept in one slot, each minute's read
 // cleared the write's error, so a store that could not be written logged
 // "works again" and the same Forbidden every minute, which read as a store
 // recovering, not as one that never would.

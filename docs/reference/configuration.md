@@ -675,7 +675,7 @@ What is restored, and what is not:
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle; a `learned state restored` line (or, with nothing
-to keep, `learned state not restored`) follows for each on its first cycle. Writing the snapshot needs the Role `wva-learned-state-role` (reading it is covered by the manager Role), which
+to keep, `learned state not restored`) follows for each on its first cycle. Writing the snapshot needs the Role `wva-learned-state-role`, and so does reading it where the manager Role does not read ConfigMaps in the controller's namespace (a namespace-scoped install with `WVA_WATCH_NS` set); the Role
 `make setup-prereqs` installs; an install upgraded from before the store existed
 reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
