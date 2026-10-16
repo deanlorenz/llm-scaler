@@ -505,7 +505,9 @@ var _ = Describe("a namespace a namespace quota excludes", func() {
 
 		It("bounds an excluded namespace by a cluster quota whatever spelling its workload uses", func() {
 			cons := constraintsOf(empty, tenants, clusterQuota(16))
-			for _, acc := range []string{"A100", "NVIDIA-A100-SXM4-80GB", "a100"} {
+			// The short name, a node's product label, a GKE accelerator value,
+			// and the short name in lower case.
+			for _, acc := range []string{"A100", "NVIDIA-A100-SXM4-80GB", "nvidia-a100-80gb", "a100"} {
 				eachRescale(func(o *GreedyByScoreOptimizer) {
 					dm := targets(o, []ModelScalingRequest{modelOn(acc, "mx", "ns-x", 0, 6, 8)}, cons)
 					Expect(dm["mx-v"].TargetReplicas).To(Equal(2), "%s, rescale=%v: 16 GPUs", acc, o.Rescale.Cluster)
