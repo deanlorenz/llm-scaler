@@ -621,7 +621,9 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(reach)))
 			g.Expect(queueStatus(g, queueB).Pending).To(Equal(nominal))
 		}, lenderDebounce+45*time.Second, 5*time.Second).Should(Succeed())
-		Expect(controllerLogsSince(asked)).NotTo(ContainSubstring(`"cause": "lender-waiting"`),
+		// The same pattern as the positive check below: a log encoder that
+		// writes "cause":"lender-waiting" with no space must not pass this.
+		Expect(controllerLogsSince(asked)).NotTo(MatchRegexp(`"cause": ?"lender-waiting"`),
 			"nothing is handed back to a lender Kueue does not reclaim for by default")
 
 		By("Opting in: releaseToNonReclaimingLenders: true")
