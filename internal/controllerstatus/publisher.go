@@ -491,6 +491,9 @@ func (p *Publisher) flushOnShutdown(ctx context.Context, logger logr.Logger, car
 	if !carried {
 		return
 	}
+	// The old leader's conflict retry cannot overwrite a new leader's write: it
+	// stops leading at RenewDeadline (50s by default), before another can take
+	// the lease at LeaseDuration (60s), and this write is capped at shutdownFlush (2s).
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.shutdownFlush)
 	defer cancel()
 	if err := p.flush(fctx); err != nil {

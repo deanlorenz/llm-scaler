@@ -376,7 +376,9 @@ Limits:
   node shared by a donor's pod and another model's group is not freed.
 - After a restart, a held replica counts its pods again only from the first
   steady-state cycle. That cycle ends every restored hold it does not decide
-  (a model deleted while the controller was down, or no longer asking).
+  (a model deleted while the controller was down, or no longer asking). A
+  model that cycle skips, for example because its metrics are missing, loses
+  its restored hold too, Unschedulable replica included.
   Until then, a hold whose pods landed in the meantime still holds its hole.
   A restored hold lasts at most three borrowing `placementTimeout`s (at
   least 5 minutes), whatever the saved value says. A wake decided in the
