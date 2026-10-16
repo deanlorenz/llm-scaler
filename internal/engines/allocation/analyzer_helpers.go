@@ -130,6 +130,14 @@ func prcForVariant(r *domain.AnalyzerResult, v string) float64 {
 // It falls back to scaleDownBoundary -- the previous behaviour exactly -- when
 // either threshold is missing or inverted, so a malformed configuration loses
 // the improvement rather than gaining a release it cannot justify.
+// ReleaseTargetUtilization is the utilization a release sheds down to: a
+// quarter of the way from the scale-down boundary to the scale-up threshold,
+// or the boundary when the band is unusable. The composite bounds every
+// frame's release at it.
+func (e NamedAnalyzerResult) ReleaseTargetUtilization() float64 {
+	return e.releaseTargetUtilization()
+}
+
 func (e NamedAnalyzerResult) releaseTargetUtilization() float64 {
 	if e.ScaleUpThreshold > 0 && e.ScaleDownBoundary > 0 &&
 		e.ScaleUpThreshold > e.ScaleDownBoundary {

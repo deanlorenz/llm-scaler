@@ -646,8 +646,11 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				break
 			}
 		}
-		if hold.NoScaleDown {
-			floor = max(floor, roleCurrentGPUs(records, stateMap, acc, role))
+		// Under a scale-down hold the role keeps what it has; under a release
+		// bound it gives no more than the bound allows. Read here because the
+		// share sizes from demand and never reads the spare the bound caps.
+		if f, ok := releaseFloorGPUs(sig, records, stateMap, acc, role); ok {
+			floor = max(floor, f)
 		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{

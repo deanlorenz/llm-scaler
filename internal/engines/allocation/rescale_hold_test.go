@@ -119,22 +119,70 @@ func TestRoundFillsToReplicas(t *testing.T) {
 	records := buildVariantRecords(req, req.CompositeSignal.Result)
 	stateMap := buildStateMap(req.VariantStates)
 	roles := []string{domain.RoleDecode, domain.RolePrefill}
+	cur := map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16}
 
 	tgt := map[string]int{domain.RolePrefill: 17, domain.RoleDecode: 23}
-	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16})
+	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, cur, initTargets(req.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 24}, tgt)
 
 	// A cut too small for any pod stays unspent rather than overshooting.
 	tgt = map[string]int{domain.RolePrefill: 19, domain.RoleDecode: 19}
-	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16})
+	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, cur, initTargets(req.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16}, tgt)
 
 	// One-GPU replicas are left as split.
 	one := pdRescaleRequest(nil)
 	tgt = map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}
 	roundFillsToReplicas(buildVariantRecords(one, one.CompositeSignal.Result), buildStateMap(one.VariantStates),
-		"A100", roles, tgt, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 4})
+		"A100", roles, tgt, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 4}, initTargets(one.VariantStates))
 	assert.Equal(t, map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}, tgt)
+}
+
+// TestRoundFillsToReplicasUsesTheVariantThatFills: the share is rounded to
+// what fillRole places, not to the cheapest variant's pod. With the 8-GPU
+// variant at its maximum and a 4-GPU one free, +4 is one 4-GPU replica;
+// rounded on the 8-GPU pod it was nothing.
+func TestRoundFillsToReplicasUsesTheVariantThatFills(t *testing.T) {
+	one := 1
+	req := ModelScalingRequest{
+		ModelID: "m", Namespace: "ns",
+		CompositeSignal: NamedAnalyzerResult{Result: &domain.AnalyzerResult{VariantCapacities: []domain.VariantCapacity{
+			{VariantName: "d8", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 800},
+			{VariantName: "d4", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 300},
+		}}},
+		VariantStates: []domain.VariantReplicaState{
+			{VariantName: "d8", Role: domain.RoleDecode, CurrentReplicas: 1, GPUsPerReplica: 8, MaxReplicas: &one},
+			{VariantName: "d4", Role: domain.RoleDecode, CurrentReplicas: 1, GPUsPerReplica: 4},
+		},
+		Variants: []domain.VariantMetadata{
+			{VariantName: "d8", Role: domain.RoleDecode, AcceleratorName: "A100", Cost: 1},
+			{VariantName: "d4", Role: domain.RoleDecode, AcceleratorName: "A100", Cost: 1},
+		},
+	}
+	records := buildVariantRecords(req, req.CompositeSignal.Result)
+	tgt := map[string]int{domain.RoleDecode: 16}
+	roundFillsToReplicas(records, buildStateMap(req.VariantStates), "A100", []string{domain.RoleDecode},
+		tgt, map[string]int{domain.RoleDecode: 12}, initTargets(req.VariantStates))
+	assert.Equal(t, 16, tgt[domain.RoleDecode])
+}
+
+// TestRescaleReclaimsNoMoreThanTheReleaseBound: a role is reclaimed only as
+// far as the composite's release bound allows, and the water-fill reserves
+// what it keeps. With a bound worth 150 at 100 per GPU, prefill sheds at most
+// one of its four GPUs, not the three its demand share would.
+func TestRescaleReclaimsNoMoreThanTheReleaseBound(t *testing.T) {
+	req := pdRescaleRequest(nil)
+	assert.Equal(t, 1, rescaleTargets(req, 8, 0)["p"], "setup: unbounded, prefill goes to its share")
+
+	req.CompositeSignal.ReleaseBound = map[string]float64{domain.RolePrefill: 150}
+	assert.GreaterOrEqual(t, rescaleTargets(req, 8, 0)["p"], 3)
+
+	in, _ := rescaleInputsForGroup([]ModelScalingRequest{req}, "A100", 16)
+	assert.Equal(t, 3, in[0].FloorGPUs, "the water-fill keeps the 3 the bound leaves prefill")
+
+	held := pdRescaleRequest(map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}})
+	in, _ = rescaleInputsForGroup([]ModelScalingRequest{held}, "A100", 16)
+	assert.Equal(t, 4, in[0].FloorGPUs, "a role that may not shrink keeps all 4")
 }
 
 // TestRescaleFillsWholePods: rescale rounds a role's share to whole pods.

@@ -41,6 +41,15 @@ func TestShareGroupsHonourCompositeHolds(t *testing.T) {
 		t.Fatal("no scale-down: the role must give nothing")
 	}
 
+	// A release bound worth 2 of its GPUs (1000 each) floors it at 3, not at
+	// what it holds: it may give the part every frame can spare.
+	bounded := shareReq("A", "ns", 800, 5)
+	bounded.CompositeSignal.ReleaseBound = map[string]float64{domain.RoleBoth: 2500}
+	groups := BuildShareGroups([]ModelScalingRequest{bounded}, full, ShareGroupOptions{ClusterIsQuota: true})
+	if len(groups) != 1 || len(groups[0].Roles) != 1 || groups[0].Roles[0].Floor != 3 {
+		t.Fatalf("release bound: groups %+v, want one role with floor 3", groups)
+	}
+
 	both := build(&RoleHold{NoScaleUp: true, NoScaleDown: true})
 	if len(both.Roles) != 0 || len(both.Frozen) != 1 {
 		t.Fatalf("held both ways: roles %+v frozen %v, want the model frozen", both.Roles, both.Frozen)

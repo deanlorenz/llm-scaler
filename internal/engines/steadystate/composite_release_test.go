@@ -96,11 +96,11 @@ func TestCostAwareReleasesWithinTheBoundOnPD(t *testing.T) {
 	assert.GreaterOrEqual(t, satPrefill, 80/0.7, "saturation's prefill keeps its boundary: targets %v", got)
 }
 
-// TestCompositeHoldsABoundRoleForTheShareOptimizer: the share optimizer and
-// rescale size from demand and never read the spare, so a role whose release
-// another frame caps is held against scale-down for them; the bounded spare
-// stays for cost-aware and greedy.
-func TestCompositeHoldsABoundRoleForTheShareOptimizer(t *testing.T) {
+// TestCompositePublishesTheReleaseBound: the release bound is published
+// whenever another frame sizes the role, at the release target the optimizer
+// sheds to, and no hold is added: the share optimizer and rescale read the
+// bound as a GPU floor. Saturation alone publishes none.
+func TestCompositePublishesTheReleaseBound(t *testing.T) {
 	sat := variantsEntry(domain.SaturationAnalyzerName, 80,
 		domain.VariantCapacity{VariantName: "a", ReplicaCount: 4, PerReplicaCapacity: 10, TotalDemand: 40},
 		domain.VariantCapacity{VariantName: "b", ReplicaCount: 2, PerReplicaCapacity: 80, TotalDemand: 40})
@@ -111,11 +111,34 @@ func TestCompositeHoldsABoundRoleForTheShareOptimizer(t *testing.T) {
 
 	composite := buildComposite(context.Background(), named, named, 0.85, 0.7)
 
-	assert.Equal(t, allocation.RoleHold{NoScaleDown: true}, composite.Holds[domain.RoleBoth])
-	assert.InDelta(t, 200-80/0.7, composite.SpareCapacity, 1e-9, "the spare is bounded, not zeroed")
-	assert.InDelta(t, 200-80/0.7, composite.ReleaseBound[domain.RoleBoth], 1e-9)
+	assert.Nil(t, composite.Holds)
+	assert.InDelta(t, 200-80/0.7, composite.SpareCapacity, 1e-9, "the spare is bounded at the boundary")
+	assert.InDelta(t, 200-80/0.7375, composite.ReleaseBound[domain.RoleBoth], 1e-9, "the release at the release target")
 
 	alone := buildComposite(context.Background(), named[:1], named[:1], 0.85, 0.7)
 	assert.Nil(t, alone.Holds)
 	assert.Nil(t, alone.ReleaseBound)
+}
+
+// TestCostAwareReleasesWithinEveryFramesReleaseTarget: the release is bounded
+// even where the bound does not lower the spare. Saturation's spare was 57.1,
+// the other frame's 57.3, so nothing was published, and the release budget,
+// the releasable 64.4 at the release target, dropped b from 80 to 16 and left
+// throughput at 0.86, above its scale-up threshold.
+func TestCostAwareReleasesWithinEveryFramesReleaseTarget(t *testing.T) {
+	sat := variantsEntry(domain.SaturationAnalyzerName, 100,
+		domain.VariantCapacity{VariantName: "a", ReplicaCount: 120, PerReplicaCapacity: 1, TotalDemand: 60},
+		domain.VariantCapacity{VariantName: "b", ReplicaCount: 80, PerReplicaCapacity: 1, TotalDemand: 40})
+	other := variantsEntry("throughput", 199,
+		domain.VariantCapacity{VariantName: "a", PerReplicaCapacity: 6.0 / 7},
+		domain.VariantCapacity{VariantName: "b", PerReplicaCapacity: 8})
+
+	got := costAwareTargets(t, []allocation.NamedAnalyzerResult{sat, other},
+		map[string]float64{"a": 1, "b": 10}, map[string]int{"a": 120, "b": 80})
+
+	// Throughput's frame in saturation's units: a worth 1, b 8 x 7/6.
+	nA, nB := 199/(6.0/7), 199.0/8
+	demand := nA
+	supply := float64(got["a"])*demand/nA + float64(got["b"])*demand/nB
+	assert.LessOrEqual(t, demand/supply, 0.7375+1e-9, "throughput stays at or below its release target: targets %v", got)
 }

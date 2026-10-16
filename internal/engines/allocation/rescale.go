@@ -383,12 +383,19 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
+		// What the composite lets the role release: none under a scale-down
+		// hold, what the release bound allows otherwise. Reserved in the
+		// split, so the other roles are cut to what is left rather than to a
+		// share computed as if this one would shrink.
+		if f, ok := releaseFloorGPUs(satNamed, records, stateMap, accType, role); ok {
+			floorByRole[role] = max(floorByRole[role], f)
+		}
 	}
 	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
-		roundFillsToReplicas(records, stateMap, accType, roles, tgtByRole, curByRole)
+		roundFillsToReplicas(records, stateMap, accType, roles, tgtByRole, curByRole, targets)
 	}
 
 	limited := make(gpuLimitTracker)
@@ -399,6 +406,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		hold := satNamed.Holds[role]
 		switch {
 		case rt < rc && !hold.NoScaleDown:
+			// rt is at or above the release floor reserved in the split.
 			reclaimRole(ctx, req.CompositeSignal, records, role, stateMap, targets, rc-rt)
 		case rt > rc && !hold.NoScaleUp:
 			want := rt - rc
@@ -678,6 +686,20 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			}
 		}
 
+		// A role the composite lets release less than its share (a scale-down
+		// hold, or a release bound) keeps that in the water-fill too: weighed
+		// as if it would shrink, the model was given a target it never
+		// reached, and the GPUs it kept were missing from the others'.
+		releaseFloor := 0
+		for _, role := range modelRolesOnType(records, accType) {
+			rf := roleFloorGPUs(records, stateMap, accType, role)
+			if f, ok := releaseFloorGPUs(satNamed, records, stateMap, accType, role); ok {
+				rf = max(rf, f)
+			}
+			releaseFloor += rf
+		}
+		floorGPUs = max(floorGPUs, releaseFloor)
+
 		demandGPUs := modelDemandGPUs(satNamed, records, stateMap, accType)
 		capGPUs := demandGPUs
 		if maxBounded {
@@ -796,15 +818,17 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 	return total
 }
 
-// roundFillsToReplicas rounds each growing role's share in tgt up from cur to
-// whole replicas of the variant fillRole would add first, and spends the GPUs
-// the rounding left over on whole replicas of the roles whose share was cut
-// most. The GPU split ignores replica size, so with 8-GPU pods a model given
-// 8 more GPUs split them +1 and +7 between its roles, neither a replica, and
-// the GPUs sat free every cycle.
+// roundFillsToReplicas lowers each growing role's share in tgt, up from cur,
+// to what fillRole can actually place as whole replicas from targets (cost
+// order, maxReplicas, every variant's own replica size), and spends the GPUs
+// that left on whole replicas of the roles cut most. The GPU split ignores
+// replica size, so with 8-GPU pods a model given 8 more GPUs split them +1
+// and +7 between its roles, neither a replica, and the GPUs sat free every
+// cycle. It fills a copy of targets; the real fill follows tgt.
 func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	accType string, roles []string, tgt, cur map[string]int) {
-	size := make(map[string]int, len(roles))
+	accType string, roles []string, tgt, cur, targets map[string]int) {
+	trial := maps.Clone(targets)
+	onType := variantsOnType(records, accType)
 	cut := make(map[string]int, len(roles))
 	leftover := 0
 	for _, role := range roles {
@@ -812,27 +836,50 @@ func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.Va
 		if want <= 0 {
 			continue
 		}
-		if _, g, ok := bestVariantForRole(records, stateMap, accType, role); ok && g > 1 {
-			size[role] = g
-			cut[role] = want % g
-			tgt[role] -= cut[role]
-			leftover += cut[role]
+		placed := fillRole(onType, role, stateMap, trial, want)
+		cut[role] = want - placed
+		tgt[role] -= cut[role]
+		leftover += cut[role]
+	}
+	order := slices.Clone(roles)
+	slices.SortStableFunc(order, func(a, b string) int { return cmp.Compare(cut[b], cut[a]) })
+	for _, role := range order {
+		if leftover <= 0 || cut[role] <= 0 {
+			continue
+		}
+		extra := fillRole(onType, role, stateMap, trial, leftover)
+		tgt[role] += extra
+		leftover -= extra
+	}
+}
+
+// releaseFloorGPUs is the fewest GPUs role may keep on accType this cycle by
+// what the composite allows it to release: all it has under a NoScaleDown
+// hold, and otherwise all it has less the GPUs ReleaseBound lets go, priced
+// at the role's densest running replica (the most capacity per GPU), so no
+// choice of replicas sheds more than the bound. ok is false when neither
+// applies.
+func releaseFloorGPUs(nr NamedAnalyzerResult, records []variantRecord,
+	stateMap map[string]domain.VariantReplicaState, accType, role string) (int, bool) {
+	current := roleCurrentGPUs(records, stateMap, accType, role)
+	if nr.Holds[role].NoScaleDown {
+		return current, true
+	}
+	bound, ok := nr.ReleaseBound[role]
+	if !ok {
+		return 0, false
+	}
+	var perGPU float64
+	for _, vc := range variantsForRole(variantsOnType(records, accType), role) {
+		g := gpusPerReplicaFromState(stateMap, vc.VariantName)
+		if stateMap[vc.VariantName].CurrentReplicas > 0 && vc.PerReplicaCapacity > 0 && g > 0 {
+			perGPU = max(perGPU, vc.PerReplicaCapacity/float64(g))
 		}
 	}
-	for leftover > 0 {
-		best := ""
-		for _, role := range roles {
-			if g := size[role]; g > 0 && g <= leftover && cut[role] > 0 && (best == "" || cut[role] > cut[best]) {
-				best = role
-			}
-		}
-		if best == "" {
-			return
-		}
-		tgt[best] += size[best]
-		leftover -= size[best]
-		cut[best] = 0
+	if !(perGPU > 0) || !(bound > 0) {
+		return current, true
 	}
+	return max(current-int(math.Floor(bound/perGPU)), 0), true
 }
 
 // distributeGPUsByWeight splits total GPUs across roles: each role is first reserved

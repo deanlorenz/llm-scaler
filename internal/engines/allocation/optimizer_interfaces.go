@@ -86,12 +86,13 @@ type NamedAnalyzerResult struct {
 	// SpareCapacity; an optimizer that sizes from demand directly reads it here.
 	Holds map[string]RoleHold
 
-	// ReleaseBound is, for each role whose release the composite capped
-	// because another analyzer's frame cannot spare as much (domain.RoleBoth
-	// on an aggregated model), the most capacity it may hand back this cycle,
-	// in its own units. initRoleState caps RoleReleasable at it, so the release
-	// budget, the larger of RoleSpare and RoleReleasable, honours it too; nil
-	// when nothing is capped.
+	// ReleaseBound is, for each role another analyzer's frame also sizes
+	// (domain.RoleBoth on an aggregated model), the most capacity it may hand
+	// back this cycle, in its own units, so that the release is safe in every
+	// frame. initRoleState caps RoleReleasable at it, so the release budget,
+	// the larger of RoleSpare and RoleReleasable, honours it; the share
+	// optimizer and rescale read it as a GPU floor (releaseFloorGPUs). nil when
+	// only saturation sizes the model.
 	ReleaseBound map[string]float64
 }
 
