@@ -287,8 +287,13 @@ sparse debits; `adopt` commits a clone's debits.
   draws on it. Both round to whole replicas of the smallest variant each group
   grows (`growStepGPUs`, over `ShareGroup.Grow`), since a group's fills place
   only those. A group that grows nothing (every role at its ceiling) claims
-  nothing, in both; in the claim, unless it has a frozen model, which today's
-  optimizer may still grow.
+  nothing in `splitClusterFree`. The namespace's claim also counts the models
+  no group plans (frozen, multi-accelerator, or in a namespace disabled for
+  sharing), which today's optimizer may still grow: `claimSteps` gives the
+  smallest replica of their variants on the type that are below `maxReplicas`
+  and whose role has no `RoleHold.NoScaleUp`. The claim's step is the smaller
+  of that and `growStepGPUs`. A namespace with models on the type but neither
+  step claims nothing.
 - `gpunodes.usageWalk` counts a Pending pod on its `Status.NominatedNodeName`
   (`occupiedNode`), in every view.
 
