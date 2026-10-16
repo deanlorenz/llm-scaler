@@ -87,6 +87,15 @@ func clusterBounds(constraints []*ResourceConstraints) []*ResourceConstraints {
 //     the merged map alone, must deny both;
 //   - a workload that names the bare family is bounded by the family's SUM, not
 //     by one of its products, and debits through the family cascade.
+//
+// Every key a namespace allowance lists is materialized the same way
+// (namespaceKeys), so the cluster bound a namespace's key is held to
+// (clusterBudgetFor) does not depend on which names this cycle's workloads
+// declare. A namespace allowance of {A100: -1} under a cluster quota of
+// {NVIDIA-A100-SXM4-80GB: 8, NVIDIA-A100-PCIE-40GB: 8} is bounded at 16, the
+// sum of the products, and not at 0 because no workload names the bare A100.
+// A key a cluster bound spells too, ignoring case, keeps the cluster's
+// spelling.
 func mergeConstraints(constraints []*ResourceConstraints, declared ...string) map[string]int {
 	cluster := clusterBounds(constraints)
 	if len(cluster) == 0 {
@@ -97,6 +106,11 @@ func mergeConstraints(constraints []*ResourceConstraints, declared ...string) ma
 	for _, c := range cluster {
 		names = slices.AppendSeq(names, maps.Keys(c.Pools))
 		keyed = append(keyed, c.Pools)
+	}
+	for _, name := range namespaceKeys(constraints) {
+		if !hasKey(keyed, name) {
+			names = append(names, name)
+		}
 	}
 	merged := make(map[string]int, len(names))
 	for _, name := range distinctSpellings(names) {
@@ -172,12 +186,8 @@ func declaredAccelerators(requests []ModelScalingRequest) []string {
 // family key that allowlist bounds at 0 -- and carries no zero key for every
 // type a workload happens to name.
 func materialized(allowlists []map[string]ResourcePool, name string) bool {
-	for _, pools := range allowlists {
-		for key := range pools {
-			if strings.EqualFold(key, name) {
-				return true
-			}
-		}
+	if hasKey(allowlists, name) {
+		return true
 	}
 	for _, pools := range allowlists {
 		if _, _, listed := allowlistBound(pools, name); !listed {
@@ -185,6 +195,19 @@ func materialized(allowlists []map[string]ResourcePool, name string) bool {
 		}
 	}
 	return true
+}
+
+// hasKey reports whether one of the allowlists has name as a key, ignoring
+// case.
+func hasKey(allowlists []map[string]ResourcePool, name string) bool {
+	for _, pools := range allowlists {
+		for key := range pools {
+			if strings.EqualFold(key, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resolvedNames is the declared names a merge materializes: every name but
@@ -198,6 +221,22 @@ func resolvedNames(declared []string) []string {
 		}
 	}
 	return out
+}
+
+// namespaceKeys is every accelerator name a provider's namespace allowances
+// list, for the cluster merge to materialize (see mergeConstraints), except
+// the unresolved placeholders (resolvedNames).
+func namespaceKeys(constraints []*ResourceConstraints) []string {
+	var out []string
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for _, perType := range c.NamespacePools {
+			out = slices.AppendSeq(out, maps.Keys(perType))
+		}
+	}
+	return resolvedNames(out)
 }
 
 // distinctSpellings returns names with spellings that differ only in case

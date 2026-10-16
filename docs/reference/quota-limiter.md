@@ -886,6 +886,12 @@ closed-allowlist semantics:
     `NVIDIA-H100-PCIE-80GB`.
   - A workload whose accelerator is the bare family (`H100`) is bounded by the
     family's total across the products it may use, and spends from that total.
+  - A namespace that lists a family is bounded by the cluster's figure for
+    that family. If a `scope: cluster` quota lists only products of it, that
+    figure is their sum. A namespace with `{H100: -1}` under a cluster quota
+    of `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-PCIE-80GB: 8}` may use 16, at
+    most 8 of each product. The bound is the same whichever GPU names the
+    workloads use.
   - Several roles or wakes on products of one family must fit the family's
     figure **together**: a decode on `NVIDIA-H100-80GB-HBM3` (8) and a prefill on
     `NVIDIA-H100-PCIE-80GB` (8) do not fit an H100 cap of 12 left.

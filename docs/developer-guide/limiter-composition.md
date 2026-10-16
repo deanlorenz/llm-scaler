@@ -98,8 +98,11 @@ and a family name never resolves to one of several product keys.
 Both merges therefore take the accelerator names the cycle's workloads declare
 (`declaredAccelerators`) and materialize each as a key of its own when every
 allowlist admits it (`materialized`): an unlisted product under an explicit
-family key, and a bare family name at its summed bound. `FitsGPUBudget`
-materializes its demand's names, and fits the demand per budget key and per
+family key, and a bare family name at its summed bound. `mergeConstraints`
+also materializes every key a namespace allowlist lists (`namespaceKeys`), so
+`clusterBudgetFor` finds the cluster bound on a namespace's family key, at the
+products' sum, whatever names the cycle declares; the warm pool's headroom
+declares none. `FitsGPUBudget` materializes its demand's names, and fits the demand per budget key and per
 key that covers several of its names (`accelerator.Covers`), as
 `fitPairToBudget` fits a P/D pair.
 

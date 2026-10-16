@@ -14,8 +14,8 @@ import (
 // {NVIDIA-H100-80GB-HBM3: 4}. The namespace the quota caps spends on the long
 // key, an excluded one on "H100"; both draw on the same 16 GPUs, so together
 // they may order at most 16. The quota's aggregate is no cluster bound, so the
-// cluster budget is the physical pool alone and the long spelling resolves to
-// its family key.
+// cluster budget is the physical pool alone: the long spelling, which the
+// merge materializes because the quota lists it, reads its family key's 16.
 func TestOpenAggregateSpellingDoesNotDoubleSpend(t *testing.T) {
 	ctx := context.Background()
 	const longH = "NVIDIA-H100-80GB-HBM3"
@@ -39,8 +39,8 @@ func TestOpenAggregateSpellingDoesNotDoubleSpend(t *testing.T) {
 	constraints := []*ResourceConstraints{phys, quota}
 
 	merged := mergeConstraints(constraints)
-	if len(merged) != 1 || merged["H100"] != 16 {
-		t.Fatalf("fixture premise: merged = %v, want the physical pool alone, H100: 16", merged)
+	if len(merged) != 2 || merged["H100"] != 16 || merged[longH] != 16 {
+		t.Fatalf("fixture premise: merged = %v, want the physical pool alone, H100: 16 and %s: 16", merged, longH)
 	}
 
 	wanting := func(namespace, model, variant, acc string, replicas int) ModelScalingRequest {
