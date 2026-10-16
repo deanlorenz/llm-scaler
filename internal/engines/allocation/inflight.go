@@ -270,16 +270,25 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight b
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
 			expires: now.Add(ttl), ttl: ttl, placed: placed}
 		return
-	case want > e.want:
-		e.expires = now.Add(ttl)
 	}
-	e.ttl = max(e.ttl, ttl)
 	if shape.Flavor == nil && e.shape.Flavor != nil && want <= e.want {
 		// The replicas admitted on a borrowed flavor's nodes are the same
 		// ones once the borrowed draw resolves (their pods exist, gated by
-		// Kueue and still holding no node): their holes stay on that flavor.
+		// Kueue and still holding no node): their holes stay on that flavor,
+		// for as long as it holds them.
 		shape.Flavor, shape.Placements = e.shape.Flavor, e.shape.Placements
+		ttl = max(ttl, e.ttl)
 	}
+	switch {
+	case want > e.want:
+		e.expires = now.Add(ttl)
+	case ttl != e.ttl:
+		// Same replicas, another TTL: the hold ends ttl after it started. An
+		// entry that left its flavor holds for InFlightTTL, not the flavor's
+		// placement timeout.
+		e.expires = e.expires.Add(ttl - e.ttl)
+	}
+	e.ttl = ttl
 	e.shape, e.want, e.placed = shape, want, placed
 	e.base = max(e.base, placedNow)
 }
