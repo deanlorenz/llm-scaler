@@ -193,6 +193,43 @@ func TestMultiQueueNamespaceChargedPerType(t *testing.T) {
 	}
 }
 
+// gatedAt is a GatedSource reporting fixed gated GPUs.
+type gatedAt map[string]map[string]int
+
+func (g gatedAt) GatedGPUs(time.Time) map[string]map[string]int { return g }
+
+// KU1, release half: a replica already gated does not cancel the charge.
+// Queue a (16, in cohort c): an unmanaged training job holds 8, serving 8
+// admitted and 8 more at Kueue's gate, so serving's variants hold 16 and
+// Kueue reserved 16. Kueue will never admit the gated replica. Its GPUs are
+// not Kueue's reservation, so the charge stays at the training job's 8:
+// serving's figure is 8, and its 16 are 8 past it -- held past guaranteed,
+// which the placement timeout releases (borrowedRelease). Before, the
+// managed 16 cancelled the whole charge: the figure read 16, nothing was
+// past it, and the gated replica waited for good.
+func TestGatedReplicaDoesNotCancelTheCharge(t *testing.T) {
+	f := kueue.QueueFigures{Nominal: 16, Guaranteed: 16, WithinNominal: 16, BorrowCap: 0}
+	e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+		Kueue:           &config.KueueQuotaSource{Enabled: true}}
+	src := &fakeQuotaSource{}
+	src.push(chargeSnapshot(chargeRow("c", f, 16), 0, "serving"), nil)
+	inv := NewQuotaInventoryWithSource(e, src)
+	inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+	inv.SetGatedSource(gatedAt{"serving": {borrowH100: 8}})
+	c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil,
+		map[string]map[string]int{"serving": {"H100": 16}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.NamespacePools["serving"]["H100"].Limit; got != 8 {
+		t.Errorf("serving's figure is %d, want 8: 16 less the training job's 8 (pool %+v)", got, c.NamespacePools["serving"])
+	}
+	if got := namespaceHeldPast([]*ResourceConstraints{c})["serving"]["H100"]; got != 8 {
+		t.Errorf("serving holds %d GPUs past its figure, want 8: the gated replica, for the placement timeout to release", got)
+	}
+}
+
 // KU1: the charge goes in before the static entry bounds the figure, so a
 // static cap tighter than what Kueue leaves is not charged a second time.
 func TestKueueChargeBeforeStaticBound(t *testing.T) {

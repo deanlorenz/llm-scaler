@@ -16,6 +16,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -46,6 +47,59 @@ func (q *QuotaInventory) SetManagedUsage(usageByNamespace map[string]map[string]
 
 var _ ManagedUsageSetter = (*QuotaInventory)(nil)
 
+// GatedSource reports the GPUs of managed pods at Kueue's admission gate, per
+// namespace and accelerator ("" when the pod's node selector names none).
+// BorrowInFlight is one: the gated pods its last borrowing cycle listed.
+type GatedSource interface {
+	GatedGPUs(now time.Time) map[string]map[string]int
+}
+
+var _ GatedSource = (*BorrowInFlight)(nil)
+
+// SetGatedSource sets where the inventory reads the managed pods at Kueue's
+// admission gate from: their GPUs are managed usage Kueue has not reserved,
+// so they do not come off a queue's charge (admittedUsage). Nil reads none.
+func (q *QuotaInventory) SetGatedSource(s GatedSource) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.gated = s
+}
+
+// admittedUsage is managed less the gated GPUs: per namespace, a gated pod's
+// GPUs come off the type its node selector names (accelerator identity), and
+// gated GPUs that name no type off the namespace's types in a stable order,
+// each clamped at 0. A replica waiting at the gate holds managed usage but no
+// reservation: taking it off Kueue's Reserved too would cancel the charge of
+// another workload by as much, so the namespace would read the queue as full
+// of its own replicas, the gated one included, and that replica -- held past
+// what Kueue admits -- would never be seen as past its figure (KU1).
+func admittedUsage(managed, gated map[string]map[string]int) map[string]map[string]int {
+	if managed == nil || len(gated) == 0 {
+		return managed
+	}
+	out := make(map[string]map[string]int, len(managed))
+	for ns, perType := range managed {
+		left := maps.Clone(perType)
+		untyped := 0
+		for acc, n := range gated[ns] {
+			if acc == "" {
+				untyped += n
+				continue
+			}
+			if t, ok := accelerator.FindBudgetKey(left, acc); ok {
+				left[t] = max(0, left[t]-n)
+			}
+		}
+		for _, t := range slices.Sorted(maps.Keys(left)) {
+			take := min(untyped, left[t])
+			left[t] -= take
+			untyped -= take
+		}
+		out[ns] = left
+	}
+	return out
+}
+
 // chargeNonManaged returns ext with every namespace's figures -- nominal,
 // guaranteed and within nominal -- charged with the non-managed charge of the
 // queues it is granted, and each borrowing row carrying its own (Charge).
@@ -53,10 +107,9 @@ var _ ManagedUsageSetter = (*QuotaInventory)(nil)
 // Per namespace, ClusterQueue, flavor and GPU resource, the charge is Kueue's
 // Reserved less the GPUs that namespace's managed variants hold in that queue
 // (namespaceCharge): another namespace sharing the queue is charged like any
-// other workload. Managed usage is what the variants' replicas hold, gated
-// pods included, so a replica Kueue has not admitted yet is counted as
-// admitted: until it is, the charge of the queue it waits in is low by at
-// most its GPUs.
+// other workload. managed is what Kueue has admitted of the managed usage:
+// the gated pods' GPUs are taken off it first (admittedUsage), so a replica
+// waiting at the gate does not cancel another workload's charge.
 //
 // Which of a namespace's queues a type's GPUs are counted in is decided per
 // accelerator type. A type one of its queues grants is counted there, and

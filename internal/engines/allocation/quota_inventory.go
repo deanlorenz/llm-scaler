@@ -87,6 +87,10 @@ type QuotaInventory struct {
 	// set before each Refresh (SetManagedUsage): the Kueue figures are charged
 	// against it (chargeNonManaged). nil, never set, charges nothing.
 	managedUsage map[string]map[string]int
+	// gated is where the managed pods at Kueue's admission gate are read
+	// (SetGatedSource): their GPUs are not taken off a queue's charge. Nil
+	// reads none.
+	gated GatedSource
 	// neverRead is set while the entry reads Kueue, leaves some type
 	// unlimited in its static caps, and has never read Kueue successfully:
 	// that type is unbounded (KueueNeverRead).
@@ -297,7 +301,11 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	// queue's non-managed charge, taken before the static entry bounds it (KU1).
 	raw := ext
 	q.mu.RLock()
-	ext = chargeNonManaged(ext, q.managedUsage)
+	admitted := q.managedUsage
+	if q.gated != nil {
+		admitted = admittedUsage(q.managedUsage, q.gated.GatedGPUs(time.Now()))
+	}
+	ext = chargeNonManaged(ext, admitted)
 	q.mu.RUnlock()
 	effective := q.static
 	if !ext.ObservedAt.IsZero() {

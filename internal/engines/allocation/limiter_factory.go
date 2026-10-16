@@ -204,6 +204,12 @@ func newQuotaLimiters(cfg *config.Config, kubeClient client.Client) ([]Limiter, 
 			source = shared.reader
 		}
 		inv := NewQuotaInventoryWithSource(entry, source)
+		if shared != nil {
+			// The managed pods the last borrowing cycle saw at Kueue's gate:
+			// Kueue has not reserved them, so they do not cancel the charge
+			// of what it reserved for others (KU1).
+			inv.SetGatedSource(DefaultBorrowInFlight)
+		}
 		if shared != nil && entry.KueueCountsBorrowable() {
 			// Counted only where every B1 condition holds; a physical limiter
 			// declared beside the entry is the GPU bound for every namespace.
