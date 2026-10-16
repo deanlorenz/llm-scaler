@@ -2592,11 +2592,16 @@ benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply conf
 	$(MAKE) benchmark-restart-controller BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-restart-controller
-benchmark-restart-controller: ## Restart WVA controller to flush in-memory state (e.g., k2 history between runs)
+# The learned-state snapshot is deleted first: with LEARNED_STATE_SNAPSHOT on, a
+# restart restores what the controller learned, the state this target exists to
+# clear. A controller that finds it gone forgets what it holds and does not
+# write it back.
+benchmark-restart-controller: ## Restart WVA controller to flush learned state (e.g., k2 history between runs)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-restart-controller BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
+	kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) delete configmap wva-learned-state -n $(BENCHMARK_NAMESPACE) --ignore-not-found
 	kubectl rollout restart -n $(BENCHMARK_NAMESPACE) $(WVA_CONTROLLER_DEPLOY)
 	kubectl rollout status -n $(BENCHMARK_NAMESPACE) $(WVA_CONTROLLER_DEPLOY) --timeout=$(WVA_ROLLOUT_TIMEOUT)
 
