@@ -30,14 +30,21 @@ const ReclaimYieldLogMessage = "Kueue reclaim: a model of this controller grows 
 // replica is recreated and waits gated for capacity that is gone, and the
 // pass has ordered more than Kueue can admit.
 //
+// Only a draw's new GPUs count: what it re-places of its own reclaim still in
+// flight (BorrowDraw.CreditGPUs) was yielded for in the pass that first
+// ordered it, and yielding again would lower the borrower a second time for
+// the same replica.
+//
 // Per cohort and accelerator, the GPUs reclaimed are taken from the own
 // borrowers in namespace order, each up to what it holds past guaranteed,
 // counting first what the pass already scales it down by; the rest lowers
-// its variants' targets one replica at a time, in model and variant order. A
-// reclaim from borrowers this controller does not manage changes nothing.
-// It returns, per "namespace/variant", the replicas it took off; nil when
-// none.
-func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision) map[string]int {
+// its models, in model order, one unit at a time (yieldUnit): a replica of a
+// single-role model, a whole pair at the model's role ratio of a P/D one. No
+// variant goes below its minReplicas, so a serving model reaches 0 only when
+// its minReplicas is 0. A reclaim from borrowers this controller does not
+// manage changes nothing. It returns, per "namespace/variant", the replicas
+// it took off; nil when none.
+func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, requests []ModelScalingRequest) map[string]int {
 	if bs == nil || len(bs.reclaims) == 0 {
 		return nil
 	}
@@ -46,15 +53,24 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision) map[st
 	need := map[key]int{}
 	reclaimant := map[key]map[string]bool{}
 	for _, d := range bs.reclaims {
-		if d.GPUs <= 0 || d.Cohort == "" {
+		fresh := d.GPUs - d.CreditGPUs
+		if fresh <= 0 || d.Cohort == "" {
 			continue
 		}
 		k := key{d.Cohort, d.Accelerator}
-		need[k] += d.GPUs
+		need[k] += fresh
 		if reclaimant[k] == nil {
 			reclaimant[k] = map[string]bool{}
 		}
 		reclaimant[k][d.Namespace] = true
+	}
+	states := map[string]domain.VariantReplicaState{}
+	paired := map[string]bool{}
+	for _, req := range requests {
+		paired[req.Namespace+"/"+req.ModelID] = req.Disaggregated
+		for _, st := range req.VariantStates {
+			states[req.Namespace+"/"+st.VariantName] = st
+		}
 	}
 	keys := slices.SortedFunc(maps.Keys(need), func(a, b key) int {
 		return cmp.Or(strings.Compare(a.cohort, b.cohort), strings.Compare(a.acc, b.acc))
@@ -74,36 +90,126 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision) map[st
 			}
 			take := min(left, bs.heldPast[ns][t])
 			left -= take
-			var own []int
 			freed := 0
+			var models []string
 			for i := range decisions {
 				d := &decisions[i]
 				if d.Namespace != ns || !accelerator.SameName(d.AcceleratorName, k.acc) {
 					continue
 				}
-				own = append(own, i)
+				if !slices.Contains(models, d.ModelID) {
+					models = append(models, d.ModelID)
+				}
 				freed += max(0, d.CurrentReplicas-d.TargetReplicas) * max(1, d.GPUsPerReplica)
 			}
-			slices.SortFunc(own, func(a, b int) int {
-				return cmp.Or(strings.Compare(decisions[a].ModelID, decisions[b].ModelID),
-					strings.Compare(decisions[a].VariantName, decisions[b].VariantName))
-			})
-			for _, i := range own {
-				d := &decisions[i]
-				for freed < take && d.TargetReplicas > 0 {
-					d.TargetReplicas--
-					d.GPUsAllocated = d.TargetReplicas * max(1, d.GPUsPerReplica)
-					freed += max(1, d.GPUsPerReplica)
-					yieldStep(d, k.cohort)
-					if lowered == nil {
-						lowered = map[string]int{}
+			slices.Sort(models)
+			for _, m := range models {
+				for freed < take {
+					unit := yieldUnit(decisions, ns, m, states, paired[ns+"/"+m])
+					gpus := 0
+					for i, n := range unit {
+						if accelerator.SameName(decisions[i].AcceleratorName, k.acc) {
+							gpus += n * max(1, decisions[i].GPUsPerReplica)
+						}
 					}
-					lowered[d.Namespace+"/"+d.VariantName]++
+					if gpus == 0 {
+						break // nothing of this model left to give back on k.acc
+					}
+					for _, i := range slices.Sorted(maps.Keys(unit)) {
+						d := &decisions[i]
+						d.TargetReplicas -= unit[i]
+						d.GPUsAllocated = d.TargetReplicas * max(1, d.GPUsPerReplica)
+						yieldStep(d, k.cohort)
+						if lowered == nil {
+							lowered = map[string]int{}
+						}
+						lowered[d.Namespace+"/"+d.VariantName] += unit[i]
+					}
+					freed += gpus
 				}
 			}
 		}
 	}
 	return lowered
+}
+
+// yieldUnit is the next unit model m of namespace ns gives back, as replicas
+// per index into decisions; nil when none is left above minReplicas. A
+// single-role model gives one replica of its first variant (by name) above
+// minReplicas. A P/D model gives a whole pair at its role ratio -- each role's
+// total target over their greatest common divisor, 1P:2D giving one prefill
+// and two decodes -- each role's part from its variants with the most above
+// minReplicas first, so the ratio is kept, as the share transfer keeps it.
+func yieldUnit(decisions []domain.VariantDecision, ns, m string, states map[string]domain.VariantReplicaState,
+	paired bool) map[int]int {
+	minOfVariant := func(d domain.VariantDecision) int { return minOf(states[ns+"/"+d.VariantName]) }
+	byRole := map[string][]int{}
+	for i, d := range decisions {
+		if d.Namespace != ns || d.ModelID != m {
+			continue
+		}
+		role := d.Role
+		if !paired {
+			role = ""
+		}
+		byRole[role] = append(byRole[role], i)
+	}
+	spare := func(i int) int { return decisions[i].TargetReplicas - minOfVariant(decisions[i]) }
+	order := func(idx []int) []int {
+		out := slices.Clone(idx)
+		slices.SortStableFunc(out, func(a, b int) int {
+			if paired {
+				if c := cmp.Compare(spare(b), spare(a)); c != 0 {
+					return c
+				}
+			}
+			return strings.Compare(decisions[a].VariantName, decisions[b].VariantName)
+		})
+		return out
+	}
+	if !paired {
+		for _, i := range order(byRole[""]) {
+			if spare(i) > 0 {
+				return map[int]int{i: 1}
+			}
+		}
+		return nil
+	}
+	totals := map[string]int{}
+	g := 0
+	for role, idx := range byRole {
+		for _, i := range idx {
+			totals[role] += decisions[i].TargetReplicas
+		}
+		if totals[role] > 0 {
+			g = gcd(g, totals[role])
+		}
+	}
+	if g == 0 {
+		return nil
+	}
+	unit := map[int]int{}
+	for _, role := range slices.Sorted(maps.Keys(byRole)) {
+		n := totals[role] / g
+		for _, i := range order(byRole[role]) {
+			take := min(n, max(0, spare(i)))
+			if take > 0 {
+				unit[i] = take
+				n -= take
+			}
+		}
+		if n > 0 {
+			return nil // the role cannot give its part without going below minReplicas
+		}
+	}
+	return unit
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
 }
 
 // yieldStep records on d that a reclaim in cohort lowered its target.
