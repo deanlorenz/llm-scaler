@@ -96,11 +96,11 @@ expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | u
 expect "state: another optimizer" "other:fancy plain" "$(printf 'optimizer:\n  type: fancy\n' | us_block_state)"
 expect "budget: quotas per namespace share nothing" namespace "$(printf '%s\n' "$QUOTA_POLICY" | us_budget_scope)"
 expect "budget: a cluster quota is shared" cluster "$(printf '%s\n' "$CLUSTER_POLICY" | us_budget_scope)"
-# As the controller builds its groups (utilization_share_groups.go): beside a
-# quota it builds no gpu-inventory limiter and ignores physicalGroups, and a
+# As the controller builds its groups (utilization_share_groups.go): a
 # namespace a namespace-scoped entry covers -- even with no figure, a zero
-# budget -- gets its own group. Only a namespace excluded from every such entry
-# shares the cluster group. These two said "cluster" before, and activate
+# budget -- gets its own group, beside a gpu-inventory limiter and with
+# physicalGroups too. Only a namespace excluded from every such entry can
+# share the cluster group. These two said "cluster" before, and activate
 # warned about namespaces that share nothing.
 expect "budget: quotas per namespace beside gpu-inventory share nothing" namespace \
     "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_budget_scope)"
@@ -116,6 +116,12 @@ expect "budget: excluded from the quota, no cluster quota: not shared" namespace
     "$(printf '%s\n' "$EXCL_POLICY" | us_budget_scope)"
 expect "budget: excluded from the quota, with a cluster quota: shared" cluster \
     "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "c", "type": "quota", "scope": "cluster", "quotas": {"NVIDIA-H200": 16}}]' | us_budget_scope)"
+# The inventory is a finite cluster bound, so beside the quota with
+# physicalGroups: true it shares the excluded namespaces too. Was namespace.
+expect "budget: excluded from the quota, gpu-inventory with physicalGroups: shared" cluster \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "p", "type": "gpu-inventory"}] | .optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
+expect "budget: excluded from the quota, gpu-inventory without physicalGroups: not shared" namespace \
+    "$(printf '%s\n' "$EXCL_POLICY" | yq '.limiters += [{"name": "p", "type": "gpu-inventory"}]' | us_budget_scope)"
 # Equality, not substring: an exclude of team-a-prod does not exclude team-a.
 # Was "team-a".
 expect "budget: a namespace name that is a prefix of another is not excluded by it" "" \
@@ -628,7 +634,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=108
+CASES_EXPECTED=110
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

@@ -122,90 +122,30 @@ func mergeConstraints(constraints []*ResourceConstraints, declared ...string) ma
 }
 
 // clusterBound is the budget one cluster bound puts on the accelerator called
-// name, and whether it bounds it at all: by allowlistBound, at 0 when it does
-// not list the name (a closed allowlist), and not at all for an unlisted
-// "unknown".
+// name, and whether it bounds it at all: accelerator.ClusterAllowlistBound
+// over its pools, with an unlimited bound read as math.MaxInt. A name it does
+// not list is bounded at 0 (a closed allowlist), and an unlisted "unknown" is
+// not bounded.
 func clusterBound(pools map[string]ResourcePool, name string) (int, bool) {
-	avail, unlimited, listed := allowlistBound(pools, name)
-	switch {
-	case !listed && name == constants.DefaultAcceleratorName:
-		return 0, false
-	case !listed:
-		return 0, true
-	case unlimited:
+	avail, unlimited, bounds := accelerator.ClusterAllowlistBound(pools, name, poolBound)
+	if bounds && unlimited {
 		return math.MaxInt, true
 	}
-	return avail, true
+	return avail, bounds
 }
 
 // allowlistBound is what one allowlist (pools keyed by accelerator) allows on
-// name, whether that is unlimited, and whether it lists name at all.
-//
-//   - A key equal to name ignoring case is its pool; for a product name, a
-//     listed family key bounds it too.
-//   - A family name listed only through products is bounded by their SUM: an
-//     allowlist of {NVIDIA-H100-80GB-HBM3: 4, NVIDIA-H100-SXM5-80GB: 4} allows
-//     8 H100s, not 4.
-//   - A product name not listed itself falls back to its family key, which
-//     admits every product under it (accelerator.FindKey's reading).
-//
-// Several case spellings of one key take the tightest.
+// name, whether that is unlimited, and whether it lists name at all:
+// accelerator.AllowlistBound over the pools, which reads the family/product
+// tree.
 func allowlistBound(pools map[string]ResourcePool, name string) (avail int, unlimited, listed bool) {
-	var own, family, products []ResourcePool
-	for key, p := range pools {
-		switch {
-		case strings.EqualFold(key, name):
-			own = append(own, p)
-		case accelerator.IsProductOf(key, name):
-			products = append(products, p)
-		case accelerator.IsProductOf(name, key):
-			family = append(family, p)
-		}
-	}
-	switch {
-	case len(own) > 0:
-		avail, unlimited = tightestPool(own)
-		if len(family) > 0 {
-			fa, fu := tightestPool(family)
-			avail, unlimited = tighterBound(avail, unlimited, fa, fu)
-		}
-	case len(products) > 0:
-		for _, p := range products {
-			if p.Limit < 0 {
-				return 0, true, true
-			}
-			avail += p.Available()
-		}
-	case len(family) > 0:
-		avail, unlimited = tightestPool(family)
-	default:
-		return 0, false, false
-	}
-	return avail, unlimited, true
+	return accelerator.AllowlistBound(pools, name, poolBound)
 }
 
-// tightestPool is the smallest free figure among pools, unlimited only when
-// every one of them is.
-func tightestPool(pools []ResourcePool) (avail int, unlimited bool) {
-	unlimited = true
-	for _, p := range pools {
-		if p.Limit < 0 {
-			continue
-		}
-		avail, unlimited = tighterBound(avail, unlimited, p.Available(), false)
-	}
-	return avail, unlimited
-}
-
-// tighterBound is the tighter of two (free, unlimited) bounds.
-func tighterBound(a int, aUnlimited bool, b int, bUnlimited bool) (int, bool) {
-	switch {
-	case aUnlimited:
-		return b, bUnlimited
-	case bUnlimited:
-		return a, false
-	}
-	return min(a, b), false
+// poolBound reads a pool as an allowlist bound: its free GPUs, unlimited for
+// the Limit < 0 sentinel.
+func poolBound(p ResourcePool) accelerator.Bound {
+	return accelerator.Bound{Free: p.Available(), Unlimited: p.Limit < 0}
 }
 
 // declaredAccelerators is every accelerator name the requests' variants

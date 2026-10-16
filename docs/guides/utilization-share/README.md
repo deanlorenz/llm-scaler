@@ -214,9 +214,10 @@ Activate follows the controller's own grouping:
 - **Quota with namespace-scoped entries:** each namespace an entry covers has
   its own budget, even with no figure for it (that is a zero budget). A
   namespace listed in the `exclude:` of every such entry shares the cluster
-  budget only when a `scope: cluster` quota entry bounds it. Without one, it is
-  not shared at all: the controller logs it as unshared and plans it as before.
-  A `gpu-inventory` limiter and `physicalGroups` do not change this.
+  budget only when a finite cluster bound covers its GPU type: a
+  `scope: cluster` quota, or a `gpu-inventory` limiter with
+  `physicalGroups: true`. Otherwise it is not shared and stays on the default
+  optimizer. When nothing finite bounds it, the controller logs it as unshared.
 - **Quota with only `scope: cluster` entries:** every namespace shares it.
 - **`gpu-inventory` alone:** namespaces share only with `physicalGroups: true`.
 - **No limiter:** nothing is shared.

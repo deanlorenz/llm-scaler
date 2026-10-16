@@ -47,7 +47,7 @@ quota in force. For one install, re-run `make deploy-wva` with
 - Latency when a cap binds: a model held at its allowance queues what another
   replica would have served. That shows up as TTFT (time to first token).
 - A fairness gap between capped and uncapped tenants
-  ([ceilings, not reservations](#three-things-that-surprise-people)), and an
+  ([ceilings, not reservations](#things-that-surprise-people)), and an
   owner for the policy.
 
 ## Evidence
@@ -115,13 +115,14 @@ The two shapes, with examples, are in the reference:
   manages**. N controllers each enforce their own copy, so N of them permit N
   times the figure.
 - **Namespace scope** caps each tenant, with an optional `exclude` list and a
-  fallback for namespaces you did not list. The fallback's key, `default`, is
-  **reserved**: the real `default` namespace cannot be given a quota by
-  listing it. Exclude it, or omit the reserved key so anything unlisted is
-  denied.
+  fallback for namespaces you did not list. `default` in `namespaceQuotas` is
+  that fallback. So you cannot give the namespace called `default` its own
+  quota. Prefer a strict allowlist with no `default` key: every unlisted
+  namespace is then denied. If you exclude `default` instead, only the
+  cluster bounds limit it.
 - A value of `-1` means unlimited.
 
-### Three things that surprise people
+### Things that surprise people
 
 **A quota does not bound the cluster.** It counts only what the scaling
 manager's own variants hold, so it can hand out capacity unmanaged workloads
@@ -136,9 +137,54 @@ namespaces it lists. A namespace that is unlimited (`-1`) or excluded is
 bounded only by the cluster bounds (a `gpu-inventory` entry or a cluster-scope
 quota; nothing, without one), so it can use GPUs a capped peer would have used.
 Nobody exceeds their own authorization, but know this before you promise a team
-its number. The utilization-share optimizer does not share an excluded
-namespace unless a `scope: cluster` quota covers it, or a `gpu-inventory` entry
-with `physicalGroups: true` (see #169 for today's optimizer).
+its number.
+
+**An excluded namespace has no quota.**
+
+- The tenants' quota does not apply to it. A full tenant quota does not stop it.
+- Only the cluster bounds limit it: a `gpu-inventory` entry and any
+  `scope: cluster` quota. A cluster quota denies it a type the quota does not
+  list, as it does everyone. With no cluster bound, the scaling manager does
+  not limit it at all. Without a `gpu-inventory` limiter, free GPUs are not
+  checked: if the cluster is full, new pods stay Pending.
+- It can take GPUs your tenants expect to use, because the scaling manager
+  reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
+- The utilization-share optimizer shares it only when a finite cluster bound
+  covers its GPU type: a `scope: cluster` quota, or a `gpu-inventory` entry
+  with `physicalGroups: true`.
+
+To bound it with a quota, add a `scope: cluster` quota beside the tenants'
+quota. Add these two entries to the `limiters:` list of the `default` entry.
+Keep the entry's other keys.
+
+```yaml
+default: |
+  limiters:
+    - name: cluster-cap
+      type: quota
+      scope: cluster
+      quotas:
+        A100: 20   # 14 for team-a + team-b, plus 6 spare. ns-x may use any of the 20.
+    - name: tenants
+      type: quota
+      scope: namespace
+      exclude: [ns-x]
+      namespaceQuotas:
+        team-a: { A100: 8 }
+        team-b: { A100: 6 }
+```
+
+This config logs no WARNING. Any namespace not listed, other than ns-x, is
+denied.
+
+The cluster quota caps everyone, tenants too, so size it as the tenants' caps
+plus what `ns-x` may use. List every GPU type your namespaces use: a type it
+does not list is denied to all of them. Like every cluster quota, it is per
+controller. It reserves nothing: while team-a is idle, `ns-x` can use team-a's
+part. Models take turns by how much they still need. With
+`enableRescale: true` on the `default` entry, `ns-x` is sized before the
+tenants when GPUs run short. So `ns-x` can take the whole cluster quota, even
+while a tenant is below its cap and wants more.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.

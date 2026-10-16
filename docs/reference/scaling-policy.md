@@ -197,7 +197,8 @@ prefill is best-effort. That follows the llm-d router: with no prefill endpoint
 it sends the request to a decode endpoint, which runs both stages itself. The
 router already skips disaggregation for short prompts and high prefix-cache hits,
 so decode-only is a normal mode, not a failure. If prefill cannot be placed (no
-free GPUs on its accelerator, or a namespace quota excludes it), waking decode
+free GPUs on its accelerator, or its namespace quota does not allow that
+accelerator), waking decode
 alone still serves the queued request; refusing would trade a slower model for no
 model.
 
@@ -348,22 +349,21 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
-**An excluded namespace needs a cluster quota.** To share the models of a
+**An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
 quota is a finite bound too: with `physicalGroups: true` they are shared over
-it. Without a finite bound, their models stay on today's
-optimizer, and the controller logs them once:
+it. Without a finite bound, their models stay on the default optimizer, and
+the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.
 
 <details>
 <summary>Details: why, and what the cluster group gets</summary>
 
-The namespace quota does not bound an excluded namespace. The only budget left
-would be the other tenants' free quota, which does not count what the excluded
-namespace holds.
+The namespace quota does not bound an excluded namespace. Without a finite
+cluster bound there is no budget to share.
 
 With a `scope: cluster` quota, the excluded namespace's models form the cluster
 group. Every GPU a tenant's own group fills is also charged to the cluster
@@ -383,7 +383,7 @@ its own free quota and the whole cluster free.
 </details>
 
 A model whose variants run on more than one accelerator type, or whose analyzer
-result is not live this cycle, is left to today's optimizer for that cycle.
+result is not live this cycle, is left to the default optimizer for that cycle.
 
 **Start in shadow mode.** `shadow` defaults to `false`, so
 `optimizer: {type: utilizationShare}` on its own **acts**: it moves replicas
@@ -419,8 +419,8 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
 | `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
-| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
-| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
+| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on the default optimizer. |
+| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to the default optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
 | `stabilization` | see below | How fast GPUs move between models against how often they move back. |
 
 **Stabilization.** GPUs that move between models take minutes to become useful
@@ -487,7 +487,7 @@ clamped into it.
 A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
-where its weight would be weighed against other tenants'; there today's optimizer
+where its weight would be weighed against other tenants'; there the default optimizer
 keeps it.
 
 **Disabling one namespace:**
@@ -507,7 +507,7 @@ disables nothing, and the controller logs
 **A canary on a cluster quota.** `namespaces:` cannot narrow a cluster group;
 `clusterNamespaces:` does. With it set, the cluster group of each accelerator type
 plans only the models of the listed namespaces, sharing among them the quota's
-free GPUs plus what they hold. Every other model stays on today's optimizer, and
+free GPUs plus what they hold. Every other model stays on the default optimizer, and
 the GPUs it holds stay outside the group. Start with one or two namespaces whose
 owners agreed to it, then widen the list or remove it (empty plans every
 namespace):

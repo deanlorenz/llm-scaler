@@ -99,11 +99,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
 				"the GPU limiter is selected only from the \"default\" entry", "key", key)
 		}
-		// A second physical entry is accepted (rejecting it would drop the whole
-		// policy) but only one physical limiter is built; say which were ignored.
-		if dups := satConfig.IgnoredPhysicalLimiters(); key == config.GlobalDefaultsKey && len(dups) > 0 {
-			logger.Info(config.IgnoredPhysicalLimitersMessage, "key", key, "ignoredIndexes", dups)
-		}
 		// optimizer: sits beside limiters: and is read from the same place only.
 		if key != config.GlobalDefaultsKey && satConfig.Optimizer != nil {
 			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+
@@ -128,6 +123,27 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		count++
 	}
 	return configs, count, rejected, ignored
+}
+
+// warnAboutLimiters logs the findings about the limiters of policy, the
+// "default" entry the cluster's limiters are read from. The caller calls it
+// only for that entry: limiters anywhere else are ignored whole, and a
+// warning about them would describe a bound nothing enforces.
+//
+// "WARNING:" rather than a level, because logr has none between Info and
+// Error: V-levels only go more verbose. Same convention as cmd/main.go.
+func warnAboutLimiters(logger logr.Logger, policy config.ScalingPolicy) {
+	key := config.GlobalDefaultsKey
+	// A second physical entry is accepted (rejecting it would drop the whole
+	// policy) but only one physical limiter is built; say which were ignored.
+	if dups := policy.IgnoredPhysicalLimiters(); len(dups) > 0 {
+		logger.Info(config.IgnoredPhysicalLimitersMessage, "key", key, "ignoredIndexes", dups)
+	}
+	// Quota findings that do not reject the config, such as a namespace in
+	// exclude that nothing bounds. Logged once per config change.
+	for _, w := range policy.LimiterWarnings() {
+		logger.Info("WARNING: "+w, "key", key)
+	}
 }
 
 // maxIgnoredFieldsReported is how many ignored fields of one ConfigMap are

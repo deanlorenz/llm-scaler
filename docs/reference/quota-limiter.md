@@ -108,11 +108,15 @@ limiters:
         H100: 2    # per-namespace fallback for unlisted namespaces
 ```
 
+Declared alone, this example logs a `WARNING`: nothing bounds the excluded
+namespaces. A `gpu-inventory` limiter or a `scope: cluster` quota beside it
+bounds them. If they run no models, you can ignore the warning.
+
 > ⚠️ **Reserved key collision.** `default` in `namespaceQuotas` is the fallback
-> for unlisted namespaces, so the Kubernetes namespace named `default` cannot be
-> given a quota by listing it. Either list it in `exclude` to bypass this
-> limiter, or use a strict allowlist (no `default` key), so every unlisted
-> namespace, `default` included, is denied.
+> for unlisted namespaces. So you cannot give the namespace called `default` its
+> own quota. Prefer a strict allowlist with no `default` key: every unlisted
+> namespace is then denied. If you exclude `default` instead, only the
+> cluster bounds limit it.
 
 ### Special values
 
@@ -130,13 +134,20 @@ value is rejected at startup (see Validation).
 When the allocator evaluates a request for namespace `N` and type `T` in
 `namespace` scope:
 
-1. If `N` appears in `exclude`, the limiter **passes through** — the request is
-   returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply. The utilization-share optimizer does not share an excluded
-   namespace unless a finite `scope: cluster` quota also covers its
-   accelerator type: this quota does not bound it, so there is no budget to
-   share
-   ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+1. If `N` appears in `exclude`, this limiter does not apply to `N` and records
+   no usage for it. Other limiters still apply.
+   - Only the cluster bounds limit `N`: a `gpu-inventory` limiter and any
+     `scope: cluster` quota. The tenants' quota does not: `N` does not use it,
+     and a full tenant quota does not stop `N`.
+   - A `scope: cluster` quota is a closed allowlist for `N`, as for everyone.
+     A type it lists with a number bounds `N` at that number. A type it lists
+     as `-1` does not bound `N`. A type it does not list is denied.
+   - With no cluster bound, the scaling manager does not limit `N`. Without a
+     `gpu-inventory` limiter, free GPUs are not checked: if the cluster is
+     full, new pods stay `Pending`.
+   - The controller logs a `WARNING` when `N` has no GPU limit on some type,
+     and when an `exclude` entry is not a valid namespace name (it never
+     matches). See [Validation](#validation).
 2. If `N` is listed in `namespaceQuotas`, that namespace's **whole map is a
    closed allowlist**: `namespaceQuotas[N][T]` is the cap if present, and a type
    `T` that `N` does **not** list is **denied** (granted = 0). A listed namespace
@@ -151,6 +162,37 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 The fall-through to `default` is therefore at the **namespace** granularity, not
 per `(namespace, type)`: it applies only when `N` is wholly unlisted.
+
+> ⚠️ **An excluded namespace can use GPUs your tenants expect.** Without a
+> cluster bound it has no limit, and the scaling manager reserves nothing for
+> the tenants. If tenants must keep their GPUs, use a Kubernetes
+> `ResourceQuota` or Kueue: those are the real boundary.
+
+<details>
+<summary>Details: how an excluded namespace is sized</summary>
+
+- The tenants and `N` share the cluster bounds. Nothing is reserved for a
+  tenant. Models take turns by how much they still need. With
+  `enableRescale: true` on the `default` entry, `N` is sized before the
+  tenants when GPUs run short. So `N` can take the whole cluster quota, even
+  while a tenant is below its cap and wants more.
+- If a cluster bound is in force, a model in `N` whose pods name no GPU type
+  does not scale up, though a wake from zero can still start it. Give its pods
+  an accelerator selector. A `scope: cluster` quota that lists `unknown` is
+  the exception: it bounds such a model at that number, and `-1` does not
+  bound it.
+- The utilization-share optimizer shares `N` only when a finite cluster bound
+  covers its accelerator type
+  ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+
+This holds for every decision: scaling up, rescale, and waking from zero. The
+limiter a decision names as `LimitedBy` reads the same bounds. GPU names match
+by family and product, as everywhere else: a workload on `a100` or
+`NVIDIA-A100-SXM4-80GB` spends a cluster quota's `A100`. A namespace that one
+namespace quota excludes and another holds is bounded by the second, as a
+tenant of it.
+
+</details>
 
 ### Kueue as a quota source
 
@@ -693,6 +735,89 @@ The policy entry is rejected for any of:
 A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
 **warning**: `exclude` wins, and the ConfigMap is still accepted.
 
+The controller logs these warnings as Info-level lines that start with
+`WARNING:`. They come from the ConfigMap the limiters are read from, at
+startup and whenever it changes. The ConfigMap is still accepted. The
+`entry[N]` index counts quota entries only. Use the quoted name to find the
+entry.
+
+- A namespace in both `exclude` and `namespaceQuotas`:
+
+  ```text
+  WARNING: entry[0] ("tenants"): namespace "team-a" is in both exclude and namespaceQuotas; the quota entry will be ignored (exclude wins)
+  ```
+
+- An `exclude` entry that can never match a namespace:
+
+  ```text
+  WARNING: entry[0] ("tenants"): exclude entry "NS-X" is not a valid namespace name (check for spaces or capitals); it never matches a namespace
+  ```
+
+- An excluded namespace with no limit at all: no `scope: cluster` quota, no
+  `gpu-inventory` limiter, and no other namespace quota holds it:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit: no scope: cluster quota and no gpu-inventory limiter are declared, so the scaling manager does not bound them
+  ```
+
+- An excluded namespace with no limit on some types:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit on [H100 (bare name), other H100 products]: no gpu-inventory limiter and no scope: cluster quota gives those accelerator types a number (-1 is unlimited)
+  ```
+
+- An excluded namespace that another namespace quota holds with `-1`:
+
+  ```text
+  WARNING: entry[0] ("tenants"): the namespaces in exclude [ns-x] have no GPU limit on [A100]: the namespace quotas that hold them ("others") set those accelerator types to -1 (unlimited), and no gpu-inventory limiter and no scope: cluster quota gives them a number
+  ```
+
+How to read the type list:
+
+- `H100`: every H100 product, and a workload that names only `H100`.
+- `H100 (bare name)`: only a workload whose selector names `H100` itself.
+- `other H100 products`: the H100 products that no quota lists.
+- `unknown`: a workload that names no GPU type.
+
+To fix one, give the named types a number in a `scope: cluster` quota, or
+declare a `gpu-inventory` limiter.
+
+<details>
+<summary>Details: which types the warnings check, and what they do not report</summary>
+
+The warnings read the configuration the way the planner reads it, with the
+same name matching. They check these types: every accelerator name any quota
+entry lists, the family of each (`H100` for `NVIDIA-H100-80GB-HBM3`), one
+stand-in for the products of each family that no entry lists, and `unknown`.
+Any other type is outside every family a quota lists, so it is denied.
+
+- A family key bounds the products a quota does not list. With
+  `{H100: -1, NVIDIA-H100-PCIE-80GB: 4}`, only the PCIe product has a number.
+  The other H100 products fall back to `H100: -1`.
+- A family that a quota lists only through products is bounded by their sum,
+  and is unlimited when one of them is `-1`.
+- A type a `scope: cluster` quota does not list is denied, so it is not
+  named. `unknown` is the exception: a cluster quota that does not list it
+  does not bound it. So `unknown` is named when a cluster quota lists it as
+  `-1` and none gives it a number.
+- A `gpu-inventory` limiter gives every named type a number. With one
+  declared, only `unknown` can be named.
+- A namespace another namespace quota holds is bounded by that quota's caps
+  for it, through its own entry or `default`. It is named only for types every
+  such quota sets to `-1`.
+
+Not reported:
+
+- anything, while a `scope: cluster` quota reads Kueue: its numbers come from
+  Kueue at runtime;
+- a namespace held by a namespace quota that reads Kueue;
+- an `exclude` entry that is not a valid namespace name, beyond the warning
+  above: it never matches a namespace;
+- a `gpu-inventory` limiter the controller may not use because it cannot list
+  nodes: the warnings read the configuration only.
+
+</details>
+
 ### Reload lifecycle
 
 The quota configuration lives in the saturation-scaling ConfigMap and applies
@@ -748,7 +873,8 @@ closed-allowlist semantics:
   that type: the physical limiter or a cluster-scope quota, and nothing when
   there are none. An **excluded** namespace is not covered by the quota at
   all: it too is bounded only by the cluster bounds, never by the sum of the
-  other tenants' caps.
+  other tenants' caps. Every GPU a tenant or an excluded namespace takes is
+  charged to the cluster bounds, so they share them.
 - Budgets follow the GPU **family and product** names. A family key such as
   `H100` bounds the sum of its products (`NVIDIA-H100-80GB-HBM3`, ...), and a
   GPU spent under one spelling is spent under the other.
@@ -815,8 +941,8 @@ not inputs to it. Two properties follow from that:
 > namespaces on the same type, and give every type a finite cluster-scope cap.
 > The utilization-share optimizer shares an excluded namespace only when a
 > finite cluster bound covers its GPU type: a `scope: cluster` quota, or a
-> `gpu-inventory` limiter with `physicalGroups: true` (see #169 for today's
-> optimizer).
+> `gpu-inventory` limiter with `physicalGroups: true`. Otherwise its models
+> stay on the default optimizer.
 
 When a model is capped below its fair-share slot it takes only up to its quota;
 the unused remainder is **released to subsequent rounds**, where the
@@ -896,7 +1022,9 @@ is named `gpu-inventory`: `inventory+quota/gpu-inventory,tenant-quota`.
 
 One physical limiter is built. A second `gpu-inventory` (or `inventory`) entry
 is ignored and logged (`Ignoring physical (gpu-inventory) limiters entries after
-the first`); it does not reject the policy.
+the first`); it does not reject the policy. The line is logged at startup, and
+for the ConfigMap the limiters are read from. A namespace-local ConfigMap's
+limiters are ignored whole, so it logs none.
 
 Edits apply without a restart: both engines rebuild the limiters when the list
 changes. A limiter that cannot be consulted in a cycle is skipped and the others
