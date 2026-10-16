@@ -1033,7 +1033,9 @@ case_begin
 JOB_YAML="$(MODEL_A=model-a MODEL_B=model-b LOAD_IMAGE=ghcr.io/llm-d/llm-d-benchmark:vX \
     render_load_job wva-two-model-load-pool pool 1770000000 2>&1)"
 n_containers="$(printf '%s\n' "$JOB_YAML" | grep -c '^        - name: load-')"
-n_starts="$(printf '%s\n' "$JOB_YAML" | grep -c '1770000000')"
+# The START_AT each container is handed; the Pod's run label carries the same
+# instant and is not a container's barrier.
+n_starts="$(printf '%s\n' "$JOB_YAML" | grep -c 'value: "1770000000"')"
 if [ "$n_containers" -ne 2 ]; then
     fail "the load Job rendered $n_containers load container(s), not 2. Only one model would be driven, and the other's rows would be an empty half of an anti-phase run"
 elif [ "$n_starts" -ne 2 ]; then
