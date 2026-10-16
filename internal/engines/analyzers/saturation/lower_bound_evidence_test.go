@@ -332,3 +332,60 @@ func TestARestartInsideAReRollDoesNotReArmTheSameFigure(t *testing.T) {
 		t.Errorf("a restart inside the re-roll re-armed the spent figure: priced at %v", got.PerReplicaCapacity)
 	}
 }
+
+// A rollback that serves on its own window for longer than the hold does not
+// spend the bound of the arguments it left: the re-roll resumes the hold where
+// the rollback found it, minutes in, not past its end.
+func TestServingOnTheRolledBackWindowDoesNotSpendTheReRollsHold(t *testing.T) {
+	a, store, clock := waProcess(mtParams(256, "vllm:v1"))
+	waRun(t, a, clock, 4000, 6)
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	for range 5 {
+		if got := waRun(t, a, clock, 1000, 0); got.PerReplicaCapacity != 4000 {
+			t.Fatalf("precondition: the new arguments are held at the previous figure, got %v", got.PerReplicaCapacity)
+		}
+	}
+	waSetParams(store, mtParams(256, "vllm:v1"))
+	for range 7 * 60 {
+		if got := waRun(t, a, clock, 1000, 0); got.PerReplicaCapacity != 4000 {
+			t.Fatalf("precondition: the rollback prices from its own window, got %v", got.PerReplicaCapacity)
+		}
+	}
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	if got := waRun(t, a, clock, 1000, 0); got.PerReplicaCapacity != 4000 {
+		t.Errorf("the hours served on the rolled-back window spent the re-roll's hold: priced at %v", got.PerReplicaCapacity)
+	}
+}
+
+// The same across a restart during the rollback: the paused clock is
+// exported and restored as it stood.
+func TestARestartDuringTheRollbackKeepsTheReRollsHold(t *testing.T) {
+	a, store, clock := waProcess(mtParams(256, "vllm:v1"))
+	waRun(t, a, clock, 4000, 6)
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	for range 5 {
+		waRun(t, a, clock, 1000, 0)
+	}
+	waSetParams(store, mtParams(256, "vllm:v1"))
+	for range 7 * 60 {
+		waRun(t, a, clock, 1000, 0)
+	}
+	raw, err := json.Marshal(a.ExportLearnedState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc LearnedState
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	b, storeB, clockB := waProcess(mtParams(256, "vllm:v1"))
+	*clockB = *clock
+	b.RestoreLearnedState(doc)
+	if got := waRun(t, b, clockB, 1000, 0); got.PerReplicaCapacity != 4000 {
+		t.Fatalf("precondition: the restored rollback prices from its own window, got %v", got.PerReplicaCapacity)
+	}
+	waSetParams(storeB, mtParams(64, "vllm:v1"))
+	if got := waRun(t, b, clockB, 1000, 0); got.PerReplicaCapacity != 4000 {
+		t.Errorf("after a restart, the re-roll's hold was spent: priced at %v", got.PerReplicaCapacity)
+	}
+}
