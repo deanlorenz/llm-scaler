@@ -145,6 +145,12 @@ func TestReclaimFromOwnBorrowerLowersItsTarget(t *testing.T) {
 				y.Action != domain.ActionScaleDown {
 				t.Fatalf("y's decision does not say why: action %q, steps %+v", y.Action, steps)
 			}
+			// Yielding is not scarcity: no limiter is named, so neither
+			// wva_decisions_limited_total nor a ResourceConstrained event
+			// counts it.
+			if y.WasLimited || y.LimitedBy != "" {
+				t.Fatalf("y's yield reads as limited (by %q): it is not a limiter's decision", y.LimitedBy)
+			}
 		})
 	}
 }
