@@ -713,10 +713,19 @@ pl_sync_kueue_borrow_read() {
 # limiter composed in, counts cohort borrowing -- and PL_KUEUE_KEPT_NS, the
 # kueue.controllerNamespace it keeps. Composed the way pl_set_limiter composes,
 # so a kept countBorrowable: false (WVA_QUOTA_KUEUE_BORROW not given) counts.
+#
+# The optional third argument is the controller's own namespace. When it is not
+# the policy namespace, its own ConfigMap is read too, as is: the same
+# candidates wva_policy_candidates gives the admin phase for a self-managed
+# controller (the policy namespace, then its own), ORed the same way
+# (wva_kueue_borrow_wanted). Deciding from the policy namespace alone revoked a
+# read the admin phase had granted for a borrowing policy the controller still
+# falls back to (M-m4). An own policy that cannot be read leaves a "no" as
+# unknown: the grant is then left as it is.
 PL_BORROW_WANTED=unknown
 PL_KUEUE_KEPT_NS=""
 pl_published_kueue() {
-    local cm_ns="$1" limiter="$2" cur="" rc=0 composed
+    local cm_ns="$1" limiter="$2" own_ns="${3:-}" cur="" rc=0 composed own_wanted
     PL_BORROW_WANTED=unknown
     PL_KUEUE_KEPT_NS=""
     kc_capture get configmap wva-scaling-policy-config -n "$cm_ns" -o jsonpath='{.data.default}' || rc=$?
@@ -736,6 +745,23 @@ pl_published_kueue() {
     [ -n "$composed" ] || return 0
     PL_BORROW_WANTED="$(printf '%s\n' "$composed" | policy_counts_borrowing)" || PL_BORROW_WANTED=unknown
     [ -n "$PL_BORROW_WANTED" ] || PL_BORROW_WANTED=unknown
+    if [ -z "$own_ns" ] || [ "$own_ns" = "$cm_ns" ] || [ "$PL_BORROW_WANTED" = yes ]; then
+        return 0
+    fi
+    rc=0
+    kc_capture get configmap wva-scaling-policy-config -n "$own_ns" -o jsonpath='{.data.default}' || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        case "$KC_ERR" in
+            *NotFound*|*"not found"*) return 0 ;;
+            *) PL_BORROW_WANTED=unknown; return 0 ;;
+        esac
+    fi
+    own_wanted="$(printf '%s\n' "${KC_OUT:-limiters: []}" | policy_counts_borrowing)" || own_wanted=unknown
+    case "$own_wanted" in
+        yes) PL_BORROW_WANTED=yes ;;
+        no) ;;
+        *) PL_BORROW_WANTED=unknown ;;
+    esac
 }
 
 # pl_can_watch_namespaces echoes yes | no | unknown: whether ServiceAccount $2
@@ -1321,7 +1347,8 @@ enable_physical_limiter() {
         fi
         if [ "$limiter" = "quota" ]; then
             # What the policy in cm_ns will say once this quota is composed in.
-            pl_published_kueue "$cm_ns" "$limiter"
+            # And what its own policy says, which it falls back to.
+            pl_published_kueue "$cm_ns" "$limiter" "$ns"
         fi
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
             pl_grant_kueue_read "$ns" "$sa" "$managed" \
