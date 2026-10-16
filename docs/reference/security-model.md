@@ -423,8 +423,8 @@ names, budgets and refusal reasons. Anyone who can query that Prometheus
 reads them for every tenant. Where that matters, give each tenant its own
 Prometheus, or put a label-enforcing proxy in front of a shared one.
 
-**Budgets are per controller.** Each controller charges a quota only with
-what its own models hold. A `scope: cluster` quota published in a shared
+**Budgets are per controller.** Each controller charges a static quota only
+with what its own models hold. A `scope: cluster` quota published in a shared
 policy therefore lets N controllers take N times the figure, and a
 namespace-scoped controller under `gpu-inventory` without a cluster-wide Pod
 list sees only its own namespace's GPUs. A bound that must hold across

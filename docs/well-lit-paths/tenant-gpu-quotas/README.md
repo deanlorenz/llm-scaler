@@ -154,7 +154,7 @@ its number.
   reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
 - The utilization-share optimizer shares it only when a finite cluster bound
   covers its GPU type: a `scope: cluster` quota, or a `gpu-inventory` entry
-  with `physicalGroups: true`.
+  with `physicalGroups: true` on a cluster-scoped controller.
 
 To bound it with a quota, add a `scope: cluster` quota beside the tenants'
 quota. Add these two entries to the `limiters:` list of the `default` entry.

@@ -118,8 +118,8 @@ falling model's whole scale-down window.
   stays on the default optimizer.
 - **A namespace a namespace quota excludes, with no finite cluster bound.** It
   is never planned and stays on the default optimizer. Add a `scope: cluster`
-  quota for its accelerator type, or set `physicalGroups: true` beside a
-  `gpu-inventory` limiter.
+  quota for its accelerator type, or, on a cluster-scoped controller, set
+  `physicalGroups: true` beside a `gpu-inventory` limiter.
 
 ### What it needs
 

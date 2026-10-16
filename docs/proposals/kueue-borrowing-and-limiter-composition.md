@@ -243,7 +243,7 @@ there are none yet). A freeze never shrinks a running model.
 - **A failed Kueue read.** A Kueue-backed quota entry with a last good read
   freezes at that read (`stale`). An entry never read is kept, bounding with
   its finite static caps; its `-1` types bind nothing until a read succeeds.
-  It is reported with `wva_kueue_never_read`, and listed as `unobserved` on
+  It is reported with `wva_kueue_never_read`, and not listed on
   `wva_constraint_provider_skipped` (A4).
 
 ### B2. What is read
@@ -322,7 +322,7 @@ reach_Q    = min(N_Q + B_Q, max(U_Q, G_Q) + cohortFree)
   borrowed: a model woken onto borrowed GPUs can be preempted before it
   serves. Not guaranteed alone either: under Kueue's default `Never`, an idle
   queue's guaranteed is 0. A wake blocked because nominal is lent to a peer
-  that need not give it back reports `nominal-lent-out` instead of waking into
+  that need not give it back reports `wake-nominal-lent-out` instead of waking into
   a gated pod. A model whose within-nominal capacity is used cannot wake, even
   with idle lenders. This holds for namespaces read but not counted too. The
   wake deducts borrowing in flight, gated GPUs, GPUs admitted but not yet

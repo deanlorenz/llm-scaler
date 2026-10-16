@@ -215,7 +215,8 @@ Scale-from-zero: no variant woken for a model with pending requests
 Other `reason` values: `no-decode-candidate` (no inactive decode/`both` variant
 to wake), `no-capacity` (nothing fit the GPU budget) and `nominal-lent-out`
 (Kueue borrowing: nothing fit because the queue's nominal quota is lent to a
-peer it cannot reclaim from; also on `wva_model_scaling_blocked`). Each is logged once per
+peer it cannot reclaim from; on `wva_model_scaling_blocked` as
+`wake-nominal-lent-out`). Each is logged once per
 change of verdict, not per poll. A model already serving is not a refusal and is
 not reported.
 
@@ -357,8 +358,8 @@ reports `invalid`) and the controller logs
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. A `gpu-inventory` limiter beside the namespace
-quota is a finite bound too: with `physicalGroups: true` they are shared over
-it. Without a finite bound, their models stay on the default optimizer, and
+quota is a finite bound too: with `physicalGroups: true` on a cluster-scoped
+controller they are shared over it. Without a finite bound, their models stay on the default optimizer, and
 the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.

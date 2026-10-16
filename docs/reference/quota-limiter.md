@@ -147,8 +147,8 @@ When the allocator evaluates a request for namespace `N` and type `T` in
      full, new pods stay `Pending`.
    - The utilization-share optimizer does not share `N` unless a finite
      cluster bound covers its type: a `scope: cluster` quota, or a
-     `gpu-inventory` limiter with `physicalGroups: true`
-     ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
+     `gpu-inventory` limiter with `physicalGroups: true` on a cluster-scoped
+     controller ([scaling policy](scaling-policy.md#optimizer-cluster-default-only-live)).
    - The controller logs a `WARNING` when `N` has no GPU limit on some type,
      and when an `exclude` entry is not a valid namespace name (it never
      matches). See [Validation](#validation).
@@ -362,7 +362,8 @@ an error from a Kueue outage would *lift* the declared cap. Instead:
 
 With borrowing counted, a failed read after a good one is published too: the
 reason `stale` on `wva_quota_borrow_withheld`, and the alert
-`WVAKueueReaderStale`.
+`WVAKueueReaderStale` (`WVAKueueReaderStaleNamespace` when only one namespace
+of the entry is stale).
 
 A change to the effective caps is logged once, at `Info`, with the Kueue figures
 and the merged result, so the controller log answers "what is bounding this
@@ -533,7 +534,8 @@ template's own `nodeSelector`, required node affinity and tolerations. A unit
 the pool holds and no such node does is limited by `node-fit`, as any replica
 is ([A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node)),
 and a borrowed replica ordered keeps its hole on the flavor's nodes until its
-pods hold a node, for up to 5 minutes, like any other. What Kueue
+pods hold a node, for up to 5 minutes or `placementTimeout`, whichever is
+longer. What Kueue
 has not reserved yet is taken out of the pool first: growth ordered and not yet
 admitted, and pods held at the admission gate in **every** namespace of the
 cohort's ClusterQueues, so a second controller's ask is seen. Still, run one
@@ -1051,7 +1053,8 @@ not inputs to it. Two properties follow from that:
 > namespaces on the same type, and give every type a finite cluster-scope cap.
 > The utilization-share optimizer shares an excluded namespace only when a
 > finite cluster bound covers its GPU type: a `scope: cluster` quota, or a
-> `gpu-inventory` limiter with `physicalGroups: true`. Otherwise its models
+> `gpu-inventory` limiter with `physicalGroups: true` on a cluster-scoped
+> controller. Otherwise its models
 > stay on the default optimizer.
 
 When a model is capped below its fair-share slot it takes only up to its quota;

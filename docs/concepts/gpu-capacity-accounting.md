@@ -25,7 +25,7 @@ utilization-share optimizer.
 | --- | --- | --- | --- |
 | `gpu-inventory` | is the hardware there? | every GPU a pod holds on the GPU nodes, whoever owns it: other teams, training jobs, system pods, and pods scheduled or nominated but not running yet | the GPUs the nodes advertise, per accelerator type, and each replica to one node (below) |
 | `quota` | is this tenant within its allowance? | only what the scaling manager's own replicas and warm pools hold: replicas times GPUs per replica | the caps you declare, per accelerator type, for the cluster or per namespace |
-| `quota` with `kueue.enabled` | the same, with Kueue's numbers | the same | the smaller of your cap and Kueue's grant, plus what the namespace may borrow from its cohort |
+| `quota` with `kueue.enabled` | the same, with Kueue's numbers | the same; for a namespace-scope entry, Kueue's figure is first reduced by what other workloads Kueue admitted hold in the queue | the smaller of your cap and Kueue's grant, plus what the namespace may borrow from its cohort |
 
 The two kinds count differently on purpose. A quota is an allowance: charged
 with every GPU on the nodes, a 4-GPU quota beside an unrelated 4-GPU training
@@ -54,9 +54,10 @@ Details: [the GPU limiter](../reference/gpu-limiter.md) and
   usage may not be observed yet, or its read failed; the controller names it
   in `wva_constraint_provider_skipped`. Only when every limiter is skipped is a
   decision unchecked. A wake then uses the last answer if it is under 5
-  minutes old.
-- **Budgets are per controller.** Each controller charges a quota only with
-  what its own models hold. N controllers that read one `scope: cluster` quota
+  minutes old. A Kueue-backed quota that has never read Kueue is not skipped:
+  its finite caps still bound, and `wva_kueue_never_read` reports it.
+- **Budgets are per controller.** Each controller charges a static quota only
+  with what its own models hold. N controllers that read one `scope: cluster` quota
   allow N times the figure.
 
 ## Node fit and the in-flight hold
@@ -65,11 +66,13 @@ With `gpu-inventory` declared, a replica must also fit **one node**. Sixteen
 free GPUs as 4+4+8 hold one 8-GPU replica, not two.
 
 - Each pod is planned into the smallest free hole that holds it, on a node of
-  its accelerator that is schedulable (not cordoned, Ready) and whose taints it
-  tolerates.
+  its accelerator that is schedulable (not cordoned, Ready), whose taints it
+  tolerates, and whose labels match its `nodeSelector` and required node
+  affinity.
 - A P/D model grows only when a prefill and a decode replica both find a node.
 - A replica just ordered keeps its hole from every later decision until its
-  pods hold a node, for up to **5 minutes**. Without this hold the next
+  pods hold a node, for up to **5 minutes** (a replica on a Kueue flavor: its
+  `placementTimeout`, when that is longer). Without this hold the next
   decision would see the hole free again while the pod is still being
   scheduled.
 - The plan assumes the scheduler packs pods the same way. When replicas of
@@ -93,8 +96,10 @@ nominal quota into capacity its cohort lends. On by default
   be trusted right now. The reason is published.
 - A P/D pair borrows only whole. A wake, the warm pool and rescale never
   borrow.
-- The scaling manager gives back only a borrowed replica that never placed
-  (after `placementTimeout`). Kueue preempts the rest when a lender needs it.
+- The scaling manager gives back a borrowed replica that never placed (after
+  `placementTimeout`). When one of its own models grows into nominal its queue
+  lent out, it also lowers its own borrower in the same pass (`kueue-reclaim`).
+  Kueue preempts the rest when a lender needs it.
 
 The rules and every reason: [Cohort borrowing](../reference/quota-limiter.md#cohort-borrowing).
 
@@ -129,12 +134,18 @@ Runbooks: [GPUs held or quota spent](../reference/troubleshooting.md#gpus-held-o
    nodes read as free (`wva_pod_access_denied` = 1). Grant `list` on Pods
    cluster-wide, or bound it with a quota
    ([details](../reference/gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)).
-4. **Kueue charges more than the scaling manager counts.** Kueue charges a
-   ClusterQueue for every Workload it admits; the scaling manager counts only
-   its own models. With other GPU work on the same ClusterQueue, or a
-   namespace with LocalQueues on several GPU ClusterQueues, it can order
-   replicas Kueue holds at its gate
-   ([details](../reference/quota-limiter.md#what-a-quota-is-charged)).
+4. **Kueue's charge is read, not watched.** A namespace-scope Kueue figure is
+   charged with what other workloads Kueue admitted hold in the queue, as of
+   the last read. Replicas can still wait at Kueue's gate when:
+   - the entry is cluster-scope, which is charged with the managed GPUs only;
+   - a variant Kueue does not manage holds GPUs, which makes the charge read
+     low;
+   - several namespaces on one queue grow in the same cycle, each into the
+     same free GPUs;
+   - a replica is gated where borrowing is not counted: it lowers the charge,
+     and nothing releases it.
+
+   [Details](../reference/quota-limiter.md#what-a-quota-is-charged).
 5. **An FMA warm pool** holds GPUs that no pod requests. A launcher keeps its
    engine on a GPU after it unbinds, charged to nobody, so in an FMA namespace
    every figure is a lower bound on use. A `ResourceQuota` has the same blind
