@@ -1426,6 +1426,13 @@ func warnUnsizableShortfall(ctx context.Context, nr *allocation.NamedAnalyzerRes
 	if nr.RequiredCapacity <= 0 || len(result.VariantCapacities) == 0 {
 		return
 	}
+	// An analyzer that priced no variant this cycle (every one no-data or
+	// error) has no capacity to be missing: the slo analyzer before its line
+	// is ready, or for a role it does not price, carries demand with no PRC.
+	// Warned, every such model logged a stuck-looking shortfall every cycle.
+	if !allocation.ResultIsInformative(*nr) {
+		return
+	}
 	for _, vc := range result.VariantCapacities {
 		if vc.PerReplicaCapacity > 0 {
 			return // at least one variant can absorb the shortfall

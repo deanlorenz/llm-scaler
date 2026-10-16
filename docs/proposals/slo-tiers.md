@@ -24,7 +24,8 @@ built)** when no phase owns it yet.
 **Built** (phase 0): the `slo` block with validation, overlay and warnings;
 TPOT pricing with the batch cap, and its source per variant (`declined`
 included); router judgement with the transient exclusion; the `wva_slo_*`
-metrics; alerts `WVAModelSLOMissed` and `WVAModelSLOUnjudged`.
+metrics; alerts `WVAModelSLOAttainmentLow` (TTFT, request-weighted),
+`WVAModelSLOMissed` (TPOT) and `WVAModelSLOUnjudged`.
 
 **Not built**: step 2a. It was built and removed, because its output could not
 answer [open question 5](#open-questions); it is re-specified as "observe what
@@ -476,7 +477,7 @@ records.
 ## Observability
 
 The `wva_slo_*` metrics are listed in [prometheus](../reference/prometheus.md)
-(*SLO Analyzer Metrics*), and the two alerts are explained in
+(*SLO Analyzer Metrics*), and the alerts are explained in
 [troubleshooting](../reference/troubleshooting.md). The design choices behind
 them:
 

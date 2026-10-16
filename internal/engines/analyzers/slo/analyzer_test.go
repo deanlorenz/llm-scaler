@@ -205,6 +205,9 @@ var _ = Describe("Analyzer", func() {
 		}
 		Expect(byName["pre"].Reason).To(Equal(domain.ReasonNoData))
 		Expect(byName["pre"].TotalDemand).To(BeZero())
+		Expect(byName["pre"].ObservedReplicas).To(Equal(1),
+			"its Ready pod is observed; 0 read as a scrape gap")
+		Expect(byName["dec"].ObservedReplicas).To(Equal(2))
 		Expect(byName["dec"].PerReplicaCapacity).To(BeNumerically(">", 0))
 		Expect(byName["dec"].TotalDemand).To(BeNumerically("~", res.TotalDemand, 1e-9))
 	})

@@ -397,7 +397,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 		r := metrics.SLOObjectiveReading{
 			Objective: constants.SLOObjectiveTTFT, Statistic: "p" + strconv.Itoa(p),
 			TargetSeconds: slo.TTFT.Target.Seconds(), Observed: math.NaN(), Attainment: math.NaN(),
-			Requests: math.NaN(),
+			ObjectiveRatio: float64(p) / 100, Requests: math.NaN(),
 		}
 		if rl != nil {
 			r.WindowSeconds = rl.WindowSeconds
@@ -557,7 +557,9 @@ func isGenerating(role string) bool {
 type fleetReading struct {
 	variants      []domain.VariantReplicaState
 	disaggregated bool
-	// ready counts each variant's Ready, non-pool replica rows.
+	// ready counts each variant's Ready, non-pool replica rows, every role
+	// included: it is the variant's observed replicas, and a prefill variant
+	// reported as 0 read as a scrape gap.
 	ready map[string]int
 	// generatingReplicas is the total of ready over decode and aggregated
 	// variants.
@@ -585,10 +587,13 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 	// the shape; equal weights when no replica reports a rate.
 	var in, out, hit, weight float64
 	for _, rm := range input.ReplicaMetrics {
-		if !rm.Ready || rm.FromWarmPool || !isGenerating(roles[rm.VariantName]) {
+		if !rm.Ready || rm.FromWarmPool {
 			continue
 		}
 		f.ready[rm.VariantName]++
+		if !isGenerating(roles[rm.VariantName]) {
+			continue
+		}
 		f.generatingReplicas++
 		if finite(rm.RequestRate) && rm.RequestRate > 0 {
 			f.requestRate += rm.RequestRate

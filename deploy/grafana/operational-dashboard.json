@@ -2435,7 +2435,7 @@
       "id": 66,
       "type": "timeseries",
       "title": "Wake from zero, p95 by model",
-      "description": "95th percentile of wva_scale_from_zero_wake_seconds per model. The heatmap above shows whether the distribution is bimodal; this shows which model moved. A step change here with no config change is the warm pool having stopped being reusable - the case measured on pokprod, where a bind to a two-day-old sleeper took 59s against a 68s cold build because the sleeper was destroyed and rebuilt rather than reused.",
+      "description": "95th percentile of wva_scale_from_zero_wake_seconds per model. The heatmap above shows whether the distribution is bimodal; this shows which model moved. A step change here with no config change is the warm pool having stopped being reusable - the case measured on a shared cluster, where a bind to a two-day-old sleeper took 59s against a 68s cold build because the sleeper was destroyed and rebuilt rather than reused.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource_uid}"

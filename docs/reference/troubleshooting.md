@@ -36,7 +36,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
 | one variant held larger than its load needs | `k2-decision` keeps `P2-hist`, `P2-prior` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-prior`: the variant's own k2 from before its engine arguments changed; expected after a rollout that changes them, held for 30 minutes of serving, then relaxed over 6 hours of serving. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist` or `P2-prior`: [reset one variant](#reset-one-variants-learned-state) (`disableK2Borrow` does not affect `P2-prior`). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
-| misses its SLO, or is never judged | `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
+| misses its SLO, or is never judged | `WVAModelSLOAttainmentLow`; `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -990,9 +990,9 @@ Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uni
 
 ## A model misses, or is never judged against, its SLO
 
-**Symptom**: `WVAModelSLOMissed` (warning) or `WVAModelSLOUnjudged` (info)
+**Symptom**: `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed` (warning), or `WVAModelSLOUnjudged` (info)
 fires, or the SLO dashboard row stays empty for a model whose policy sets
-targets. Both alerts carry `component: slo`, so they can be routed apart from
+targets. All three carry `component: slo`, so they can be routed apart from
 pages.
 
 **On this release the slo analyzer only observes**, so neither alert means the
@@ -1005,10 +1005,15 @@ The `wva_slo_*` series carry the model's namespace as `exported_namespace`
 (see [the labels](prometheus.md#slo-analyzer-metrics)); filter on that, not on
 `namespace`.
 
-### `WVAModelSLOMissed`
+### `WVAModelSLOAttainmentLow` or `WVAModelSLOMissed`
 
-At least half of the judged minutes of the last 30, and at least 5, were over
-target.
+- `WVAModelSLOAttainmentLow` (TTFT): over the last 30 minutes fewer requests
+  met the target than the objective promises (90% for `p90`), every judged
+  request counted once. It needs at least 15 judged minutes, holding at least
+  half the half hour's requests: at p99 a window needs 1000 requests to be
+  judged, and a model judged only in its busy bursts is not judged at all.
+- `WVAModelSLOMissed` (TPOT): the mean was over target in at least half of the
+  judged minutes of the last 30, and in at least 7.
 
 **1. Check the target can be met at all.** If it cannot, more replicas do not
 help: loosen the target, or move the model to faster hardware.
@@ -1016,10 +1021,17 @@ help: loosen the target, or move the model to faster hardware.
 ```promql
 # tpot: 1 for "infeasible" -- even an almost empty replica is over the target
 wva_slo_source{model_name="<model>", source="infeasible"} == 1
-# ttft: prefill time per pod (vLLM), queue left out; at or above the TTFT
-# target, no replica count meets it
-rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
+# ttft: the objective's percentile of prefill time alone (vLLM), queue left
+# out; at or above the TTFT target, no replica count meets it. Use the same
+# percentile as the objective (0.90 for p90): a mean under the target hides a
+# tail of long prompts that no replica count can make faster.
+histogram_quantile(0.90, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{namespace="<ns>", model_name="<model>"}[5m])))
 ```
+
+The prefill buckets are coarse above 2s (2.5s, then 5s), so a reading in the
+bucket that holds the target is inconclusive. On P/D, read the prefill pods
+alone (decode pods report almost no prefill time and pull the percentile
+down), and the KV transfer to decode is extra time on top.
 
 `infeasible` read from a `pinned-default` line is not reliable: that line's
 intercept is a default for no particular card.
@@ -1054,9 +1066,14 @@ low-priority band back on purpose, that wait counts as a miss too. Only
 completed requests count, so under shedding the alert can resolve while
 requests are refused: read `llm_d_epp_request_error_total` too.
 
-The alert resolves once the judged minutes that meet the target outnumber the
-misses in the last 30, so it stays up for a while after a fix. Changing the
-tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
+`WVAModelSLOAttainmentLow` resolves once a judged reading of the last 5
+minutes meets the objective. A window excluded while a replica starts does not
+resolve it, so the miss that brought the replica on stays one alert. It also
+ends when too few minutes are judged to hold half the requests.
+`WVAModelSLOMissed` resolves once the judged minutes that meet the target
+outnumber the misses in the last 30, so it stays up for a while after a fix.
+Changing the tier's TTFT percentile clears the old percentile's alert at once;
+the new one needs 15 judged minutes before it can fire.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 

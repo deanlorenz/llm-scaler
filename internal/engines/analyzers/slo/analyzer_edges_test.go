@@ -370,6 +370,8 @@ var _ = Describe("judge's sample minimums and labels", func() {
 		Expect(out[0].Statistic).To(Equal("mean"))
 		Expect(out[1].Objective).To(Equal(constants.SLOObjectiveTTFT))
 		Expect(out[1].Statistic).To(Equal("p99"))
+		Expect(out[1].ObjectiveRatio).To(Equal(0.99), "the attainment alert compares with it")
+		Expect(out[0].ObjectiveRatio).To(BeZero(), "a mean promises no share")
 	})
 
 	It("asks a p99 for a thousand requests", func() {
