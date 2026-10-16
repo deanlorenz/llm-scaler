@@ -1288,12 +1288,16 @@ set_share_policy() {
 wait_share_mode() {
     local want="$1" deadline=$(( $(date +%s) + ${SHARE_MODE_TIMEOUT:-300} )) res
     local q="max by (mode) (wva_utilization_share_mode{namespace=\"$WVA_NS\"})"
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    # Asked once before the deadline is consulted. The clock is whole seconds, so
+    # a `while now < deadline` guard skips the loop whenever the second turns
+    # between the two reads -- with a short budget, without asking at all.
+    while :; do
         res="$(prom_queries "" "$q")" && \
             [ "$(jq -r --arg q "$q" --arg m "$want" '[.[$q][]? | select(.metric.mode==$m) | .value[1]] | first // ""' <<<"$res")" = "1" ] && {
                 ok "the controller reports utilization-share mode '$want'"
                 return 0
             }
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep "${SHARE_MODE_POLL:-15}"
     done
     warn "the controller did not report mode '$want' within ${SHARE_MODE_TIMEOUT:-300}s. Last answer: ${res:-<none>}"
@@ -1640,7 +1644,8 @@ wait_resident() {
         return 1
     fi
     deadline=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    # Read once before the deadline is consulted, as in wait_share_mode.
+    while :; do
         blob="$(pool_residency)"
         have_a=0; have_b=0
         # Matched on the MODEL ID and on the stack short name, because the
@@ -1654,6 +1659,7 @@ wait_resident() {
         if [ "$have_a" = 1 ] && [ "$have_b" = 1 ]; then
             return 0
         fi
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep 10
     done
     warn "timed out. What the supervisors actually reported:"

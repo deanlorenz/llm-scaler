@@ -419,13 +419,15 @@ SECONDS=0; reseed_wait 13 600; echo "rc=$?"')"
 fi
 ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else
+    # "At once" is counted in sleeps, not read off SECONDS: SECONDS also follows
+    # the wall clock, so a fork that straddles a second boundary read as a wait.
     for c in Succeeded:0 Failed:1 Pending:1; do
-        out="$(PHASE="${c%%:*}" bash -c 'kubectl() { printf %s "$PHASE"; }; sleep() { SECONDS=$((SECONDS + $1)); }; NAMESPACE=ns; '"$ps_body"'
-SECONDS=0; pod_succeeded p 900; echo "rc=$? after=$SECONDS"')"
+        out="$(PHASE="${c%%:*}" bash -c 'kubectl() { printf %s "$PHASE"; }; sleep() { slept=$((slept + 1)); SECONDS=$((SECONDS + $1)); }; NAMESPACE=ns; '"$ps_body"'
+slept=0; SECONDS=0; pod_succeeded p 900; echo "rc=$? slept=$slept"')"
         want="rc=${c#*:}"
         case "$c:$out" in
             Pending*) [ "${out%% *}" = "$want" ] && ok "pod_succeeded: a pod still $(echo "${c%%:*}") at the deadline is a failure" || fail "pod_succeeded on ${c%%:*}: $out" ;;
-            *) [ "$out" = "$want after=0" ] && ok "pod_succeeded: ${c%%:*} answers at once ($want)" || fail "pod_succeeded on ${c%%:*}: $out (want $want at once)" ;;
+            *) [ "$out" = "$want slept=0" ] && ok "pod_succeeded: ${c%%:*} answers at once ($want)" || fail "pod_succeeded on ${c%%:*}: $out (want $want at once)" ;;
         esac
     done
 fi
