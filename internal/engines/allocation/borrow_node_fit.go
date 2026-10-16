@@ -14,8 +14,8 @@ import (
 
 // eligibleFit is, in order, the nodes a pod of r may land on. A replica with
 // no templates and no flavor is the view's own rule (eligible: accelerator,
-// schedulable, taints its template tolerates). A replica the Kueue borrowing
-// placer orders is judged further: every node must satisfy each pod
+// schedulable, taints its template tolerates). A replica with templates (any
+// path, WN3) is judged further: every node must satisfy each pod
 // template's nodeSelector and required node affinity, which the scheduler
 // enforces whatever flavor Kueue adds; and on borrowed capacity (r.flavor set,
 // the flavor Kueue admits it on) only the flavor's nodes count, those carrying

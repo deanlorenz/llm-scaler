@@ -119,8 +119,13 @@ sparse debits; `adopt` commits a clone's debits.
   (`scaletarget.PodTolerations`, the leader's template). With
   `ReplicaShape.DomainKey` (`scaletarget.ExclusiveTopology`) and more than one
   pod, all pods land in one value of that label (`domainsOf`, tried in order).
-  `VariantReplicaState.Tolerations`/`TopologyKey` and `Candidate.Tolerations`/
-  `DomainKey` carry them from the scale target, which discovery already reads.
+  `ReplicaShape.Placements` (the templates' nodeSelector and required node
+  affinity) narrows the nodes further (`eligibleFit`) on every path: the
+  greedy pass (`nodeFit.replica`), the borrowing placer, a wake (`shapeOf`)
+  and the ledger's holes (`steadystate.admitInFlight`).
+  `VariantReplicaState.Tolerations`/`TopologyKey`/`Placements` and
+  `Candidate.Tolerations`/`DomainKey`/`Placements` (`variantmeta.PodPlacements`)
+  carry them from the scale target, which discovery already reads.
 - Owners: every debit is charged to `NodeView.owner` (`setOwner`): the model
   (`modelKey`) for the greedy and rescale passes, `PromisedOwner` for
   `ReservePromised`, `InFlightOwner` for the ledger. `DebitsExcept` and

@@ -326,11 +326,12 @@ keeps its hole for it.
 
 Limits:
 
-- GPUs only. CPU, memory and node affinity beyond the accelerator are not
-  checked; a node counts when it carries the replica's accelerator, is
-  schedulable (not cordoned, Ready, not being removed by an autoscaler), and
-  its taints are tolerated. A LeaderWorkerSet's workers are judged by its
-  leader's tolerations.
+- GPUs only. CPU and memory are not checked; a node counts when it carries
+  the replica's accelerator, is schedulable (not cordoned, Ready, not being
+  removed by an autoscaler), its taints are tolerated, and its labels match
+  the pod templates' `nodeSelector` and required node affinity. That holds for
+  growth, wakes and in-flight holds alike. A LeaderWorkerSet's workers are
+  judged by its leader's tolerations.
 - A replica whose pod layout is unknown and larger than any node (a
   multi-node group) is bounded by the pool alone.
 - A workload that names a bare family (`H100`) lands on any node of the

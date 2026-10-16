@@ -29,19 +29,19 @@ import (
 // nothing is fitted: every method accepts a nil receiver, every placement then
 // succeeds, and the copies are nil.
 //
-// It counts GPUs only. CPU or memory exhaustion on a node is not seen, nor
-// node affinity beyond the accelerator: a node is a candidate for a pod when
-// it carries the pod's accelerator, is schedulable
-// (decision.NodeGPU.Unschedulable: cordoned, not Ready, or tainted for
-// removal), and every NoSchedule or NoExecute taint it carries is tolerated by
-// the pod's template (ReplicaShape.Tolerations). A pod is placed best-fit, in
-// the smallest hole that holds it; the pods of a replica with a topology key
+// It counts GPUs only. CPU or memory exhaustion on a node is not seen: a node
+// is a candidate for a pod when it carries the pod's accelerator, is
+// schedulable (decision.NodeGPU.Unschedulable: cordoned, not Ready, or
+// tainted for removal), every NoSchedule or NoExecute taint it carries is
+// tolerated by the pod's template (ReplicaShape.Tolerations), and its labels
+// satisfy the templates' nodeSelector and required node affinity
+// (ReplicaShape.Placements; eligibleFit, borrow_node_fit.go) -- on every
+// path: the pass, a wake, and the in-flight ledger's holes. On borrowed
+// capacity the flavor's node labels and tolerations count too
+// (ReplicaShape.Flavor). A pod is placed best-fit, in the smallest hole that
+// holds it; the pods of a replica with a topology key
 // (ReplicaShape.DomainKey: an exclusive-topology LeaderWorkerSet) are placed
-// in one domain, the nodes sharing one value of that label. A replica the
-// Kueue borrowing placer orders is judged further (ReplicaShape.Placements and
-// Flavor; eligibleFit, borrow_node_fit.go): its pod templates' nodeSelector
-// and required node affinity, and on borrowed capacity its flavor's node
-// labels and tolerations, against the same view and debits.
+// in one domain, the nodes sharing one value of that label.
 //
 // A NodeView is not safe for concurrent use: one optimizer pass, or one wake
 // decision, owns it.
@@ -204,8 +204,9 @@ type ReplicaShape struct {
 	// of (an exclusive-topology LeaderWorkerSet), "" for none.
 	DomainKey string
 	// Placements is each pod template's nodeSelector and required node
-	// affinity; nil leaves them unjudged. Set for the replicas the Kueue
-	// borrowing placer orders, and for their holes in the in-flight ledger.
+	// affinity (domain.VariantReplicaState.Placements); nil leaves them
+	// unjudged. Set on every path that fits a replica: the steady-state pass,
+	// the borrowing placer, a wake, and their holes in the in-flight ledger.
 	Placements []domain.PodPlacement
 	// Flavor is the Kueue flavor a borrowed replica is admitted on: its pods
 	// land only on nodes carrying every node label it names, and carry its

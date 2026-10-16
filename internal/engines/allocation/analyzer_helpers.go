@@ -575,11 +575,13 @@ type nodeFit struct {
 }
 
 // replica is one replica of variant v as the view places it: its pods
-// (NodeView.replicaPods), tolerations and topology key.
+// (NodeView.replicaPods), tolerations, topology key, and its pod templates'
+// nodeSelector and required node affinity (WN3).
 func (f nodeFit) replica(variants []variantRecord, stateMap map[string]domain.VariantReplicaState, v string) replicaFit {
 	st := stateMap[v]
 	return f.nodes.fitOf(ReplicaShape{Variant: f.namespace + "/" + v, Accelerator: accFromVCs(variants, v),
-		PodGPUs: st.PodGPUs, GPUs: gpusPerReplicaFromState(stateMap, v), Tolerations: st.Tolerations, DomainKey: st.TopologyKey})
+		PodGPUs: st.PodGPUs, GPUs: gpusPerReplicaFromState(stateMap, v), Tolerations: st.Tolerations, DomainKey: st.TopologyKey,
+		Placements: st.Placements})
 }
 
 // fitPairToNodes places the picked roles' replicas on a copy of the node view,

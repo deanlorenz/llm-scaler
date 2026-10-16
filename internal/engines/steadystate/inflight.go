@@ -36,7 +36,8 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 // A variant the pass placed on a Kueue flavor -- its queue's, within
 // guaranteed, or a borrowed chunk's -- or with borrowed growth in flight
 // (allocation.BorrowInFlight) has its holes held on that flavor's nodes, where
-// the placer fitted them, with its pod templates' placement (borrowedFlavors). The ledger holds the node;
+// the placer fitted them (borrowedFlavors). Every hole is held with its pod
+// templates' nodeSelector and required node affinity. The ledger holds the node;
 // the shared pool's GPUs are held apart, by the borrowed draw until the pods
 // exist and by the gated-pod deduction while Kueue's admission gate holds them
 // (prepareBorrowing): one is a hole on a node, the other GPUs of a cohort's
@@ -71,10 +72,13 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 			c := e.client
 			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), c, ns, acc) }
 		}
+		// Every hole keeps its pod templates' placement, a guaranteed or
+		// unbounded one too: the pass fitted it with them (WN3).
 		shape := allocation.ReplicaShape{Variant: key, Accelerator: d.AcceleratorName,
-			PodGPUs: st.PodGPUs, GPUs: max(st.GPUsPerReplica, 1), Tolerations: st.Tolerations, DomainKey: st.TopologyKey}
+			PodGPUs: st.PodGPUs, GPUs: max(st.GPUsPerReplica, 1), Tolerations: st.Tolerations, DomainKey: st.TopologyKey,
+			Placements: st.Placements}
 		if f, ok := flavors[key]; ok {
-			shape.Placements, shape.Flavor = st.Placements, f
+			shape.Flavor = f
 		}
 		allocation.DefaultInFlight.Admit(key, shape, d.TargetReplicas, placedNow, placed, now)
 	}

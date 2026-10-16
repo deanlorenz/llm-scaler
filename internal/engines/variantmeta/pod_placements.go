@@ -33,6 +33,13 @@ func podPlacements(acc scaletarget.ScaleTargetAccessor) []domain.PodPlacement {
 	return out
 }
 
+// PodPlacements is the node placement of each distinct pod template of one
+// replica of acc, leader first; nil when no template constrains its nodes.
+// The scale-from-zero engine fits a wake with it (WN3).
+func PodPlacements(acc scaletarget.ScaleTargetAccessor) []domain.PodPlacement {
+	return podPlacements(acc)
+}
+
 // replicaRequests is what one replica's pods request in all of each resource,
 // in milli-units (domain.VariantMetadata.ReplicaRequests): the leader pod once
 // and, for a LeaderWorkerSet, each worker of the group. A resource no
