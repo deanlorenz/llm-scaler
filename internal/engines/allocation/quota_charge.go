@@ -49,8 +49,10 @@ var _ ManagedUsageSetter = (*QuotaInventory)(nil)
 // guaranteed and within nominal -- charged with the non-managed charge of the
 // queues it is granted, and each borrowing row carrying its own (Charge).
 //
-// Per ClusterQueue, flavor and GPU resource, the charge is Kueue's Reserved
-// less the managed GPUs counted as held in that queue. The managed usage of a
+// Per namespace, ClusterQueue, flavor and GPU resource, the charge is Kueue's
+// Reserved less the GPUs that namespace's managed variants hold in that queue
+// (namespaceCharge): another namespace sharing the queue is charged like any
+// other workload. The managed usage of a
 // namespace granted exactly one GPU queue is counted in that queue; a
 // namespace granted several (multi-queue-namespace) counts in none, which
 // charges its GPUs to every one of them, the cautious side. Managed usage is
@@ -65,46 +67,11 @@ func chargeNonManaged(ext config.ExternalQuotas, managed map[string]map[string]i
 	if managed == nil || len(ext.Borrow) == 0 {
 		return ext
 	}
-	queuesOf := map[string][]string{}
-	rowsOf := map[string][]config.ExternalBorrow{} // per queue, one row per flavor and resource
-	for _, ns := range slices.Sorted(maps.Keys(ext.Borrow)) {
-		for _, r := range ext.Borrow[ns] {
-			if !slices.Contains(queuesOf[ns], r.Queue) {
-				queuesOf[ns] = append(queuesOf[ns], r.Queue)
-			}
-			if !slices.ContainsFunc(rowsOf[r.Queue], func(o config.ExternalBorrow) bool {
-				return o.Flavor == r.Flavor && o.Resource == r.Resource
-			}) {
-				rowsOf[r.Queue] = append(rowsOf[r.Queue], r)
-			}
-		}
-	}
-	held := map[string]map[string]int{} // per queue, the managed GPUs counted in it
-	for ns, queues := range queuesOf {
-		if len(queues) != 1 {
-			continue
-		}
-		for t, n := range managed[ns] {
-			if held[queues[0]] == nil {
-				held[queues[0]] = map[string]int{}
-			}
-			held[queues[0]][t] += n
-		}
-	}
-	charge := map[string]map[string]int{} // per queue, per "flavor/resource"
-	for q, rows := range rowsOf {
-		left := maps.Clone(held[q])
-		charge[q] = map[string]int{}
-		for _, r := range typedFirst(rows) {
-			taken := takeManaged(left, r, rows, r.Reserved)
-			charge[q][r.Flavor+"/"+r.Resource] = max(0, r.Reserved-taken)
-		}
-	}
-
 	out := ext
 	out.Borrow = make(map[string][]config.ExternalBorrow, len(ext.Borrow))
 	byNS := map[string]config.ExternalCaps{}
 	for ns, rows := range ext.Borrow {
+		charge := namespaceCharge(rows, managed[ns])
 		charged := slices.Clone(rows)
 		perQueue := map[string]config.ExternalCaps{}
 		untyped := map[string]map[string]int{} // per queue, per resource: as clusterQueueCapsAt sums untyped lines
@@ -136,6 +103,40 @@ func chargeNonManaged(ext config.ExternalQuotas, managed map[string]map[string]i
 	out.NamespaceGuaranteed = chargeCaps(ext.NamespaceGuaranteed, byNS)
 	out.NamespaceWithinNominal = chargeCaps(ext.NamespaceWithinNominal, byNS)
 	return out
+}
+
+// namespaceCharge is, per queue of one namespace's rows and per "flavor/
+// resource", the queue's charge as that namespace sees it: what Kueue
+// reserved in the queue less what this namespace's own variants hold there
+// (held). Another namespace's GPUs in a shared queue are charged like any
+// other workload's: Kueue admits them against the same nominal, so they are
+// not this namespace's to spend.
+func namespaceCharge(rows []config.ExternalBorrow, held map[string]int) map[string]map[string]int {
+	var queues []string
+	rowsOf := map[string][]config.ExternalBorrow{} // per queue, one row per flavor and resource
+	for _, r := range rows {
+		if !slices.Contains(queues, r.Queue) {
+			queues = append(queues, r.Queue)
+		}
+		if !slices.ContainsFunc(rowsOf[r.Queue], func(o config.ExternalBorrow) bool {
+			return o.Flavor == r.Flavor && o.Resource == r.Resource
+		}) {
+			rowsOf[r.Queue] = append(rowsOf[r.Queue], r)
+		}
+	}
+	charge := map[string]map[string]int{}
+	for _, q := range queues {
+		var left map[string]int
+		if len(queues) == 1 {
+			left = maps.Clone(held)
+		}
+		charge[q] = map[string]int{}
+		for _, r := range typedFirst(rowsOf[q]) {
+			taken := takeManaged(left, r, rowsOf[q], r.Reserved)
+			charge[q][r.Flavor+"/"+r.Resource] = max(0, r.Reserved-taken)
+		}
+	}
+	return charge
 }
 
 // typedFirst is rows with the ones naming an accelerator first, each group in

@@ -92,6 +92,34 @@ func TestKueueFigureChargedWithNonManagedReservation(t *testing.T) {
 	}
 }
 
+// 186-1: the charge is per namespace and queue. One ClusterQueue of 16 is
+// shared by ns1, holding nothing, and ns2, holding all 16. Kueue admits
+// nothing more through it, for either. Before, the managed GPUs of both
+// namespaces were pooled per queue: the queue's charge read 0, and ns1 was
+// given 16 GPUs that ns2 holds.
+func TestKueueChargePerNamespaceInSharedQueue(t *testing.T) {
+	noCohort := kueue.QueueFigures{Nominal: 16, Guaranteed: 16, WithinNominal: 16, BorrowCap: config.QuotaUnlimited,
+		Reason: kueue.ReasonNoCohort}
+	e := config.QuotaLimiterConfig{Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+		NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+		Kueue:           &config.KueueQuotaSource{Enabled: true}}
+	src := &fakeQuotaSource{}
+	src.push(chargeSnapshot(chargeRow("", noCohort, 16), 0, "ns1", "ns2"), nil)
+	inv := NewQuotaInventoryWithSource(e, src)
+	inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+	c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil,
+		map[string]map[string]int{"ns1": {}, "ns2": {"H100": 16}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := NewGreedyByScoreOptimizer().Optimize(context.Background(), []ModelScalingRequest{
+		borrowModel("ns1", "m1", 8, 0, 2, nil), borrowModel("ns2", "m2", 8, 2, 1, nil)}, []*ResourceConstraints{c})
+	if got := addedGPUs(ds); got["m1"] != 0 || got["m2"] != 0 {
+		t.Fatalf("ordered ns1 %d and ns2 %d GPUs, want 0 and 0: ns2 holds the queue's 16 (pools %+v)",
+			got["m1"], got["m2"], c.NamespacePools)
+	}
+}
+
 // KU1: the charge goes in before the static entry bounds the figure, so a
 // static cap tighter than what Kueue leaves is not charged a second time.
 func TestKueueChargeBeforeStaticBound(t *testing.T) {
