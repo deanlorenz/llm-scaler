@@ -272,14 +272,14 @@ func TestNoClusterBoundLeavesOpenNamespacesUnbounded(t *testing.T) {
 	}
 }
 
-func fkShareReq(id, ns, acc string, current int) ModelScalingRequest {
+func fkShareReq(id, ns, acc string) ModelScalingRequest {
 	v := id + "-v"
 	req := withSatEntry(&satEntryFixture{
 		ModelID: id, Namespace: ns, TotalDemand: 20000,
-		VariantCapacities: []vcFixture{{VariantName: v, AcceleratorName: acc, Cost: 5, ReplicaCount: current, PerReplicaCapacity: 1000}},
+		VariantCapacities: []vcFixture{{VariantName: v, AcceleratorName: acc, Cost: 5, ReplicaCount: 0, PerReplicaCapacity: 1000}},
 	}, ModelScalingRequest{
 		ModelID: id, Namespace: ns,
-		VariantStates: []domain.VariantReplicaState{{VariantName: v, CurrentReplicas: current, GPUsPerReplica: 8, MinReplicas: ptrInt(0)}},
+		VariantStates: []domain.VariantReplicaState{{VariantName: v, CurrentReplicas: 0, GPUsPerReplica: 8, MinReplicas: ptrInt(0)}},
 	})
 	req.CompositeSignal.ScaleUpThreshold = 0.8
 	return req
@@ -295,10 +295,10 @@ func TestShareGroupsDoNotSplitANamespaceFamilyKey(t *testing.T) {
 			fkNamespaceQuota(t, "ns-quota", map[string]map[string]int{"team-a": {"H100": aCap}, "team-b": {famHBM3: 8}}, "e"),
 		}
 		groups := BuildShareGroups([]ModelScalingRequest{
-			fkShareReq("ma", "team-a", famHBM3, 0),
-			fkShareReq("mp", "team-a", famPCIe, 0),
-			fkShareReq("mb", "team-b", famHBM3, 0),
-			fkShareReq("me", "e", famHBM3, 0),
+			fkShareReq("ma", "team-a", famHBM3),
+			fkShareReq("mp", "team-a", famPCIe),
+			fkShareReq("mb", "team-b", famHBM3),
+			fkShareReq("me", "e", famHBM3),
 		}, c, ShareGroupOptions{ClusterIsQuota: true})
 		found := false
 		for _, g := range groups {
