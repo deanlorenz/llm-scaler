@@ -354,6 +354,12 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
+**A namespace over its quota.** When a namespace holds more GPUs than its quota
+allows (for example a Deployment scaled by hand), the optimizer shares only the
+quota, takes no more GPUs, and gives the extra back; the controller logs
+`the group's scope holds more GPUs than its quota allows`, and
+`wva_utilization_share_reserve_debt_gpus` shows what is still to give back.
+
 **An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is

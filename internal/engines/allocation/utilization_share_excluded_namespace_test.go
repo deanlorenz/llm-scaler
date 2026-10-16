@@ -166,11 +166,13 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}{
 			// The cluster quota's free 20-4-held, less what team-a (free 6)
 			// and team-b (free 4) may still claim of it. Past that ns-x keeps
-			// what it holds and fills nothing.
+			// what it holds and fills nothing. Over the quota itself it is
+			// planned over what the quota leaves it, 20-4, and the rest is a
+			// debt.
 			{held: 2, budget: 2 + 4, idle: 4}, // 14 free; 14-(6+4) = 4
 			{held: 8, budget: 8 + 0, idle: 0}, // 8 free; 8-(6+4) < 0
 			{held: 14, budget: 14, idle: 0},   // 2 free
-			{held: 26, budget: 26, idle: 0},   // over the quota: 0 free
+			{held: 26, budget: 16, idle: 0},   // over the quota by 10
 		} {
 			cons := constraintsOf(map[string]map[string]int{
 				"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": c.held},
@@ -182,7 +184,7 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			Expect(g.Roles).To(HaveLen(1))
 			Expect(g.Roles[0].Key).To(Equal("ns-x/mx/both"))
 			Expect(g.Budget).To(Equal(c.budget), "held=%d", c.held)
-			Expect(g.Budget-g.Committed["ns-x/mx/both"]).To(Equal(c.idle), "held=%d", c.held)
+			Expect(max(0, g.Budget-g.Committed["ns-x/mx/both"])).To(Equal(c.idle), "held=%d", c.held)
 			Expect(g.ClusterFree).To(Equal(c.idle), "held=%d: what the tenants leave of the cluster free", c.held)
 			// The tenants keep their own budgets; their fills share the
 			// cluster free with the cluster group's (splitClusterFree), so
