@@ -371,12 +371,16 @@ Limits:
   or family, taints the receivers tolerate, and each pod's `nodeSelector` and
   node affinity (a LeaderWorkerSet's leader by its own template, its workers
   by theirs). It places one exclusive-topology group per domain, as node fit
-  does. A domain whose only group is a donor group the share is taking
-  counts as free for a new group.
+  does. A domain counts as free for a new group only when every group there
+  is a donor group the share is taking, each judged as its own group: a
+  node shared by a donor's pod and another model's group is not freed.
 - After a restart, a held replica counts its pods again only from the first
-  steady-state cycle. Until then, a hold whose pods landed in the meantime
-  still holds its hole. A wake decided in the moment before the controller
-  has read the holds back does not see them.
+  steady-state cycle. That cycle ends every restored hold it does not decide
+  (a model deleted while the controller was down, or no longer asking).
+  Until then, a hold whose pods landed in the meantime still holds its hole.
+  A restored hold lasts at most three borrowing `placementTimeout`s (at
+  least 5 minutes), whatever the saved value says. A wake decided in the
+  moment before the controller has read the holds back does not see them.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.
