@@ -366,13 +366,15 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// charged to the cluster budget (a cluster quota counts every namespace).
 	// So the cluster group gets only what the cluster budget leaves after the
 	// namespace groups' largest claim: the cluster free less, per accelerator
-	// type, the sum of the namespace groups' claims, floored at 0. A group
-	// claims its free quota in whole replicas of the smallest variant it
-	// grows (growStepGPUs), which is all its fills place: with 8-GPU
-	// replicas, 4 free GPUs place nothing, and claiming them would leave a
-	// free node unused by every group. A 1-GPU variant it does not grow does
-	// not shrink the step, and a group that grows nothing claims nothing
-	// unless it has a frozen model. (Capping each claim at the
+	// type, the sum of the namespace groups' claims, floored at 0. A namespace
+	// claims its free quota in whole replicas of the smallest one it can still
+	// grow: its group's grow step (growStepGPUs), which is all its fills place,
+	// or a variant below its ceiling of a model no group plans (claimSteps),
+	// which today's optimizer may grow. With 8-GPU replicas, 4 free GPUs place
+	// nothing, and claiming them would leave a free node unused by every
+	// group. A 1-GPU variant at its ceiling, or one the group does not grow,
+	// does not shrink the step, and a namespace that can grow nothing on the
+	// type claims nothing. (Capping each claim at the
 	// cluster free first gives the same remainder: once one claim reaches it,
 	// nothing is left either way.) This keeps the cluster group from counting
 	// GPUs a namespace group may also fill. A claim is charged to the cluster
@@ -386,12 +388,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// today's optimizer just the same. A namespace disabled for sharing
 	// (NamespaceEnabled), or whose models span several accelerator types,
 	// forms no group, and left out of the claims its whole free quota was idle
-	// fill for the cluster group. A claim is rounded to whole replicas of the
-	// smallest replica the namespace can place on the type: its group's grow
-	// step, else its models' (claimSteps) -- a namespace that formed no group still has
-	// models -- else the cluster group's of that type, the best guess for a
-	// namespace with no model yet. With no replica size known anywhere it is
-	// not rounded.
+	// fill for the cluster group. A namespace with no model on the type yet is
+	// rounded to the cluster group's smallest replica of that type, the best
+	// guess; with no replica size known anywhere it is not rounded.
 	//
 	// A claim covers the namespace's free quota in whole replicas, its warm
 	// pools' headroom included, so the cluster group carves a claimed
@@ -399,23 +398,31 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// unclaimed), and the pools of namespaces that made no claim whole.
 	claimed := map[string]int{}
 	unclaimed := map[string]map[string]int{}
-	steps := claimSteps(requests, availableByNS)
+	planned := map[string]bool{}
+	for _, g := range groups {
+		for _, o := range g.Origins {
+			planned[utils.GetNamespacedKey(o.Namespace, o.ModelID)] = true
+		}
+	}
+	steps := claimSteps(requests, availableByNS, planned)
 	for _, ns := range slices.Sorted(maps.Keys(availableByNS)) {
 		for _, acc := range slices.Sorted(maps.Keys(availableByNS[ns])) {
 			nsFree, ok := freeOf(key{acc, ns})
 			if !ok {
 				continue
 			}
-			step, placesNone := 0, false
+			step := 0
 			if g := groups[key{acc, ns}]; g != nil {
 				step = growStepGPUs(g)
-				// A group that grows nothing, with no frozen model that
-				// today's optimizer may grow, places nothing: it claims none.
-				placesNone = step == 0 && len(g.Frozen) == 0
 			}
-			if step <= 0 {
-				step = steps[ns][acc]
+			// The models no group plans grow through today's optimizer.
+			unplanned, hasModel := steps[ns][acc]
+			if unplanned > 0 && (step == 0 || unplanned < step) {
+				step = unplanned
 			}
+			// A namespace whose models on the type all sit at their ceiling,
+			// or are held from scaling up, places nothing: it claims none.
+			placesNone := step == 0 && hasModel
 			if g := groups[key{budgetKey(available, acc), ""}]; step <= 0 && g != nil {
 				step = smallestReplicaGPUs(g)
 			}
@@ -473,11 +480,15 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 }
 
 // claimSteps is, per namespace in availableByNS and per its budget key, the
-// fewest GPUs one replica of any of the namespace's models' variants on that
-// type takes: whole replicas of it are what the namespace can place there,
-// whether or not its models formed a share group. Absent when no model of the
-// namespace has a variant on the type.
-func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[string]int) map[string]map[string]int {
+// fewest GPUs one replica takes of any variant on that type that today's
+// optimizer may grow for a model no share group plans (planned, by
+// namespace/model): frozen, spanning several accelerator types, or in a
+// namespace that forms no group. Whole replicas of it are what those models
+// can place there. A variant at its maxReplicas, or of a role the composite
+// holds from scaling up, grows nothing, so it does not count. The step is 0
+// when the namespace has a model on the type but none of those variants can
+// grow, and absent when it has no model on the type.
+func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[string]int, planned map[string]bool) map[string]map[string]int {
 	out := map[string]map[string]int{}
 	for _, req := range requests {
 		budgets, ok := availableByNS[req.Namespace]
@@ -487,16 +498,35 @@ func claimSteps(requests []ModelScalingRequest, availableByNS map[string]map[str
 		stateMap := buildStateMap(req.VariantStates)
 		for _, vc := range recordsForRequest(req) {
 			k := budgetKey(budgets, vc.AcceleratorName)
-			gpus := gpusPerReplicaFromState(stateMap, vc.VariantName)
 			if out[req.Namespace] == nil {
 				out[req.Namespace] = map[string]int{}
 			}
-			if cur := out[req.Namespace][k]; cur == 0 || gpus < cur {
+			cur := out[req.Namespace][k]
+			out[req.Namespace][k] = cur
+			if planned[modelKey(req)] || !unplannedCanGrow(req, vc, stateMap) {
+				continue
+			}
+			if gpus := gpusPerReplicaFromState(stateMap, vc.VariantName); cur == 0 || gpus < cur {
 				out[req.Namespace][k] = gpus
 			}
 		}
 	}
 	return out
+}
+
+// unplannedCanGrow reports whether today's optimizer may add a replica of vc:
+// it is below its maxReplicas, and the composite does not hold its role from
+// scaling up.
+func unplannedCanGrow(req ModelScalingRequest, vc variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
+	st := stateMap[vc.VariantName]
+	if st.MaxReplicas != nil && *st.MaxReplicas > 0 && st.CurrentReplicas >= *st.MaxReplicas {
+		return false
+	}
+	role := vc.Role
+	if role == "" {
+		role = domain.RoleBoth
+	}
+	return !req.CompositeSignal.Holds[role].NoScaleUp
 }
 
 // growStepGPUs is the smallest step g can grow by: the fewest GPUs one
