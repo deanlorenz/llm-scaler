@@ -54,7 +54,7 @@
 //	                       quota entry named one of the reserved limiter
 //	                       names, which a later release rejects. Empty when
 //	                       none.
-//	utilizationShare      the optimizer's mode: off, invalid, shadow or
+//	utilizationShare       the optimizer's mode: off, invalid, shadow or
 //	                       active.
 //	utilizationShareError  the optimizer block's configuration error when the
 //	                       mode is invalid; empty otherwise.
