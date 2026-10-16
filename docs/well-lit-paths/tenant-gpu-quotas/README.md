@@ -145,8 +145,8 @@ its number.
 - Only the cluster bounds limit it: a `gpu-inventory` entry and any
   `scope: cluster` quota. A cluster quota denies it a type the quota does not
   list, as it does everyone. With no cluster bound, the scaling manager does
-  not limit it at all. With a quota alone, free GPUs are not checked: if the
-  cluster is full, new pods stay Pending.
+  not limit it at all. Without a `gpu-inventory` limiter, free GPUs are not
+  checked: if the cluster is full, new pods stay Pending.
 - It can take GPUs your tenants expect to use, because the scaling manager
   reserves nothing. A Kubernetes `ResourceQuota` or Kueue is the real boundary.
 - The utilization-share optimizer shares it only when a finite cluster bound
@@ -154,8 +154,8 @@ its number.
   with `physicalGroups: true`.
 
 To bound it with a quota, add a `scope: cluster` quota beside the tenants'
-quota. This goes in the `limiters:` list of the scaling policy's `default`
-entry:
+quota. Add these two entries to the `limiters:` list of the `default` entry.
+Keep the entry's other keys.
 
 ```yaml
 default: |
@@ -174,13 +174,17 @@ default: |
         team-b: { A100: 6 }
 ```
 
+This config logs no WARNING. Any namespace not listed, other than ns-x, is
+denied.
+
 The cluster quota caps everyone, tenants too, so size it as the tenants' caps
 plus what `ns-x` may use. List every GPU type your namespaces use: a type it
 does not list is denied to all of them. Like every cluster quota, it is per
 controller. It reserves nothing: while team-a is idle, `ns-x` can use team-a's
-part. Models take turns by how much they still need, and with `enableRescale`
-on, `ns-x` is sized before the tenants. So `ns-x` can take the whole cluster
-quota, even while a tenant is below its cap and wants more.
+part. Models take turns by how much they still need. With
+`enableRescale: true` on the `default` entry, `ns-x` is sized before the
+tenants when GPUs run short. So `ns-x` can take the whole cluster quota, even
+while a tenant is below its cap and wants more.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.

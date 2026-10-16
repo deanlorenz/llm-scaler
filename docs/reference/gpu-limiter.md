@@ -228,7 +228,10 @@ If cluster policy declares `gpu-inventory` and the controller may not list nodes
 it reports **not ready** and stays that way.
 
 Declared **beside a quota**, it does not go NotReady. It skips the physical
-limiter and the quota still bounds every decision. It logs `Cluster policy
+limiter. The quotas still bound the namespaces they cap, but a namespace a
+namespace quota excludes is then bounded only by a `scope: cluster` quota, and
+by nothing without one. The exclude warnings read the configuration only, so
+they do not report this. It logs `Cluster policy
 declares gpu-inventory beside quota limiters, but this controller may not list
 nodes` when that starts, and
 `wva_constraint_provider_skipped{provider="gpu-limiter",reason="node_read_denied"}`

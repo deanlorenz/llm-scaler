@@ -332,7 +332,7 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
-**An excluded namespace needs a cluster quota.** To share the models of a
+**An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. A `gpu-inventory` limiter beside the namespace

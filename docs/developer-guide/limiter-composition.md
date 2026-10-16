@@ -85,7 +85,13 @@ The budget model is in `budget_merge.go`. `mergeConstraints` intersects the
 cluster bounds and `mergeNamespaceConstraints` the namespace allowlists, each
 per provider through `allowlistBound` (a listed key; a family listed only
 through products bounds their sum; a product falls back to an EXPLICITLY listed
-family key). The merged map no longer says which family keys were explicit, so
+family key). `allowlistBound` and `clusterBound` wrap
+`accelerator.AllowlistBound` and `accelerator.ClusterAllowlistBound`
+(`internal/accelerator/allowlist.go`), the one reading of an allowlist: the
+configuration's exclude warnings (`QuotaLimiterEntries.unboundedExcludeWarnings`
+in `internal/config`) read the quota entries through the same two functions,
+so the warning and the planner agree on which key bounds which name. The
+merged map no longer says which family keys were explicit, so
 `accelerator.FindBudgetKey` denies an unlisted product beside a listed sibling,
 and a family name never resolves to one of several product keys.
 
