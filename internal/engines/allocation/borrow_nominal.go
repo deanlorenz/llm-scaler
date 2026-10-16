@@ -143,16 +143,22 @@ func (q *QuotaInventory) NamespaceNominal(activeNamespaces []string) map[string]
 // queues' nominal splits (kueue.QueueFigures): After is the growth Kueue
 // admits before it preempts for it, which needs a node hole; GPUs is what it
 // then reclaims from borrowers, which does not. A replica places without a
-// hole only when After no longer covers it and GPUs covers it whole.
+// hole only when nothing of After is left and GPUs covers it whole.
 type Reclaim struct {
 	After int
 	GPUs  int
 }
 
 // exempt reports whether a replica of g GPUs grown next is Kueue's to
-// reclaim: past After, and whole within GPUs.
+// reclaim whole: nothing of After left, and all of it within GPUs. A replica
+// that takes part of After first -- a 16-GPU replica with 8 of After left --
+// is admitted on that part without a preemption, so the pods holding it need
+// a node hole like any growth; only its preempting part would not. The
+// replica is then fitted to a node whole, the cautious side (NEW-2, M2):
+// exempted whole, half its gang waited Pending for a hole no preemption
+// frees.
 func (r Reclaim) exempt(g int) bool {
-	return r.After < g && r.GPUs >= g
+	return r.After <= 0 && r.GPUs >= g
 }
 
 // take is what a replica of g GPUs grown next consumes: After first, then

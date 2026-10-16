@@ -729,9 +729,11 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		// Growth into nominal a reclaiming queue lent out: the namespace's
 		// own, counted or not (W1). A lender at zero whose nodes borrowers
 		// fill must still order the replica Kueue preempts them for -- but
-		// only a replica Kueue does preempt for: past what it admits without
-		// preemption (after), and whole within what peers borrow (lentOut,
-		// N1). Unused nominal nobody borrows frees no node.
+		// only a replica Kueue does preempt for whole: once nothing is left
+		// of what it admits without preemption (after; a replica taking part
+		// of it needs a hole for that part, so it is fitted whole, NEW-2),
+		// and whole within what peers borrow (lentOut, N1). Unused nominal
+		// nobody borrows frees no node.
 		lent := borrow
 		if lent == nil {
 			if k, ok := accelerator.FindKey(bs.lent[p.namespace], acc); ok {

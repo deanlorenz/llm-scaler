@@ -70,8 +70,8 @@ func (v *NodeView) eligibleFit(r replicaFit) []int {
 // ReclaimableNominal). Each replica, in order, grows the namespace: it takes
 // what is left of the type's Reclaim.After first -- growth Kueue admits
 // without preemption -- then of its GPUs (Reclaim.take). A replica no node
-// holds still places when it is Kueue's to reclaim (Reclaim.exempt: past
-// After, and whole within the GPUs peers borrow) -- Kueue preempts the
+// holds still places when it is Kueue's to reclaim (Reclaim.exempt: nothing
+// of After left, and whole within the GPUs peers borrow) -- Kueue preempts the
 // borrowers whose pods fill those nodes to admit it. A replica a node holds is
 // debited there. It reports whether every replica placed and, per key of
 // reclaimable, what the placement took of it. A nil view places everything

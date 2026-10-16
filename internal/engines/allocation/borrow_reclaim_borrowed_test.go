@@ -128,6 +128,47 @@ func TestWideReplicaReclaimedOnlyWhole(t *testing.T) {
 	}
 }
 
+// Review NEW-2 (M2): a wide replica is exempt from the node hole only when
+// Kueue preempts for all of it. Namespace a has 8 of PreemptAfter left (growth
+// Kueue admits from the free pool, preempting nothing) and peers borrow 16 of
+// its nominal. A 16-GPU replica (two 8-GPU pods) takes the 8 first: that pod
+// needs a hole, and one node of four is down, so the view holds one 8-GPU
+// hole -- n3's -- and n1 and n2 are full. Exempted whole, the replica was
+// ordered and half its gang waited Pending for a hole no preemption frees.
+// Steady placer and wake alike. Control: nothing of After left.
+func TestWideReplicaWithAfterLeftNeedsAHole(t *testing.T) {
+	nodes := func() map[string]decision.NodeGPU {
+		return map[string]decision.NodeGPU{"n1": h100Node(8, nil), "n2": h100Node(8, nil), "n3": h100Node(0, nil)}
+	}
+	for _, tc := range []struct {
+		name  string
+		after int
+		want  int
+	}{
+		{"After 8, LentOut 16, one node down: refused", 8, 0},
+		{"control: After 0, LentOut 16: Kueue preempts for it whole", 0, 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			physical := physicalH100(32)
+			physical.Pools["H100"] = ResourcePool{Limit: 32, Used: 16}
+			q := borrowQuota(0, nsBorrow{ns: "a", guaranteed: 32, cap: 0, wn: 32, lentOut: 16, after: tc.after})
+			o := NewGreedyByScoreOptimizer()
+			o.Nodes = NewNodeView(nodes())
+			ds := o.Optimize(context.Background(), []ModelScalingRequest{borrowModel("a", "m", 16, 0, 1, []int{8, 8})},
+				[]*ResourceConstraints{physical, q})
+			if got := addedGPUs(ds)["m"]; got != tc.want {
+				t.Fatalf("steady: a grew %d GPUs, want %d (After %d, LentOut 16)", got, tc.want, tc.after)
+			}
+			placed, _ := NewNodeView(nodes()).PlaceReplicasReclaiming(
+				[]ReplicaShape{{Variant: "a/m-v", Accelerator: "H100", GPUs: 16, PodGPUs: []int{8, 8}}}, true,
+				map[string]Reclaim{"H100": {After: tc.after, GPUs: 16}})
+			if placed != (tc.want > 0) {
+				t.Fatalf("wake: placed %v, want %v (After %d, LentOut 16)", placed, tc.want > 0, tc.after)
+			}
+		})
+	}
+}
+
 // Review N1: what a cycle grew into by Kueue's reclaim is held in flight, so
 // the next cycle does not order replicas for the same borrowed GPUs again
 // before a read shows them. b borrows 8 of a's nominal; cycle 1 orders a's
