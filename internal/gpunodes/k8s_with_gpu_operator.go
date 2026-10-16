@@ -3,7 +3,9 @@ package gpunodes
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -322,7 +324,8 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
 			Taints:        nodes[name].Taints,
-			LWSGroup:      groups[name],
+			LWSGroup:      len(groups[name]) > 0,
+			LWSGroups:     slices.Sorted(maps.Keys(groups[name])),
 		}
 	}
 	return byType, byNamespace, out, nil
@@ -331,8 +334,9 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
 // pods occupying GPU nodes, per accelerator type, per namespace and per node;
 // and the GPU nodes a LeaderWorkerSet group's pod occupies, GPUs or not
-// (decision.NodeGPU.LWSGroup).
-func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, map[string]bool, error) {
+// (decision.NodeGPU.LWSGroup), each with the groups there, keyed
+// "namespace/<group-unique-hash>".
+func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, map[string]map[string]bool, error) {
 	pods, err := d.listPods(ctx)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -341,7 +345,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
-	groups := make(map[string]bool)
+	groups := make(map[string]map[string]bool)
 
 	for _, pod := range pods {
 		node := occupiedNode(&pod)
@@ -357,8 +361,11 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 			// Node doesn't have GPUs, skip
 			continue
 		}
-		if _, ok := pod.Labels[lwsv1.GroupUniqueHashLabelKey]; ok {
-			groups[node] = true
+		if hash, ok := pod.Labels[lwsv1.GroupUniqueHashLabelKey]; ok {
+			if groups[node] == nil {
+				groups[node] = map[string]bool{}
+			}
+			groups[node][pod.Namespace+"/"+hash] = true
 		}
 
 		gpuCount := resources.PodGPURequests(&pod)

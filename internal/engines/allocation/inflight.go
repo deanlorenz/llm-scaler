@@ -48,16 +48,24 @@ const InFlightOwner = "in-flight"
 // once the view's snapshot is at least as recent as when the rise was seen:
 // before, the snapshot does not count the pod on its node either.
 //
+// The steady-state engine persists the live entries in the controller
+// status (MarshalInFlight) and restores them after a restart
+// (RestoreInFlight), so a hold outlives the process that started it.
+//
 // Safe for concurrent use.
 type InFlightLedger struct {
 	mu      sync.Mutex
 	entries map[string]*inFlightEntry
 	// sighted is, per variant key a committed admission named in this
-	// process (InFlightAdmission.ExistingOnly), when it last did. The ledger
-	// is not persisted, so after a restart no variant is sighted yet. A key
+	// process (InFlightAdmission.ExistingOnly), when it last did. Sightings
+	// are not persisted (RestoreInFlight restores entries only), so after a
+	// restart no variant is sighted yet. A key
 	// not named for sightedFor is dropped (Commit): a deleted variant does
 	// not stay, and every cycle names the variants it decides.
 	sighted map[string]time.Time
+	// restored is the entries RestoreInFlight restored that no committed
+	// admission has updated since (DropRestoredExcept).
+	restored map[string]bool
 }
 
 // sightedFor is how long a variant stays sighted with no committed admission
@@ -147,7 +155,7 @@ type placedAt struct {
 
 // NewInFlightLedger returns an empty ledger.
 func NewInFlightLedger() *InFlightLedger {
-	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}}
+	return &InFlightLedger{entries: map[string]*inFlightEntry{}, sighted: map[string]time.Time{}, restored: map[string]bool{}}
 }
 
 // DefaultInFlight is the process-wide ledger both engines share.
@@ -185,10 +193,13 @@ type InFlightAdmission struct {
 	// the growth still in flight and starts no hold of its own -- when the
 	// variant has a replica that cannot place (Unplaced), or once this
 	// process has sighted the variant. On the first sighting, with every
-	// replica placeable, it starts a hold as growth does: the ledger is not
-	// persisted, and after a restart the replica a Pending pod was ordered
-	// for before it is growth no entry remembers. Without that hold a wake
-	// took the node the Pending pod was about to land on.
+	// replica placeable, it starts a hold as growth does: after a restart
+	// the replica a Pending pod was ordered for before it is growth no entry
+	// remembers when the persisted ledger did not carry it (it was written
+	// before the order, or could not be read). Without that hold a wake took
+	// the node the Pending pod was about to land on. An entry the persisted
+	// ledger restored (RestoreInFlight) is updated like any other, so a
+	// replica that cannot place keeps the hold it had before the restart.
 	ExistingOnly bool
 	// Unplaced is set when the variant has a replica that cannot place: a
 	// pod Unschedulable, or held at Kueue's admission gate past a cycle --
@@ -274,6 +285,8 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight b
 	_, sighted := l.sighted[key]
 	if sight {
 		l.sighted[key] = now
+		// Admitted again: the entry has its own count now.
+		delete(l.restored, key)
 	}
 	if want <= placedNow {
 		delete(l.entries, key)
@@ -341,6 +354,7 @@ func (l *InFlightLedger) Reset() {
 	defer l.mu.Unlock()
 	clear(l.entries)
 	clear(l.sighted)
+	clear(l.restored)
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has

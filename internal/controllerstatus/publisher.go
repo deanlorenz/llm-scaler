@@ -80,6 +80,12 @@
 //	                       controller with no quota on its namespace ignores
 //	                       physicalGroups and says so here. The mode is not
 //	                       invalid; absent otherwise.
+//	inFlightLedger         the in-flight node ledger, JSON
+//	                       (allocation.PersistedInFlight): the holes held for
+//	                       replicas whose pods hold no node yet, each with its
+//	                       expiry. State, not status: the steady-state engine
+//	                       reads it back after a restart, and a new term
+//	                       carries it over. See KeyInFlightLedger.
 //
 // limiter, limiterWarnings and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -148,6 +154,12 @@ const (
 	// a model's cooldown. The steady-state engine writes it and reads it back
 	// on start.
 	KeyBorrowReleaseLedger = "borrowReleaseLedger"
+	// KeyInFlightLedger is the in-flight node ledger, JSON
+	// (allocation.PersistedInFlight): the replicas ordered or woken whose
+	// pods hold no node yet, with the shape and expiry of the hole each
+	// holds, so a restart does not hand a held node to another decision. The
+	// steady-state engine writes it and reads it back on start.
+	KeyInFlightLedger = "inFlightLedger"
 	// KeyClusterQuotaPerController carries the warning that a scope: cluster
 	// quota caps this namespace-scoped controller only. Derived from the
 	// applied configuration; absent when it does not apply.
@@ -172,7 +184,7 @@ const PodListDeniedMessage = "this controller cannot list Pods cluster-wide, so 
 // persistedKeys are the keys a new term carries over from the ConfigMap it
 // finds, rather than overwriting with this process's empty start: state, not
 // status.
-var persistedKeys = []string{KeyBorrowReleaseLedger}
+var persistedKeys = []string{KeyBorrowReleaseLedger, KeyInFlightLedger}
 
 // Labels on the controller-status ConfigMap.
 const (
@@ -191,6 +203,8 @@ const (
 	// conflictAttempts is how many times one flush re-reads and retries after
 	// a resourceVersion conflict or a create that lost a race.
 	conflictAttempts = 3
+	// defaultShutdownFlush bounds the last write of a term (Start).
+	defaultShutdownFlush = 2 * time.Second
 )
 
 // Publisher holds the controller status and writes it to the
@@ -205,6 +219,8 @@ type Publisher struct {
 	debounce time.Duration
 	retryMin time.Duration
 	retryMax time.Duration
+	// shutdownFlush bounds the write Start makes when its context ends.
+	shutdownFlush time.Duration
 
 	mu      sync.Mutex
 	desired map[string]string
@@ -238,14 +254,15 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 		}
 	}
 	return &Publisher{
-		writer:    writer,
-		reader:    reader,
-		namespace: namespace,
-		debounce:  defaultDebounce,
-		retryMin:  defaultRetryMin,
-		retryMax:  defaultRetryMax,
-		notify:    make(chan struct{}, 1),
-		now:       time.Now,
+		writer:        writer,
+		reader:        reader,
+		namespace:     namespace,
+		debounce:      defaultDebounce,
+		retryMin:      defaultRetryMin,
+		retryMax:      defaultRetryMax,
+		shutdownFlush: defaultShutdownFlush,
+		notify:        make(chan struct{}, 1),
+		now:           time.Now,
 		desired: map[string]string{
 			KeyFormatVersion:         FormatVersion,
 			KeyPolicyNamespace:       config.SystemNamespace(),
@@ -344,6 +361,14 @@ func (p *Publisher) SetBorrowReleaseLedger(ledger string) {
 	p.update(func(d map[string]string) { d[KeyBorrowReleaseLedger] = ledger })
 }
 
+// SetInFlightLedger records the in-flight node ledger (JSON).
+func (p *Publisher) SetInFlightLedger(ledger string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { d[KeyInFlightLedger] = ledger })
+}
+
 // ReadKey reads one key of the controller-status ConfigMap in namespace
 // through reader, which should bypass the manager's cache. found is false when
 // the ConfigMap or the key is absent; any other failure is returned.
@@ -425,11 +450,13 @@ func (p *Publisher) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			p.flushOnShutdown(ctx, logger, carried)
 			return nil
 		case <-p.notify:
 		case <-retry:
 		}
 		if !sleep(ctx, p.debounce) {
+			p.flushOnShutdown(ctx, logger, carried)
 			return nil
 		}
 		err := error(nil)
@@ -452,6 +479,26 @@ func (p *Publisher) Start(ctx context.Context) error {
 		p.reportRecovered(logger)
 		timer.Stop()
 		retry, backoff = nil, p.retryMin
+	}
+}
+
+// flushOnShutdown writes what changed since the last write once more when the
+// term ends, bounded by shutdownFlush: a change the debounce still held --
+// the in-flight ledger's last cycle, say -- would otherwise be lost to the
+// next leader. Only after the persisted keys were carried over: a write
+// without them would erase them. A failure is logged and dropped.
+func (p *Publisher) flushOnShutdown(ctx context.Context, logger logr.Logger, carried bool) {
+	if !carried {
+		return
+	}
+	// The old leader's conflict retry cannot overwrite a new leader's write: it
+	// stops leading at RenewDeadline (50s by default), before another can take
+	// the lease at LeaseDuration (60s), and this write is capped at shutdownFlush (2s).
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.shutdownFlush)
+	defer cancel()
+	if err := p.flush(fctx); err != nil {
+		logger.Info("Could not write the controller status on shutdown; the last change is lost to the next leader",
+			"error", err.Error())
 	}
 }
 

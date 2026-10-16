@@ -302,12 +302,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, t := range l.Transfers() {
 		before[t.ID] = t
 	}
-	nodes, units, domains := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
+	nodes, units, domains, placements := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
-		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
+		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains, Placements: placements,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.ClusterFree,
 		Headroom: allocation.ShareHeadroom{Capped: true, Replicas: us.MaxHeadroomReplicas, ReturnLoad: us.Stabilization.ReturnSpareLoad},
 		Origins:  g.Origins,
@@ -416,7 +416,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		}
 	}
 
-	e.fillIdleShare(logger, l, g, plan.Evaluation, held, shareFit{nodes: plan.Nodes, domains: domains}, variantKey, now, tm)
+	e.fillIdleShare(logger, l, g, plan.Evaluation, held, shareFit{nodes: plan.Nodes, domains: domains, placements: placements}, variantKey, now, tm)
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
@@ -539,7 +539,7 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 			// A receiver whose pod shape is unknown is filled by count, as
 			// without node information: guessing one large pod would refuse
 			// a multi-pod replica that fits.
-			if fit.nodes != nil && len(grow.PodGPUs) > 0 && !allocation.ShareFitPods(fit.nodes, grow.PodGPUs, fit.domains[rc]) {
+			if fit.nodes != nil && len(grow.PodGPUs) > 0 && !allocation.ShareFitPods(fit.nodes, allocation.ShareReplicaFit{PodGPUs: grow.PodGPUs, DomainKey: fit.domains[rc], Placements: fit.placements[rc]}) {
 				logger.V(logging.DEBUG).Info("Utilization share: idle GPUs do not fit the receiver's pods on any node",
 					"receiver", rc, "pods", grow.PodGPUs)
 				break

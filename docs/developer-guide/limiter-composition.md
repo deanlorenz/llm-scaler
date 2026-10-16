@@ -258,6 +258,25 @@ sparse debits; `adopt` commits a clone's debits.
   counts by the view's rule (`allocation.NodeAdmits`: `accelerator.SameName`,
   schedulable, taints tolerated by every receiver role's
   `scaletarget.PodTolerations`).
+- The share's groups follow the view's domain rule. `ShareNode.Groups` is the
+  snapshot's `LWSGroups`: the groups on the node, `namespace/<group hash>`,
+  from `usageWalk`. `ShareNode.Claimed` is the label keys for which the
+  node's domain already got a group this cycle: from the pass and the
+  in-flight holds (`PassLeft.TakenDomains`, net of the models the share
+  plans, via `ClaimShareDomains`), or from the share itself. `ShareFitPods`
+  (the idle fill and the planner's idle credit) builds a `NodeView` from the
+  share's picture (`shareNodeView`: `Groups` as `LWSGroup`, each claim taken
+  in `NodeView.domains` under its own key) and places through
+  `NodeView.place`. That covers one group per domain, best fit, and
+  each pod judged by its own template (`podTemplates`,
+  `SharePlanInput.Placements`). A group it places claims its domain. The
+  donor-set search (`shareNodeSet`) opens holes the view does not model. It
+  judges templates with the same functions (`sharePodNodes`) and skips a
+  domain claimed for its key. It also skips a domain where a group stays
+  (`freesGroups`): a domain stays allowed only when every group on its nodes
+  is a donor group the set takes (`ShareUnit.Group`, named as in `Groups`).
+  The planner/fill agreement table checks both walk domains, groups, claims
+  and templates the same way.
 - The utilization share's cluster budget is the cluster bounds alone
   (`clusterBudgets`, over `mergeConstraints`): a namespace-scoped quota is no
   budget over every namespace. A model of a namespace such a quota excludes is
@@ -302,9 +321,34 @@ is newer than the view's snapshot.
   applies when the variant has an unplaced replica (`InFlightAdmission.Unplaced`)
   or the ledger has already sighted it in this process (`sighted`, set by
   `Commit` and `Admit`, not by `Provisional`). On the first sighting after a
-  restart a variant with no unplaced replica starts its entry: the ledger is
-  not persisted, and a Pending pod's node stays held. The scale-from-zero engine admits
-  each woken candidate at want 1 (`wake_tick.go`).
+  restart a variant with no unplaced replica and no restored entry starts
+  one, so a Pending pod's node stays held even when the persisted ledger
+  did not carry it. The scale-from-zero engine admits each woken candidate at
+  want 1 (`wake_tick.go`).
+- Persistence (`inflight_persist.go` in `allocation` and in `steadystate`):
+  every steady-state cycle hands `MarshalInFlight` to the status publisher
+  (`controllerstatus.KeyInFlightLedger`, carried over to a new term). It
+  holds each live entry's shape, `want`, placed count, expiry and TTL, and
+  its partial groups' placed pods. It is bounded by `maxInFlightPersisted`
+  and `maxInFlightBytes`, keeping the holds that end last. The engine reads
+  it back once, before its first cycle (`restoreInFlight`, from
+  `StartOptimizeLoop` and each cycle until a read succeeds), and persists
+  nothing before that read. `RestoreInFlight` keeps each entry's clock,
+  skips a variant the ledger already holds, and drops an entry with figures
+  this controller does not write, then keeps the `maxInFlightPersisted` holds
+  that end last. A TTL is cut to `max(InFlightTTL, 3 x PlacementTimeout)`.
+  A restored entry has no `placed` func: it counts no pods until the
+  variant's next `Commit`. The first fitted cycle ends every restored entry
+  it does not admit (`DropRestoredExcept`, from `admitInFlight`; a committed
+  admission, a wake's included, takes the entry off `restored`).
+  `MarshalInFlight` encodes each entry under the lock. On shutdown the
+  publisher writes once more, bounded by 2s (`flushOnShutdown`), so the last
+  cycle's ledger reaches the next leader. A restored partial
+  group's placed pods are seen at the zero time, so they are never charged
+  again on their node. An Unschedulable replica and a half-placed group thus
+  keep their holes across a restart: the first cycle's `ExistingOnly`
+  admission updates the restored entry. A ledger that is not JSON, or of
+  another `InFlightFormat`, is ignored.
 - TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
   (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both
   engines; from the steady-state engine three times it while
