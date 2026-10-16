@@ -562,7 +562,9 @@ the deployment-derived figure, which is higher. That orders **fewer** replicas,
 so TTFT suffers after every upgrade or leader change until the fleet has
 saturated once more. With it on, the acting controller writes what it learned
 to the ConfigMap `wva-learned-state` at most once a minute, and the next
-controller reads it on its first cycle.
+controller reads it on its first cycle. The startup line `learned-state horizons`
+shows `snapshot` as `true` when it is on -- its metrics read 0 both when it is
+off and when it works, so that line is where to confirm it.
 If that read fails it is retried every minute; until it succeeds, for at
 most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
 strength and none is started or moved, so none started in that time
@@ -675,7 +677,7 @@ What is restored, and what is not:
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle; a `learned state restored` line (or, with nothing
-to keep, `learned state not restored`) follows for each on its first cycle. Writing the snapshot needs the Role `wva-learned-state-role`, and so does reading it where the manager Role does not read ConfigMaps in the controller's namespace (a namespace-scoped install with `WVA_WATCH_NS` set); the Role
+to keep, `learned state not restored`) follows for each on its first cycle. Writing the snapshot needs the Role `wva-learned-state-role` (the manager Role reads it, in every install mode), which
 `make setup-prereqs` installs; an install upgraded from before the store existed
 reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for

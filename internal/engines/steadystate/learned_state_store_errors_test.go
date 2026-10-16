@@ -17,8 +17,7 @@ import (
 )
 
 // A store that can be read and not written -- the learned-state Role missing,
-// in an install whose manager Role reads ConfigMaps in the controller's
-// namespace -- reports the write failure once
+// the manager Role still reading ConfigMaps -- reports the write failure once
 // and its recovery once. With one error slot for both operations, each
 // minute's successful read cleared the write's error: "works again" and the
 // same Forbidden were logged every minute, a store that looked like it kept

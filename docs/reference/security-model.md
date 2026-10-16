@@ -98,8 +98,10 @@ controller.
 
 Granted to `wva-controller-manager` unless noted. "Own" is the controller's
 namespace; "managed" is the namespace it manages (the same one unless
-`WVA_WATCH_NS` is set, in which case the prereqs phase puts the `manager-role`
-Role and its binding in the managed namespace).
+`WVA_WATCH_NS` is set, in which case the prereqs phase puts a copy of the
+`manager-role` Role and its binding in the managed namespace as well; the one
+in the controller's own namespace stays, so the controller reads ConfigMaps
+in both).
 
 | Verbs | Resource | Scope | Why |
 | --- | --- | --- | --- |

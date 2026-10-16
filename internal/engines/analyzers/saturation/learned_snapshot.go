@@ -328,10 +328,16 @@ type RestoredVariant struct {
 	// NoArgs is a RestoredIncomplete whose document recorded no arguments for
 	// the variant: no window could be checked, and none was installed.
 	NoArgs bool
-	// Stored is how many k2 windows the document held for the variant: with
-	// none, nothing could have been kept, and "none recent enough" would send
-	// an operator looking for an age or a hardware move that did not happen.
+	// Stored is how many k2 windows the document held for the variant, when
+	// it was read: with none, nothing could have been kept, and "none recent
+	// enough" would send an operator looking for an age or a hardware move
+	// that did not happen.
 	Stored int
+	// BoundPriors is how many of the variant's lower bounds hold a previous
+	// figure when its entries are installed: a figure restored with its bound
+	// -- a window set aside before the export -- rather than from a window.
+	// It prices the variant (P2-prior) as a restored window would.
+	BoundPriors int
 	// Entries is how many entries were installed, or rejected.
 	Entries int
 }
@@ -360,6 +366,11 @@ type pendingVariant struct {
 	expect     string // the fingerprint they were learned under
 	expectArgs string // the same without the image; empty in an older document
 	state      LearnedState
+	// stored is how many k2 windows the document held for the variant,
+	// counted when it was read: the sweep that runs before the variant's
+	// first cycle prunes windows past retention from state, and a window
+	// that aged out is not one the variant never had.
+	stored int
 }
 
 // alive says whether any of the entries could still be installed: one within
@@ -797,6 +808,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 				p.state.K2Args = map[string]string{}
 			}
 			p.state.K2[k] = w
+			p.stored++
 			if args, ok := s.K2Args[k]; ok {
 				p.state.K2Args[k] = args
 			}
@@ -1021,7 +1033,8 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
-	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size(), Stored: len(p.state.K2)}
+	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size(), Stored: p.stored,
+		BoundPriors: a.boundPriorsLocked(namespace, modelID, variant)}
 	switch {
 	case whole:
 		out.Outcome, out.Installed = RestoredWhole, true
@@ -1204,6 +1217,19 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		}
 	}
 	return kept
+}
+
+// boundPriorsLocked counts the variant's lower bounds holding a previous
+// figure. Callers hold a.mu.
+func (a *SaturationAnalyzer) boundPriorsLocked(namespace, modelID, variant string) int {
+	prefix := namespace + "|" + variant + "|" + modelID + "|"
+	n := 0
+	for k, lb := range a.lowerBounds {
+		if lb.prior > 0 && strings.HasPrefix(k, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // spentLowerBound is a stored running bound as a forget leaves it: armed, its

@@ -98,3 +98,65 @@ func TestTheRestartLineSaysWhetherTheSnapshotHeldAWindow(t *testing.T) {
 		})
 	}
 }
+
+// The windows counted are the ones the snapshot held when it was read: the
+// sweep before the variant's first cycle prunes one past retention, and a
+// window that aged out is not one the variant never had.
+func TestTheStoredCountSurvivesTheSweep(t *testing.T) {
+	a, _, _ := waProcess(mtParams(64, "vllm:v1"))
+	old := rrWindow(4000).Snapshot()
+	old.LastUsed = time.Now().Add(-60 * 24 * time.Hour)
+	old.LastWritten = old.LastUsed
+	a.RestoreLearnedState(LearnedState{
+		Config:        map[string]string{"test-ns/variant-a": mtParams(256, "vllm:v1").Fingerprint()},
+		Args:          map[string]string{"test-ns/variant-a": mtParams(256, "vllm:v1").ArgsFingerprint()},
+		K2:            map[string]capacity.RollingAverageSnapshot{rrKey(a, "variant-a"): old},
+		VariantSeenAt: map[string]time.Time{a.itlWindowKey("test-ns", "test-model", "variant-a", "H100", 1): time.Now()},
+	})
+	a.NoteVariantsPresent("test-ns", "test-model", []string{"variant-a"})
+	a.EvictStaleHistory()
+	r, done := a.installRestored("test-ns", "test-model", "variant-a")
+	if !done {
+		t.Fatal("precondition: the variant's entries were pending")
+	}
+	if r.Stored != 1 {
+		t.Errorf("the window the snapshot held was not counted once the sweep pruned it: stored %d", r.Stored)
+	}
+}
+
+// A variant pricing on its previous figure when the snapshot was written has
+// that figure in its lower bound, its window set aside: restored under yet
+// other arguments, the figure prices it again, and the restart line says it
+// was restored, not that the snapshot held nothing.
+func TestARestoredBoundFigureIsReportedAsRestored(t *testing.T) {
+	first, store, clock := waProcess(mtParams(256, "vllm:v1"))
+	waRun(t, first, clock, 4000, 6)
+	waSetParams(store, mtParams(64, "vllm:v1"))
+	if got := waRun(t, first, clock, 1000, 0); got.PerReplicaCapacity != 4000 {
+		t.Fatalf("precondition: priced at the previous figure, got %v", got.PerReplicaCapacity)
+	}
+	doc := first.ExportLearnedState()
+
+	var logged []string
+	ctx := ctrl.LoggerInto(context.Background(),
+		funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
+	second, _, _ := waProcess(mtParams(128, "vllm:v1"))
+	second.RestoreLearnedState(doc)
+	in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50)}, mtOneVariant)
+	res, err := second.Analyze(ctx, in)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if got := res.VariantCapacities[0].PerReplicaCapacity; got != 4000 {
+		t.Fatalf("precondition: the restored previous figure prices the variant, got %v", got)
+	}
+	for _, l := range logged {
+		if strings.Contains(l, "learned state") && strings.Contains(l, "variant-a") {
+			if strings.Contains(l, "not restored") || !strings.Contains(l, "kept with their lower bounds") {
+				t.Errorf("the restart line denies the figure that prices the variant: %q", l)
+			}
+			return
+		}
+	}
+	t.Fatal("no restart line for variant-a")
+}

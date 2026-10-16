@@ -831,14 +831,12 @@ failed reads and writes, and the log says why (logger `learned-state`):
   `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- the read failed; the error says
-  why. Forbidden: the Role `wva-learned-state-role` or its binding is missing
-  in an install where the manager Role does not read ConfigMaps in the
-  controller's namespace -- a namespace-scoped install with `WVA_WATCH_NS`
-  set. Ask an admin to re-run
-  `NAMESPACE=<controller-namespace> make setup-prereqs`; do not widen the
-  manager Role instead, it reads every ConfigMap it is granted. In any other
-  install the manager Role covers the read, so look for an API server or
-  network error. Retried every minute;
+  why. Not a missing `wva-learned-state-role`: in every install mode the
+  manager Role reads ConfigMaps in the controller's namespace. Look for an
+  API server or network error, or a `wva-manager-role` or its binding in the
+  controller's namespace that was edited or removed (re-run
+  `NAMESPACE=<controller-namespace> make setup-prereqs` to restore it).
+  Retried every minute;
   the stored state is not overwritten meanwhile, and `Learned state: the
   snapshot can be read again` marks recovery. For the first 10 minutes
   lower bounds (`P2-borrow`, `P2-prior`) are held at full strength and none
@@ -847,11 +845,10 @@ failed reads and writes, and the log says why (logger `learned-state`):
   runs its hold and relaxation again. Fix the cause within 10 minutes to
   avoid it.
 - `Learned state: could not write the snapshot` -- typically Forbidden: the
-  Role `wva-learned-state-role` or its binding is missing. Where the manager
-  Role reads ConfigMaps in the controller's namespace -- cluster scope, or
-  namespace scope without `WVA_WATCH_NS` -- the snapshot is still read and
-  restored, but nothing learned since is kept for the next restart; where
-  it does not, the read fails first (above). Ask an admin to re-run
+  Role `wva-learned-state-role` or its binding is missing. The snapshot is
+  still read and restored -- the manager Role reads it -- but nothing learned
+  since is kept for the next restart, which restores the snapshot as it was
+  when writing stopped. Ask an admin to re-run
   `NAMESPACE=<controller-namespace> make setup-prereqs`. Logged once, not
   every minute; `Learned state: the snapshot can be written again` marks
   recovery.
