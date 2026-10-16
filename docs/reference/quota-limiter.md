@@ -991,6 +991,12 @@ closed-allowlist semantics:
     through those products. With `{NVIDIA-H100-SXM5-80GB: -1}` under the
     cluster quota above, a workload that names the bare `H100` gets nothing:
     the cluster quota allows no SXM5.
+  - A namespace that lists the family and denies a product of it may use the
+    family only through its other products. With `{H100: -1,
+    NVIDIA-H100-SXM5-80GB: 0}` under a cluster quota of
+    `{NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-SXM5-80GB: 24}`, a workload that
+    names the bare `H100` gets 8, the HBM3 GPUs. A wake from zero is checked
+    the same way.
   - A namespace that lists the family shares each product with a namespace
     that lists the product. The cluster quota reserves nothing for either:
     with team-a at `{H100: -1}` and team-b at `{NVIDIA-H100-80GB-HBM3: 8}`,

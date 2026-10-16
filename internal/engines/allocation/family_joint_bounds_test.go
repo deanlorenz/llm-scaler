@@ -2,16 +2,37 @@ package allocation
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 )
 
 // Bounds that only hold together: several cluster quotas that each list
 // products of one family, and a namespace that lists the family and denies one
 // of its products. Every replica below is a whole 8-GPU node.
+
+// jbPhysical is the physical inventory of whole 8-GPU nodes, installed GPUs per
+// product.
+func jbPhysical(t *testing.T, installed map[string]int) *ResourceConstraints {
+	t.Helper()
+	nodes := map[string]map[string]gpunodes.AcceleratorModelInfo{}
+	for product, count := range installed {
+		for i := 0; i < count/8; i++ {
+			nodes[fmt.Sprintf("node-%s-%d", product, i)] = map[string]gpunodes.AcceleratorModelInfo{product: {Count: 8}}
+		}
+	}
+	rc, err := NewDefaultLimiter("gpu-limiter", NewTypeInventory("gpu-limiter", &mockDiscovery{inventory: nodes})).
+		ComputeConstraints(context.Background(), map[string]int{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rc
+}
 
 // jbClusterQuota is a cluster-scope quota called name, with used GPUs already
 // held under it.
@@ -27,6 +48,50 @@ func jbClusterQuota(t *testing.T, name string, quotas, used map[string]int) *Res
 		t.Fatal(err)
 	}
 	return rc
+}
+
+// A namespace that lists the family and denies one of its products may use
+// only the other products. A workload that names the bare family is bounded
+// by those, at the cluster's figure for each, not by the whole family.
+func TestBareFamilyInANamespaceThatDeniesAProduct(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cluster []*ResourceConstraints
+		allow   map[string]int
+		want    int
+	}{
+		{
+			"the family, but no SXM5; the cluster has 8 HBM3 and 24 SXM5",
+			[]*ResourceConstraints{jbClusterQuota(t, "cq0", map[string]int{famHBM3: 8, famSXM5: 24}, nil)},
+			map[string]int{"H100": -1, famSXM5: 0}, 8,
+		},
+		{
+			"16 of the family, but no HBM3, the only product the quota lists",
+			[]*ResourceConstraints{
+				jbPhysical(t, map[string]int{famPCIe: 24}),
+				jbClusterQuota(t, "cq0", map[string]int{famHBM3: 16, famA100: 24}, nil),
+			},
+			map[string]int{"H100": 16, famHBM3: 0}, 0,
+		},
+		{
+			"the family, and SXM5 at 8, which the cluster does not list",
+			[]*ResourceConstraints{jbClusterQuota(t, "cq0", map[string]int{famHBM3: 8, famPCIe: 8}, nil)},
+			map[string]int{"H100": -1, famSXM5: 8}, 16,
+		},
+	} {
+		c := append(slices.Clone(tc.cluster), famNamespaceQuota(t, map[string]map[string]int{"x": tc.allow}))
+		if !FitsGPUBudget(c, "x", map[string]int{"H100": tc.want}) || FitsGPUBudget(c, "x", map[string]int{"H100": tc.want + 8}) {
+			t.Errorf("%s: a bare H100 in x does not fit exactly %d GPUs", tc.name, tc.want)
+		}
+		if got := namespaceHeadroom(c)["x"]["H100"]; got != tc.want {
+			t.Errorf("%s: x's H100 headroom = %d, want %d", tc.name, got, tc.want)
+		}
+		for _, rescale := range []bool{false, true} {
+			if got := fkTargets(c, rescale, famWanting("x", "m", "H100", 3, 8)); 8*got["m-v"] != tc.want {
+				t.Errorf("%s, rescale=%v: bare H100 got %d replicas, want %d GPUs", tc.name, rescale, got["m-v"], tc.want)
+			}
+		}
+	}
 }
 
 // A share's promise of 8 H100s to namespace a, which may use the family, under
