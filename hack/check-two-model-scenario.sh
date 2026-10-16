@@ -64,10 +64,31 @@ case "$args" in
         # model, on the Deployments the route resolves to.
         so() { printf '{"metadata":{"name":"%s-wva"},"spec":{"scaleTargetRef":{"name":"%s"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
         echo "{\"items\":[$(so unsloth--244120d9-instruct-decode),$(so unsloth--244120d9-instruct-prefill),$(so qwen-qwe-6e036fd5-qwen3-8b-decode),$(so qwen-qwe-6e036fd5-qwen3-8b-prefill)]}"
+      elif [ "${MIXED_SO:-0}" = "1" ]; then
+        # A mixed-size run: each ScaledObject's trigger names its model.
+        echo '{"items":[{"metadata":{"name":"so-a"},"spec":{"scaleTargetRef":{"name":"qwen3-30b-a3b-decode"},"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-30B-A3B-FP8"}}]}},
+                        {"metadata":{"name":"so-b"},"spec":{"scaleTargetRef":{"name":"qwen3-8b-decode"},"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-8B"}}]}}]}'
       else
         echo '{"items":[]}'
       fi
       exit 0 ;;
+  *"get scaledobject so-a -o json"*)
+      echo '{"metadata":{"name":"so-a"},"spec":{"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-30B-A3B-FP8"}}]}}'; exit 0 ;;
+  *"get scaledobject so-b -o json"*)
+      echo '{"metadata":{"name":"so-b"},"spec":{"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-8B"}}]}}'; exit 0 ;;
+  # Node data, asked as the controller's ServiceAccount. CAN_NODES / CAN_PODS:
+  # yes, no, or unknown (this identity may not impersonate it).
+  *"auth can-i list nodes"*) can="${CAN_NODES:-unknown}" ;;&
+  *"auth can-i list pods"*) can="${CAN_PODS:-unknown}" ;;&
+  *"auth can-i"*)
+      case "${can:-unknown}" in
+        yes) echo yes; exit 0 ;;
+        no) echo no; exit 1 ;;
+        *) echo 'Error from server (Forbidden): User "me" cannot impersonate resource "serviceaccounts"' >&2; exit 1 ;;
+      esac ;;
+  # STATUS_JSON: the controller's own status ConfigMap; unset, it is absent.
+  *"get configmap wva-controller-status"*) [ -n "${STATUS_JSON:-}" ] || exit 1; echo "$STATUS_JSON"; exit 0 ;;
+  *"get deploy wva-controller-manager -o jsonpath={.status.readyReplicas}"*) echo "${CTL_READY:-1}"; exit 0 ;;
   # The controller, which decides whether the policy is the benchmark's own:
   # namespace-scoped (the standup's install) unless CTL_SCOPE says otherwise.
   *"get deploy wva-controller-manager"*"-o json"*)
@@ -1440,6 +1461,285 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Mixed replica sizes: a 2-GPU model beside a 1-GPU model under one quota.
+# ---------------------------------------------------------------------------
+# One GPUS_PER_REPLICA for both models priced a 3 x 2-GPU MoE as 3 GPUs: the
+# peak, the placement and every GPU-second would describe a run that did not
+# happen. And a share arm without node data measures the small model never
+# funding the large one -- the documented limit, not the experiment.
+MIXED="BENCH_SPEC=guides/two-model-mixed-sizes STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 MAX_REPLICAS_A=3 MAX_REPLICAS_B=4"
+# mixed_verb [VAR=value...] <verb...>: run_verb with the mixed-size settings
+# and the given ones exported, in a subshell, so none of them outlives the case.
+mixed_verb() {
+    (
+        for kv in $MIXED; do export "$kv"; done
+        while [ $# -gt 0 ] && [[ "$1" =~ ^[A-Z_][A-Z0-9_]*= ]]; do export "$1"; shift; done
+        run_verb "$@"
+        printf '%s' "$OUT" > "$WORK/mixed.out"
+        echo "$RC" > "$WORK/mixed.rc"
+    )
+    OUT="$(cat "$WORK/mixed.out")"; RC="$(cat "$WORK/mixed.rc")"; CALLS="$WORK/calls"
+}
+
+case_begin
+if [ ! -f "$SPEC_DIR/two-model-mixed-sizes.yaml" ] || [ ! -f "$SPEC_DIR/two-model-mixed-sizes.yaml.j2" ]; then
+    fail "two-model-mixed-sizes.yaml or its specification is missing"
+elif ! grep -q 'scenarios/guides/two-model-mixed-sizes.yaml' "$SPEC_DIR/two-model-mixed-sizes.yaml.j2"; then
+    fail "the mixed-sizes specification points at a scenario other than its own"
+else
+    drift="$(diff <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-shapes.yaml" | tr -d '\r') \
+                  <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-mixed-sizes.yaml" | tr -d '\r') | grep -E '^[<>]' \
+             | sed 's/^\([<>]\) */\1 /' | sort | tr '\n' '|')"
+    expected="$(printf '%s\n' \
+        '< workDir: "~/data/two-model-shapes"' '< - name: "llama-31-8b"' \
+        '< name: unsloth/Meta-Llama-3.1-8B-Instruct' '< shortName: llama-31-8b' \
+        '< path: models/unsloth/Meta-Llama-3.1-8B-Instruct' '< huggingfaceId: unsloth/Meta-Llama-3.1-8B-Instruct' \
+        '< size: 32Gi' '< memory: 64Gi' '< memory: 64Gi' '< cpu: "8"' '< cpu: "8"' \
+        '< nvidia.com/gpu: "1"' '< nvidia.com/gpu: "1"' '< maxReplicas: 3' \
+        '> workDir: "~/data/two-model-mixed-sizes"' '> - name: "qwen3-30b-a3b"' \
+        '> name: Qwen/Qwen3-30B-A3B-FP8' '> shortName: qwen3-30b-a3b' '> path: models/Qwen/Qwen3-30B-A3B-FP8' \
+        '> huggingfaceId: Qwen/Qwen3-30B-A3B-FP8' '> size: 40Gi' '> parallelism:' '> tensor: 2' '> data: 1' \
+        '> dataLocal: 1' '> workers: 1' '> memory: 128Gi' '> memory: 128Gi' '> cpu: "16"' '> cpu: "16"' \
+        '> nvidia.com/gpu: "2"' '> nvidia.com/gpu: "2"' '> maxReplicas: 4' | sort | tr '\n' '|')"
+    if [ "$drift" != "$expected" ]; then
+        fail "two-model-mixed-sizes.yaml differs from two-model-shapes.yaml in more than stack A's model and size, B's ceiling and workDir: $drift"
+    else
+        ok "two-model-mixed-sizes is two-model-shapes with stack A a 2-GPU TP-2 MoE, and its specification names it"
+    fi
+fi
+
+case_begin
+mixed_verb NODE_GPUS=16 preflight
+if ! printf '%s' "$OUT" | grep -q 'this run peaks at 10'; then
+    fail "preflight did not price the mixed run at 3 x 2 + 4 x 1 = 10 GPUs: $(printf '%s' "$OUT" | grep -E 'peaks|model A')"
+elif ! printf '%s' "$OUT" | grep -q 'model A (qwen3-30b-a3b, Qwen/Qwen3-30B-A3B-FP8): 2 GPU(s) per replica (tensor 2), 1..3'; then
+    fail "preflight did not read model A's size and tensor parallelism from the scenario: $(printf '%s' "$OUT" | grep 'model A')"
+else
+    ok "preflight prices each model at its own size and ceiling, read from the scenario"
+fi
+
+case_begin
+mixed_verb GPUS_PER_REPLICA_A=1 NODE_GPUS=16 preflight
+if [ "$RC" -eq 0 ]; then
+    fail "preflight passed GPUS_PER_REPLICA_A=1 for a stack that deploys 2 GPUs per replica"
+elif ! printf '%s' "$OUT" | grep -q 'priced on a size it does not deploy'; then
+    fail "preflight refused without naming the size mismatch: $(printf '%s' "$OUT" | grep -iE 'warn|error' | head -3)"
+else
+    ok "a per-model size that disagrees with the scenario is refused"
+fi
+
+case_begin
+mixed_verb STACK_A=llama-31-8b NODE_GPUS=16 preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'is not a stack of guides/two-model-mixed-sizes'; then
+    fail "preflight accepted a STACK_A the scenario does not have (rc=$RC): $(printf '%s' "$OUT" | grep -i stack | head -2)"
+else
+    ok "a stack the scenario does not have is refused, with the stacks it does have"
+fi
+
+case_begin
+mixed_verb WVA_LIMITER=quota WVA_QUOTAS='H200=7' standup
+if [ "$RC" -eq 0 ]; then
+    fail "standup of a mixed-size run went ahead with WVA_LIMITER=quota alone; its share arms could never fund the 2-GPU model"
+elif ! printf '%s' "$OUT" | grep -q 'declares no gpu-inventory limiter'; then
+    fail "standup refused without naming the missing gpu-inventory limiter: $(printf '%s' "$OUT" | tail -2)"
+elif grep -q '^MAKE\[' "$CALLS"; then
+    fail "standup refused only after starting the harness: $(grep '^MAKE\[' "$CALLS")"
+else
+    ok "a mixed-size standup without gpu-inventory is refused before anything is stood up"
+fi
+
+QUOTA_ONLY='limiters:
+- type: quota
+  quotas:
+    H200: 7'
+BOTH_LIMITERS='limiters:
+- type: gpu-inventory
+- type: quota
+  quotas:
+    H200: 7'
+
+case_begin
+mixed_verb POLICY_TEXT="$QUOTA_ONLY" CAN_NODES=yes CAN_PODS=yes run today
+if [ "$RC" -eq 0 ]; then
+    fail "a mixed-size today arm ran under a policy with no gpu-inventory limiter"
+elif ! printf '%s' "$OUT" | grep -q 'declares no gpu-inventory limiter' || ! printf '%s' "$OUT" | grep -q 'kubectl create clusterrolebinding wva-pod-lister-ns-under-test'; then
+    fail "the refusal did not name the missing limiter and print the admin commands: $(printf '%s' "$OUT" | tail -5)"
+elif grep -q 'patch configmap wva-scaling-policy-config\|apply -f' "$CALLS"; then
+    fail "the arm wrote the policy or created the load before refusing"
+else
+    ok "a mixed-size share arm without gpu-inventory is refused before anything changes, with the admin commands"
+fi
+
+case_begin
+mixed_verb POLICY_TEXT="$BOTH_LIMITERS" CAN_NODES=yes CAN_PODS=no run share
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'may not list pods in every namespace'; then
+    fail "a share arm whose controller cannot list pods cluster-wide was not refused for it (rc=$RC): $(printf '%s' "$OUT" | grep -i 'pods' | head -2)"
+elif grep -q 'apply -f' "$CALLS"; then
+    fail "the arm created the load before refusing"
+else
+    ok "a controller that cannot list pods in every namespace stops the share arm"
+fi
+
+case_begin
+mixed_verb POLICY_TEXT="$BOTH_LIMITERS" CAN_NODES=unknown CAN_PODS=unknown CTL_READY=1 \
+    STATUS_JSON='{"data":{"podListDenied":"pods is forbidden"}}' run shadow
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'may not list pods in every namespace'; then
+    fail "without impersonation, the controller's own podListDenied did not stop the arm (rc=$RC)"
+else
+    ok "without impersonation, the controller's own podListDenied stops the arm"
+fi
+
+case_begin
+mixed_verb POLICY_TEXT="$BOTH_LIMITERS" CAN_NODES=unknown CAN_PODS=unknown CTL_READY=1 \
+    STATUS_JSON='{"data":{"lastCycle":"ok"}}' run today
+if ! printf '%s' "$OUT" | grep -q 'node data: gpu-inventory in the policy'; then
+    fail "node data that is all there was not accepted: $(printf '%s' "$OUT" | grep -iE 'node data|may not|could not tell' | head -3)"
+elif ! grep -q 'patch configmap wva-scaling-policy-config' "$CALLS"; then
+    fail "with node data present the arm did not go on to write its policy"
+else
+    ok "with gpu-inventory, a Ready controller and no podListDenied, the arm goes on"
+fi
+
+case_begin
+POLICY_TEXT="$QUOTA_ONLY" run_verb run today
+if printf '%s' "$OUT" | grep -q 'needs node data'; then
+    fail "a same-size run asked for node data it does not need"
+elif ! grep -q 'patch configmap wva-scaling-policy-config' "$CALLS"; then
+    fail "a same-size today arm under a quota alone did not reach its policy write: $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a run whose models are one size needs no node data"
+fi
+
+case_begin
+mixed_verb NODE_GPUS=8 BOUND_GPUS=4 BENCH_NODE=n1 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_NODE=n1 has 4 free accelerator(s) and the run peaks at 7'; then
+    fail "preflight did not refuse a pinned node with 4 free for a 7-GPU run (rc=$RC): $(printf '%s' "$OUT" | grep BENCH_NODE)"
+else
+    ok "a pinned node with fewer free accelerators than the run peaks at is refused"
+fi
+
+# Sourced: what the functions render and patch, per model.
+case_begin
+got="$( (BENCH_SPEC=guides/two-model-mixed-sizes STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 BENCH_NODE=n1 \
+         SIM_GPU_PRODUCT=NVIDIA-H200; sim_manifest a) 2>&1)"
+if [ "$(printf '%s\n' "$got" | grep -c 'nvidia.com/gpu: "2"')" -ne 2 ]; then
+    fail "the simulator stack for the 2-GPU model does not request and limit 2 GPUs: $(printf '%s\n' "$got" | grep 'nvidia.com/gpu')"
+elif ! printf '%s\n' "$got" | grep -q 'kubernetes.io/hostname: "n1"' || ! printf '%s\n' "$got" | grep -q 'nvidia.com/gpu.product: "NVIDIA-H200"'; then
+    fail "the simulator stack is not pinned to BENCH_NODE and the product: $(printf '%s\n' "$got" | grep -A3 nodeSelector)"
+elif ! printf '%s\n' "$got" | grep -q '"Qwen/Qwen3-30B-A3B-FP8"'; then
+    fail "the simulator does not serve model A's name, so the loader would ask it for a model it does not have"
+else
+    ok "the simulator stack takes the model's own GPUs per replica and the pins"
+fi
+
+case_begin
+SC_CALLS="$WORK/ceiling.calls"; : > "$SC_CALLS"
+( export KCALLS="$SC_CALLS" MIXED_SO=1
+  MAX_REPLICAS=3 MAX_REPLICAS_A=3 MAX_REPLICAS_B=4 MODEL_A=Qwen/Qwen3-30B-A3B-FP8 MODEL_B=Qwen/Qwen3-8B
+  set_arm_ceiling today ) >/dev/null 2>&1
+if ! grep -q 'patch scaledobject so-a .*"maxReplicaCount":3' "$SC_CALLS" || ! grep -q 'patch scaledobject so-b .*"maxReplicaCount":4' "$SC_CALLS"; then
+    fail "each model did not get its own ceiling on its ScaledObject: $(grep 'patch scaledobject' "$SC_CALLS")"
+else
+    ok "each model's ScaledObject gets that model's ceiling"
+fi
+
+case_begin
+if python3 - "$ROOT/hack/benchmark" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import two_model_report as r
+r.BASELINE = "today"
+base = {"max_replicas_per_model": 3, "gpus_per_replica": 1, "max_replicas_a": 3, "max_replicas_b": 4,
+        "gpus_per_replica_a": 2, "gpus_per_replica_b": 1}
+other = dict(base, gpus_per_replica_a=1)
+a = {"name": "today", "budget": base}
+b = {"name": "share", "budget": other}
+same = {"name": "shadow", "budget": dict(base)}
+sys.exit(0 if r.budget_problem(a, b) and not r.budget_problem(a, same) else 1)
+PY
+then
+    ok "the report refuses arms whose models were priced at different sizes"
+else
+    fail "the report compared arms whose model A was priced at 2 and 1 GPU(s) per replica"
+fi
+
+# The repeats report, on two repeats written here: TTFT per burst, the
+# spread, transfers counted from the log (the metric missed one), GPU-seconds.
+case_begin
+REP="$WORK/reps"
+python3 - "$REP" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+sched = [{"start": 0, "end": 60, "rate_a": 1, "rate_b": 1},
+         {"start": 60, "end": 90, "rate_a": 1, "rate_b": 8},
+         {"start": 90, "end": 160, "rate_a": 1, "rate_b": 8},
+         {"start": 160, "end": 180, "rate_a": 1, "rate_b": 1},
+         {"start": 180, "end": 210, "rate_a": 6, "rate_b": 1},
+         {"start": 210, "end": 280, "rate_a": 6, "rate_b": 1}]
+# p95 of the rise windows: B rises at stage 1, A at stage 4.
+rise = {"today": (9.0, 20.0), "shadow": (9.5, 19.0), "share": (0.5, 21.0)}
+for rep, jitter in (("rep1", 0.0), ("rep2", 0.4)):
+    for arm, (b95, a95) in rise.items():
+        d = os.path.join(root, rep, arm)
+        os.makedirs(d)
+        def w(p95):
+            return {"n": 100, "failed": 0, "p50": p95 / 2, "p95": p95}
+        stages_a = [w(0.2)] * 6
+        stages_b = [w(0.2)] * 6
+        stages_b[1] = w(b95 + jitter)
+        stages_a[4] = w(a95 + jitter)
+        meta = {"t0": 1000, "schedule": sched, "windows": {"a": {"overall": w(1), "stages": stages_a},
+                                                            "b": {"overall": w(1), "stages": stages_b}}}
+        json.dump(meta, open(os.path.join(d, "meta.json"), "w"))
+        gpus = 7 if arm == "share" else 5
+        with open(os.path.join(d, "gpus.jsonl"), "w") as fh:
+            for t in range(990, 1300, 10):
+                fh.write(json.dumps({"ts": t, "pods": [{"name": "p", "gpus": gpus, "model": "m"}]}) + "\n")
+        json.dump({"sum by (outcome) (increase(x))": [{"metric": {"outcome": "done"}, "value": [0, "1"]}],
+                   "sum by (model_name, reason) (y)": [{"metric": {"model_name": "Qwen/Qwen3-30B-A3B-FP8", "reason": "quota-exhausted"}, "value": [0, "120"]}],
+                   "sum by (variant_name, limiter_name) (z)": [{"metric": {"variant_name": "a", "limiter_name": "H200"}, "value": [0, "3"]}],
+                   "min by (mode) (m)": []},
+                  open(os.path.join(d, "share.json"), "w"))
+        if arm == "share":
+            with open(os.path.join(d, "controller.log"), "w") as fh:
+                fh.write('{"level":"info","msg":"Utilization share: filling from idle GPUs","id":"f1","receiver":"b"}\n')
+                fh.write('{"level":"info","msg":"Utilization share: transfer started","id":"t1","set":"s1","donor":"b","receiver":"a","planned":true}\n')
+                fh.write('{"level":"info","msg":"Utilization share: transfer started","id":"t2","set":"s1","donor":"b","receiver":"a","planned":true}\n')
+                fh.write('2026-10-16T10:00:00Z\tINFO\tUtilization share: transfer ended\t{"id": "t1", "outcome": "done", "donor": "b", "receiver": "a"}\n')
+                fh.write('{"level":"info","msg":"Utilization share: transfer ended","id":"t2","outcome":"done","donor":"b","receiver":"a"}\n')
+PY
+REP_OUT="$(python3 "$ROOT/hack/benchmark/two_model_share_repeats.py" --out-root "$REP" \
+    --model-a Qwen/Qwen3-30B-A3B-FP8 --model-b Qwen/Qwen3-8B --json "$WORK/reps.json" 2>&1)"
+REP_RC=$?
+if [ "$REP_RC" -ne 0 ]; then
+    fail "the repeats report failed on two complete repeats: $REP_OUT"
+elif ! printf '%s\n' "$REP_OUT" | grep -q '| rep2 | share | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 1 | 2 | 1 | 1 |'; then
+    fail "transfers were not counted from the controller log (2 done, 1 donor set, 2 node-planned, 1 fill; the metric says 1): $(printf '%s\n' "$REP_OUT" | grep '| share |' | tail -2)"
+elif ! printf '%s\n' "$REP_OUT" | grep -q 'model B (Qwen/Qwen3-8B) burst 1, rise window p95: today 9.00 / 9.40 s, share 0.50 / 0.90 s (by repeat). Share was faster in every repeat'; then
+    fail "the summary did not report the small model's burst as faster beyond the spread: $(printf '%s\n' "$REP_OUT" | grep 'model B' | tail -1)"
+elif ! printf '%s\n' "$REP_OUT" | grep -q 'model A (Qwen/Qwen3-30B-A3B-FP8) burst 1, .*within the run.s own spread'; then
+    fail "the summary claimed a difference for the large model's burst inside the spread: $(printf '%s\n' "$REP_OUT" | grep 'model A' | tail -1)"
+elif ! printf '%s\n' "$REP_OUT" | grep -q '| rep1 | share | 1960 | 7 | +40% |'; then
+    fail "GPU-seconds were not priced against today: $(printf '%s\n' "$REP_OUT" | grep '| rep1 | share |' | tail -1)"
+elif ! printf '%s\n' "$REP_OUT" | grep -q 'Qwen/Qwen3-30B-A3B-FP8: quota-exhausted = 120'; then
+    fail "refused scale-ups were not reported per model and reason"
+else
+    ok "the repeats report: TTFT per burst, spread, log-counted transfers, refused scale-ups, GPU-seconds and the summary"
+fi
+
+# The standup deploys the copy it makes last, so the engine resources must be
+# rendered into THAT copy. Rendered only into benchmark-scenarios' copy, the git
+# reset between them restored the upstream file and a P/D run deployed 32 CPU /
+# 128Gi after logging 2 CPU / 8Gi.
+case_begin
+block="$(awk '/Copying local scenario:/ {on=1} on {print} on && /^\tfi$/ {exit}' "$ROOT/Makefile")"
+if ! printf '%s\n' "$block" | grep -q 'render-engine-resources.py'; then
+    fail "benchmark-standup copies the scenario it deploys without rendering the engine resources into it"
+else
+    ok "the scenario copy the standup deploys has its engine resources rendered"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -1450,7 +1750,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=87
+CASES_EXPECTED=103
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

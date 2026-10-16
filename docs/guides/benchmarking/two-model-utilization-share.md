@@ -210,6 +210,85 @@ The scenario (`hack/benchmark/scenarios/guides/two-model-shapes.yaml`) is
 a copy otherwise. `BENCH_SPEC` is read by preflight and standup; the shapes are
 read by each `run`, and every arm of one comparison must use the same ones.
 
+## Mixed replica sizes: a 2-GPU model beside a 1-GPU model
+
+> **Not run on GPUs yet.** The flow has run end to end on kind with simulated
+> engines (below). No real-GPU result exists.
+
+This is the real-GPU stand-in for one large model beside small ones. Model A is
+`Qwen/Qwen3-30B-A3B-FP8` at tensor parallel 2, so each replica takes **2 GPUs**.
+Model B is `Qwen/Qwen3-8B` at 1 GPU. The scenario is
+`hack/benchmark/scenarios/guides/two-model-mixed-sizes.yaml`.
+
+What is new against the other runs:
+
+- **Sizes and ceilings per model.** The driver reads each stack's GPUs per
+  replica from the scenario. `MAX_REPLICAS_A` and `MAX_REPLICAS_B` set each
+  model's ceiling. `preflight` and `standup` refuse a scenario whose GPU request
+  is not tensor × dataLocal, a stack name the scenario does not have, and a
+  `GPUS_PER_REPLICA_A`/`_B` that disagrees with the scenario. `verify` refuses
+  a deployed replica that holds a different number of GPUs.
+- **Node data.** The optimizer funds a 2-GPU replica from two 1-GPU replicas
+  only when it can see they share a node. So the policy needs a `gpu-inventory`
+  limiter beside the quota (`WVA_LIMITER=gpu-inventory,quota`), and the
+  controller needs node read and a pod list in every namespace. Both are cluster
+  admin grants. `make benchmark-two-model-node-data` checks them and prints the
+  exact commands. Every share arm refuses to start without them; `NODE_DATA=off`
+  is the deliberate way past.
+- **One node.** `BENCH_NODE=<node>` pins every model replica to that node.
+  `preflight` checks that node alone has the GPUs the run peaks at.
+- **Repeats in one command.** `make benchmark-two-model-share-arms` runs
+  `REPEATS` (2) rounds of today, shadow and share, each after a reset, a report
+  per repeat, then `report-repeats`. Even repeats run the arms in reverse order.
+  `TEARDOWN_ON_EXIT=1` tears down on every exit path, then prints what still
+  holds a GPU.
+- **The repeats report** (`repeats.md`): TTFT p50 and p95 per burst by model and
+  arm, the spread across repeats and between today and shadow, refused
+  scale-ups, transfers by outcome counted from each arm's controller log,
+  GPU-seconds, and a short "what this shows".
+
+```bash
+export BENCHMARK_NAMESPACE=<your namespace>
+export BENCH_SPEC=guides/two-model-mixed-sizes
+export STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 MAX_REPLICAS_A=3
+export STACK_B=qwen3-8b MODEL_B=Qwen/Qwen3-8B MAX_REPLICAS_B=4
+export WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=7'
+export BENCH_NODE=<a node with at least 7 free GPUs>
+make benchmark-two-model-preflight
+make benchmark-two-model-standup
+make benchmark-two-model-node-data     # an admin runs what it prints, once
+make benchmark-two-model-verify
+TEARDOWN_ON_EXIT=1 make benchmark-two-model-share-arms
+```
+
+Results land in `rep1/`, `rep2/` under the results directory, with
+`repeats.md` beside them.
+
+### A dry run on kind
+
+`BENCH_SIM=1` replaces the harness standup with simulator stacks
+(`llm-d-inference-sim`) that hold emulated GPUs. Everything after it is the real
+path: the controller install, ScaledObject registration, node data, reset, the
+arms, the loader, sampling, collection and every report. It refuses any cluster
+that is not kind. It says nothing about latency: the simulator's TTFT is a
+setting.
+
+```bash
+# A one-node kind cluster with 8 emulated H200s
+bash deploy/kind-emulator/setup.sh -c bench-dryrun -n 1 -g 8 -t nvidia -d NVIDIA-H200-141GB
+export BENCH_SIM=1 SIM_GPU_PRODUCT=NVIDIA-H200-141GB
+export WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='H200=7' KEDA_HELM_INSTALL=true
+export PHASE_SECONDS=90 RISE_WINDOW=30 OVERLAP_SECONDS=20 LEAD_IN=30 CYCLES=1 PRELOAD_GRACE=200
+export LOAD_CPU=250m LOAD_MEMORY=1Gi LOAD_MEMORY_LIMIT=4Gi
+make benchmark-two-model-standup
+bash hack/benchmark/two_model_pool.sh node-data grant
+make benchmark-two-model-verify
+TEARDOWN_ON_EXIT=1 make benchmark-two-model-share-arms
+```
+
+Set the model and stack variables as in the block above. Give the controller an
+image the kind node can load (`IMG=` and `WVA_IMAGE_PULL_POLICY=IfNotPresent`).
+
 ## The load shape, and the case it does not reach
 
 The schedule is the warm-pool run's ([The phases](two-model-warm-pool.md#the-phases)):
@@ -297,6 +376,8 @@ and also:
   the headroom is not exercised.
 - **Node-aware placement, whole-node pods and P/D.** One accelerator per replica
   and aggregated models: no donor sets, no LeaderWorkerSets, no 8-GPU replicas.
+  The [mixed-size scenario](#mixed-replica-sizes-a-2-gpu-model-beside-a-1-gpu-model)
+  adds donor sets and 2-GPU replicas, and has not run on GPUs yet.
   A P/D variant of the different-burst-shapes scenario,
   `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml` (both models
   disaggregated, four roles under one quota; how to drive it is in its header),
@@ -325,11 +406,11 @@ decode share the quota. `PD_SINGLE_STACK=1` switches the driver to that mode:
 **This mode has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed at
 one replica through 20 minutes of 15 000-token prompts at 12 rps, so the arms had
 nothing to compare ([why](../../well-lit-paths/utilization-share/measured.md#an-earlier-attempt-on-one-model)).
-The two-model P/D scenario above did produce one. Two tooling problems are open:
+The two-model P/D scenario above did produce one. One tooling problem is open
+(the standup rendering the scenario's 32 CPU / 128 GiB engine requests over the
+2 CPU / 8 GiB override is fixed: the copy the standup deploys is now rendered
+too):
 
-- The standup rendered the scenario's 32 CPU / 128 GiB engine requests despite
-  logging the 2 CPU / 8 GiB override for Qwen3-0.6B. Check the Deployments and
-  set the requests by hand if needed.
 - A decode-heavy loader with 4000-token outputs wrote no results within
   `RESULT_GRACE` (1200 s) after its load ended. The arm now keeps what the loader
   left (`harness-partial/`, `loader-pod.json`, `loader-b-ps.txt`) for the next

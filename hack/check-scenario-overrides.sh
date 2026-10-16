@@ -134,7 +134,24 @@ refuse "DECODE_CPU on a scenario with no decode requests" "$T/bare.yaml" BENCHMA
 refuse "a CPU quantity that is not one" "$SCEN/two-model-shapes.yaml" "BENCHMARK_DECODE_CPU=4; rm"
 refuse "a provider namespace that is not a name" "$SCEN/two-model-shapes.yaml" BENCHMARK_GATEWAY_SKIP_INSTALL=true BENCHMARK_GATEWAY_PROVIDER_NAMESPACE=Bad_NS
 
-CASES_EXPECTED=21
+# BENCHMARK_DECODE_NODE pins every stack's engines to one node, and nothing
+# else: the shared block sizes no Pod, and a pin there is one nobody asked for.
+cp "$SCEN/two-model-mixed-sizes.yaml" "$T/node.yaml"
+if BENCHMARK_RENDER_DRAIN=false BENCHMARK_DECODE_NODE=gpu-node-7 bash "$SCRIPT" "$T/node.yaml" > "$T/node.out" 2>&1; then
+    got="$(yq -r '[.scenario[].modelservice.decode.nodeSelector."kubernetes.io/hostname"] | join(",")' "$T/node.yaml")"
+    shared="$(yq -r '.shared.modelservice.decode.nodeSelector // "none"' "$T/node.yaml")"
+    if [ "$got" = "gpu-node-7,gpu-node-7" ] && [ "$shared" = none ]; then
+        ok "BENCHMARK_DECODE_NODE pins both stacks' engines to the node, and only them"
+    else
+        fail "BENCHMARK_DECODE_NODE pinned the stacks as '$got' and the shared block as '$shared'"
+    fi
+else
+    fail "BENCHMARK_DECODE_NODE refused on the mixed-sizes scenario: $(cat "$T/node.out")"
+fi
+refuse "a node name that is not one" "$SCEN/two-model-mixed-sizes.yaml" "BENCHMARK_DECODE_NODE=n1;x"
+refuse "a node pin on a scenario with no engine resources" "$T/bare.yaml" BENCHMARK_DECODE_NODE=n1
+
+CASES_EXPECTED=28
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     echo "FAIL $CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
     FAIL=$((FAIL + 1))
