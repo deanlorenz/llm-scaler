@@ -242,7 +242,7 @@ type BorrowGovernor struct {
 	// halfLowered is the models whose lender release this cycle's Observe
 	// dropped half landed, past twice its timeout (LenderReport.HalfLowered).
 	halfLowered []string
-	started bool
+	started     bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
