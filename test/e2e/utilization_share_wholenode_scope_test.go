@@ -126,7 +126,7 @@ func setControllerWatchNamespace(ns string) error {
 func managerContainer(dep *appsv1.Deployment) *corev1.Container {
 	cs := dep.Spec.Template.Spec.Containers
 	for i := range cs {
-		if cs[i].Name == "manager" {
+		if cs[i].Name == utils.ControllerContainerName {
 			return &cs[i]
 		}
 	}
