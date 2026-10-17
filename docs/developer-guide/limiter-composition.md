@@ -284,7 +284,16 @@ sparse debits; `adopt` commits a clone's debits.
   bound covers its type. The cluster group's budget and `ClusterFree` are what
   that bound leaves after the namespace groups' claims, in whole replicas; then
   `splitClusterFree` divides each finite cluster key between every group that
-  draws on it, also in whole replicas of each group's smallest variant.
+  draws on it. Both round to whole replicas of the smallest variant each group
+  grows (`growStepGPUs`, over `ShareGroup.Grow`), since a group's fills place
+  only those. A group that grows nothing (every role at its ceiling) claims
+  nothing in `splitClusterFree`. The namespace's claim also counts the models
+  no group plans (frozen, multi-accelerator, or in a namespace disabled for
+  sharing), which today's optimizer may still grow: `claimSteps` gives the
+  smallest replica of their variants on the type that are below `maxReplicas`
+  and whose role has no `RoleHold.NoScaleUp`. The claim's step is the smaller
+  of that and `growStepGPUs`. A namespace with models on the type but neither
+  step claims nothing.
 - `gpunodes.usageWalk` counts a Pending pod on its `Status.NominatedNodeName`
   (`occupiedNode`), in every view.
 

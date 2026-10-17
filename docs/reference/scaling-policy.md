@@ -378,8 +378,19 @@ below zero. For example, a cluster quota of 20
 with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
 fill 4.
 
-A tenant claims only whole replicas. With 8-GPU replicas, a tenant with 4 free
-GPUs claims none of them, so the cluster group can still fill a free node.
+A tenant claims only whole replicas of the variant it grows. A tenant grows
+its most cost-efficient variant that is below its `maxReplicas`. With 8-GPU
+replicas, a tenant with 4 free GPUs claims none of them, so the cluster group
+can still fill a free node. This holds even when the tenant also has a 1-GPU
+variant: it does not grow that variant, so it claims nothing for it. It claims
+the 4 GPUs only when it grows the 1-GPU variant and can place them.
+
+Models the share does not plan count too: frozen ones, ones that span two
+accelerator types, and those of a tenant with sharing turned off. Today's
+optimizer can still grow them, so the claim rounds to the smallest replica
+anything in the tenant can grow. A variant at its `maxReplicas`, or whose role
+the analyzers hold from scaling up, grows nothing and does not count. A tenant
+with nothing on the type that can grow claims nothing.
 
 This stops the cluster group from counting GPUs a tenant may also fill. It does
 not bound the tenants against each other: each tenant's group is bounded only by

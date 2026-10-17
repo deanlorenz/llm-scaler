@@ -362,6 +362,206 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}
 	})
 
+	// A tenant with a 1-GPU and an 8-GPU variant on one type grows only the
+	// variant shareGrowVariant picks. Rounding its claim to the smallest
+	// variant claimed 4 of the one free node for an 8-GPU grow it could not
+	// place, and left the cluster group 4, too few for its 8-GPU replica: the
+	// node stayed idle. The claim is rounded to the replicas it grows.
+	It("rounds a tenant's claim to the variant it grows, not its smallest", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 12, Used: 8}},
+			}},
+		}
+		// mixed is team-a's model: an 8-GPU and a 1-GPU variant, the 8-GPU
+		// one the most cost-efficient unless smallFirst.
+		mixed := func(smallFirst bool) ModelScalingRequest {
+			bigCost, smallCost := 5.0, 5.0
+			if smallFirst {
+				bigCost = 500
+			} else {
+				smallCost = 500
+			}
+			req := withSatEntry(&satEntryFixture{
+				ModelID: "ma", Namespace: "team-a", TotalDemand: 9000,
+				VariantCapacities: []vcFixture{
+					{VariantName: "ma-big", AcceleratorName: "A100", Cost: bigCost, ReplicaCount: 1, PerReplicaCapacity: 8000},
+					{VariantName: "ma-small", AcceleratorName: "A100", Cost: smallCost, ReplicaCount: 0, PerReplicaCapacity: 1000},
+				},
+			}, ModelScalingRequest{
+				ModelID: "ma", Namespace: "team-a",
+				VariantStates: []domain.VariantReplicaState{
+					{VariantName: "ma-big", CurrentReplicas: 1, GPUsPerReplica: 8, MinReplicas: ptrInt(0)},
+					{VariantName: "ma-small", CurrentReplicas: 0, GPUsPerReplica: 1, MinReplicas: ptrInt(0)},
+				},
+			})
+			req.CompositeSignal.ScaleUpThreshold = 0.8
+			return req
+		}
+		for _, c := range []struct {
+			smallFirst              bool
+			grow                    string
+			clusterIdle, tenantIdle int
+		}{
+			// Grows 8-GPU replicas: 4 free place none, so it claims none,
+			// and the cluster group can fill the free node.
+			{smallFirst: false, grow: "ma-big", clusterIdle: 8, tenantIdle: 0},
+			// Grows 1-GPU replicas: it can place all 4, and claims them.
+			{smallFirst: true, grow: "ma-small", clusterIdle: 0, tenantIdle: 4},
+		} {
+			reqs := []ModelScalingRequest{mixed(c.smallFirst), node("mx", "ns-x", 1)}
+			groups, unshared := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
+			Expect(unshared).To(BeEmpty())
+			Expect(groups["team-a"].Grow["team-a/ma/both"].Name).To(Equal(c.grow))
+			idle := map[string]int{}
+			for scope, g := range groups {
+				idle[scope] = max(0, min(idleClaim(g), g.ClusterFree))
+			}
+			Expect(idle).To(Equal(map[string]int{"": c.clusterIdle, "team-a": c.tenantIdle}), "grows %s", c.grow)
+		}
+	})
+
+	// A tenant whose every role is at its ceiling grows nothing, so its fill
+	// places nothing. It claimed its 8 free GPUs all the same, and the free
+	// node went to it, not to the cluster group's 8-GPU replica.
+	It("claims nothing for a tenant that grows nothing", func() {
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 16, Used: 8}},
+			}},
+		}
+		full := node("ma", "team-a", 1)
+		full.VariantStates[0].MaxReplicas = ptrInt(1)
+		groups, unshared := build([]ModelScalingRequest{full, node("mx", "ns-x", 1)}, cons, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(unshared).To(BeEmpty())
+		Expect(groups["team-a"].Grow).To(BeEmpty())
+		idle := map[string]int{}
+		for scope, g := range groups {
+			idle[scope] = max(0, min(idleClaim(g), g.ClusterFree))
+		}
+		Expect(idle).To(Equal(map[string]int{"": 8, "team-a": 0}))
+	})
+
+	// The models of a tenant that no group plans -- frozen, or spanning
+	// several accelerator types -- still grow through today's optimizer, so
+	// the claim counts them. Which of them can still grow decides it.
+	Describe("a tenant's models that no group plans", func() {
+		// 8 free GPUs in the cluster and 8 in team-a's quota of A100.
+		consFor := func(teamAUsed int) []*ResourceConstraints {
+			return []*ResourceConstraints{
+				{Pools: map[string]ResourcePool{"A100": {Limit: 8 + teamAUsed + 8, Used: teamAUsed + 8}}},
+				{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+					"team-a": {"A100": {Limit: teamAUsed + 8, Used: teamAUsed}},
+				}},
+			}
+		}
+		full := func() ModelScalingRequest {
+			req := node("a1", "team-a", 1)
+			req.VariantStates[0].MaxReplicas = ptrInt(1)
+			return req
+		}
+		frozenA3 := ShareGroupOptions{ClusterIsQuota: true, Exclude: func(req ModelScalingRequest, _ bool) string {
+			if req.ModelID == "a3" {
+				return "frozen"
+			}
+			return ""
+		}}
+		// clusterGroup returns the cluster group's budget and the GPUs it may
+		// place this cycle.
+		clusterGroup := func(reqs []ModelScalingRequest, cons []*ResourceConstraints, opts ShareGroupOptions) (int, int) {
+			GinkgoHelper()
+			groups, unshared := build(reqs, cons, opts)
+			Expect(unshared).To(BeEmpty())
+			Expect(groups).To(HaveKey(""))
+			return groups[""].Budget, groups[""].ClusterFree
+		}
+
+		// team-a's only planned model is at its ceiling, so its group grows
+		// nothing. A model on A100 and H100 forms no group but can grow an
+		// 8-GPU A100 replica. The group was taken to place nothing and
+		// claimed nothing, and the cluster group filled the free node.
+		It("keeps the claim of a multi-accelerator model that can grow", func() {
+			multi := withSatEntry(&satEntryFixture{
+				ModelID: "a2", Namespace: "team-a", TotalDemand: 9000,
+				VariantCapacities: []vcFixture{
+					{VariantName: "a2-a100", AcceleratorName: "A100", Cost: 5, ReplicaCount: 0, PerReplicaCapacity: 8000},
+					{VariantName: "a2-h100", AcceleratorName: "H100", Cost: 9, ReplicaCount: 0, PerReplicaCapacity: 8000},
+				},
+			}, ModelScalingRequest{
+				ModelID: "a2", Namespace: "team-a",
+				VariantStates: []domain.VariantReplicaState{
+					{VariantName: "a2-a100", CurrentReplicas: 0, GPUsPerReplica: 8, MinReplicas: ptrInt(0)},
+					{VariantName: "a2-h100", CurrentReplicas: 0, GPUsPerReplica: 8, MinReplicas: ptrInt(0)},
+				},
+			})
+			multi.CompositeSignal.ScaleUpThreshold = 0.8
+			budget, clusterFree := clusterGroup([]ModelScalingRequest{full(), multi, node("mx", "ns-x", 1)},
+				consFor(8), ShareGroupOptions{ClusterIsQuota: true})
+			Expect(budget).To(Equal(8), "ns-x holds 8; team-a claims the 8 free")
+			Expect(clusterFree).To(Equal(0))
+		})
+
+		// A frozen model that cannot grow -- at its maxReplicas, or held from
+		// scaling up -- placed nothing, yet its 1-GPU replica kept team-a's
+		// whole free quota claimed, and the free node stayed idle. One that
+		// can grow keeps the claim.
+		It("claims nothing for frozen models that cannot grow, and keeps the claim of one that can", func() {
+			atCeiling := shareReq("a3", "team-a", 9000, 1)
+			atCeiling.VariantStates[0].MaxReplicas = ptrInt(1)
+			noScaleUp := shareReq("a3", "team-a", 9000, 1)
+			noScaleUp.CompositeSignal.Holds = map[string]RoleHold{domain.RoleBoth: {NoScaleUp: true}}
+			canGrow := shareReq("a3", "team-a", 9000, 1)
+			for name, c := range map[string]struct {
+				a3                  ModelScalingRequest
+				budget, clusterFree int
+			}{
+				"at its ceiling":       {atCeiling, 16, 8},
+				"held from scaling up": {noScaleUp, 16, 8},
+				"below its ceiling":    {canGrow, 8, 0},
+			} {
+				budget, clusterFree := clusterGroup([]ModelScalingRequest{full(), c.a3, node("mx", "ns-x", 1)},
+					consFor(9), frozenA3)
+				Expect(budget).To(Equal(c.budget), name)
+				Expect(clusterFree).To(Equal(c.clusterFree), name)
+			}
+		})
+
+		// team-a's group grows 8-GPU replicas, so its 4 free GPUs place none
+		// of them. A frozen 1-GPU model can place all 4 through today's
+		// optimizer, so they are claimed, and the cluster group's 1-GPU model
+		// does not fill them.
+		It("rounds the claim to the smallest replica anything in the namespace can grow", func() {
+			mixed := withSatEntry(&satEntryFixture{
+				ModelID: "a1", Namespace: "team-a", TotalDemand: 9000,
+				VariantCapacities: []vcFixture{
+					{VariantName: "a1-big", AcceleratorName: "A100", Cost: 5, ReplicaCount: 1, PerReplicaCapacity: 8000},
+					{VariantName: "a1-small", AcceleratorName: "A100", Cost: 500, ReplicaCount: 1, PerReplicaCapacity: 1000},
+				},
+			}, ModelScalingRequest{
+				ModelID: "a1", Namespace: "team-a",
+				VariantStates: []domain.VariantReplicaState{
+					{VariantName: "a1-big", CurrentReplicas: 1, GPUsPerReplica: 8, MinReplicas: ptrInt(0)},
+					{VariantName: "a1-small", CurrentReplicas: 1, GPUsPerReplica: 1, MinReplicas: ptrInt(0), MaxReplicas: ptrInt(1)},
+				},
+			})
+			mixed.CompositeSignal.ScaleUpThreshold = 0.8
+			cons := []*ResourceConstraints{
+				{Pools: map[string]ResourcePool{"A100": {Limit: 15, Used: 11}}},
+				{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+					"team-a": {"A100": {Limit: 14, Used: 10}},
+				}},
+			}
+			reqs := []ModelScalingRequest{mixed, shareReq("a3", "team-a", 9000, 1), shareReq("mx", "ns-x", 9000, 1)}
+			groups, unshared := build(reqs, cons, frozenA3)
+			Expect(unshared).To(BeEmpty())
+			Expect(groups["team-a"].Grow["team-a/a1/both"].Name).To(Equal("a1-big"))
+			Expect(groups[""].Budget).To(Equal(1), "ns-x holds 1; team-a claims the 4 free")
+			Expect(groups[""].ClusterFree).To(Equal(0))
+		})
+	})
+
 	// A claim rounded down to whole replicas leaves part of the namespace's
 	// free quota unclaimed. A warm pool there can grow into that remainder,
 	// so the cluster group carves it: team-a has 12 free, claims one 8-GPU
