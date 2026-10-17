@@ -369,6 +369,17 @@ var _ = Describe("BuildShareGroups: floors, ceilings and replica sizes", func() 
 		Expect(r.Need).To(BeNumerically("~", 8+(8800/0.85-800)/200, 1e-9))
 	})
 
+	It("grows past the best variant's ceiling in GPUs of the next one (#193)", func() {
+		// b has room for two replicas (32 GPUs, 6400); the rest is grown as
+		// a, at 100 per GPU.
+		req := shareReqVariants(8800,
+			shareVariant{name: "a", gpus: 8, current: 1, cost: 8, prc: 800},
+			shareVariant{name: "b", gpus: 16, cost: 16, prc: 3200, max: ptrInt(2)},
+		)
+		req.CompositeSignal.ScaleUpThreshold = 0.85
+		Expect(only(req).Need).To(BeNumerically("~", 8+32+(8800/0.85-800-6400)/100, 1e-9))
+	})
+
 	It("shares a shortfall at the utilization a role really runs at (#193)", func() {
 		// m needs 103.5 GPUs of a, o needs 100 of its own: 168 GPUs hold 82.5%
 		// of each. Priced on b, m looked like 51.8 and was given 57 GPUs --

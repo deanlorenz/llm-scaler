@@ -333,8 +333,9 @@ aggregated model) is first given its *need* — the GPUs that put it exactly at 
 `scaleUpThreshold` — and what is left is shared as headroom above that need, in
 proportion to each model's weight. The need is counted in the GPUs the role
 actually holds and grows. A role that needs more than it serves now adds the
-rest as GPUs of the variant it grows, its most cost-efficient one with room. A
-role that needs less is priced at what its running replicas serve per GPU. So
+rest as GPUs of the variants it grows: its most cost-efficient one first, up to
+that variant's `maxReplicas`, then the next. A role that needs less is priced
+at what its running replicas serve per GPU. So
 a role that runs a variant with less capacity per GPU than its best one needs
 more GPUs, not fewer. When the quota cannot hold every model at
 its recent peak at the same time, that headroom is capped at
