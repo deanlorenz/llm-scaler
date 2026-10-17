@@ -143,10 +143,20 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	if adm.serving() {
 		a.noteBorrowServing(historyKey, a.now(), !config.DisableK2Borrow)
 	}
+	// The saturated reading is judged, and recorded, on the BUSIEST engine
+	// rank, not on the pod's sum and mean (domain.ReplicaMetrics.
+	// MaxRankQueueLength). queueLengthThreshold is a queue on one engine: a
+	// pod of eight ranks with one request waiting on each sums to eight and
+	// is not saturated, and recording its 30 % occupancy as k2 priced it at
+	// half its capacity for as long as the window lived. And a k2 is one
+	// engine's occupancy at saturation scaled by the ranks
+	// (BusiestRankTokens): the tokens one full rank holds plus seven idle
+	// ones' nothing is not what the pod holds when it is full. With one rank
+	// both are the pod's own queue and tokens, as before.
 	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
-		rm.QueueLength, rm.TokensInUse,
+		rm.BusiestRankQueue(), rm.BusiestRankTokens(),
 		rm.AvgOutputTokens, rm.AvgInputTokens,
 		config.QueueLengthThreshold,
 		engineParams,
@@ -306,6 +316,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
+		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
+		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
 		"requestRate", rm.RequestRate,
 		"saturatedThroughput", saturatedThroughput, "saturatedThroughputBucket", throughputBucket)
 
