@@ -300,6 +300,11 @@ const (
 	// confirm cycles in a row -- for at most its scale-down window
 	// (returnSpare).
 	ShareWithheldReturnPodBusy = "return-pod-busy"
+	// ShareWithheldReturnUnplaceable counts a role above its target that
+	// keeps its spare because every role below its own target is one no node
+	// can hold a replica of (returnSpare): returned, the GPUs would sit
+	// unassigned.
+	ShareWithheldReturnUnplaceable = "return-receiver-unplaceable"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -1208,6 +1213,9 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 //     whole replicas -- with one short, the GPUs go to it by a transfer,
 //     which the holds govern; a role short only of its headroom, or held
 //     from filling, does not block;
+//   - not while every role below its target is one no node can hold a
+//     replica of (unplaceable): the GPUs would sit unassigned, and the role
+//     would lose its headroom for nothing;
 //   - never below its target, floor or keep, and not while held from giving;
 //   - and only while it stays calm one replica lower: what its need serves at
 //     most the return load of what it would keep less its headroom serves
@@ -1253,6 +1261,14 @@ func (p *sharePlanRun) returnSpare() {
 				return
 			}
 		}
+	}
+	if p.onlyUnplaceableShort() {
+		for _, o := range over {
+			if o {
+				p.plan.Withheld[ShareWithheldReturnUnplaceable]++
+			}
+		}
+		return
 	}
 	for _, r := range p.roles {
 		dn := r.Key
@@ -1318,6 +1334,38 @@ func (p *sharePlanRun) returnSpare() {
 // serve.
 func (p *sharePlanRun) returnCalm(r ShareRole, g float64) bool {
 	return r.serves(p.need(r.Key)) <= p.in.Headroom.returnLoad()*r.serves(g)
+}
+
+// onlyUnplaceableShort reports whether there are roles below their
+// whole-replica target that can grow and are not held from filling -- the
+// roles the GPUs a return frees would go to -- and every one of them is
+// unplaceable.
+func (p *sharePlanRun) onlyUnplaceableShort() bool {
+	short := false
+	for _, r := range p.roles {
+		if p.work[r.Key] >= p.integ[r.Key] || p.l.FillHeld(r.Key, p.now) {
+			continue
+		}
+		if _, grows := variantOf(p.in.Grow, r.Key, r.ReplicaGPUs); !grows {
+			continue
+		}
+		if !p.unplaceable(r.Key) {
+			return false
+		}
+		short = true
+	}
+	return short
+}
+
+// unplaceable reports whether no node can hold a replica of receiver rc: no
+// donor could fund it (ShareUnfundedNoCompatibleDonor) while the planner knew
+// the nodes and rc's pods, so no node-aware set -- donor pods and free GPUs on
+// one node -- could open a hole for it. A return frees no more than such a set
+// would. Without node information the idle fill places blind, and a return
+// may still serve rc.
+func (p *sharePlanRun) unplaceable(rc string) bool {
+	grow, ok := p.in.Grow[rc]
+	return ok && len(grow.PodGPUs) > 0 && p.in.Nodes != nil && p.plan.Unfunded[rc] == ShareUnfundedNoCompatibleDonor
 }
 
 // fundBySet funds rc from several donors when no single donor replica fits

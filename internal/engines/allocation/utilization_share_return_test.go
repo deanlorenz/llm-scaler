@@ -1,7 +1,9 @@
 package allocation
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -696,5 +698,86 @@ func TestShareFillCreditIsNotSpare(t *testing.T) {
 				t.Fatalf("cycle %d: A, below its target, returned %+v", i+1, tr)
 			}
 		}
+	}
+}
+
+// fragmented is the whole-node e2e's fragmented cluster (#235): G holds one
+// 8-GPU replica and needs two; S1 and S2, idle, hold five 1-GPU replicas each,
+// spread over nodes n2, n3 and n4 beside GPUs no model holds, so no node can
+// be emptied for G. The quota of 18 is spent. nodes says whether the planner
+// knows the nodes.
+func fragmented(nodes bool) SharePlanInput {
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "G", Weight: 1, Need: 16, Floor: 8, Ceiling: 16, ReplicaGPUs: 8},
+			{Key: "S1", Weight: 1, Need: 0.2, Floor: 1, Ceiling: 5, ReplicaGPUs: 1},
+			{Key: "S2", Weight: 1, Need: 0.2, Floor: 1, Ceiling: 5, ReplicaGPUs: 1},
+		},
+		Held:       map[string]int{"G": 8, "S1": 5, "S2": 5},
+		Thresholds: map[string]float64{"G": 0.8, "S1": 0.8, "S2": 0.8}, Budget: 18, Tolerance: 0.15,
+		Give: map[string]ShareVariant{
+			"S1": {Name: "s1", GPUs: 1, PodGPUs: []int{1}},
+			"S2": {Name: "s2", GPUs: 1, PodGPUs: []int{1}},
+		},
+		Grow:         map[string]ShareVariant{"G": {Name: "g", GPUs: 8, PodGPUs: []int{8}}},
+		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
+	}
+	if !nodes {
+		return in
+	}
+	in.Nodes = map[string]ShareNode{"n1": {}, "n2": {}, "n3": {}, "n4": {}}
+	in.DonorUnits = map[string][]ShareUnit{}
+	for _, s := range []string{"S1", "S2"} {
+		for i, n := range []string{"n2", "n2", "n3", "n3", "n4"} {
+			name := fmt.Sprintf("ns/%s-%d", strings.ToLower(s), i)
+			in.DonorUnits[s] = append(in.DonorUnits[s], ShareUnit{Pods: []SharePod{{Name: name, Node: n, GPUs: 1}}})
+		}
+	}
+	return in
+}
+
+// While the only role short of its target is one no node can hold a replica
+// of, nothing is returned for it (#235): the GPUs would sit unassigned, and
+// the small models would lose their headroom for nothing. Without node
+// information the idle fill places blind and a return may still serve G, so
+// returns go on as before. Re-judged every cycle: once a node can be emptied
+// G is funded, and the spare above the targets is returned again.
+func TestShareReturnsNothingForAnUnplaceableReceiver(t *testing.T) {
+	l := NewShareLedger()
+	in := fragmented(true)
+	returns, withheld := 0, 0
+	for i := range 6 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		returns += p.Returns
+		withheld += p.Withheld[ShareWithheldReturnUnplaceable]
+		if i >= 2 && p.Unfunded["G"] != ShareUnfundedNoCompatibleDonor {
+			t.Fatalf("cycle %d: G unfunded %q, want %q", i+1, p.Unfunded["G"], ShareUnfundedNoCompatibleDonor)
+		}
+	}
+	if returns != 0 || withheld == 0 {
+		t.Fatalf("fragmented: %d returned, %d withheld for G; want none returned, withheld counted", returns, withheld)
+	}
+
+	returns = 0
+	for _, p := range planEach(NewShareLedger(), fragmented(false), 6) {
+		returns += p.Returns
+	}
+	if returns == 0 {
+		t.Fatal("control, no node information: nothing returned")
+	}
+
+	// Judged every cycle, on the same ledger: two pods outside the models
+	// leave n2, and its four free GPUs and the four small pods on it make a
+	// hole for G. The spare the small models kept funds it: a set takes them
+	// to their targets of one.
+	in.Nodes["n2"] = ShareNode{Free: 4}
+	funded := false
+	for i := range 4 {
+		for _, tr := range PlanShareTransfers(l, in, time.Unix(int64(1090+15*i), 0), spareTimings()).Started {
+			funded = funded || tr.Receiver == "G"
+		}
+	}
+	if c := l.Committed(in.Held); !funded || c["G"] != 16 || c["S1"] != 1 || c["S2"] != 1 {
+		t.Fatalf("a node freed: G funded %v, committed %v; want G at 16 from the small models' spare", funded, c)
 	}
 }
