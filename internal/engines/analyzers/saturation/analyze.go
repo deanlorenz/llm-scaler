@@ -711,33 +711,6 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	total = c.a.applyThroughputFloor(c.input, c.cfg, caps, d.variants,
 		total, d.roleDemand, d.queueByRole, eppQueued, c.shapeChanged, c.logger)
 
-	// A replica with a full engine rank is not released on its mean
-	// (hot_rank_hold.go). It keeps that replica, not the role, so it is
-	// reported apart from the holds (hotRank, not held): a held role releases
-	// nothing, and the other replicas' spare is still theirs to give. Prefill
-	// is judged only while decode is not saturated, so this cannot meet the
-	// prefill hold below.
-	var hotRank map[string]float64
-	{
-		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
-		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
-			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
-		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
-			d.roleDemand, total, scaleUp, scaleDown)
-		if after > total {
-			moved := after - total
-			total = after
-			hotRank = byRole
-			if d.roleDemand == nil {
-				hotRank = map[string]float64{domain.RoleBoth: moved}
-			}
-			c.logger.V(logging.DEFAULT).Info("hot-rank-hold",
-				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
-				"raisedByRole", hotRank, "totalDemandMoved", moved, "hotReplicas", len(hot),
-				"reason", "a replica's busiest engine rank is full: its capacity is kept, and only the other replicas' spare may be released")
-		}
-	}
-
 	// While decode is saturated, prefill's DEMAND is not a reading of prefill
 	// either: the KV it holds and the queue behind it are decode's backlog
 	// (computeK2 explains the mechanism), and the gate above only keeps them
@@ -792,6 +765,36 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 				hold(role, before[role])
 			}
 			logShapeHold(c.logger, c.input.ModelID, c.input.Namespace, moved, raised)
+		}
+	}
+
+	// A replica with a full engine rank is not released on its mean
+	// (hot_rank_hold.go). It keeps that replica, not the role, so it is
+	// reported apart from the holds (hotRank, not held): a held role releases
+	// nothing, and the other replicas' spare is still theirs to give. Last,
+	// so its cap under the scale-up threshold sees every raise above: run
+	// before the prefill hold, it filled decode's room to the model's
+	// ceiling and the prefill hold's raise then took the model over it.
+	// Prefill is judged only while decode is not saturated, so this never
+	// raises a role the prefill hold set.
+	var hotRank map[string]float64
+	{
+		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
+			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
+		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
+			d.roleDemand, total, scaleUp, scaleDown)
+		if after > total {
+			moved := after - total
+			total = after
+			hotRank = byRole
+			if d.roleDemand == nil {
+				hotRank = map[string]float64{domain.RoleBoth: moved}
+			}
+			c.logger.V(logging.DEFAULT).Info("hot-rank-hold",
+				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
+				"raisedByRole", hotRank, "totalDemandMoved", moved, "hotReplicas", len(hot),
+				"reason", "a replica's busiest engine rank is full: its capacity is kept, and only the other replicas' spare may be released")
 		}
 	}
 
