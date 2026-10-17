@@ -93,6 +93,23 @@ func TestShareCapSpare(t *testing.T) {
 	}
 }
 
+// A held role's headroom is counted above its need, never below what it
+// holds: above its floor, every cycle a hold lasts would raise it a replica.
+func TestShareCapSpareHeldRole(t *testing.T) {
+	roles := []ShareRole{
+		{Key: "low", Weight: 1, Need: 3.5, Floor: 10, ReplicaGPUs: 1, Held: true},   // keeps 10, no headroom above
+		{Key: "high", Weight: 1, Need: 12, Floor: 10, ReplicaGPUs: 1, Held: true},   // grows: need + a replica
+		{Key: "node", Weight: 1, Need: 9, Floor: 16, ReplicaGPUs: 8, Held: true},    // whole-node replicas
+		{Key: "free", Weight: 1, Need: 3.5, Floor: 10, ReplicaGPUs: 1, Held: false}, // a minReplicas floor: as before
+	}
+	want := map[string]int{"low": 10, "high": 13, "node": 24, "free": 11}
+	for _, r := range ShareCapSpare(roles, 1) {
+		if r.Ceiling != want[r.Key] {
+			t.Errorf("%s ceiling %d, want %d", r.Key, r.Ceiling, want[r.Key])
+		}
+	}
+}
+
 // Capped, the targets leave the spare unassigned instead of spreading it.
 func TestShareCapSpareLeavesTheSpareUnassigned(t *testing.T) {
 	in := spareRun(2, 0.4, 3)
