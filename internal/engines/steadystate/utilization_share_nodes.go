@@ -6,6 +6,7 @@ package steadystate
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -110,6 +111,117 @@ func (e *Engine) shareNodes(now time.Time) map[string]decision.NodeGPU {
 		store = decision.DefaultNodeGPUs
 	}
 	return store.Latest(decision.NodeGPUsMaxAge, now)
+}
+
+// shareUnfunded is the plan's unfunded receivers, with every short role no
+// node can hold a replica of marked allocation.ShareUnfundedNoNodeFits
+// (shareNoNodeFits). It is the plan's own map, unchanged, without node
+// information, when no role is short, or when a giving role's pods cannot be
+// listed: a pod left out would read as a node that cannot be emptied.
+func (e *Engine) shareUnfunded(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger, g allocation.ShareGroup,
+	ev allocation.ShareEvaluation, unfunded map[string]string, accessor func(role, variant string) scaletarget.ScaleTargetAccessor,
+	nodes map[string]allocation.ShareNode, domains map[string]string, placements map[string][]domain.PodPlacement) map[string]string {
+	if nodes == nil || !slices.ContainsFunc(ev.Roles, func(v allocation.ShareRoleVerdict) bool { return v.Headroom < 0 }) {
+		return unfunded
+	}
+	pods, err := e.shareGroupPodGPUs(ctx, g, accessor)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("Utilization share: could not list the group's pods; "+
+			"whether a node can hold a short model's replica is not judged this cycle", "error", err.Error())
+		return unfunded
+	}
+	return markNoNodeFits(unfunded, shareNoNodeFits(l, g, ev, nodes, pods, domains, placements))
+}
+
+// markNoNodeFits is unfunded with each of roles marked
+// allocation.ShareUnfundedNoNodeFits, over any reason the plan gave it: no
+// donor and no return can place the role, so neither is what it waits for.
+// unfunded itself is not changed.
+func markNoNodeFits(unfunded map[string]string, roles []string) map[string]string {
+	if len(roles) == 0 {
+		return unfunded
+	}
+	out := maps.Clone(unfunded)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for _, r := range roles {
+		out[r] = allocation.ShareUnfundedNoNodeFits
+	}
+	return out
+}
+
+// shareGroupPodGPUs is, per giving role, the GPUs its pods hold on each node:
+// every pod of the variant it gives that is bound to a node and not finished.
+// Marked and terminating pods count -- they hold their GPUs until they go,
+// and the node's free GPUs grow by what each one held when it does.
+func (e *Engine) shareGroupPodGPUs(ctx context.Context, g allocation.ShareGroup,
+	accessor func(role, variant string) scaletarget.ScaleTargetAccessor) (map[string]map[string]int, error) {
+	if e.client == nil {
+		return nil, fmt.Errorf("no client")
+	}
+	out := map[string]map[string]int{}
+	for _, role := range slices.Sorted(maps.Keys(g.Give)) {
+		give := g.Give[role]
+		acc := accessor(role, give.Name)
+		if acc == nil {
+			return nil, fmt.Errorf("role %s: no scale target for variant %s", role, give.Name)
+		}
+		list, err := variantmeta.ListVariantPods(ctx, e.client, g.Origins[role].Namespace, acc)
+		if err != nil {
+			return nil, fmt.Errorf("role %s: %w", role, err)
+		}
+		byNode := map[string]int{}
+		for i := range list {
+			p := &list[i]
+			if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			byNode[p.Spec.NodeName] += resources.PodGPURequests(p)
+		}
+		out[role] = byNode
+	}
+	return out, nil
+}
+
+// shareNoNodeFits lists the roles that are short (below their need), are
+// receiving no transfer, and of which no node can hold one replica even if
+// every pod of the group's other giving roles on it went
+// (allocation.ShareNoNodeFits). pods is each giving role's GPUs by node
+// (shareGroupPodGPUs). Such a role cannot be funded by a transfer, a donor set,
+// returns or the idle fill, whatever the other roles hold: the cause, and so
+// its reason, stays the same while the others give or keep their spare.
+func shareNoNodeFits(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
+	nodes map[string]allocation.ShareNode, pods map[string]map[string]int, domains map[string]string,
+	placements map[string][]domain.PodPlacement) []string {
+	receiving := map[string]bool{}
+	for _, t := range l.Transfers() {
+		if t.Receiver != "" {
+			receiving[t.Receiver] = true
+		}
+	}
+	var out []string
+	for _, v := range ev.Roles {
+		grow, ok := g.Grow[v.Key]
+		if v.Headroom >= 0 || !ok || len(grow.PodGPUs) == 0 || receiving[v.Key] {
+			continue
+		}
+		others := map[string]int{}
+		for role, byNode := range pods {
+			if role == v.Key {
+				continue
+			}
+			for n, gpus := range byNode {
+				others[n] += gpus
+			}
+		}
+		fit := allocation.ShareReplicaFit{PodGPUs: grow.PodGPUs, DomainKey: domains[v.Key], Placements: placements[v.Key]}
+		if allocation.ShareNoNodeFits(nodes, others, fit) {
+			out = append(out, v.Key)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // shareFillTimeoutCause attributes a transfer whose receiver stayed Pending

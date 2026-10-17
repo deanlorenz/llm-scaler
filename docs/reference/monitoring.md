@@ -303,6 +303,12 @@ histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
 # marks-unreadable ship as alerts).
 wva_model_scaling_blocked{reason="no-compatible-donor"} == 1
 
+# A large model that cannot be placed: one alert for every reason that means it
+# (see the list below). max_over_time keeps the two that expire by themselves.
+max by (exported_namespace, model_name) (
+  max_over_time(wva_model_scaling_blocked{reason=~"no-node-fits|no-compatible-donor|release-shape-mismatch|release-taken"}[15m])
+) == 1
+
 # A role stuck below three quarters of its need while the optimizer acts.
 wva_utilization_share_headroom < -0.25
   and on() (wva_utilization_share_mode{mode="active"} == 1)
@@ -314,6 +320,23 @@ sum by (exported_namespace, model_name, reason) (
 ```
 
 Notes on these alerts:
+
+- **A large model cannot be placed.** Four reasons mean the optimizer cannot
+  get a replica of the model onto a node. Alert on all four together, not on
+  one:
+  - `no-node-fits`: no node can hold a replica, even if every pod the other
+    models could give on it went. Set every cycle while the model is short,
+    whatever the other models give or keep. Needs node information.
+  - `no-compatible-donor`: no donor pod, or set of donor pods on one node, can
+    host a replica. Without node information this is how fragmentation shows.
+  - `release-shape-mismatch`: a transfer's GPUs came free, but on no node
+    enough for the model's largest pod. Expires one release timeout later.
+  - `release-taken`: a transfer's GPUs came free, and a pod the scaling
+    manager did not place took them first. Expires one release timeout later.
+
+  `donors-at-floor` and `quota-short` are not on the list: they mean no model
+  has GPUs to give, not that a node cannot hold the replica. See
+  [a large model cannot be placed](troubleshooting.md#a-large-model-cannot-be-placed).
 
 - **`mode="invalid"`** includes a block whose `limiters:` list was removed (no
   budget to share). **`mode="off"`** means no `optimizer:` block (edited out by

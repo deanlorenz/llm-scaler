@@ -2254,6 +2254,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net`, over the configured floors only (`ShareRole.MinFloor`) |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
 | `wva_model_scaling_blocked` | `reason="no-compatible-donor"` | out of band, and no donor set opens a fitting hole for every pod of a receiver replica — without node information, no single donor pod is large enough (§6.5) |
+| `wva_model_scaling_blocked` | `reason="no-node-fits"` | below need, and with node information no node holds a receiver replica even if every pod the group's other giving roles run on it went (`allocation.ShareNoNodeFits`). Counted from the pods, marked and terminating ones included, so returns do not change it: set every cycle while the role is short and receives nothing, and it replaces `donors-at-floor`, `no-compatible-donor`, `reversal-hold`, `transfer-limit` and `burst-ending` on that role (issue #236) |
 | `wva_utilization_share_claims_total` | `accelerator_type`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `refused-held` / `none-releasing` |
 | `wva_utilization_share_donors_per_transfer` | `accelerator_type`, `scope` | histogram: donor replicas funding one receiver replica |
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
