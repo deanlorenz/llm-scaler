@@ -50,9 +50,12 @@ const (
 // What the per-pod queries return for dp8-0 behind one API server: the
 // fixture's expected samples, which promtool evaluates from the rank series.
 var dp8Folded = map[string]float64{
-	registration.QueryKvCacheUsage:          0.203125,
-	registration.QueryKvUsageInstant:        0.203125,
-	registration.QueryQueueLength:           8,
+	registration.QueryKvCacheUsage:   0.203125,
+	registration.QueryKvUsageInstant: 0.203125,
+	registration.QueryQueueLength:    8,
+	// The busiest rank, rank 7.
+	registration.QueryMaxRankKvCacheUsage:   0.875,
+	registration.QueryMaxRankQueueLength:    6,
 	registration.QueryAvgOutputTokens:       896,
 	registration.QueryAvgOutputTokensRecent: 896,
 	registration.QueryAvgInputTokens:        1792,
@@ -126,6 +129,9 @@ func perPortResults() map[string]*source.MetricResult {
 		addValue(results, registration.QueryKvCacheUsage, labels, r.kv)
 		addValue(results, registration.QueryKvUsageInstant, labels, r.kv)
 		addValue(results, registration.QueryQueueLength, labels, float64(r.wait))
+		// One rank per instance: its busiest rank is itself.
+		addValue(results, registration.QueryMaxRankKvCacheUsage, labels, r.kv)
+		addValue(results, registration.QueryMaxRankQueueLength, labels, float64(r.wait))
 		addValue(results, registration.QueryRequestRate, labels, r.rps)
 		addValue(results, registration.QueryGenerationTokenRate, labels, r.rps*r.out)
 		if r.rps > 0 {
@@ -168,6 +174,13 @@ func TestCollectReplicaMetrics_SingleFrontendDPPod(t *testing.T) {
 	assert.Equal(t, int64(1040000), pod.TokensInUse, "used tokens summed over the ranks")
 	assert.Equal(t, 8, pod.QueueLength, "every rank's waiting requests")
 	assert.InDelta(t, 0.04241071428571429, pod.AvgITL, 1e-15, "the token-weighted mean, not the slowest rank's 0.0625")
+	// Beside the sum and the mean, the busiest rank: what the saturation
+	// guards judge.
+	assert.Equal(t, 6, pod.MaxRankQueueLength, "rank 7's queue, of the pod's 8")
+	assert.Equal(t, 6, pod.BusiestRankQueue())
+	assert.Equal(t, 0.875, pod.MaxRankKvCacheUsage, "rank 7's cache")
+	assert.Equal(t, 0.875, pod.BusiestRankKvUsage())
+	assert.Equal(t, int64(4480000), pod.BusiestRankTokens(), "0.875 of the pod's 5,120,000 tokens: one full rank, scaled to the pod")
 }
 
 // The same physical pod with one API server per rank gives the same row: the
@@ -184,12 +197,15 @@ func TestCollectReplicaMetrics_DPLayoutsAgree(t *testing.T) {
 	assert.Equal(t, a.TotalKvCapacityTokens, b.TotalKvCapacityTokens, "TotalKvCapacityTokens")
 	assert.Equal(t, a.TokensInUse, b.TokensInUse, "TokensInUse")
 	assert.Equal(t, a.QueueLength, b.QueueLength, "QueueLength")
+	assert.Equal(t, a.MaxRankQueueLength, b.MaxRankQueueLength, "MaxRankQueueLength")
+	assert.Equal(t, a.BusiestRankTokens(), b.BusiestRankTokens(), "BusiestRankTokens")
 	for _, f := range []struct {
 		name string
 		get  func(domain.ReplicaMetrics) float64
 	}{
 		{"KvCacheUsage", func(m domain.ReplicaMetrics) float64 { return m.KvCacheUsage }},
 		{"KvUsageInstant", func(m domain.ReplicaMetrics) float64 { return m.KvUsageInstant }},
+		{"MaxRankKvCacheUsage", func(m domain.ReplicaMetrics) float64 { return m.MaxRankKvCacheUsage }},
 		{"RequestRate", func(m domain.ReplicaMetrics) float64 { return m.RequestRate }},
 		{"GenerationTokenRate", func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate }},
 		{"AvgOutputTokens", func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokens }},

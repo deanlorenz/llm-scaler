@@ -42,6 +42,9 @@ import (
 //     Σtokens/Σcapacity rather than averaged, so an instance with a larger cache
 //     weighs proportionally more. Without capacity to weigh by they fall back to
 //     the plain mean.
+//   - The busiest rank's queue and utilization (MaxRankQueueLength,
+//     MaxRankKvCacheUsage) take the max over the instances: they describe one
+//     engine, the fullest, which the saturation guards judge.
 //   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
 //     instance serving more of them should dominate. ITL is a mean per
@@ -116,6 +119,8 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.EngineRanks = 0
 	pod.TokensInUse = 0
 	pod.QueueLength = 0
+	pod.MaxRankQueueLength = 0
+	pod.MaxRankKvCacheUsage = 0
 	pod.RequestRate = 0
 	pod.GenerationTokenRate = 0
 
@@ -128,6 +133,12 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 		pod.EngineRanks += m.Ranks()
 		pod.TokensInUse += m.TokensInUse
 		pod.QueueLength += m.QueueLength
+		// The busiest rank of the pod is the busiest rank of its busiest
+		// row: a max, as the per-pod query takes it over ranks behind one
+		// API server. Each row's figure is read through the row's own ranks,
+		// so a row of one rank gives its queue and utilization as they are.
+		pod.MaxRankQueueLength = max(pod.MaxRankQueueLength, m.BusiestRankQueue())
+		pod.MaxRankKvCacheUsage = max(pod.MaxRankKvCacheUsage, m.BusiestRankKvUsage())
 		pod.RequestRate += m.RequestRate
 		pod.GenerationTokenRate += m.GenerationTokenRate
 

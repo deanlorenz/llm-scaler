@@ -25,6 +25,11 @@ type podMetricData struct {
 	queueLen       int
 	queueTimestamp time.Time
 	hasQueue       bool
+	// maxRankKv and maxRankQueue are the busiest engine rank's figures,
+	// where kvUsage is the mean over the ranks and queueLen their sum
+	// (domain.ReplicaMetrics.MaxRankQueueLength).
+	maxRankKv    float64
+	maxRankQueue int
 	// V2 fields for token-based capacity analysis
 	numGpuBlocks int64
 	blockSize    int64
@@ -135,6 +140,29 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				"instanceKey", instanceKey,
 				"pod", podName,
 				"queueLength", int(value.Value))
+		}
+	}
+
+	// The busiest rank's KV utilization and queue. Supplementary: they attach
+	// to instances the two queries above saw and never define one, and a
+	// failed query leaves them at zero, which BusiestRankQueue and
+	// BusiestRankKvUsage read as "not collected".
+	if result := results[registration.QueryMaxRankKvCacheUsage]; result != nil && !result.HasError() {
+		for _, value := range result.Values {
+			instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
+				value.Value >= 0 && !math.IsInf(value.Value, 0) {
+				data.maxRankKv = value.Value
+			}
+		}
+	}
+	if result := results[registration.QueryMaxRankQueueLength]; result != nil && !result.HasError() {
+		for _, value := range result.Values {
+			instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
+				value.Value >= 0 && !math.IsInf(value.Value, 0) {
+				data.maxRankQueue = int(value.Value)
+			}
 		}
 	}
 

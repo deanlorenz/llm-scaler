@@ -10,6 +10,10 @@ const (
 	// Saturation queries (per-pod peak metrics over time windows)
 	QueryKvCacheUsage = "kv_cache_usage"
 	QueryQueueLength  = "queue_length"
+	// QueryMaxRankKvCacheUsage and QueryMaxRankQueueLength are the busiest
+	// engine rank's figures, beside the pod's mean and sum above.
+	QueryMaxRankKvCacheUsage = "max_rank_kv_cache_usage"
+	QueryMaxRankQueueLength  = "max_rank_queue_length"
 
 	// V2 queries (token-based capacity analysis)
 	QueryCacheConfigInfo = "cache_config_info"
@@ -56,9 +60,14 @@ const (
 //     answer for the same ranks:
 //       - extensive gauges (the waiting queue) are SUMMED over the ranks,
 //         after a max per rank so a target scraped twice is not counted twice;
-//       - utilization (kv_cache_usage_perc) is AVERAGED: every rank of a pod
-//         runs the same model on the same GPUs, so the mean of the ranks'
-//         fractions is used tokens over total capacity;
+//       - utilization (kv_cache_usage_perc) is AVERAGED, after a max per rank
+//         for the same reason: every rank of a pod runs the same model on the
+//         same GPUs, so the mean of the ranks' fractions is used tokens over
+//         total capacity;
+//       - the busiest rank's queue and utilization are read as well, by a max
+//         over the ranks (QueryMaxRankQueueLength, QueryMaxRankKvCacheUsage):
+//         the sum and the mean price the pod, and the busiest rank says
+//         whether one engine of it is saturated;
 //       - per-request and per-token means (token lengths, ITL, TTFT, service
 //         time, prefix hit rate) are sum(rate(_sum)) / sum(rate(_count)),
 //         which weights each rank by its own traffic and leaves an idle rank
@@ -86,11 +95,17 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 	// Uses max_over_time to catch saturation events between scrapes, per rank,
 	// then the mean over the instance's ranks (see the note above
 	// RegisterSaturationQueries for the grouping key, namespace scoping and
-	// the DP rank rules)
+	// the DP rank rules). The max per rank first, as for the queue: a rank
+	// whose gauge has copies counts once. A target scraped twice has two.
+	// An older vLLM run with --api-server-count above one can export the
+	// gauge in prometheus_client's multiprocess "all" mode: one copy per API
+	// server process, told apart by a pid label, and a process that never
+	// received the rank's stats holds 0. A plain mean over such copies reads
+	// 0.375 for a pod whose two ranks are both at 0.75.
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryKvCacheUsage,
 		Type:        source.QueryTypePromQL,
-		Template:    `avg by (model_name, instance, pod) (max_over_time(vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}[1m]))`,
+		Template:    `avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}[1m])))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Peak KV cache utilization per instance (0.0-1.0) over last minute",
 	})
@@ -105,6 +120,28 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:num_requests_waiting{namespace="{{.namespace}}"}[1m])))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Peak queue length per instance over last minute",
+	})
+
+	// The busiest rank's KV cache utilization and queue: the largest one-
+	// minute peak over the instance's ranks. The two queries above give what
+	// the pod holds; these say whether any one engine of it is full and
+	// queued, which is what the saturation guards ask (see
+	// domain.ReplicaMetrics.MaxRankQueueLength). A max is also idempotent
+	// over copies of a series, so a second scrape or a pid copy cannot move
+	// it. On an instance with one rank each is the query above.
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryMaxRankKvCacheUsage,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (max_over_time(vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak KV cache utilization of the busiest engine rank per instance (0.0-1.0) over last minute",
+	})
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryMaxRankQueueLength,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (max_over_time(vllm:num_requests_waiting{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak queue length of the busiest engine rank per instance over last minute",
 	})
 
 	// --- V2 queries for token-based capacity analysis ---
@@ -261,6 +298,23 @@ func registerSGLangSaturationQueries(registry *source.QueryList) {
 		Template:    `max by (model_name, instance, pod) (max_over_time(sglang:num_queue_reqs{namespace="{{.namespace}}"}[1m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Peak queue length per instance over last minute (SGLang)",
+	})
+
+	// The busiest-rank figures are the two queries above: they already take
+	// the max per instance.
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryMaxRankKvCacheUsage,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (max_over_time(sglang:token_usage{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak KV cache utilization of the busiest rank per instance (0.0-1.0) over last minute (SGLang)",
+	})
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryMaxRankQueueLength,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (max_over_time(sglang:num_queue_reqs{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak queue length of the busiest rank per instance over last minute (SGLang)",
 	})
 
 	// Total KV-cache token capacity per instance.

@@ -28,6 +28,8 @@ var perPodVLLMQueries = []string{
 	QueryKvCacheUsage,
 	QueryKvUsageInstant,
 	QueryQueueLength,
+	QueryMaxRankKvCacheUsage,
+	QueryMaxRankQueueLength,
 	QueryCacheConfigInfo,
 	QueryAvgOutputTokens,
 	QueryAvgOutputTokensRecent,
@@ -115,14 +117,20 @@ func TestPerPodQueriesMatchPromtoolFixture(t *testing.T) {
 
 // The structural rule for each query, stated where a reader of the registry
 // finds it. The fixture proves the numbers; this names the mistake: a max over
-// a pod's ranks priced the busiest rank as the whole pod (issue #150).
+// a pod's ranks priced the busiest rank as the whole pod (issue #150). The two
+// busiest-rank queries are the exception by name, and the only ones.
 func TestPerPodQueriesFoldDataParallelRanks(t *testing.T) {
 	built := builtPerPodQueries(t, "llm")
 	const perPod = "by (model_name, instance, pod) ("
+	// A max per rank first, so copies of one rank's series -- a second
+	// scrape, a per-process pid copy -- count once.
+	const perRank = "max by (model_name, instance, pod, engine) ("
 	want := map[string]string{
-		QueryKvCacheUsage:   "avg " + perPod,
-		QueryKvUsageInstant: "avg " + perPod,
-		QueryQueueLength:    "sum " + perPod + "max by (model_name, instance, pod, engine) (",
+		QueryKvCacheUsage:        "avg " + perPod + perRank,
+		QueryKvUsageInstant:      "avg " + perPod + perRank,
+		QueryQueueLength:         "sum " + perPod + perRank,
+		QueryMaxRankKvCacheUsage: "max " + perPod + "max_over_time(",
+		QueryMaxRankQueueLength:  "max " + perPod + "max_over_time(",
 		QueryCacheConfigInfo: "count by (instance, pod, num_gpu_blocks, block_size) " +
 			"(max by (instance, pod, num_gpu_blocks, block_size, engine) (",
 	}

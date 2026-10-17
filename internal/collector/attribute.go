@@ -174,6 +174,15 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 
 	kvUsage := data.kvUsage
 	queueLen := data.queueLen
+	// The busiest rank's figures go with the pod's: a pod whose own KV or
+	// queue reading is missing has none of either.
+	maxRankKv, maxRankQueue := data.maxRankKv, data.maxRankQueue
+	if !data.hasKv {
+		maxRankKv = 0
+	}
+	if !data.hasQueue {
+		maxRankQueue = 0
+	}
 
 	if !data.hasKv {
 		logger.Info("Pod missing KV cache metrics, using 0",
@@ -405,6 +414,8 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		BlockSize:                data.blockSize,
 		TotalKvCapacityTokens:    totalKvCapacityTokens,
 		EngineRanks:              data.engineRanks,
+		MaxRankQueueLength:       maxRankQueue,
+		MaxRankKvCacheUsage:      maxRankKv,
 		TokensInUse:              tokensInUse,
 		AvgOutputTokens:          data.avgOutputTokens,
 		AvgOutputTokensRecent:    data.avgOutputTokensRecent,

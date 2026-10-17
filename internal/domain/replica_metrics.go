@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // This file holds the ANALYZER-AGNOSTIC replica signal.
 //
@@ -155,6 +158,23 @@ type ReplicaMetrics struct {
 	// eight ranks admits eight times max_num_seqs sequences. The KV capacity
 	// above is already the whole pod's in both layouts.
 	EngineRanks int
+
+	// MaxRankQueueLength and MaxRankKvCacheUsage are the waiting queue and
+	// the KV cache utilization of the record's busiest rank: the largest one-
+	// minute peak over its ranks, where QueueLength is their sum and
+	// KvCacheUsage their mean. Zero when not collected. Read them through
+	// BusiestRankQueue and BusiestRankKvUsage, which also cover a record of
+	// one rank and a record collected without them.
+	//
+	// The sum and the mean are what the pod holds, and price demand and
+	// utilization. They do not say whether one rank is full. The saturation
+	// guards ask exactly that: whether a replica is full and queued, as
+	// queueLengthThreshold and kvCacheThreshold define it for ONE engine.
+	// A pod whose eight ranks each have one request waiting is not
+	// saturated, though its queue sums to eight; a pod with one full rank
+	// and seven idle ones has a saturated rank, though its mean reads 0.125.
+	MaxRankQueueLength  int
+	MaxRankKvCacheUsage float64
 
 	// TokensInUse is the derived current token demand on this replica.
 	// Computed as KvCacheUsage × TotalKvCapacityTokens.
@@ -314,6 +334,54 @@ type ReplicaMetrics struct {
 // per-record figure; see EngineRanks.
 func (m ReplicaMetrics) Ranks() int {
 	return max(m.EngineRanks, 1)
+}
+
+// BusiestRankQueue is the waiting queue of the record's busiest rank (see
+// MaxRankQueueLength). With one rank it is QueueLength. With several and no
+// busiest-rank reading while requests wait, it is the queue's mean over the
+// ranks rounded up: the least the busiest rank can hold.
+func (m ReplicaMetrics) BusiestRankQueue() int {
+	if m.Ranks() <= 1 {
+		return m.QueueLength
+	}
+	if m.MaxRankQueueLength > 0 || m.QueueLength <= 0 {
+		return m.MaxRankQueueLength
+	}
+	ranks := m.Ranks()
+	return (m.QueueLength + ranks - 1) / ranks
+}
+
+// BusiestRankKvUsage is the KV cache utilization of the record's busiest
+// rank (see MaxRankKvCacheUsage). With one rank it is KvCacheUsage. With
+// several and no busiest-rank reading, it is the mean, the least the busiest
+// rank can hold.
+func (m ReplicaMetrics) BusiestRankKvUsage() float64 {
+	if m.Ranks() <= 1 || !(m.MaxRankKvCacheUsage > 0) {
+		return m.KvCacheUsage
+	}
+	return m.MaxRankKvCacheUsage
+}
+
+// BusiestRankTokens is the tokens the record would hold were every one of
+// its ranks as full as its busiest one: BusiestRankKvUsage times the
+// record's KV capacity. With one rank, or without a capacity, it is
+// TokensInUse.
+//
+// It is the record's occupancy at the moment ONE engine saturates. A k2
+// learned from it is one engine's saturation point scaled by the ranks, as
+// the derived k2 scales one engine's settings.
+func (m ReplicaMetrics) BusiestRankTokens() int64 {
+	if m.Ranks() <= 1 || m.TotalKvCapacityTokens <= 0 {
+		return m.TokensInUse
+	}
+	// Rounded and clamped to the capacity as TokensInUse is
+	// (collector.attributeInstance). Never below TokensInUse: the busiest
+	// rank holds at least the mean.
+	busiest := math.Round(m.BusiestRankKvUsage() * float64(m.TotalKvCapacityTokens))
+	if !(busiest <= float64(m.TotalKvCapacityTokens)) {
+		busiest = float64(m.TotalKvCapacityTokens)
+	}
+	return max(int64(busiest), m.TokensInUse)
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics

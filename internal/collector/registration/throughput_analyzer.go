@@ -61,8 +61,11 @@ const (
 	// per rank, and the mean of the ranks' fractions is the pod's used tokens
 	// over its capacity (the ranks are alike). A max here read the busiest rank
 	// as the whole pod (issue #150). With one rank the mean is that rank's
-	// value, and duplicate series from a pod scraped by two targets (PodMonitor
-	// + ServiceMonitor) carry the same value, so they do not move it.
+	// value. A max per rank comes first, so copies of a rank's gauge count
+	// once: duplicate series from a pod scraped by two targets (PodMonitor +
+	// ServiceMonitor), and the per-process copies an older vLLM run with
+	// --api-server-count above one can export, where a process that never
+	// received the rank's stats holds 0 (see QueryKvCacheUsage).
 	// Source: vllm:kv_cache_usage_perc (gauge)
 	QueryKvUsageInstant = "kv_usage_instant"
 
@@ -306,7 +309,7 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryKvUsageInstant,
 		Type:        source.QueryTypePromQL,
-		Template:    `avg by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"})`,
+		Template:    `avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
 	})
