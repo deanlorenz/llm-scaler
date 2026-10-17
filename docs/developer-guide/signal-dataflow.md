@@ -32,6 +32,7 @@ from?"* rather than *"what does the analyzer do?"*.
 │   registration/*.go  the PromQL templates, per engine                       │
 │   extract.go         query results -> per-INSTANCE podMetricData            │
 │   pod_collapse.go    a pod's engines -> one replica (sum or weight, per field)│
+│                      (ranks behind one API server: folded in the PromQL)    │
 │   attribute.go       replica -> variant, + the not-Ready and uptime guards  │
 │   freshness.go       how old each driving metric is                         │
 └───────────────────────────────┬─────────────────────────────────────────────┘
@@ -186,6 +187,13 @@ rather than a bad measurement.
 `S` appears **twice** — here and in the derived mu — and the second is the one
 people forget: above a certain cache size, mu stops responding to capacity at
 all because `S` binds first.
+
+`B`, `S` and `TotalKvTokensOverride` bound **one engine**. A replica running
+several data-parallel ranks runs that many engines, so each is multiplied by
+the replica's `Ranks()` before it meets the replica's own figures: the derived
+k2, the derived mu's sequence cap and the SLO analyzer's batch cap. `k1` needs
+no scaling; `TotalKvCapacityTokens` is already the whole replica's. See
+[Data-parallel pods](#data-parallel-pods).
 
 `computeK2` has a priority order (observed, historical, derived, fallback) and
 `k2Source` in the log says which answered. The *observed* k2 is
@@ -472,6 +480,51 @@ input to the proposed prefill TTFT model) and `AvgServiceTime` (kept for
 diagnostics; the Little's-law floor built on it was retired, because service
 time is `ITL x O` and ITL grows with the batch, so it priced the same load
 differently at every fleet size and oscillated).
+
+### Data-parallel pods
+
+A `domain.ReplicaMetrics` row is one pod, however many vLLM engine ranks it
+runs. Ranks reach the collector in two layouts, and both end as one row with
+the same figures:
+
+- **One API server per rank.** Each rank is its own scrape target, so the
+  collector sees one instance per port (`pod:port`) and
+  `collector.collapseToPods` merges them.
+- **Several ranks behind one API server.** vLLM exports every series once per
+  rank from one target, told apart by the `engine` label
+  (`vllm/v1/metrics/loggers.py`). The per-pod queries in
+  `collector/registration` drop `engine` and fold the ranks by the merge's
+  rules, so the row arrives already whole.
+
+The rules, the same in both:
+
+| field | rule |
+| --- | --- |
+| KV capacity (`NumGpuBlocks`, `TotalKvCapacityTokens`) | the sum over the ranks. vLLM's API server already sums its engines' blocks into the `num_gpu_blocks` label of `vllm:cache_config_info`, so that label is read as is and never multiplied |
+| `EngineRanks` | the sum: the merge adds rows, the query counts the `cache_config_info` series (one per rank). `Ranks()` reads an unknown count as 1 |
+| `KvCacheUsage`, `KvUsageInstant` | used tokens over total capacity: the merge weighs by each row's capacity, the query takes the mean over ranks (ranks of a pod are alike) |
+| `QueueLength`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate` | the sum |
+| token lengths, `AvgTTFT`, `AvgServiceTime` | weighted by each rank's requests |
+| `AvgITL` | weighted by each rank's generated tokens |
+| `PrefixCacheHitRate` | weighted by each rank's prompt tokens |
+
+Latency is a weighted mean and not the busiest rank's, which is what the queries
+took before issue #150. The ranks share a frontend that sends each request to
+its least-loaded rank, so the pod's latency is what its average request sees,
+and the line is fitted against the pod's mean utilization and priced on its
+whole capacity. One hot rank's backlog is still counted: the queue is summed,
+and the queue is what the saturation guards read. On an expert-parallel pod
+the ranks step together, so their latencies barely differ anyway.
+
+`hack/check-collector-queries.sh` evaluates the queries with promtool on a
+fixture of eight ranks behind one API server and an ordinary pod
+(`collector/registration/testdata/per-pod-queries.test.yaml`), and
+`TestCollectReplicaMetrics_DPLayoutsAgree` checks that the two layouts give
+the same row.
+
+Not covered: SGLang's per-pod queries are unchanged, and an LWS group whose
+data-parallel ranks run one API server per node is still its leader's row, so
+the workers' ranks are not counted.
 
 ## Prefill, specifically
 

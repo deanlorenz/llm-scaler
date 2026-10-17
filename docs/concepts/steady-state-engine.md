@@ -279,6 +279,13 @@ Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-s
 `--max-model-len`, `--max-num-batched-tokens`, `--num-gpu-blocks-override`, …) are read from the
 Deployment/LeaderWorkerSet — **not** Prometheus — and feed the derived-capacity path.
 
+A pod that runs several data-parallel engine ranks is one replica, measured as all of its ranks.
+This holds whether each rank has its own API server or the ranks share one (vLLM then labels
+each series with `engine`). Its capacity is the sum over the ranks. Its cache use is used tokens
+over that total, and its queue is the sum. Its latencies are means weighted by each rank's
+traffic, not the busiest rank's. `--max-num-seqs` and `--max-num-batched-tokens` limit one
+rank, so the pod's batch limit is the ranks times them.
+
 ### Output — metrics to observe the engine's decisions
 
 | Metric | Type | Meaning |

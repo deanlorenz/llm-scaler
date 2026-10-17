@@ -349,6 +349,16 @@ What changes without a config change:
   is skipped (no node read, say), no new borrowing starts. See the box above
   and [the guide](../guides/kueue-borrowing/). Borrowing state is kept in
   `wva-controller-status`, so it survives a restart.
+- **A vLLM pod running several data-parallel ranks behind one API server now
+  gets its real capacity, so fewer replicas are ordered for it.** Before, each
+  per-pod figure took the busiest rank: its cache use, its latency and its
+  queue stood for the whole pod, and `--max-num-seqs` capped the whole pod at
+  one rank's batch. A pod of eight ranks could be ordered up to about eight
+  times the replicas it needs. Now its use is the mean over its ranks, its
+  queue is the sum, its latencies are traffic-weighted means, and its batch cap
+  is the ranks times `--max-num-seqs`. A pod with one rank per API server is
+  priced as before (bug fix). See
+  [Data-parallel pods](../developer-guide/signal-dataflow.md#data-parallel-pods).
 
 New reads, for borrowing: `cohorts` and `workloads` (Kueue; `workloads`
 cluster-wide, watched through an informer), the `kueue-controller-manager`
