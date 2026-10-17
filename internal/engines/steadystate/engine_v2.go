@@ -988,7 +988,9 @@ func runRegisteredAnalyzer(
 // The same formula and the same (scaleUp, scaleDown) are applied at every
 // scope — model-level and each RoleCapacity entry. There are no per-role
 // threshold overrides. A non-positive scaleUp or scaleDown leaves the
-// corresponding signal unchanged.
+// corresponding signal unchanged. A role the analyzer holds has no spare,
+// and no required capacity within a rounding residue of zero
+// (settleHeldRoles).
 func applyUniversalThreshold(nr *allocation.NamedAnalyzerResult, scaleUp, scaleDown float64) {
 	if nr == nil || nr.Result == nil {
 		return
@@ -1010,6 +1012,63 @@ func applyUniversalThreshold(nr *allocation.NamedAnalyzerResult, scaleUp, scaleD
 			rc.SpareCapacity = atLeastZero(rc.TotalSupply - rc.TotalDemand/scaleDown)
 		}
 		nr.RoleCapacities[role] = rc
+	}
+	settleHeldRoles(nr, scaleUp, scaleDown)
+}
+
+// heldRequiredResidue is the largest RequiredCapacity, as a fraction of
+// anticipated supply, that a held role reads as zero: far below a replica
+// on any fleet, far above the rounding of one multiply and one divide.
+const heldRequiredResidue = 1e-9
+
+// settleHeldRoles fixes the signals of every role the analyzer holds
+// (Result.HeldRoleDemand), and the model-level ones when every role is held:
+// its spare is zero, and a required capacity within heldRequiredResidue of
+// zero is zero.
+//
+// A hold keeps a role where it is by moving its demand to the edge of the
+// band where the formula above gives zero: up to scaleDown x supply, or,
+// for prefill while decode is saturated, down to scaleUp x anticipated
+// supply. In floating point the formula does not always land on zero:
+// 0.7 x (21 x 24576) / 0.7 comes back 5.8e-11 above 21 x 24576. A positive
+// spare let the optimizer release up to the role's releasable capacity,
+// about 5% of supply at the default thresholds, so a held role of twenty or
+// more replicas shed one under the hold meant to stop it; a positive
+// required capacity is rounded up to a whole replica and ordered one.
+//
+// The spare is zeroed outright: no hold releases. The required capacity only
+// within the residue, because a hold is a floor on the way up: a shape
+// change, or prefill's undispatched queue, still orders.
+func settleHeldRoles(nr *allocation.NamedAnalyzerResult, scaleUp, scaleDown float64) {
+	held := nr.Result.HeldRoleDemand
+	if len(held) == 0 {
+		return
+	}
+	settle := func(required, spare *float64, anticipated float64) {
+		if scaleUp > 0 && *required <= heldRequiredResidue*anticipated {
+			*required = 0
+		}
+		if scaleDown > 0 {
+			*spare = 0
+		}
+	}
+	if nr.RoleCapacities == nil {
+		if _, ok := held[domain.RoleBoth]; ok {
+			settle(&nr.RequiredCapacity, &nr.SpareCapacity, nr.TotalAnticipatedSupply)
+		}
+		return
+	}
+	all := true
+	for role, rc := range nr.RoleCapacities {
+		if _, ok := held[role]; !ok {
+			all = false
+			continue
+		}
+		settle(&rc.RequiredCapacity, &rc.SpareCapacity, rc.TotalAnticipatedSupply)
+		nr.RoleCapacities[role] = rc
+	}
+	if all {
+		settle(&nr.RequiredCapacity, &nr.SpareCapacity, nr.TotalAnticipatedSupply)
 	}
 }
 
