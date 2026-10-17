@@ -159,6 +159,11 @@ func (e *Engine) reportLenders(ctx context.Context, requests []allocation.ModelS
 
 // lenderBlockedMessage says why a waiting lender was handed nothing.
 func lenderBlockedMessage(b allocation.LenderReleaseBlock) string {
+	if b.Reason == allocation.LenderPreempting {
+		return fmt.Sprintf("ClusterQueue %s waits in cohort %s while %d GPUs of Workloads Kueue preempted still stop: "+
+			"nothing is handed back until they are free, at most 30 minutes after each eviction "+
+			"(releaseToNonReclaimingLenders)", b.Lender.Lender, b.Lender.Cohort, b.Givable)
+	}
 	if b.Reason == allocation.LenderTaken {
 		return fmt.Sprintf("ClusterQueue %s still waits in cohort %s after capacity was handed back to it, and Kueue's "+
 			"borrowed figure did not fall: another borrower took it. Nothing more is handed back to it while it waits "+

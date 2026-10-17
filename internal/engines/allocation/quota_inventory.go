@@ -662,7 +662,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOption
 			Lenders: lenders, ReadAt: ext.ObservedAt,
 			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree), CoUnbound: slices.Clone(p.CoUnbound),
 			Restricted: slices.Clone(pools.restricted[poolKey(p)]), ClassPriority: maps.Clone(ext.ClassPriority),
-			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority, BorrowerLowest: p.BorrowerLowest, EvictingGPUs: p.EvictingGPUs, EvictionsRead: p.EvictionsRead,
+			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority, BorrowerLowest: p.BorrowerLowest, EvictingGPUs: p.EvictingGPUs, StuckEvictingGPUs: p.StuckEvictingGPUs, EvictionsRead: p.EvictionsRead,
 			ReleaseToNonReclaiming: release, RawFree: p.Free,
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),

@@ -363,6 +363,11 @@ const (
 	// back: another borrower took it. Nothing more is released to it while it
 	// waits.
 	LenderTaken = "taken-by-another-borrower"
+	// LenderPreempting: Workloads Kueue preempted on the lender's flavor in
+	// its cohort still hold their quota while their pods stop; nothing is
+	// released until they have (Givable is their GPUs), for at most
+	// kueue.EvictionBound from each eviction.
+	LenderPreempting = "kueue-preempting"
 )
 
 // LenderReleaseBlock is a waiting lender Kueue does not reclaim for that a
@@ -476,7 +481,12 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 				}
 				continue
 			}
-			if !g.releaseDue(key, l, ch.ReadAt) || kueueReclaimsAll(l, ch) || kueueFreeing(ch) {
+			if !g.releaseDue(key, l, ch.ReadAt) || kueueReclaimsAll(l, ch) {
+				continue
+			}
+			if kueueFreeing(ch) {
+				g.report.Blocked = append(g.report.Blocked, LenderReleaseBlock{Lender: key, Reason: LenderPreempting,
+					Need: l.PendingGPUs, Givable: ch.EvictingGPUs})
 				continue
 			}
 			if left == nil {
@@ -580,11 +590,16 @@ func (g *BorrowGovernor) kueueMayPreemptOutside(key LenderKey, l kueue.LenderSta
 	return since.IsZero() || ch.ReadAt.Sub(since) < window
 }
 
-// kueueFreeing reports whether Kueue is freeing GPUs in the cohort by
-// preemption: a Workload it preempted (Evicted, reason Preempted) still holds
-// its quota while its pods stop. Its GPUs reach the pool, and its queue's
-// borrowed figure falls, with nothing handed back; a release sized before
-// they do would give the same GPUs twice. No release goes until they have.
+// kueueFreeing reports whether Kueue is freeing GPUs on the chunk's flavor in
+// the cohort by preemption: a Workload it preempted (Evicted, reason
+// Preempted, not re-admitted since) still holds its quota while its pods
+// stop. Its GPUs reach the pool, and its queue's borrowed figure falls, with
+// nothing handed back; a release sized before they do would give the same
+// GPUs twice. No release goes until they have -- but not for good: a victim
+// evicted longer ago than kueue.EvictionBound is stuck (a pod Terminating on
+// a NotReady node), not stopping, and is not waited for
+// (SharedPoolChunk.StuckEvictingGPUs). The lender is reported
+// (LenderPreempting) while it waits.
 func kueueFreeing(ch *SharedPoolChunk) bool {
 	return ch.EvictingGPUs > 0
 }

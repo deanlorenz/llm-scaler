@@ -102,6 +102,28 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		Expect(pool.BorrowerLowest).To(BeNil())
 	})
 
+	// PR #203 final check: what preemption victims hold is waited for on the
+	// lender's flavor alone, and for EvictionBound at most.
+	It("counts a victim's quota on its own flavor, and not once it is stuck past the bound", func() {
+		victimOf := func(flavor string, age time.Duration) QueueState {
+			q := member("a", QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8})
+			q.Evicting = []EvictingWorkload{{Since: now.Add(-age),
+				GPUs: map[ResourceKey]int64{{Flavor: flavor, Resource: gpuKey.Resource}: 8}}}
+			return q
+		}
+		pool := func(q QueueState) SharedPool {
+			t := topology(member("lender", QueueResource{Nominal: 8}), q)
+			t.Now = now
+			return ComputeBorrowing(t, false).Pools[0]
+		}
+		Expect(pool(victimOf("h100", 5*time.Minute)).EvictingGPUs).To(Equal(8), "a victim stopping on this flavor")
+		Expect(pool(victimOf("", 5*time.Minute)).EvictingGPUs).To(Equal(8), "no flavor named: counted, the cautious side")
+		Expect(pool(victimOf("a100", 5*time.Minute)).EvictingGPUs).To(BeZero(), "a victim on another flavor frees nothing here")
+		stuck := pool(victimOf("h100", EvictionBound+time.Minute))
+		Expect(stuck.EvictingGPUs).To(BeZero(), "stuck past the bound: no longer waited for")
+		Expect(stuck.StuckEvictingGPUs).To(Equal(8))
+	})
+
 	It("carries the part it keeps unused: Kueue admits that much without a release", func() {
 		l := member("lender", QueueResource{Nominal: 32, LendingLimit: ptr(16)})
 		l.PendingWorkloads = []PendingWorkload{pendingGPU(16, 0)}

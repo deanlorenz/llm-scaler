@@ -691,6 +691,9 @@ func TestLenderReleaseRecheck(t *testing.T) {
 				t.Fatalf("released %+v at %v while the outside victim at 10 still terminates", rel, at)
 			}
 		}
+		if b, ok := blockedOf(gov, "lender"); !ok || b.Reason != LenderPreempting || b.Givable != 16 {
+			t.Errorf("report %+v, want the lender reported %s, 16 GPUs stopping", gov.LenderReport(), LenderPreempting)
+		}
 		// With the Workloads read and no victim, one admission pass is the wait.
 		w.evicting = 0
 		gov = NewBorrowGovernor(settings)

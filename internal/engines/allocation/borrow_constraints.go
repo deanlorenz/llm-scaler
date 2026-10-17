@@ -139,6 +139,9 @@ type SharedPoolChunk struct {
 	// (kueue.SharedPool).
 	EvictingGPUs  int
 	EvictionsRead bool
+	// StuckEvictingGPUs is what victims evicted longer ago than
+	// kueue.EvictionBound still hold: no longer waited for.
+	StuckEvictingGPUs int
 	// ReleaseToNonReclaiming is set when the entry that read the chunk opts
 	// in to kueue.releaseToNonReclaimingLenders (PR-C): Free then counts what
 	// lenders Kueue does not reclaim for lend, and the governor hands it back
@@ -550,6 +553,7 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	}
 	prev.Borrowed = max(prev.Borrowed, p.Borrowed)
 	prev.EvictingGPUs = max(prev.EvictingGPUs, p.EvictingGPUs)
+	prev.StuckEvictingGPUs = max(prev.StuckEvictingGPUs, p.StuckEvictingGPUs)
 	prev.EvictionsRead = prev.EvictionsRead && p.EvictionsRead
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt

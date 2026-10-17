@@ -327,9 +327,12 @@ releases and their pins:
   `releaseDue`: two fresh reads in its debounce watch, or `PendingSince` past
   `kueueSchedulingInterval`. `kueueReclaimsAll` leaves a `LowerPriority`
   lender above the chunk's `BorrowerPriority` to Kueue;
-  `kueueFreeing` holds every release while the chunk's `EvictingGPUs`
-  (reserved GPUs of Workloads with `Evicted=True`, reason `Preempted`, read
-  by `readPending`) is above 0; `kueueMayPreemptOutside` waits one
+  `kueueFreeing` holds every release, reported `LenderPreempting`, while
+  the chunk's `EvictingGPUs` is above 0: reserved GPUs, on the chunk's
+  flavor, of Workloads `workloadVictim` reads as preempted (`Evicted=True`,
+  reason `Preempted`, no `QuotaReserved=True` transition after it), evicted
+  within `kueue.EvictionBound` (30m; older ones go to
+  `StuckEvictingGPUs`); `kueueMayPreemptOutside` waits one
   `kueueSchedulingInterval` (`lenderPreemptWindow` when
   `EvictionsRead` is false) while the chunk's `BorrowerLowest` (unknown, or
   below the head) and a `Borrowed` above this controller's own say Kueue may

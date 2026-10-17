@@ -639,8 +639,11 @@ when the lender does not outrank the borrowing model.
   the namespaces borrow (lower targets other than a wake's reclaim yield,
   terminating pods, releases that landed), less what Kueue preempts for it
   from models it outranks. No release goes while a Workload Kueue preempted
-  in the cohort still holds its quota (its pods stopping, however long their
-  grace): Kueue is freeing those GPUs itself. Under `LowerPriority`, when a
+  on the lender's flavor in the cohort still holds its quota (its pods
+  stopping): Kueue is freeing those GPUs itself. The lender is then reported
+  (`reason="kueue-preempting"`). A victim evicted more than 30 minutes ago
+  is taken to be stuck (a pod Terminating on a NotReady node) and no longer
+  waited for; one Kueue re-admitted since is no victim. Under `LowerPriority`, when a
   borrower this controller does not govern may hold the pool below the
   lender's waiting Workload, the release also waits one admission pass for
   Kueue to choose its victims (about two minutes if the Workloads cannot be

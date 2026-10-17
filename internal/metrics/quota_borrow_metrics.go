@@ -115,8 +115,9 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 		Name: constants.WVAKueueLenderReleaseBlocked,
 		Help: "1 while a waiting lender Kueue does not reclaim for is handed nothing, with " +
 			"kueue.releaseToNonReclaimingLenders: reason unservable (what this controller could give back " +
-			"would not admit its next Workload) or taken-by-another-borrower (a release landed and another " +
-			"borrower took it).",
+			"would not admit its next Workload), taken-by-another-borrower (a release landed and another " +
+			"borrower took it) or kueue-preempting (Workloads Kueue preempted still hold their quota while " +
+			"their pods stop, at most 30 minutes after each eviction).",
 	}, withInstance(constants.LabelCohort, constants.LabelClusterQueue, constants.LabelReason))
 	ledgerUnread = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueBorrowLedgerUnread,

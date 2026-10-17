@@ -176,10 +176,26 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		victim := workload("team-a", "victim", 10, gpus("2"), "team-a-cq")
 		st := victim.Object["status"].(map[string]interface{})
 		st["conditions"] = append(st["conditions"].([]interface{}),
-			map[string]interface{}{"type": WorkloadEvicted, "status": "True", "reason": WorkloadEvictedByPreemption})
+			map[string]interface{}{"type": WorkloadEvicted, "status": "True", "reason": WorkloadEvictedByPreemption,
+				"lastTransitionTime": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)})
 		read("", victim, workload("team-a", "serve", 100, gpus("8"), "team-a-cq"))
 		Expect(snap.SharedPools[0].EvictionsRead).To(BeTrue())
 		Expect(snap.SharedPools[0].EvictingGPUs).To(Equal(2), "the victim's 2, not the running Workload's 8")
+	})
+
+	// PR #203 final check: a Workload re-admitted after its eviction is no
+	// victim, whatever its Evicted condition still says.
+	It("does not count a Workload re-admitted after its eviction", func() {
+		evictedAt := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+		readmittedAt := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+		w := workload("team-a", "back", 10, gpus("2"), "team-a-cq")
+		w.Object["status"].(map[string]interface{})["conditions"] = []interface{}{
+			map[string]interface{}{"type": "QuotaReserved", "status": "True", "lastTransitionTime": readmittedAt},
+			map[string]interface{}{"type": WorkloadEvicted, "status": "True", "reason": WorkloadEvictedByPreemption,
+				"lastTransitionTime": evictedAt},
+		}
+		read("", w)
+		Expect(snap.SharedPools[0].EvictingGPUs).To(BeZero(), "re-admitted 5 minutes after its eviction")
 	})
 
 	It("reads each class's priority and each namespace's highest, from unfinished GPU Workloads", func() {

@@ -155,10 +155,10 @@ type QueueState struct {
 	WithinClusterQueue string
 	// QueueingStrategy is spec.queueingStrategy; empty for BestEffortFIFO.
 	QueueingStrategy string
-	// EvictingGPUs is, per GPU resource, what the queue's Workloads Kueue
-	// preempted (Evicted=True, reason Preempted) still hold reserved while
-	// their pods stop.
-	EvictingGPUs map[string]int64
+	// Evicting is the queue's Workloads Kueue preempted (Evicted=True, reason
+	// Preempted, not re-admitted since) that still hold their quota while
+	// their pods stop (workloadVictim).
+	Evicting []EvictingWorkload
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -193,6 +193,26 @@ type QueueState struct {
 	CoFlavors map[string][]string
 	CoWithGPU map[string]bool
 }
+
+// EvictingWorkload is a preempted Workload that still holds its quota.
+type EvictingWorkload struct {
+	// Since is its Evicted condition's lastTransitionTime. Zero (not
+	// written) reads as past EvictionBound: a wait nothing bounds is not
+	// started for it.
+	Since time.Time
+	// GPUs is, per flavor and GPU resource of its admission, what it
+	// reserves; Flavor is empty where the admission names none.
+	GPUs map[ResourceKey]int64
+}
+
+// EvictionBound is how long a preempted Workload's quota counts as being
+// freed (SharedPool.EvictingGPUs). Past it the victim is stuck -- a pod
+// Terminating on a NotReady node, or a stale condition -- not stopping: it
+// no longer holds a release to a lender. Thirty minutes is the longest
+// release latency a release itself is allowed (the engine's
+// MaxReleaseLatency), and longer than any termination grace a serving pod
+// sets in practice.
+const EvictionBound = 30 * time.Minute
 
 // coFlavor is the flavor a replica on GPU flavor gpuFlavor is charged res on:
 // the GPU's own flavor when res shares its resource group, the one flavor of
@@ -403,12 +423,15 @@ type SharedPool struct {
 	// that borrows has none read.
 	BorrowerLowest *int32
 	// EvictingGPUs is what the members' preempted Workloads still hold
-	// reserved of this resource while their pods stop (whatever their
-	// flavor: the cautious side, which waits longer). Kueue's borrowed figure
-	// still counts them, and they are freed without anything handed back.
+	// reserved of this flavor and resource while their pods stop, evicted
+	// within EvictionBound (a Workload whose admission names no flavor counts
+	// for every flavor). Kueue's borrowed figure still counts them, and they
+	// are freed without anything handed back. StuckEvictingGPUs is the same
+	// for victims evicted longer ago than that: counted no more.
 	// EvictionsRead says whether the Workloads were read at all.
-	EvictingGPUs  int
-	EvictionsRead bool
+	EvictingGPUs      int
+	StuckEvictingGPUs int
+	EvictionsRead     bool
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -597,7 +620,15 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				if !declares {
 					continue
 				}
-				if n := q.EvictingGPUs[key.Resource]; n > 0 {
+				for _, v := range q.Evicting {
+					n := v.GPUs[key] + v.GPUs[ResourceKey{Resource: key.Resource}]
+					if n <= 0 {
+						continue // another flavor's
+					}
+					if !t.Now.IsZero() && t.Now.Sub(v.Since) > EvictionBound {
+						p.StuckEvictingGPUs = addCapped(p.StuckEvictingGPUs, clampQuota(n))
+						continue
+					}
 					p.EvictingGPUs = addCapped(p.EvictingGPUs, clampQuota(n))
 				}
 				if r.Borrowed > 0 {

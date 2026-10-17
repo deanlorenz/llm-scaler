@@ -531,8 +531,9 @@ type ExternalSharedPool struct {
 	// EvictingGPUs is what the members' preempted Workloads still hold
 	// reserved while their pods stop; EvictionsRead whether the Workloads
 	// were read (kueue.SharedPool).
-	EvictingGPUs  int  `json:"evictingGPUs,omitempty"`
-	EvictionsRead bool `json:"evictionsRead,omitempty"`
+	EvictingGPUs      int  `json:"evictingGPUs,omitempty"`
+	StuckEvictingGPUs int  `json:"stuckEvictingGPUs,omitempty"`
+	EvictionsRead     bool `json:"evictionsRead,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.

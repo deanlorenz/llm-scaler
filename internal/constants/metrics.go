@@ -1058,8 +1058,10 @@ const (
 	// ClusterQueue and reason while a waiting lender Kueue does not reclaim
 	// for is handed nothing (kueue.releaseToNonReclaimingLenders): reason
 	// unservable (what this controller could hand back would not admit its
-	// next Workload) or taken-by-another-borrower (a release landed and
-	// another borrower took it). Absent otherwise.
+	// next Workload), taken-by-another-borrower (a release landed and
+	// another borrower took it) or kueue-preempting (Workloads Kueue
+	// preempted still hold their quota while their pods stop). Absent
+	// otherwise.
 	WVAKueueLenderReleaseBlocked = "wva_kueue_lender_release_blocked"
 
 	// WVAKueueBorrowLedgerUnread is a gauge, 1 with a reason while the

@@ -3,6 +3,7 @@ package kueue
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -126,9 +127,9 @@ type pendingRead struct {
 	// lowestReserved is, per ClusterQueue, the lowest spec.priority of its
 	// reserved GPU Workloads (QueueState.LowestReserved).
 	lowestReserved map[string]int32
-	// evicting is, per ClusterQueue and GPU resource, what its Workloads
-	// Kueue preempted still hold reserved (QueueState.EvictingGPUs).
-	evicting map[string]map[string]int64
+	// evicting is, per ClusterQueue, its Workloads Kueue preempted that
+	// still hold their quota (QueueState.Evicting).
+	evicting map[string][]EvictingWorkload
 }
 
 // readPending reads the Workloads for the lender-waiting signal and the
@@ -150,7 +151,7 @@ type pendingRead struct {
 func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Unstructured) (out pendingRead, unreadable bool) {
 	out = pendingRead{byQueue: map[string][]PendingWorkload{}, lenderPriority: map[string]int32{},
 		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}, borrowerPriority: map[string]int32{},
-		lowestReserved: map[string]int32{}, evicting: map[string]map[string]int64{}}
+		lowestReserved: map[string]int32{}, evicting: map[string][]EvictingWorkload{}}
 	fail := func(err error) (pendingRead, bool) {
 		if !r.warnedPending && ctx.Err() == nil {
 			r.warnedPending = true
@@ -209,13 +210,8 @@ func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Uns
 				lowest(out.lenderPriority, cq, priority)
 				highest(out.borrowerPriority, cq, priority)
 				lowest(out.lowestReserved, cq, priority)
-				if workloadPreemptedNow(w) {
-					if out.evicting[cq] == nil {
-						out.evicting[cq] = map[string]int64{}
-					}
-					for res, n := range gpus {
-						out.evicting[cq][res] += n
-					}
+				if since, ok := workloadVictim(w); ok {
+					out.evicting[cq] = append(out.evicting[cq], EvictingWorkload{Since: since, GPUs: admittedGPUs(w, gpus)})
 				}
 			}
 			continue
@@ -399,20 +395,55 @@ func workloadFinished(w *unstructured.Unstructured) bool {
 	return false
 }
 
-// workloadPreemptedNow reports whether a Workload carries Evicted=True with
-// reason Preempted. Kueue evicts a preempted Workload at once, but its quota
-// stays reserved -- in the queue's borrowed figure -- until its pods stop,
-// which a long termination grace makes minutes.
-func workloadPreemptedNow(w *unstructured.Unstructured) bool {
+// workloadVictim reports whether a reserved Workload is a preemption victim
+// still holding its quota, and since when: Evicted=True with reason
+// Preempted, and no QuotaReserved=True transition after it. Kueue evicts a
+// preempted Workload at once, but its quota stays reserved -- in the queue's
+// borrowed figure -- until its pods stop, which a long termination grace
+// makes minutes. A Workload re-admitted since (QuotaReserved turned True
+// after the eviction) is not a victim, whatever its Evicted condition still
+// says.
+func workloadVictim(w *unstructured.Unstructured) (time.Time, bool) {
 	conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+	var evicted, reserved time.Time
+	victim := false
 	for _, raw := range conds {
 		cond, _ := raw.(map[string]interface{})
-		if cond["type"] == WorkloadEvicted && cond["status"] == string(corev1.ConditionTrue) &&
-			cond["reason"] == WorkloadEvictedByPreemption {
-			return true
+		at, _ := time.Parse(time.RFC3339, fmt.Sprint(cond["lastTransitionTime"]))
+		switch {
+		case cond["type"] == WorkloadEvicted && cond["status"] == string(corev1.ConditionTrue) &&
+			cond["reason"] == WorkloadEvictedByPreemption:
+			victim, evicted = true, at
+		case cond["type"] == WorkloadQuotaReserved && cond["status"] == string(corev1.ConditionTrue):
+			reserved = at
 		}
 	}
-	return false
+	if !victim || (!reserved.IsZero() && !evicted.IsZero() && reserved.After(evicted)) {
+		return time.Time{}, false
+	}
+	return evicted, true
+}
+
+// admittedGPUs is a reserved Workload's GPUs per flavor and resource, from
+// the flavors its admission assigns (status.admission.podSetAssignments);
+// a resource it assigns no flavor for is keyed with an empty Flavor.
+func admittedGPUs(w *unstructured.Unstructured, gpus map[string]int64) map[ResourceKey]int64 {
+	flavorOf := map[string]string{}
+	assignments, _, _ := unstructured.NestedSlice(w.Object, "status", "admission", "podSetAssignments")
+	for _, raw := range assignments {
+		a, _ := raw.(map[string]interface{})
+		flavors, _, _ := unstructured.NestedStringMap(a, "flavors")
+		for res, f := range flavors {
+			if _, isGPU := gpus[res]; isGPU && flavorOf[res] == "" {
+				flavorOf[res] = f
+			}
+		}
+	}
+	out := make(map[ResourceKey]int64, len(gpus))
+	for res, n := range gpus {
+		out[ResourceKey{Flavor: flavorOf[res], Resource: res}] += n
+	}
+	return out
 }
 
 // workloadWaitingSince is when a pending Workload started to wait: its
