@@ -289,9 +289,11 @@ rank, so the pod's batch limit is the ranks times them.
 Whether such a pod is saturated is judged on its busiest rank, because `queueLengthThreshold`
 and `kvCacheThreshold` describe one engine. One request waiting on each of eight ranks is not
 a saturated pod. One rank with a full cache and a queue at the threshold is, and the capacity
-learned from it is that rank's use scaled to the whole pod. A pod with a full rank is not
-released on its mean: only the other pods' spare capacity can be given back while the rank is
-full.
+learned from it is that rank's use scaled to the whole pod. A pod with a full rank keeps its
+own capacity: the other pods' spare can still be given back, but not that pod's, and no
+replica is ordered for it. It stays kept until the rank drops 5 points below
+`kvCacheThreshold`. On a P/D model this covers decode, and prefill while decode is not
+saturated.
 
 ### Output — metrics to observe the engine's decisions
 

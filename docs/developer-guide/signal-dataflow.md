@@ -540,9 +540,18 @@ reading they fall back to the mean, the least the busiest rank holds.
 `saturation.holdHotRanks` keeps a replica whose busiest rank is full
 (`kvFull`) from being released on its mean: the variant's demand is raised to
 its other replicas' demand plus `scaleDown x PerReplicaCapacity` for each such
-replica, capped under the scale-up threshold so it never orders, and reported
-in `HeldRoleDemand` on a P/D model. Only rows of more than one rank are
-judged, and not prefill. The log line is `hot-rank-hold`.
+replica. The spare the engine then computes is the other replicas' spare. The
+raise is capped under the scale-up threshold on the supply the engine reads
+(replicas capped at the scale target, as `clampReplicaCountToScaleTarget`
+caps them), and lands on that cap in the engine's own arithmetic, so it never
+orders. It is reported in `AnalyzerResult.HotRankDemand`, not in
+`HeldRoleDemand`: a held role's spare is zeroed (`settleHeldRoles`) and the
+utilization-share optimizer gives nothing from it, where a hot replica keeps
+only its own capacity. Once held, a replica stays held until its busiest rank
+falls below `kvCacheThreshold - 0.05` (`hotRankReleaseMargin`, remembered per
+model in `hotRankHeld`). Only rows of more than one rank are judged. Prefill
+is judged only while decode is not saturated; while it is, `holdPrefillDemand`
+decides prefill. The log line is `hot-rank-hold`.
 
 `hack/check-collector-queries.sh` evaluates the queries with promtool on a
 fixture of eight ranks behind one API server, an ordinary pod, a pod of two

@@ -384,8 +384,12 @@ What changes without a config change:
   its busiest rank: a queue on one rank at `queueLengthThreshold`, and that
   rank's cache at `kvCacheThreshold`. Eight ranks with one request waiting
   each are not saturated, though their queues add up to eight. A pod with one
-  full rank is not released on its mean: only the other pods' spare capacity
-  can be given back while that rank stays full.
+  full rank keeps its own capacity: the other pods' spare can still be given
+  back, but not that pod's. The rest of the role is not held, and no replica
+  is ordered for it. Once kept, the pod is kept until that rank drops 5 points
+  below `kvCacheThreshold`, so a rank hovering at the threshold does not
+  switch it on and off every cycle. On a P/D model this applies to decode, and
+  to prefill while decode is not saturated.
 - **Learned capacity saved before the upgrade.** With the learned-state
   snapshot turned on (`LEARNED_STATE_SNAPSHOT`, off by default), the k2
   figures it carries across the upgrade were measured the old way, from the
