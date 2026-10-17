@@ -26,8 +26,11 @@ type podMetricData struct {
 	queueTimestamp time.Time
 	hasQueue       bool
 	// V2 fields for token-based capacity analysis
-	numGpuBlocks                int64
-	blockSize                   int64
+	numGpuBlocks int64
+	blockSize    int64
+	// engineRanks is the value of the cache_config_info row: how many engine
+	// ranks the instance serves (see QueryCacheConfigInfo). Zero when no row.
+	engineRanks                 int
 	avgOutputTokens             float64
 	avgOutputTokensRecent       float64
 	avgOutputTokensTimestamp    time.Time
@@ -173,12 +176,20 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 					data.hasCacheConfig = true
 					data.cacheConfigTimestamp = value.Timestamp
 				}
+				// The value counts the instance's engine ranks: vLLM writes
+				// one cache_config_info series per rank it serves. The blocks
+				// label is already the sum over those ranks, so it is NOT
+				// multiplied by this count.
+				if ranks := value.Value; ranks >= 1 && !math.IsInf(ranks, 0) {
+					data.engineRanks = int(math.Round(ranks))
+				}
 
 				logger.V(logging.DEBUG).Info("Cache config info metric",
 					"instanceKey", instanceKey,
 					"pod", podName,
 					"numGpuBlocks", data.numGpuBlocks,
-					"blockSize", data.blockSize)
+					"blockSize", data.blockSize,
+					"engineRanks", data.engineRanks)
 			}
 		}
 	}

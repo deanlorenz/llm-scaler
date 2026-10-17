@@ -139,6 +139,23 @@ type ReplicaMetrics struct {
 	// Zero value means capacity data is unavailable.
 	TotalKvCapacityTokens int64
 
+	// EngineRanks is how many data-parallel engine ranks this record covers.
+	// Zero means unknown, and is read as one (see Ranks).
+	//
+	// A pod can run several ranks in two layouts, and both arrive here as one
+	// record. With one API server per rank, each rank is its own scrape target
+	// (pod:port), and collapseToPods adds them up. With several ranks behind
+	// ONE API server, the ranks share a scrape target and are told apart only
+	// by vLLM's engine label; the collector counts the cache_config_info
+	// series of the instance, one per rank, and the per-pod queries fold the
+	// ranks the same way the merge would.
+	//
+	// It matters because some engine settings are PER RANK: --max-num-seqs
+	// and --max-num-batched-tokens bound one engine, not the pod. A pod of
+	// eight ranks admits eight times max_num_seqs sequences. The KV capacity
+	// above is already the whole pod's in both layouts.
+	EngineRanks int
+
 	// TokensInUse is the derived current token demand on this replica.
 	// Computed as KvCacheUsage × TotalKvCapacityTokens.
 	// Zero when TotalKvCapacityTokens is unavailable.
@@ -287,6 +304,16 @@ type ReplicaMetrics struct {
 	// Measures completed requests only; undercounts when requests queue in the scheduler.
 	// Zero when metrics are unavailable.
 	RequestRate float64
+}
+
+// Ranks is the number of data-parallel engine ranks the record covers, never
+// less than one: an unknown count (EngineRanks zero) is one engine, which is
+// what every record meant before the count existed.
+//
+// Multiply a per-rank engine setting by it before comparing it with a
+// per-record figure; see EngineRanks.
+func (m ReplicaMetrics) Ranks() int {
+	return max(m.EngineRanks, 1)
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics

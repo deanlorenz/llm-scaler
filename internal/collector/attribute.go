@@ -404,6 +404,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		NumGpuBlocks:             data.numGpuBlocks,
 		BlockSize:                data.blockSize,
 		TotalKvCapacityTokens:    totalKvCapacityTokens,
+		EngineRanks:              data.engineRanks,
 		TokensInUse:              tokensInUse,
 		AvgOutputTokens:          data.avgOutputTokens,
 		AvgOutputTokensRecent:    data.avgOutputTokensRecent,
