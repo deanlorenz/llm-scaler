@@ -329,10 +329,10 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			for _, vc := range vs {
 				g.Variants[r.Key] = append(g.Variants[r.Key], shareVariantOf(vc, stateMap))
 			}
-			// A role whose demand the analyzer holds keeps what it has: it is
-			// sized on its unheld demand (shareRolesForRequest) and gives
+			// A held role keeps what it has: it is sized on its unheld demand
+			// with a floor at what it holds (shareRolesForRequest) and gives
 			// nothing until the hold ends.
-			if give, ok := shareGiveVariant(vs, stateMap); ok && !r.held {
+			if give, ok := shareGiveVariant(vs, stateMap); ok && !r.Held {
 				g.Give[r.Key] = give
 			}
 			if grow, ok := shareGrowVariant(vs, stateMap); ok {
@@ -778,9 +778,6 @@ func idleClaim(g ShareGroup) int {
 type shareRoleInput struct {
 	ShareRole
 	role string
-	// held is whether the analyzer held this role's demand this cycle
-	// (domain.AnalyzerResult.HeldRoleDemand).
-	held bool
 	// startSeconds is the role's measured replica start, 0 when not measured
 	// (domain.AnalyzerResult.RoleStartSeconds).
 	startSeconds float64
@@ -829,7 +826,8 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		// 0.70/0.85 of what the role holds: plus a replica of headroom, every
 		// idle fill raised the next, and two idle models filled a quota of 10
 		// from 1 and 1 to 5 and 4 on a cluster. The role is sized on its demand
-		// before the hold, and the hold's keep is kept by giving nothing.
+		// before the hold, and the hold's keep is kept by giving nothing and
+		// by a floor at what it holds (below).
 		before, held := sig.Result.HeldRoleDemand[role]
 		if held {
 			if raised := sig.Result.RoleDemand[role] - before; raised > 0 {
@@ -886,7 +884,11 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				break
 			}
 		}
-		if hold.NoScaleDown {
+		// A role that may not shrink keeps what it holds, and so does one the
+		// analyzer holds: it gives nothing (BuildShareGroups), so a target
+		// below what it holds promised another role GPUs no transfer could
+		// take (issue #222). Its need stays the demand before the hold.
+		if hold.NoScaleDown || held {
 			floor = max(floor, roleCurrentGPUs(records, stateMap, acc, role))
 		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
@@ -900,9 +902,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
 				Capacity:    capacity,
+				Held:        held || hold.NoScaleDown,
 			},
 			role:             role,
-			held:             held || hold.NoScaleDown,
 			startSeconds:     sig.Result.RoleStartSeconds[role],
 			busiestQueueLoad: busy,
 		})
