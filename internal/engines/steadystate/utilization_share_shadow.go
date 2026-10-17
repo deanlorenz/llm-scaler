@@ -292,7 +292,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			r := roleByKey[v.Key]
 			actual := math.NaN()
 			if r.Need > 0 && v.Committed > 0 {
-				actual = r.Need * g.Thresholds[v.Key] / float64(v.Committed)
+				actual = r.Utilization(float64(v.Committed), g.Thresholds[v.Key])
 			}
 			o := g.Origins[v.Key]
 			excess := math.Max(0, float64(r.MinFloor)-r.Need)

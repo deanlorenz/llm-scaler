@@ -533,7 +533,7 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 		}
 	}
 	z := func(k string) float64 {
-		return allocation.ShareScore(float64(committed[k]), roles[k].Need, roles[k].Weight)
+		return roles[k].Score(float64(committed[k]))
 	}
 	slices.SortFunc(receivers, func(a, b string) int { return cmp.Or(cmp.Compare(z(a), z(b)), cmp.Compare(a, b)) })
 	// Whoever is still short when the fill is done is told to the planner.
@@ -918,10 +918,10 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		// donor that stays calm after giving a replica (a hard imbalance under
 		// the band rb); naming the hold then would send an operator after the
 		// wrong cause.
-		urgent := rb.Urgent(r.Need, g.Committed[r.Key])
+		urgent := rb.Urgent(r, g.Committed[r.Key])
 		calmDonor := slices.ContainsFunc(g.Roles, func(o allocation.ShareRole) bool {
 			left := g.Committed[o.Key] - max(o.ReplicaGPUs, 1)
-			return o.Key != r.Key && left >= 0 && rb.Calm(o.Need, left)
+			return o.Key != r.Key && left >= 0 && rb.Calm(o, left)
 		})
 		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] {
 			switch {
@@ -1008,7 +1008,7 @@ func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map
 		}
 		out = append(out, decision.ShareClaimable{
 			ID:           t.ID,
-			ReceiverZ:    allocation.ShareScore(float64(held[t.Receiver]), r.Need, r.Weight),
+			ReceiverZ:    r.Score(float64(held[t.Receiver])),
 			DonorPodGPUs: pods,
 			DonorGPUs:    t.DonorGPUs,
 		})

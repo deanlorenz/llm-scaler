@@ -1,6 +1,9 @@
 package allocation
 
 import (
+	"math"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -407,6 +410,144 @@ var _ = Describe("BuildShareGroups: floors, ceilings and replica sizes", func() 
 			shareVariant{name: "small", gpus: 1, current: 3, cost: 2, prc: 1000},
 		)
 		Expect(only(same).Need).To(Equal(d / k / (4000.0 / 4)))
+	})
+
+	It("prices a shrink on the replicas a role gives first, the denser ones when they cost more (#209)", func() {
+		// v0 is 1-GPU replicas serving 100 at cost 0.5, the most cost-efficient;
+		// v1 one 8-GPU replica serving 1600 (200 per GPU) at cost 16, the least,
+		// so v1 is what the role gives. Required is 1100 of 2400: giving v1
+		// leaves 800, so the role keeps v0's 8 GPUs (800) and 300 of v1, 1.5
+		// of its GPUs. The fleet average, 1100 x 16 / 2400 = 7.33, priced the
+		// GPUs it keeps at what v1 serves.
+		req := shareReqVariants(1100*0.8,
+			shareVariant{name: "v0", gpus: 1, current: 8, cost: 0.5, prc: 100},
+			shareVariant{name: "v1", gpus: 8, current: 1, cost: 16, prc: 1600},
+		)
+		r := only(req)
+		Expect(r.Need).To(BeNumerically("~", 9.5, 1e-9))
+		Expect(r.Capacity).To(Equal([]ShareCapacityStep{{GPUs: 8, PerGPU: 1}, {GPUs: 8, PerGPU: 2}, {GPUs: math.Inf(1), PerGPU: 1}}))
+	})
+
+	It("prices a shrink on the replicas a role gives first, the sparser ones when cost follows GPUs (#211)", func() {
+		// a is 1-GPU replicas serving 100, b 4-GPU replicas serving 800 (200
+		// per GPU); cost is 1 per GPU, so b is the most cost-efficient and a
+		// is given first. Four a and two b serve 2000 on 12 GPUs. Required
+		// 1500: all four a go (1600 left), and a b replica would leave 800, so
+		// the need is b's 8 GPUs less the 100 of it the role does not need,
+		// 0.5 of a GPU. The fleet average, 1500 x 12 / 2000 = 9, overstated it.
+		req := shareReqVariants(1500*0.8,
+			shareVariant{name: "a", gpus: 1, current: 4, cost: 1, prc: 100},
+			shareVariant{name: "b", gpus: 4, current: 2, cost: 4, prc: 800},
+		)
+		Expect(only(req).Need).To(BeNumerically("~", 7.5, 1e-9))
+	})
+
+	It("gives a variant held at its minReplicas last (#209)", func() {
+		// As above, but a's minReplicas keeps all four a: the role gives b
+		// first, and a's 4 GPUs (400, 2 GPUs of b) are what it keeps last
+		// given. Required 1500 is 7.5 GPUs of b: 2 on a's 4 GPUs, 5.5 on b.
+		req := shareReqVariants(1500*0.8,
+			shareVariant{name: "a", gpus: 1, current: 4, cost: 1, prc: 100, min: ptrInt(4)},
+			shareVariant{name: "b", gpus: 4, current: 2, cost: 4, prc: 800},
+		)
+		Expect(only(req).Need).To(BeNumerically("~", 4+5.5, 1e-9))
+	})
+
+	It("keeps a single-variant role's need and leaves it no capacity curve (#209)", func() {
+		d, k := 1200.0, 0.8
+		r := only(shareReqVariants(d, shareVariant{name: "b", gpus: 4, current: 5, cost: 4, prc: 800}))
+		Expect(r.Need).To(Equal(d / k / (800.0 / 4)))
+		Expect(r.Capacity).To(BeNil())
+	})
+
+	It("counts a running variant with a NaN or infinite capacity as dense as best (#209)", func() {
+		// The 8-GPU replica with no reading counts as 8 GPUs of best, so the
+		// role holds 10 GPUs of best and required 300 is 3 of them. A NaN
+		// froze the model; an infinity was ranked the best variant and made
+		// the need 0.
+		for _, prc := range []float64{math.NaN(), math.Inf(1), 0, -5} {
+			req := shareReqVariants(300*0.8,
+				shareVariant{name: "best", gpus: 1, current: 2, cost: 1, prc: 100},
+				shareVariant{name: "odd", gpus: 8, current: 1, cost: 8, prc: prc},
+			)
+			r := only(req)
+			Expect(r.Need).To(BeNumerically("~", 3, 1e-9), "capacity %v", prc)
+			Expect(r.Capacity).To(BeNil(), "capacity %v", prc)
+		}
+	})
+
+	It("reads a role's utilization from what its GPUs serve, not from their count (#209)", func() {
+		// 8 GPUs of best, then 8 that serve twice as much: 16 GPUs serve 24 GPUs
+		// of best, and a need of 10 GPUs serves 12.
+		r := ShareRole{Need: 10, Capacity: []ShareCapacityStep{{GPUs: 8, PerGPU: 1}, {GPUs: 8, PerGPU: 2}, {GPUs: math.Inf(1), PerGPU: 1}}}
+		Expect(r.Utilization(16, 0.8)).To(BeNumerically("~", 12*0.8/24, 1e-12))
+		// Its score, too: 16 GPUs are 100% headroom over the need, not 60%.
+		r.Weight = 1
+		Expect(r.Score(16)).To(BeNumerically("~", 1, 1e-12))
+		// 12 of 24 is calm (at most 0.6); 10 of 16 GPUs read as 0.625 was not.
+		Expect(ShareSkipWaits{}.Calm(r, 16)).To(BeTrue())
+		// 12 of the 14 that 11 GPUs serve is below 0.9; 10 of 11 GPUs read as urgent.
+		Expect(ShareSkipWaits{}.Urgent(r, 11)).To(BeFalse())
+		// Without a curve both read the GPU count, as before.
+		r.Capacity = nil
+		Expect(r.Utilization(16, 0.8)).To(BeNumerically("~", 10*0.8/16, 1e-12))
+		Expect(r.Score(16)).To(BeNumerically("~", 0.6, 1e-12))
+		Expect(ShareSkipWaits{}.Calm(r, 16)).To(BeFalse())
+		Expect(ShareSkipWaits{}.Urgent(r, 11)).To(BeTrue())
+	})
+
+	It("moves a dense replica off a shrinking role only when the quota cannot hold both (#209)", func() {
+		// X as in the first #209 spec (need 9.5 on 16 GPUs), Y one 8-GPU
+		// replica. Giving X's 8-GPU v1 leaves it serving 800 of 1100.
+		k := 0.8
+		model := func(id string, demand float64, vs ...shareVariant) ModelScalingRequest {
+			fx := &satEntryFixture{ModelID: id, Namespace: "ns", TotalDemand: demand}
+			req := ModelScalingRequest{ModelID: id, Namespace: "ns"}
+			for _, v := range vs {
+				name := id + "-" + v.name
+				fx.VariantCapacities = append(fx.VariantCapacities, vcFixture{
+					VariantName: name, AcceleratorName: "A100", Cost: v.cost, ReplicaCount: v.current, PerReplicaCapacity: v.prc,
+				})
+				req.VariantStates = append(req.VariantStates, domain.VariantReplicaState{
+					VariantName: name, CurrentReplicas: v.current, GPUsPerReplica: v.gpus, MinReplicas: ptrInt(0),
+				})
+			}
+			req = withSatEntry(fx, req)
+			req.CompositeSignal.ScaleUpThreshold = k
+			return req
+		}
+		given := func(yNeed float64) map[string]int {
+			x := model("x", 1100*k,
+				shareVariant{name: "v0", gpus: 1, current: 8, cost: 0.5, prc: 100},
+				shareVariant{name: "v1", gpus: 8, current: 1, cost: 16, prc: 1600})
+			y := model("y", yNeed*100*k, shareVariant{name: "v", gpus: 8, current: 1, cost: 8, prc: 800})
+			full := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 24, Used: 24}}}}
+			g := BuildShareGroups([]ModelScalingRequest{x, y}, full, ShareGroupOptions{ClusterIsQuota: true})
+			ExpectWithOffset(1, g).To(HaveLen(1))
+			in := SharePlanInput{
+				Roles: g[0].Roles, Held: g[0].Committed, Thresholds: g[0].Thresholds, DownThresholds: g[0].DownThresholds,
+				Budget: g[0].Budget, Tolerance: 0.15, Give: g[0].Give, Grow: g[0].Grow, PhysicalFree: g[0].ClusterFree,
+				Headroom: ShareHeadroom{Capped: true, Replicas: 1, ReturnLoad: 0.6}, Origins: g[0].Origins,
+			}
+			l := NewShareLedger()
+			t0 := time.Unix(1_000_000, 0)
+			for c := 0; c < 6; c++ {
+				PlanShareTransfers(l, in, t0.Add(time.Duration(c)*simCycle), simTimings())
+			}
+			out := map[string]int{}
+			for _, t := range l.Transfers() {
+				out[t.DonorVariant]++
+			}
+			return out
+		}
+		// Y at or near its need: X keeps v1. At 10, Y holds 80% of what it
+		// needs, and X left with 800 would hold 73%.
+		Expect(given(8)).To(BeEmpty())
+		Expect(given(10)).To(BeEmpty())
+		// Y short by a replica or more: the quota cannot hold both, and the
+		// share moves v1 to Y as it did before #193.
+		Expect(given(16)).To(Equal(map[string]int{"x-v1": 1}))
+		Expect(given(24)).To(Equal(map[string]int{"x-v1": 1}))
 	})
 
 	It("plans a model with no demand and no capacity reading at its floor", func() {

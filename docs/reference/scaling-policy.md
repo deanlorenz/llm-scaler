@@ -335,9 +335,14 @@ proportion to each model's weight. The need is counted in the GPUs the role
 actually holds and grows. A role that needs more than it serves now adds the
 rest as GPUs of the variants it grows: its most cost-efficient one first, up to
 that variant's `maxReplicas`, then the next. A role that needs less is priced
-at what its running replicas serve per GPU. So
-a role that runs a variant with less capacity per GPU than its best one needs
-more GPUs, not fewer. When the quota cannot hold every model at
+in the order it gives replicas back: its least cost-efficient variant first.
+Its need is what it keeps after giving every whole replica it can spare while
+the rest still serves its demand at `scaleUpThreshold`, plus part of the next
+replica it would give. So a role that runs a variant with less capacity per GPU
+than its best one needs more GPUs, not fewer. How busy a role is, and which
+role is worst off, is judged on what its GPUs serve, not on how many it holds.
+A variant with no capacity reading counts as serving as much per GPU as the
+best one. When the quota cannot hold every model at
 its recent peak at the same time, that headroom is capped at
 `maxHeadroomReplicas` replicas per role (one by default) times the model's
 weight, and the rest stays unassigned in the quota, where a model whose demand
