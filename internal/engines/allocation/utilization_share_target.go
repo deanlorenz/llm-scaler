@@ -36,6 +36,10 @@ type ShareRole struct {
 	// serves as much as one of the role's best variant. Nil when every GPU
 	// serves alike; Need is then also the role's utilization in GPUs.
 	Capacity []ShareCapacityStep
+	// Held is whether the role keeps what it holds this cycle: its analyzer
+	// holds it, or it may not scale down. Floor is then what it holds, and
+	// ShareCapSpare counts its headroom above Need, not above that Floor.
+	Held bool
 }
 
 // ShareCapacityStep is a run of a role's GPUs that serve alike: the replicas
@@ -135,6 +139,10 @@ func ShareHeadroomReplicas(w float64, n int) int {
 // is never below one. A negative n, a claim that is not finite, and a limit
 // too large to hold leave the ceiling as it is, as does a limit of zero, which
 // would read as unbounded -- a role with no claim takes no spare anyway.
+//
+// A held role (ShareRole.Held) is given its headroom above its need, and never
+// a ceiling below what it holds. Above its Floor -- what it holds -- each cycle
+// the hold lasts would raise it a replica more.
 func ShareCapSpare(roles []ShareRole, n int) []ShareRole {
 	out := slices.Clone(roles)
 	if n < 0 {
@@ -142,7 +150,14 @@ func ShareCapSpare(roles []ShareRole, n int) []ShareRole {
 	}
 	for i, r := range out {
 		g := float64(max(r.ReplicaGPUs, 1))
-		limit := g * (math.Ceil(r.Claim()/g-1e-9) + float64(ShareHeadroomReplicas(r.Weight, n)))
+		claim := r.Claim()
+		if r.Held {
+			claim = math.Min(r.Need, r.ceiling())
+		}
+		limit := g * (math.Ceil(claim/g-1e-9) + float64(ShareHeadroomReplicas(r.Weight, n)))
+		if r.Held {
+			limit = math.Max(limit, float64(r.Floor))
+		}
 		if math.IsNaN(limit) || limit < 1 || limit > MaxShareBudgetGPUs {
 			continue
 		}

@@ -1607,6 +1607,41 @@ accelerator type, or lower a model whose pods are at least as large. With pods
 of more than one size (P/D roles with different GPU counts), each role is judged
 on its own pods; find the short one with `wva_utilization_share_headroom < 0`.
 
+### A large model cannot be placed
+
+**Symptom**: a model with large replicas (often one whole 8-GPU node each)
+stays short, and no transfer toward it starts. It shows one of these reasons:
+
+```promql
+wva_model_scaling_blocked{reason=~"no-node-fits|no-compatible-donor|release-shape-mismatch|release-taken"} == 1
+```
+
+All four mean the same thing for an operator: the optimizer cannot get a
+replica of the model onto a node. Alert on all four together (see
+[monitoring](monitoring.md#the-metrics-that-answer-specific-questions)).
+
+- `no-node-fits`: no node can hold one replica, even if every pod the other
+  models in its group could give on that node went. Pods the scaling manager
+  does not plan hold the rest of each node. It is set every cycle while the
+  model is short, and stays the same while the other models give their spare
+  back to the quota. It needs node information (a cluster-scoped install, or
+  the `gpu-inventory` limiter).
+- `no-compatible-donor`: no donor pod, or set of donor pods on one node, can
+  host a replica. Without node information, fragmentation shows as this.
+- `release-shape-mismatch` and `release-taken`: a transfer's GPUs came free,
+  but the replica still did not land. Each expires one release timeout later.
+
+**What it means**: the GPUs are fragmented. The quota may have room, and the
+small models may give their spare back, but no node has a whole replica's GPUs
+free. Without the optimizer, the same quota would order a replica that stays
+Pending.
+
+**What to do**: keep the large model's nodes whole. Put it on its own node pool
+or behind a taint it alone tolerates, or use a bin-packing scheduler profile so
+small pods fill nodes before they spread. Lowering another model's floor does
+not help with `no-node-fits`: it already counts every pod those models could
+give.
+
 ### Transfer marks left on pods after a downgrade
 
 **Symptom**: after moving to a version without the utilization-share optimizer,

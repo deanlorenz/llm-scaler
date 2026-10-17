@@ -387,7 +387,8 @@ The specs:
   that node. Also checks G's start estimate.
 - **A fragmented cluster** (`utilization_share_wholenode_fragment_test.go`).
   The small pods share their nodes with pause pods, so no node can be
-  emptied. G must get no transfer and report `no-compatible-donor`. Then,
+  emptied. G must get no transfer and report `no-node-fits` in every reading
+  once it first does, while the small models return their spare. Then,
   with the optimizer off and room in the quota, today's optimizer orders a G
   replica that stays Pending.
 - **A released node taken.** Same layout as "funded", plus a pause pod

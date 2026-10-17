@@ -275,8 +275,12 @@ const (
 	// ShareUnfundedAwaitingReturn marks a receiver whose replica spans
 	// several pods credited with returns still releasing (returnsCover).
 	ShareUnfundedAwaitingReturn = "awaiting-return"
-	ShareWithheldReversalHold   = "reversal-hold"
-	ShareWithheldNotActionable  = "not-actionable"
+	// ShareUnfundedNoNodeFits marks a receiver no node can hold a replica of
+	// (ShareNoNodeFits). The plan does not set it: the caller does, from the
+	// pods the group's roles run, which the plan does not see.
+	ShareUnfundedNoNodeFits    = "no-node-fits"
+	ShareWithheldReversalHold  = "reversal-hold"
+	ShareWithheldNotActionable = "not-actionable"
 	// ShareWithheldReturnNotCalm counts a role above its target that keeps
 	// its spare because it would not stay calm one replica lower.
 	ShareWithheldReturnNotCalm = "return-not-calm"

@@ -82,6 +82,26 @@ func ShareFitPods(nodes map[string]ShareNode, r ShareReplicaFit) bool {
 	return true
 }
 
+// ShareNoNodeFits reports whether no node can hold one replica r even if every
+// pod the group could give on it went: each node holds its free GPUs plus
+// others, the GPUs that pods of the group's other roles hold on it, and no
+// topology domain is held -- a group in one may be among those pods. Pods the
+// scaling manager does not plan, and the receiver's own, stay. It reports
+// false for a replica with no known pod shape, and for no nodes.
+//
+// The answer does not change as the other roles give or keep their spare: a
+// pod that goes moves its GPUs from others to the node's free GPUs.
+func ShareNoNodeFits(nodes map[string]ShareNode, others map[string]int, r ShareReplicaFit) bool {
+	if len(nodes) == 0 || len(r.PodGPUs) == 0 {
+		return false
+	}
+	all := make(map[string]ShareNode, len(nodes))
+	for n, info := range nodes {
+		all[n] = ShareNode{Free: info.Free + others[n], Labels: info.Labels}
+	}
+	return !ShareFitPods(all, r)
+}
+
 // shareClaimOwner is the owner of a domain a share picture's claim holds on
 // its node view (shareNodeView).
 const shareClaimOwner = "share-claimed"

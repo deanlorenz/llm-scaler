@@ -73,11 +73,13 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 		e.load(loadG, msG, modelG, 16)
 	})
 
-	// S1 and S2 hold spare replicas above their targets of one, and G reports
-	// no-compatible-donor. They are idle, but G is the only model below its
-	// target and no node can hold its replica, so nothing is returned: the
-	// returned GPUs would only sit unassigned. S1 and S2 keep their five
-	// replicas, and G keeps reporting no-compatible-donor.
+	// No node can hold a G replica, even if every small pod went: G reports
+	// no-node-fits. S1 and S2 hold spare replicas above their targets of one
+	// and are idle, but G is the only model below its target and no node can
+	// hold its replica, so nothing is returned: the returned GPUs would only
+	// sit unassigned. S1 and S2 keep their five replicas. The cause does not
+	// change, so neither does the reason: once reported, no-node-fits is in
+	// every reading (issue #236).
 	It("starts no transfer for G, reports why, and returns no spare for it", func() {
 		start := time.Now()
 		wholeNodeProm()
