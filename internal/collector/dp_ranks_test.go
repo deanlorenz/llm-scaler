@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -110,7 +111,7 @@ func singleFrontendResults() map[string]*source.MetricResult {
 	}
 	addValue(results, registration.QueryCacheConfigInfo, map[string]string{
 		"pod": dp8Pod, "instance": "10.0.0.8:8000",
-		"num_gpu_blocks": fmt.Sprint(8 * dp8BlocksPerRank), "block_size": fmt.Sprint(dp8BlockSize),
+		"num_gpu_blocks": strconv.Itoa(8 * dp8BlocksPerRank), "block_size": strconv.Itoa(dp8BlockSize),
 	}, 8)
 	return results
 }
@@ -144,7 +145,7 @@ func perPortResults() map[string]*source.MetricResult {
 		}
 		addValue(results, registration.QueryCacheConfigInfo, map[string]string{
 			"pod": dp8Pod, "instance": inst,
-			"num_gpu_blocks": fmt.Sprint(dp8BlocksPerRank), "block_size": fmt.Sprint(dp8BlockSize),
+			"num_gpu_blocks": strconv.Itoa(dp8BlocksPerRank), "block_size": strconv.Itoa(dp8BlockSize),
 		}, 1)
 	}
 	return results
