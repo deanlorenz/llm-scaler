@@ -988,7 +988,8 @@ func runRegisteredAnalyzer(
 // The same formula and the same (scaleUp, scaleDown) are applied at every
 // scope — model-level and each RoleCapacity entry. There are no per-role
 // threshold overrides. A non-positive scaleUp or scaleDown leaves the
-// corresponding signal unchanged.
+// corresponding signal unchanged. A role the analyzer holds has no spare,
+// whatever the formula's rounding leaves (zeroHeldSpare).
 func applyUniversalThreshold(nr *allocation.NamedAnalyzerResult, scaleUp, scaleDown float64) {
 	if nr == nil || nr.Result == nil {
 		return
@@ -1010,6 +1011,49 @@ func applyUniversalThreshold(nr *allocation.NamedAnalyzerResult, scaleUp, scaleD
 			rc.SpareCapacity = atLeastZero(rc.TotalSupply - rc.TotalDemand/scaleDown)
 		}
 		nr.RoleCapacities[role] = rc
+	}
+	if scaleDown > 0 {
+		zeroHeldSpare(nr)
+	}
+}
+
+// zeroHeldSpare sets the spare of every role the analyzer holds
+// (Result.HeldRoleDemand) to zero, and the model-level spare when every role
+// is held.
+//
+// A hold keeps a role where it is by raising its demand to scaleDown x
+// supply, the demand at which the formula above gives a spare of zero. In
+// floating point it does not always: 0.7 x (21 x 24576) / 0.7 comes back
+// 5.8e-11 above 21 x 24576. Any positive spare lets the optimizer release up
+// to the role's releasable capacity, about 5% of supply at the default
+// thresholds, so a held role of twenty or more replicas shed one under the
+// hold meant to stop it, and was held again the next cycle. Saying so here
+// does not depend on the arithmetic landing on zero.
+//
+// Only the spare: the hold's own figure is still the role's demand, so
+// RequiredCapacity and everything sized from demand are unchanged.
+func zeroHeldSpare(nr *allocation.NamedAnalyzerResult) {
+	held := nr.Result.HeldRoleDemand
+	if len(held) == 0 {
+		return
+	}
+	if nr.RoleCapacities == nil {
+		if _, ok := held[domain.RoleBoth]; ok {
+			nr.SpareCapacity = 0
+		}
+		return
+	}
+	all := true
+	for role, rc := range nr.RoleCapacities {
+		if _, ok := held[role]; !ok {
+			all = false
+			continue
+		}
+		rc.SpareCapacity = 0
+		nr.RoleCapacities[role] = rc
+	}
+	if all {
+		nr.SpareCapacity = 0
 	}
 }
 
