@@ -331,7 +331,12 @@ that needs them later waits. With it, the GPUs a quota allows are shared out on
 purpose. Every role (the decode and prefill of a P/D model, or the one role of an
 aggregated model) is first given its *need* — the GPUs that put it exactly at its
 `scaleUpThreshold` — and what is left is shared as headroom above that need, in
-proportion to each model's weight. When the quota cannot hold every model at
+proportion to each model's weight. The need is counted in the GPUs the role
+actually holds and grows. A role that needs more than it serves now adds the
+rest as GPUs of the variant it grows, its most cost-efficient one with room. A
+role that needs less is priced at what its running replicas serve per GPU. So
+a role that runs a variant with less capacity per GPU than its best one needs
+more GPUs, not fewer. When the quota cannot hold every model at
 its recent peak at the same time, that headroom is capped at
 `maxHeadroomReplicas` replicas per role (one by default) times the model's
 weight, and the rest stays unassigned in the quota, where a model whose demand

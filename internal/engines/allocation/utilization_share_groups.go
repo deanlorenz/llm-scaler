@@ -747,10 +747,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			if !measured {
 				return nil, "role " + role + " has demand but no measured capacity"
 			}
-			// need = demand / scale-up threshold, in GPUs of the role's most
-			// cost-efficient variant: the GPU form of RequiredCapacity.
-			perGPU := best.PerReplicaCapacity / float64(g)
-			need = demand / sig.ScaleUpThreshold / perGPU
+			// need is the GPU form of RequiredCapacity (demand / scale-up
+			// threshold), counted in the GPUs the role holds and grows.
+			need = roleNeedGPUs(demand/sig.ScaleUpThreshold, vs, stateMap, best, g)
 		}
 		if math.IsNaN(need) || math.IsInf(need, 0) {
 			// Every share sum -- the spare, the targets, the peaks that
@@ -795,6 +794,51 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		})
 	}
 	return out, ""
+}
+
+// roleNeedGPUs is the GPUs at which a role serves required, the capacity
+// that puts it at its scale-up threshold, counted in the GPUs it holds: a role
+// that grows takes required beyond what it serves now in GPUs of the variant it
+// grows (shareGrowVariant), and a role that shrinks keeps the per-GPU capacity
+// of its fleet now, since it gives its least efficient replicas first. Every
+// share sum and band compares the need with the GPUs a role holds, and a GPU of
+// a variant the role does not run is not one of them (issue #193). With no
+// replica running, or every running one as dense per GPU as best (the role's
+// most cost-efficient variant, of gpus GPUs per replica) and grown as best,
+// it is required in GPUs of best, as it always was. A running variant with no
+// capacity reading counts as dense as best.
+func roleNeedGPUs(required float64, vs []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	best variantRecord, gpus int) float64 {
+	bestPerGPU := best.PerReplicaCapacity / float64(gpus)
+	perGPU := func(vc variantRecord) float64 {
+		if vc.PerReplicaCapacity <= 0 {
+			return bestPerGPU
+		}
+		return vc.PerReplicaCapacity / float64(gpusPerReplicaFromState(stateMap, vc.VariantName))
+	}
+	serves, held, mixed := 0.0, 0, false
+	for _, vc := range vs {
+		n := stateMap[vc.VariantName].CurrentReplicas
+		if n <= 0 {
+			continue
+		}
+		g := n * gpusPerReplicaFromState(stateMap, vc.VariantName)
+		serves += float64(g) * perGPU(vc)
+		held += g
+		mixed = mixed || perGPU(vc) != bestPerGPU
+	}
+	growPerGPU := bestPerGPU
+	if grow, ok := shareGrowRecord(vs, stateMap); ok {
+		growPerGPU = perGPU(grow)
+	}
+	switch {
+	case !mixed && (required <= serves || growPerGPU == bestPerGPU):
+		return required / bestPerGPU
+	case required <= serves:
+		return required * float64(held) / serves
+	default:
+		return float64(held) + (required-serves)/growPerGPU
+	}
 }
 
 // roleCeilingGPUs is the GPUs a role's maxReplicas allow, summed over its
@@ -863,14 +907,23 @@ func shareGiveVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 // shareGrowVariant picks the variant a role grows: the most cost-efficient one
 // with room below its ceiling.
 func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantReplicaState) (ShareVariant, bool) {
+	vc, ok := shareGrowRecord(vs, stateMap)
+	if !ok {
+		return ShareVariant{}, false
+	}
+	return shareVariantOf(vc, stateMap), true
+}
+
+// shareGrowRecord is the record of the variant shareGrowVariant picks.
+func shareGrowRecord(vs []variantRecord, stateMap map[string]domain.VariantReplicaState) (variantRecord, bool) {
 	for _, vc := range sortByCostEfficiencyAsc(vs) {
 		st := stateMap[vc.VariantName]
 		if st.MaxReplicas != nil && *st.MaxReplicas > 0 && st.CurrentReplicas >= *st.MaxReplicas {
 			continue
 		}
-		return shareVariantOf(vc, stateMap), true
+		return vc, true
 	}
-	return ShareVariant{}, false
+	return variantRecord{}, false
 }
 
 // poolCarve is a group's share of the warm pools' unheld target: a namespace

@@ -343,6 +343,61 @@ var _ = Describe("BuildShareGroups: floors, ceilings and replica sizes", func() 
 		Expect(g[0].Frozen).To(ConsistOf(ContainSubstring("no measured capacity")))
 	})
 
+	// Issue #193: variant a is 8-GPU replicas serving 800 (100 per GPU),
+	// variant b 16-GPU replicas serving 3200 (200 per GPU). b is the most
+	// cost-efficient, so it is the one the role grows.
+	issue193 := func(demand float64, a, b int) ModelScalingRequest {
+		req := shareReqVariants(demand,
+			shareVariant{name: "a", gpus: 8, current: a, cost: 8, prc: 800},
+			shareVariant{name: "b", gpus: 16, current: b, cost: 16, prc: 3200},
+		)
+		req.CompositeSignal.ScaleUpThreshold = 0.85
+		return req
+	}
+
+	It("counts the need of a role that runs a less dense variant in the GPUs it runs (#193)", func() {
+		// 16 replicas of a hold 128 GPUs and serve 12800. Demand 8800 at 0.85
+		// needs 10353, which is 103.5 GPUs of a. Priced on b it was 51.8.
+		r := only(issue193(8800, 16, 0))
+		Expect(r.Need).To(BeNumerically("~", 8800/0.85/100, 1e-9))
+	})
+
+	It("counts a role's growth in GPUs of the variant it grows (#193)", func() {
+		// One replica of a (8 GPUs, 800) is held; the rest is grown as b,
+		// at 200 per GPU.
+		r := only(issue193(8800, 1, 0))
+		Expect(r.Need).To(BeNumerically("~", 8+(8800/0.85-800)/200, 1e-9))
+	})
+
+	It("shares a shortfall at the utilization a role really runs at (#193)", func() {
+		// m needs 103.5 GPUs of a, o needs 100 of its own: 168 GPUs hold 82.5%
+		// of each. Priced on b, m looked like 51.8 and was given 57 GPUs --
+		// 55% of its need as the a replicas it holds -- while o got 110%.
+		o := shareReq("o", "ns", 80000, 40)
+		full := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 168, Used: 168}}}}
+		g := BuildShareGroups([]ModelScalingRequest{issue193(8800, 16, 0), o}, full, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(g).To(HaveLen(1))
+		Expect(g[0].Budget).To(Equal(168))
+		cont := ContinuousShareTargets(g[0].Roles, float64(g[0].Budget))
+		mCovered := cont["ns/m/both"] * 100 / (8800 / 0.85)
+		oCovered := cont["ns/o/both"] * 1000 / (80000 / 0.8)
+		Expect(oCovered).To(BeNumerically("<", 1))
+		Expect(mCovered).To(BeNumerically("~", oCovered, 1e-9))
+	})
+
+	It("leaves the need of a role that runs only its best variant as it was (#193)", func() {
+		d, k := 8800.0, 0.85
+		r := only(issue193(d, 0, 4))
+		Expect(r.Need).To(Equal(d / k / (3200.0 / 16)))
+		// Two running variants as dense as the best one change nothing either.
+		d, k = 4000, 0.8
+		same := shareReqVariants(d,
+			shareVariant{name: "big", gpus: 4, current: 2, cost: 5, prc: 4000},
+			shareVariant{name: "small", gpus: 1, current: 3, cost: 2, prc: 1000},
+		)
+		Expect(only(same).Need).To(Equal(d / k / (4000.0 / 4)))
+	})
+
 	It("plans a model with no demand and no capacity reading at its floor", func() {
 		r := only(shareReqVariants(0, shareVariant{name: "v", gpus: 2, cost: 5, prc: 0, min: ptrInt(1)}))
 		Expect(r.Need).To(BeZero())
