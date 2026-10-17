@@ -97,6 +97,29 @@ func TestTheLoopStoppingWritesTheLatestState(t *testing.T) {
 	assert.Equal(t, []float64{5000}, kept.State.K2["ns|v|m|H100|1|both|short|q5"].Values, "a controller that never read the snapshot overwrote it")
 }
 
+// The loop stopping writes clock progress the digest leaves out -- a
+// window's last use, a bound's tick -- which an ordinary write only carries
+// on the refresh: the next leader otherwise read the time since as a pause.
+func TestTheLoopStoppingWritesClockOnlyProgress(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	spy := &stateSpy{state: sampleState(4000)}
+	e := snapshotEngine(t, c, spy)
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	const key = "ns|v|m|H100|1|both|short|q5"
+	used := now.Add(5 * time.Minute).UTC().Truncate(time.Second)
+	w := spy.state.K2[key]
+	w.LastUsed = used
+	spy.state.K2[key] = w
+
+	e.flushLearnedState()
+	got, _ := storedDoc(t, c)
+	assert.True(t, got.State.K2[key].LastUsed.Equal(used),
+		"the loop stopped without writing clock progress the digest leaves out: last used %v, want %v", got.State.K2[key].LastUsed, used)
+}
+
 // A snapshot the operator deleted, and the controller has since found gone
 // and forgotten, is not created again by the loop stopping: the restart that
 // follows a delete-and-restart reset starts cold.
