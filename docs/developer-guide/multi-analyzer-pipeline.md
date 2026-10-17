@@ -408,7 +408,9 @@ it, the PRC of each variant another analyzer decided, and the holds:
   role saturation would keep. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
-  raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale
+  raising the role's floor to what it has on `NoScaleDown` -- and on a role
+  saturation holds (`HeldRoleDemand`), which gives nothing either -- with its
+  headroom cap counted above its need (`ShareRole.Held`). Greedy's rescale
   pass (`rescaleModelDecisions`) also reads them: a role held both ways freezes
   the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
   such a model exactly its current GPUs in the water-fill, so the rest of the

@@ -349,6 +349,9 @@ weight, and the rest stays unassigned in the quota, where a model whose demand
 rises takes it at once. When the GPUs no longer match those targets,
 the optimizer *transfers* replicas: it scales a donor down, waits until its GPUs
 are actually released, and only then scales the receiver up.
+A role whose scale-down is held, for example after a shape change or while
+decode is saturated, keeps every GPU it holds, and no other model is planned
+those GPUs.
 
 The design and its reasoning are in the
 [utilization-share optimizer proposal](../proposals/utilization-share-optimizer.md);
