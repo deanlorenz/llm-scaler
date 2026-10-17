@@ -137,6 +137,18 @@ func restartWVAController(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The learned-state snapshot goes first: with LEARNED_STATE_SNAPSHOT on, a
+	// restart restores what was learned, the state this restart exists to drop.
+	// A controller that finds it gone forgets what it holds and does not write
+	// it back. Not a guaranteed cold start with more than one replica: one that
+	// never read the snapshot can write it again during the rolling restart
+	// (make benchmark-restart-controller scales to zero for that). The suite
+	// runs with the snapshot off, where this delete finds nothing.
+	if err := k8sClient.CoreV1().ConfigMaps(cfg.WVANamespace).Delete(
+		ctx, "wva-learned-state", metav1.DeleteOptions{},
+	); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete the learned-state snapshot: %w", err)
+	}
 	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"` + restartedAtAnnotation + `":"` +
 		stamp + `"}}}}}`)
 	if _, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Patch(

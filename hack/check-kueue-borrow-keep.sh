@@ -4,7 +4,7 @@
 # that rebuilding a Kueue quota entry KEEPS the whole kueue block written by
 # hand into the live one -- borrowNamespaces (the pilot list),
 # assumeTestedVersion, controllerNamespace, the timings, refreshInterval,
-# resources -- and, unless WVA_QUOTA_KUEUE_BORROW is given, countBorrowable.
+# resources, releaseToNonReclaimingLenders -- and, unless WVA_QUOTA_KUEUE_BORROW is given, countBorrowable.
 #
 # It exists because `make deploy-wva WVA_QUOTA_KUEUE=true` with WVA_LIMITER set,
 # and `make enable-physical-limiter WVA_LIMITER_TYPE=quota`, rebuilt the entry
@@ -58,6 +58,7 @@ OLD_ENTRY='- name: install-quota
     borrowNamespaces: [team-a]
     assumeTestedVersion: true
     controllerNamespace: kueue-ops
+    releaseToNonReclaimingLenders: true
     borrowCooldown: 20m
     placementTimeout: 9m
     lenderDebounce: 90s
@@ -92,7 +93,8 @@ OUT="$(policy_with_limiters "$LIVE_POLICY" "$ENTRY" compose)"
 # R4: every hand-written field of the block, not only the pilot list.
 for kv in 'assumeTestedVersion=true' 'controllerNamespace=kueue-ops' 'borrowCooldown=20m' \
     'placementTimeout=9m' 'lenderDebounce=90s' 'refreshInterval=45s' \
-    'resources | join(",")=nvidia.com/gpu,example.com/gpu' 'enabled=true'; do
+    'resources | join(",")=nvidia.com/gpu,example.com/gpu' 'enabled=true' \
+    'releaseToNonReclaimingLenders=true'; do
     f="${kv%%=*}" want="${kv#*=}"
     [ "$(field "$OUT" ".kueue.$f")" = "$want" ] \
         && ok "enable-physical-limiter keeps kueue.$f" \
@@ -127,7 +129,7 @@ OUT="$(LIMITERS_KEEP_FROM="$KEEP" policy_with_limiters "$RESET_POLICY" "$ENTRY")
     && ok "deploy-wva keeps countBorrowable read before its apply" \
     || fail "deploy-wva dropped countBorrowable: $(field "$OUT" '.kueue')"
 for kv in 'assumeTestedVersion=true' 'controllerNamespace=kueue-ops' 'placementTimeout=9m' \
-    'resources | join(",")=nvidia.com/gpu,example.com/gpu'; do
+    'resources | join(",")=nvidia.com/gpu,example.com/gpu' 'releaseToNonReclaimingLenders=true'; do
     f="${kv%%=*}" want="${kv#*=}"
     [ "$(field "$OUT" ".kueue.$f")" = "$want" ] \
         && ok "deploy-wva keeps kueue.$f read before its apply" \
@@ -167,5 +169,5 @@ OUT="$(policy_with_limiters "$LIVE_POLICY" "$PLAIN" compose)"
 echo "check-kueue-borrow-keep: $PASS passed, $FAIL failed"
 # A run that ended early passes nothing it skipped: count the cases.
 RAN=$((PASS + FAIL))
-[ "$RAN" -eq 24 ] || { echo "FAIL: $RAN cases ran, not 24. Update the count deliberately."; exit 1; }
+[ "$RAN" -eq 26 ] || { echo "FAIL: $RAN cases ran, not 26. Update the count deliberately."; exit 1; }
 [ "$FAIL" -eq 0 ]

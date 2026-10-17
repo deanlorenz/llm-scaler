@@ -81,3 +81,20 @@ func TestTheDigestIgnoresTheClocksThatMoveEveryCycle(t *testing.T) {
 		assert.Equal(t, learnedStateDigest(base()), learnedStateDigest(moved), name)
 	}
 }
+
+// An ITL line a decode fleet refits every cycle is republished with a new
+// learnedAt and its last digits moved: the same line, which must not rewrite
+// the document every minute. A line that really moved still does.
+func TestTheDigestIgnoresALineThatOnlyRefitted(t *testing.T) {
+	now := time.Now()
+	line := func(a, b float64, at time.Time) saturation.LearnedState {
+		return saturation.LearnedState{ITLLines: map[string]saturation.LineSnapshot{
+			"m|H200|1|fp": {A: a, B: b, FromVariant: "ns|m|v|H200|1", LearnedAt: at},
+		}}
+	}
+	base := learnedStateDigest(line(0.016921, 0.0029311, now))
+	assert.Equal(t, base, learnedStateDigest(line(0.016918, 0.0029307, now.Add(time.Minute))),
+		"a refit that moved the line in its last digits rewrote the document")
+	assert.NotEqual(t, base, learnedStateDigest(line(0.0189, 0.0029311, now)),
+		"a line that moved by a tenth is a change and must be written")
+}

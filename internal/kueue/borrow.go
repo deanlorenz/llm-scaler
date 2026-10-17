@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -92,7 +93,9 @@ const (
 	// lender lends is not counted (it could never get it back), so the pool
 	// counted is 0 although Kueue's is not. The namespace stays counted at its
 	// guaranteed figure and borrows nothing new. What a LowerPriority lender
-	// lends is counted only for the models it outranks (Reclaims).
+	// lends is counted only for the models it outranks (Reclaims). An entry
+	// with kueue.releaseToNonReclaimingLenders counts all of it and hands it
+	// back itself, so it never shows this reason.
 	ReasonLenderCannotReclaim Reason = "lender-cannot-reclaim"
 )
 
@@ -142,6 +145,20 @@ type QueueState struct {
 	// borrows holds the cohort's GPUs at up to that priority
 	// (SharedPool.BorrowerPriority).
 	BorrowerPriority *int32
+	// LowestReserved is the lowest spec.priority of the queue's reserved
+	// Workloads that request a GPU; nil when none was read. With
+	// WithinClusterQueue set, Kueue admits a pending Workload of higher
+	// priority by preempting one of them (preemptsWithin).
+	LowestReserved *int32
+	// WithinClusterQueue is spec.preemption.withinClusterQueue; empty or
+	// Never when the queue never preempts its own Workloads.
+	WithinClusterQueue string
+	// QueueingStrategy is spec.queueingStrategy; empty for BestEffortFIFO.
+	QueueingStrategy string
+	// Evicting is the queue's Workloads Kueue preempted (Evicted=True, reason
+	// Preempted, not re-admitted since) that still hold their quota while
+	// their pods stop (workloadVictim).
+	Evicting []EvictingWorkload
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -176,6 +193,26 @@ type QueueState struct {
 	CoFlavors map[string][]string
 	CoWithGPU map[string]bool
 }
+
+// EvictingWorkload is a preempted Workload that still holds its quota.
+type EvictingWorkload struct {
+	// Since is its Evicted condition's lastTransitionTime. Zero (not
+	// written) reads as past EvictionBound: a wait nothing bounds is not
+	// started for it.
+	Since time.Time
+	// GPUs is, per flavor and GPU resource of its admission, what it
+	// reserves; Flavor is empty where the admission names none.
+	GPUs map[ResourceKey]int64
+}
+
+// EvictionBound is how long a preempted Workload's quota counts as being
+// freed (SharedPool.EvictingGPUs). Past it the victim is stuck -- a pod
+// Terminating on a NotReady node, or a stale condition -- not stopping: it
+// no longer holds a release to a lender. Thirty minutes is the longest
+// release latency a release itself is allowed (the engine's
+// MaxReleaseLatency), and longer than any termination grace a serving pod
+// sets in practice.
+const EvictionBound = 30 * time.Minute
 
 // coFlavor is the flavor a replica on GPU flavor gpuFlavor is charged res on:
 // the GPU's own flavor when res shares its resource group, the one flavor of
@@ -278,6 +315,12 @@ type Topology struct {
 	// LendersUnreadable is set when the Workloads were not read cluster-wide,
 	// or the read failed: no lender's wait can be seen.
 	LendersUnreadable bool
+	// WorkloadsRead is set when the Workloads were read (an entry that counts
+	// borrowing, and the read passed): EvictingGPUs is known.
+	WorkloadsRead bool
+	// Now is when the read was made: a pending Workload whose requeueAt is
+	// later is not in line yet (lenderNext). Zero reads every one as in line.
+	Now time.Time
 }
 
 // QueueFigures is what one ClusterQueue could reach for one flavor and GPU
@@ -373,6 +416,22 @@ type SharedPool struct {
 	// borrowed (allocation.SharedPoolChunk.drawable).
 	Borrowed         int
 	BorrowerPriority *int32
+	// BorrowerLowest is the lowest priority any member that borrows holds a
+	// GPU Workload reserved at (QueueState.LowestReserved over the members
+	// with Borrowed): under LowerPriority, Kueue reclaims for a lender's
+	// Workload from a borrower below it. Nil when none borrows, or when one
+	// that borrows has none read.
+	BorrowerLowest *int32
+	// EvictingGPUs is what the members' preempted Workloads still hold
+	// reserved of this flavor and resource while their pods stop, evicted
+	// within EvictionBound (a Workload whose admission names no flavor counts
+	// for every flavor). Kueue's borrowed figure still counts them, and they
+	// are freed without anything handed back. StuckEvictingGPUs is the same
+	// for victims evicted longer ago than that: counted no more.
+	// EvictionsRead says whether the Workloads were read at all.
+	EvictingGPUs      int
+	StuckEvictingGPUs int
+	EvictionsRead     bool
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -391,6 +450,23 @@ type LenderState struct {
 	// reclaims for it from a borrowed Workload of lower priority. Nil when
 	// none was read.
 	Priority *int32
+	// Kept is the part of its nominal it keeps (lendingLimit) and does not
+	// use, max(0, G - U): Kueue admits that much of its own Workloads without
+	// anything handed back.
+	Kept int
+	// PendingGPUs is the smallest of its pending Workloads that Kueue could
+	// admit next within its nominal of this key (lenderNext: queue order, the
+	// same fit rule as Waiting, none in requeue backoff, none it admits by
+	// preempting its own, the head alone under StrictFIFO): the least that
+	// unblocks it, what a release to it is sized by
+	// (kueue.releaseToNonReclaimingLenders). 0 for an inactive queue.
+	PendingGPUs int
+	// PendingPriority is the highest priority among those Workloads: Kueue
+	// preempts for the lender at its head's priority. Nil when none counts.
+	PendingPriority *int32
+	// PendingSince is when the longest-waiting of those Workloads started to
+	// wait; zero when none counts or none says.
+	PendingSince time.Time
 }
 
 // Borrowing is the result of ComputeBorrowing.
@@ -434,6 +510,21 @@ func (r QueueResource) lent() (lent, kept int) {
 func (r QueueResource) unused() int {
 	_, kept := r.lent()
 	return max(0, r.Nominal-max(r.Reserved, kept))
+}
+
+// keptFree is what the queue keeps (G, never lent) and does not use,
+// max(0, G - U): with unused, everything of its nominal it does not use.
+func (r QueueResource) keptFree() int {
+	_, kept := r.lent()
+	return max(0, kept-r.Reserved)
+}
+
+// admits reports whether a Workload of n GPUs fits the queue's nominal: what
+// it lends unused plus what it keeps unused, unused() + keptFree(), which is
+// max(0, N - U). The one fit rule of the lender signal (lenderPendingOn) and
+// of a release to a lender (lenderNext).
+func (r QueueResource) admits(n int64) bool {
+	return n <= int64(r.unused()+r.keptFree())
 }
 
 // ComputeBorrowing derives, from one read, what each ClusterQueue could reach
@@ -522,11 +613,23 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				p.Free = cohortFree(qs, key)
 				p.CoFree, p.CoUnbound = cohortCoFree(qs, key.Flavor)
 			}
-			unknownBorrower := false
+			unknownBorrower, unknownLowest := false, false
+			p.EvictionsRead = t.WorkloadsRead
 			for _, q := range qs {
 				r, declares := q.Resources[key]
 				if !declares {
 					continue
+				}
+				for _, v := range q.Evicting {
+					n := v.GPUs[key] + v.GPUs[ResourceKey{Resource: key.Resource}]
+					if n <= 0 {
+						continue // another flavor's
+					}
+					if !t.Now.IsZero() && t.Now.Sub(v.Since) > EvictionBound {
+						p.StuckEvictingGPUs = addCapped(p.StuckEvictingGPUs, clampQuota(n))
+						continue
+					}
+					p.EvictingGPUs = addCapped(p.EvictingGPUs, clampQuota(n))
 				}
 				if r.Borrowed > 0 {
 					p.Borrowed = addCapped(p.Borrowed, r.Borrowed)
@@ -536,6 +639,13 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 					case p.BorrowerPriority == nil || *q.BorrowerPriority > *p.BorrowerPriority:
 						bp := *q.BorrowerPriority
 						p.BorrowerPriority = &bp
+					}
+					switch {
+					case q.LowestReserved == nil:
+						unknownLowest = true
+					case p.BorrowerLowest == nil || *q.LowestReserved < *p.BorrowerLowest:
+						lo := *q.LowestReserved
+						p.BorrowerLowest = &lo
 					}
 				}
 				// An inactive queue still lends (cohortFree counts it), but
@@ -552,11 +662,19 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				if waiting {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
-				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
-					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority})
+				ls := LenderState{Queue: q.Name, Waiting: waiting,
+					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority, Kept: r.keptFree()}
+				if !q.Inactive {
+					d := lenderNext(q, key, t.Flavors[key.Flavor].NodeLabels, t.Now)
+					ls.PendingGPUs, ls.PendingPriority, ls.PendingSince = d.gpus, d.priority, d.since
+				}
+				p.Lenders = append(p.Lenders, ls)
 			}
 			if unknownBorrower {
 				p.BorrowerPriority = nil // held at a priority not read: the cautious side
+			}
+			if unknownLowest {
+				p.BorrowerLowest = nil
 			}
 			slices.Sort(p.WaitingLenders)
 			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })

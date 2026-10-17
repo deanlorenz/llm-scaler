@@ -156,6 +156,15 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, reques
 // minReplicas first, so the ratio is kept, as the share transfer keeps it.
 func yieldUnit(decisions []domain.VariantDecision, ns, m string, states map[string]domain.VariantReplicaState,
 	paired bool) map[int]int {
+	return yieldUnitWhere(decisions, ns, m, states, paired, nil)
+}
+
+// yieldUnitWhere is yieldUnit with a single-role model's replica taken only
+// from a variant eligible accepts (nil accepts every one): a release to a
+// lender gives back a replica on the lender's flavor, not the first variant
+// by name. A P/D pair is whole whatever eligible says.
+func yieldUnitWhere(decisions []domain.VariantDecision, ns, m string, states map[string]domain.VariantReplicaState,
+	paired bool, eligible func(i int) bool) map[int]int {
 	minOfVariant := func(d domain.VariantDecision) int { return minOf(states[ns+"/"+d.VariantName]) }
 	byRole := map[string][]int{}
 	for i, d := range decisions {
@@ -183,7 +192,7 @@ func yieldUnit(decisions []domain.VariantDecision, ns, m string, states map[stri
 	}
 	if !paired {
 		for _, i := range order(byRole[""]) {
-			if spare(i) > 0 {
+			if spare(i) > 0 && (eligible == nil || eligible(i)) {
 				return map[int]int{i: 1}
 			}
 		}

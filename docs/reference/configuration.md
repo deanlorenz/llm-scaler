@@ -728,6 +728,7 @@ Set on the quota entry's `kueue:` block in the scaling policy, beside
 | `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
 | `controllerNamespace` | Not a duration: the namespace of the `kueue-controller-manager` Deployment, whose image tag gives the Kueue version borrowing is checked against, and of its leader-election Lease, which tells whether Kueue runs (not renewed, or neither readable: borrowing freezes as `kueue-controller-down`). | `kueue-system` |
 | `assumeTestedVersion` | Not a duration: `true` counts a Kueue whose version cannot be read from its image tag as tested, lifting `kueue-version-unknown`. It does not lift `kueue-controller-down`. | `false` |
+| `releaseToNonReclaimingLenders` | Not a duration, experimental: `true` counts what lenders Kueue does not reclaim for lend (`reclaimWithinCohort: Never`, or `LowerPriority` below the model), and gives it back when they wait ([how](quota-limiter.md#lenders-kueue-does-not-reclaim-for)). Refused with `countBorrowable: false`; a warning with `enabled: false`. Applies to every namespace the entry governs. Kept by a re-install with the rest of the `kueue:` block. | `false` |
 | `borrowNamespaces` | A list of namespaces, not a duration: borrowing is counted only in these (a pilot); every other namespace is capped at nominal, withheld as `not-selected`. A re-run of the install or of `make enable-physical-limiter` keeps it, with the rest of the `kueue:` block ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)). | empty: all |
 
 The cooldowns and the placement-timeout releases still in flight are recorded
@@ -746,8 +747,9 @@ so TTFT suffers after every upgrade or leader change until the fleet has
 saturated once more. With it on, the acting controller writes what it learned
 to the ConfigMap `wva-learned-state` at most once a minute, and the next
 controller reads it on its first cycle. The startup line `learned-state horizons`
-shows `snapshot` as `true` when it is on -- its metrics read 0 both when it is
-off and when it works, so that line is where to confirm it.
+shows `snapshot` as `true` when it is on. Its error counters read 0 both when
+it is off and when it works; `wva_learned_state_snapshot_bytes` above 0 on the
+leader confirms it is writing.
 If that read fails it is retried every minute; until it succeeds, for at
 most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
 strength and none is started or moved, so none started in that time

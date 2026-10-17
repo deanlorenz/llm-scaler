@@ -160,6 +160,11 @@ type SaturationAnalyzer struct {
 	// fit, which a fleet the router balances rarely spans -- dropped, a
 	// rollback priced the engine that measured it at the default intercept.
 	itlBaselineStash map[string]float64
+	// throughputHeld is the hold a put-aside throughput window had given when
+	// a rollback took it back, keyed like the stash (heldMark); a re-roll that
+	// sets the same window aside again resumes it. Not exported: a restart in
+	// between gives the window a fresh hold, as it did before.
+	throughputHeld map[string]heldMark
 	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
 	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
@@ -334,6 +339,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlTracker:             itl.NewTracker(),
 		itlArgs:                make(map[string]string),
 		itlBaselineStash:       make(map[string]float64),
+		throughputHeld:         make(map[string]heldMark),
 		itlLines:               make(map[string]learnedLine),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -671,6 +677,21 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		if st.window.Stale(bucketRetention) {
 			delete(a.throughputStash, key)
 			evicted.StashedWindows++
+		}
+	}
+	// A held mark describes a window a rollback took back, and is read only
+	// when that window is set aside again under the same arguments: once the
+	// window is gone or carries other arguments, nothing reads it.
+	for key := range a.throughputHeld {
+		live := false
+		for k, tag := range a.throughputWindowArgs {
+			if _, ok := a.saturatedThroughput[k]; ok && stashKey(k, tag) == key {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(a.throughputHeld, key)
 		}
 	}
 	// A lower bound goes with its variant: when nothing has read it, ticked

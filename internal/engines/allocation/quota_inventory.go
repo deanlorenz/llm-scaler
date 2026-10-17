@@ -136,6 +136,12 @@ func (q *QuotaInventory) KueueBacked() bool {
 	return q.source != nil && q.static.Scope == config.QuotaScopeNamespace && q.static.KueueEnabled()
 }
 
+// KueueBounded reports whether the entry, of either scope, is bounded by
+// figures it reads from Kueue.
+func (q *QuotaInventory) KueueBounded() bool {
+	return q.source != nil && q.static.KueueEnabled()
+}
+
 // KueueCountsBorrowing reports whether the entry is configured to count
 // cohort borrowing (EnableBorrowing with countBorrowable on), whether or not
 // a namespace counts it now.
@@ -577,7 +583,8 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOption
 		}
 		counted[ns] = true
 	}
-	pools := reclaimablePools(ext, counted, heldWithheld)
+	release := q.static.KueueReleasesToNonReclaiming()
+	pools := reclaimablePools(ext, counted, heldWithheld, release)
 	for ns := range counted {
 		if heldWithheld[ns] != "" || !pools.cannotReclaimOnly(rowCohorts(ext.Borrow[ns])) {
 			continue
@@ -649,15 +656,20 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOption
 		}
 		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
 		for _, l := range p.Lenders {
-			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting,
-				Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority})
+			ls := kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, Reclaim: l.Reclaim, Unused: l.Unused,
+				Priority: l.Priority, Kept: l.Kept, PendingGPUs: l.PendingGPUs, PendingPriority: l.PendingPriority}
+			if l.PendingSince != nil {
+				ls.PendingSince = *l.PendingSince
+			}
+			lenders = append(lenders, ls)
 		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: pools.free[poolKey(p)],
 			Lenders: lenders, ReadAt: ext.ObservedAt,
 			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree), CoUnbound: slices.Clone(p.CoUnbound),
 			Restricted: slices.Clone(pools.restricted[poolKey(p)]), ClassPriority: maps.Clone(ext.ClassPriority),
-			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority,
+			Borrowed: p.Borrowed, BorrowerPriority: p.BorrowerPriority, BorrowerLowest: p.BorrowerLowest, EvictingGPUs: p.EvictingGPUs, StuckEvictingGPUs: p.StuckEvictingGPUs, EvictionsRead: p.EvictionsRead,
+			ReleaseToNonReclaiming: release, RawFree: p.Free,
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
 			},
@@ -703,7 +715,13 @@ func poolKey(p config.ExternalSharedPool) string {
 // and their own queues are not lenders here: their unused nominal is theirs.
 // Everything the borrowers hold is taken from the reclaimable part, the
 // cautious side: Kueue does not say whose lending a borrowed GPU is.
-func reclaimablePools(ext config.ExternalQuotas, counted map[string]bool, heldWithheld map[string]string) countedPools {
+//
+// With release set (kueue.releaseToNonReclaimingLenders, PR-C) every lender's
+// unused nominal counts, unrestricted, for every model: the scaling manager
+// itself hands it back when such a lender waits (BorrowGovernor.Releases), so
+// nothing is left that only Kueue's reclaim could free, and no pool is zeroed
+// for lender-cannot-reclaim.
+func reclaimablePools(ext config.ExternalQuotas, counted map[string]bool, heldWithheld map[string]string, release bool) countedPools {
 	own := map[string]bool{}
 	for ns := range counted {
 		if heldWithheld[ns] != "" {
@@ -719,7 +737,7 @@ func reclaimablePools(ext config.ExternalQuotas, counted map[string]bool, heldWi
 		cannot := 0
 		for _, l := range p.Lenders {
 			switch {
-			case own[l.Queue] || l.Unused <= 0 || kueue.Reclaims(l.Reclaim, nil, nil):
+			case own[l.Queue] || l.Unused <= 0 || kueue.Reclaims(l.Reclaim, nil, nil) || release:
 			case l.Reclaim == kueue.ReclaimLowerPriority && l.Priority != nil:
 				out.restricted[poolKey(p)] = append(out.restricted[poolKey(p)],
 					PriorityLend{Queue: l.Queue, Below: *l.Priority, GPUs: l.Unused})

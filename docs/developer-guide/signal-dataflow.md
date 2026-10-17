@@ -387,7 +387,12 @@ The asymmetry is deliberate: starting replicas count toward supply, so the
 engine does not double-order while pods launch, but **not** toward removable
 capacity. Between `scaleDown x supply` and `scaleUp x anticipated` the engine
 neither orders nor releases — and the two demand holds work by clamping a
-role's demand *into* that band.
+role's demand *into* that band. The edge of the band does not always give
+exactly zero in floating point: `0.7 x (21 x 24576) / 0.7` comes back
+`5.8e-11` above `21 x 24576`. So for a role in `HeldRoleDemand`,
+`settleHeldRoles` sets SC to 0, and RC to 0 when it is within `1e-9` of
+anticipated supply. RC is not zeroed outright, because a hold is a floor on
+the way up.
 
 `atLeastZero` rejects NaN and `+Inf` explicitly, because demand is deliberately
 not sanitised on the way in and this is where a non-finite figure must fail

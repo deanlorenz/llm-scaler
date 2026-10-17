@@ -80,6 +80,25 @@ func (e *Engine) publishBorrowSignals(constraints []*allocation.ResourceConstrai
 	// force, published while some entry counts borrowing.
 	metrics.PublishKueueBorrowCooldown(e.borrowSettings().Cooldown.Seconds(),
 		e.Config != nil && e.Config.KueueCountsBorrowable())
+	// What the same alert adds to the cooldown, per cohort whose pool opts
+	// in to releaseToNonReclaimingLenders: how long a release there takes to
+	// land. The last figures measured are kept through cycles that count no
+	// borrowing; every other cohort's threshold stays the cooldown alone.
+	on := e.Config != nil && e.Config.KueueReleasesToNonReclaiming()
+	latencies := map[string]float64{}
+	for cohort, d := range st.releaseLatencies {
+		if on && d > 0 {
+			latencies[cohort] = d.Seconds()
+		}
+	}
+	metrics.PublishKueueReleaseLatency(latencies)
+	// No release to a lender is decided while the persisted ledger is
+	// unread: say why, while the option is on.
+	unread := ""
+	if on {
+		unread = st.ledgerUnread
+	}
+	metrics.PublishBorrowLedgerUnread(unread)
 	metrics.PublishKueueNeverRead(kueueNeverRead(constraints))
 }
 
@@ -100,11 +119,12 @@ func kueueNeverRead(constraints []*allocation.ResourceConstraints) []string {
 func (e *Engine) borrowReasons(req allocation.ModelScalingRequest, constraints []*allocation.ResourceConstraints,
 	decisions []domain.VariantDecision, now time.Time) []string {
 	st := &e.borrowing
-	var unplaced, reclaimed, lentOut bool
+	var unplaced, reclaimed, lentOut, released bool
 	counted := countsBorrowing(constraints, req.Namespace)
 	for _, v := range req.VariantStates {
 		s := st.governor.VariantStatus(req.Namespace, v.VariantName)
 		unplaced = unplaced || s.TimeoutRelease || (s.Unplaced && counted)
+		released = released || s.LenderRelease
 	}
 	if until, ok := st.reclaimedUntil[req.Namespace+"/"+req.ModelID]; ok && now.Before(until) {
 		reclaimed = true
@@ -125,6 +145,7 @@ func (e *Engine) borrowReasons(req allocation.ModelScalingRequest, constraints [
 		{constants.ScalingBlockedBorrowUnplaced, unplaced},
 		{constants.ScalingBlockedLenderReclaimed, reclaimed},
 		{constants.ScalingBlockedNominalLentOut, lentOut},
+		{constants.ScalingBlockedReleasedToLender, released},
 	} {
 		if r.on {
 			out = append(out, r.reason)
@@ -280,6 +301,14 @@ func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now t
 // the scaling manager lowered it to give borrowed capacity back, and why. The
 // recorder aggregates repeats.
 func (e *Engine) borrowReleasedEvent(r allocation.BorrowRelease, acc scaletarget.ScaleTargetAccessor) {
+	if r.Cause == allocation.ReleaseLenderWaiting {
+		e.shareEvent(acc, corev1.EventTypeNormal, constants.K8SEventBorrowedCapacityReleased,
+			fmt.Sprintf("Released borrowed Kueue capacity to ClusterQueue %s: replicas lowered from %d to %d (cause %s). "+
+				"It waits for capacity it lent in cohort %s, and Kueue does not reclaim it "+
+				"(releaseToNonReclaimingLenders is on); this model borrows nothing new there for the cooldown",
+				r.Lender.Lender, r.From, r.To, r.Cause, r.Lender.Cohort))
+		return
+	}
 	if r.AtGate {
 		e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventBorrowedCapacityReleased,
 			fmt.Sprintf("Released replicas held at Kueue's admission gate: replicas lowered from %d to %d (cause %s). "+

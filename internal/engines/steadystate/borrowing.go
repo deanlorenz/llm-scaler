@@ -74,6 +74,11 @@ type borrowingState struct {
 	// ledgerErrLogged once a failed read was logged.
 	ledgerLoaded    bool
 	ledgerErrLogged bool
+	// ledgerUnread is why the persisted ledger could not be read
+	// (forbidden, read-error, newer-version); empty once read. A ledger of a
+	// newer version is held unread: no release to a lender starts, and the
+	// ledger is not persisted over it (persistBorrowLedger).
+	ledgerUnread string
 	// holdChecked is set once a cycle that counts no borrowing, before any
 	// that does, read the persisted pins (restoreHeldReleases).
 	holdChecked bool
@@ -132,6 +137,17 @@ type borrowingState struct {
 	// splitWarned is the borrow-namespaces-split warning last logged, so it
 	// is logged once per change (B13).
 	splitWarned string
+	// releaseLatencies is, per cohort whose pool opts in to
+	// releaseToNonReclaimingLenders, how long a release to a waiting lender
+	// there takes to land (releaseLatencies), as last measured: kept through
+	// cycles that count no borrowing.
+	releaseLatencies map[string]time.Duration
+	// lenderBlocked is, per lender reported as handed nothing, the report
+	// last logged and recorded, so each is logged and recorded once per
+	// change; sharedWarned the same for a pool where Kueue's borrowed
+	// figure exceeds this controller's (SF4).
+	lenderBlocked map[string]string
+	sharedWarned  map[string]string
 }
 
 // prepareBorrowing readies one cycle's borrowing: it drops the in-flight draws

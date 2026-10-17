@@ -159,6 +159,9 @@ type VariantBorrowStatus struct {
 	// Unplaced: the variant has unplaced replicas, so it grows on no
 	// borrowed capacity (the placement hold).
 	Unplaced bool
+	// LenderRelease: a release to a waiting lender Kueue does not reclaim
+	// for lowers the variant until it lands (releaseToNonReclaimingLenders).
+	LenderRelease bool
 }
 
 // VariantStatus reports what the governor holds against a variant.
@@ -169,6 +172,7 @@ func (g *BorrowGovernor) VariantStatus(namespace, variant string) VariantBorrowS
 	var s VariantBorrowStatus
 	_, s.TimeoutRelease = g.timeoutHeld[key]
 	s.Unplaced = g.held[key]
+	s.LenderRelease = g.lenderPinned(key)
 	return s
 }
 

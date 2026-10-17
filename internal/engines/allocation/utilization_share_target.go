@@ -9,7 +9,7 @@ import (
 
 // ShareRole is one role's input to the utilization-share allocation: a role of
 // a P/D model, or the single synthetic role of an aggregated one. All GPU
-// quantities are whole GPUs except Need, which is continuous.
+// quantities are whole GPUs except Need and Capacity, which are continuous.
 //
 // See docs/proposals/utilization-share-optimizer.md, sections 4 and 5.
 type ShareRole struct {
@@ -31,6 +31,75 @@ type ShareRole struct {
 	Ceiling int
 	// ReplicaGPUs is g_r, one replica of the role.
 	ReplicaGPUs int
+	// Capacity is what the role's GPUs serve, in the order it keeps and grows
+	// them: the first step is the GPUs it gives last. Past the last step a GPU
+	// serves as much as one of the role's best variant. Nil when every GPU
+	// serves alike; Need is then also the role's utilization in GPUs.
+	Capacity []ShareCapacityStep
+}
+
+// ShareCapacityStep is a run of a role's GPUs that serve alike: the replicas
+// of one variant.
+type ShareCapacityStep struct {
+	// GPUs is the run's length; +Inf for a variant with no ceiling.
+	GPUs float64
+	// PerGPU is what one of its GPUs serves, as a fraction of what a GPU of
+	// the role's best variant serves.
+	PerGPU float64
+}
+
+// serves is what g GPUs of the role serve, counted in GPUs of its best
+// variant: g itself when every GPU serves alike. The role's utilization at g
+// GPUs is serves(Need)·k / serves(g).
+func (r ShareRole) serves(g float64) float64 {
+	if len(r.Capacity) == 0 || !(g > 0) {
+		return g
+	}
+	s := 0.0
+	for _, st := range r.Capacity {
+		take := math.Min(g, st.GPUs)
+		s += take * st.PerGPU
+		g -= take
+		if g <= 0 {
+			return s
+		}
+	}
+	return s + g
+}
+
+// Utilization is the role's utilization holding held GPUs, threshold being
+// its scale-up threshold: what its need serves, times threshold, over what
+// held serves. It is Need·threshold / held when every GPU serves alike.
+func (r ShareRole) Utilization(held, threshold float64) float64 {
+	return r.serves(r.Need) * threshold / r.serves(held)
+}
+
+// Score is the role's ShareScore holding held GPUs, judged on what its GPUs
+// serve: ShareScore(held, Need, Weight) when every GPU serves alike.
+func (r ShareRole) Score(held float64) float64 {
+	return ShareScore(r.serves(held), r.serves(r.Need), r.Weight)
+}
+
+// gpusFor is the inverse of serves: the GPUs at which the role serves c,
+// counted in GPUs of its best variant. It is c itself while every step it
+// walks serves as much as best.
+func (r ShareRole) gpusFor(c float64) float64 {
+	if len(r.Capacity) == 0 || !(c > 0) {
+		return c
+	}
+	g, left, uniform := 0.0, c, true
+	for _, st := range r.Capacity {
+		uniform = uniform && st.PerGPU == 1
+		if left <= st.GPUs*st.PerGPU {
+			g, left = g+left/st.PerGPU, 0
+			break
+		}
+		g, left = g+st.GPUs, left-st.GPUs*st.PerGPU
+	}
+	if uniform {
+		return c
+	}
+	return g + left
 }
 
 func (r ShareRole) ceiling() float64 {
@@ -241,7 +310,7 @@ type shareEntry struct {
 	held int
 }
 
-func (e shareEntry) z() float64 { return ShareScore(float64(e.held), e.role.Need, e.role.Weight) }
+func (e shareEntry) z() float64 { return e.role.Score(float64(e.held)) }
 
 // shareHeap is a min-heap on (z, -weight, key).
 type shareHeap []shareEntry
@@ -274,7 +343,8 @@ const ShareIdleFloor = 0.05
 // GPUs, never narrower than half a replica; a role not past its scale-up
 // threshold is also in band when its utilization is within ShareIdleFloor of
 // the target's. threshold is the role's scale-up threshold k_r, so its
-// utilization is need·k / GPUs.
+// utilization at g GPUs is serves(need)·k / serves(g): need·k / g when every
+// GPU serves alike.
 func ShareInBand(committed, target float64, r ShareRole, tolerance, threshold float64) bool {
 	if math.Abs(committed-target) <= shareTol(target, r, tolerance) {
 		return true
@@ -282,8 +352,8 @@ func ShareInBand(committed, target float64, r ShareRole, tolerance, threshold fl
 	if committed <= 0 || target <= 0 {
 		return false
 	}
-	u := r.Need * threshold / committed
-	ut := r.Need * threshold / target
+	u := r.Utilization(committed, threshold)
+	ut := r.Utilization(target, threshold)
 	return u <= threshold && math.Abs(u-ut) <= ShareIdleFloor
 }
 
@@ -295,8 +365,8 @@ type ShareRoleVerdict struct {
 	// Continuous is Ĝ_r and Integer is G*_r.
 	Continuous float64
 	Integer    int
-	// Headroom is x_r = Committed / Need − 1: the spike the role absorbs before
-	// it must scale. NaN when the role has no need.
+	// Headroom is x_r = Committed / Need − 1, counted in what the GPUs serve:
+	// the spike the role absorbs before it must scale. NaN when the role has no need.
 	Headroom float64
 	// InBand and Actionable are §6.1 steps 3 and 4: a role is actionable when it
 	// is out of band AND off its integer target, so a move could fix it.
@@ -338,7 +408,7 @@ func EvaluateShare(roles []ShareRole, committed map[string]int, thresholds map[s
 			Headroom:   math.NaN(),
 		}
 		if r.Need > 0 {
-			v.Headroom = float64(c)/r.Need - 1
+			v.Headroom = r.serves(float64(c))/r.serves(r.Need) - 1
 		}
 		// Below its need, a role is never in band while its target covers
 		// that need: it runs past its scale-up threshold, which today's

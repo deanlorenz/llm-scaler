@@ -659,6 +659,10 @@ func (e *Engine) StartOptimizeLoop(ctx context.Context) {
 	// ledger.
 	e.restoreInFlight(ctx, time.Now())
 	e.executor.Start(ctx)
+	// Start returns once the loop has stopped -- leadership lost or the
+	// controller shutting down -- and after its last cycle, so this write
+	// races none.
+	e.flushLearnedState()
 }
 
 func (e *Engine) recordActiveOptimizer() {

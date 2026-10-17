@@ -170,6 +170,14 @@ type lowerBound struct {
 	// priorUsed is when the previous figure was last offered to a decision:
 	// it ages on it, as the window it stands in for ages on its last read.
 	priorUsed time.Time
+	// figureWritten is when the window the variant's own previous figure
+	// came from was last written, kept after the figure is cleared: a
+	// rollback puts that window back as the variant's own, and a re-roll
+	// sets the same window aside again. Not written since, it is the figure
+	// the bound already ran on, not a newer one, and does not restart it
+	// (notePreviousFigureLocked) -- each undo and redo otherwise re-armed a
+	// spent figure at full strength on no new measurement.
+	figureWritten time.Time
 	// rearmPending says a newer previous figure replaced the one the bound
 	// ran on, or the arguments changed under a running bound
 	// (notePreviousFigureLocked): its next serving cycle arms it afresh,
@@ -327,6 +335,15 @@ func (a *SaturationAnalyzer) HoldLowerBounds(held bool) {
 // armed bound is left alone: serving does not start a bound, pricing from one
 // does. siblings is false when the model has the borrow turned off: a bound
 // running on a sibling's figure is then not in use and waits.
+//
+// Nor does a bound on the variant's own previous figure while the key has a
+// window again: a bound is read only when there is none (computeK2). A
+// rollback puts the variant's window back with that bound still armed;
+// ticked through the hours it served on the window, the bound was spent by
+// a re-roll that had run on it for minutes, and the re-roll -- the same
+// figure, so it does not restart the bound (notePreviousFigureLocked) --
+// was priced at k1. A bound on a sibling's figure runs on: a re-roll is new
+// evidence for it and re-arms it (lowerBound.newArgs).
 func (a *SaturationAnalyzer) noteBorrowServing(key string, now time.Time, siblings bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -337,6 +354,9 @@ func (a *SaturationAnalyzer) noteBorrowServing(key string, now time.Time, siblin
 func (a *SaturationAnalyzer) noteBorrowServingLocked(key string, now time.Time, siblings bool) {
 	lb := a.lowerBounds[key]
 	if lb == nil || !lb.armed || (!siblings && !lb.own) || a.boundsHeld {
+		return
+	}
+	if ra, ok := a.computeCapacityHistory[key]; lb.own && ok && ra.Len() > 0 {
 		return
 	}
 	lb.tickLocked(now, max(a.borrowTickGap, BorrowedK2TickGap))

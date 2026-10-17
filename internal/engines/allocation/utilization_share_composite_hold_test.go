@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -62,7 +63,7 @@ func TestShareGroupsHonourCompositeHolds(t *testing.T) {
 		}
 		return groups[0].Roles[0]
 	}
-	if r := framed(5000, 800); r != free.Roles[0] {
+	if r := framed(5000, 800); !reflect.DeepEqual(r, free.Roles[0]) {
 		t.Fatalf("agreeing frame: role %+v, want %+v as saturation alone", r, free.Roles[0])
 	}
 	if r := framed(4000, 2400); math.Abs(r.Need-4) > 1e-9 || r.Floor != 1 {

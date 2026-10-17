@@ -64,6 +64,20 @@ const (
 	ReclaimAny           = "Any"
 )
 
+// A ClusterQueue's spec.preemption.withinClusterQueue beyond Never: Kueue
+// admits a pending Workload by preempting the queue's own reserved ones of
+// lower priority, or also of equal priority and newer
+// (apis/kueue/v1beta1/clusterqueue_types.go, PreemptionPolicy).
+const (
+	WithinLowerPriority             = "LowerPriority"
+	WithinLowerOrNewerEqualPriority = "LowerOrNewerEqualPriority"
+)
+
+// QueueingStrictFIFO is spec.queueingStrategy StrictFIFO: a head Workload
+// that does not fit blocks every Workload behind it. Absent means
+// BestEffortFIFO, which tries the next.
+const QueueingStrictFIFO = "StrictFIFO"
+
 // Priority classes. A Workload's priority comes from the WorkloadPriorityClass
 // its object's priority-class label names, else from the pod priorityClassName
 // (pkg/controller/constants/constants.go, WorkloadPriorityClassLabel). Kueue

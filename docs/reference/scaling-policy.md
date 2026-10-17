@@ -331,7 +331,18 @@ that needs them later waits. With it, the GPUs a quota allows are shared out on
 purpose. Every role (the decode and prefill of a P/D model, or the one role of an
 aggregated model) is first given its *need* — the GPUs that put it exactly at its
 `scaleUpThreshold` — and what is left is shared as headroom above that need, in
-proportion to each model's weight. When the quota cannot hold every model at
+proportion to each model's weight. The need is counted in the GPUs the role
+actually holds and grows. A role that needs more than it serves now adds the
+rest as GPUs of the variants it grows: its most cost-efficient one first, up to
+that variant's `maxReplicas`, then the next. A role that needs less is priced
+in the order it gives replicas back: its least cost-efficient variant first.
+Its need is what it keeps after giving every whole replica it can spare while
+the rest still serves its demand at `scaleUpThreshold`, plus part of the next
+replica it would give. So a role that runs a variant with less capacity per GPU
+than its best one needs more GPUs, not fewer. How busy a role is, and which
+role is worst off, is judged on what its GPUs serve, not on how many it holds.
+A variant with no capacity reading counts as serving as much per GPU as the
+best one. When the quota cannot hold every model at
 its recent peak at the same time, that headroom is capped at
 `maxHeadroomReplicas` replicas per role (one by default) times the model's
 weight, and the rest stays unassigned in the quota, where a model whose demand
@@ -353,6 +364,30 @@ reports `invalid`) and the controller logs
 - one cluster group per accelerator type for every other model, when a
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
+
+**A namespace over its quota.** When a group's own models hold more GPUs than a
+static quota allows (for example a Deployment scaled by hand), the optimizer
+shares only the quota, takes no more GPUs, and gives the extra back. The
+controller logs `the group's scope holds more GPUs than its quota allows`, and
+`wva_utilization_share_reserve_debt_gpus` shows what is still to give back.
+It gives back only in these cases:
+
+- A namespace holds more than its `scope: namespace` quota, and the quota
+  entry does not read Kueue.
+- The namespaces of the cluster group hold more than the `scope: cluster`
+  quota leaves them after the other namespaces, and the quota entry does not
+  read Kueue. When the other namespaces
+  already hold more than the cluster quota by themselves, the overage is
+  theirs: the cluster group gives back only what it alone holds past the quota.
+- A namespace that counts Kueue borrowing holds more than its queue's nominal
+  quota plus `borrowingLimit`.
+
+GPUs that Kueue granted are never given back, whether borrowed, held beside
+another workload in the same queue, or held through several queues: Kueue
+preempts what it must. With `countBorrowable: false` the optimizer starts no
+new borrowing, but keeps what Kueue already lent. A count of the physical
+inventory past its capacity is not given back either: it is a stale read, not
+a spent quota.
 
 **An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite

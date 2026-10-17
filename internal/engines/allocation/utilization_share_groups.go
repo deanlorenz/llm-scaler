@@ -123,6 +123,10 @@ type ShareGroup struct {
 	ClusterFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
+	// OverQuota is how many GPUs the group's scope holds past what its quota
+	// allows on the group's type (overQuota), taken out of Budget: a scope
+	// over its quota plans to come back within it. 0 when it is within.
+	OverQuota int
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
 	// DownThresholds is each role's scale-down boundary: the utilization
@@ -468,8 +472,20 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
+		// free is floored at 0 (ResourcePool.Available), so a scope that
+		// holds more than its quota reads as exactly full, and free plus what
+		// it holds is what it holds, not what it may hold. Its overage comes
+		// out of the budget, which the planner then pays back as a debt. Only
+		// an allowance the group's own members spent past it is given back:
+		// never what Kueue granted, nor a physical over-count
+		// (namespaceAllowances, clusterAllowances, clusterOverQuota).
+		if k.scope != "" {
+			g.OverQuota = overQuota(namespaceAllowances(constraints, k.scope), k.acc)
+		} else if opts.ClusterIsQuota {
+			g.OverQuota = clusterOverQuota(clusterAllowances(constraints), k.acc, g.listed)
+		}
 		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, unclaimed, k.acc, k.scope)
-		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
+		g.Budget = max(0, free+g.listed-g.OverQuota-opts.ReserveGPUs-g.PoolCarve)
 		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
@@ -572,6 +588,96 @@ func clusterBudgets(constraints []*ResourceConstraints, declared ...string) (map
 		return c != nil && !isClusterBound(c)
 	})
 	return mergeConstraints(constraints, declared...), namespaced
+}
+
+// overQuota is how many GPUs are held under allowlists past what they allow
+// on the accelerator called name, read as the budgets read them
+// (accelerator.ClusterAllowlistsBound): the free figure floored at 0 less the
+// same figure unfloored. 0 when nothing is held past the bound, and when no
+// finite bound covers name. A namespace under its quota and a namespace at it
+// both read 0; a namespace holding 10 under a quota of 7 reads 3.
+func overQuota(allowlists []map[string]ResourcePool, name string) int {
+	free, unlimited, bounds := accelerator.ClusterAllowlistsBound(allowlists, name, poolBound)
+	if !bounds || unlimited {
+		return 0
+	}
+	left, _, _ := accelerator.ClusterAllowlistsBound(allowlists, name, func(p ResourcePool) accelerator.Bound {
+		return accelerator.Bound{Free: p.Limit - p.Used, Unlimited: p.Limit < 0}
+	})
+	return max(0, free-left)
+}
+
+// clusterOverQuota is how many GPUs the cluster group, whose planned roles
+// hold own on the accelerator called name, gives back of its cluster quotas'
+// overage (overQuota). A cluster quota counts every namespace, and the group
+// plans only some of them. While the GPUs held outside the group fit within
+// the quota (the overage is at most own), the group holds the overage past
+// what the others leave it, and gives it all back. When they already pass the
+// quota by themselves, the overage is theirs, and the group gives back only
+// what it alone holds past the quota: a group is never planned down for
+// another group's overage.
+func clusterOverQuota(allowlists []map[string]ResourcePool, name string, own int) int {
+	over := overQuota(allowlists, name)
+	if over <= own {
+		return over
+	}
+	limit, unlimited, bounds := accelerator.ClusterAllowlistsBound(allowlists, name, func(p ResourcePool) accelerator.Bound {
+		return accelerator.Bound{Free: p.Limit, Unlimited: p.Limit < 0}
+	})
+	if !bounds || unlimited {
+		return 0
+	}
+	return max(0, own-limit)
+}
+
+// clusterAllowances is the pools of every cluster quota (clusterBounds) a
+// group gives GPUs back against: not the physical inventory, whose count past
+// its capacity is a stale read (a pod counted beside the victims it
+// nominated), not an allowance spent; and not a quota bounded by Kueue
+// (KueueBounded), which admitted what is held and preempts what it must.
+func clusterAllowances(constraints []*ResourceConstraints) []map[string]ResourcePool {
+	var out []map[string]ResourcePool
+	for _, c := range clusterBounds(constraints) {
+		if c.ProviderName != PhysicalLimiterName && !c.KueueBounded {
+			out = append(out, c.Pools)
+		}
+	}
+	return out
+}
+
+// namespaceAllowances is the allowlists of namespace ns a group gives GPUs
+// back against: every provider's (namespaceHolders), but of a provider bounded
+// by Kueue (KueueBounded) only the types whose borrowing it counted
+// (CountedBorrow), held past what Kueue may admit. Its other figures are
+// Kueue's, charged with what Kueue reserved for others and, for a namespace
+// on several queues, with the smallest queue's reach (KU1, KU2): they say how
+// far the namespace may grow, not what Kueue admitted, and Kueue preempts
+// what it must.
+func namespaceAllowances(constraints []*ResourceConstraints, ns string) []map[string]ResourcePool {
+	var out []map[string]ResourcePool
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		perType, ok := c.NamespacePools[ns]
+		if !ok {
+			continue
+		}
+		if !c.KueueBounded {
+			out = append(out, perType)
+			continue
+		}
+		counted := map[string]ResourcePool{}
+		for accType, p := range perType {
+			if c.CountedBorrow[ns][accType] {
+				counted[accType] = p
+			}
+		}
+		if len(counted) > 0 {
+			out = append(out, counted)
+		}
+	}
+	return out
 }
 
 // splitClusterFree divides each finite cluster key's free GPUs between the
@@ -743,14 +849,20 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		}
 		best, g, measured := bestVariantForRole(records, stateMap, acc, role)
 		need := 0.0
-		if demand > 0 {
-			if !measured {
-				return nil, "role " + role + " has demand but no measured capacity"
+		var capacity []ShareCapacityStep
+		if demand > 0 && !measured {
+			return nil, "role " + role + " has demand but no measured capacity"
+		}
+		if measured {
+			// need is the GPU form of RequiredCapacity (demand / scale-up
+			// threshold), counted in the GPUs the role holds and grows. The
+			// curve is built with no demand too: the need the ledger
+			// remembers for the role is judged on it.
+			required := 0.0
+			if demand > 0 {
+				required = demand / sig.ScaleUpThreshold
 			}
-			// need = demand / scale-up threshold, in GPUs of the role's most
-			// cost-efficient variant: the GPU form of RequiredCapacity.
-			perGPU := best.PerReplicaCapacity / float64(g)
-			need = demand / sig.ScaleUpThreshold / perGPU
+			need, capacity = roleNeedGPUs(required, vs, stateMap, best, g)
 		}
 		if math.IsNaN(need) || math.IsInf(need, 0) {
 			// Every share sum -- the spare, the targets, the peaks that
@@ -787,6 +899,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				MinFloor:    minFloor,
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
+				Capacity:    capacity,
 			},
 			role:             role,
 			held:             held || hold.NoScaleDown,
@@ -795,6 +908,90 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		})
 	}
 	return out, ""
+}
+
+// roleNeedGPUs is the GPUs at which a role serves required, the capacity
+// that puts it at its scale-up threshold, counted in the GPUs it holds and
+// grows, with the role's capacity curve (ShareRole.Capacity). Every share sum
+// and band compares the need with the GPUs a role holds, and a GPU of a
+// variant the role does not run is not one of them (issue #193).
+//
+// The curve walks the role's GPUs in the order it keeps them, the reverse of
+// the order it gives them (shareGiveVariant): the least cost-efficient
+// variant above its minReplicas first, down to it, then the next; then the
+// replicas minReplicas keeps, in the same order. A role that needs less than
+// it serves is priced on that order: it gives whole replicas while what it
+// keeps still serves required, and the rest of the need is priced on the next
+// replica it would give. A role that needs more grows the rest as a fill does:
+// in its most cost-efficient variants first, each up to its maxReplicas, at
+// what that variant serves per GPU. What no variant has room for is priced on
+// best, the role's most cost-efficient measured variant (gpus GPUs per
+// replica); the ceiling caps that part of the claim anyway.
+//
+// When every GPU the walk reaches serves as much as one of best -- a role with
+// one variant, or none running -- the need is required in GPUs of best,
+// computed as it always was. A variant with no capacity reading
+// (hasCapacityReading) counts as dense as best. The curve is nil when every
+// step serves as much as best.
+//
+// The curve counts CurrentReplicas, where Committed counts HeldReplicas: a
+// terminating replica still holds its GPUs but no longer serves, and it is
+// not one the role can give.
+func roleNeedGPUs(required float64, vs []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	best variantRecord, gpus int) (float64, []ShareCapacityStep) {
+	bestPerGPU := best.PerReplicaCapacity / float64(gpus)
+	rel := func(vc variantRecord) float64 {
+		if !hasCapacityReading(vc.PerReplicaCapacity) {
+			return 1
+		}
+		p := vc.PerReplicaCapacity / float64(gpusPerReplicaFromState(stateMap, vc.VariantName))
+		if p == bestPerGPU {
+			return 1
+		}
+		return p / bestPerGPU
+	}
+	sorted := sortByCostEfficiencyAsc(vs)
+	// The GPUs the role holds, in the order it gives them.
+	var give []ShareCapacityStep
+	for _, floored := range []bool{false, true} {
+		for i := len(sorted) - 1; i >= 0; i-- {
+			st := stateMap[sorted[i].VariantName]
+			floor := 0
+			if st.MinReplicas != nil {
+				floor = max(*st.MinReplicas, 0)
+			}
+			n := st.CurrentReplicas - floor
+			if floored {
+				n = min(st.CurrentReplicas, floor)
+			}
+			if n > 0 {
+				give = append(give, ShareCapacityStep{
+					GPUs:   float64(n * gpusPerReplicaFromState(stateMap, sorted[i].VariantName)),
+					PerGPU: rel(sorted[i]),
+				})
+			}
+		}
+	}
+	slices.Reverse(give)
+	steps := give
+	// Then the GPUs it grows, as a fill grows them.
+	for _, vc := range sorted {
+		st := stateMap[vc.VariantName]
+		room := math.Inf(1)
+		if st.MaxReplicas != nil && *st.MaxReplicas > 0 {
+			room = float64(max(0, *st.MaxReplicas-st.CurrentReplicas) * gpusPerReplicaFromState(stateMap, vc.VariantName))
+		}
+		if room > 0 {
+			steps = append(steps, ShareCapacityStep{GPUs: room, PerGPU: rel(vc)})
+		}
+		if math.IsInf(room, 1) {
+			break
+		}
+	}
+	if !slices.ContainsFunc(steps, func(s ShareCapacityStep) bool { return s.PerGPU != 1 }) {
+		steps = nil
+	}
+	return ShareRole{Capacity: steps}.gpusFor(required / bestPerGPU), steps
 }
 
 // roleCeilingGPUs is the GPUs a role's maxReplicas allow, summed over its

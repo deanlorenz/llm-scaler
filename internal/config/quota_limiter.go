@@ -211,6 +211,17 @@ type KueueQuotaSource struct {
 	// (kueue-version-unknown). It applies only to a version that cannot be
 	// read from a readable Deployment, and never lifts kueue-controller-down.
 	AssumeTestedVersion bool `yaml:"assumeTestedVersion,omitempty" json:"assumeTestedVersion,omitempty"`
+
+	// ReleaseToNonReclaimingLenders also counts what lenders Kueue does not
+	// reclaim for lend -- reclaimWithinCohort Never, or LowerPriority below
+	// the borrowing model's priority -- and hands it back when such a lender
+	// waits: the scaling manager lowers the borrowing models, lowest priority
+	// first, by whole units covering what the lender waits for. It makes the
+	// scaling manager Kueue's reclaim agent for those lenders. Off by
+	// default (experimental): that lending is then not counted
+	// (lender-cannot-reclaim), and a waiting lender only stops new borrowing
+	// in its cohort. It needs countBorrowable.
+	ReleaseToNonReclaimingLenders bool `yaml:"releaseToNonReclaimingLenders,omitempty" json:"releaseToNonReclaimingLenders,omitempty"`
 }
 
 // KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
@@ -294,6 +305,14 @@ func (q QuotaLimiterConfig) KueueCountsBorrowable() bool {
 	return q.KueueEnabled() && (q.Kueue.CountBorrowable == nil || *q.Kueue.CountBorrowable)
 }
 
+// KueueReleasesToNonReclaiming reports whether this entry counts what lenders
+// Kueue does not reclaim for lend, and hands it back when they wait
+// (releaseToNonReclaimingLenders, off by default). It needs the entry to
+// count borrowing.
+func (q QuotaLimiterConfig) KueueReleasesToNonReclaiming() bool {
+	return q.KueueCountsBorrowable() && q.Kueue.ReleaseToNonReclaimingLenders
+}
+
 // DefaultKueueRefreshInterval is how often Kueue quotas are re-read when the
 // entry does not say. The saturation cycle is of the same order, so a shorter
 // value would only add API calls the next decision cannot use.
@@ -361,6 +380,10 @@ func (k *KueueQuotaSource) validate(location string) error {
 		case d <= 0:
 			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q must be positive", location, f.name, f.value))
 		}
+	}
+	if k.ReleaseToNonReclaimingLenders && k.CountBorrowable != nil && !*k.CountBorrowable {
+		errs = append(errs, fmt.Errorf("%s.kueue.releaseToNonReclaimingLenders: true needs countBorrowable; "+
+			"with countBorrowable: false nothing is borrowed, so nothing is handed back", location))
 	}
 	return errors.Join(errs...)
 }
@@ -501,6 +524,16 @@ type ExternalSharedPool struct {
 	// nil when not every borrower's was read (kueue.SharedPool).
 	Borrowed         int    `json:"borrowed,omitempty"`
 	BorrowerPriority *int32 `json:"borrowerPriority,omitempty"`
+	// BorrowerLowest is the lowest priority a borrowing member holds a GPU
+	// Workload at; nil when none borrows or one's was not read
+	// (kueue.SharedPool.BorrowerLowest).
+	BorrowerLowest *int32 `json:"borrowerLowest,omitempty"`
+	// EvictingGPUs is what the members' preempted Workloads still hold
+	// reserved while their pods stop; EvictionsRead whether the Workloads
+	// were read (kueue.SharedPool).
+	EvictingGPUs      int  `json:"evictingGPUs,omitempty"`
+	StuckEvictingGPUs int  `json:"stuckEvictingGPUs,omitempty"`
+	EvictionsRead     bool `json:"evictionsRead,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.
@@ -516,6 +549,19 @@ type ExternalLender struct {
 	// Priority is the lowest priority of its unfinished GPU Workloads, pending
 	// or reserved; nil when none was read.
 	Priority *int32 `json:"priority,omitempty"`
+	// Kept is what it keeps of its nominal (lendingLimit) and does not use:
+	// Kueue admits that much of its own without anything handed back.
+	Kept int `json:"kept,omitempty"`
+	// PendingGPUs is the smallest pending Workload Kueue could admit next
+	// within its nominal (kueue.LenderState.PendingGPUs): what a release to
+	// it (releaseToNonReclaimingLenders) is sized by.
+	PendingGPUs int `json:"pendingGPUs,omitempty"`
+	// PendingPriority is the highest priority among those Workloads, the
+	// one Kueue preempts for it at; nil when none counts.
+	PendingPriority *int32 `json:"pendingPriority,omitempty"`
+	// PendingSince is when the longest-waiting of them started to wait; nil
+	// when none counts.
+	PendingSince *time.Time `json:"pendingSince,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU
@@ -872,6 +918,10 @@ func (e *QuotaLimiterEntries) Validate() (warnings []string, err error) {
 		}
 		if kErr := entry.Kueue.validate(fmt.Sprintf("entry[%d] (%q)", i, entry.Name)); kErr != nil {
 			errs = append(errs, kErr)
+		}
+		if entry.Kueue != nil && entry.Kueue.ReleaseToNonReclaimingLenders && !entry.Kueue.Enabled {
+			warnings = append(warnings, fmt.Sprintf("entry[%d] (%q): kueue.releaseToNonReclaimingLenders is set but kueue.enabled "+
+				"is false; nothing is read from Kueue, so nothing is counted or handed back", i, entry.Name))
 		}
 
 		switch entry.Scope {

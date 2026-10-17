@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -67,6 +70,9 @@ const (
 	// failure to pass, short enough that a store that stays unreadable --
 	// a missing Role -- does not keep every lower bound at full strength.
 	learnedStateBoundHold = 10 * time.Minute
+	// learnedStateFlushTimeout bounds the last write as the loop stops: the
+	// manager waits for runnables only so long before it releases the lease.
+	learnedStateFlushTimeout = 5 * time.Second
 )
 
 // learnedStateKey is the ConfigMap data key this version's document lives
@@ -359,11 +365,36 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, nil, "")
+	e.metricsEmitter.RecordLearnedStateSnapshotSize(len(raw), budget, dropped)
 	st.seen, st.lastDigest, st.lastWriteDone = true, digest, now
 	if dropped > 0 {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",
 			"dropped", dropped, "maxBytes", budget)
 	}
+}
+
+// flushLearnedState writes the learned state once more as the optimize loop
+// stops, whatever the interval and the digest say. Without it, a planned
+// upgrade or a leader hand-off lost up to a minute of readings and up to
+// learnedStateRefresh of lower-bound clock progress: the digest leaves the
+// clocks out, so they are written only on the refresh, and the next leader
+// read the time since then as a pause, holding bounds at full strength
+// longer. Best effort, on its own short context: the loop's is cancelled.
+//
+// It only updates a snapshot this controller has read or written (seen),
+// never creates one. A snapshot found deleted was forgotten, and a flush that
+// created it from what was relearned in the seconds since undid the deletion
+// -- a benchmark reset by deleting it and restarting started warm. A store
+// that has not written yet loses at most its first interval.
+func (e *Engine) flushLearnedState() {
+	if e.Config == nil || !e.Config.LearnedStateSnapshotEnabled() || !e.learnedState.restored || !e.learnedState.seen {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), learnedStateFlushTimeout)
+	defer cancel()
+	st := &e.learnedState
+	st.lastWrite, st.lastDigest = time.Time{}, ""
+	e.writeLearnedState(ctx, time.Now())
 }
 
 // learnedStateDigest identifies what was learned, so a state that changed only
@@ -408,6 +439,19 @@ func learnedStateDigest(s saturation.LearnedState) string {
 		lb.Tick, lb.Seen, lb.PriorUsed = time.Time{}, time.Time{}, time.Time{}
 		s.LowerBounds[k] = lb
 	}
+	// A fitted ITL line is republished every cycle a variant fits one: its
+	// learnedAt moves every cycle and its A and B drift in their last digits
+	// with every refit, so kept in, any decode fleet rewrote the document
+	// every minute. Left out, and rounded to three significant figures, a
+	// line that really moved is still written; one that only refitted is
+	// written with the refresh.
+	for k, l := range s.ITLLines {
+		l.LearnedAt, l.A, l.B = time.Time{}, sig3(l.A), sig3(l.B)
+		s.ITLLines[k] = l
+	}
+	for k, b := range s.ITLBaseline {
+		s.ITLBaseline[k] = sig3(b)
+	}
 	for k, m := range s.Forgotten {
 		m.Seen = time.Time{}
 		s.Forgotten[k] = m
@@ -424,6 +468,15 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// sig3 rounds x to three significant figures, for the digest only.
+func sig3(x float64) float64 {
+	v, err := strconv.ParseFloat(strconv.FormatFloat(x, 'g', 3, 64), 64)
+	if err != nil {
+		return x
+	}
+	return v
 }
 
 // encodeLearnedState encodes the document, leaving out the least recently used
@@ -546,7 +599,15 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 			delete(s.VariantSeenAt, k)
 			delete(s.ITLBaseline, k)
 			delete(s.StartSeconds, k)
+			maps.DeleteFunc(s.ITLBaselineStash, func(sk string, _ float64) bool { return strings.HasPrefix(sk, k+"#") })
 		}})
+	}
+	// A put-aside ITL baseline goes with its variant's liveness; one whose
+	// variant left none goes first, as a spent bound does.
+	for k := range s.ITLBaselineStash {
+		if base, _, _ := strings.Cut(k, "#"); s.VariantSeenAt[base].IsZero() {
+			out = append(out, learnedStateEntry{spare: true, key: "itlstash|" + k, drop: func() { delete(s.ITLBaselineStash, k) }})
+		}
 	}
 	for k, l := range s.ITLLines {
 		out = append(out, learnedStateEntry{at: l.LearnedAt, key: "itl|" + k, drop: func() { delete(s.ITLLines, k) }})
