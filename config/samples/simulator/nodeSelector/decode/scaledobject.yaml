@@ -48,9 +48,12 @@ spec:
         # actually running and repoints this at it, changing nothing else:
         #
         #     make scaledobjects-repoint
-        scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc:9090
         # Must match what the container actually serves (--model test-model), and
         # it is the grouping key: variants sharing a modelID are optimized
         # together.
         modelID: test-model
         variantCost: "30.0"
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-workload-variant-autoscaler-system
+        kind: ClusterTriggerAuthentication

@@ -370,7 +370,9 @@ wva_keda_apiservice_ns() {
     kc_capture get apiservice v1beta1.external.metrics.k8s.io \
         -o jsonpath='{.spec.service.namespace}{" "}{.spec.service.name}' || rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf '%s' "$KC_ERR" | grep -qi 'notfound\|not found' && return 1
+        # Anchored on the API server status "(NotFound)", never the bare word:
+        # a Forbidden message naming a namespace notfound-prod is not absent.
+        printf '%s' "$KC_ERR" | grep -qF '(NotFound)' && return 1
         return 2
     fi
     read -r ns name <<< "$KC_OUT"
@@ -390,7 +392,8 @@ wva_scaler_np_keda_ns() {
     kc_capture get networkpolicy wva-external-scaler -n "$ns" \
         -o jsonpath='{range .spec.ingress[*]}{range .ports[*]}{.port}{" "}{end}{"|"}{range .from[*]}{.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}{" "}{end}{"\n"}{end}' || rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf '%s' "$KC_ERR" | grep -qi 'notfound\|not found' && return 1
+        # Anchored, as in wva_keda_apiservice_ns.
+        printf '%s' "$KC_ERR" | grep -qF '(NotFound)' && return 1
         return 2
     fi
     found="$(printf '%s\n' "$KC_OUT" | awk -F'|' '{

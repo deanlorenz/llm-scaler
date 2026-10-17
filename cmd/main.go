@@ -992,13 +992,15 @@ func main() {
 	if cfg.EnableLeaderElection() {
 		externalScaler.Elected = mgr.Elected()
 	}
-	if *externalScalerClientCA != "" && *externalScalerCertPath == "" {
-		setupLog.Error(nil, "--external-scaler-client-ca needs --external-scaler-cert-path: mutual TLS needs a serving certificate")
-		os.Exit(1)
-	}
-	allowedScalerClients := scaler.ParseClientIdentities(*externalScalerClientSAN)
-	if len(allowedScalerClients) > 0 && *externalScalerClientCA == "" {
-		setupLog.Error(nil, "--external-scaler-client-san needs --external-scaler-client-ca: a client name is verified only under mutual TLS")
+	allowedScalerClients, err := scaler.CheckTLSFlags(scaler.TLSFlags{
+		CertPath:     *externalScalerCertPath,
+		ClientCA:     *externalScalerClientCA,
+		ClientCASet:  flag.CommandLine.Changed("external-scaler-client-ca"),
+		ClientSAN:    *externalScalerClientSAN,
+		ClientSANSet: flag.CommandLine.Changed("external-scaler-client-san"),
+	})
+	if err != nil {
+		setupLog.Error(err, "invalid external scaler TLS flags")
 		os.Exit(1)
 	}
 	if *externalScalerCertPath != "" {

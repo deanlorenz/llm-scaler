@@ -492,6 +492,21 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	ev allocation.ShareEvaluation, held map[string]int, fit shareFit, variantKey func(string, string) string,
 	now time.Time, tm allocation.ShareTimings) {
 	committed := l.Committed(held)
+	// A role is charged at least the target the overrides publish for it: a
+	// target above what it holds, with no transfer to explain it -- its
+	// Deployment scaled down from outside, a raise whose pods are not placed
+	// yet -- is GPUs its scale target takes back, not idle ones.
+	for role, vs := range g.Variants {
+		target := 0
+		for _, v := range vs {
+			d := max(e.utilizationShare.desired[variantKey(role, v.Name)], v.Min)
+			if v.Max > 0 {
+				d = min(d, v.Max)
+			}
+			target += d * v.GPUs
+		}
+		committed[role] = max(committed[role], target)
+	}
 	// GPUs redirected to a woken model are its, however idle they look.
 	// Nor are those a reserve refill or a returned spare still releases: the
 	// quota counts the donor's pod until it is gone.

@@ -15,6 +15,9 @@
 #   BENCHMARK_DECODE_CPU / BENCHMARK_DECODE_MEMORY
 #       A decode Pod's CPU and memory request (and limit, where the scenario
 #       sets one), for nodes whose spare CPU is smaller than the scenario asks.
+#   BENCHMARK_DECODE_NODE=<node>
+#       Every engine role with its own resources pinned to that node
+#       (nodeSelector kubernetes.io/hostname).
 #   BENCHMARK_RENDER_DRAIN=true (the default)
 #       The drain fields -- a preStop sleep of WVA_DRAIN_SLEEP_SECONDS (45) and
 #       terminationGracePeriodSeconds of WVA_DRAIN_GRACE_SECONDS (120) -- on every
@@ -59,6 +62,20 @@ decode_resource() {  # decode_resource <cpu|memory> <value>
 }
 [ -z "${BENCHMARK_DECODE_CPU:-}" ] || decode_resource cpu "$BENCHMARK_DECODE_CPU"
 [ -z "${BENCHMARK_DECODE_MEMORY:-}" ] || decode_resource memory "$BENCHMARK_DECODE_MEMORY"
+
+# BENCHMARK_DECODE_NODE=<node>: every engine role that sizes its own Pods (a
+# decode or prefill map with resources -- the per-stack entries) is pinned to
+# that node by kubernetes.io/hostname. A mixed-size run needs its small model's
+# donors on the large model's node, and a shared cluster's scheduler spreads them.
+if [ -n "${BENCHMARK_DECODE_NODE:-}" ]; then
+    export DECODE_NODE="$BENCHMARK_DECODE_NODE"
+    case "$DECODE_NODE" in *[!a-z0-9.-]*) log_error "not a node name: '${DECODE_NODE}'" ;; esac
+    PINNED='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("resources"))'
+    n="$(yq -r "[${PINNED}] | length" "$SCENARIO")"
+    [ "$n" -gt 0 ] || log_error "BENCHMARK_DECODE_NODE=${DECODE_NODE}, but ${SCENARIO} has no engine role with resources to pin"
+    yq -i "(${PINNED} | .nodeSelector.\"kubernetes.io/hostname\") = strenv(DECODE_NODE)" "$SCENARIO"
+    echo "node: ${n} engine role(s) pinned to ${DECODE_NODE}"
+fi
 
 if [ "${BENCHMARK_RENDER_DRAIN:-true}" = "true" ]; then
     export DRAIN_GRACE="${WVA_DRAIN_GRACE_SECONDS:-120}" DRAIN_CMD="sleep ${WVA_DRAIN_SLEEP_SECONDS:-45}"

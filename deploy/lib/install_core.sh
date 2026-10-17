@@ -314,6 +314,12 @@ $(pl_kueue_borrowers_besides "$WVA_NS")"
         fi
         WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
             deploy_wva_controller
+
+        # KEDA's side of the scaler TLS, when the certificates were written
+        # before KEDA's API was served.
+        if declare -F wva_scaler_tls_after_keda >/dev/null; then
+            wva_scaler_tls_after_keda
+        fi
     fi
 }
 
@@ -585,6 +591,12 @@ main() {
             WVA_APPLY_SCOPE=controller deploy_wva_controller
         fi
 
+        # ScaledObjects that must follow the scaler to its new TLS mode
+        # (WVA_SCALER_TLS_MIGRATE=true), now that the controller has it.
+        if [ "$DEPLOY_WVA" = "true" ] && declare -F wva_scaler_tls_finish >/dev/null; then
+            wva_scaler_tls_finish
+        fi
+
         # After the scaler backend (wva_run_prereqs_phase installs or confirms it):
         # a ScaledObject is meaningless until KEDA is there to reconcile it.
         install_default_scaledobjects
@@ -612,7 +624,7 @@ main() {
 
     if [ "$verified" != true ]; then
         echo ""
-        log_warning "Deployment on $ENVIRONMENT FINISHED WITH ERRORS — the WVA controller is not ready."
+        log_warning "Deployment on $ENVIRONMENT FINISHED WITH ERRORS — the WVA controller is not ready, or KEDA has not wired a ScaledObject to it (see the warnings above)."
         log_warning "Everything above was created; nothing is scaling. Diagnose with the commands printed above, then re-run this script (it is idempotent)."
         return 1
     fi

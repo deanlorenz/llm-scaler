@@ -100,8 +100,11 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        scalerAddress: wva-external-scaler.<wva-namespace>.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.<wva-namespace>.svc:9090
         warmPoolName: default   # must match the Deployment's llm-d.ai/warm-pool
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-<wva-namespace>
+        kind: ClusterTriggerAuthentication
 ```
 
 The scaling manager publishes `lent + reserve + 1`: the Pods now bridging, the

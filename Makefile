@@ -671,11 +671,18 @@ check-prereqs: ## Phase 1, read-only: tools, permissions, the namespace and the 
 ## no install attached. `kubectl rollout status` returns immediately when the
 ## rollout is already complete, so this doesn't sit around waiting on a
 ## controller that has been healthy for days.
+##
+## scaler_tls.sh is sourced too: without it the scaler TLS checks (KEDA's side,
+## its certificate's expiry, a rotated CA, stranded ScaledObjects) are skipped.
+## ENVIRONMENT, when not given, is detected only as far as "openshift", which
+## decides the CA KEDA must trust.
 .PHONY: verify-deployment
 verify-deployment: ## Is the controller running, and are metrics flowing? Read-only. WVA_NS=<ns>, NAMESPACE=<ns>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
-		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; \
+	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) \
+		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			export DEPLOY_PROMETHEUS=$${DEPLOY_PROMETHEUS:-true}; export DEPLOY_OPERATIONAL_DASHBOARD=$${DEPLOY_OPERATIONAL_DASHBOARD:-true}; export SCALER_BACKEND=$${SCALER_BACKEND:-keda}; export MONITORING_NAMESPACE=$${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}; \
+			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
+			[ -n "$${ENVIRONMENT:-}" ] || ! wva_is_openshift || ENVIRONMENT=openshift; \
 			wva_bootstrap_env; verify_deployment'
 
 ## List the llm-d model servers WVA would create ScaledObjects for, and stop.
@@ -773,11 +780,13 @@ BENCHMARK_ENGINE_CACHE_SEED ?= auto
 # with less spare CPU than the scenario asks. BENCHMARK_RENDER_DRAIN renders the
 # drain hook and grace into every engine before it first starts, so the
 # workload patch after the standup finds nothing to roll and no model starts
-# twice; false leaves it to that patch, as before.
+# twice; false leaves it to that patch, as before. BENCHMARK_DECODE_NODE pins
+# every engine role to one node (kubernetes.io/hostname).
 BENCHMARK_GATEWAY_SKIP_INSTALL ?= false
 BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
 BENCHMARK_DECODE_CPU ?=
 BENCHMARK_DECODE_MEMORY ?=
+BENCHMARK_DECODE_NODE ?=
 BENCHMARK_RENDER_DRAIN ?= true
 # How long one kubectl request in a benchmark recipe may take before it fails
 # with a reason. kubectl has none by default, and a get of model-pvc hung for
@@ -1368,6 +1377,67 @@ test-e2e-kueue-borrow-with-setup: ## Deploy e2e infra + Kueue, then run the live
 	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
 	$(MAKE) test-e2e-kueue-borrow
 
+# The whole-node utilization-share specs (label utilization-share-wholenode): a
+# large model whose replica is one whole 8-GPU node, or a LeaderWorkerSet group
+# of two, beside 1-GPU models. They need up to five free schedulable nodes of
+# exactly 8 GPUs of one product, which the default kind cluster (one product
+# per 16-GPU node) does not have, so they are outside the full tier and run
+# here. docs/developer-guide/testing.md lists them.
+# REQUIRE_WHOLENODE_E2E=true (the default here) turns their skips -- no such
+# nodes, no Prometheus, no Kueue -- into failures. About 70 minutes on a 22-CPU box.
+USHARE_WHOLENODE_CLUSTER_GPU_TYPE ?= nvidia
+USHARE_WHOLENODE_CLUSTER_GPUS     ?= 8
+USHARE_WHOLENODE_CLUSTER_NODES    ?= 6
+REQUIRE_WHOLENODE_E2E             ?= true
+USHARE_WHOLENODE_TIMEOUT          ?= 200m
+USHARE_WHOLENODE_GO_TIMEOUT       ?= 210m
+.PHONY: test-e2e-ushare-wholenode
+test-e2e-ushare-wholenode: ## Run the whole-node utilization-share e2e specs (8-GPU nodes)
+	@echo "Running the whole-node utilization-share e2e specs..."
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	PF_PID=""; \
+	if kubectl get svc -n $(E2E_MONITORING_NAMESPACE) kube-prometheus-stack-prometheus >/dev/null 2>&1; then \
+		kubectl port-forward -n $(E2E_MONITORING_NAMESPACE) svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 & \
+		PF_PID=$$!; \
+		for i in $$(seq 1 20); do \
+			curl -sk --max-time 2 https://localhost:9090/-/ready >/dev/null 2>&1 && break; \
+			sleep 1; \
+		done; \
+	else \
+		echo "WARNING: svc/kube-prometheus-stack-prometheus not found in $(E2E_MONITORING_NAMESPACE)"; \
+	fi; \
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
+	SCALER_BACKEND=keda \
+	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
+	MODEL_ID=$(MODEL_ID) \
+	REQUIRE_WHOLENODE_E2E=$(REQUIRE_WHOLENODE_E2E) \
+	go test ./test/e2e/ -timeout $(USHARE_WHOLENODE_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(USHARE_WHOLENODE_TIMEOUT) \
+		-ginkgo.label-filter="utilization-share-wholenode" -ginkgo.fail-on-empty $(FOCUS_ARGS) $(SKIP_ARGS); \
+	TEST_EXIT_CODE=$$?; \
+	[ -n "$$PF_PID" ] && kill $$PF_PID 2>/dev/null || true; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Test execution completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
+
+# Creates the whole-node kind cluster (CREATE_CLUSTER=true, five 8-GPU workers
+# of one product), deploys the e2e infra with LeaderWorkerSet and Kueue's
+# controller, and runs the whole-node specs. It never deletes the cluster.
+.PHONY: test-e2e-ushare-wholenode-with-setup
+test-e2e-ushare-wholenode-with-setup: ## Create an 8-GPU-node kind cluster, deploy infra + Kueue, run the whole-node share specs
+	CLUSTER_GPU_TYPE=$(USHARE_WHOLENODE_CLUSTER_GPU_TYPE) CLUSTER_GPUS=$(USHARE_WHOLENODE_CLUSTER_GPUS) \
+		CLUSTER_NODES=$(USHARE_WHOLENODE_CLUSTER_NODES) DEPLOY_LWS=true SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
+	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
+	$(MAKE) test-e2e-ushare-wholenode
+
 ##@ llm-d-benchmark CLI (standup / run / teardown)
 
 # llmdbenchmark binary from the benchmark repo venv
@@ -1797,11 +1867,17 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# install, which is why the ordering never mattered there.
 	@$(MAKE) --no-print-directory benchmark-scenarios
 	@cd $(BENCHMARK_REPO_DIR) && git reset --hard origin/$(BENCHMARK_REPO_REF) 2>/dev/null || true
+	@# THE COPY BELOW IS THE ONE THE STANDUP DEPLOYS, so the engine resources are
+	@# rendered into it as well. benchmark-scenarios rendered them into the copy
+	@# it installed, and the git reset above put the upstream file back over any
+	@# scenario upstream also ships (guides/pd-disaggregation): a P/D run logged
+	@# "2 CPU / 8Gi" and deployed the scenario's 32 CPU / 128Gi.
 	@if [ -f "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml" ]; then \
 		echo "Copying local scenario: hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml -> $(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"; \
 		mkdir -p "$(BENCHMARK_REPO_DIR)/config/scenarios/$$(dirname $(BENCHMARK_SPEC))"; \
 		sed -e 's/__WARM_REPLICAS__/$(WARM_REPLICAS)/g' -e 's/^\([ 	]*\)gpuMemoryUtilization:.*/\1gpuMemoryUtilization: $(GPU_MEM_UTIL)/' "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml" \
 		   > "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"; \
+		python3 hack/benchmark/render-engine-resources.py "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml" --model "$(BENCHMARK_MODEL_ID)" || exit 1; \
 	fi
 	@if [ -f "$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml.j2" ]; then \
 		echo "Copying local specification: hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml.j2 -> $(BENCHMARK_REPO_DIR)/config/specification/$(BENCHMARK_SPEC).yaml.j2"; \
@@ -1940,6 +2016,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@BENCHMARK_GATEWAY_SKIP_INSTALL="$(BENCHMARK_GATEWAY_SKIP_INSTALL)" \
 		BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$(BENCHMARK_GATEWAY_PROVIDER_NAMESPACE)" \
 		BENCHMARK_DECODE_CPU="$(BENCHMARK_DECODE_CPU)" BENCHMARK_DECODE_MEMORY="$(BENCHMARK_DECODE_MEMORY)" \
+		BENCHMARK_DECODE_NODE="$(BENCHMARK_DECODE_NODE)" \
 		BENCHMARK_RENDER_DRAIN="$(BENCHMARK_RENDER_DRAIN)" \
 		bash hack/benchmark/scenario_overrides.sh "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"
 	@# Node-local weights, last of the scenario edits: the script refuses a
@@ -2706,6 +2783,18 @@ benchmark-two-model-report: ## Two-model pool run: compare every arm that ran ag
 benchmark-two-model-report-share: ## Two-model run: compare the shadow and share arms against today, and what the optimizer recorded
 	@$(TWO_MODEL) report-share
 
+.PHONY: benchmark-two-model-node-data
+benchmark-two-model-node-data: ## Two-model run: does the controller have the node data a mixed-size share run needs; prints the admin commands when not
+	@$(TWO_MODEL) node-data
+
+.PHONY: benchmark-two-model-share-arms
+benchmark-two-model-share-arms: ## Two-model run: REPEATS (2) x reset+run of today, shadow and share, a report per repeat, then report-repeats; TEARDOWN_ON_EXIT=1 tears down on every exit
+	@$(TWO_MODEL) share-arms
+
+.PHONY: benchmark-two-model-report-repeats
+benchmark-two-model-report-repeats: ## Two-model run: per-burst TTFT, spread across repeats, transfers from the controller log, GPU-seconds
+	@$(TWO_MODEL) report-repeats
+
 .PHONY: benchmark-two-model-status
 benchmark-two-model-status: ## Two-model pool run: what exists, and what holds accelerators
 	@$(TWO_MODEL) status
@@ -2820,6 +2909,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rewrite another workload's trigger metadata. A policy that selects no Pod,
 	@# admits {} or drops the metrics port all apply cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-external-scaler-networkpolicy.sh
+	@echo "Checking the external-scaler TLS provisioning..."
+	@# Runs the certificate code against a stubbed kubectl and the real openssl:
+	@# a certificate naming the wrong host, a re-install that drops TLS, or a
+	@# foreign Secret overwritten all install cleanly.
+	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-scaler-tls.sh
 	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
 	@# evaluates the shipped rules on synthetic series.
 	@$(MAKE) --no-print-directory promtool

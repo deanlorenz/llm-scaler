@@ -384,8 +384,19 @@ below zero. For example, a cluster quota of 20
 with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
 fill 4.
 
-A tenant claims only whole replicas. With 8-GPU replicas, a tenant with 4 free
-GPUs claims none of them, so the cluster group can still fill a free node.
+A tenant claims only whole replicas of the variant it grows. A tenant grows
+its most cost-efficient variant that is below its `maxReplicas`. With 8-GPU
+replicas, a tenant with 4 free GPUs claims none of them, so the cluster group
+can still fill a free node. This holds even when the tenant also has a 1-GPU
+variant: it does not grow that variant, so it claims nothing for it. It claims
+the 4 GPUs only when it grows the 1-GPU variant and can place them.
+
+Models the share does not plan count too: frozen ones, ones that span two
+accelerator types, and those of a tenant with sharing turned off. Today's
+optimizer can still grow them, so the claim rounds to the smallest replica
+anything in the tenant can grow. A variant at its `maxReplicas`, or whose role
+the analyzers hold from scaling up, grows nothing and does not count. A tenant
+with nothing on the type that can grow claims nothing.
 
 This stops the cluster group from counting GPUs a tenant may also fill. It does
 not bound the tenants against each other: each tenant's group is bounded only by
@@ -652,7 +663,9 @@ replica is kept, but it is not reported as a floor: `floor-pinned`,
 
 **How much spike a model absorbs.** Its spike capacity is the headroom it holds
 (`wva_utilization_share_headroom`), plus whatever GPUs of the quota are
-unassigned, which it takes without a transfer. A spike larger than that waits
+unassigned, which it takes without a transfer. GPUs another model's target asks
+for are not unassigned, even before that model holds them (its new replica is
+still starting, or its Deployment was scaled down by hand). A spike larger than that waits
 for a transfer, and a transfer releases the donor first: expect at least one donor
 scale-down window before the new replica serves. For whole-node models the full
 wait is the donor's scale-down window, its drain and termination grace, up to
@@ -1058,9 +1071,12 @@ key the trigger carries is listed in [ScaledObject trigger metadata](scaledobjec
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
       modelID: ibm/granite-13b
       defaultOutputTokens: "6000"
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-<controller-namespace>
+      kind: ClusterTriggerAuthentication
 ```
 
 The scaling manager prices each request waiting in the router queue at the
@@ -2116,9 +2132,12 @@ the registration, so nothing needs to be watched, listed or matched:
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
       modelID: ibm/granite-13b
       scalingPolicy: interactive
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-<controller-namespace>
+      kind: ClusterTriggerAuthentication
 ```
 
 **Resolution order** — most specific wins (`ResolveScalingPolicyForTier`):

@@ -177,10 +177,13 @@ spec:
   - type: external-push     # push: wakes a parked workload immediately
     name: wva-external-scaler
     metadata:
-      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090  # your NAMESPACE on a namespace install
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090  # your NAMESPACE on a namespace install
       modelID: meta/llama-3-8b   # required — the only field you must supply
       scalingPolicy: interactive # optional — a tier you add to the scaling policy; none ship enabled
       variantCost: "10.0"        # optional — defaults to "10.0"
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-<controller-namespace>
+      kind: ClusterTriggerAuthentication
 ```
 
 `modelID` is the one required field. The accelerator, the role, GPUs per

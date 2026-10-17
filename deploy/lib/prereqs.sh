@@ -71,7 +71,10 @@ append_conditional_tools() {
         tools+=("column")
     fi
     # openssl mints the self-signed cert for a Prometheus this install deploys.
-    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ]; then
+    # It also mints the external scaler certificates when there is no
+    # cert-manager; asked for whenever scaler TLS is requested, since whether
+    # cert-manager answers is only known later.
+    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] || [ "${WVA_SCALER_TLS:-}" = "true" ]; then
         tools+=("openssl")
     fi
     if [ "${ENVIRONMENT:-kubernetes}" = "openshift" ]; then
@@ -1070,6 +1073,24 @@ check_permissions() {
             denied+=("create namespace $ns (it does not exist yet)")
             cluster_denied=1
         fi
+    fi
+
+    # The external scaler certificates and KEDA's side of them (WVA_SCALER_TLS).
+    # Written beside the overlay rather than rendered in it, so the loop above
+    # never sees them. One "<resource> <namespace>" per line; "-" is cluster-scoped.
+    if declare -F wva_scaler_tls_permission_needs >/dev/null; then
+        local tls_res tls_ns tls_needs
+        tls_needs="$(wva_scaler_tls_permission_needs)"
+        while read -r tls_res tls_ns; do
+            [ -n "$tls_res" ] || continue
+            if [ "$tls_ns" = - ]; then
+                kubectl auth can-i create "$tls_res" >/dev/null 2>&1 \
+                    || { denied+=("create $tls_res, cluster-scoped (external scaler TLS; WVA_SCALER_TLS=false skips it)"); cluster_denied=1; }
+            else
+                kubectl auth can-i create "$tls_res" -n "$tls_ns" >/dev/null 2>&1 \
+                    || denied+=("create $tls_res in $tls_ns (external scaler TLS; WVA_SCALER_TLS=false skips it)")
+            fi
+        done <<< "$tls_needs"
     fi
 
     if [ ${#unknown[@]} -ne 0 ]; then

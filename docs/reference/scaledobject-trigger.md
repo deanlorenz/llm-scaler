@@ -47,11 +47,14 @@ spec:
       name: wva-external-scaler
       metricType: AverageValue               # the default; never Value, see "Before the first decision"
       metadata:
-        scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
         modelID: "Qwen/Qwen3-32B"            # = the engine's --served-model-name
         variantCost: "10.0"
         # scalingPolicy: "interactive"       # only once that tier exists in the ConfigMap
         defaultOutputTokens: "6000"          # long generations; seed only
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-<controller-namespace>
+        kind: ClusterTriggerAuthentication
 ```
 
 ## Model keys
@@ -69,7 +72,12 @@ These appear on a ScaledObject that scales a model server.
 | `replicaStartSeconds` | no | — | — | **nothing yet** | **Reserved.** Declared as the seed for how long a replica takes to become Ready, but not read by any code path today. The analyzer uses its own default until it measures a replica start. Setting it has no effect. |
 
 `scalerAddress` is KEDA's own key (where to dial); the scaling manager never
-reads it. Its value is `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`.
+reads it. On a TLS install (the default) its value is
+`wva-external-scaler.<controller-namespace>.svc:9090`, and the trigger carries
+an `authenticationRef` to ClusterTriggerAuthentication
+`wva-external-scaler-<controller-namespace>`. On a plaintext install it is
+`wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`, with no
+`authenticationRef`. See [external scaler mutual TLS](configuration.md#external-scaler-mutual-tls).
 
 **A bad value freezes the model at its current count.** If `modelID` is empty,
 or `variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the

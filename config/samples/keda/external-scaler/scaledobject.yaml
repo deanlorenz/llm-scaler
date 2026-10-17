@@ -99,7 +99,7 @@ spec:
     metricType: AverageValue
     metadata:
       # The WVA controller's external-scaler gRPC service (host:port).
-      scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc:9090
       # The model this variant serves. Required: it is the grouping key for every
       # multi-variant decision.
       modelID: default/default
@@ -107,3 +107,6 @@ spec:
       variantCost: "10.0"
       # The scale target is NOT set here. It is read from this ScaledObject's own
       # spec.scaleTargetRef, so the two cannot disagree.
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-workload-variant-autoscaler-system
+      kind: ClusterTriggerAuthentication

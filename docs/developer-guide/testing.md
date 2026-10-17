@@ -342,6 +342,65 @@ read the `-v` output.
     A pods with `"planned": true`, raise B only after both release, and B's
     second pod must run.
 
+### Whole-node utilization-share specs (own cluster shape)
+
+Seven specs, label `utilization-share-wholenode`, put a large model whose
+replica is a whole 8-GPU node (or a LeaderWorkerSet group of two) beside
+1-GPU models. They need nodes of exactly 8 GPUs of one product, which the
+default cluster (one product per 16-GPU node) does not have. They are not in
+the full tier and run on their own cluster:
+
+```bash
+CREATE_CLUSTER=true CLUSTER_NAME=ushare-large make test-e2e-ushare-wholenode-with-setup
+# or, on a cluster that already has that shape:
+make test-e2e-ushare-wholenode            # FOCUS=... narrows it
+```
+
+- The cluster is `CLUSTER_GPU_TYPE=nvidia CLUSTER_GPUS=8 CLUSTER_NODES=6`
+  (`USHARE_WHOLENODE_CLUSTER_*`). Kind leaves the control-plane schedulable
+  here, so all six nodes take pods. The setup also installs LeaderWorkerSet and
+  Kueue's controller.
+- `REQUIRE_WHOLENODE_E2E=true` (the target's default) turns every skip -- too
+  few 8-GPU nodes, no Prometheus, no Kueue -- into a failure. The target passes
+  `-ginkgo.fail-on-empty`. Check `Ran N of M Specs`.
+- About 70 minutes on a 22-CPU workstation; the budget is `USHARE_WHOLENODE_TIMEOUT=200m`. No CI job runs
+  them yet.
+- Each spec closes every GPU it does not use with `registry.k8s.io/pause` pods
+  (`fixtures.FillNodeGPUs`) and creates its models in an order that decides
+  where each pod lands. Do not run them on a shared cluster.
+- `fixtures.WithStartDelay` holds a replica not Ready for a while after it is
+  scheduled (a readiness probe's initial delay), to emulate a large model's
+  load. `fixtures.QueueGPUPod` makes a pod outside WVA wait for GPUs on one
+  node.
+
+The specs:
+
+- **Lending a node** (`utilization_share_wholenode_test.go`). G has two 8-GPU
+  replicas; S1 is loaded. G gives a whole node and S1 grows onto it. Then G is
+  loaded and gets a node back.
+- **Funded by small models.** G (one replica, 3-minute start) beside eight
+  1-GPU pods of S1 and S2 on one node. G grows by a donor set that empties
+  that node. Also checks G's start estimate.
+- **A fragmented cluster** (`utilization_share_wholenode_fragment_test.go`).
+  The small pods share their nodes with pause pods, so no node can be
+  emptied. G must get no transfer and report `no-compatible-donor`. Then,
+  with the optimizer off and room in the quota, today's optimizer orders a G
+  replica that stays Pending.
+- **A released node taken.** Same layout as "funded", plus a pause pod
+  waiting for one GPU on the small models' node. The transfer must end
+  `fill-timeout` with `release-taken`, and G's raise is undone.
+- **A two-node LeaderWorkerSet** (`utilization_share_wholenode_lws_test.go`).
+  G has two groups of two 8-GPU pods. It lends its highest group to S1, then
+  gets a group back.
+- **A namespace-scoped controller** (`utilization_share_wholenode_scope_test.go`).
+  The "funded" layout, with the controller's `WATCH_NAMESPACE` set for this
+  spec only. Without node data the small pods cannot fund G:
+  `no-compatible-donor`, no transfer. The spec restores cluster scope after.
+- **Under Kueue.** G and S on one ClusterQueue (nominal 9), a second queue
+  lends 8. With the optimizer G stays at one replica and nothing is borrowed;
+  without it, today's optimizer borrows 8 GPUs for a second G replica. It also
+  logs whether Kueue's `waitForPodsReady` is on.
+
 ### Controller state between runs
 
 `BeforeSuite` restarts the controller first. This is needed for determinism.
@@ -405,6 +464,7 @@ The main variables (full list in the [E2E README](../../test/e2e/)):
 | `SCALER_BACKEND` | `keda` | `keda` (ScaledObject) or `none` (use a pre-installed backend) |
 | `POD_READY_TIMEOUT` / `SCALE_UP_TIMEOUT` | `300` / `600` | Model ready vs longest scale/job waits (seconds) |
 | `E2E_EVENTUALLY_*`, `E2E_EVENTUALLY_POLL*` | see README | Optional `Eventually` timeouts and poll intervals |
+| `E2E_EXPECT_SCALER_TLS` | unset | `true` fails the run when the controller serves the external scaler in plaintext. Without it, a plaintext install just skips the scaler TLS spec, which reads as a pass. CI sets it |
 
 Deploy-time knobs: `SKIP_HELM_REPO_UPDATE`, and `SCALE_UP_THRESHOLD` /
 `SCALE_DOWN_BOUNDARY` (when set, the Makefile patches the

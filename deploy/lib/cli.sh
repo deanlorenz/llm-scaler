@@ -130,6 +130,14 @@ Environment Variables:
                                none of those, NO policy is written and :9090 stays open (warned)
   WVA_SCALER_NETWORKPOLICY     false skips the NetworkPolicy that admits :9090 only from KEDA
                                (default: true)
+  WVA_SCALER_TLS               unset (default): mutual TLS on the external scaler when KEDA's side
+                               is in place and no ScaledObject is left behind, else plaintext with
+                               a warning. true: the same, but refuse instead. false: plaintext.
+                               A controller that already has TLS keeps it
+  WVA_SCALER_TLS_MIGRATE       true moves the ScaledObjects that name the scaler with it when its
+                               TLS mode changes (default: false)
+  WVA_SCALER_TLS_PROVIDER      auto (default) | cert-manager | openssl: who issues those
+                               certificates. auto uses cert-manager when it is installed
   CRD_INSTALL                  if-missing (default) | always | never. Gateway API and GAIE CRDs are
                                cluster-scoped and shared; 'always' overwrites what other controllers use.
   DEPLOY_LWS                   Install the LeaderWorkerSet CRD if absent (default: false)
@@ -190,6 +198,16 @@ wva_split_image_ref() {
   WVA_IMAGE_REPO="${ref%:*}"
   WVA_IMAGE_TAG="${ref##*:}"
   WVA_IMAGE_DIGEST=""
+}
+
+# wva_image_ref echoes the image reference WVA_IMAGE_REPO, WVA_IMAGE_TAG and
+# WVA_IMAGE_DIGEST name: repo@digest, repo:tag@digest, or repo:tag. Gluing
+# repo and tag alone printed "repo:" for a digest, which names nothing.
+wva_image_ref() {
+  local ref="$WVA_IMAGE_REPO"
+  [ -z "${WVA_IMAGE_TAG:-}" ] || ref="$ref:$WVA_IMAGE_TAG"
+  [ -z "${WVA_IMAGE_DIGEST:-}" ] || ref="$ref@$WVA_IMAGE_DIGEST"
+  printf '%s\n' "$ref"
 }
 
 # wva_image_ref_fields echoes "<repo>|<tag>|<digest>" for an image reference,

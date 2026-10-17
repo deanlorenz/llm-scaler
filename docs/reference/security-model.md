@@ -245,7 +245,7 @@ delete it when they go
 
 | Port | Protocol | Exposed by | Authentication | Notes |
 | --- | --- | --- | --- | --- |
-| `9090` | gRPC, **plaintext** by default; TLS with `--external-scaler-cert-path` | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace, where the admin phase wrote it (below) | **none** by default; mutual TLS with `--external-scaler-client-ca`, limited to named clients with `--external-scaler-client-san` | the KEDA external scaler |
+| `9090` | gRPC over **mutual TLS** when the install can turn it on, else plaintext ([when](configuration.md#external-scaler-mutual-tls)) | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace, where the admin phase wrote it (below) | with TLS, only a client certificate the install's CA signed for `wva-keda-client`; in plaintext, **none** | the KEDA external scaler |
 | `8443` | HTTPS | Service `wva-controller-manager-metrics-service` (ClusterIP) | TokenReview + SubjectAccessReview on `get /metrics` | self-signed certificate unless `--metrics-cert-path` is set (OpenShift sets it, from the service CA) |
 | `8081` | HTTP | no Service; the kubelet's probes | none | `/healthz`, `/readyz` |
 | `8001` (warm pool only) | HTTP, **plaintext** | the warm-pool pod's launcher (supervisor); also `8002` (proxy control) and `9001`-`9016` (engine instances) | **none** | the supervisor starts engine processes with **caller-supplied argv and env**, in a pod that mounts the shared model cache (`model-pvc`) **read-write**. The only protection is the pool's NetworkPolicy, see below |
@@ -334,6 +334,49 @@ spec:
 - `8081` is admitted from every source, because kubelet probes come from the
   node, which no `from:` selector can name.
 
+### Scaler mutual TLS
+
+The NetworkPolicy holds only on a network plugin that enforces it. Mutual TLS
+holds on any network. It is on by default, once KEDA's side is in place
+([when it stays off](configuration.md#external-scaler-mutual-tls)):
+
+- The installer issues a serving certificate for the scaler Service and a
+  client certificate for KEDA, from cert-manager when it is installed and from
+  a private CA of its own otherwise (on OpenShift the serving certificate comes
+  from the service CA). Details: [configuration](configuration.md#external-scaler-mutual-tls).
+- The controller then accepts only a client certificate that CA signed **and**
+  that names `wva-keda-client`. Anything else is refused in the TLS handshake,
+  before any call can register a workload or read a decision.
+- KEDA presents its certificate through a ClusterTriggerAuthentication that
+  reads a copy of the client Secret in KEDA's own namespace. The admin phase
+  writes both; no model namespace gets a copy.
+- It protects the port only where the tenant cannot edit the controller's
+  Deployment (the controller in an admin-owned namespace): whoever owns the
+  Deployment owns its flags.
+- It authenticates KEDA, not whoever wrote a ScaledObject. Anyone who may
+  create a ScaledObject can give it this install's `authenticationRef`, and
+  KEDA then calls the scaler for them
+  ([what a ScaledObject needs](configuration.md#external-scaler-mutual-tls)).
+  Who may create ScaledObjects is still your RBAC.
+- A ScaledObject on the TLS address **without** the `authenticationRef` gets no
+  access, but can cost everyone scaling. KEDA shares one connection per
+  address; after a KEDA restart, if that ScaledObject connects first, the
+  connection opens without KEDA's certificate, and every ScaledObject on that
+  address stops scaling until it is fixed and KEDA is restarted
+  ([multi-tenancy](#multi-tenancy)).
+
+These Secrets are as sensitive as the port. Anyone who can read one can call
+the scaler as KEDA:
+
+- `wva-external-scaler-client-tls` in the controller's namespace, and its copy
+  `wva-external-scaler-<controller namespace>` in KEDA's: KEDA's client key.
+- `wva-external-scaler-ca` in the controller's namespace: the CA's private key,
+  from cert-manager or the installer alike. With it, anyone can sign a client
+  certificate of their own.
+
+A tenant who can read Secrets in the controller's namespace holds the client
+key and the CA key.
+
 ## Data handled
 
 Metrics only. The controller reads Prometheus series, EPP and model-server
@@ -418,6 +461,7 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 | A Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` | `make enable-physical-limiter` treats it as a controller only if it runs as the controller ServiceAccount (`WVA_CONTROLLER_SA`) and has a `manager` container from a controller image repository (`WVA_CONTROLLER_IMAGE_REPOS`; a namespace named in `WVA_LIMITER_TARGETS` relaxes the image check). Anything else is `SKIPPED`, granted nothing, and listed as NOT bound under the banner. A verified one gets its ServiceAccount node read (and Kueue read), a `kubectl rollout restart` of that named Deployment when it must re-resolve its policy namespace (it could not read its Namespace, or started before the policy namespace existed), and `limiters` in the ConfigMap its policy resolves to, the `wva.llmd.ai/policy-namespace` label honoured | signals, not proof: any tenant can satisfy them. Where tenants are not trusted, run their controllers out of reach and name exactly those namespaces in `WVA_LIMITER_TARGETS` |
 | Reaching `:9090` | register or overwrite trigger metadata; read decisions | closed by the shipped NetworkPolicy, above, where it was applied and the network plugin enforces it. Scaler mutual TLS closes it on any network only with `--external-scaler-client-san` pinning KEDA's identity, and only where an admin owns the controller's Deployment: in the tenant-owned shape the tenant owns its args, and so the TLS flags |
 | A ScaledObject whose `scalerAddress` names another install's scaler | KEDA relays its calls, and that controller registers and sizes the workload | **open**: both controls above authenticate KEDA, not the tenant. No per-namespace authorization exists |
+| A ScaledObject on a shared controller's TLS address **without** its `authenticationRef` (or with a CA-only TriggerAuthentication) | **availability, not access.** The scaler still refuses it in the TLS handshake. But KEDA keeps one connection per address: after a KEDA operator restart, if this ScaledObject connects first, that connection opens without KEDA's certificate, and every ScaledObject on that address, in every namespace, stops scaling until it is fixed and KEDA is restarted | **open**: neither the NetworkPolicy nor the address limits it. KEDA connects from its own namespace, which the policy admits, and the address is predictable. `make verify-deployment` names such ScaledObjects in the namespaces it watches. To close it, limit who may create ScaledObjects, or add an admission policy that requires the `authenticationRef` on triggers naming that address |
 
 **A shared Prometheus shows every tenant's series.** Every controller's
 metrics carry the model namespace (`exported_namespace`), model and variant
@@ -537,13 +581,20 @@ scaling manager asks for; the quota bounds what the cluster admits
 | One limiter unavailable in a cycle (usage not observed yet, or an error) | skipped, logged when the skip starts and ends, and `wva_constraint_provider_skipped` = 1; the others still bound. Only when every one is unavailable is a decision unchecked; scale-from-zero then uses its last constraints if under 5 minutes old, debiting each wake from them (best-effort: per namespace and accelerator name), and counts a wake with no check in `wva_scale_from_zero_wake_unchecked_total` | held |
 | The installer cannot tell where KEDA runs | no external-scaler NetworkPolicy is applied; the installer warns and `make verify-deployment` reports `:9090` open | **open**, and reported |
 | The external-scaler NetworkPolicy names a namespace KEDA does not run in | KEDA's calls are dropped; ScaledObjects go not-Ready and nothing scales | closed |
+| Scaler TLS on, a ScaledObject on the plaintext address or without KEDA's `authenticationRef` | the scaler refuses it in the handshake and logs the refusal. On the TLS address it may still work, riding the connection an authenticated ScaledObject opened; after a KEDA restart, if it connects first, every ScaledObject on that address stops scaling. `make verify-deployment` names it | closed to access; **open** to that outage |
+| TLS is the default, but KEDA's side is missing or ScaledObjects would be left behind | the install stays on plaintext and says why; `WVA_SCALER_TLS=true` refuses instead | **open**, and reported |
+| KEDA's copy of the client certificate expired (no `make setup-prereqs` since) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
+| Scaler TLS on, the serving certificate expired (no cert-manager, no re-install) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
+| The installer finds a Secret, Issuer or Certificate it did not create, or cannot read one, in the controller namespace or on KEDA's side (KEDA's copy, the ClusterTriggerAuthentication, the `wva-scaler-keda-auth` ConfigMap) | it refuses to install TLS and changes nothing: every one is checked before the first write | closed |
+| TLS is the default, but cert-manager does not accept or issue the certificates, or you may not read or create them | the install stays on plaintext and says why; `WVA_SCALER_TLS=true`, or a controller that already has TLS, refuses instead | **open**, and reported |
+| KEDA's certificate carries another client identity than the controller pins (`WVA_SCALER_CLIENT_SAN` changed on a split install) | the default stays on plaintext, `WVA_SCALER_TLS=true` refuses, and a controller that has TLS keeps it with a warning; the fix is `make setup-prereqs` and a KEDA restart | closed |
 
 ## Production hardening checklist
 
 - [ ] Prometheus TLS verified: `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"` and `PROMETHEUS_CA_CERT_PATH` set (the controller sends its token there).
 - [ ] A real certificate for `:8443`: `--metrics-cert-path` (OpenShift does this; on Kubernetes the shipped ServiceMonitor also skips verification).
 - [ ] Controller image pinned to a tag or digest, not `:main`.
-- [ ] The shipped external-scaler NetworkPolicy in place (`WVA_SCALER_NETWORKPOLICY` not `false`), naming the KEDA operator's namespace (`make verify-deployment` prints no NetworkPolicy warning), on a network plugin that enforces it — or scaler mutual TLS (`--external-scaler-client-ca` with `--external-scaler-client-san`) on a controller Deployment an admin owns.
+- [ ] The shipped external-scaler NetworkPolicy in place (`WVA_SCALER_NETWORKPOLICY` not `false`), naming the KEDA operator's namespace (`make verify-deployment` prints no NetworkPolicy warning), on a network plugin that enforces it — or scaler mutual TLS (on by default; `make verify-deployment` says "mutual TLS" and names no ScaledObject left on plaintext) on a controller Deployment an admin owns. `make verify-deployment` reports which, and the certificate's expiry.
 - [ ] A `ResourceQuota` on the GPU resource in every tenant namespace — the real bound.
 - [ ] The controller out of the tenant's reach (`WVA_NS` admin-owned, `WVA_WATCH_NS` the tenant's) wherever a bound must hold.
 - [ ] `make enable-physical-limiter` run with an explicit `WVA_LIMITER_TARGETS`.

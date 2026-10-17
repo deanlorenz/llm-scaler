@@ -17,7 +17,7 @@ const fillerImage = "registry.k8s.io/pause:3.9"
 
 // FreeGPUsOnNode is a node's allocatable GPUs of resourceName less what the
 // pods scheduled to it request, as the scheduler accounts them.
-func FreeGPUsOnNode(ctx context.Context, k8sClient *kubernetes.Clientset, node *corev1.Node, resourceName string) (int, error) {
+func FreeGPUsOnNode(ctx context.Context, k8sClient kubernetes.Interface, node *corev1.Node, resourceName string) (int, error) {
 	alloc, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]
 	if !ok {
 		return 0, nil
@@ -58,30 +58,63 @@ func FillGPUNodes(ctx context.Context, k8sClient *kubernetes.Clientset, namespac
 		if free <= 0 {
 			continue
 		}
-		qty := *resource.NewQuantity(int64(free), resource.DecimalSI)
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "gpu-filler-", Namespace: namespace,
-				Labels: map[string]string{"app": "gpu-filler"}},
-			Spec: corev1.PodSpec{
-				NodeName: n.Name,
-				// Tolerate the control-plane taint: a product labelled only there
-				// is still a node the picture counts.
-				Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
-				Containers: []corev1.Container{{Name: "pause", Image: fillerImage,
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{corev1.ResourceName(resourceName): qty},
-						Limits:   corev1.ResourceList{corev1.ResourceName(resourceName): qty},
-					}}},
-			},
-		}
-		created, err := k8sClient.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
+		name, err := FillNodeGPUs(ctx, k8sClient, namespace, n.Name, resourceName, free)
 		if err != nil {
-			return names, total, fmt.Errorf("create filler on %s: %w", n.Name, err)
+			return names, total, err
 		}
-		names = append(names, created.Name)
+		names = append(names, name)
 		total += free
 	}
 	return names, total, nil
+}
+
+// FillNodeGPUs takes gpus GPUs of resourceName on node with one pause pod in
+// namespace, bound to the node by name, and returns the pod's name. Bound by
+// name, the pod skips the scheduler: it holds the GPUs from the moment the
+// kubelet admits it, whatever else is waiting for them.
+func FillNodeGPUs(ctx context.Context, k8sClient kubernetes.Interface, namespace, node, resourceName string, gpus int) (string, error) {
+	pod := gpuPausePod(namespace, "gpu-filler-", "gpu-filler", resourceName, gpus)
+	pod.Spec.NodeName = node
+	created, err := k8sClient.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("create filler on %s: %w", node, err)
+	}
+	return created.Name, nil
+}
+
+// QueueGPUPod creates a pause pod in namespace asking for gpus GPUs of
+// resourceName on node, through the scheduler: a node selector on the node's
+// hostname, not a binding. While the node has no room the pod waits Pending,
+// and the scheduler places it the moment enough GPUs come free there -- a
+// foreign workload taking GPUs another model was released for. It returns the
+// pod's name.
+func QueueGPUPod(ctx context.Context, k8sClient kubernetes.Interface, namespace, node, resourceName string, gpus int) (string, error) {
+	pod := gpuPausePod(namespace, "gpu-queued-", "gpu-queued", resourceName, gpus)
+	pod.Spec.NodeSelector = map[string]string{corev1.LabelHostname: node}
+	created, err := k8sClient.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("create queued GPU pod for %s: %w", node, err)
+	}
+	return created.Name, nil
+}
+
+// gpuPausePod is a pause pod labelled app=app asking for gpus GPUs of
+// resourceName. It tolerates every taint: a product labelled only on the
+// control-plane is still a node the picture counts.
+func gpuPausePod(namespace, generateName, app, resourceName string, gpus int) *corev1.Pod {
+	qty := *resource.NewQuantity(int64(gpus), resource.DecimalSI)
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: generateName, Namespace: namespace,
+			Labels: map[string]string{"app": app}},
+		Spec: corev1.PodSpec{
+			Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
+			Containers: []corev1.Container{{Name: "pause", Image: fillerImage,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceName(resourceName): qty},
+					Limits:   corev1.ResourceList{corev1.ResourceName(resourceName): qty},
+				}}},
+		},
+	}
 }
 
 // TerminatingPodsOnNodes counts the pods still terminating on the nodes
