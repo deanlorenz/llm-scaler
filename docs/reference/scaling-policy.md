@@ -354,11 +354,29 @@ reports `invalid`) and the controller logs
   `scope: cluster` quota bounds it. Under a `gpu-inventory` limiter alone there
   is no cluster group unless you set `physicalGroups: true` (see the table).
 
-**A namespace over its quota.** When a namespace holds more GPUs than its quota
-allows (for example a Deployment scaled by hand), the optimizer shares only the
-quota, takes no more GPUs, and gives the extra back; the controller logs
-`the group's scope holds more GPUs than its quota allows`, and
+**A namespace over its quota.** When a group's own models hold more GPUs than a
+static quota allows (for example a Deployment scaled by hand), the optimizer
+shares only the quota, takes no more GPUs, and gives the extra back. The
+controller logs `the group's scope holds more GPUs than its quota allows`, and
 `wva_utilization_share_reserve_debt_gpus` shows what is still to give back.
+It gives back only in these cases:
+
+- A namespace holds more than its `scope: namespace` quota, and the quota
+  entry does not read Kueue.
+- The namespaces of the cluster group hold more than the `scope: cluster`
+  quota leaves them after the other namespaces, and the quota entry does not
+  read Kueue. When the other namespaces
+  already hold more than the cluster quota by themselves, the overage is
+  theirs: the cluster group gives back only what it alone holds past the quota.
+- A namespace that counts Kueue borrowing holds more than its queue's nominal
+  quota plus `borrowingLimit`.
+
+GPUs that Kueue granted are never given back, whether borrowed, held beside
+another workload in the same queue, or held through several queues: Kueue
+preempts what it must. With `countBorrowable: false` the optimizer starts no
+new borrowing, but keeps what Kueue already lent. A count of the physical
+inventory past its capacity is not given back either: it is a stale read, not
+a spent quota.
 
 **An excluded namespace needs a finite cluster bound.** To share the models of a
 namespace that a namespace quota lists in `exclude`, add a finite
