@@ -90,7 +90,11 @@ type hrCycle struct {
 // (VariantMetadata.ToReplicaState).
 func (e *hrEngine) cycle(t *testing.T, vars ...hrVariant) hrCycle {
 	t.Helper()
-	var rows []domain.ReplicaMetrics
+	n := 0
+	for _, v := range vars {
+		n += len(v.rows)
+	}
+	rows := make([]domain.ReplicaMetrics, 0, n)
 	meta := map[string]domain.VariantMetadata{}
 	for _, v := range vars {
 		rows = append(rows, v.rows...)
