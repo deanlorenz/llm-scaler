@@ -1052,9 +1052,12 @@ key the trigger carries is listed in [ScaledObject trigger metadata](scaledobjec
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
       modelID: ibm/granite-13b
       defaultOutputTokens: "6000"
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-<controller-namespace>
+      kind: ClusterTriggerAuthentication
 ```
 
 The scaling manager prices each request waiting in the router queue at the
@@ -2110,9 +2113,12 @@ the registration, so nothing needs to be watched, listed or matched:
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
       modelID: ibm/granite-13b
       scalingPolicy: interactive
+    authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+      name: wva-external-scaler-<controller-namespace>
+      kind: ClusterTriggerAuthentication
 ```
 
 **Resolution order** — most specific wins (`ResolveScalingPolicyForTier`):

@@ -43,7 +43,9 @@ is the one command that changes that, and it is an admin's to run.
 
 > **Coming from llm-d's docs?** The scaling manager ships **no CustomResourceDefinition**. A
 > workload is registered by a KEDA ScaledObject whose `external-push` trigger names the
-> scaling manager's external scaler
-> (`wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`). Instructions to
+> scaling manager's external scaler: `wva-external-scaler.<controller-namespace>.svc:9090`
+> with an `authenticationRef` on a TLS install (the default), or
+> `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090` on a plaintext one
+> ([external scaler mutual TLS](../docs/reference/configuration.md#external-scaler-mutual-tls)). Instructions to
 > apply a `VariantAutoscaling` CRD, or to point an HPA or Prometheus Adapter at a
 > `wva_` metric, describe upstream WVA and do not apply here.

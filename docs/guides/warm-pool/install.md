@@ -132,7 +132,7 @@ cluster-specific, and three fail in a way that looks like something else:
 | in | what to set | if you skip it |
 | --- | --- | --- |
 | `warmpool-networkpolicy.yaml` | the `>>> EDIT THIS <<<` `namespaceSelector` — the namespace the scaling manager runs in | every read fails; the pool reports itself **empty** while holding accelerators |
-| `warmpool-scaledobject.yaml` | the `>>> EDIT THIS <<<` in `scalerAddress` | applies cleanly, KEDA creates the HPA, the address never resolves, and the scaling manager never learns the pool exists |
+| `warmpool-scaledobject.yaml` | the two `>>> EDIT THIS <<<`, in `scalerAddress` and the `authenticationRef` name: the scaling manager's namespace. On a plaintext install, use the `.svc.cluster.local` address and delete the `authenticationRef` | applies cleanly, KEDA creates the HPA, the address never resolves, and the scaling manager never learns the pool exists |
 | `warmpool-deployment.yaml` | the proxy `image` — build your own with `make docker-build-warmpool-proxy` | `ImagePullBackOff`; the shipped digest is a personal registry namespace |
 | `warmpool-deployment.yaml` | `runtimeClassName`, and the `claimName` of your model cache | admission fails outright; or the second replica sits Pending forever if the claim is not **ReadWriteMany** |
 
@@ -246,9 +246,12 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        scalerAddress: wva-external-scaler.<wva-namespace>.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.<wva-namespace>.svc:9090
         warmPoolName: default     # must match the Deployment's llm-d.ai/warm-pool label
         warmPoolSleepMinSize: "1" # the reserve
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-<wva-namespace>
+        kind: ClusterTriggerAuthentication
 ```
 
 **Deleting this ScaledObject deletes the pool**, not just its elasticity: the

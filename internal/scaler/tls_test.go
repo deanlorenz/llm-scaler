@@ -238,6 +238,49 @@ var _ = Describe("Server over TLS", func() {
 		})
 	})
 
+	Describe("the TLS flags", func() {
+		It("accepts the installer's flags and returns the identities", func() {
+			allowed, err := scaler.CheckTLSFlags(scaler.TLSFlags{
+				CertPath: "/etc/wva/scaler-tls", ClientCA: "/ca.crt", ClientCASet: true,
+				ClientSAN: "wva-keda-client", ClientSANSet: true,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(allowed).To(Equal([]string{"wva-keda-client"}))
+		})
+
+		It("accepts no TLS flags at all, and TLS without mutual TLS", func() {
+			_, err := scaler.CheckTLSFlags(scaler.TLSFlags{})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = scaler.CheckTLSFlags(scaler.TLSFlags{CertPath: "/etc/wva/scaler-tls"})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		DescribeTable("refuses a client SAN that names no identity",
+			func(san string) {
+				_, err := scaler.CheckTLSFlags(scaler.TLSFlags{
+					CertPath: "/etc/wva/scaler-tls", ClientCA: "/ca.crt", ClientCASet: true,
+					ClientSAN: san, ClientSANSet: true,
+				})
+				Expect(err).To(MatchError(ContainSubstring("names no client identity")))
+			},
+			Entry("a comma", ","),
+			Entry("a space", " "),
+			Entry("empty", ""),
+		)
+
+		It("refuses a client CA passed empty next to a serving certificate", func() {
+			_, err := scaler.CheckTLSFlags(scaler.TLSFlags{CertPath: "/etc/wva/scaler-tls", ClientCA: " ", ClientCASet: true})
+			Expect(err).To(MatchError(ContainSubstring("--external-scaler-client-ca was passed empty")))
+		})
+
+		It("refuses a client CA without a serving certificate, and a SAN without a client CA", func() {
+			_, err := scaler.CheckTLSFlags(scaler.TLSFlags{ClientCA: "/ca.crt", ClientCASet: true})
+			Expect(err).To(MatchError(ContainSubstring("needs --external-scaler-cert-path")))
+			_, err = scaler.CheckTLSFlags(scaler.TLSFlags{CertPath: "/etc/wva/scaler-tls", ClientSAN: "x", ClientSANSet: true})
+			Expect(err).To(MatchError(ContainSubstring("needs --external-scaler-client-ca")))
+		})
+	})
+
 	It("serves a rotated certificate on the next handshake", func() {
 		ca := newTestCA()
 		certs := make([]tls.Certificate, 2)

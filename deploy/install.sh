@@ -203,6 +203,8 @@ source "$DEPLOY_LIB_DIR/physical_limiter.sh"
 source "$DEPLOY_LIB_DIR/pod_writer.sh"
 # shellcheck source=lib/infra_wva.sh
 source "$DEPLOY_LIB_DIR/infra_wva.sh"
+# shellcheck source=lib/scaler_tls.sh
+source "$DEPLOY_LIB_DIR/scaler_tls.sh"
 # shellcheck source=lib/infra_epp.sh
 source "$DEPLOY_LIB_DIR/infra_epp.sh"
 # shellcheck source=lib/infra_monitoring.sh

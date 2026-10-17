@@ -258,8 +258,8 @@ wva_warn_scaler_port_open() {
     fi
     log_warning "  To close it, as a cluster admin:"
     log_warning "    $phase_cmd"
-    log_warning "  or serve the scaler over mutual TLS (--external-scaler-cert-path and"
-    log_warning "  --external-scaler-client-ca; see docs/reference/configuration.md)."
+    log_warning "  or serve the scaler over mutual TLS (WVA_SCALER_TLS=true; see"
+    log_warning "  docs/reference/configuration.md)."
     log_warning "=================================================================="
 }
 
@@ -1353,6 +1353,11 @@ EOF
     # Who may call the external scaler: KEDA's namespace only, unless opted out.
     wva_append_scaler_networkpolicy_patch "$tmp_overlay/kustomization.yaml"
 
+    # How KEDA's calls are authenticated: WVA_SCALER_TLS provisions the
+    # certificates and mounts them (deploy/lib/scaler_tls.sh). Before the apply,
+    # so the first pod of a TLS install finds its Secrets.
+    wva_scaler_tls_prepare "$tmp_overlay/kustomization.yaml"
+
     # Prune on INSTALL as well as uninstall. Waiting for an uninstall would leave
     # the grant in place on every cluster that already has it, since upgrading is
     # what people actually do -- and the whole reason the binding was dropped is
@@ -1791,10 +1796,13 @@ wva_reconcile_prometheus_scheme() {
     local wva_deploy
     wva_deploy=$(kubectl get deployment -n "$WVA_NS" -l "$WVA_CONTROLLER_LABEL_SELECTOR" \
         -o name 2>/dev/null | head -1)
+    # WVA_CONTROLLER_ROLLED_OUT records the result: wva_scaler_tls_finish moves
+    # ScaledObjects to the scaler's new mode only once the new pod serves it.
+    WVA_CONTROLLER_ROLLED_OUT=false
     if [ -z "$wva_deploy" ]; then
         log_warning "No WVA Deployment found in $WVA_NS to wait for"
     elif kubectl rollout status "$wva_deploy" -n "$WVA_NS" --timeout=60s; then
-        :
+        WVA_CONTROLLER_ROLLED_OUT=true
     else
         log_warning "WVA controller is not ready yet - check 'kubectl get pods -n $WVA_NS'"
     fi

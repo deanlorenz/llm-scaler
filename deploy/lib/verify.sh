@@ -323,6 +323,8 @@ verify_deployment() {
             fi
         fi
         wva_verify_scaler_networkpolicy
+        wva_verify_scaler_tls
+        wva_verify_scaler_wiring || all_good=false
     elif [ "$SCALER_BACKEND" = "none" ]; then
         log_info "Scaler backend skipped (SCALER_BACKEND=none) — assuming external metrics API is pre-installed"
     fi
@@ -397,6 +399,195 @@ wva_verify_scaler_networkpolicy() {
     return 0
 }
 
+# wva_scaler_flag_of echoes the value of flag $2 on the manager container of
+# Deployment JSON $1, given as --flag=value or as --flag followed by the value.
+wva_scaler_flag_of() {
+    printf '%s' "$1" | jq -r --arg f "$2" '
+        [.spec.template.spec.containers[]? | select(.name == "manager") | (.args // [])] | first // [] | . as $a
+        | ([range(0; $a | length) | select($a[.] | startswith($f + "=")) | $a[.] | sub("^[^=]*="; "")]
+           + [range(0; ($a | length) - 1) | select($a[.] == $f) | $a[. + 1]]) | first // ""' 2>/dev/null || true
+}
+
+# wva_verify_scaler_tls reports how KEDA's calls to the external scaler are
+# protected: plaintext, TLS, or mutual TLS (and the client identity it pins);
+# the serving certificate's expiry and names; and, when TLS is on, every
+# ScaledObject that would still dial plaintext. Read from the running
+# Deployment, so a hand-set flag is reported as faithfully as an installed one.
+# Never fatal.
+wva_verify_scaler_tls() {
+    local dep rc=0 cert_path client_ca san mode secret crt sans end host unauth
+    dep="$(kubectl get deployment wva-controller-manager -n "$WVA_NS" -o json 2>/dev/null)" || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$dep" ]; then
+        log_info "Could not read Deployment wva-controller-manager in $WVA_NS, so the external scaler's TLS mode is not reported."
+        return 0
+    fi
+    cert_path="$(wva_scaler_flag_of "$dep" --external-scaler-cert-path)"
+    client_ca="$(wva_scaler_flag_of "$dep" --external-scaler-client-ca)"
+    san="$(wva_scaler_flag_of "$dep" --external-scaler-client-san)"
+    if [ -z "$cert_path" ]; then
+        log_info "External scaler: plaintext gRPC (no TLS). To serve mutual TLS and move the ScaledObjects that name it:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true)  (see docs/reference/configuration.md#external-scaler-mutual-tls)."
+        # ScaledObjects on the TLS address or reference cannot reach it.
+        if declare -F wva_scaler_plaintext_scaledobjects >/dev/null; then
+            rc=0
+            unauth="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
+            if [ "$rc" = 0 ] && [ -n "$unauth" ]; then
+                log_warning "=================================================================="
+                log_warning "The external scaler is on plaintext, but these ScaledObjects use its TLS address or authenticationRef $(wva_scaler_keda_auth_name):"
+                printf '%s\n' "$unauth" | head -10 | sed 's/^/    /' >&2
+                log_warning "  $(wva_scaler_mixed_risk)"
+                log_warning "  Fix: turn TLS on, or move them back:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true)"
+                log_warning "=================================================================="
+            fi
+        fi
+        return 0
+    fi
+    if [ -z "$client_ca" ]; then
+        mode="TLS, server only: any client may call it"
+    elif [ -z "$san" ]; then
+        mode="mutual TLS: any client certificate the client CA signed"
+    else
+        mode="mutual TLS, client identity $san"
+    fi
+    log_success "External scaler: $mode"
+
+    # The serving certificate, from the Secret mounted at the cert path.
+    secret="$(printf '%s' "$dep" | jq -r --arg p "$cert_path" '
+        .spec.template.spec as $s
+        | [($s.containers[]? | select(.name == "manager") | .volumeMounts[]? | select(.mountPath == $p) | .name) as $v
+           | $s.volumes[]? | select(.name == $v) | .secret.secretName // empty] | first // ""' 2>/dev/null || true)"
+    if [ -z "$secret" ]; then
+        log_info "  serving certificate: not mounted from a Secret at $cert_path, so its expiry is not checked."
+    elif ! command -v openssl >/dev/null 2>&1; then
+        log_info "  serving certificate: Secret $secret (openssl is not on PATH, so its expiry and names are not checked)."
+    else
+        crt="$(mktemp)"
+        if kubectl get secret "$secret" -n "$WVA_NS" -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d > "$crt" 2>/dev/null \
+            && [ -s "$crt" ] && end="$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null)"; then
+            end="${end#notAfter=}"
+            sans="$(openssl x509 -in "$crt" -noout -text 2>/dev/null \
+                | awk '/Subject Alternative Name/ { getline; print }' | tr ',' '\n' | sed -n 's/^ *DNS://p' | tr '\n' ' ')"
+            log_info "  serving certificate: Secret $secret, expires $end, names: ${sans:-none}"
+            if ! openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1; then
+                log_warning "  The external scaler certificate in Secret $secret has EXPIRED: KEDA's handshakes fail and nothing scales. Re-run make deploy-wva to re-issue it (cert-manager renews its own)."
+            elif ! openssl x509 -in "$crt" -noout -checkend $((${WVA_SCALER_RENEW_DAYS:-30} * 86400)) >/dev/null 2>&1; then
+                log_warning "  The external scaler certificate in Secret $secret expires within ${WVA_SCALER_RENEW_DAYS:-30} days ($end). Re-run make deploy-wva to re-issue it (cert-manager renews its own)."
+            fi
+            for host in "wva-external-scaler.${WVA_NS}.svc" "wva-external-scaler.${WVA_NS}.svc.cluster.local"; do
+                case " $sans " in
+                    *" $host "*) ;;
+                    *) log_warning "  The external scaler certificate does not name $host, a scalerAddress host the installer writes: KEDA rejects the server and nothing scales." ;;
+                esac
+            done
+        else
+            log_info "  serving certificate: Secret $secret is not readable by you (or has no tls.crt), so its expiry is not checked."
+        fi
+        rm -f "$crt"
+    fi
+
+    # KEDA's side, as the admin phase recorded it.
+    if declare -F wva_scaler_keda_marker_state >/dev/null && [ -n "$san" ]; then
+        wva_scaler_keda_marker_state "$san"
+        if [ "$WVA_SCALER_KEDA_READY" != true ]; then
+            log_warning "  KEDA's side is not usable: ${WVA_SCALER_KEDA_WHY}. KEDA cannot present a client certificate and nothing scales. A cluster admin runs:  $(wva_make_cmd setup-prereqs)"
+        else
+            log_info "  KEDA's client certificate: ClusterTriggerAuthentication $(wva_scaler_keda_auth_name), expires ${WVA_SCALER_KEDA_NOT_AFTER}"
+            if [ "$WVA_SCALER_KEDA_STALE" = true ]; then
+                log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)  and then restart KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+            fi
+            wva_scaler_keda_ca_report log_warning
+            # Say so when it matches, too: the docs promise this line, and
+            # silence read as "not checked".
+            case "${WVA_SCALER_KEDA_CA_STALE:-}" in
+                false) log_info "  KEDA trusts the current CA: the one that signs the scaler's certificate now." ;;
+                unread) log_info "  The scaler's current CA could not be read, so whether KEDA trusts it is not checked." ;;
+            esac
+            if [ "$WVA_SCALER_KEDA_EXPIRING" = true ]; then
+                log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)"
+            fi
+        fi
+    fi
+
+    if ! declare -F wva_scaler_plaintext_scaledobjects >/dev/null; then
+        return 0
+    fi
+    # Hand-set TLS flags: KEDA's side is whoever set them, not this installer's.
+    if [ -z "$(printf '%s' "$dep" | jq -r --arg a "$WVA_SCALER_TLS_ANNOTATION" '.spec.template.metadata.annotations[$a] // ""')" ]; then
+        log_info "  TLS was set up by hand, so ScaledObjects are not checked against this installer's address and ClusterTriggerAuthentication."
+        return 0
+    fi
+    rc=0
+    unauth="$(wva_scaler_plaintext_scaledobjects tls)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        log_info "  Could not list ScaledObjects, so whether every one reaches this scaler over TLS is not checked."
+    elif [ -n "$unauth" ]; then
+        log_warning "=================================================================="
+        log_warning "TLS is on, but these ScaledObjects name this scaler on the plaintext address or without authenticationRef $(wva_scaler_keda_auth_name) (kind ClusterTriggerAuthentication):"
+        printf '%s\n' "$unauth" | head -10 | sed 's/^/    /' >&2
+        log_warning "  $(wva_scaler_mixed_risk)"
+        log_warning "  Fix: add that authenticationRef and the address $(wva_scaler_address "$WVA_NS" tls), or move them:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true)"
+        log_warning "=================================================================="
+    else
+        log_info "  Every ScaledObject naming this scaler uses $(wva_scaler_address "$WVA_NS" tls) and authenticationRef $(wva_scaler_keda_auth_name)."
+    fi
+}
+
+# wva_verify_scaler_wiring names every ScaledObject naming this scaler whose
+# HPA KEDA built without the scaler's external metric, or whose
+# status.externalMetricNames lacks it (wva_scaler_so_wiring). Such a
+# ScaledObject reads Ready and Active, while its HPA scales on the CPU default
+# and WVA's decisions reach nothing. KEDA wires a new or changed ScaledObject
+# within about half a minute, so this waits up to WVA_VERIFY_WIRE_WAIT seconds
+# (default 60) before it calls one unwired. Returns 1 when one is, and when
+# KEDA presents a client certificate the controller refuses
+# (wva_scaler_keda_conn_state): then it names the KEDA restart, not a re-wire.
+wva_verify_scaler_wiring() {
+    declare -F wva_scaler_so_wiring >/dev/null || return 0
+    local rows rc=0
+    rows="$(wva_scaler_plaintext_scaledobjects any)" || rc=$?
+    [ "$rc" = 0 ] && [ -n "$rows" ] || return 0
+    # KEDA presenting an old client certificate fails every call, wired or
+    # not, and only a restart of its operator fixes it: said first, and no
+    # re-wire offered.
+    wva_scaler_keda_conn_state
+    if [ "$WVA_SCALER_KEDA_CONN" = stale ] || [ "$WVA_SCALER_KEDA_CONN" = copy ]; then
+        log_warning "=================================================================="
+        log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it and the HPA scales on the CPU default:"
+        printf '%s\n' "$rows" | sed 's/^/    /' >&2
+        wva_scaler_keda_conn_report || true
+        log_warning "=================================================================="
+        return 1
+    fi
+    if wva_scaler_wait_wired "$rows" "${WVA_VERIFY_WIRE_WAIT:-60}"; then
+        [ -z "$WVA_SCALER_WIRE_UNKNOWN" ] \
+            || log_info "  Could not read these ScaledObjects or their HPAs, so whether KEDA wired the scaler's metric is not checked: $(printf '%s' "$WVA_SCALER_WIRE_UNKNOWN" | paste -sd' ' -)"
+        return 0
+    fi
+    log_warning "=================================================================="
+    log_warning "KEDA did not wire the scaler's metric onto the HPA of these ScaledObjects. They read Ready, but the HPA scales on the CPU default and WVA's decisions reach nothing:"
+    printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
+    # Read again: refusals may have started while it waited.
+    wva_scaler_keda_conn_state
+    if wva_scaler_keda_conn_report; then
+        log_warning "=================================================================="
+        return 1
+    fi
+    log_warning "  KEDA asks for the metric spec only when the spec changes, and a call that failed then (the scaler moving or restarting) is not retried. Change it again:"
+    printf '%s' "$WVA_SCALER_UNWIRED" | while IFS= read -r row; do
+        [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")" >&2
+    done
+    log_warning "=================================================================="
+    return 1
+}
+
+# wva_summary_scaledobjects echoes <namespace>/<name> of every ScaledObject,
+# in the namespaces this install watches, with a trigger naming this install's
+# scaler on either address. Exits 2 when they cannot be listed, or the lister
+# is not loaded: unknown, not none.
+wva_summary_scaledobjects() {
+    declare -F wva_scaler_plaintext_scaledobjects >/dev/null || return 2
+    wva_scaler_plaintext_scaledobjects any
+}
+
 # print_summary is the most-read text this install produces: it is what someone
 # looks at to find out whether it worked and what to do next. So it says the one
 # thing that is true and easy to miss — an installed WVA scales nothing until a
@@ -408,7 +599,7 @@ print_summary() {
     echo " Workload-Variant-Autoscaler installed"
     echo "=========================================="
     echo ""
-    echo "  Controller:   $WVA_NS  ($WVA_IMAGE_REPO:$WVA_IMAGE_TAG)"
+    echo "  Controller:   $WVA_NS  ($(wva_image_ref))"
     echo "  Scope:        $(wva_install_scope)-scoped"
     if [ "$(wva_install_scope)" = "cluster" ]; then
         echo "  Manages:      every namespace"
@@ -484,18 +675,32 @@ print_summary() {
     echo ""
 
     # The step everyone misses. WVA has no watch and no listing: it is asked about
-    # a workload by KEDA, or it never hears of it.
-    echo "  NEXT: nothing scales yet."
-    echo ""
-    echo "  A ScaledObject is how a workload registers with WVA. Until one exists,"
-    echo "  the controller is running and idle. To see what it would create:"
-    echo ""
-    echo "      make scaledobjects-plan"
-    echo ""
-    echo "  then apply it, or an edited copy of it:"
-    echo ""
-    echo "      make scaledobjects-apply"
-    echo ""
+    # a workload by KEDA, or it never hears of it. Said only when no ScaledObject
+    # names this scaler: on a re-install with ScaledObjects in place, "nothing
+    # scales yet" is false. A list that cannot be read is not "none".
+    local named rc=0
+    named="$(wva_summary_scaledobjects)" || rc=$?
+    if [ "$rc" = 0 ] && [ -n "$named" ]; then
+        echo "  ScaledObjects: $(printf '%s\n' "$named" | wc -l | tr -d ' ') name this scaler. Check them:  make verify-scaledobjects"
+        echo ""
+    else
+        if [ "$rc" = 0 ]; then
+            echo "  NEXT: nothing scales yet."
+        else
+            echo "  NEXT: the ScaledObjects could not be listed, so whether any names this"
+            echo "  scaler is not known. If none does, nothing scales yet."
+        fi
+        echo ""
+        echo "  A ScaledObject is how a workload registers with WVA. Until one exists,"
+        echo "  the controller is running and idle. To see what it would create:"
+        echo ""
+        echo "      make scaledobjects-plan"
+        echo ""
+        echo "  then apply it, or an edited copy of it:"
+        echo ""
+        echo "      make scaledobjects-apply"
+        echo ""
+    fi
 
     echo "  Worth knowing:"
     case "$(effective_limiter_summary)" in

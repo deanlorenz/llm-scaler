@@ -52,8 +52,12 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        # WVA's external scaler. Same address the model ScaledObjects use.
-        scalerAddress: wva-external-scaler.>>> EDIT THIS <<<.svc.cluster.local:9090
+        # WVA's external scaler. Same address the model ScaledObjects use: this
+        # one, with the authenticationRef at the end of the trigger, on a TLS
+        # install (the default). On a plaintext install use
+        # wva-external-scaler.<namespace>.svc.cluster.local:9090 and delete the
+        # authenticationRef.
+        scalerAddress: wva-external-scaler.>>> EDIT THIS <<<.svc:9090
 
         # THIS TRIGGER IS THE POOL'S DECLARATION. A warm pool is a WVA concept
         # that happens to have Pods, not a workload WVA happens to manage --
@@ -100,3 +104,7 @@ spec:
         # ONE engine and typically claims ~95% of the card, leaving room for no
         # sleepers beside an awake one.
         warmPoolGPUMemoryUtilization: "0.90"
+      # KEDA's client certificate (TLS installs). Same namespace as above.
+      authenticationRef:
+        name: wva-external-scaler->>> EDIT THIS <<<
+        kind: ClusterTriggerAuthentication

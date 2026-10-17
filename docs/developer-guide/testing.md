@@ -405,6 +405,7 @@ The main variables (full list in the [E2E README](../../test/e2e/)):
 | `SCALER_BACKEND` | `keda` | `keda` (ScaledObject) or `none` (use a pre-installed backend) |
 | `POD_READY_TIMEOUT` / `SCALE_UP_TIMEOUT` | `300` / `600` | Model ready vs longest scale/job waits (seconds) |
 | `E2E_EVENTUALLY_*`, `E2E_EVENTUALLY_POLL*` | see README | Optional `Eventually` timeouts and poll intervals |
+| `E2E_EXPECT_SCALER_TLS` | unset | `true` fails the run when the controller serves the external scaler in plaintext. Without it, a plaintext install just skips the scaler TLS spec, which reads as a pass. CI sets it |
 
 Deploy-time knobs: `SKIP_HELM_REPO_UPDATE`, and `SCALE_UP_THRESHOLD` /
 `SCALE_DOWN_BOUNDARY` (when set, the Makefile patches the
