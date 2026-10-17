@@ -218,11 +218,29 @@ they enable. Do this, in order:
 >    `hierarchy-unknown` (Cohorts), `kueue-controller-down` (the Role in the
 >    Kueue namespace). [What each reason means](troubleshooting.md#borrowing-is-withheld).
 >
-> Counting the capacity of lenders that do **not** reclaim
+> The capacity of lenders that do **not** reclaim
 > (`reclaimWithinCohort: Never`, or `LowerPriority` that does not outrank the
-> borrowers), and handing it back to them, is not in this release: it moves to
-> a later release, as an opt-in. Here such a lender's capacity is not counted
-> (`lender-cannot-reclaim`).
+> borrowers) is not counted by default (`lender-cannot-reclaim`). Counting it,
+> and handing it back when they wait, is an opt-in, experimental setting:
+> `kueue.releaseToNonReclaimingLenders: true`
+> ([how it works](quota-limiter.md#lenders-kueue-does-not-reclaim-for)). Nothing
+> changes until you set it. Set, it adds `released-to-lender` on
+> `wva_model_scaling_blocked`, cause `lender-waiting` on
+> `wva_borrow_releases_total` and the `BorrowedCapacityReleased` Event, and
+> the gauges `wva_kueue_borrow_release_latency_seconds{cohort}` (which
+> `WVAKueueLenderWaitingPastCooldown` adds to its threshold, in that cohort
+> only), `wva_kueue_lender_release_blocked` and
+> `wva_kueue_borrow_ledger_unread`, and the Warning Event
+> `LenderReleaseBlocked`. The release ledger in `wva-controller-status` gains
+> a `version` field; a controller older than this release ignores the fields
+> it does not know, so a rollback hands nothing back but keeps the cooldowns.
+>
+> **Before turning it off or rolling back**, lower each borrowing model's
+> `maxReplicaCount` to what its guaranteed figure holds: capacity borrowed
+> from a `Never` lender stays borrowed (Kueue never reclaims it), the lender
+> waits, and the alert pages at the cooldown alone. A release in flight keeps
+> its targets for up to twice its latency. Raise `maxReplicaCount` again
+> afterwards.
 
 **Before you upgrade**, list the limiter types every policy declares, and
 every Kueue-backed entry with its borrowing settings. A cluster admin runs

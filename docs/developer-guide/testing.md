@@ -247,7 +247,11 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   - with Kueue back, the model grows to 4, every pod placed, and no further;
   - the lender asks for its nominal: Kueue preempts the borrowed pods, the
     scaling manager lowers the target so no gated replacement lingers, and
-    the model borrows nothing until `borrowCooldown` ends.
+    the model borrows nothing until `borrowCooldown` ends;
+  - the lender goes back to `Never` and asks again: nothing is handed back
+    while `releaseToNonReclaimingLenders` is unset; once it is set, the model
+    drops to its nominal 2 (cause `lender-waiting`) and Kueue admits the
+    lender.
 
   The policy sets short Kueue timings (`placementTimeout: 30s`,
   `borrowCooldown: 4m`, `lenderDebounce: 10s`) and declares `gpu-inventory`,

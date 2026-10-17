@@ -130,6 +130,29 @@ type SharedPoolChunk struct {
 	// lender that does not outrank it stays closed (drawable, M1).
 	Borrowed         int
 	BorrowerPriority *int32
+	// BorrowerLowest is the lowest priority any borrower holds the cohort's
+	// GPUs at (kueue.SharedPool.BorrowerLowest); nil when not known. A
+	// LowerPriority lender above it may have Kueue preempt for it.
+	BorrowerLowest *int32
+	// EvictingGPUs is what Workloads Kueue preempted in the cohort still hold
+	// reserved while their pods stop; EvictionsRead whether that is known
+	// (kueue.SharedPool).
+	EvictingGPUs  int
+	EvictionsRead bool
+	// StuckEvictingGPUs is what victims evicted longer ago than
+	// kueue.EvictionBound still hold: no longer waited for.
+	StuckEvictingGPUs int
+	// ReleaseToNonReclaiming is set when the entry that read the chunk opts
+	// in to kueue.releaseToNonReclaimingLenders (PR-C): Free then counts what
+	// lenders Kueue does not reclaim for lend, and the governor hands it back
+	// when such a lender waits. Off, it is not counted and a waiting lender
+	// only closes the cohort to new borrowing.
+	ReleaseToNonReclaiming bool
+	// RawFree is the cohort's free pool as Kueue's read gives it
+	// (kueue.SharedPool.Free), before anything here takes from it: what Kueue
+	// admits a waiting lender from with nothing handed back. A release to a
+	// lender is sized net of it.
+	RawFree int
 	// restrictedClosed is set, for the rest of the pass, once a model that
 	// some Restricted lender does not outrank drew on the chunk (K2-2), and
 	// before the pass when such a model's draw is still in flight
@@ -487,6 +510,7 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 // (mergeSharedPools).
 func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	prev.Free = min(prev.Free, p.Free)
+	prev.RawFree = min(prev.RawFree, p.RawFree)
 	prev.PendingGPUs = max(prev.PendingGPUs, p.PendingGPUs)
 	for res, n := range p.CoFree {
 		if have, ok := prev.CoFree[res]; !ok || n < have {
@@ -503,6 +527,10 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	}
 	slices.Sort(prev.CoUnbound)
 	prev.Stale = prev.Stale || p.Stale
+	// Released only when every entry reading the cohort opts in: one that
+	// does not counts none of that lending (its Free is the smaller), and a
+	// release it never asked for would lower its models.
+	prev.ReleaseToNonReclaiming = prev.ReleaseToNonReclaiming && p.ReleaseToNonReclaiming
 	prev.restrictedClosed = prev.restrictedClosed || p.restrictedClosed
 	// The borrowed figure: the larger, at the higher priority, unknown when
 	// either read holds borrowing at a priority it did not read.
@@ -514,7 +542,19 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		bp := *p.BorrowerPriority
 		prev.BorrowerPriority = &bp
 	}
+	// The lowest borrower priority: the lower, unknown when either read has
+	// borrowing without one.
+	switch {
+	case (prev.Borrowed > 0 && prev.BorrowerLowest == nil) || (p.Borrowed > 0 && p.BorrowerLowest == nil):
+		prev.BorrowerLowest = nil
+	case p.BorrowerLowest != nil && (prev.BorrowerLowest == nil || *p.BorrowerLowest < *prev.BorrowerLowest):
+		lo := *p.BorrowerLowest
+		prev.BorrowerLowest = &lo
+	}
 	prev.Borrowed = max(prev.Borrowed, p.Borrowed)
+	prev.EvictingGPUs = max(prev.EvictingGPUs, p.EvictingGPUs)
+	prev.StuckEvictingGPUs = max(prev.StuckEvictingGPUs, p.StuckEvictingGPUs)
+	prev.EvictionsRead = prev.EvictionsRead && p.EvictionsRead
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt
 	}
@@ -526,6 +566,18 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		}
 		o := &prev.Lenders[i]
 		o.Waiting = o.Waiting || l.Waiting
+		// What a release hands it, the side releasing less: the smaller
+		// demand, the larger part it keeps, the higher priority (more is left
+		// to Kueue's reclaim), the later start of its wait.
+		o.PendingGPUs = min(o.PendingGPUs, l.PendingGPUs)
+		o.Kept = max(o.Kept, l.Kept)
+		if l.PendingPriority != nil && (o.PendingPriority == nil || *l.PendingPriority > *o.PendingPriority) {
+			p := *l.PendingPriority
+			o.PendingPriority = &p
+		}
+		if l.PendingSince.After(o.PendingSince) {
+			o.PendingSince = l.PendingSince
+		}
 	}
 	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
 	// Restricted GPUs: the cautious side is the larger figure and the lower

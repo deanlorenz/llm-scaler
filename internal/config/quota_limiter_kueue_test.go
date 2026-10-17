@@ -274,6 +274,27 @@ var _ = Describe("KueueQuotaSource", func() {
 		Expect(QuotaLimiterConfig{}.KueueCountsBorrowable()).To(BeFalse())
 	})
 
+	// PR-C: the release to lenders Kueue does not reclaim for is opt-in, and
+	// only where borrowing is counted.
+	It("hands nothing back to non-reclaiming lenders unless releaseToNonReclaimingLenders is set", func() {
+		parse := func(doc string) QuotaLimiterConfig {
+			var e QuotaLimiterEntries
+			Expect(yaml.Unmarshal([]byte(doc), &e)).To(Succeed())
+			Expect(e.Limiters).To(HaveLen(1))
+			return e.Limiters[0]
+		}
+		head := "limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n"
+		Expect(parse(head).KueueReleasesToNonReclaiming()).To(BeFalse(), "off by default")
+		on := parse(head + "    releaseToNonReclaimingLenders: true\n")
+		Expect(on.Kueue.ReleaseToNonReclaimingLenders).To(BeTrue())
+		Expect(on.KueueReleasesToNonReclaiming()).To(BeTrue())
+		Expect(on.clone().Kueue.ReleaseToNonReclaimingLenders).To(BeTrue(), "kept by a clone")
+		disabled := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: false\n" +
+			"    releaseToNonReclaimingLenders: true\n")
+		Expect(disabled.KueueReleasesToNonReclaiming()).To(BeFalse(), "nothing is read without the reader")
+		Expect(QuotaLimiterConfig{}.KueueReleasesToNonReclaiming()).To(BeFalse())
+	})
+
 	It("deep-copies countBorrowable", func() {
 		off := false
 		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true, CountBorrowable: &off}}
@@ -340,6 +361,27 @@ var _ = Describe("KueueQuotaSource", func() {
 
 		It("accepts an enabled block with defaults", func() {
 			Expect(validate(&KueueQuotaSource{Enabled: true})).To(Succeed())
+		})
+
+		It("rejects releaseToNonReclaimingLenders with countBorrowable: false, and accepts it otherwise", func() {
+			off := false
+			Expect(validate(&KueueQuotaSource{Enabled: true, CountBorrowable: &off, ReleaseToNonReclaimingLenders: true})).To(
+				MatchError(ContainSubstring("releaseToNonReclaimingLenders")))
+			Expect(validate(&KueueQuotaSource{Enabled: true, ReleaseToNonReclaimingLenders: true})).To(Succeed())
+		})
+
+		// PR #203 review (SF minor): the option on an entry that reads no
+		// Kueue does nothing, and says so.
+		It("warns about releaseToNonReclaimingLenders on an entry with kueue.enabled false", func() {
+			warnings := func(k *KueueQuotaSource) []string {
+				e := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace, Kueue: k}}}
+				w, err := e.Validate()
+				Expect(err).NotTo(HaveOccurred())
+				return w
+			}
+			Expect(warnings(&KueueQuotaSource{ReleaseToNonReclaimingLenders: true})).To(ContainElement(
+				ContainSubstring("releaseToNonReclaimingLenders is set but kueue.enabled is false")))
+			Expect(warnings(&KueueQuotaSource{Enabled: true, ReleaseToNonReclaimingLenders: true})).To(BeEmpty())
 		})
 
 		It("rejects an empty resource name", func() {

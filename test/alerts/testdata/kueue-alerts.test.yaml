@@ -164,3 +164,69 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, exported_namespace: a, model_name: m}
           - exp_labels: {severity: warning, exported_namespace: a, model_name: p}
+
+  # 6. WVAKueueLenderWaitingPastCooldown without releaseToNonReclaimingLenders:
+  #    no release-latency gauge, so the threshold is the 600s cooldown alone.
+  #    The lender waits past it from minute 11 and pages two minutes later.
+  - interval: 1m
+    input_series:
+      - series: 'wva_kueue_lender_waiting_seconds{cohort="c",cluster_queue="lender",pod="wva-a"}'
+        values: '0+60x30'
+      - series: 'wva_kueue_borrow_cooldown_seconds{pod="wva-a"}'
+        values: '600x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WVAKueueLenderWaitingPastCooldown
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: WVAKueueLenderWaitingPastCooldown
+        exp_alerts:
+          - exp_labels: {severity: warning, cohort: c, cluster_queue: lender}
+
+  # 6b. With releaseToNonReclaimingLenders a release lands only after the
+  #     scale-down of the models it lowers: cohort c's 360s latency is added
+  #     to the wait of c's lender alone, so it is quiet at 14 minutes and
+  #     pages once past 960s (minute 17) for two minutes. Cohort any, whose
+  #     lender Kueue reclaims for, publishes no latency: its threshold stays
+  #     the cooldown alone, and it pages at 14 minutes as in case 6 (PR #203
+  #     review SF2: one tenant's latency must not delay every cohort's page).
+  - interval: 1m
+    input_series:
+      - series: 'wva_kueue_lender_waiting_seconds{cohort="c",cluster_queue="lender",pod="wva-a"}'
+        values: '0+60x30'
+      - series: 'wva_kueue_lender_waiting_seconds{cohort="any",cluster_queue="team",pod="wva-a"}'
+        values: '0+60x30'
+      - series: 'wva_kueue_borrow_cooldown_seconds{pod="wva-a"}'
+        values: '600x30'
+      - series: 'wva_kueue_borrow_release_latency_seconds{cohort="c",pod="wva-a"}'
+        values: '360x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WVAKueueLenderWaitingPastCooldown
+        exp_alerts:
+          - exp_labels: {severity: warning, cohort: any, cluster_queue: team}
+      - eval_time: 18m
+        alertname: WVAKueueLenderWaitingPastCooldown
+        exp_alerts:
+          - exp_labels: {severity: warning, cohort: any, cluster_queue: team}
+      - eval_time: 20m
+        alertname: WVAKueueLenderWaitingPastCooldown
+        exp_alerts:
+          - exp_labels: {severity: warning, cohort: any, cluster_queue: team}
+          - exp_labels: {severity: warning, cohort: c, cluster_queue: lender}
+
+  # 7. A release to a waiting lender is capacity handed back on purpose, not
+  #    a loss: four of them in an hour (cause lender-waiting) do not page
+  #    WVAKueueBorrowThrashing (PR #203 review, SF minor); four placement-
+  #    timeout releases of another model in the same hour do.
+  - interval: 50s
+    input_series:
+      - series: 'wva_borrow_releases_total{exported_namespace="a",model_name="r",cause="lender-waiting",pod="wva-a"}'
+        values: '0x70 1x2 2x2 3x2 4x80'
+      - series: 'wva_borrow_releases_total{exported_namespace="a",model_name="t",cause="placement-timeout",pod="wva-a"}'
+        values: '0x70 1x2 2x2 3x2 4x80'
+    alert_rule_test:
+      - eval_time: 79m
+        alertname: WVAKueueBorrowThrashing
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: a, model_name: t}

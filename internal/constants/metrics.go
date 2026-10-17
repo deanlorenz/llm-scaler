@@ -914,6 +914,11 @@ const (
 	// guaranteed figure sits below nominal. A parked model refused a wake for
 	// the same cause carries ScalingBlockedWakeNominalLentOut instead.
 	ScalingBlockedNominalLentOut = "nominal-lent-out"
+	// ScalingBlockedReleasedToLender indicates the scaling manager lowered
+	// the model to hand borrowed capacity back to a waiting lender Kueue does
+	// not reclaim for (kueue.releaseToNonReclaimingLenders). Present while
+	// the release is in flight, until it lands.
+	ScalingBlockedReleasedToLender = "released-to-lender"
 )
 
 // Scale-from-zero refusal reasons (values for the `reason` label of
@@ -941,6 +946,7 @@ var ScalingBlockedReasonsBorrowing = []string{
 	ScalingBlockedLenderReclaimed,
 	ScalingBlockedBorrowUnplaced,
 	ScalingBlockedNominalLentOut,
+	ScalingBlockedReleasedToLender,
 }
 
 // ScalingBlockedReasonsWakeCapacity are decided by the scale-from-zero loop
@@ -1038,6 +1044,31 @@ const (
 	// in seconds, while a quota entry counts Kueue borrowing; the threshold
 	// the lender-waiting alert compares against. Absent otherwise.
 	WVAKueueBorrowCooldownSeconds = "wva_kueue_borrow_cooldown_seconds"
+
+	// WVAKueueBorrowReleaseLatencySeconds is a gauge, per cohort whose pool
+	// opts in to kueue.releaseToNonReclaimingLenders: how long a release of
+	// borrowed capacity to a waiting lender there takes to land -- the
+	// slowest KEDA scale-down window of the models a release may lower, plus
+	// the HPA sync, the KEDA poll and the termination grace, capped at 30
+	// minutes. The lender-waiting alert adds it to the cooldown for that
+	// cohort alone. Absent for every other cohort.
+	WVAKueueBorrowReleaseLatencySeconds = "wva_kueue_borrow_release_latency_seconds"
+
+	// WVAKueueLenderReleaseBlocked is a gauge, 1 per cohort, lender
+	// ClusterQueue and reason while a waiting lender Kueue does not reclaim
+	// for is handed nothing (kueue.releaseToNonReclaimingLenders): reason
+	// unservable (what this controller could hand back would not admit its
+	// next Workload), taken-by-another-borrower (a release landed and
+	// another borrower took it) or kueue-preempting (Workloads Kueue
+	// preempted still hold their quota while their pods stop). Absent
+	// otherwise.
+	WVAKueueLenderReleaseBlocked = "wva_kueue_lender_release_blocked"
+
+	// WVAKueueBorrowLedgerUnread is a gauge, 1 with a reason while the
+	// persisted borrowing release ledger cannot be read and some quota
+	// entry sets kueue.releaseToNonReclaimingLenders: no release to a lender
+	// is decided until it is. Reasons: forbidden, read-error, newer-version.
+	WVAKueueBorrowLedgerUnread = "wva_kueue_borrow_ledger_unread"
 
 	// WVAKueueBorrowedGPUs is a gauge: per cohort and flavor, the GPUs the
 	// namespaces this controller governs hold past their guaranteed figures,

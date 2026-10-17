@@ -1,8 +1,11 @@
 package kueue
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"slices"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -25,6 +28,14 @@ type PendingWorkload struct {
 	// GPU, one per pod set: a flavor whose nodeLabels one of them rules out is
 	// not one the Workload waits for (B6).
 	Placements []WorkloadPlacement
+	// Since is when it started to wait: its creation, or the last time Kueue
+	// took its quota reservation away (QuotaReserved turning False), if
+	// later. Kueue queues Workloads of one priority oldest first.
+	Since time.Time
+	// RequeueAt is status.requeueState.requeueAt: Kueue does not try to
+	// admit it before then (a backoff after a waitForPodsReady eviction).
+	// Nil when unset.
+	RequeueAt *time.Time
 }
 
 // WorkloadPlacement is one pod set's node selection: spec.nodeSelector and the
@@ -113,6 +124,12 @@ type pendingRead struct {
 	// borrowerPriority is, per ClusterQueue, the highest spec.priority of its
 	// reserved GPU Workloads (QueueState.BorrowerPriority).
 	borrowerPriority map[string]int32
+	// lowestReserved is, per ClusterQueue, the lowest spec.priority of its
+	// reserved GPU Workloads (QueueState.LowestReserved).
+	lowestReserved map[string]int32
+	// evicting is, per ClusterQueue, its Workloads Kueue preempted that
+	// still hold their quota (QueueState.Evicting).
+	evicting map[string][]EvictingWorkload
 }
 
 // readPending reads the Workloads for the lender-waiting signal and the
@@ -133,7 +150,8 @@ type pendingRead struct {
 // once until a read passes. Callers must hold r.mu.
 func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Unstructured) (out pendingRead, unreadable bool) {
 	out = pendingRead{byQueue: map[string][]PendingWorkload{}, lenderPriority: map[string]int32{},
-		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}, borrowerPriority: map[string]int32{}}
+		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}, borrowerPriority: map[string]int32{},
+		lowestReserved: map[string]int32{}, evicting: map[string][]EvictingWorkload{}}
 	fail := func(err error) (pendingRead, bool) {
 		if !r.warnedPending && ctx.Err() == nil {
 			r.warnedPending = true
@@ -191,6 +209,10 @@ func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Uns
 			if cq, _, _ := unstructured.NestedString(w.Object, "status", "admission", "clusterQueue"); cq != "" {
 				lowest(out.lenderPriority, cq, priority)
 				highest(out.borrowerPriority, cq, priority)
+				lowest(out.lowestReserved, cq, priority)
+				if since, ok := workloadVictim(w); ok {
+					out.evicting[cq] = append(out.evicting[cq], EvictingWorkload{Since: since, GPUs: admittedGPUs(w, gpus)})
+				}
 			}
 			continue
 		}
@@ -202,7 +224,7 @@ func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Uns
 			lowest(out.lenderPriority, cq, priority)
 			requests, placements := workloadShape(sets, r.gpuNames)
 			out.byQueue[cq] = append(out.byQueue[cq], PendingWorkload{Priority: priority, GPUs: gpus,
-				Requests: requests, Placements: placements})
+				Requests: requests, Placements: placements, Since: workloadWaitingSince(w), RequeueAt: workloadRequeueAt(w)})
 		}
 	}
 	return out, false
@@ -373,6 +395,87 @@ func workloadFinished(w *unstructured.Unstructured) bool {
 	return false
 }
 
+// workloadVictim reports whether a reserved Workload is a preemption victim
+// still holding its quota, and since when: Evicted=True with reason
+// Preempted, and no QuotaReserved=True transition after it. Kueue evicts a
+// preempted Workload at once, but its quota stays reserved -- in the queue's
+// borrowed figure -- until its pods stop, which a long termination grace
+// makes minutes. A Workload re-admitted since (QuotaReserved turned True
+// after the eviction) is not a victim, whatever its Evicted condition still
+// says.
+func workloadVictim(w *unstructured.Unstructured) (time.Time, bool) {
+	conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+	var evicted, reserved time.Time
+	victim := false
+	for _, raw := range conds {
+		cond, _ := raw.(map[string]interface{})
+		at, _ := time.Parse(time.RFC3339, fmt.Sprint(cond["lastTransitionTime"]))
+		switch {
+		case cond["type"] == WorkloadEvicted && cond["status"] == string(corev1.ConditionTrue) &&
+			cond["reason"] == WorkloadEvictedByPreemption:
+			victim, evicted = true, at
+		case cond["type"] == WorkloadQuotaReserved && cond["status"] == string(corev1.ConditionTrue):
+			reserved = at
+		}
+	}
+	if !victim || (!reserved.IsZero() && !evicted.IsZero() && reserved.After(evicted)) {
+		return time.Time{}, false
+	}
+	return evicted, true
+}
+
+// admittedGPUs is a reserved Workload's GPUs per flavor and resource, from
+// the flavors its admission assigns (status.admission.podSetAssignments);
+// a resource it assigns no flavor for is keyed with an empty Flavor.
+func admittedGPUs(w *unstructured.Unstructured, gpus map[string]int64) map[ResourceKey]int64 {
+	flavorOf := map[string]string{}
+	assignments, _, _ := unstructured.NestedSlice(w.Object, "status", "admission", "podSetAssignments")
+	for _, raw := range assignments {
+		a, _ := raw.(map[string]interface{})
+		flavors, _, _ := unstructured.NestedStringMap(a, "flavors")
+		for res, f := range flavors {
+			if _, isGPU := gpus[res]; isGPU && flavorOf[res] == "" {
+				flavorOf[res] = f
+			}
+		}
+	}
+	out := make(map[ResourceKey]int64, len(gpus))
+	for res, n := range gpus {
+		out[ResourceKey{Flavor: flavorOf[res], Resource: res}] += n
+	}
+	return out
+}
+
+// workloadWaitingSince is when a pending Workload started to wait: its
+// creation, or the last time its QuotaReserved condition turned False, if
+// later (an evicted Workload waits again from then).
+func workloadWaitingSince(w *unstructured.Unstructured) time.Time {
+	since := w.GetCreationTimestamp().Time
+	conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+	for _, raw := range conds {
+		cond, _ := raw.(map[string]interface{})
+		if cond["type"] != WorkloadQuotaReserved || cond["status"] != string(corev1.ConditionFalse) {
+			continue
+		}
+		s, _ := cond["lastTransitionTime"].(string)
+		if at, err := time.Parse(time.RFC3339, s); err == nil && at.After(since) {
+			since = at
+		}
+	}
+	return since
+}
+
+// workloadRequeueAt is status.requeueState.requeueAt; nil when unset or not
+// a time.
+func workloadRequeueAt(w *unstructured.Unstructured) *time.Time {
+	s, _, _ := unstructured.NestedString(w.Object, "status", "requeueState", "requeueAt")
+	at, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil
+	}
+	return &at
+}
+
 // workloadActive reports whether a Workload is active: spec.active not false.
 func workloadActive(w *unstructured.Unstructured) bool {
 	active, found, _ := unstructured.NestedBool(w.Object, "spec", "active")
@@ -382,7 +485,7 @@ func workloadActive(w *unstructured.Unstructured) bool {
 // lenderPending is what a lender waits for of one flavor and GPU resource:
 // the largest GPU request among its pending Workloads that ask for the
 // resource and fit within its unused nominal quota of key (Nominal minus
-// Reserved). A pending Workload has no flavor assigned yet, so it counts for
+// Reserved, QueueResource.admits). A pending Workload has no flavor assigned yet, so it counts for
 // every flavor of the queue that offers the resource. 0 when none qualifies:
 // the lender does not wait.
 //
@@ -404,15 +507,97 @@ func lenderPendingOn(q QueueState, key ResourceKey, nodeLabels map[string]string
 	if !ok {
 		return 0
 	}
-	unused := int64(max(0, r.Nominal-r.Reserved))
 	for _, w := range q.PendingWorkloads {
 		n := w.GPUs[key.Resource]
-		if n <= 0 || n > unused || !w.allowsFlavor(nodeLabels) || !fitsCoResources(q, key.Flavor, w) {
+		if n <= 0 || !r.admits(n) || !w.allowsFlavor(nodeLabels) || !fitsCoResources(q, key.Flavor, w) {
 			continue
 		}
 		gpus = max(gpus, clampQuota(n))
 	}
 	return gpus
+}
+
+// lenderDemand is what a release to a waiting lender is sized by
+// (lenderNext).
+type lenderDemand struct {
+	// gpus is the smallest Workload Kueue could admit next within the
+	// lender's nominal.
+	gpus int
+	// priority is the highest priority among the Workloads counted: Kueue
+	// preempts for the lender at its head's priority. Nil when none counts.
+	priority *int32
+	// since is when the longest-waiting one of them started to wait.
+	since time.Time
+}
+
+// lenderNext is what a release to q, as a waiting lender of key, is sized by:
+// its pending Workloads, in Kueue's queue order (priority, then oldest
+// first), that Kueue could admit within q's nominal of key (admits, the same
+// rule as lenderPendingOn) on a flavor their node selection allows, their
+// co-resources fitting. Left out, because handing capacity back would not
+// admit them:
+//   - a Workload whose requeueState.requeueAt is still to come: Kueue does
+//     not try it before then;
+//   - one q admits by preempting its own lower-priority Workloads
+//     (withinClusterQueue): the cohort owes it nothing;
+//   - under StrictFIFO, every Workload behind a head that does not fit, or
+//     that is not for this key: the head blocks them. Only the head counts.
+//
+// The size is the smallest Workload counted: the least that unblocks q.
+func lenderNext(q QueueState, key ResourceKey, nodeLabels map[string]string, now time.Time) lenderDemand {
+	var out lenderDemand
+	r, ok := q.Resources[key]
+	if !ok {
+		return out
+	}
+	queue := slices.Clone(q.PendingWorkloads)
+	slices.SortStableFunc(queue, func(a, b PendingWorkload) int {
+		if a.Priority != b.Priority {
+			return cmp.Compare(b.Priority, a.Priority)
+		}
+		return a.Since.Compare(b.Since)
+	})
+	strict := q.QueueingStrategy == QueueingStrictFIFO
+	for _, w := range queue {
+		if w.RequeueAt != nil && w.RequeueAt.After(now) {
+			continue // not in line until then
+		}
+		n := w.GPUs[key.Resource]
+		counts := n > 0 && r.admits(n) && w.allowsFlavor(nodeLabels) && fitsCoResources(q, key.Flavor, w) &&
+			!q.preemptsWithin(w)
+		if counts {
+			if out.gpus == 0 || clampQuota(n) < out.gpus {
+				out.gpus = clampQuota(n)
+			}
+			if out.priority == nil || w.Priority > *out.priority {
+				p := w.Priority
+				out.priority = &p
+			}
+			if !w.Since.IsZero() && (out.since.IsZero() || w.Since.Before(out.since)) {
+				out.since = w.Since
+			}
+		}
+		if strict {
+			break // the head alone is in line
+		}
+	}
+	return out
+}
+
+// preemptsWithin reports whether Kueue admits w by preempting q's own
+// reserved Workloads (spec.preemption.withinClusterQueue): one of them runs
+// at a priority w outranks.
+func (q QueueState) preemptsWithin(w PendingWorkload) bool {
+	if q.LowestReserved == nil {
+		return false
+	}
+	switch q.WithinClusterQueue {
+	case WithinLowerPriority:
+		return w.Priority > *q.LowestReserved
+	case WithinLowerOrNewerEqualPriority:
+		return w.Priority >= *q.LowestReserved
+	}
+	return false
 }
 
 // pendingOn is what q's pending Workloads request of key's GPU resource in

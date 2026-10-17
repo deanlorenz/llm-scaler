@@ -71,10 +71,16 @@ func chunkOf(t *testing.T, snap config.ExternalQuotas) *SharedPoolChunk {
 // gives the optimizer for snap.
 func constraintsOf(t *testing.T, snap config.ExternalQuotas) *ResourceConstraints {
 	t.Helper()
+	return constraintsOfEntry(t, snap, config.KueueQuotaSource{Enabled: true})
+}
+
+// constraintsOfEntry is constraintsOf for an entry with the given kueue block.
+func constraintsOfEntry(t *testing.T, snap config.ExternalQuotas, k config.KueueQuotaSource) *ResourceConstraints {
+	t.Helper()
 	e := config.QuotaLimiterConfig{
 		Name: "namespace-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
 		NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
-		Kueue:           &config.KueueQuotaSource{Enabled: true},
+		Kueue:           &k,
 	}
 	src := &fakeQuotaSource{}
 	src.push(snap, nil)

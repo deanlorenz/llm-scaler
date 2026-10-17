@@ -71,6 +71,48 @@ func WithKueueTimings(placementTimeout, borrowCooldown, lenderDebounce string) Q
 	}
 }
 
+// SetKueueQuotaOption sets one field of the kueue block of the quota entry
+// SetNamespaceQuota wrote (say releaseToNonReclaimingLenders), in place,
+// keeping everything else. The restore SetNamespaceQuota returned still puts
+// the original document back.
+func SetKueueQuotaOption(ctx context.Context, clientset kubernetes.Interface, configNamespace, configName, field string, value any) error {
+	cms := clientset.CoreV1().ConfigMaps(configNamespace)
+	cm, err := cms.Get(ctx, configName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("read %s: %w", configName, err)
+	}
+	doc := map[string]any{}
+	if err := yaml.Unmarshal([]byte(cm.Data[defaultEntryKey]), &doc); err != nil {
+		return fmt.Errorf("parse %s entry: %w", defaultEntryKey, err)
+	}
+	limiters, _ := doc["limiters"].([]any)
+	found := false
+	for _, l := range limiters {
+		entry, _ := l.(map[string]any)
+		if entry == nil || entry["name"] != quotaLimiterName {
+			continue
+		}
+		block, _ := entry["kueue"].(map[string]any)
+		if block == nil {
+			return fmt.Errorf("the quota entry %s has no kueue block", quotaLimiterName)
+		}
+		block[field] = value
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("no quota entry %s in %s", quotaLimiterName, configName)
+	}
+	merged, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal %s entry: %w", defaultEntryKey, err)
+	}
+	cm.Data[defaultEntryKey] = string(merged)
+	if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update %s: %w", configName, err)
+	}
+	return nil
+}
+
 // WithPhysicalLimiter declares the physical GPU limiter (gpu-inventory) beside
 // the quota entry, so a decision must fit the GPUs the nodes have as well. A
 // Kueue quota entry counts cohort borrowing only where such a GPU bound exists.
