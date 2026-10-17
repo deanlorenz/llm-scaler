@@ -497,7 +497,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		var derived derivedMu
 		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
-			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
@@ -531,7 +531,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
-				"maxNumSeqs", maxSeqs)
+				// Per engine rank; the replica admits engineRanks times it.
+				"maxNumSeqs", maxSeqs, "engineRanks", rm.Ranks())
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
