@@ -108,7 +108,7 @@ func brRun(t *testing.T, role string, cycles ...[]brPod) []brCycle {
 		EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
 	})
 	a := NewSaturationAnalyzer(store)
-	var out []brCycle
+	out := make([]brCycle, 0, len(cycles))
 	for _, pods := range cycles {
 		ctx, logs := observedCtx(t)
 		rows := make([]domain.ReplicaMetrics, 0, len(pods))
@@ -155,7 +155,7 @@ var brRoles = []string{"", domain.RoleDecode}
 func TestHotRankRecordsK2ScaledToThePod(t *testing.T) {
 	for _, role := range brRoles {
 		t.Run("role="+role, func(t *testing.T) {
-			var cycles [][]brPod
+			cycles := make([][]brPod, 0, 6)
 			for _, q := range []int{5, 10, 20} {
 				cycles = append(cycles, []brPod{brHot("pod-a", 0, 1.0, q)})
 			}
@@ -312,7 +312,7 @@ func TestHotRankHoldOnPD(t *testing.T) {
 		})
 	}
 	a := NewSaturationAnalyzer(store)
-	var rows []domain.ReplicaMetrics
+	rows := make([]domain.ReplicaMetrics, 0, 4)
 	for _, v := range []string{"dec", "pre"} {
 		for _, p := range []brPod{brHot(v+"-a", 0.1, 1.0, 3), brUniform(v+"-b", 0.1, 0)} {
 			rm := brRow(p)
