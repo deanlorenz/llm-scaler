@@ -312,6 +312,13 @@ const (
 	// WVALearnedStateSnapshotErrorsTotal counts failed reads and writes of
 	// the learned-state snapshot ConfigMap, by operation (read or write).
 	WVALearnedStateSnapshotErrorsTotal = "wva_learned_state_snapshot_errors_total"
+	// WVALearnedStateSnapshotBytes is the size of the learned-state document
+	// last written, WVALearnedStateSnapshotBudgetBytes the bound it had to fit,
+	// and WVALearnedStateSnapshotDroppedEntries how many entries, least
+	// recently used first, that write left out to fit it.
+	WVALearnedStateSnapshotBytes          = "wva_learned_state_snapshot_bytes"
+	WVALearnedStateSnapshotBudgetBytes    = "wva_learned_state_snapshot_budget_bytes"
+	WVALearnedStateSnapshotDroppedEntries = "wva_learned_state_snapshot_dropped_entries"
 
 	// LabelFingerprint is the engine-configuration digest, and
 	// LabelFingerprintVersion the hash's own version -- published beside it

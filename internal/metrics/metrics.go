@@ -108,6 +108,9 @@ var (
 	learnedStateK2Age        *prometheus.GaugeVec
 	learnedStateRestores     *prometheus.CounterVec
 	learnedStateErrors       *prometheus.CounterVec
+	learnedStateBytes        prometheus.Gauge
+	learnedStateBudget       prometheus.Gauge
+	learnedStateDropped      prometheus.Gauge
 	analyzerObservedReplicas *prometheus.GaugeVec
 
 	// controllerInstance stores the optional controller instance identifier.
@@ -348,6 +351,18 @@ func InitMetrics(registry prometheus.Registerer) error {
 		},
 		[]string{constants.LabelOperation},
 	)
+	learnedStateBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: constants.WVALearnedStateSnapshotBytes,
+		Help: "Size in bytes of the learned-state snapshot document last written (LEARNED_STATE_SNAPSHOT). Compare with wva_learned_state_snapshot_budget_bytes: at the bound, every write leaves the least recently used entries out.",
+	})
+	learnedStateBudget = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: constants.WVALearnedStateSnapshotBudgetBytes,
+		Help: "The bound, in bytes, the learned-state snapshot document last written had to fit: the smaller of 700 KiB and 900 KiB less what other versions' documents take of the ConfigMap. 0 until the first write.",
+	})
+	learnedStateDropped = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: constants.WVALearnedStateSnapshotDroppedEntries,
+		Help: "How many entries the last learned-state snapshot write left out to fit its bound, least recently used first: windows of variants idle longest, which a restart then prices at derived or k1 until they saturate again. 0 is the normal case.",
+	})
 	for _, o := range LearnedStateRestoreOutcomes {
 		learnedStateRestores.WithLabelValues(o)
 	}
@@ -954,7 +969,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		return fmt.Errorf("failed to register %s: %w", constants.WVAEngineConfig, err)
 	}
 	for _, c := range []prometheus.Collector{learnedStateBorrowed, learnedStateRelaxed, learnedStateK2Source, learnedStateK2Age,
-		learnedStateRestores, learnedStateErrors} {
+		learnedStateRestores, learnedStateErrors, learnedStateBytes, learnedStateBudget, learnedStateDropped} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register a learned-state metric: %w", err)
 		}
@@ -2263,6 +2278,17 @@ func (m *MetricsEmitter) AddLearnedStateRestores(byOutcome map[string]int) {
 			learnedStateRestores.WithLabelValues(outcome).Add(float64(n))
 		}
 	}
+}
+
+// RecordLearnedStateSnapshotSize publishes the size of the snapshot document
+// just written, the bound it had to fit, and how many entries it left out.
+func (m *MetricsEmitter) RecordLearnedStateSnapshotSize(bytes, budget, dropped int) {
+	if learnedStateBytes == nil {
+		return
+	}
+	learnedStateBytes.Set(float64(bytes))
+	learnedStateBudget.Set(float64(budget))
+	learnedStateDropped.Set(float64(dropped))
 }
 
 // IncLearnedStateSnapshotError counts one failed read or write of the
