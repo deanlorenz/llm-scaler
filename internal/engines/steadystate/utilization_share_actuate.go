@@ -421,7 +421,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, plan.Unfunded, plan.MeanCapped, shareSkipWaits(us), now, tm)
+	unfunded := e.shareUnfunded(ctx, logger, l, g, plan.Evaluation, plan.Unfunded, accessor, nodes, domains, placements)
+	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, unfunded, plan.MeanCapped, shareSkipWaits(us), now, tm)
 	out.evaluation = &plan.Evaluation
 	out.headroomCapped = &plan.HeadroomCapped
 	// Said when it changes: what the cap does to every model's headroom
@@ -832,8 +833,9 @@ func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) in
 // shareBlockedReasons is each planned model's utilization-share blocked
 // reasons (section 9), keyed by namespace/model. Every planned model has an
 // entry, empty when nothing holds it back, so a reason that stops holding is
-// cleared. meanCapped are the roles the plan capped on their mean need
-// (allocation.SharePlan.MeanCapped).
+// cleared. unfunded is the plan's unfunded receivers, with those no node can
+// hold a replica of marked by shareUnfunded. meanCapped are the roles the plan
+// capped on their mean need (allocation.SharePlan.MeanCapped).
 func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
 	unfunded map[string]string, meanCapped []string, rb allocation.ShareSkipWaits, now time.Time, tm allocation.ShareTimings) map[string][]string {
 	out := map[string][]string{}
@@ -879,6 +881,14 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			add(r.Key, constants.ScalingBlockedFloorPinned)
 		}
 		v := verdict[r.Key]
+		// No node can hold one of its replicas, whatever the others give: the
+		// one reason for what keeps it from receiving. Which donor reason held
+		// would change as the others give or keep their spare -- for a
+		// cycle, none -- while the cause does not (shareNoNodeFits).
+		noNodeFits := v.Headroom < 0 && unfunded[r.Key] == allocation.ShareUnfundedNoNodeFits
+		if noNodeFits {
+			add(r.Key, constants.ScalingBlockedNoNodeFits)
+		}
 		if v.Headroom < 0 && ev.Spare < 0 {
 			add(r.Key, constants.ScalingBlockedQuotaShort)
 		}
@@ -890,7 +900,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		// Not "out of band": the targets already absorb floors, so a role
 		// whose GPUs are all pinned elsewhere sits in band at its shortfall.
 		// What the operator needs is the cause -- short, and nobody can give.
-		if v.Headroom < 0 && donorsAtFloor(r.Key) {
+		if v.Headroom < 0 && !noNodeFits && donorsAtFloor(r.Key) {
 			add(r.Key, constants.ScalingBlockedDonorsAtFloor)
 		}
 		switch {
@@ -910,7 +920,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		// its model's burst is expected to end before a move lands. Reported
 		// whether or not it is receiving -- a role taking a replica a cycle
 		// through a long shortfall otherwise shows no reason at all.
-		if v.Headroom < 0 && l.HardCycles(r.Key) >= allocation.ShareUnpacedAfterCycles && l.ModelBurstEnds(r.Key, peers, tm) {
+		if v.Headroom < 0 && !noNodeFits && l.HardCycles(r.Key) >= allocation.ShareUnpacedAfterCycles && l.ModelBurstEnds(r.Key, peers, tm) {
 			add(r.Key, constants.ScalingBlockedBurstEnding)
 		}
 		// What keeps a short role from receiving, when something does. A role
@@ -923,7 +933,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			left := g.Committed[o.Key] - max(o.ReplicaGPUs, 1)
 			return o.Key != r.Key && left >= 0 && rb.Calm(o, left)
 		})
-		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] {
+		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] && !noNodeFits {
 			switch {
 			case l.ReceivingHeld(r.Key, now, tm) && (!urgent || !calmDonor):
 				add(r.Key, constants.ScalingBlockedReversalHold)

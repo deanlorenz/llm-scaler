@@ -72,12 +72,11 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 		e.load(loadG, msG, modelG, 16)
 	})
 
-	// While S1 and S2 hold spare replicas, G reports no-compatible-donor. They
-	// are idle, and their spare goes back to the quota by returns once G reads
-	// unfundable; G then reports donors-at-floor, the quota's 8 GPUs sit
-	// unassigned, and still no node holds G. Which of the two reasons a
-	// sample catches depends on when the returns land, so the spec accepts
-	// either and records the order it saw.
+	// No node can hold a G replica, even if every small pod went: G reports
+	// no-node-fits. S1 and S2 are idle, and their spare goes back to the
+	// quota by returns; the quota's 8 GPUs then sit unassigned, and still no
+	// node holds G. The cause does not change, so neither does the reason:
+	// once reported, it is in every reading (issue #236).
 	It("starts no transfer for G and reports why", func() {
 		start := time.Now()
 		wholeNodeProm()
