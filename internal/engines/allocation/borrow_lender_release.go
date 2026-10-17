@@ -225,7 +225,7 @@ func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, reques
 		if e.LandedAt == nil && len(e.Units) > 0 && unitsLanded(e.Units, states) {
 			at := now
 			e.LandedAt = &at
-			for _, m := range releasedModels(e.Units, states, requests) {
+			for _, m := range releasedModels(e.Units, requests) {
 				g.markBackoff(m, []string{k.Cohort}, at, true)
 			}
 		}
@@ -303,7 +303,7 @@ func halfLanded(units []ReleasedUnit, states map[string]variantRef) []ReleasedUn
 // releasedModels is the "namespace/model" keys of a release's units: the
 // unit's own, or, for a unit that names none, the model whose request holds
 // the variant.
-func releasedModels(units []ReleasedUnit, states map[string]variantRef, requests []ModelScalingRequest) []string {
+func releasedModels(units []ReleasedUnit, requests []ModelScalingRequest) []string {
 	byVariant := map[string]string{}
 	for _, req := range requests {
 		for _, st := range req.VariantStates {

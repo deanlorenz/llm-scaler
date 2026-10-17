@@ -491,7 +491,8 @@ func TestLenderReleaseLanding(t *testing.T) {
 		landed := t0.Add(3 * time.Minute)
 		w.readAt = landed.Add(-5 * time.Second)
 		cycleOf(gov, landed, w, govModel("x", 4, 8)) // lands
-		w.readAt = landed.Add(15 * time.Second) // fresh, after the landing, Kueue's figure not updated yet
+		// A fresh read after the landing, Kueue's figure not updated yet.
+		w.readAt = landed.Add(15 * time.Second)
 		if rel, _ := cycleOf(gov, landed.Add(20*time.Second), w, govModel("x", 4, 8)); len(rel) != 0 {
 			t.Fatalf("released %+v on a read that lags the landing", rel)
 		}

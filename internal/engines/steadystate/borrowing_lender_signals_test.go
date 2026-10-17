@@ -123,7 +123,7 @@ var _ = Describe("TestLenderReleaseSignals: what on-call sees of a release to a 
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "x-v", Namespace: "b"}})}
 		e.borrowing.inFlight = allocation.NewBorrowInFlight()
 		e.borrowing.ledgerLoaded = true
-		cs = e.governBorrowing(ctx, cs, reqs, targets, now)
+		e.governBorrowing(ctx, cs, reqs, targets, now)
 		ds := lenderDecisions(reqs)
 		e.releaseBorrowed(ctx, reqs, ds, targets, now)
 		Expect(ds[0].TargetReplicas).To(Equal(6), "nothing handed back to sit idle")
