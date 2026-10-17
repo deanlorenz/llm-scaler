@@ -157,9 +157,6 @@ func markNoNodeFits(unfunded map[string]string, roles []string) map[string]strin
 // and the node's free GPUs grow by what each one held when it does.
 func (e *Engine) shareGroupPodGPUs(ctx context.Context, g allocation.ShareGroup,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor) (map[string]map[string]int, error) {
-	if e.client == nil {
-		return nil, fmt.Errorf("no client")
-	}
 	out := map[string]map[string]int{}
 	for _, role := range slices.Sorted(maps.Keys(g.Give)) {
 		give := g.Give[role]

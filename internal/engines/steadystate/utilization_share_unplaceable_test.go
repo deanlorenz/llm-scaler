@@ -127,7 +127,7 @@ func (f *fragFleet) run(cycles int) ([][]string, bool) {
 	tm := allocation.ShareTimings{Window: 300 * time.Second, ReleaseTimeout: 6 * time.Minute,
 		FillTimeout: 2 * time.Minute, ReversalHold: 10 * time.Minute, SwingWindow: time.Hour}
 	t0 := time.Unix(1_000_000, 0)
-	var seq [][]string
+	seq := make([][]string, 0, cycles)
 	funded := false
 	for c := range cycles {
 		now := t0.Add(time.Duration(c) * 30 * time.Second)
@@ -158,7 +158,7 @@ func (f *fragFleet) run(cycles int) ([][]string, bool) {
 func TestUtilizationShareUnplaceableReceiverKeepsOneReason(t *testing.T) {
 	f := newFragFleet([]string{"n2", "n2", "n2", "n2", "n4"}, []string{"n3", "n3", "n3", "n3", "n4"})
 	seq, funded := f.run(12)
-	var lines []string
+	lines := make([]string, 0, len(seq))
 	for c, r := range seq {
 		lines = append(lines, fmt.Sprintf("c%d %v", c, r))
 	}
@@ -198,9 +198,9 @@ func TestUtilizationShareEmptiableNodeIsNotNoNodeFits(t *testing.T) {
 // the fixture's layout, where two of A's pods share a node, is never reported.
 func TestUtilizationShareEnginePublishesNoNodeFits(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name  string
 		apart bool
-		want bool
+		want  bool
 	}{
 		{"every node holds one GPU", true, true},
 		{"two pods share a node (control)", false, false},
