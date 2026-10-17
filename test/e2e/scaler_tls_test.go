@@ -14,6 +14,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
 // scalerTLSOn records whether the controller serves the external scaler over
@@ -24,12 +25,12 @@ var scalerTLSOn bool
 // installer's mutual TLS, points every fixture at the TLS scaler address with
 // KEDA's ClusterTriggerAuthentication, as the installer's ScaledObjects are.
 func configureScalerTLS() {
-	dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, "wva-controller-manager", metav1.GetOptions{})
+	dep, err := k8sClient.AppsV1().Deployments(cfg.WVANamespace).Get(ctx, utils.ControllerDeploymentName, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred(), "reading the controller Deployment to learn its scaler TLS mode")
 	provider := dep.Spec.Template.Annotations["wva.llmd.ai/scaler-tls"]
 	certFlag := false
 	for _, c := range dep.Spec.Template.Spec.Containers {
-		if c.Name != "manager" {
+		if c.Name != utils.ControllerContainerName {
 			continue
 		}
 		for _, a := range c.Args {

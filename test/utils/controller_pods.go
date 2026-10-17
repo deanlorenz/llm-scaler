@@ -22,6 +22,10 @@ const ControllerDeploymentName = "wva-controller-manager"
 // not because one is the other.
 const ControllerServiceAccountName = "wva-controller-manager"
 
+// ControllerContainerName is the controller Pod's container that runs the
+// manager binary (config/base/manager/deployment.yaml).
+const ControllerContainerName = "manager"
+
 // controllerLabelSelector narrows the list before ownership is checked. It
 // does not identify the controller on its own: see IsControllerPod.
 const controllerLabelSelector = "control-plane=controller-manager"

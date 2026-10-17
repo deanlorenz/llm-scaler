@@ -156,7 +156,7 @@ func scalingPolicyConfigMapName() string {
 // saturationConfigMapNameFromDeployment extracts SATURATION_CONFIG_MAP_NAME from manager container env.
 func saturationConfigMapNameFromDeployment(dep *appsv1.Deployment) string {
 	for _, c := range dep.Spec.Template.Spec.Containers {
-		if c.Name != "manager" {
+		if c.Name != testutils.ControllerContainerName {
 			continue
 		}
 		for _, e := range c.Env {
