@@ -657,7 +657,9 @@ replica is kept, but it is not reported as a floor: `floor-pinned`,
 
 **How much spike a model absorbs.** Its spike capacity is the headroom it holds
 (`wva_utilization_share_headroom`), plus whatever GPUs of the quota are
-unassigned, which it takes without a transfer. A spike larger than that waits
+unassigned, which it takes without a transfer. GPUs another model's target asks
+for are not unassigned, even before that model holds them (its new replica is
+still starting, or its Deployment was scaled down by hand). A spike larger than that waits
 for a transfer, and a transfer releases the donor first: expect at least one donor
 scale-down window before the new replica serves. For whole-node models the full
 wait is the donor's scale-down window, its drain and termination grace, up to
