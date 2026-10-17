@@ -117,6 +117,7 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 	if k, ok := l.inventory.(KueueBackedInventory); ok {
 		rc.KueueBacked = k.KueueBacked()
 		rc.KueueCountsBorrowing = rc.KueueBacked && k.KueueCountsBorrowing()
+		rc.KueueBounded = k.KueueBounded()
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the

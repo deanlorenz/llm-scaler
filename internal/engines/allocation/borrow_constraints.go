@@ -384,7 +384,8 @@ func heldPastBorrowCap(p ResourcePool, b NamespaceBorrow) int {
 
 // withoutBorrowing drops the borrowing figures from every constraint carrying
 // them, moving each borrowing namespace's Limit to its within-nominal figure
-// when within is set, and its Used to heldPastBorrowCap when it is not.
+// when within is set, and its Used to heldPastBorrowCap, recorded in
+// CountedBorrow, when it is not.
 func withoutBorrowing(constraints []*ResourceConstraints, within bool) []*ResourceConstraints {
 	if !HasBorrowing(constraints) {
 		return constraints
@@ -397,6 +398,9 @@ func withoutBorrowing(constraints []*ResourceConstraints, within bool) []*Resour
 		}
 		cc := *c
 		cc.NamespacePools = make(map[string]map[string]ResourcePool, len(c.NamespacePools))
+		if !within {
+			cc.CountedBorrow = map[string]map[string]bool{}
+		}
 		for ns, perType := range c.NamespacePools {
 			pools := maps.Clone(perType)
 			for accType, b := range c.NamespaceBorrow[ns] {
@@ -408,6 +412,10 @@ func withoutBorrowing(constraints []*ResourceConstraints, within bool) []*Resour
 					p.Limit = b.WithinNominal
 				} else {
 					p.Used = heldPastBorrowCap(p, b)
+					if cc.CountedBorrow[ns] == nil {
+						cc.CountedBorrow[ns] = map[string]bool{}
+					}
+					cc.CountedBorrow[ns][accType] = true
 				}
 				pools[accType] = p
 			}
