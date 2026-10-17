@@ -345,7 +345,11 @@ def budget_problem(a, b):
                 % (bb.get("min_replicas_per_model"), BASELINE, ba.get("min_replicas_per_model", 1)))
     # Per-role bounds, recorded by a P/D run. Absent on older budgets, which had
     # one ceiling for every role.
-    for key in ("max_prefill", "max_decode", "min_prefill", "min_decode"):
+    # And per model, recorded by a run whose models differ in size or ceiling:
+    # one model allowed another ceiling, or priced at another size, is not the
+    # same experiment either.
+    for key in ("max_prefill", "max_decode", "min_prefill", "min_decode",
+                "max_replicas_a", "max_replicas_b", "gpus_per_replica_a", "gpus_per_replica_b"):
         if key in ba and key in bb and ba[key] != bb[key]:
             return ("the %s arm ran with %s=%s against the %s arm's %s: its roles were "
                     "bounded differently, so its TTFT differs for a reason that is not "
@@ -821,8 +825,11 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
 
 
 def arm_ceiling(bud):
-    return (2 * bud["max_replicas_per_model"] * bud["gpus_per_replica"]
-            + bud.get("pool_replicas", 0) * bud["gpus_per_replica"])
+    models = 2 * bud["max_replicas_per_model"] * bud["gpus_per_replica"]
+    if "gpus_per_replica_a" in bud:
+        models = (bud["max_replicas_a"] * bud["gpus_per_replica_a"]
+                  + bud["max_replicas_b"] * bud["gpus_per_replica_b"])
+    return models + bud.get("pool_replicas", 0) * bud["gpus_per_replica"]
 
 
 def main(argv):
@@ -994,7 +1001,16 @@ def main(argv):
     print("")
     for arm in arms:
         bud = arm["budget"]
-        if bud:
+        if bud and "gpus_per_replica_a" in bud and (
+                bud["gpus_per_replica_a"] != bud["gpus_per_replica_b"]
+                or bud["max_replicas_a"] != bud["max_replicas_b"]):
+            # Models of different sizes or ceilings: each at its own.
+            print("- %s: model A up to %d replicas of %d GPU(s), model B up to %d of %d, "
+                  "pool %d Pod(s) -- ceiling %d accelerators"
+                  % (arm["name"], bud["max_replicas_a"], bud["gpus_per_replica_a"],
+                     bud["max_replicas_b"], bud["gpus_per_replica_b"], bud.get("pool_replicas", 0),
+                     arm_ceiling(bud)))
+        elif bud:
             floor = bud.get("min_replicas_per_model")
             print("- %s: each model %s %d replicas, pool %d Pod(s) -- ceiling %d accelerators"
                   % (arm["name"],
