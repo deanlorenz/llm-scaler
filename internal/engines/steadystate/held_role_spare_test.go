@@ -134,6 +134,33 @@ func TestHeldSpareIsZeroAtModelLevelWhenEveryRoleIsHeld(t *testing.T) {
 	assert.Zero(t, nr.SpareCapacity, "aggregated, held")
 }
 
+// TestCappedHeldRoleOrdersNothingOnARequiredResidue: the same residue on the
+// way up. While decode is saturated, saturation clamps prefill's demand down
+// to scaleUp x anticipated supply, where RequiredCapacity is zero. 0.80 x
+// (21 x 24576) / 0.80 comes back 5.8e-11 above 21 x 24576, and a scale-up
+// rounds up, so the held role ordered a whole replica.
+func TestCappedHeldRoleOrdersNothingOnARequiredResidue(t *testing.T) {
+	const n, prc, scaleUp, scaleDown = 21, 24576.0, 0.80, 0.65
+	sat := heldPrefillEntry(n, prc, scaleUp, 0, true)
+	sat.Result.HeldRoleDemand[domain.RolePrefill] = 2 * n * prc
+	alone := []allocation.NamedAnalyzerResult{sat}
+	got, composite := costAwareTargetsAt(alone, alone, scaleUp, scaleDown, map[string]int{"p": n, "d": 2})
+	assert.Zero(t, composite.RoleCapacities[domain.RolePrefill].RequiredCapacity, "a capped held role has no required capacity")
+	assert.Equal(t, n, got["p"], "the held prefill orders nothing")
+	assert.Equal(t, 2, got["d"], "setup: decode orders nothing")
+}
+
+// TestHeldRoleStillOrdersARealShortfall: a hold is a floor on the way up,
+// so a held role whose demand is genuinely above the scale-up threshold
+// still grows. Prefill 21 x 100 is held at 1% above scaleUp x supply.
+func TestHeldRoleStillOrdersARealShortfall(t *testing.T) {
+	sat := heldPrefillEntry(21, 100, 0.85*1.01, 0, true)
+	alone := []allocation.NamedAnalyzerResult{sat}
+	got, composite := costAwareTargetsAt(alone, alone, 0.85, 0.70, map[string]int{"p": 21, "d": 2})
+	assert.InDelta(t, 21, composite.RoleCapacities[domain.RolePrefill].RequiredCapacity, 1e-9)
+	assert.Equal(t, 22, got["p"])
+}
+
 // TestUnheldRoleStillReleasesOnASmallSpare: a role nothing holds, with a real
 // spare well below one replica, still releases what its releasable capacity
 // allows. Prefill runs 21 x 100 at demand 1469: a spare of 1.4, and 108 of
