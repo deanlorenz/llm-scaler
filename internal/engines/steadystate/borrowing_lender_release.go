@@ -120,7 +120,7 @@ func (e *Engine) reportLenders(ctx context.Context, requests []allocation.ModelS
 		msg := lenderBlockedMessage(b)
 		logger.Info(msg, "lenderClusterQueue", b.Lender.Lender, "cohort", b.Lender.Cohort, "flavor", b.Lender.Flavor,
 			"reason", b.Reason, "needGPUs", b.Need, "givableGPUs", b.Givable, "models", b.Models)
-		e.lenderBlockedEvents(b, msg, requests, scaleTargets)
+		e.lenderBlockedEvents(b, msg, requests, scaleTargets, constants.K8SEventLenderReleaseBlocked)
 	}
 	for k := range st.lenderBlocked {
 		if !seen[k] {
@@ -128,6 +128,14 @@ func (e *Engine) reportLenders(ctx context.Context, requests []allocation.ModelS
 		}
 	}
 	metrics.PublishLenderReleaseBlocked(series)
+	for _, m := range report.HalfLowered {
+		msg := "A release to a waiting lender outlived twice its timeout with this P/D model half lowered: one role " +
+			"scaled down, its partner did not, and the release's pins are dropped. Check the scale-down of the " +
+			"role still above its target (its ScaledObject's scale-down policies and its pods' termination grace)"
+		logger.Info("Warning: "+msg, "model", m)
+		e.lenderBlockedEvents(allocation.LenderReleaseBlock{Models: []string{m}}, msg, requests, scaleTargets,
+			constants.K8SEventLenderReleaseHalfLanded)
+	}
 	shared := map[string]bool{}
 	for _, s := range report.Shared {
 		k := s.Cohort + "/" + s.Flavor + "/" + s.Resource
@@ -162,10 +170,10 @@ func lenderBlockedMessage(b allocation.LenderReleaseBlock) string {
 		b.Need, b.Givable)
 }
 
-// lenderBlockedEvents records msg as a Warning Event on one scale target of
-// each candidate model of b.
+// lenderBlockedEvents records msg as a Warning Event of reason on one scale
+// target of each model of b.
 func (e *Engine) lenderBlockedEvents(b allocation.LenderReleaseBlock, msg string, requests []allocation.ModelScalingRequest,
-	scaleTargets map[string]scaletarget.ScaleTargetAccessor) {
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, reason string) {
 	models := map[string]bool{}
 	for _, m := range b.Models {
 		models[m] = true
@@ -178,7 +186,7 @@ func (e *Engine) lenderBlockedEvents(b allocation.LenderReleaseBlock, msg string
 		slices.Sort(names)
 		for _, v := range names {
 			if acc := scaleTargets[req.Namespace+"/"+v]; acc != nil {
-				e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventLenderReleaseBlocked, msg)
+				e.shareEvent(acc, corev1.EventTypeWarning, reason, msg)
 				break
 			}
 		}

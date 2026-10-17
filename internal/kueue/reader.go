@@ -577,6 +577,10 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			bp := *p.BorrowerPriority
 			e.BorrowerPriority = &bp
 		}
+		if p.BorrowerLowest != nil {
+			lo := *p.BorrowerLowest
+			e.BorrowerLowest = &lo
+		}
 		out = append(out, e)
 	}
 	return out

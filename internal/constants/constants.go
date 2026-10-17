@@ -209,6 +209,10 @@ const (
 	// what this controller could give back would not admit it, or another
 	// borrower took what it gave.
 	K8SEventLenderReleaseBlocked = "LenderReleaseBlocked"
+	// K8SEventLenderReleaseHalfLanded is a Warning recorded on a P/D model
+	// whose release to a waiting lender outlived twice its timeout half
+	// landed: one role lowered, its partner not, and the pins dropped.
+	K8SEventLenderReleaseHalfLanded = "LenderReleaseHalfLanded"
 
 	// Enforcer policy types.
 	EnforcerPolicyTypeScaleToZero     = "scale_to_zero"

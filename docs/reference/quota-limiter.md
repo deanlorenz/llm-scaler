@@ -635,9 +635,13 @@ when the lender does not outrank the borrowing model.
   not count.
 - **How much.** Only what unblocks the lender: its smallest Workload Kueue
   could admit next, less the part of its nominal it keeps (`lendingLimit`),
-  less the cohort's free pool, less what the cycle already frees (lower
-  targets, terminating pods, releases that landed), less what Kueue preempts
-  for it from models it outranks.
+  less the cohort's free pool, less what the cycle already frees past what
+  the namespaces borrow (lower targets other than a wake's reclaim yield,
+  terminating pods, releases that landed), less what Kueue preempts for it
+  from models it outranks. Under `LowerPriority`, when a borrower this
+  controller does not govern may hold the pool below the lender's waiting
+  Workload, the release waits about two minutes for Kueue to preempt it,
+  then decides on a fresh read.
 - **All or nothing.** The borrowing models are lowered by whole units -- a
   replica, a P/D pair at the model's role ratio, a LeaderWorkerSet group --
   until that is covered. The last unit may pass it by at most one replica; a
@@ -655,9 +659,12 @@ when the lender does not outrank the borrowing model.
   lender stops waiting, when Kueue's borrowed figure falls by what was handed
   back, or after twice the release latency. If it landed but the lender still
   waits and Kueue's borrowed figure did not fall, another borrower took the
-  GPUs: nothing more is handed to that lender while it waits
+  GPUs: nothing more is handed to that lender while it waits, for up to
+  twice the release timeout, after which one new release may be tried
   (`reason="taken-by-another-borrower"`). A P/D pair half scaled down at the
-  timeout keeps its targets until both roles land.
+  timeout keeps its targets until both roles land, or until twice the
+  timeout; then a Warning `LenderReleaseHalfLanded` Event says the pair was
+  left half lowered.
 - **Latency.** A release lands after the models' KEDA scale-down window, the
   HPA sync, the KEDA poll and the pods' termination grace, capped at 30
   minutes. It is measured per cohort, over the models a release there may

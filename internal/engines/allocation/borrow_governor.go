@@ -238,7 +238,10 @@ type BorrowGovernor struct {
 	lenderRestored map[LenderKey]bool
 	// report is what the last Releases saw of the waiting lenders it did not
 	// serve (LenderReport).
-	report  LenderReport
+	report LenderReport
+	// halfLowered is the models whose lender release this cycle's Observe
+	// dropped half landed, past twice its timeout (LenderReport.HalfLowered).
+	halfLowered []string
 	started bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.

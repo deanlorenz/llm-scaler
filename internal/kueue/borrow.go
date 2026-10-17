@@ -389,6 +389,12 @@ type SharedPool struct {
 	// borrowed (allocation.SharedPoolChunk.drawable).
 	Borrowed         int
 	BorrowerPriority *int32
+	// BorrowerLowest is the lowest priority any member that borrows holds a
+	// GPU Workload reserved at (QueueState.LowestReserved over the members
+	// with Borrowed): under LowerPriority, Kueue reclaims for a lender's
+	// Workload from a borrower below it. Nil when none borrows, or when one
+	// that borrows has none read.
+	BorrowerLowest *int32
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -570,7 +576,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				p.Free = cohortFree(qs, key)
 				p.CoFree, p.CoUnbound = cohortCoFree(qs, key.Flavor)
 			}
-			unknownBorrower := false
+			unknownBorrower, unknownLowest := false, false
 			for _, q := range qs {
 				r, declares := q.Resources[key]
 				if !declares {
@@ -584,6 +590,13 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 					case p.BorrowerPriority == nil || *q.BorrowerPriority > *p.BorrowerPriority:
 						bp := *q.BorrowerPriority
 						p.BorrowerPriority = &bp
+					}
+					switch {
+					case q.LowestReserved == nil:
+						unknownLowest = true
+					case p.BorrowerLowest == nil || *q.LowestReserved < *p.BorrowerLowest:
+						lo := *q.LowestReserved
+						p.BorrowerLowest = &lo
 					}
 				}
 				// An inactive queue still lends (cohortFree counts it), but
@@ -610,6 +623,9 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 			}
 			if unknownBorrower {
 				p.BorrowerPriority = nil // held at a priority not read: the cautious side
+			}
+			if unknownLowest {
+				p.BorrowerLowest = nil
 			}
 			slices.Sort(p.WaitingLenders)
 			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })

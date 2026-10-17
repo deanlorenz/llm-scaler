@@ -88,6 +88,20 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 		Expect(r.admits(29)).To(BeFalse())
 	})
 
+	// PR #203 re-check (KC4): Kueue reclaims for a LowerPriority lender from
+	// any borrower below its head, this controller's or not.
+	It("carries the lowest priority a borrower holds the pool at, unknown when one is not read", func() {
+		a := member("a", QueueResource{Nominal: 0, Reserved: 4, Borrowed: 4})
+		a.LowestReserved = p(10)
+		b := member("b", QueueResource{Nominal: 0, Reserved: 4, Borrowed: 4})
+		b.LowestReserved = p(200)
+		pool := ComputeBorrowing(topology(member("lender", QueueResource{Nominal: 8}), a, b), false).Pools[0]
+		Expect(pool.BorrowerLowest).To(HaveValue(Equal(int32(10))))
+		b.LowestReserved = nil
+		pool = ComputeBorrowing(topology(member("lender", QueueResource{Nominal: 8}), a, b), false).Pools[0]
+		Expect(pool.BorrowerLowest).To(BeNil())
+	})
+
 	It("carries the part it keeps unused: Kueue admits that much without a release", func() {
 		l := member("lender", QueueResource{Nominal: 32, LendingLimit: ptr(16)})
 		l.PendingWorkloads = []PendingWorkload{pendingGPU(16, 0)}

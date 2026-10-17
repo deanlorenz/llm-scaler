@@ -192,6 +192,7 @@ type poolRead struct {
 //     read goes (WP7); an entry left without units goes.
 func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, requests []ModelScalingRequest,
 	states map[string]variantRef, now time.Time) {
+	g.halfLowered = nil
 	if len(g.lenderRel) == 0 {
 		return
 	}
@@ -241,13 +242,23 @@ func (g *BorrowGovernor) observeLenderReleases(chunks []*SharedPoolChunk, reques
 				e.Taken, e.Units = true, nil
 			}
 		}
-		if e.Taken {
-			continue // stays while the lender waits
-		}
 		age := now.Sub(e.ReleasedAt)
+		if e.Taken {
+			// It stays while the lender waits, but not for good: a misread
+			// (Kueue's figure lagging, say) would starve the lender. Past
+			// twice the timeout one new release may be tried.
+			if age > 2*g.lenderTimeout(k.Cohort) {
+				g.dropLenderRelease(k)
+			}
+			continue
+		}
 		switch {
 		case age <= g.lenderTimeout(k.Cohort):
-		case e.TimedOut && (age > 2*g.lenderTimeout(k.Cohort) || unitsLanded(e.Units, states)):
+		case e.TimedOut && unitsLanded(e.Units, states):
+			g.dropLenderRelease(k)
+		case e.TimedOut && age > 2*g.lenderTimeout(k.Cohort):
+			// Its pins go with it: the pair stays half lowered. Say so.
+			g.halfLowered = append(g.halfLowered, releasedModels(e.Units, requests)...)
 			g.dropLenderRelease(k)
 		case !e.TimedOut:
 			if half := halfLanded(e.Units, states); len(half) > 0 {
@@ -303,6 +314,12 @@ func halfLanded(units []ReleasedUnit, states map[string]variantRef) []ReleasedUn
 // releasedModels is the "namespace/model" keys of a release's units: the
 // unit's own, or, for a unit that names none, the model whose request holds
 // the variant.
+//
+// A unit names no model only in a ledger written before units carried one
+// (the first cut of version 1). Such an entry is handled per entry, as it
+// always was: halfLanded groups its units under one empty model, so a
+// timeout keeps all or none of its pins; only the backoff looks the model up
+// here.
 func releasedModels(units []ReleasedUnit, requests []ModelScalingRequest) []string {
 	byVariant := map[string]string{}
 	for _, req := range requests {
@@ -375,13 +392,18 @@ type SharedBorrow struct {
 type LenderReport struct {
 	Blocked []LenderReleaseBlock
 	Shared  []SharedBorrow
+	// HalfLowered is the "namespace/model" keys of P/D models whose release
+	// to a lender outlived twice its timeout half landed: its pins dropped
+	// with one role lowered and its partner not.
+	HalfLowered []string
 }
 
 // LenderReport returns what the last Releases reported.
 func (g *BorrowGovernor) LenderReport() LenderReport {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return LenderReport{Blocked: slices.Clone(g.report.Blocked), Shared: slices.Clone(g.report.Shared)}
+	return LenderReport{Blocked: slices.Clone(g.report.Blocked), Shared: slices.Clone(g.report.Shared),
+		HalfLowered: slices.Clone(g.halfLowered)}
 }
 
 // lenderReleases hands borrowed capacity back, on every fresh pool whose entry
@@ -463,6 +485,9 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 			if b == nil {
 				b = g.budgetOf(c, ch, cohorts, plain, decisions, left)
 			}
+			if g.kueueMayPreemptOutside(key, l, ch, b) {
+				continue
+			}
 			cands, outranked := g.lenderCandidates(c, key, l, ch, cohorts, plain, left)
 			need := l.PendingGPUs - l.Kept - outranked
 			covered := min(max(0, need), b.free)
@@ -516,6 +541,37 @@ func kueueReclaimsAll(l kueue.LenderState, ch *SharedPoolChunk) bool {
 		kueue.Reclaims(l.Reclaim, l.PendingPriority, ch.BorrowerPriority)
 }
 
+// lenderPreemptWindow is how long a LowerPriority lender's wait is left to
+// Kueue when Kueue may preempt a borrower this controller does not govern for
+// it: one admission pass, plus twice the default termination grace for the
+// victims to go. A victim with a longer grace is still terminating when it
+// ends; the release then sized counts the GPUs Kueue's borrowed figure no
+// longer holds, so the overlap is at most that victim's own GPUs, once.
+const lenderPreemptWindow = kueueSchedulingInterval + 2*k8sDefaultTerminationGrace
+
+// kueueMayPreemptOutside reports whether a LowerPriority lender's wait is
+// still Kueue's to answer: some borrower holds the pool's GPUs at a priority
+// below the lender's waiting Workload, or at one not read, and Kueue's
+// borrowed figure is more than this controller's namespaces hold, so that
+// borrower may be one this controller does not govern, and lenderCandidates
+// cannot count what Kueue preempts from it. The lender is left to Kueue
+// until it has waited lenderPreemptWindow; then a fresh read decides, Kueue's
+// preemption, if any, already in its figures. A borrower of this controller
+// that is the lowest only delays the release by the window.
+func (g *BorrowGovernor) kueueMayPreemptOutside(key LenderKey, l kueue.LenderState, ch *SharedPoolChunk, b *poolBudget) bool {
+	if l.Reclaim != kueue.ReclaimLowerPriority || l.PendingPriority == nil || ch.Borrowed <= b.ours {
+		return false
+	}
+	if ch.BorrowerLowest != nil && *ch.BorrowerLowest >= *l.PendingPriority {
+		return false // nobody borrows below its head: Kueue preempts no one
+	}
+	since := l.PendingSince
+	if w := g.watches[key]; w != nil && (since.IsZero() || w.since.Before(since)) {
+		since = w.since
+	}
+	return since.IsZero() || ch.ReadAt.Sub(since) < lenderPreemptWindow
+}
+
 // poolBudget is what one pool's waiting lenders share in a pass
 // (lenderReleases): free, the GPUs Kueue admits a lender from with nothing
 // handed back; borrowed, what is left of Kueue's borrowed figure to hand
@@ -539,13 +595,43 @@ func (g *BorrowGovernor) budgetOf(c BorrowCycle, ch *SharedPoolChunk, cohorts ma
 			accs[req.Namespace+"/"+st.VariantName] = accOf(req, st.VariantName)
 		}
 	}
+	// What the cycle frees reaches the cohort's pool only past what the
+	// namespace's queue keeps: a GPU freed within it goes back to the queue
+	// itself. The namespace's figure past guaranteed (gated pods aside, before
+	// the cycle lowers it) is what it borrows from the pool, a lower bound of
+	// what it holds past its kept part; freeing is counted up to it.
+	past := namespaceBorrowed(c.Constraints, c.Gated)
+	freed := map[string]map[string]int{}
 	for _, d := range decisions {
-		if !slices.Contains(cohorts[d.Namespace], ch.Cohort) || !ch.serves(accs[d.Namespace+"/"+d.VariantName]) {
+		acc := accs[d.Namespace+"/"+d.VariantName]
+		if !slices.Contains(cohorts[d.Namespace], ch.Cohort) || !ch.serves(acc) {
+			continue
+		}
+		t, ok := accelerator.FindKey(past[d.Namespace], acc)
+		if !ok {
 			continue
 		}
 		s := states[d.Namespace+"/"+d.VariantName]
-		freeing := max(0, d.CurrentReplicas-d.TargetReplicas) + max(0, heldOf(s)-d.CurrentReplicas)
-		b.free += freeing * max(1, d.GPUsPerReplica)
+		// This cycle's lower targets count before KEDA acts on them: the
+		// other releases' pins (placement timeout, kueue gate) hold them in
+		// force until they land, and counting them only once pods go would
+		// hand the lender the same GPUs twice in this cycle. A target a wake's
+		// reclaim yield lowered frees GPUs for this controller's own reclaim,
+		// not for the lender: those do not count. Terminating pods (held past
+		// current) are freeing already.
+		freeing := max(0, heldOf(s)-d.CurrentReplicas)
+		if !yielded(d) {
+			freeing += max(0, d.CurrentReplicas-d.TargetReplicas)
+		}
+		if freed[d.Namespace] == nil {
+			freed[d.Namespace] = map[string]int{}
+		}
+		freed[d.Namespace][t] += freeing * max(1, d.GPUsPerReplica)
+	}
+	for ns, perType := range freed {
+		for t, n := range perType {
+			b.free += min(n, past[ns][t])
+		}
 	}
 	for k, e := range g.lenderRel {
 		if k.flavorKey() == ch.key() && e.LandedAt != nil && !e.Taken {
@@ -563,6 +649,12 @@ func (g *BorrowGovernor) budgetOf(c BorrowCycle, ch *SharedPoolChunk, cohorts ma
 		}
 	}
 	return b
+}
+
+// yielded reports whether a wake's or a reclaim's yield lowered d this cycle
+// (yieldReclaimed's step).
+func yielded(d domain.VariantDecision) bool {
+	return slices.ContainsFunc(d.DecisionSteps, func(s domain.DecisionStep) bool { return s.Name == ReclaimYieldStepName })
 }
 
 // releaseTo lowers, for one waiting lender, the candidate models unit by unit

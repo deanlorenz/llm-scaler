@@ -524,6 +524,10 @@ type ExternalSharedPool struct {
 	// nil when not every borrower's was read (kueue.SharedPool).
 	Borrowed         int    `json:"borrowed,omitempty"`
 	BorrowerPriority *int32 `json:"borrowerPriority,omitempty"`
+	// BorrowerLowest is the lowest priority a borrowing member holds a GPU
+	// Workload at; nil when none borrows or one's was not read
+	// (kueue.SharedPool.BorrowerLowest).
+	BorrowerLowest *int32 `json:"borrowerLowest,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.

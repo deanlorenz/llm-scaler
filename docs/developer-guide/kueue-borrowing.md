@@ -326,11 +326,16 @@ releases and their pins:
   policy Kueue does not reclaim under, with no `LenderRelease` in flight, and
   `releaseDue`: two fresh reads in its debounce watch, or `PendingSince` past
   `kueueSchedulingInterval`. `kueueReclaimsAll` leaves a `LowerPriority`
-  lender above the chunk's `BorrowerPriority` to Kueue. Nothing while
+  lender above the chunk's `BorrowerPriority` to Kueue;
+  `kueueMayPreemptOutside` waits `lenderPreemptWindow` while the chunk's
+  `BorrowerLowest` (unknown, or below the head) and a `Borrowed` above this
+  controller's own say Kueue may preempt an outside borrower for it. Nothing while
   `BorrowCycle.LedgerUnread`.
 - **Need.** `PendingGPUs - Kept - outranked`, then the pool's `poolBudget.free`
-  (`budgetOf`: `RawFree`, plus `current - target` and `held - current` of the
-  cohort's decisions on the flavor, plus landed, not taken, releases) is taken
+  (`budgetOf`: `RawFree`, plus `current - target` (not for a `yielded`
+  decision; counted before KEDA acts, see the comment) and `held - current`
+  of the cohort's decisions on the flavor, capped per namespace at what it
+  borrows, plus landed, not taken, releases) is taken
   off, in lender order. `outranked` is what `lenderCandidates` finds Kueue
   will preempt: under `LowerPriority`, the models `PendingPriority` outranks,
   capped per namespace by `borrowedLeft`. `poolBudget.borrowed`, Kueue's
@@ -357,10 +362,11 @@ releases and their pins:
   the lender gone or not waiting, or `Borrowed <= BorrowedBefore - GPUs`. A
   landed entry with a read past `LandedAt + kueueSchedulingInterval` and
   neither is `Taken`: its units drop and it stays while the lender waits
-  (`LenderTaken` in the report). Past `lenderTimeout(cohort)` (the larger of
+  (`LenderTaken` in the report), at most twice `lenderTimeout`. Past `lenderTimeout(cohort)` (the larger of
   `ReleaseActuation` and twice the cohort's latency) it goes, except a P/D
   model half landed (`halfLanded`), kept until it lands or twice the
-  timeout. A restored entry's unit whose variant is gone while its namespace
+  timeout (then `LenderReport.HalfLowered`, a Warning
+  `LenderReleaseHalfLanded` Event). A restored entry's unit whose variant is gone while its namespace
   is read drops. `applyLenderPins` keeps the targets, clamped to
   `minReplicas`, also in cycles that count no borrowing (`HoldReleases`,
   which drops a landed entry).

@@ -38,6 +38,7 @@ type relWorld struct {
 	readAt                     time.Time
 	classPriority              map[string]int32
 	borrowerPriority           *int32
+	borrowerLowest             *int32
 }
 
 func (w relWorld) constraints() []*ResourceConstraints {
@@ -51,6 +52,7 @@ func (w relWorld) constraints() []*ResourceConstraints {
 	ch.RawFree = w.rawFree
 	ch.ClassPriority = w.classPriority
 	ch.BorrowerPriority = w.borrowerPriority
+	ch.BorrowerLowest = w.borrowerLowest
 	return cs
 }
 
@@ -523,16 +525,33 @@ func TestLenderReleaseLanding(t *testing.T) {
 		if b, ok := blockedOf(gov, "lender"); !ok || b.Reason != LenderTaken {
 			t.Errorf("report %+v, want the lender reported %s", gov.LenderReport(), LenderTaken)
 		}
-		later := w.readAt.Add(gov.lenderTimeout("c") + time.Hour)
+		later := t0.Add(2*gov.lenderTimeout("c") - time.Minute)
 		w.readAt = later
 		if rel, _ := cycleOf(gov, later, w, govModel("x", 4, 8)); len(rel) != 0 {
 			t.Errorf("released %+v while the lender still waits for what another borrower took", rel)
 		}
 		stopped := w
 		stopped.l.Waiting = false
-		cycleOf(gov, later.Add(time.Minute), stopped, govModel("x", 4, 8))
+		cycleOf(gov, later.Add(30*time.Second), stopped, govModel("x", 4, 8))
 		if gov.lenderRel[key] != nil {
 			t.Error("the taken release outlived the lender's wait")
+		}
+	})
+
+	// PR #203 re-check (minor 1): a taken release, restored across restarts
+	// as it may be, must not starve the lender for good.
+	t.Run("a taken release ends after twice the timeout, and one new release may follow", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		gov.Restore(BorrowLedger{LenderReleases: []LenderRelease{{LenderKey: key, GPUs: 16, BorrowedBefore: 48, ReleasedAt: t0,
+			Taken: true}}})
+		w := relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true}
+		at := t0.Add(2*gov.lenderTimeout("c") - time.Minute)
+		if rel, _ := cycleOf(gov, at, w, govModel("x", 6, 8)); len(rel) != 0 {
+			t.Fatalf("released %+v within twice the timeout of a taken release", rel)
+		}
+		at = t0.Add(2*gov.lenderTimeout("c") + time.Minute)
+		if rel, _ := cycleOf(gov, at, w, govModel("x", 6, 8)); len(rel) != 1 {
+			t.Errorf("released %+v past twice the timeout, want one new release", rel)
 		}
 	})
 
@@ -556,6 +575,10 @@ func TestLenderReleaseLanding(t *testing.T) {
 		w.readAt = gone
 		if _, ds := cycleOf(gov, gone, w, pd(1, 4)); lowered(ds)["d"] != 0 {
 			t.Errorf("lowered %v past twice the timeout, want the pins gone", lowered(ds))
+		}
+		// PR #203 re-check (minor 2): the pair is left half lowered; say so.
+		if got := gov.LenderReport().HalfLowered; len(got) != 1 || got[0] != "b/pd" {
+			t.Errorf("half lowered %v, want b/pd reported", got)
 		}
 	})
 
@@ -609,6 +632,74 @@ func TestLenderReleaseLanding(t *testing.T) {
 		gov.HoldReleases(t0.Add(2*time.Minute), []ModelScalingRequest{govModel("x", 4, 8)}, ds)
 		if ds[0].TargetReplicas != 6 || gov.lenderRel[key] != nil {
 			t.Errorf("x's target is %d after the release landed, want the pin gone", ds[0].TargetReplicas)
+		}
+	})
+}
+
+// PR #203 re-check: what Kueue may still do for the lender itself, and what
+// the cycle frees that never reaches it.
+func TestLenderReleaseRecheck(t *testing.T) {
+	t0 := time.Unix(50000, 0)
+	settings := DefaultBorrowSettings()
+	p := func(n int32) *int32 { return &n }
+
+	// MAJOR (rest of KC4): an outside queue borrows 16 at priority 10, our
+	// model 16 at 200, the lender's head is 16 GPUs at 100. Kueue preempts
+	// the outside 16; releasing ours too would hand back 32.
+	t.Run("a borrower outside this controller below the head is left to Kueue's preemption first", func(t *testing.T) {
+		l := waitingLender(16, 32)
+		l.Reclaim, l.PendingPriority, l.PendingSince = kueue.ReclaimLowerPriority, p(100), t0.Add(-10*time.Second)
+		w := relWorld{g: 0, used: 16, borrowed: 32, l: l, release: true, borrowerPriority: p(200),
+			classPriority: map[string]int32{"top": 200}}
+		w.borrowerLowest = p(10)
+		gov := NewBorrowGovernor(settings)
+		cycleOf(gov, t0, w, withClass(govModel("m", 2, 8), "top"))
+		if rel, ds := cycleOf(gov, t0.Add(20*time.Second), w, withClass(govModel("m", 2, 8), "top")); len(rel) != 0 {
+			t.Fatalf("released %+v (lowered %v) while Kueue may still preempt the outside borrower at 10", rel, lowered(ds))
+		}
+		// Past the window the lender still waits and Kueue's figure stands:
+		// a fresh read decides, and the release goes.
+		late := t0.Add(lenderPreemptWindow + time.Minute)
+		if rel, _ := cycleOf(gov, late, w, withClass(govModel("m", 2, 8), "top")); len(rel) != 1 {
+			t.Errorf("released %+v past the preemption window, want m handed to the lender", rel)
+		}
+		// Nobody borrows below the head: no wait.
+		w.borrowerLowest = p(150)
+		gov = NewBorrowGovernor(settings)
+		cycleOf(gov, t0, w, withClass(govModel("m", 2, 8), "top"))
+		if rel, _ := cycleOf(gov, t0.Add(20*time.Second), w, withClass(govModel("m", 2, 8), "top")); len(rel) != 1 {
+			t.Errorf("released %+v, want m at once: every borrower outranks the head", rel)
+		}
+	})
+
+	// Minor 3: what a namespace frees within what it keeps never reaches
+	// the cohort's pool.
+	t.Run("what the cycle frees counts only up to what the namespace borrows", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		w := relWorld{g: 40, used: 48, l: waitingLender(16, 32), release: true, readAt: t0}
+		c := BorrowCycle{Now: t0, Constraints: w.constraints(), Requests: []ModelScalingRequest{govModel("x", 6, 8)}}
+		gov.Observe(c)
+		ds := decisionsOf(c.Requests)
+		ds[0].TargetReplicas = 3 // a demand fall frees 24, of which 8 were borrowed
+		gov.Releases(c, ds)
+		if b, ok := blockedOf(gov, "lender"); !ok || b.Need != 8 {
+			t.Errorf("report %+v, want the lender still lacking 8: only the 8 borrowed reach the pool", gov.LenderReport())
+		}
+	})
+
+	// Minor 5: a wake's reclaim yield frees GPUs for this controller's own
+	// reclaim, not for the lender.
+	t.Run("what a reclaim yield lowers does not cover the lender", func(t *testing.T) {
+		gov := NewBorrowGovernor(settings)
+		w := relWorld{g: 16, used: 48, l: waitingLender(8, 32), release: true, readAt: t0}
+		c := BorrowCycle{Now: t0, Constraints: w.constraints(), Requests: []ModelScalingRequest{govModel("x", 6, 8)}}
+		gov.Observe(c)
+		ds := decisionsOf(c.Requests)
+		ds[0].TargetReplicas = 5
+		ds[0].DecisionSteps = []domain.DecisionStep{{Name: ReclaimYieldStepName, TargetReplicas: 5}}
+		gov.Releases(c, ds)
+		if got := ds[0].TargetReplicas; got != 4 {
+			t.Errorf("x's target is %d, want 4: the yield's replica goes to the wake, the lender gets one more", got)
 		}
 	})
 }

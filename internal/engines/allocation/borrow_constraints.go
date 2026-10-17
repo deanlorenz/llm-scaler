@@ -130,6 +130,10 @@ type SharedPoolChunk struct {
 	// lender that does not outrank it stays closed (drawable, M1).
 	Borrowed         int
 	BorrowerPriority *int32
+	// BorrowerLowest is the lowest priority any borrower holds the cohort's
+	// GPUs at (kueue.SharedPool.BorrowerLowest); nil when not known. A
+	// LowerPriority lender above it may have Kueue preempt for it.
+	BorrowerLowest *int32
 	// ReleaseToNonReclaiming is set when the entry that read the chunk opts
 	// in to kueue.releaseToNonReclaimingLenders (PR-C): Free then counts what
 	// lenders Kueue does not reclaim for lend, and the governor hands it back
@@ -529,6 +533,15 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 	case p.BorrowerPriority != nil && (prev.BorrowerPriority == nil || *p.BorrowerPriority > *prev.BorrowerPriority):
 		bp := *p.BorrowerPriority
 		prev.BorrowerPriority = &bp
+	}
+	// The lowest borrower priority: the lower, unknown when either read has
+	// borrowing without one.
+	switch {
+	case (prev.Borrowed > 0 && prev.BorrowerLowest == nil) || (p.Borrowed > 0 && p.BorrowerLowest == nil):
+		prev.BorrowerLowest = nil
+	case p.BorrowerLowest != nil && (prev.BorrowerLowest == nil || *p.BorrowerLowest < *prev.BorrowerLowest):
+		lo := *p.BorrowerLowest
+		prev.BorrowerLowest = &lo
 	}
 	prev.Borrowed = max(prev.Borrowed, p.Borrowed)
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
