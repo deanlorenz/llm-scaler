@@ -50,6 +50,9 @@ type utilizationShareState struct {
 	// floorHeavy are the groups whose floors hold more than half their
 	// budget above need: reported once per change (reportFloorHeavy).
 	floorHeavy map[string]bool
+	// overQuota is, per group, how many GPUs its scope held past its quota
+	// when last evaluated: reported once per change (reportOverQuota).
+	overQuota map[string]int
 	// lastActionable is, per group, the actionable roles last logged.
 	lastActionable map[string]string
 	// headroomCapped is, per group, whether its headroom was capped when
@@ -314,6 +317,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			}
 		}
 		st.reportFloorHeavy(logger, shareGroupKey(g), floorExcess, g.Budget)
+		st.reportOverQuota(logger, shareGroupKey(g), g.OverQuota, g.Budget)
 		mode := "Utilization share: would rebalance (shadow)"
 		if !us.Shadow {
 			mode = "Utilization share: rebalancing"
@@ -568,6 +572,28 @@ func (st *utilizationShareState) reportUnshared(logger logr.Logger, models []str
 		logger.Info("Utilization share: not sharing models no quota bounds; the default optimizer keeps them",
 			"models", models)
 	}
+}
+
+// reportOverQuota logs, once per change, a group whose scope holds more GPUs
+// than its quota allows -- a Deployment scaled by hand, pods started outside
+// the optimizer -- and when it is back within it. The budget leaves the
+// overage out, so the group takes no more GPUs and fills nothing, and pays it back
+// as wva_utilization_share_reserve_debt_gpus.
+func (st *utilizationShareState) reportOverQuota(logger logr.Logger, group string, over, budget int) {
+	if st.overQuota[group] == over {
+		return
+	}
+	if st.overQuota == nil {
+		st.overQuota = map[string]int{}
+	}
+	st.overQuota[group] = over
+	if over > 0 {
+		logger.Info("Utilization share: the group's scope holds more GPUs than its quota allows; "+
+			"it is planned back within the quota and takes no more GPUs",
+			"group", group, "overQuotaGPUs", over, "budget", budget)
+		return
+	}
+	logger.Info("Utilization share: the group's scope is back within its quota", "group", group, "budget", budget)
 }
 
 // reportFloorHeavy logs, once per change, a group whose floors hold more than

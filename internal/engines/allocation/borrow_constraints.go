@@ -382,13 +382,33 @@ func WithinNominal(constraints []*ResourceConstraints) []*ResourceConstraints {
 // held borrowed GPUs are never debt, and starts no new borrowing (B4). Its
 // ClusterFree reads only the cluster bounds -- a namespace-scope provider, the
 // only one that borrows, is never one -- and so never includes a shared pool.
+//
+// A borrowing namespace's Used is charged only what it holds past its borrow
+// cap beyond the guaranteed figure (heldPastBorrowCap): the share takes a
+// namespace holding more than its quota allows back within it (overQuota),
+// and borrowed GPUs within the cap are not that.
 func GuaranteedOnly(constraints []*ResourceConstraints) []*ResourceConstraints {
 	return withoutBorrowing(constraints, false)
 }
 
+// heldPastBorrowCap is p's Used with the GPUs held past its guaranteed Limit
+// and within the borrow cap b taken out: unchanged within the Limit, the Limit
+// within the cap, and Used less the cap past it. An unlimited Limit or cap
+// leaves nothing past them.
+func heldPastBorrowCap(p ResourcePool, b NamespaceBorrow) int {
+	switch {
+	case p.Limit < 0:
+		return p.Used
+	case b.Cap < 0:
+		return min(p.Used, p.Limit)
+	}
+	return max(min(p.Used, p.Limit), p.Used-b.Cap)
+}
+
 // withoutBorrowing drops the borrowing figures from every constraint carrying
 // them, moving each borrowing namespace's Limit to its within-nominal figure
-// when within is set.
+// when within is set, and its Used to heldPastBorrowCap, recorded in
+// CountedBorrow, when it is not.
 func withoutBorrowing(constraints []*ResourceConstraints, within bool) []*ResourceConstraints {
 	if !HasBorrowing(constraints) {
 		return constraints
@@ -401,15 +421,26 @@ func withoutBorrowing(constraints []*ResourceConstraints, within bool) []*Resour
 		}
 		cc := *c
 		cc.NamespacePools = make(map[string]map[string]ResourcePool, len(c.NamespacePools))
+		if !within {
+			cc.CountedBorrow = map[string]map[string]bool{}
+		}
 		for ns, perType := range c.NamespacePools {
 			pools := maps.Clone(perType)
-			if within {
-				for accType, b := range c.NamespaceBorrow[ns] {
-					if p, ok := pools[accType]; ok {
-						p.Limit = b.WithinNominal
-						pools[accType] = p
-					}
+			for accType, b := range c.NamespaceBorrow[ns] {
+				p, ok := pools[accType]
+				if !ok {
+					continue
 				}
+				if within {
+					p.Limit = b.WithinNominal
+				} else {
+					p.Used = heldPastBorrowCap(p, b)
+					if cc.CountedBorrow[ns] == nil {
+						cc.CountedBorrow[ns] = map[string]bool{}
+					}
+					cc.CountedBorrow[ns][accType] = true
+				}
+				pools[accType] = p
 			}
 			cc.NamespacePools[ns] = pools
 		}

@@ -123,6 +123,10 @@ type ShareGroup struct {
 	ClusterFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
+	// OverQuota is how many GPUs the group's scope holds past what its quota
+	// allows on the group's type (overQuota), taken out of Budget: a scope
+	// over its quota plans to come back within it. 0 when it is within.
+	OverQuota int
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
 	// DownThresholds is each role's scale-down boundary: the utilization
@@ -468,8 +472,20 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
+		// free is floored at 0 (ResourcePool.Available), so a scope that
+		// holds more than its quota reads as exactly full, and free plus what
+		// it holds is what it holds, not what it may hold. Its overage comes
+		// out of the budget, which the planner then pays back as a debt. Only
+		// an allowance the group's own members spent past it is given back:
+		// never what Kueue granted, nor a physical over-count
+		// (namespaceAllowances, clusterAllowances, clusterOverQuota).
+		if k.scope != "" {
+			g.OverQuota = overQuota(namespaceAllowances(constraints, k.scope), k.acc)
+		} else if opts.ClusterIsQuota {
+			g.OverQuota = clusterOverQuota(clusterAllowances(constraints), k.acc, g.listed)
+		}
 		g.PoolCarve = poolCarve(opts.PoolUnheld, availableByNS, unclaimed, k.acc, k.scope)
-		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
+		g.Budget = max(0, free+g.listed-g.OverQuota-opts.ReserveGPUs-g.PoolCarve)
 		g.ClusterFree = clusterFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
@@ -572,6 +588,96 @@ func clusterBudgets(constraints []*ResourceConstraints, declared ...string) (map
 		return c != nil && !isClusterBound(c)
 	})
 	return mergeConstraints(constraints, declared...), namespaced
+}
+
+// overQuota is how many GPUs are held under allowlists past what they allow
+// on the accelerator called name, read as the budgets read them
+// (accelerator.ClusterAllowlistsBound): the free figure floored at 0 less the
+// same figure unfloored. 0 when nothing is held past the bound, and when no
+// finite bound covers name. A namespace under its quota and a namespace at it
+// both read 0; a namespace holding 10 under a quota of 7 reads 3.
+func overQuota(allowlists []map[string]ResourcePool, name string) int {
+	free, unlimited, bounds := accelerator.ClusterAllowlistsBound(allowlists, name, poolBound)
+	if !bounds || unlimited {
+		return 0
+	}
+	left, _, _ := accelerator.ClusterAllowlistsBound(allowlists, name, func(p ResourcePool) accelerator.Bound {
+		return accelerator.Bound{Free: p.Limit - p.Used, Unlimited: p.Limit < 0}
+	})
+	return max(0, free-left)
+}
+
+// clusterOverQuota is how many GPUs the cluster group, whose planned roles
+// hold own on the accelerator called name, gives back of its cluster quotas'
+// overage (overQuota). A cluster quota counts every namespace, and the group
+// plans only some of them. While the GPUs held outside the group fit within
+// the quota (the overage is at most own), the group holds the overage past
+// what the others leave it, and gives it all back. When they already pass the
+// quota by themselves, the overage is theirs, and the group gives back only
+// what it alone holds past the quota: a group is never planned down for
+// another group's overage.
+func clusterOverQuota(allowlists []map[string]ResourcePool, name string, own int) int {
+	over := overQuota(allowlists, name)
+	if over <= own {
+		return over
+	}
+	limit, unlimited, bounds := accelerator.ClusterAllowlistsBound(allowlists, name, func(p ResourcePool) accelerator.Bound {
+		return accelerator.Bound{Free: p.Limit, Unlimited: p.Limit < 0}
+	})
+	if !bounds || unlimited {
+		return 0
+	}
+	return max(0, own-limit)
+}
+
+// clusterAllowances is the pools of every cluster quota (clusterBounds) a
+// group gives GPUs back against: not the physical inventory, whose count past
+// its capacity is a stale read (a pod counted beside the victims it
+// nominated), not an allowance spent; and not a quota bounded by Kueue
+// (KueueBounded), which admitted what is held and preempts what it must.
+func clusterAllowances(constraints []*ResourceConstraints) []map[string]ResourcePool {
+	var out []map[string]ResourcePool
+	for _, c := range clusterBounds(constraints) {
+		if c.ProviderName != PhysicalLimiterName && !c.KueueBounded {
+			out = append(out, c.Pools)
+		}
+	}
+	return out
+}
+
+// namespaceAllowances is the allowlists of namespace ns a group gives GPUs
+// back against: every provider's (namespaceHolders), but of a provider bounded
+// by Kueue (KueueBounded) only the types whose borrowing it counted
+// (CountedBorrow), held past what Kueue may admit. Its other figures are
+// Kueue's, charged with what Kueue reserved for others and, for a namespace
+// on several queues, with the smallest queue's reach (KU1, KU2): they say how
+// far the namespace may grow, not what Kueue admitted, and Kueue preempts
+// what it must.
+func namespaceAllowances(constraints []*ResourceConstraints, ns string) []map[string]ResourcePool {
+	var out []map[string]ResourcePool
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		perType, ok := c.NamespacePools[ns]
+		if !ok {
+			continue
+		}
+		if !c.KueueBounded {
+			out = append(out, perType)
+			continue
+		}
+		counted := map[string]ResourcePool{}
+		for accType, p := range perType {
+			if c.CountedBorrow[ns][accType] {
+				counted[accType] = p
+			}
+		}
+		if len(counted) > 0 {
+			out = append(out, counted)
+		}
+	}
+	return out
 }
 
 // splitClusterFree divides each finite cluster key's free GPUs between the

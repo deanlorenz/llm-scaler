@@ -136,6 +136,12 @@ func (q *QuotaInventory) KueueBacked() bool {
 	return q.source != nil && q.static.Scope == config.QuotaScopeNamespace && q.static.KueueEnabled()
 }
 
+// KueueBounded reports whether the entry, of either scope, is bounded by
+// figures it reads from Kueue.
+func (q *QuotaInventory) KueueBounded() bool {
+	return q.source != nil && q.static.KueueEnabled()
+}
+
 // KueueCountsBorrowing reports whether the entry is configured to count
 // cohort borrowing (EnableBorrowing with countBorrowable on), whether or not
 // a namespace counts it now.

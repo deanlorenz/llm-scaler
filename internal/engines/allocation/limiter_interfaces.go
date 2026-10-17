@@ -166,6 +166,19 @@ type ResourceConstraints struct {
 	// counting no borrowing: any other may be withheld for a while (a stale
 	// read, an eligibility check) while Kueue still admits it by borrowing.
 	KueueCountsBorrowing bool
+	// KueueBounded is set on a quota entry of either scope that reads Kueue:
+	// its limits are bounded by Kueue's figures. Kueue admitted what such an
+	// entry's namespaces hold and preempts what it must, so the
+	// utilization-share optimizer gives nothing back against its figures
+	// (overQuota) except CountedBorrow's.
+	KueueBounded bool
+	// CountedBorrow is set only on a GuaranteedOnly copy of a provider that
+	// counted cohort borrowing: per namespace, the accelerator types whose
+	// borrowing it counted. Their Used is what the namespace holds past its
+	// reach (heldPastBorrowCap) -- its queue's nominal plus borrowingLimit,
+	// less what Kueue reserved for others, or the static or ResourceQuota bound
+	// on that -- which Kueue never admitted. Nil otherwise.
+	CountedBorrow map[string]map[string]bool
 }
 
 // KueueReadReporter is an inventory that reports a Kueue source never read
@@ -174,11 +187,12 @@ type KueueReadReporter interface {
 	KueueNeverRead() bool
 }
 
-// KueueBackedInventory is an inventory that reports whether its namespace
-// figures are read from Kueue (QuotaInventory).
+// KueueBackedInventory is an inventory that reports whether its figures are
+// read from Kueue (QuotaInventory).
 type KueueBackedInventory interface {
 	KueueBacked() bool
 	KueueCountsBorrowing() bool
+	KueueBounded() bool
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.
