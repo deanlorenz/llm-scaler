@@ -9,22 +9,22 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
-// giveBackReq is one model on accelerator acc holding current replicas of
-// gpus GPUs each, short of its need.
-func giveBackReq(id, ns, acc string, current, gpus int) ModelScalingRequest {
+// giveBackReq is one model on accelerator acc holding current 1-GPU replicas,
+// short of its need.
+func giveBackReq(id, ns, acc string, current int) ModelScalingRequest {
 	v := id + "-v"
 	req := withSatEntry(&satEntryFixture{
 		ModelID: id, Namespace: ns, TotalDemand: 40000,
 		VariantCapacities: []vcFixture{{VariantName: v, AcceleratorName: acc, Cost: 5, ReplicaCount: current, PerReplicaCapacity: 1000}},
 	}, ModelScalingRequest{
 		ModelID: id, Namespace: ns,
-		VariantStates: []domain.VariantReplicaState{{VariantName: v, CurrentReplicas: current, GPUsPerReplica: gpus, MinReplicas: ptrInt(1)}},
+		VariantStates: []domain.VariantReplicaState{{VariantName: v, CurrentReplicas: current, GPUsPerReplica: 1, MinReplicas: ptrInt(1)}},
 	})
 	req.CompositeSignal.ScaleUpThreshold = 0.8
 	return req
 }
 
-// giveBackGroup is the group of accelerator acc and scope scope that reqs form
+// giveBackGroup is the group of accelerator acc and the given scope that reqs form
 // under the utilization share's view of cons (GuaranteedOnly).
 func giveBackGroup(t *testing.T, reqs []ModelScalingRequest, cons []*ResourceConstraints, opts ShareGroupOptions, acc, scope string) ShareGroup {
 	t.Helper()
@@ -103,7 +103,7 @@ func TestShareGivesBackNothingKueueGranted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cons := kueueConstraints(t, tc.snap, tc.count, map[string]map[string]int{"serving": {"H100": tc.serving}})
-			reqs := []ModelScalingRequest{giveBackReq("m", "serving", "H100", tc.serving, 1)}
+			reqs := []ModelScalingRequest{giveBackReq("m", "serving", "H100", tc.serving)}
 			g := giveBackGroup(t, reqs, cons, ShareGroupOptions{}, "H100", "serving")
 			if g.Budget != tc.budget || g.OverQuota != tc.over {
 				t.Fatalf("budget %d over %d, want budget %d over %d", g.Budget, g.OverQuota, tc.budget, tc.over)
@@ -137,7 +137,7 @@ func TestShareClusterGroupPaysOnlyItsOwnOverage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			byNS := map[string]map[string]int{"team-a": {"A100": tc.teamA}, "ns-x": {"A100": tc.nsX}}
 			byType := map[string]int{"A100": tc.teamA + tc.nsX}
-			var cons []*ResourceConstraints
+			cons := make([]*ResourceConstraints, 0, 2)
 			for _, q := range []config.QuotaLimiterConfig{nsq, clq} {
 				rc, err := NewDefaultLimiter(q.Name, NewQuotaInventory(q)).ComputeConstraints(context.Background(), byType, byNS)
 				if err != nil {
@@ -145,7 +145,7 @@ func TestShareClusterGroupPaysOnlyItsOwnOverage(t *testing.T) {
 				}
 				cons = append(cons, rc)
 			}
-			reqs := []ModelScalingRequest{giveBackReq("ma", "team-a", "A100", tc.teamA, 1), giveBackReq("mx", "ns-x", "A100", tc.nsX, 1)}
+			reqs := []ModelScalingRequest{giveBackReq("ma", "team-a", "A100", tc.teamA), giveBackReq("mx", "ns-x", "A100", tc.nsX)}
 			g := giveBackGroup(t, reqs, cons, ShareGroupOptions{ClusterIsQuota: true}, "A100", "")
 			if g.Budget != tc.budget || g.OverQuota != tc.over {
 				t.Fatalf("cluster group budget %d over %d, want budget %d over %d", g.Budget, g.OverQuota, tc.budget, tc.over)
@@ -172,7 +172,7 @@ func TestShareGivesBackNothingForAPhysicalOverCount(t *testing.T) {
 				{ProviderName: "cluster", Pools: map[string]ResourcePool{"A100": {Limit: 20, Used: 16}}},
 				{ProviderName: PhysicalLimiterName, Pools: map[string]ResourcePool{"A100": tc.phys}},
 			}
-			reqs := []ModelScalingRequest{giveBackReq("a", "ns", "A100", 10, 1), giveBackReq("b", "ns", "A100", 6, 1)}
+			reqs := []ModelScalingRequest{giveBackReq("a", "ns", "A100", 10), giveBackReq("b", "ns", "A100", 6)}
 			g := giveBackGroup(t, reqs, cons, ShareGroupOptions{ClusterIsQuota: true}, "A100", "")
 			if g.Budget != tc.budget || g.OverQuota != 0 {
 				t.Fatalf("budget %d over %d, want budget %d over 0", g.Budget, g.OverQuota, tc.budget)
