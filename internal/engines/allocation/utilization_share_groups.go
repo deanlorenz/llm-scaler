@@ -849,14 +849,20 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		}
 		best, g, measured := bestVariantForRole(records, stateMap, acc, role)
 		need := 0.0
-		if demand > 0 {
-			if !measured {
-				return nil, "role " + role + " has demand but no measured capacity"
+		var capacity []ShareCapacityStep
+		if demand > 0 && !measured {
+			return nil, "role " + role + " has demand but no measured capacity"
+		}
+		if measured {
+			// need is the GPU form of RequiredCapacity (demand / scale-up
+			// threshold), counted in the GPUs the role holds and grows. The
+			// curve is built with no demand too: the need the ledger
+			// remembers for the role is judged on it.
+			required := 0.0
+			if demand > 0 {
+				required = demand / sig.ScaleUpThreshold
 			}
-			// need = demand / scale-up threshold, in GPUs of the role's most
-			// cost-efficient variant: the GPU form of RequiredCapacity.
-			perGPU := best.PerReplicaCapacity / float64(g)
-			need = demand / sig.ScaleUpThreshold / perGPU
+			need, capacity = roleNeedGPUs(required, vs, stateMap, best, g)
 		}
 		if math.IsNaN(need) || math.IsInf(need, 0) {
 			// Every share sum -- the spare, the targets, the peaks that
@@ -893,6 +899,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				MinFloor:    minFloor,
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
+				Capacity:    capacity,
 			},
 			role:             role,
 			held:             held || hold.NoScaleDown,
@@ -901,6 +908,90 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		})
 	}
 	return out, ""
+}
+
+// roleNeedGPUs is the GPUs at which a role serves required, the capacity
+// that puts it at its scale-up threshold, counted in the GPUs it holds and
+// grows, with the role's capacity curve (ShareRole.Capacity). Every share sum
+// and band compares the need with the GPUs a role holds, and a GPU of a
+// variant the role does not run is not one of them (issue #193).
+//
+// The curve walks the role's GPUs in the order it keeps them, the reverse of
+// the order it gives them (shareGiveVariant): the least cost-efficient
+// variant above its minReplicas first, down to it, then the next; then the
+// replicas minReplicas keeps, in the same order. A role that needs less than
+// it serves is priced on that order: it gives whole replicas while what it
+// keeps still serves required, and the rest of the need is priced on the next
+// replica it would give. A role that needs more grows the rest as a fill does:
+// in its most cost-efficient variants first, each up to its maxReplicas, at
+// what that variant serves per GPU. What no variant has room for is priced on
+// best, the role's most cost-efficient measured variant (gpus GPUs per
+// replica); the ceiling caps that part of the claim anyway.
+//
+// When every GPU the walk reaches serves as much as one of best -- a role with
+// one variant, or none running -- the need is required in GPUs of best,
+// computed as it always was. A variant with no capacity reading
+// (hasCapacityReading) counts as dense as best. The curve is nil when every
+// step serves as much as best.
+//
+// The curve counts CurrentReplicas, where Committed counts HeldReplicas: a
+// terminating replica still holds its GPUs but no longer serves, and it is
+// not one the role can give.
+func roleNeedGPUs(required float64, vs []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	best variantRecord, gpus int) (float64, []ShareCapacityStep) {
+	bestPerGPU := best.PerReplicaCapacity / float64(gpus)
+	rel := func(vc variantRecord) float64 {
+		if !hasCapacityReading(vc.PerReplicaCapacity) {
+			return 1
+		}
+		p := vc.PerReplicaCapacity / float64(gpusPerReplicaFromState(stateMap, vc.VariantName))
+		if p == bestPerGPU {
+			return 1
+		}
+		return p / bestPerGPU
+	}
+	sorted := sortByCostEfficiencyAsc(vs)
+	// The GPUs the role holds, in the order it gives them.
+	var give []ShareCapacityStep
+	for _, floored := range []bool{false, true} {
+		for i := len(sorted) - 1; i >= 0; i-- {
+			st := stateMap[sorted[i].VariantName]
+			floor := 0
+			if st.MinReplicas != nil {
+				floor = max(*st.MinReplicas, 0)
+			}
+			n := st.CurrentReplicas - floor
+			if floored {
+				n = min(st.CurrentReplicas, floor)
+			}
+			if n > 0 {
+				give = append(give, ShareCapacityStep{
+					GPUs:   float64(n * gpusPerReplicaFromState(stateMap, sorted[i].VariantName)),
+					PerGPU: rel(sorted[i]),
+				})
+			}
+		}
+	}
+	slices.Reverse(give)
+	steps := give
+	// Then the GPUs it grows, as a fill grows them.
+	for _, vc := range sorted {
+		st := stateMap[vc.VariantName]
+		room := math.Inf(1)
+		if st.MaxReplicas != nil && *st.MaxReplicas > 0 {
+			room = float64(max(0, *st.MaxReplicas-st.CurrentReplicas) * gpusPerReplicaFromState(stateMap, vc.VariantName))
+		}
+		if room > 0 {
+			steps = append(steps, ShareCapacityStep{GPUs: room, PerGPU: rel(vc)})
+		}
+		if math.IsInf(room, 1) {
+			break
+		}
+	}
+	if !slices.ContainsFunc(steps, func(s ShareCapacityStep) bool { return s.PerGPU != 1 }) {
+		steps = nil
+	}
+	return ShareRole{Capacity: steps}.gpusFor(required / bestPerGPU), steps
 }
 
 // roleCeilingGPUs is the GPUs a role's maxReplicas allow, summed over its

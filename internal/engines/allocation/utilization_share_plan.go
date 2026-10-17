@@ -461,8 +461,9 @@ type shareLimits struct {
 // shareHardImbalance reports whether a move to receiver rc, holding rcHeld,
 // from donor dn, left with dnLeft after giving, rebalances a hard imbalance:
 // rc's load is at or near its scale-up threshold (ShareSkipWaitsReceiverLoad)
-// while dn's stays well below its own (ShareSkipWaitsDonorLoad). Load is need
-// over GPUs held: utilization as a fraction of the scale-up threshold. Such a move does not wait: the
+// while dn's stays well below its own (ShareSkipWaitsDonorLoad). Load is what
+// the need serves over what the GPUs held serve (ShareRole.serves):
+// utilization as a fraction of the scale-up threshold. Such a move does not wait: the
 // reversal hold and the confirm cycles exist to stop GPUs ping-ponging for
 // headroom, and must not keep a model at its threshold while another idles.
 // Measured on alternating bursts, the hold kept a rising model at 3 of 8
@@ -470,11 +471,7 @@ type shareLimits struct {
 // cancelled pair's hold, back-offs and an exhausted donor still apply
 // (PairHeld, GivingBlocked), as do §6.2 admission and the donor's band.
 func shareHardImbalance(b ShareSkipWaits, rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
-	if b.Off {
-		return false
-	}
-	urgent, calm := b.band()
-	return rc.Need > 0 && rc.Need >= urgent*float64(rcHeld) && dn.Need <= calm*float64(dnLeft)
+	return rc.Need > 0 && b.Urgent(rc, rcHeld) && b.Calm(dn, dnLeft)
 }
 
 // ShareSkipWaits is the band shareHardImbalance applies
@@ -503,18 +500,19 @@ func (b ShareSkipWaits) band() (urgent, calm float64) {
 	return urgent, calm
 }
 
-// Urgent reports whether a role whose need is need while holding held is at
-// or near its scale-up threshold under the band.
-func (b ShareSkipWaits) Urgent(need float64, held int) bool {
+// Urgent reports whether role r, holding held, is at or near its scale-up
+// threshold under the band. Its load is what its need serves over what held
+// serves (ShareRole.serves).
+func (b ShareSkipWaits) Urgent(r ShareRole, held int) bool {
 	urgent, _ := b.band()
-	return !b.Off && need >= urgent*float64(held)
+	return !b.Off && r.serves(r.Need) >= urgent*r.serves(float64(held))
 }
 
-// Calm reports whether a donor whose need is need, keeping kept, is well
-// below its threshold under the band.
-func (b ShareSkipWaits) Calm(need float64, kept int) bool {
+// Calm reports whether donor r, keeping kept, is well below its threshold
+// under the band.
+func (b ShareSkipWaits) Calm(r ShareRole, kept int) bool {
 	_, calm := b.band()
-	return !b.Off && need <= calm*float64(kept)
+	return !b.Off && r.serves(r.Need) <= calm*r.serves(float64(kept))
 }
 
 // shareMoveHeld reports whether donor dn may not give to receiver rc in a
@@ -569,8 +567,7 @@ func (p *sharePlanRun) limits() shareLimits {
 
 // z is a role's score at g GPUs.
 func (p *sharePlanRun) z(k string, g int) float64 {
-	r := p.byKey[k]
-	return ShareScore(float64(g), r.Need, r.Weight)
+	return p.byKey[k].Score(float64(g))
 }
 
 // need is a role's need for judging whether it is calm: the higher of this
@@ -683,7 +680,7 @@ func (p *sharePlanRun) bandKeep(dn string, v ShareRole) int {
 	// where today's scale-down keeps 3.
 	target := down + (up-down)/4
 	g := max(v.ReplicaGPUs, 1)
-	keep := g * int(math.Ceil(v.Need*up/target/float64(g)-1e-9))
+	keep := g * int(math.Ceil(v.gpusFor(v.serves(v.Need)*up/target)/float64(g)-1e-9))
 	for _, r := range p.in.Roles {
 		if r.Key == dn && r.Ceiling > 0 {
 			keep = min(keep, r.Ceiling)

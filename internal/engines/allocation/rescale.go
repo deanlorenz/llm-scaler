@@ -846,7 +846,7 @@ func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, state
 func bestVariantForRole(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	accType, role string) (best variantRecord, gpusPerReplica int, ok bool) {
 	for _, vc := range sortByCostEfficiencyAsc(variantsForRole(variantsOnType(records, accType), role)) {
-		if vc.PerReplicaCapacity > 0 {
+		if hasCapacityReading(vc.PerReplicaCapacity) {
 			return vc, gpusPerReplicaFromState(stateMap, vc.VariantName), true
 		}
 	}

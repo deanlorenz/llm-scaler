@@ -222,9 +222,17 @@ func sortByCostEfficiencyAsc(capacities []variantRecord) []variantRecord {
 	return sorted
 }
 
-// costEfficiency returns the cost per unit of capacity.
+// hasCapacityReading reports whether prc is a capacity reading: a positive,
+// finite number. NaN, an infinity, zero and a negative are no reading.
+func hasCapacityReading(prc float64) bool {
+	return prc > 0 && !math.IsInf(prc, 1)
+}
+
+// costEfficiency returns the cost per unit of capacity. A variant with no
+// capacity reading (hasCapacityReading) sorts last: a NaN would break the
+// order of the rest, and an infinity would rank first.
 func costEfficiency(vc variantRecord) float64 {
-	if vc.PerReplicaCapacity <= 0 {
+	if !hasCapacityReading(vc.PerReplicaCapacity) {
 		return math.MaxFloat64
 	}
 	return vc.Cost / vc.PerReplicaCapacity
