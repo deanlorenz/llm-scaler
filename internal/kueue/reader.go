@@ -341,6 +341,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		var pending pendingRead
 		if r.opts.CountsBorrowing {
 			pending, topo.LendersUnreadable = r.readPending(ctx, localQueues)
+			topo.WorkloadsRead = !topo.LendersUnreadable
 		}
 		classPriority, highest = pending.classPriority, pending.highestByNamespace
 		for name, q := range topo.Queues {
@@ -354,6 +355,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			if p, ok := pending.lowestReserved[name]; ok {
 				q.LowestReserved = &p
 			}
+			q.EvictingGPUs = pending.evicting[name]
 			topo.Queues[name] = q
 		}
 	} else {
@@ -581,6 +583,7 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			lo := *p.BorrowerLowest
 			e.BorrowerLowest = &lo
 		}
+		e.EvictingGPUs, e.EvictionsRead = p.EvictingGPUs, p.EvictionsRead
 		out = append(out, e)
 	}
 	return out

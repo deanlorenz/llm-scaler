@@ -134,6 +134,11 @@ type SharedPoolChunk struct {
 	// GPUs at (kueue.SharedPool.BorrowerLowest); nil when not known. A
 	// LowerPriority lender above it may have Kueue preempt for it.
 	BorrowerLowest *int32
+	// EvictingGPUs is what Workloads Kueue preempted in the cohort still hold
+	// reserved while their pods stop; EvictionsRead whether that is known
+	// (kueue.SharedPool).
+	EvictingGPUs  int
+	EvictionsRead bool
 	// ReleaseToNonReclaiming is set when the entry that read the chunk opts
 	// in to kueue.releaseToNonReclaimingLenders (PR-C): Free then counts what
 	// lenders Kueue does not reclaim for lend, and the governor hands it back
@@ -544,6 +549,8 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		prev.BorrowerLowest = &lo
 	}
 	prev.Borrowed = max(prev.Borrowed, p.Borrowed)
+	prev.EvictingGPUs = max(prev.EvictingGPUs, p.EvictingGPUs)
+	prev.EvictionsRead = prev.EvictionsRead && p.EvictionsRead
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt
 	}

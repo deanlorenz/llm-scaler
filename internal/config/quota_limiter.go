@@ -528,6 +528,11 @@ type ExternalSharedPool struct {
 	// Workload at; nil when none borrows or one's was not read
 	// (kueue.SharedPool.BorrowerLowest).
 	BorrowerLowest *int32 `json:"borrowerLowest,omitempty"`
+	// EvictingGPUs is what the members' preempted Workloads still hold
+	// reserved while their pods stop; EvictionsRead whether the Workloads
+	// were read (kueue.SharedPool).
+	EvictingGPUs  int  `json:"evictingGPUs,omitempty"`
+	EvictionsRead bool `json:"evictionsRead,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.

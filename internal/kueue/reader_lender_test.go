@@ -170,6 +170,18 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		Expect(l.PendingGPUs).To(BeZero(), "StrictFIFO: the older 6-GPU head does not fit and blocks the 4")
 	})
 
+	// PR #203 re-check follow-up: a Workload Kueue preempted keeps its quota
+	// reserved while its pods stop; the pool says how much.
+	It("counts what preempted Workloads still hold reserved", func() {
+		victim := workload("team-a", "victim", 10, gpus("2"), "team-a-cq")
+		st := victim.Object["status"].(map[string]interface{})
+		st["conditions"] = append(st["conditions"].([]interface{}),
+			map[string]interface{}{"type": WorkloadEvicted, "status": "True", "reason": WorkloadEvictedByPreemption})
+		read("", victim, workload("team-a", "serve", 100, gpus("8"), "team-a-cq"))
+		Expect(snap.SharedPools[0].EvictionsRead).To(BeTrue())
+		Expect(snap.SharedPools[0].EvictingGPUs).To(Equal(2), "the victim's 2, not the running Workload's 8")
+	})
+
 	It("reads each class's priority and each namespace's highest, from unfinished GPU Workloads", func() {
 		read("",
 			classed(workload("team-a", "serve", 1000, gpus("8"), "team-a-cq"), WorkloadPriorityClassGroup, "serving"),

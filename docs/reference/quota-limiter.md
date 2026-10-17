@@ -638,10 +638,13 @@ when the lender does not outrank the borrowing model.
   less the cohort's free pool, less what the cycle already frees past what
   the namespaces borrow (lower targets other than a wake's reclaim yield,
   terminating pods, releases that landed), less what Kueue preempts for it
-  from models it outranks. Under `LowerPriority`, when a borrower this
-  controller does not govern may hold the pool below the lender's waiting
-  Workload, the release waits about two minutes for Kueue to preempt it,
-  then decides on a fresh read.
+  from models it outranks. No release goes while a Workload Kueue preempted
+  in the cohort still holds its quota (its pods stopping, however long their
+  grace): Kueue is freeing those GPUs itself. Under `LowerPriority`, when a
+  borrower this controller does not govern may hold the pool below the
+  lender's waiting Workload, the release also waits one admission pass for
+  Kueue to choose its victims (about two minutes if the Workloads cannot be
+  read), then decides on a fresh read.
 - **All or nothing.** The borrowing models are lowered by whole units -- a
   replica, a P/D pair at the model's role ratio, a LeaderWorkerSet group --
   until that is covered. The last unit may pass it by at most one replica; a

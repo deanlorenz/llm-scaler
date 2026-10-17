@@ -39,6 +39,8 @@ type relWorld struct {
 	classPriority              map[string]int32
 	borrowerPriority           *int32
 	borrowerLowest             *int32
+	evicting                   int
+	evictionsRead              bool
 }
 
 func (w relWorld) constraints() []*ResourceConstraints {
@@ -53,6 +55,7 @@ func (w relWorld) constraints() []*ResourceConstraints {
 	ch.ClassPriority = w.classPriority
 	ch.BorrowerPriority = w.borrowerPriority
 	ch.BorrowerLowest = w.borrowerLowest
+	ch.EvictingGPUs, ch.EvictionsRead = w.evicting, w.evictionsRead
 	return cs
 }
 
@@ -669,6 +672,31 @@ func TestLenderReleaseRecheck(t *testing.T) {
 		cycleOf(gov, t0, w, withClass(govModel("m", 2, 8), "top"))
 		if rel, _ := cycleOf(gov, t0.Add(20*time.Second), w, withClass(govModel("m", 2, 8), "top")); len(rel) != 1 {
 			t.Errorf("released %+v, want m at once: every borrower outranks the head", rel)
+		}
+	})
+
+	// Re-check follow-up: Kueue evicts a preempted Workload at once but keeps
+	// its quota until its pods stop. A vLLM pod with a 300s grace still shows
+	// in Kueue's borrowed figure at 120s; a release then would give the same
+	// GPUs twice.
+	t.Run("a preempted outside Workload still terminating holds the release, however long its grace", func(t *testing.T) {
+		l := waitingLender(16, 32)
+		l.Reclaim, l.PendingPriority, l.PendingSince = kueue.ReclaimLowerPriority, p(100), t0.Add(-10*time.Second)
+		w := relWorld{g: 0, used: 16, borrowed: 32, l: l, release: true, borrowerPriority: p(200),
+			classPriority: map[string]int32{"top": 200}, borrowerLowest: p(10), evictionsRead: true, evicting: 16}
+		gov := NewBorrowGovernor(settings)
+		cycleOf(gov, t0, w, withClass(govModel("m", 2, 8), "top"))
+		for _, at := range []time.Duration{2 * time.Minute, 5 * time.Minute} {
+			if rel, _ := cycleOf(gov, t0.Add(at), w, withClass(govModel("m", 2, 8), "top")); len(rel) != 0 {
+				t.Fatalf("released %+v at %v while the outside victim at 10 still terminates", rel, at)
+			}
+		}
+		// With the Workloads read and no victim, one admission pass is the wait.
+		w.evicting = 0
+		gov = NewBorrowGovernor(settings)
+		cycleOf(gov, t0, w, withClass(govModel("m", 2, 8), "top"))
+		if rel, _ := cycleOf(gov, t0.Add(kueueSchedulingInterval), w, withClass(govModel("m", 2, 8), "top")); len(rel) != 1 {
+			t.Errorf("released %+v, want m handed back once no victim terminates and an admission pass went by", rel)
 		}
 	})
 

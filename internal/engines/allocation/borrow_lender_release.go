@@ -476,7 +476,7 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 				}
 				continue
 			}
-			if !g.releaseDue(key, l, ch.ReadAt) || kueueReclaimsAll(l, ch) {
+			if !g.releaseDue(key, l, ch.ReadAt) || kueueReclaimsAll(l, ch) || kueueFreeing(ch) {
 				continue
 			}
 			if left == nil {
@@ -543,10 +543,14 @@ func kueueReclaimsAll(l kueue.LenderState, ch *SharedPoolChunk) bool {
 
 // lenderPreemptWindow is how long a LowerPriority lender's wait is left to
 // Kueue when Kueue may preempt a borrower this controller does not govern for
-// it: one admission pass, plus twice the default termination grace for the
-// victims to go. A victim with a longer grace is still terminating when it
-// ends; the release then sized counts the GPUs Kueue's borrowed figure no
-// longer holds, so the overlap is at most that victim's own GPUs, once.
+// it and the Workloads could not be read (SharedPoolChunk.EvictionsRead):
+// one admission pass, plus twice the default termination grace for the
+// victims to go. It is only a fallback: a victim with a longer grace is
+// still terminating when it ends, its quota still in Kueue's borrowed
+// figure. Where the Workloads are read, a victim is seen directly (Evicted,
+// reason Preempted, quota still reserved: EvictingGPUs) and no release goes
+// while one is, however long its grace; the wait is then one admission pass,
+// for Kueue to choose its victims.
 const lenderPreemptWindow = kueueSchedulingInterval + 2*k8sDefaultTerminationGrace
 
 // kueueMayPreemptOutside reports whether a LowerPriority lender's wait is
@@ -569,7 +573,20 @@ func (g *BorrowGovernor) kueueMayPreemptOutside(key LenderKey, l kueue.LenderSta
 	if w := g.watches[key]; w != nil && (since.IsZero() || w.since.Before(since)) {
 		since = w.since
 	}
-	return since.IsZero() || ch.ReadAt.Sub(since) < lenderPreemptWindow
+	window := lenderPreemptWindow
+	if ch.EvictionsRead {
+		window = kueueSchedulingInterval
+	}
+	return since.IsZero() || ch.ReadAt.Sub(since) < window
+}
+
+// kueueFreeing reports whether Kueue is freeing GPUs in the cohort by
+// preemption: a Workload it preempted (Evicted, reason Preempted) still holds
+// its quota while its pods stop. Its GPUs reach the pool, and its queue's
+// borrowed figure falls, with nothing handed back; a release sized before
+// they do would give the same GPUs twice. No release goes until they have.
+func kueueFreeing(ch *SharedPoolChunk) bool {
+	return ch.EvictingGPUs > 0
 }
 
 // poolBudget is what one pool's waiting lenders share in a pass

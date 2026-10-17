@@ -126,6 +126,9 @@ type pendingRead struct {
 	// lowestReserved is, per ClusterQueue, the lowest spec.priority of its
 	// reserved GPU Workloads (QueueState.LowestReserved).
 	lowestReserved map[string]int32
+	// evicting is, per ClusterQueue and GPU resource, what its Workloads
+	// Kueue preempted still hold reserved (QueueState.EvictingGPUs).
+	evicting map[string]map[string]int64
 }
 
 // readPending reads the Workloads for the lender-waiting signal and the
@@ -147,7 +150,7 @@ type pendingRead struct {
 func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Unstructured) (out pendingRead, unreadable bool) {
 	out = pendingRead{byQueue: map[string][]PendingWorkload{}, lenderPriority: map[string]int32{},
 		classPriority: map[string]int32{}, highestByNamespace: map[string]int32{}, borrowerPriority: map[string]int32{},
-		lowestReserved: map[string]int32{}}
+		lowestReserved: map[string]int32{}, evicting: map[string]map[string]int64{}}
 	fail := func(err error) (pendingRead, bool) {
 		if !r.warnedPending && ctx.Err() == nil {
 			r.warnedPending = true
@@ -206,6 +209,14 @@ func (r *Reader) readPending(ctx context.Context, localQueues []unstructured.Uns
 				lowest(out.lenderPriority, cq, priority)
 				highest(out.borrowerPriority, cq, priority)
 				lowest(out.lowestReserved, cq, priority)
+				if workloadPreemptedNow(w) {
+					if out.evicting[cq] == nil {
+						out.evicting[cq] = map[string]int64{}
+					}
+					for res, n := range gpus {
+						out.evicting[cq][res] += n
+					}
+				}
 			}
 			continue
 		}
@@ -382,6 +393,22 @@ func workloadFinished(w *unstructured.Unstructured) bool {
 	for _, raw := range conds {
 		cond, _ := raw.(map[string]interface{})
 		if cond["type"] == WorkloadFinished && cond["status"] == string(corev1.ConditionTrue) {
+			return true
+		}
+	}
+	return false
+}
+
+// workloadPreemptedNow reports whether a Workload carries Evicted=True with
+// reason Preempted. Kueue evicts a preempted Workload at once, but its quota
+// stays reserved -- in the queue's borrowed figure -- until its pods stop,
+// which a long termination grace makes minutes.
+func workloadPreemptedNow(w *unstructured.Unstructured) bool {
+	conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+	for _, raw := range conds {
+		cond, _ := raw.(map[string]interface{})
+		if cond["type"] == WorkloadEvicted && cond["status"] == string(corev1.ConditionTrue) &&
+			cond["reason"] == WorkloadEvictedByPreemption {
 			return true
 		}
 	}

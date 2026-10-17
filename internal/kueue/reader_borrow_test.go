@@ -132,6 +132,7 @@ var _ = Describe("Reader borrowing figures", func() {
 			NodeLabels: map[string]string{"nvidia.com/gpu.product": h100Product}, Free: 21,
 			Lenders: []config.ExternalLender{{Queue: "team-a-cq", Reclaim: "Never", Unused: 9},
 				{Queue: "team-b-cq", Reclaim: "Never", Unused: 12}},
+			EvictionsRead: true,
 		}}))
 	})
 

@@ -327,9 +327,13 @@ releases and their pins:
   `releaseDue`: two fresh reads in its debounce watch, or `PendingSince` past
   `kueueSchedulingInterval`. `kueueReclaimsAll` leaves a `LowerPriority`
   lender above the chunk's `BorrowerPriority` to Kueue;
-  `kueueMayPreemptOutside` waits `lenderPreemptWindow` while the chunk's
-  `BorrowerLowest` (unknown, or below the head) and a `Borrowed` above this
-  controller's own say Kueue may preempt an outside borrower for it. Nothing while
+  `kueueFreeing` holds every release while the chunk's `EvictingGPUs`
+  (reserved GPUs of Workloads with `Evicted=True`, reason `Preempted`, read
+  by `readPending`) is above 0; `kueueMayPreemptOutside` waits one
+  `kueueSchedulingInterval` (`lenderPreemptWindow` when
+  `EvictionsRead` is false) while the chunk's `BorrowerLowest` (unknown, or
+  below the head) and a `Borrowed` above this controller's own say Kueue may
+  preempt an outside borrower for it. Nothing while
   `BorrowCycle.LedgerUnread`.
 - **Need.** `PendingGPUs - Kept - outranked`, then the pool's `poolBudget.free`
   (`budgetOf`: `RawFree`, plus `current - target` (not for a `yielded`

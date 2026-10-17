@@ -155,6 +155,10 @@ type QueueState struct {
 	WithinClusterQueue string
 	// QueueingStrategy is spec.queueingStrategy; empty for BestEffortFIFO.
 	QueueingStrategy string
+	// EvictingGPUs is, per GPU resource, what the queue's Workloads Kueue
+	// preempted (Evicted=True, reason Preempted) still hold reserved while
+	// their pods stop.
+	EvictingGPUs map[string]int64
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -291,6 +295,9 @@ type Topology struct {
 	// LendersUnreadable is set when the Workloads were not read cluster-wide,
 	// or the read failed: no lender's wait can be seen.
 	LendersUnreadable bool
+	// WorkloadsRead is set when the Workloads were read (an entry that counts
+	// borrowing, and the read passed): EvictingGPUs is known.
+	WorkloadsRead bool
 	// Now is when the read was made: a pending Workload whose requeueAt is
 	// later is not in line yet (lenderNext). Zero reads every one as in line.
 	Now time.Time
@@ -395,6 +402,13 @@ type SharedPool struct {
 	// Workload from a borrower below it. Nil when none borrows, or when one
 	// that borrows has none read.
 	BorrowerLowest *int32
+	// EvictingGPUs is what the members' preempted Workloads still hold
+	// reserved of this resource while their pods stop (whatever their
+	// flavor: the cautious side, which waits longer). Kueue's borrowed figure
+	// still counts them, and they are freed without anything handed back.
+	// EvictionsRead says whether the Workloads were read at all.
+	EvictingGPUs  int
+	EvictionsRead bool
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -577,10 +591,14 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				p.CoFree, p.CoUnbound = cohortCoFree(qs, key.Flavor)
 			}
 			unknownBorrower, unknownLowest := false, false
+			p.EvictionsRead = t.WorkloadsRead
 			for _, q := range qs {
 				r, declares := q.Resources[key]
 				if !declares {
 					continue
+				}
+				if n := q.EvictingGPUs[key.Resource]; n > 0 {
+					p.EvictingGPUs = addCapped(p.EvictingGPUs, clampQuota(n))
 				}
 				if r.Borrowed > 0 {
 					p.Borrowed = addCapped(p.Borrowed, r.Borrowed)
