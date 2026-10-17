@@ -121,6 +121,11 @@ type SaturationAnalyzer struct {
 	// (rememberDecodeSaturation); swept by EvictStaleHistory beside the
 	// history, one time.Time per model that ever saturated.
 	decodeSaturatedAt map[string]time.Time
+	// hotRankHeld is, per namespace|model, the replicas the hot-rank hold
+	// kept last cycle (hotRankPods), so a busiest rank hovering at k1 does
+	// not turn it on and off every cycle. Deleted the cycle no replica is
+	// hot; swept by EvictStaleHistory for a model that stops being analysed.
+	hotRankHeld map[string]hotRankMemo
 	// fleetShape is the (I, O) bucket pair last seen per namespace|model,
 	// and when a change of either was raised and not yet settled. See
 	// shape_change.go for what the event is for.
@@ -272,8 +277,11 @@ type Evicted struct {
 	// sweep emits. A reviewer found both of the last two uncounted.
 	Accelerators     int
 	DecodeSaturation int
-	FleetShapes      int
-	VariantStamps    int
+	// HotRankHolds is the per-model memory of the replicas the hot-rank
+	// hold kept, for a model no longer analysed.
+	HotRankHolds  int
+	FleetShapes   int
+	VariantStamps int
 	// ITLLines is the fitted lines shared between variants running the same
 	// engine configuration. Counted separately because it is the one map here
 	// keyed on a CONFIGURATION rather than a variant or a workload bucket, and
@@ -293,7 +301,7 @@ func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
-		e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
+		e.HotRankHolds > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -335,6 +343,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		throughputLastRead:     make(map[string]float64),
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
+		hotRankHeld:            make(map[string]hotRankMemo),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlTracker:             itl.NewTracker(),
 		itlArgs:                make(map[string]string),
@@ -760,6 +769,11 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.DecodeSaturation++
 		}
 	}
+	held := len(a.hotRankHeld)
+	maps.DeleteFunc(a.hotRankHeld, func(_ string, m hotRankMemo) bool {
+		return now.Sub(m.seen) > variantTimeout
+	})
+	evicted.HotRankHolds = held - len(a.hotRankHeld)
 	// The fleet-shape memo is per namespace|model and exists only to key and
 	// stabilise the capacity figures, so it goes when they do. Without this it
 	// is the one map on this struct that grows without bound as models and

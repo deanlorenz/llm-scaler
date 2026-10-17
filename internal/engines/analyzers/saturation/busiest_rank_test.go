@@ -228,21 +228,8 @@ func TestHotRankHoldsItsReplica(t *testing.T) {
 	}
 }
 
-// S2, three replicas. The hold keeps the replica with the full rank, not the
-// fleet: two idle replicas at 0.1 still give one back.
-func TestHotRankHoldReleasesTheOthers(t *testing.T) {
-	for _, role := range brRoles {
-		t.Run("role="+role, func(t *testing.T) {
-			got := brRun(t, role, []brPod{
-				brHot("pod-a", 0.1, 1.0, 4), brUniform("pod-b", 0.1, 0), brUniform("pod-c", 0.1, 0),
-			})[0]
-			require.Equal(t, 3, got.replicas)
-			assert.True(t, got.hotRankHeld)
-			assert.GreaterOrEqual(t, got.spareReplicas(), 1.0, "pod-b's and pod-c's spare is a replica")
-			assert.Less(t, got.spareReplicas(), 2.0, "but not two: pod-a's is kept")
-		})
-	}
-}
+// S2 with more replicas, and the release the engine makes of them, are in
+// steadystate (hot_rank_hold_test.go): the spare is the engine's to compute.
 
 // The same pods with no full rank are not held: the hold is the full rank.
 func TestNoHotRankNoHold(t *testing.T) {
@@ -300,10 +287,10 @@ func TestSingleRankReplicaUnchangedByBusiestRank(t *testing.T) {
 	}
 }
 
-// Disaggregated: decode's replica with a full rank is held, and the hold is
-// reported as one (HeldRoleDemand), so a consumer sizing the role on its need
-// reads the demand from before it. Prefill is not judged: its KV is held for
-// decode's pulls.
+// Disaggregated: a replica with a full rank is kept, decode's and, while
+// decode is not saturated, prefill's. The raise is reported apart
+// (HotRankDemand), never as a hold of the role (HeldRoleDemand): a held role
+// releases nothing, and a role with a hot replica still releases the others.
 func TestHotRankHoldOnPD(t *testing.T) {
 	store := capacity.NewStore()
 	for _, v := range []string{"dec", "pre"} {
@@ -327,9 +314,39 @@ func TestHotRankHoldOnPD(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.Equal(t, 1, logs.FilterMessage("hot-rank-hold").Len())
-	before, held := res.HeldRoleDemand[domain.RoleDecode]
-	require.True(t, held, "decode's hold is reported")
-	assert.Less(t, before, res.RoleDemand[domain.RoleDecode], "and the demand from before it is the lower")
-	_, prefillHeld := res.HeldRoleDemand[domain.RolePrefill]
-	assert.False(t, prefillHeld, "prefill is not judged")
+	assert.Empty(t, res.HeldRoleDemand, "no role is held")
+	for _, role := range []string{domain.RoleDecode, domain.RolePrefill} {
+		assert.Positive(t, res.HotRankDemand[role], "%s's hot replica is kept", role)
+	}
+}
+
+// While decode is saturated, prefill's hot rank is decode's backlog, and
+// holdPrefillDemand decides prefill: the hot-rank hold leaves it alone.
+func TestHotRankHoldLeavesPrefillToThePrefillHold(t *testing.T) {
+	store := capacity.NewStore()
+	for _, v := range []string{"dec", "pre"} {
+		store.Update("test-ns", "test-model", v, capacity.Record{
+			EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
+		})
+	}
+	a := NewSaturationAnalyzer(store)
+	rows := make([]domain.ReplicaMetrics, 0, 4)
+	for _, p := range []brPod{brHot("dec-a", 0.1, 1.0, brQueueThr), brUniform("dec-b", 0.1, 0)} {
+		rm := brRow(p)
+		rm.VariantName = "dec"
+		rows = append(rows, rm)
+	}
+	for _, p := range []brPod{brHot("pre-a", 0.1, 1.0, 3), brUniform("pre-b", 0.1, 0)} {
+		rm := brRow(p)
+		rm.VariantName = "pre"
+		rows = append(rows, rm)
+	}
+	ctx, _ := observedCtx(t)
+	res, err := a.Analyze(ctx, makeAnalyzerInput(rows, []domain.VariantReplicaState{
+		{VariantName: "dec", AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 8, Role: domain.RoleDecode},
+		{VariantName: "pre", AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 8, Role: domain.RolePrefill},
+	}))
+	require.NoError(t, err)
+	_, prefill := res.HotRankDemand[domain.RolePrefill]
+	assert.False(t, prefill, "decode is saturated: prefill is the prefill hold's")
 }

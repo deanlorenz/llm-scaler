@@ -100,7 +100,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
-	total, held := c.applyFloorAndHolds(caps, d)
+	total, held, hotRank := c.applyFloorAndHolds(caps, d)
 
 	roleOf := make(map[string]string, len(c.rolesByVariant))
 	for variant, role := range c.rolesByVariant {
@@ -116,6 +116,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		TotalDemand:       total,
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
+		HotRankDemand:     hotRank,
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
 		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
@@ -659,11 +660,12 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 }
 
 // applyFloorAndHolds raises the demand to what the load requires, and then to
-// what the two holds refuse to release. Every step here only ever increases
+// what the holds refuse to release. Every step here only ever increases
 // it; nothing below lowers a demand the stages above computed. It returns the
-// total, and each held role's demand from before its first hold
-// (AnalyzerResult.HeldRoleDemand).
-func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) (float64, map[string]float64) {
+// total, each held role's demand from before its first hold
+// (AnalyzerResult.HeldRoleDemand), and what the hot-rank hold added per role
+// (AnalyzerResult.HotRankDemand).
+func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) (float64, map[string]float64, map[string]float64) {
 	total := d.total
 	var held map[string]float64
 	hold := func(role string, before float64) {
@@ -710,23 +712,28 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 		total, d.roleDemand, d.queueByRole, eppQueued, c.shapeChanged, c.logger)
 
 	// A replica with a full engine rank is not released on its mean
-	// (hot_rank_hold.go). Prefill is not judged here, so this cannot meet
-	// the prefill hold below.
+	// (hot_rank_hold.go). It keeps that replica, not the role, so it is
+	// reported apart from the holds (hotRank, not held): a held role releases
+	// nothing, and the other replicas' spare is still theirs to give. Prefill
+	// is judged only while decode is not saturated, so this cannot meet the
+	// prefill hold below.
+	var hotRank map[string]float64
 	{
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
-		before := maps.Clone(d.roleDemand)
-		moved, byRole := holdHotRanks(c.input.ReplicaMetrics, c.rolesByVariant, caps, d.variants,
-			d.roleDemand, total, scaleUp, scaleDown, c.cfg.KvCacheThreshold)
-		if moved > 0 {
-			total += moved
-			if d.roleDemand != nil {
-				for role := range byRole {
-					hold(role, before[role])
-				}
+		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
+			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
+		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
+			d.roleDemand, total, scaleUp, scaleDown)
+		if after > total {
+			moved := after - total
+			total = after
+			hotRank = byRole
+			if d.roleDemand == nil {
+				hotRank = map[string]float64{domain.RoleBoth: moved}
 			}
 			c.logger.V(logging.DEFAULT).Info("hot-rank-hold",
 				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
-				"raisedByRole", byRole, "totalDemandMoved", moved,
+				"raisedByRole", hotRank, "totalDemandMoved", moved, "hotReplicas", len(hot),
 				"reason", "a replica's busiest engine rank is full: its capacity is kept, and only the other replicas' spare may be released")
 		}
 	}
@@ -788,5 +795,5 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 		}
 	}
 
-	return total, held
+	return total, held, hotRank
 }
