@@ -1288,11 +1288,14 @@ When the group acts:
     the reversal hold). The band no longer gates a return: the idle-floor rule
     kept the idlest whole-node donors in band, so they never returned anything;
   - it never takes the role below its target, its floor or its keep;
-  - **the role stays calm on what it keeps, less its headroom**: its need is at
-    most the return load (`stabilization.returnSpareWhenLoadAtMost`, default
-    0.6) times what it would hold after the return less its headroom,
-    `N_r ≤ ρ × (Ḡ_r − g_r − g_r·h_r)` with `Ḡ_r` before the return and
-    `h_r` its headroom replicas (counted `return-not-calm` when it holds back).
+  - **the role stays calm on what it keeps, less its headroom**: what its need
+    serves is at most the return load (`stabilization.returnSpareWhenLoadAtMost`,
+    default 0.6) times what it would hold after the return less its headroom
+    serves, `s_r(N_r) ≤ ρ × s_r(Ḡ_r − g_r − g_r·h_r)` with `Ḡ_r` before the
+    return, `h_r` its headroom replicas and `s_r` its capacity curve (the
+    identity when every GPU serves alike; counted `return-not-calm` when it
+    holds back). Read in GPUs, a role whose sparse replicas sit at the end of
+    its curve returned GPUs at a served load of up to 0.76.
 
   Once due, everything above the target that passes the calm rule goes in one
   cycle, as a scale-down would: returns are unpaced and outside the
