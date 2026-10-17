@@ -394,15 +394,16 @@ func (e *wholeNodeEnv) readyReplicas(g Gomega, dep string) int32 {
 // records, as they change, the reasons G reports, G's replicas and the small
 // models' (label names the spec in the MEASURE lines).
 //
-// The small models are idle, and once G reads unfundable their spare goes
-// back to the quota by returns. With mayFill false -- node information, so
-// the idle fill places only where a pod fits -- G must stay at one replica
-// and report no-node-fits: from its first reading on, in every reading, while
-// the small models hold spare, while it is returned and after. With mayFill
-// true -- no node information, so no-node-fits cannot be judged -- the idle
-// fill may raise G into the returned GPUs blind; then G's growth must have
-// come from an idle fill, not a transfer, and otherwise one reading must name
-// the missing donor (no-compatible-donor or donors-at-floor).
+// The small models are idle. With mayFill false -- node information, so the
+// idle fill places only where a pod fits -- no node can hold G's replica, so
+// the small models keep their spare (no return for an unplaceable receiver),
+// and G must stay at one replica and report no-node-fits: from its first
+// reading on, in every reading. With mayFill true -- no node information, so
+// no node fit can be judged -- their spare goes back to the quota by
+// returns, and the idle fill may raise G into the returned GPUs blind; then
+// G's growth must have come from an idle fill, not a transfer, and otherwise
+// one reading must name the missing donor (no-compatible-donor or
+// donors-at-floor).
 func (e *wholeNodeEnv) holdUnfunded(label, modelG, depG string, small []string, start, floorDropped time.Time, d time.Duration, mayFill bool) {
 	GinkgoHelper()
 	pc := wholeNodeProm()
@@ -419,8 +420,8 @@ func (e *wholeNodeEnv) holdUnfunded(label, modelG, depG string, small []string, 
 		reasons, err := blockedReasons(pc, e.ns, modelG)
 		g.Expect(err).NotTo(HaveOccurred())
 		if !mayFill {
-			// Once said, said every reading: the cause does not change as
-			// the small models give their spare back.
+			// Once said, said every reading: the cause does not change
+			// while the small models keep their spare.
 			has := slices.Contains(reasons, constants.ScalingBlockedNoNodeFits)
 			g.Expect(has || !noFit).To(BeTrue(), "G stopped reporting no-node-fits: %v after %v", reasons, timeline)
 			noFit = noFit || has

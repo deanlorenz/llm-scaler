@@ -1621,19 +1621,22 @@ replica of the model onto a node. Alert on all four together (see
 [monitoring](monitoring.md#the-metrics-that-answer-specific-questions)).
 
 - `no-node-fits`: no node can hold one replica, even if every pod the other
-  models in its group could give on that node went. Pods the scaling manager
-  does not plan hold the rest of each node. It is set every cycle while the
-  model is short, and stays the same while the other models give their spare
-  back to the quota. It needs node information (a cluster-scoped install, or
-  the `gpu-inventory` limiter).
+  models in its group could give on that node went. The rest of each node is
+  held by pods the scaling manager does not plan, or by a held role's pods
+  (then it clears when the hold ends). It is set every cycle while the model
+  is short. It needs node information (a cluster-scoped install, or the
+  `gpu-inventory` limiter).
 - `no-compatible-donor`: no donor pod, or set of donor pods on one node, can
   host a replica. Without node information, fragmentation shows as this.
 - `release-shape-mismatch` and `release-taken`: a transfer's GPUs came free,
   but the replica still did not land. Each expires one release timeout later.
 
-**What it means**: the GPUs are fragmented. The quota may have room, and the
-small models may give their spare back, but no node has a whole replica's GPUs
-free. Without the optimizer, the same quota would order a replica that stays
+**What it means**: the GPUs are fragmented. The quota may have room, but no
+node has a whole replica's GPUs free. While this model is the only one below
+its target, the other models keep their spare rather than give it back to
+GPUs that would sit unassigned; each cycle this happens is counted as
+`return-receiver-unplaceable` in `wva_utilization_share_withheld_total`.
+Without the optimizer, the same quota would order a replica that stays
 Pending.
 
 **What to do**: keep the large model's nodes whole. Put it on its own node pool
