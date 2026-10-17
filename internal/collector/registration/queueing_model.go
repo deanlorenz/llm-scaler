@@ -67,7 +67,8 @@ const (
 	// utilization and priced on the pod's WHOLE capacity, the max read the
 	// pod as one hot rank's latency eight times over. Demand stuck on a hot
 	// rank is not lost by this: the waiting queue is summed over the ranks
-	// (QueryQueueLength), and the queue is what the saturation guards read.
+	// (QueryQueueLength) into demand, and the saturation guards read the
+	// busiest rank's queue and cache (QueryMaxRankQueueLength).
 	// It is also what collector.collapseToPods already did for ranks that run
 	// their own API servers, so both layouts give the same answer. On an
 	// expert-parallel pod the ranks step together and their latencies barely

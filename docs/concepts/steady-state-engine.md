@@ -286,6 +286,13 @@ over that total, and its queue is the sum. Its latencies are means weighted by e
 traffic, not the busiest rank's. `--max-num-seqs` and `--max-num-batched-tokens` limit one
 rank, so the pod's batch limit is the ranks times them.
 
+Whether such a pod is saturated is judged on its busiest rank, because `queueLengthThreshold`
+and `kvCacheThreshold` describe one engine. One request waiting on each of eight ranks is not
+a saturated pod. One rank with a full cache and a queue at the threshold is, and the capacity
+learned from it is that rank's use scaled to the whole pod. A pod with a full rank is not
+released on its mean: only the other pods' spare capacity can be given back while the rank is
+full.
+
 ### Output — metrics to observe the engine's decisions
 
 | Metric | Type | Meaning |
