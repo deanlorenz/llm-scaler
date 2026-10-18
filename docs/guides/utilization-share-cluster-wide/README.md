@@ -109,8 +109,10 @@ make utilization-share-check
 ```
 <!-- guide:deploy.check end -->
 
-It prints the accelerator names the controller resolves. If it warns that the
-quota has no key for one of them, re-run step 1 with that exact name.
+It prints the accelerator names the controller resolves. Run it a minute or
+so after step 2: until the controller has sized the models it has logged no
+accelerator, and the check says so. If it warns that the quota has no key for
+one of them, re-run step 1 with that exact name.
 
 ### 4. Shadow, then active
 
