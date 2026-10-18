@@ -1218,8 +1218,9 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 //     which the holds govern; a role short only of its headroom, or held
 //     from filling, does not block;
 //   - not while every role below its target is one no node can hold a
-//     replica of (unplaceable): the GPUs would sit unassigned, and the role
-//     would lose its headroom for nothing;
+//     replica of, even with the returning roles' pods gone (unplaceable):
+//     the GPUs would sit unassigned, and the role would lose its headroom
+//     for nothing;
 //   - never below its target, floor or keep, and not while held from giving;
 //   - and only while it stays calm one replica lower: what its need serves at
 //     most the return load of what it would keep less its headroom serves
@@ -1266,7 +1267,7 @@ func (p *sharePlanRun) returnSpare() {
 			}
 		}
 	}
-	if p.onlyUnplaceableShort() {
+	if p.onlyUnplaceableShort(over) {
 		for _, o := range over {
 			if o {
 				p.plan.Withheld[ShareWithheldReturnUnplaceable]++
@@ -1343,8 +1344,8 @@ func (p *sharePlanRun) returnCalm(r ShareRole, g float64) bool {
 // onlyUnplaceableShort reports whether there are roles below their
 // whole-replica target that can grow and are not held from filling -- the
 // roles the GPUs a return frees would go to -- and every one of them is
-// unplaceable.
-func (p *sharePlanRun) onlyUnplaceableShort() bool {
+// unplaceable, even with the returns of the roles in over.
+func (p *sharePlanRun) onlyUnplaceableShort(over map[string]bool) bool {
 	short := false
 	for _, r := range p.roles {
 		if p.work[r.Key] >= p.integ[r.Key] || p.l.FillHeld(r.Key, p.now) {
@@ -1353,7 +1354,7 @@ func (p *sharePlanRun) onlyUnplaceableShort() bool {
 		if _, grows := variantOf(p.in.Grow, r.Key, r.ReplicaGPUs); !grows {
 			continue
 		}
-		if !p.unplaceable(r.Key) {
+		if !p.unplaceable(r.Key, over) {
 			return false
 		}
 		short = true
@@ -1361,15 +1362,39 @@ func (p *sharePlanRun) onlyUnplaceableShort() bool {
 	return short
 }
 
-// unplaceable reports whether no node can hold a replica of receiver rc: no
-// donor could fund it (ShareUnfundedNoCompatibleDonor) while the planner knew
-// the nodes and rc's pods, so no node-aware set -- donor pods and free GPUs on
-// one node -- could open a hole for it. A return frees no more than such a set
-// would. Without node information the idle fill places blind, and a return
-// may still serve rc.
-func (p *sharePlanRun) unplaceable(rc string) bool {
+// unplaceable reports whether no node can hold a replica of receiver rc, even
+// once the roles in over -- the ones a return would shrink -- gave back every
+// pod they could give: no donor could fund it (ShareUnfundedNoCompatibleDonor)
+// while the planner knew the nodes, rc's pods and the donors' pods, and no
+// node holds rc's pods in its free GPUs plus those roles' pods on it
+// (ShareNoNodeFits, as the no-node-fits reason counts the giving roles' pods).
+//
+// No donor funding rc is not enough. A donor set pays a receiver's whole
+// replica from donor replicas and never from the idle quota, so a receiver a
+// node could hold once a neighbour's pods went is still unfunded when the
+// neighbour cannot pay all of it: a large model that lent a node to a small
+// one, and bursts, gets the node back only by the small model returning its
+// pods there and the idle fill raising it. Without node information, or
+// without the donors' pods, the idle fill places blind, and a return may
+// still serve rc.
+func (p *sharePlanRun) unplaceable(rc string, over map[string]bool) bool {
 	grow, ok := p.in.Grow[rc]
-	return ok && len(grow.PodGPUs) > 0 && p.in.Nodes != nil && p.plan.Unfunded[rc] == ShareUnfundedNoCompatibleDonor
+	if !ok || len(grow.PodGPUs) == 0 || p.in.Nodes == nil || p.in.DonorUnits == nil ||
+		p.plan.Unfunded[rc] != ShareUnfundedNoCompatibleDonor {
+		return false
+	}
+	returning := map[string]int{}
+	for dn, o := range over {
+		if !o || dn == rc {
+			continue
+		}
+		for _, u := range p.in.DonorUnits[dn] {
+			for _, pod := range u.Pods {
+				returning[pod.Node] += pod.GPUs
+			}
+		}
+	}
+	return ShareNoNodeFits(p.in.Nodes, returning, p.in.receiverFit(rc, grow))
 }
 
 // fundBySet funds rc from several donors when no single donor replica fits

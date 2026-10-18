@@ -781,3 +781,80 @@ func TestShareReturnsNothingForAnUnplaceableReceiver(t *testing.T) {
 		t.Fatalf("a node freed: G funded %v, committed %v; want G at 16 from the small models' spare", funded, c)
 	}
 }
+
+// lentNode is the whole-node e2e's lending layout after G lent a node: G holds
+// one 8-GPU replica on n1 and, bursting, needs two; S1, idle now, grew onto
+// the node G gave (n2) with three 1-GPU replicas beside five free GPUs, and
+// holds a fourth on n3 beside S2. The quota of 18 has 5 to spare.
+func lentNode() SharePlanInput {
+	return SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "G", Weight: 1, Need: 16, Floor: 8, Ceiling: 16, ReplicaGPUs: 8},
+			{Key: "S1", Weight: 1, Need: 0, Floor: 1, Ceiling: 4, ReplicaGPUs: 1},
+			{Key: "S2", Weight: 1, Need: 0, Floor: 1, Ceiling: 2, ReplicaGPUs: 1},
+		},
+		Held:       map[string]int{"G": 8, "S1": 4, "S2": 1},
+		Thresholds: map[string]float64{"G": 0.8, "S1": 0.8, "S2": 0.8}, Budget: 18, Tolerance: 0.15,
+		Give: map[string]ShareVariant{
+			"G":  {Name: "g", GPUs: 8, PodGPUs: []int{8}},
+			"S1": {Name: "s1", GPUs: 1, PodGPUs: []int{1}},
+			"S2": {Name: "s2", GPUs: 1, PodGPUs: []int{1}},
+		},
+		Grow: map[string]ShareVariant{
+			"G":  {Name: "g", GPUs: 8, PodGPUs: []int{8}},
+			"S1": {Name: "s1", GPUs: 1, PodGPUs: []int{1}},
+			"S2": {Name: "s2", GPUs: 1, PodGPUs: []int{1}},
+		},
+		Nodes: map[string]ShareNode{"n1": {}, "n2": {Free: 5}, "n3": {}},
+		DonorUnits: map[string][]ShareUnit{
+			"G": {{Pods: []SharePod{{Name: "ns/g-0", Node: "n1", GPUs: 8}}}},
+			"S1": {
+				{Pods: []SharePod{{Name: "ns/s1-0", Node: "n2", GPUs: 1}}},
+				{Pods: []SharePod{{Name: "ns/s1-1", Node: "n2", GPUs: 1}}},
+				{Pods: []SharePod{{Name: "ns/s1-2", Node: "n2", GPUs: 1}}},
+				{Pods: []SharePod{{Name: "ns/s1-3", Node: "n3", GPUs: 1}}},
+			},
+			"S2": {{Pods: []SharePod{{Name: "ns/s2-0", Node: "n3", GPUs: 1}}}},
+		},
+		PhysicalFree: 5, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
+	}
+}
+
+// A large model that lent a node gets it back on its burst. No donor funds G:
+// a donor set pays its whole 8-GPU replica from donor replicas, and S1 has
+// only three to give. But G is not unplaceable: n2's five free GPUs and S1's
+// three pods there hold its replica. S1 returns those three, and the idle
+// fill raises G onto the emptied node with the quota's 5 and the 3 returned.
+// Withheld as for a receiver no node can hold, the return never went, and G
+// stayed at one replica for the whole burst.
+func TestShareReturnsForAReceiverALentNodeHolds(t *testing.T) {
+	l := NewShareLedger()
+	in := lentNode()
+	returned, withheld := 0, 0
+	unfunded := ""
+	for i := range 6 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		withheld += p.Withheld[ShareWithheldReturnUnplaceable]
+		if p.Unfunded["G"] != "" {
+			unfunded = p.Unfunded["G"]
+		}
+		for _, tr := range p.Started {
+			if tr.Receiver == "G" {
+				t.Fatalf("cycle %d: G funded by a transfer %+v; the scenario needs no donor to fund it", i+1, tr)
+			}
+			if tr.Returned && tr.Donor == "S1" {
+				returned += tr.DonorGPUs
+			}
+		}
+	}
+	if unfunded != ShareUnfundedNoCompatibleDonor {
+		t.Fatalf("G unfunded %q, want %q: the scenario is a receiver no donor funds", unfunded, ShareUnfundedNoCompatibleDonor)
+	}
+	if returned != 3 || withheld != 0 {
+		t.Fatalf("lent node: S1 returned %d GPUs, %d returns withheld as unplaceable; want 3 returned, none withheld", returned, withheld)
+	}
+	after := map[string]ShareNode{"n1": {}, "n2": {Free: 5 + 3}, "n3": {}}
+	if !ShareFitPods(after, in.receiverFit("G", in.Grow["G"])) {
+		t.Fatal("once S1's pods on n2 leave, G's replica does not fit n2")
+	}
+}
