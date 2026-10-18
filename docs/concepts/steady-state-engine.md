@@ -279,6 +279,22 @@ Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-s
 `--max-model-len`, `--max-num-batched-tokens`, `--num-gpu-blocks-override`, …) are read from the
 Deployment/LeaderWorkerSet — **not** Prometheus — and feed the derived-capacity path.
 
+A pod that runs several data-parallel engine ranks is one replica, measured as all of its ranks.
+This holds whether each rank has its own API server or the ranks share one (vLLM then labels
+each series with `engine`). Its capacity is the sum over the ranks. Its cache use is used tokens
+over that total, and its queue is the sum. Its latencies are means weighted by each rank's
+traffic, not the busiest rank's. `--max-num-seqs` and `--max-num-batched-tokens` limit one
+rank, so the pod's batch limit is the ranks times them.
+
+Whether such a pod is saturated is judged on its busiest rank, because `queueLengthThreshold`
+and `kvCacheThreshold` describe one engine. One request waiting on each of eight ranks is not
+a saturated pod. One rank with a full cache and a queue at the threshold is, and the capacity
+learned from it is that rank's use scaled to the whole pod. A pod with a full rank keeps its
+own capacity: the other pods' spare can still be given back, but not that pod's, and no
+replica is ordered for it. It stays kept until the rank drops 5 points below
+`kvCacheThreshold`. On a P/D model this covers decode, and prefill while decode is not
+saturated.
+
 ### Output — metrics to observe the engine's decisions
 
 | Metric | Type | Meaning |

@@ -813,6 +813,7 @@ var (
 		ScalingBlockedFloorsExceedQuota,
 		ScalingBlockedDonorsAtFloor,
 		ScalingBlockedNoCompatibleDonor,
+		ScalingBlockedNoNodeFits,
 		ScalingBlockedReleaseTimeout,
 		ScalingBlockedReleaseTaken,
 		ScalingBlockedReleaseShapeMismatch,
@@ -866,6 +867,16 @@ const (
 	// band, and no donor replica's pods can host one of its replicas
 	// (section 6.5).
 	ScalingBlockedNoCompatibleDonor = "no-compatible-donor"
+	// ScalingBlockedNoNodeFits indicates the role is short and no node can
+	// hold one of its replicas, even if every pod the group's other models
+	// could give on that node went: pods the scaling manager does not plan
+	// fill the rest of every node. No transfer or return can place it, so
+	// none is planned. While it holds, the donor reasons (donors-at-floor,
+	// no-compatible-donor) and the receive reasons (reversal-hold,
+	// transfer-limit, burst-ending) are not reported for the role: they
+	// change as the other models give or keep their spare, and this cause
+	// does not. Needs node information.
+	ScalingBlockedNoNodeFits = "no-node-fits"
 	// ScalingBlockedReleaseTimeout indicates the role's last release was
 	// aborted, and it is backing off before it is asked to give again.
 	ScalingBlockedReleaseTimeout = "release-timeout"

@@ -119,6 +119,7 @@ func buildComposite(
 	result.VariantCapacities = compositeVCs
 	result.RoleDemand = maps.Clone(sat.Result.RoleDemand)
 	result.HeldRoleDemand = maps.Clone(sat.Result.HeldRoleDemand)
+	result.HotRankDemand = maps.Clone(sat.Result.HotRankDemand)
 	result.RoleStartSeconds = maps.Clone(sat.Result.RoleStartSeconds)
 	result.VariantBusiestQueueLoad = maps.Clone(sat.Result.VariantBusiestQueueLoad)
 	roles := rolesPresent(sat.Result.VariantCapacities)
@@ -369,6 +370,7 @@ func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []va
 
 	target := chosen.demand
 	delete(result.HeldRoleDemand, role)
+	delete(result.HotRankDemand, role)
 	if result.RoleDemand == nil {
 		result.TotalDemand = target
 	} else {
