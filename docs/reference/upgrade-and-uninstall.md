@@ -17,15 +17,18 @@ production on it.
 
 Pin a release tag or a digest, and deploy with the manifests from the **same**
 release. An image older than the manifests crash-loops on flags it does not
-know. Before the first release, pin a digest.
+know. Releases are listed on the
+[Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
+the first is `v0.10.0-rc1`. A checked-out release deploys its own tag, so
+`IMG_TAG` below only makes that explicit.
 
 ```bash
-git checkout v0.9.0
-make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.9.0
+git checkout v0.10.0-rc1
+make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.0-rc1
 # or a digest
 make deploy-wva NAMESPACE=<namespace> IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
-NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.9.0
+NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.0-rc1
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
