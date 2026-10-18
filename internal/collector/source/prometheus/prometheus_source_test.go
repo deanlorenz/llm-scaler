@@ -45,7 +45,7 @@ func (m *mockPrometheusAPI) DeleteSeries(ctx context.Context, matches []string, 
 func (m *mockPrometheusAPI) Flags(ctx context.Context) (v1.FlagsResult, error) {
 	return v1.FlagsResult{}, nil
 }
-func (m *mockPrometheusAPI) LabelNames(ctx context.Context, matches []string, startTime, endTime time.Time, opts ...v1.Option) ([]string, v1.Warnings, error) {
+func (m *mockPrometheusAPI) LabelNames(ctx context.Context, matches []string, startTime, endTime time.Time, opts ...v1.Option) (model.LabelNames, v1.Warnings, error) {
 	return nil, nil, nil
 }
 func (m *mockPrometheusAPI) LabelValues(ctx context.Context, label string, matches []string, startTime, endTime time.Time, opts ...v1.Option) (model.LabelValues, v1.Warnings, error) {
@@ -60,7 +60,7 @@ func (m *mockPrometheusAPI) QueryExemplars(ctx context.Context, query string, st
 func (m *mockPrometheusAPI) QueryRange(ctx context.Context, query string, r v1.Range, opts ...v1.Option) (model.Value, v1.Warnings, error) {
 	return nil, nil, nil
 }
-func (m *mockPrometheusAPI) Rules(ctx context.Context) (v1.RulesResult, error) {
+func (m *mockPrometheusAPI) Rules(ctx context.Context, matches []string) (v1.RulesResult, error) {
 	return v1.RulesResult{}, nil
 }
 func (m *mockPrometheusAPI) Runtimeinfo(ctx context.Context) (v1.RuntimeinfoResult, error) {
@@ -83,6 +83,12 @@ func (m *mockPrometheusAPI) TSDB(ctx context.Context, opts ...v1.Option) (v1.TSD
 }
 func (m *mockPrometheusAPI) WalReplay(ctx context.Context) (v1.WalReplayStatus, error) {
 	return v1.WalReplayStatus{}, nil
+}
+func (m *mockPrometheusAPI) TSDBBlocks(ctx context.Context) (v1.TSDBBlocksResult, error) {
+	return v1.TSDBBlocksResult{}, nil
+}
+func (m *mockPrometheusAPI) FormatQuery(ctx context.Context, query string) (string, error) {
+	return query, nil
 }
 
 var _ = Describe("PrometheusSource", func() {

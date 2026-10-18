@@ -48,7 +48,7 @@ var _ = Describe("InformerWorkloads after the cluster-wide grant is revoked", fu
 		Expect(err).NotTo(HaveOccurred())
 		inf, err := fc.FakeInformerFor(ctx, idxObj)
 		Expect(err).NotTo(HaveOccurred())
-		inf.Synced = true
+		inf.Synced()
 		got, err := src.Workloads(ctx, "", "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(HaveLen(1))

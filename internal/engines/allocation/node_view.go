@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -510,8 +511,13 @@ func eligibleNode(n *nodeSlot, acc string, tolerations []corev1.Toleration, anyT
 	if anyTaint {
 		return true
 	}
+	// The numeric Lt/Gt toleration operators stay off, as before k8s.io/api
+	// v0.36 made them a parameter: such a toleration tolerates nothing here.
+	// With them off the logger is never used.
 	for i := range n.taints {
-		if !slices.ContainsFunc(tolerations, func(t corev1.Toleration) bool { return t.ToleratesTaint(&n.taints[i]) }) {
+		if !slices.ContainsFunc(tolerations, func(t corev1.Toleration) bool {
+			return t.ToleratesTaint(logr.Discard(), &n.taints[i], false)
+		}) {
 			return false
 		}
 	}

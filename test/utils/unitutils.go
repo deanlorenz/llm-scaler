@@ -302,7 +302,7 @@ func (m *MockPromAPI) Flags(ctx context.Context) (promv1.FlagsResult, error) {
 	return promv1.FlagsResult{}, nil
 }
 
-func (m *MockPromAPI) LabelNames(ctx context.Context, matches []string, startTime, endTime time.Time, opts ...promv1.Option) ([]string, promv1.Warnings, error) {
+func (m *MockPromAPI) LabelNames(ctx context.Context, matches []string, startTime, endTime time.Time, opts ...promv1.Option) (model.LabelNames, promv1.Warnings, error) {
 	return nil, nil, nil
 }
 
@@ -326,8 +326,18 @@ func (m *MockPromAPI) TSDB(ctx context.Context, opts ...promv1.Option) (promv1.T
 	return promv1.TSDBResult{}, nil
 }
 
+// TSDBBlocks returns an empty result.
+func (m *MockPromAPI) TSDBBlocks(ctx context.Context) (promv1.TSDBBlocksResult, error) {
+	return promv1.TSDBBlocksResult{}, nil
+}
+
 func (m *MockPromAPI) WalReplay(ctx context.Context) (promv1.WalReplayStatus, error) {
 	return promv1.WalReplayStatus{}, nil
+}
+
+// FormatQuery returns the query unchanged.
+func (m *MockPromAPI) FormatQuery(ctx context.Context, query string) (string, error) {
+	return query, nil
 }
 
 func (m *MockPromAPI) Targets(ctx context.Context) (promv1.TargetsResult, error) {
@@ -354,7 +364,7 @@ func (m *MockPromAPI) Snapshot(ctx context.Context, skipHead bool) (promv1.Snaps
 	return promv1.SnapshotResult{}, nil
 }
 
-func (m *MockPromAPI) Rules(ctx context.Context) (promv1.RulesResult, error) {
+func (m *MockPromAPI) Rules(ctx context.Context, matches []string) (promv1.RulesResult, error) {
 	return promv1.RulesResult{}, nil
 }
 

@@ -110,7 +110,7 @@ var _ = Describe("InformerWorkloads", func() {
 
 		inf, err := fc.FakeInformerFor(ctx, idxObj)
 		Expect(err).NotTo(HaveOccurred())
-		inf.Synced = true
+		inf.Synced()
 		got, err = src.Workloads(ctx, eligNS, p.UID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(HaveLen(1))
