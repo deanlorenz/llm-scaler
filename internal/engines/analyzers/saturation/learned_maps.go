@@ -99,6 +99,7 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("itlLines", scopeOwnRule, a.itlLines),
 		registered("forgotten", scopeOwnRule, a.forgotten),
 		registered("decodeSaturatedAt", scopeShared, a.decodeSaturatedAt),
+		registered("hotRankHeld", scopeShared, a.hotRankHeld),
 		registered("fleetShape", scopeShared, a.fleetShape),
 	}
 }

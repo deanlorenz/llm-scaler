@@ -154,6 +154,15 @@ type AnalyzerResult struct {
 	// as what to keep, reads the lower of the two.
 	HeldRoleDemand map[string]float64
 
+	// HotRankDemand is, for each role (RoleBoth on a model that is not
+	// disaggregated) with a replica whose busiest data-parallel engine rank is
+	// full, the demand the analyzer added to keep that replica's capacity
+	// (nil when none was added). RoleDemand and TotalDemand carry it. It is
+	// not a hold of the role, and a consumer must not read it as one: the
+	// role's other replicas can still be released on their own spare, which a
+	// role in HeldRoleDemand cannot.
+	HotRankDemand map[string]float64
+
 	// RoleStartSeconds is, for each role with a measured variant, how long a
 	// new replica of its slowest measured variant took to become Ready, in
 	// seconds (nil or absent when none is measured). The slowest, not the

@@ -582,6 +582,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"itlLines", history.ITLLines,
 			"accelerators", history.Accelerators,
 			"decodeSaturation", history.DecodeSaturation,
+			"hotRankHolds", history.HotRankHolds,
 			"fleetShapes", history.FleetShapes,
 			"variantStamps", history.VariantStamps,
 			"stashedWindows", history.StashedWindows,

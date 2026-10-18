@@ -100,7 +100,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
-	total, held := c.applyFloorAndHolds(caps, d)
+	total, held, hotRank := c.applyFloorAndHolds(caps, d)
 
 	roleOf := make(map[string]string, len(c.rolesByVariant))
 	for variant, role := range c.rolesByVariant {
@@ -116,6 +116,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		TotalDemand:       total,
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
+		HotRankDemand:     hotRank,
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
 		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
@@ -497,7 +498,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		var derived derivedMu
 		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
-			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
@@ -531,7 +532,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
-				"maxNumSeqs", maxSeqs)
+				// Per engine rank; the replica admits engineRanks times it.
+				"maxNumSeqs", maxSeqs, "engineRanks", rm.Ranks())
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
@@ -658,11 +660,12 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 }
 
 // applyFloorAndHolds raises the demand to what the load requires, and then to
-// what the two holds refuse to release. Every step here only ever increases
+// what the holds refuse to release. Every step here only ever increases
 // it; nothing below lowers a demand the stages above computed. It returns the
-// total, and each held role's demand from before its first hold
-// (AnalyzerResult.HeldRoleDemand).
-func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) (float64, map[string]float64) {
+// total, each held role's demand from before its first hold
+// (AnalyzerResult.HeldRoleDemand), and what the hot-rank hold added per role
+// (AnalyzerResult.HotRankDemand).
+func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) (float64, map[string]float64, map[string]float64) {
 	total := d.total
 	var held map[string]float64
 	hold := func(role string, before float64) {
@@ -765,5 +768,35 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 		}
 	}
 
-	return total, held
+	// A replica with a full engine rank is not released on its mean
+	// (hot_rank_hold.go). It keeps that replica, not the role, so it is
+	// reported apart from the holds (hotRank, not held): a held role releases
+	// nothing, and the other replicas' spare is still theirs to give. Last,
+	// so its cap under the scale-up threshold sees every raise above: run
+	// before the prefill hold, it filled decode's room to the model's
+	// ceiling and the prefill hold's raise then took the model over it.
+	// Prefill is judged only while decode is not saturated, so this never
+	// raises a role the prefill hold set.
+	var hotRank map[string]float64
+	{
+		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
+			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
+		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
+			d.roleDemand, total, scaleUp, scaleDown)
+		if after > total {
+			moved := after - total
+			total = after
+			hotRank = byRole
+			if d.roleDemand == nil {
+				hotRank = map[string]float64{domain.RoleBoth: moved}
+			}
+			c.logger.V(logging.DEFAULT).Info("hot-rank-hold",
+				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
+				"raisedByRole", hotRank, "totalDemandMoved", moved, "hotReplicas", len(hot),
+				"reason", "a replica's busiest engine rank is full: its capacity is kept, and only the other replicas' spare may be released")
+		}
+	}
+
+	return total, held, hotRank
 }
