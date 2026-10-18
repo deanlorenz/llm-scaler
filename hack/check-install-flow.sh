@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=66
+EXPECT_CASES=71
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -832,6 +832,78 @@ else
     fail "a failed helm list must refuse with its error, not install $kps_default" "$(cat "$WORK/kps.out")"
 fi
 KPS_LIST='[]'
+
+# --- REGISTRATIONS AT CLUSTER SCOPE ------------------------------------------
+#
+# A cluster-scoped controller registers workloads in every namespace, never in
+# its own. The preflight counted its own namespace, said "none yet" beside a
+# cluster full of ScaledObjects, and printed plan/apply commands without
+# SCOPE=cluster, which scan only the controller's namespace and find nothing.
+#
+# so_report <scope> echoes what wva_report_scaledobjects logged, against a
+# stub with two WVA ScaledObjects in team-a and team-b and none in wva-system.
+SO_TWO='{"items":[
+ {"metadata":{"namespace":"team-a","name":"a"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"namespace":"team-b","name":"b"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}'
+so_report() {
+    (
+        WVA_SCOPE="$1"
+        kubectl() {
+            case "$*" in
+                "get scaledobject -A -o json") [ -n "${SO_NONE:-}" ] && echo '{"items":[]}' || printf '%s' "$SO_TWO" ;;
+                "get scaledobject -n "*) echo '{"items":[]}' ;;
+                *) return 1 ;;
+            esac
+        }
+        log_info() { printf 'INFO %s\n' "$1"; }
+        log_success() { printf 'OK %s\n' "$1"; }
+        log_warning() { printf 'WARN %s\n' "$1"; }
+        wva_report_scaledobjects
+    ) 2>&1
+}
+out="$(so_report cluster)"
+if printf '%s' "$out" | grep -q '2 workload(s) on the cluster already registered'; then
+    ok "cluster scope: ScaledObjects in other namespaces are counted"
+else
+    fail "cluster scope must count ScaledObjects in every namespace" "$out"
+fi
+out="$(SO_NONE=1 so_report cluster)"
+if printf '%s' "$out" | grep -q 'make scaledobjects-plan SCOPE=cluster ' \
+    && printf '%s' "$out" | grep -q 'make scaledobjects-apply SCOPE=cluster '; then
+    ok "cluster scope: the registration commands carry SCOPE=cluster"
+else
+    fail "cluster scope: the printed plan/apply commands must carry SCOPE=cluster" "$out"
+fi
+out="$(so_report namespace)"
+if printf '%s' "$out" | grep -q 'none in wva-system yet' && ! printf '%s' "$out" | grep -q 'SCOPE=cluster'; then
+    ok "namespace scope: only the controller's namespace is read"
+else
+    fail "namespace scope must read only its own namespace" "$out"
+fi
+
+# The node read, with no physical limiter: the admin phase grants it, so a run
+# that includes that phase must not warn that the controller cannot list nodes.
+node_note() {
+    (
+        WVA_SCOPE=cluster INSTALL_PHASE="$1"
+        can_i_as() { echo no; }
+        log_info() { printf 'INFO %s\n' "$1"; }
+        log_success() { printf 'OK %s\n' "$1"; }
+        log_warning() { printf 'WARN %s\n' "$1"; }
+        log_error() { printf 'ERROR %s\n' "$1"; }
+        wva_check_limiter_node_read "" "system:serviceaccount:wva-system:wva-controller-manager"
+    ) 2>&1
+}
+if ! node_note all | grep -q '^WARN'; then
+    ok "no limiter, INSTALL_PHASE=all: the node read the admin phase grants is not warned about"
+else
+    fail "INSTALL_PHASE=all must not warn about a node read its admin phase grants" "$(node_note all)"
+fi
+if node_note wva | grep -q '^WARN.*cannot list nodes'; then
+    ok "no limiter, INSTALL_PHASE=wva: a missing node read is still warned about"
+else
+    fail "INSTALL_PHASE=wva must still warn about a missing node read" "$(node_note wva)"
+fi
 
 echo ""
 echo "check-install-flow: $PASS passed, $FAIL failed"
