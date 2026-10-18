@@ -1614,7 +1614,7 @@ not readings of the fleet:
 
 ### Default Configuration
 
-Since v0.9.0 the shipped `default` entry selects **V2** (token/capacity-based) via
+The shipped `default` entry selects **V2** (token/capacity-based) via
 the `analyzers:` list:
 
 ```yaml
@@ -1956,7 +1956,7 @@ metadata:
   namespace: <controller-namespace>
 data:
   default: |
-    analyzers:                    # selects V2 (default since v0.9.0)
+    analyzers:                    # selects V2 (the default)
       - name: saturation
         score: 1.0
     kvCacheThreshold: 0.80        # Should match EPP kvCacheUtilThreshold
@@ -2237,7 +2237,7 @@ metadata:
   namespace: <controller-namespace>
 data:
   default: |
-    analyzers:              # selects V2 (default since v0.9.0)
+    analyzers:              # selects V2 (the default)
       - name: saturation
         score: 1.0
     scaleUpThreshold: 0.85
@@ -2537,7 +2537,7 @@ metadata:
   name: wva-scaling-policy-config
   namespace: <controller-namespace>
 data:
-  # Conservative defaults for most workloads (V2 analyzer — the default since v0.9.0)
+  # Conservative defaults for most workloads (V2 analyzer — the default)
   default: |
     analyzers:
       - name: saturation
