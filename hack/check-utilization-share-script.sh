@@ -406,6 +406,34 @@ fresh "$CLUSTER_POLICY"; touch "$STATE/sos.forbidden"; run activate
 vcase "activate: an unreadable ScaledObject list is warned as unknown, not taken for none" \
     eval '[ $RC -eq 0 ] && says "other namespaces sharing this budget are unknown"'
 
+# --grant-shared: the same namespaces, granted instead of named. A cluster-wide
+# install shares one budget across every model namespace, and running activate
+# once per namespace was the step a reader missed. Only this budget's
+# namespaces: team-c is already granted, team-d and team-e call a pool or
+# another controller.
+fresh "$CLUSTER_POLICY"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-d wva-external-scaler.team-a.svc.cluster.local:9090 pool' \
+    'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
+echo yes > "$STATE/cani.team-c"
+run activate --grant-shared
+vcase "activate --grant-shared: grants in each other namespace of the budget, and only those" \
+    eval '[ $RC -eq 0 ] && grep -q "namespace: team-a" "$STATE/applied" && grep -q "namespace: team-b" "$STATE/applied" && ! grep -q "namespace: team-c" "$STATE/applied" && ! grep -q "namespace: team-d" "$STATE/applied" && ! grep -q "namespace: team-e" "$STATE/applied" && says "may patch pods in team-b" && ! says "Run: make utilization-share-activate"'
+fresh "$CLUSTER_POLICY"; touch "$STATE/sos.forbidden"; run activate --grant-shared
+vcase "activate --grant-shared: an unreadable ScaledObject list stops before going active" \
+    eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "cannot tell which namespaces share this budget"'
+fresh "$TUNED_POLICY"
+printf '%s\n' 'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate --grant-shared
+vcase "activate --grant-shared: quotas per namespace grant nowhere else" \
+    eval '[ $RC -eq 0 ] && ! grep -q "namespace: team-b" "$STATE/applied"'
+fresh "$TUNED_POLICY"; run shadow --grant-shared
+vcase "shadow --grant-shared: refused, it is an activate option" \
+    eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "activate option"'
+
 # Only the namespaces of THIS budget. Quotas per namespace share nothing, so
 # team-b, scaled by the same controller, is not this budget's concern.
 fresh "$TUNED_POLICY"
@@ -658,7 +686,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=112
+CASES_EXPECTED=116
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

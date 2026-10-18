@@ -26,6 +26,11 @@
 #                               a namespace-scoped controller, which ignores it
 #   --restart                   restart the controller when it logs no reload of
 #                               the policy, then require the reload after start
+#   --grant-shared              (activate) also grant the controller patch on
+#                               pods in every other namespace that shares this
+#                               budget, instead of naming them. For a
+#                               cluster-scoped controller whose models span
+#                               namespaces; needs create on Roles in each
 #
 # How a write is confirmed: a controller that publishes the ConfigMap
 # wva-controller-status (data contract: internal/controllerstatus) records the
@@ -672,6 +677,8 @@ warn_ungranted_namespaces() {
     only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
+        [ "$GRANT_SHARED" -eq 0 ] \
+            || die "could not list ScaledObjects cluster-wide, so --grant-shared cannot tell which namespaces share this budget (${list:0:300}). Run activate in each of them instead"
         warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
         return 0
     fi
@@ -684,6 +691,12 @@ warn_ungranted_namespaces() {
             continue
         fi
         if [ -n "$excluded" ] && ! grep -qxF -- "$ns" <<<"$excluded"; then
+            continue
+        fi
+        if [ "$GRANT_SHARED" -eq 1 ] && [ "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" != yes ]; then
+            wva_ensure_pod_writes "$ns" "$CONTROLLER_NS" \
+                || die "could not grant the controller patch on pods in $ns (role/wva-pod-writer): ${WVA_POD_WRITER_ERR}. This needs create on roles and rolebindings there; or an admin runs: $(wva_pod_writer_admin_hint "$ns" "$CONTROLLER_NS")"
+            ok "the controller in $CONTROLLER_NS may patch pods in $ns (role/wva-pod-writer), which shares this budget"
             continue
         fi
         case "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" in
@@ -787,14 +800,15 @@ verb_off() {
     info "today's optimizer runs again; the limiter is untouched"
 }
 
-usage() { sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 main() {
     local verb="${1:-}"
     [ $# -gt 0 ] && shift
-    NS="" CONTROLLER_NS="" POLICY_NS="" PHYSICAL=0 RESTART=0
+    NS="" CONTROLLER_NS="" POLICY_NS="" PHYSICAL=0 RESTART=0 GRANT_SHARED=0
     while [ $# -gt 0 ]; do
         case "$1" in
+            --grant-shared) GRANT_SHARED=1; shift ;;
             -n|--namespace) NS="${2:-}"; shift 2 ;;
             --controller-namespace) CONTROLLER_NS="${2:-}"; shift 2 ;;
             --policy-namespace) POLICY_NS="${2:-}"; shift 2 ;;
@@ -806,6 +820,7 @@ main() {
     done
     [ -n "$NS" ] || { fail "set the models' namespace with -n"; usage; }
     CONTROLLER_NS="${CONTROLLER_NS:-$NS}"
+    [ "$GRANT_SHARED" -eq 0 ] || [ "$verb" = activate ] || die "--grant-shared is an activate option"
     case "$verb" in
         check|shadow|activate|status|off) resolve_policy_ns ;;
         *) usage ;;

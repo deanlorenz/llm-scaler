@@ -540,9 +540,9 @@ utilization-share-shadow: ## Utilization share: compute and report, move nothing
 	@bash deploy/utilization-share.sh shadow $(us_args) $(if $(filter 1 true,$(PHYSICAL_GROUPS)),--physical-groups,)
 
 .PHONY: utilization-share-activate
-utilization-share-activate: ## Utilization share: act on what shadow reported. NAMESPACE=<ns> [RESTART=1]
+utilization-share-activate: ## Utilization share: act on what shadow reported. NAMESPACE=<ns> [GRANT_SHARED=true] [RESTART=1]
 	$(us_namespace_check)
-	@bash deploy/utilization-share.sh activate $(us_args)
+	@bash deploy/utilization-share.sh activate $(us_args) $(if $(filter 1 true,$(GRANT_SHARED)),--grant-shared,)
 
 .PHONY: utilization-share-status
 utilization-share-status: ## Utilization share: mode, recent decisions, transfers, warnings, marked pods. NAMESPACE=<ns>
