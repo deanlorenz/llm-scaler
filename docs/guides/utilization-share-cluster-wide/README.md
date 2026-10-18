@@ -162,7 +162,7 @@ receiver holds the GPUs.
 ```bash
 # The optimizer's decisions, from the controller's log.
 kubectl logs -n ${CONTROLLER_NAMESPACE} deploy/wva-controller-manager --tail=-1 \
-  | grep -E 'Utilization share: (would rebalance|rebalancing|transfer (started|ended|cancelled))'
+  | grep -E 'Utilization share: (would rebalance|rebalancing|transfer (started|ended|cancelled)|released, raising the receiver)'
 ```
 <!-- guide:verify.log end -->
 
@@ -226,6 +226,14 @@ cluster](../install-cluster-wide/#cleanup).
 - **Without `GRANT_SHARED=true`**, activate grants only `NAMESPACE` and prints
   the command to run in each other namespace. A namespace without the grant
   cannot give GPUs.
+- **Your own Prometheus.** The install uses it, and warns that no Prometheus
+  may scrape the controller's `/metrics`. Until one may, the `wva_*` series
+  are only on the controller's endpoint (the metrics block above). To grant
+  it: `PROMETHEUS_SA=<namespace>/<serviceaccount> make setup-prereqs
+  SCOPE=cluster`.
+- **Registering resizes.** Once a model is registered, a model with more
+  replicas than its load needs drops to what it needs, after its scale-down
+  window. Nothing restarts; a replica that goes drains first.
 - **Re-running `make deploy-wva`** drops the optimizer block. Run shadow and
   activate again after an upgrade.
 
