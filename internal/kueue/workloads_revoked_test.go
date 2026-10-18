@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -38,7 +37,7 @@ var _ = Describe("InformerWorkloads after the cluster-wide grant is revoked", fu
 		idxObj.SetGroupVersionKind(w.GroupVersionKind())
 		reader := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(eligibilityMapper()).
 			WithObjects(w.DeepCopy()).WithIndex(idxObj, WorkloadOwnerUIDField, workloadOwnerUIDs).Build()
-		fc := &fakeWorkloadCache{FakeInformers: &informertest.FakeInformers{Scheme: runtime.NewScheme()}, reader: reader}
+		fc := &fakeWorkloadCache{FakeInformers: unsyncedInformers(idxObj.GroupVersionKind()), reader: reader}
 		src := NewInformerWorkloads(fc, api)
 		clock := time.Unix(50000, 0)
 		src.now = func() time.Time { return clock }

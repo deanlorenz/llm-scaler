@@ -662,8 +662,10 @@ func main() {
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		Datastore: ds,
-		Recorder:  mgr.GetEventRecorderFor("workload-variant-autoscaler-configmap-reconciler"),
-		Status:    controllerStatus,
+		// The core/v1 events recorder: its replacement, GetEventRecorder, writes
+		// events.k8s.io Events, which the manager's Role does not grant.
+		Recorder: mgr.GetEventRecorderFor("workload-variant-autoscaler-configmap-reconciler"), //nolint:staticcheck // SA1019, see above
+		Status:   controllerStatus,
 	}
 
 	ctx := ctrl.LoggerInto(signalCtx, setupLog)
@@ -851,7 +853,7 @@ func main() {
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			mgr.GetScheme(),
-			mgr.GetEventRecorderFor("workload-variant-autoscaler-saturation-engine"),
+			mgr.GetEventRecorderFor("workload-variant-autoscaler-saturation-engine"), //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 			sourceRegistry,
 			cfg, // Pass unified Config to engine
 			gpuLimiter,
@@ -874,7 +876,7 @@ func main() {
 			engine.Preemptions = preemptions
 		}
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
-		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		// The registry is also what tells the datastore which namespaces to load
 		// configuration for. That used to come from a ScaledObject reconciler, whose
 		// watch was a cluster-wide informer; the registry knows the same thing for a
@@ -910,7 +912,7 @@ func main() {
 
 	// Register scale from zero engine loop with the manager. Only start when leader.
 	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
-		engine, err := scalefromzero.NewEngine(mgr.GetClient(), mgr.GetEventRecorderFor("workload-variant-autoscaler-scalezero-engine"), ds, cfg)
+		engine, err := scalefromzero.NewEngine(mgr.GetClient(), mgr.GetEventRecorderFor("workload-variant-autoscaler-scalezero-engine"), ds, cfg) //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		if err != nil {
 			return nil, err
 		}
@@ -921,7 +923,7 @@ func main() {
 		// other has just read.
 		engine.Variants = registry.Default
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
-		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		// Let the engine bring the usage picture up to date immediately before it
 		// places a wake. The periodic observation alone can be a full interval old
 		// at the moment it is consulted, and a workload that has just started

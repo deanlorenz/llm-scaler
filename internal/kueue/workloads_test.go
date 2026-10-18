@@ -12,10 +12,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllertest"
 )
 
 // indexedSource is an APIWorkloads that claims an index, recording the owners
@@ -80,6 +82,16 @@ func (f *fakeWorkloadCache) List(ctx context.Context, list client.ObjectList, op
 	return f.reader.List(ctx, list, opts...)
 }
 
+// unsyncedInformers returns fake informers whose informer for gvk starts
+// unsynced, until the test calls its Synced. controller-runtime's own fake
+// creates every informer already synced.
+func unsyncedInformers(gvk schema.GroupVersionKind) *informertest.FakeInformers {
+	return &informertest.FakeInformers{
+		Scheme:         runtime.NewScheme(),
+		InformersByGVK: map[schema.GroupVersionKind]toolscache.SharedIndexInformer{gvk: controllertest.NewFakeInformer()},
+	}
+}
+
 func (f *fakeWorkloadCache) IndexField(_ context.Context, _ client.Object, field string, _ client.IndexerFunc) error {
 	f.indexed = field == WorkloadOwnerUIDField
 	return nil
@@ -98,7 +110,7 @@ var _ = Describe("InformerWorkloads", func() {
 		idxObj.SetGroupVersionKind(w.GroupVersionKind())
 		reader := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(eligibilityMapper()).
 			WithObjects(w.DeepCopy()).WithIndex(idxObj, WorkloadOwnerUIDField, workloadOwnerUIDs).Build()
-		fc := &fakeWorkloadCache{FakeInformers: &informertest.FakeInformers{Scheme: runtime.NewScheme()}, reader: reader}
+		fc := &fakeWorkloadCache{FakeInformers: unsyncedInformers(idxObj.GroupVersionKind()), reader: reader}
 		src := NewInformerWorkloads(fc, api)
 		ctx := context.Background()
 
