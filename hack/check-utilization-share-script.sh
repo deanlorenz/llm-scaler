@@ -268,6 +268,9 @@ case "$args" in
   *" get events "*)
     [ -e "$S/events.forbidden" ] && { echo 'Error from server (Forbidden): events is forbidden' >&2; exit 1; }
     case "$args" in
+      # events.unresolved.other is an event in ANOTHER namespace: only an
+      # all-namespaces read (-A) returns it.
+      *" -A "*AcceleratorNotResolved*) cat "$S/events.unresolved" "$S/events.unresolved.other" 2>/dev/null ;;
       *AcceleratorNotResolved*) cat "$S/events.unresolved" 2>/dev/null ;;
       *type=Warning*) cat "$S/events.warning" 2>/dev/null ;;
     esac
@@ -555,6 +558,17 @@ vcase "check: an unresolved accelerator fails" eval '[ $RC -ne 0 ] && says "Acce
 fresh "$QUOTA_POLICY"; touch "$STATE/events.forbidden"; run check
 vcase "check: unreadable events fail, not pass" eval '[ $RC -ne 0 ] && says "could not read events"'
 
+# A cluster-scoped controller plans every namespace into one group, so an
+# unresolved accelerator in another namespace fails the check too. The stub's
+# default controller is cluster-scoped. A namespace-scoped one reads NS only.
+fresh "$QUOTA_POLICY"; echo 'team-b event/y' > "$STATE/events.unresolved.other"; run check
+vcase "check: cluster-scoped, an unresolved accelerator in another namespace fails" \
+    eval '[ $RC -ne 0 ] && says "AcceleratorNotResolved event(s) in the namespaces this cluster-scoped controller manages"'
+fresh "$QUOTA_POLICY"; echo 'team-b event/y' > "$STATE/events.unresolved.other"
+printf '%s' "$NS_SCOPED_DEPLOY" > "$STATE/deploy.json"; run check
+vcase "check: namespace-scoped, another namespace's event is not read" \
+    eval '[ $RC -eq 0 ] && says "no AcceleratorNotResolved"'
+
 fresh "$QUOTA_POLICY"; touch "$STATE/logs.forbidden"; run check
 vcase "check: an unreadable log fails, not reads as empty" eval '[ $RC -ne 0 ] && says "could not read the log"'
 
@@ -686,7 +700,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=116
+CASES_EXPECTED=118
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

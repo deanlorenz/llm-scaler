@@ -601,10 +601,20 @@ verb_check() {
     else
         info "accelerators the controller resolves: $(printf '%s' "$accels" | tr '\n' ' ')"
     fi
-    kread events get events -n "$NS" --field-selector reason=AcceleratorNotResolved -o name \
-        || die "could not read events in $NS: $events"
+    # A cluster-scoped controller plans models of every namespace into one
+    # group, so an unresolved accelerator in another namespace matters as much
+    # as one here: that model gets no budget and the group plans around it.
+    # Read every namespace for it; NS alone passed a cluster where only the
+    # other namespace was broken.
+    local where="-n $NS" in_where="in $NS"
+    if [ "$(controller_managed_ns)" = "*" ]; then
+        where="-A" in_where="in the namespaces this cluster-scoped controller manages"
+    fi
+    # shellcheck disable=SC2086 # $where is one or two words by construction
+    kread events get events $where --field-selector reason=AcceleratorNotResolved -o name \
+        || die "could not read events $in_where: $events"
     if [ -n "$events" ]; then
-        fail "$(printf '%s\n' "$events" | grep -c .) AcceleratorNotResolved event(s) in $NS: those variants get no budget"; rc=1
+        fail "$(printf '%s\n' "$events" | grep -c .) AcceleratorNotResolved event(s) $in_where: those variants get no budget. List them: kubectl get events $where --field-selector reason=AcceleratorNotResolved"; rc=1
     else
         ok "no AcceleratorNotResolved events"
     fi
