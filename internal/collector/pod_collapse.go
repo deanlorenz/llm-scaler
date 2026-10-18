@@ -184,7 +184,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	}
 	// The hit rate is a fraction of the prompt tokens looked up, so each
 	// instance weighs by its prompt-token rate, as the per-pod query weighs a
-	// rank by its prefix_cache_queries. Falls back to the request rate.
+	// rank by its prefix_cache_queries_total. Falls back to the request rate.
 	pod.PrefixCacheHitRate = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate },
 		func(m domain.ReplicaMetrics) float64 { return m.RequestRate * m.AvgInputTokens })
 
