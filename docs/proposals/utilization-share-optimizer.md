@@ -1285,14 +1285,19 @@ When the group acts:
     version blocked on the first two, so one tenant could pin everyone's spare;
   - **not for a receiver no node can hold**: while every role below its
     whole-replica target that could take the GPUs is one the planner found
-    unfundable with the nodes and its pods known -- no node-aware set, donor
-    pods and free GPUs on one node, opens a hole for it -- nothing is returned
-    (counted `return-receiver-unplaceable`). A return frees no more than such
-    a set would, so the GPUs would sit unassigned while the donors lose their
-    headroom; in the whole-node kind run, small models returned 8 replicas
-    for a large model no node could hold. Judged every cycle, and never
-    without node information, where the idle fill places blind and a return
-    may still serve the receiver;
+    unfundable (no compatible donor), and no node holds its replica in the
+    node's free GPUs plus the pods there of the roles that would return,
+    nothing is returned (counted `return-receiver-unplaceable`). The GPUs
+    would sit unassigned while the donors lose their headroom; in the
+    whole-node kind run, small models returned 8 replicas for a large model
+    no node could hold. Unfundable alone is not enough: a donor set pays the
+    receiver's whole replica from donor replicas, never from the idle quota,
+    so a large model that lent a node to a small one and then bursts is
+    unfundable while the small model holds fewer GPUs than one large replica
+    -- and gets the node back only by the small model returning its pods
+    there and the idle fill raising it. Judged every cycle, and never without
+    node information or the donors' pods, where the idle fill places blind
+    and a return may still serve the receiver;
   - the role is not held from giving (`GivingHeld`: backing off after an
     aborted release, all it can give already in flight, or it received within
     the reversal hold). The band no longer gates a return: the idle-floor rule
