@@ -1041,6 +1041,11 @@ accel_case 'H20=8'  warn   "H20 is a substring of NVIDIA-H200 but not a token of
 accel_case 'H100=8' silent "H100 is a whole token of NVIDIA-H100-80GB-HBM3"
 accel_case 'A10=8'  warn   "A10 is a substring of NVIDIA-A100-SXM4-40GB, a different real GPU"
 accel_case 'A100=8' silent "A100 is advertised, under the GKE label key rather than the GFD one"
+# The whole label is the name the controller logs where it cannot shorten one
+# (kind's NVIDIA-A100-PCIE-80GB). It warned, then listed that same name as
+# advertised.
+accel_case 'NVIDIA-H100-80GB-HBM3=8' silent "the whole product label is advertised"
+accel_case 'NVIDIA-H100-80GB=8' warn "a prefix of a product label is no product"
 
 # ---------------------------------------------------------------------------
 # enable_physical_limiter, EXECUTED end to end against the stub.
@@ -1406,7 +1411,7 @@ got="$(
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=79
+CASES_EXPECTED=81
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
