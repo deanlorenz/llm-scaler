@@ -77,6 +77,8 @@ that per model.
   `--model`. Fix it in the plan, or fix the flag.
 - **`APPLY` reads `adopt`.** The model already has a ScaledObject. Adopting it
   points that one at the scaling manager.
+- **`(no fallback: KEDA version unknown)`** before KEDA is installed. Nothing
+  to fix: the apply in step 2 reads KEDA again and adds the fallback.
 
 **`workload-patch`** names each model server that is costly to scale, and
 writes `wva-workload-patch.yaml` with the fix. On a vLLM server with a drain
