@@ -96,9 +96,10 @@ Optional.
 
 | Parameter | Default | Example |
 | --- | --- | --- |
-| `CLUSTER_GPU_TYPE` | `nvidia-mix` | `nvidia-a100` |
+| `CLUSTER_NAME` | `kind-wva-gpu-cluster` | `my-test` |
+| `CLUSTER_GPU_TYPE` | `nvidia-mix` | `nvidia` |
 | `CLUSTER_NODES` | `3` | `1` |
-| `CLUSTER_GPUS` | `4` | `8` |
+| `CLUSTER_GPUS` | `16` | `4` |
 
 <!-- guide:env.static.cluster start -->
 ```bash

@@ -1221,6 +1221,19 @@ wva_check_limiter_node_read() {
             log_warning "  Remedy: have a cluster admin run '$(wva_make_cmd setup-prereqs)', which grants node read; or drop gpu-inventory from the policy (re-run with WVA_LIMITER naming the limiters to keep)."
             return 0
         fi
+        # A run that includes the admin phase applies the role that grants the
+        # node read (the manager ClusterRole at cluster scope, node-reader at
+        # namespace scope), so asking first refuses the very apply that fixes
+        # it -- the rule wva_check_kueue_namespace_read follows. On a fresh
+        # cluster the ServiceAccount does not even exist yet: `make deploy-wva
+        # SCOPE=cluster WVA_LIMITER=gpu-inventory` was refused on every new
+        # cluster. Only the controller-only phase (INSTALL_PHASE=wva) cannot
+        # grant it; the post-install check and wva_node_access_denied report a
+        # grant that did not take.
+        if [ "$node_read" != yes ] && [ "${INSTALL_PHASE:-all}" != "wva" ]; then
+            log_info "The gpu-inventory limiter needs the controller to list nodes; this run's admin phase grants it."
+            return 0
+        fi
         case "$node_read" in
             yes)
                 log_success "The controller can list nodes, which the gpu-inventory limiter requires"
@@ -1249,6 +1262,13 @@ physical limiter: drop gpu-inventory from WVA_LIMITER."
     else
         case "$node_read" in
             no)
+                # The admin phase grants it, as above: before an install the
+                # ServiceAccount does not exist, and this warned on every fresh
+                # cluster about a read the same run was about to grant.
+                if [ "${INSTALL_PHASE:-all}" != "wva" ]; then
+                    log_info "The controller will list nodes to resolve accelerators; this run's admin phase grants it."
+                    return 0
+                fi
                 log_warning "$sa cannot list nodes. Without a physical limiter this is survivable but degraded: accelerators stay unresolved, so metrics lose the accelerator label and the capacity model cannot reuse learned capacity across variants."
                 log_warning "  It stops being fine the moment someone sets a gpu-inventory limiter: every variant would then get no GPU budget and stop scaling up. Watch wva_node_access_denied."
                 ;;
@@ -1279,19 +1299,28 @@ physical limiter: drop gpu-inventory from WVA_LIMITER."
 # mid-flow state between `deploy-wva` and `scaledobjects-apply`, or a forgotten
 # registration step -- and NOTHING IN CLUSTER STATE DISTINGUISHES THEM.
 wva_report_scaledobjects() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" count
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where sc=""
+    # A cluster-scoped controller registers workloads in every namespace, never
+    # in its own. Counting its own namespace reported "none yet" beside a
+    # cluster full of registrations, and the commands it printed, without
+    # SCOPE=cluster, scan only the controller's namespace and find nothing.
+    where="-n $ns" in_where="in $ns"
+    if [ "$(wva_install_scope)" = cluster ]; then
+        where="-A" in_where="on the cluster" sc=" SCOPE=cluster"
+    fi
 
     # `|| count=0` is the "never fails" contract above, not decoration: under the
     # caller's `set -e -o pipefail`, a non-zero exit anywhere in this pipe -- e.g.
     # the ScaledObject CRD not installed yet, an entirely ordinary state for a
     # preflight to run in -- would otherwise abort the whole script right here,
     # in the one function on this path that promises it can't.
-    count=$(kubectl get scaledobject -n "$ns" -o json 2>/dev/null | jq -r '
+    # shellcheck disable=SC2086 # $where is one or two words by construction
+    count=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
         [ .items[]?
           | select([ .spec.triggers[]?.metadata.scalerAddress // ""
                      | select(startswith("wva-external-scaler.")) ] | length > 0) ] | length' 2>/dev/null) || count=0
     if [ "${count:-0}" -gt 0 ]; then
-        log_success "  ScaledObjects: $count workload(s) in $ns already registered with WVA."
+        log_success "  ScaledObjects: $count workload(s) $in_where already registered with WVA."
         log_info "    The plan will offer 'adopt' for each, so you choose what happens to them."
 
         # EXISTING is not the same as WORKING, and the difference is silent.
@@ -1313,12 +1342,13 @@ wva_report_scaledobjects() {
         # lastTransitionTime unset. An annotation touch did not clear it; only
         # deleting and recreating the ScaledObject did.
         local notready
-        notready=$(kubectl get scaledobject -n "$ns" -o json 2>/dev/null | jq -r '
+        # shellcheck disable=SC2086
+        notready=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
             .items[]?
             | select([ .spec.triggers[]?.metadata.scalerAddress // ""
                        | select(startswith("wva-external-scaler.")) ] | length > 0)
             | select([ .status.conditions[]? | select(.type == "Ready" and .status == "True") ] | length == 0)
-            | "      " + .metadata.name + ": " +
+            | "      " + .metadata.namespace + "/" + .metadata.name + ": " +
               ([ .status.conditions[]? | select(.type == "Ready") | .message // .reason ][0] // "no Ready condition yet")
         ' 2>/dev/null) || notready=""
         if [ -n "$notready" ]; then
@@ -1330,7 +1360,7 @@ wva_report_scaledobjects() {
         return 0
     fi
     # Deliberately log_info, not a warning: this is the expected state here.
-    log_info "  ScaledObjects: none in $ns yet — registration is the next step, and nothing scales until it runs:"
-    log_info "      make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
-    log_info "      make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
+    log_info "  ScaledObjects: none $in_where yet — registration is the next step, and nothing scales until it runs:"
+    log_info "      make scaledobjects-plan${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
+    log_info "      make scaledobjects-apply${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
 }

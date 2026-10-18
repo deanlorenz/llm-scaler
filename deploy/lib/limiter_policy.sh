@@ -349,8 +349,19 @@ warn_unadvertised_accelerators() {
             # each token keeps every correct name quiet while a typo
             # matches nothing. -x anchors it; -F keeps a name
             # containing a regex character from being one.
-            printf '%s\n' "$node_products" | tr '\055_.' '\n\n\n' \
-                | grep -qixF -- "$q_name" || unmatched="$unmatched $q_name"
+            #
+            # The whole product name counts too: on a cluster whose
+            # product WVA cannot shorten (kind's NVIDIA-A100-PCIE-80GB)
+            # the controller logs the full label, and this warned on
+            # exactly the key it then told the reader to use.
+            #
+            # grep reads all of its input (no -q): the install runs under
+            # pipefail, and a grep that exits on the first match leaves the
+            # printf behind it writing to a closed pipe. Its SIGPIPE then
+            # failed the pipeline, and a name that matched warned anyway.
+            { printf '%s\n' "$node_products"
+              printf '%s\n' "$node_products" | tr '\055_.' '\n\n\n'; } \
+                | grep -ixF -- "$q_name" >/dev/null || unmatched="$unmatched $q_name"
         done
         [ "$reset_q_glob" = 1 ] && set +f
     fi
@@ -359,7 +370,7 @@ warn_unadvertised_accelerators() {
         log_warning "  A budget keyed on a name nothing matches is not an error anywhere -- the entry is valid, the controller accepts it, and every accelerator you DO have is then unlisted, which the quota limiter reads as a budget of ZERO. Every managed workload stops scaling up."
         log_warning "  This cluster advertises:"
         printf '%s\n' "$node_products" | sed 's/^/      /' >&2
-        log_warning "  WVA resolves a SHORT name from these; check what it logged: kubectl logs -n ${WVA_NS} deploy/wva-controller-manager | grep accelerator"
+        log_warning "  WVA resolves a SHORT name from these; check what it logged: kubectl logs -n ${WVA_NS:-<controller namespace>} deploy/wva-controller-manager | grep accelerator"
     fi
 }
 

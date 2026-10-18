@@ -19,6 +19,11 @@ IMG ?= $(IMAGE_TAG_BASE)/llm-scaling-manager:$(IMG_TAG)
 # not the controller's. Pin a digest in the manifest; this tag is for building.
 WARMPOOL_PROXY_IMG ?= $(IMAGE_TAG_BASE)/llm-scaling-manager/warmpool-proxy:$(IMG_TAG)
 KIND_ARGS ?= -t mix -n 3 -g 2   # Default: 3 nodes, 2 GPUs per node, mixed vendors
+# The kind cluster create-kind-cluster and destroy-kind-cluster act on: the
+# variable deploy/kind-emulator/install.sh already reads. Both targets ignored
+# it, so `make destroy-kind-cluster CLUSTER_NAME=mine` deleted the default
+# cluster instead.
+CLUSTER_NAME ?= kind-wva-gpu-cluster
 CLUSTER_GPU_TYPE ?= nvidia-mix
 CLUSTER_NODES ?= 3
 # 16 because the e2e's simulator pods now REQUEST a GPU each
@@ -429,12 +434,12 @@ test: manifests generate fmt vet setup-envtest helm check-import-direction check
 .PHONY: create-kind-cluster
 create-kind-cluster:
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) && \
-		deploy/kind-emulator/setup.sh -t $(CLUSTER_GPU_TYPE) -n $(CLUSTER_NODES) -g $(CLUSTER_GPUS)
+		deploy/kind-emulator/setup.sh -c $(CLUSTER_NAME) -t $(CLUSTER_GPU_TYPE) -n $(CLUSTER_NODES) -g $(CLUSTER_GPUS)
 
 # Destroys the Kind cluster created by `create-kind-cluster`
 .PHONY: destroy-kind-cluster
 destroy-kind-cluster:
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) && \
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_NAME=$(CLUSTER_NAME) && \
         deploy/kind-emulator/teardown.sh
 
 
@@ -535,9 +540,9 @@ utilization-share-shadow: ## Utilization share: compute and report, move nothing
 	@bash deploy/utilization-share.sh shadow $(us_args) $(if $(filter 1 true,$(PHYSICAL_GROUPS)),--physical-groups,)
 
 .PHONY: utilization-share-activate
-utilization-share-activate: ## Utilization share: act on what shadow reported. NAMESPACE=<ns> [RESTART=1]
+utilization-share-activate: ## Utilization share: act on what shadow reported. NAMESPACE=<ns> [GRANT_SHARED=true] [RESTART=1]
 	$(us_namespace_check)
-	@bash deploy/utilization-share.sh activate $(us_args)
+	@bash deploy/utilization-share.sh activate $(us_args) $(if $(filter 1 true,$(GRANT_SHARED)),--grant-shared,)
 
 .PHONY: utilization-share-status
 utilization-share-status: ## Utilization share: mode, recent decisions, transfers, warnings, marked pods. NAMESPACE=<ns>

@@ -33,6 +33,11 @@ own-install quota, the cluster admin for a policy in `wva-policy` or `wva-<ns>`.
 3. [Turn it on in shadow, read what it would move, then activate it](../../guides/utilization-share/README.md#installation-instructions).
 4. [Check it works](../../guides/utilization-share/README.md#verification): the mode reads `active` and transfers end `done`.
 
+Models in several namespaces, one budget for all of them? Use [Share GPUs
+between models in different namespaces](../../guides/utilization-share-cluster-wide/)
+instead: one cluster-wide install, from llm-d already serving to GPUs moving
+between namespaces.
+
 To undo, see [Cleanup](../../guides/utilization-share/README.md#cleanup). The
 guide's two-model trial holds GPUs until you tear it down. If the controller
 is out of your reach, see [Details](#when-the-controller-is-out-of-your-reach).

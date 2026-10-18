@@ -62,6 +62,9 @@ Activate tells you which:
   a warning with the command to run there:
   `make utilization-share-activate NAMESPACE=<ns> CONTROLLER_NAMESPACE=<controller ns>`.
 - No warning means no other namespace needs it.
+- `GRANT_SHARED=true` grants it in each of those namespaces instead of
+  warning. A cluster-wide setup is in [Share GPUs between models in different
+  namespaces](../utilization-share-cluster-wide/).
 
 Which namespaces share a budget is under
 [Details](#which-namespaces-share-a-budget).
@@ -165,8 +168,10 @@ cluster. Three things differ:
   releases can be taken by a pod the scaling manager did not place. That
   transfer ends `release-taken`.
 
-Only the quota benchmarks have been measured. The physical limiter has not been
-run with the optimizer on a cluster.
+Only the quota benchmarks have been measured. The physical limiter has been
+run with the optimizer only on kind with emulated GPUs, where transfers
+between two namespaces completed: [Share GPUs between models in different
+namespaces](../utilization-share-cluster-wide/) has the steps.
 
 ## Details
 
