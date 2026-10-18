@@ -62,6 +62,9 @@ Activate tells you which:
   a warning with the command to run there:
   `make utilization-share-activate NAMESPACE=<ns> CONTROLLER_NAMESPACE=<controller ns>`.
 - No warning means no other namespace needs it.
+- `GRANT_SHARED=true` grants it in each of those namespaces instead of
+  warning. A cluster-wide setup is in [Share GPUs between models in different
+  namespaces](../utilization-share-cluster-wide/).
 
 Which namespaces share a budget is under
 [Details](#which-namespaces-share-a-budget).

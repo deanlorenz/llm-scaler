@@ -38,6 +38,9 @@ make check-prereqs SCOPE=cluster
 ```
 <!-- guide:prerequisites.check end -->
 
+No KEDA yet, and you will add `KEDA_HELM_INSTALL=true` to the install? Add it
+to this check too. Without it the check stops at the missing KEDA.
+
 ## Installation Instructions
 
 ### 1. Install the scaling manager
@@ -188,6 +191,9 @@ reads `<unknown>/1 (avg)` and nothing scales.
 - `make benchmark-smoke NAMESPACE=<ns>`: drive load at one managed namespace
   and snapshot the dashboard
 - [Bound every install by real GPUs](../admin-gpu-bounding/)
+- [Share GPUs between models in different
+  namespaces](../utilization-share-cluster-wide/): one budget across
+  namespaces, with the utilization-share optimizer
 - `deploy/warmpool.sh plan -n <ns>`: read-only check of whether a namespace has
   models that could share a [warm pool](../warm-pool/)
 - [After the install](../../reference/operations.md)
