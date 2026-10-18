@@ -1221,6 +1221,19 @@ wva_check_limiter_node_read() {
             log_warning "  Remedy: have a cluster admin run '$(wva_make_cmd setup-prereqs)', which grants node read; or drop gpu-inventory from the policy (re-run with WVA_LIMITER naming the limiters to keep)."
             return 0
         fi
+        # A run that includes the admin phase applies the role that grants the
+        # node read (the manager ClusterRole at cluster scope, node-reader at
+        # namespace scope), so asking first refuses the very apply that fixes
+        # it -- the rule wva_check_kueue_namespace_read follows. On a fresh
+        # cluster the ServiceAccount does not even exist yet: `make deploy-wva
+        # SCOPE=cluster WVA_LIMITER=gpu-inventory` was refused on every new
+        # cluster. Only the controller-only phase (INSTALL_PHASE=wva) cannot
+        # grant it; the post-install check and wva_node_access_denied report a
+        # grant that did not take.
+        if [ "$node_read" != yes ] && [ "${INSTALL_PHASE:-all}" != "wva" ]; then
+            log_info "The gpu-inventory limiter needs the controller to list nodes; this run's admin phase grants it."
+            return 0
+        fi
         case "$node_read" in
             yes)
                 log_success "The controller can list nodes, which the gpu-inventory limiter requires"

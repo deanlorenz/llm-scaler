@@ -40,7 +40,7 @@ for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_s
     }
 done
 
-EXPECT_CASES=71
+EXPECT_CASES=75
 RAN=0
 FAILED=0
 
@@ -303,7 +303,7 @@ run_node_check() {
                 *) echo 'Error from server (Forbidden): cannot impersonate'; return 1 ;;
             esac
         }
-        WVA_SCOPE=cluster WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CANI=no
+        WVA_SCOPE=cluster WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CANI=no INSTALL_PHASE=wva
         local kv
         for kv in "$@"; do eval "$kv"; done
         wva_check_limiter_node_read "$(wva_limiter_set)" "system:serviceaccount:wva-ctl:wva-controller-manager"
@@ -321,6 +321,19 @@ check 'gpu-inventory,quota with node read -> proceeds' \
     'OK' "$(run_node_check WVA_LIMITER=gpu-inventory,quota STUB_CANI=yes)"
 check 'a named composed set without node read says the physical limiter would be skipped' '1' \
     "$(run_node_check WVA_LIMITER=gpu-inventory,quota >/dev/null; grep -c 'SKIPS the physical limiter' "$WORK/refusal")"
+# The cases above are the controller-only phase, which cannot grant the read.
+# A run that includes the admin phase applies the role that grants it, so it
+# must not be refused for lacking it: `make deploy-wva SCOPE=cluster
+# WVA_LIMITER=gpu-inventory` was refused on every fresh cluster, where the
+# ServiceAccount did not exist yet.
+check 'gpu-inventory alone, INSTALL_PHASE=all, no node read yet -> proceeds' \
+    'OK' "$(run_node_check WVA_LIMITER=gpu-inventory INSTALL_PHASE=all)"
+check 'gpu-inventory alone, INSTALL_PHASE=auto -> proceeds' \
+    'OK' "$(run_node_check WVA_LIMITER=gpu-inventory INSTALL_PHASE=auto)"
+check 'gpu-inventory alone, INSTALL_PHASE=wva, no node read -> refused' \
+    'REFUSED' "$(run_node_check WVA_LIMITER=gpu-inventory)"
+check 'gpu-inventory, INSTALL_PHASE=all, unverifiable -> proceeds' \
+    'OK' "$(run_node_check WVA_LIMITER=gpu-inventory INSTALL_PHASE=all STUB_CANI=unknown)"
 
 # WVA_LIMITER unset keeps the LIVE policy's limiters, so the node read is
 # checked against them (check_permissions passes the live set). An upgrade
