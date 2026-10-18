@@ -3,7 +3,7 @@
 # removed from quay.io and resolved to "not found", so every build without that
 # layer already cached failed -- CI could not build main at all, while local
 # builds kept succeeding from cache and hid it.
-FROM quay.io/projectquay/golang:1.25@sha256:584a3564b3e98dcbd200ffcb22636ff95f7ddc73e692dff13e993ad3d702fdaa AS builder
+FROM quay.io/projectquay/golang:1.26@sha256:506a668eb4c763a964ffc4d4ad0125d45d75aac899392be7e5d39380f8452564 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

@@ -1,9 +1,9 @@
 package variant
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 // GroupVersion identifies the (historical) VariantAutoscaling group/version.
@@ -16,15 +16,15 @@ import (
 var GroupVersion = schema.GroupVersion{Group: "llmd.ai", Version: "v1alpha1"}
 
 // SchemeBuilder registers the VariantAutoscaling types with a runtime.Scheme.
-var SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+var SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
+	s.AddKnownTypes(GroupVersion, &VariantAutoscaling{}, &VariantAutoscalingList{})
+	metav1.AddToGroupVersion(s, GroupVersion)
+	return nil
+})
 
 // AddToScheme adds the VariantAutoscaling types to the given scheme. Intended for
 // test fake clients only — see GroupVersion.
 var AddToScheme = SchemeBuilder.AddToScheme
-
-func init() {
-	SchemeBuilder.Register(&VariantAutoscaling{}, &VariantAutoscalingList{})
-}
 
 // ensure the types satisfy runtime.Object at compile time.
 var (

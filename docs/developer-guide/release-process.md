@@ -198,7 +198,9 @@ re-run from the **Actions** tab.
 3. **Scan before push.** Builds the `linux/amd64` image locally and scans it
    with Trivy. A **fixable CRITICAL** vulnerability fails the release. A CRITICAL
    with no upstream fix is reported but does not block. A second, non-blocking
-   scan prints every HIGH and CRITICAL finding.
+   scan prints every HIGH and CRITICAL finding. The same blocking scan runs in
+   the PR checks' `e2e-tests-smoke` job, so a finding fails the PR that brings
+   it in before it can fail a tag.
 4. **Build and push once.** One `linux/amd64,linux/arm64` build, pushed with an
    SBOM and a max-mode SLSA provenance attestation.
 5. **Tags.** Always `:<version>`. `:latest` moves only for the highest final

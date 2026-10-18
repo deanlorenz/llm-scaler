@@ -6,7 +6,7 @@ How to set up, build, run and change the scaling manager.
 
 ### Prerequisites
 
-- Go 1.25.0+ (`go.mod`)
+- Go 1.26.0+ (`go.mod`)
 - Docker, Make, git
 - kubectl 1.24+ (the installer refuses older), or `oc` on OpenShift
 - Helm 3.8+ (the installer uses it for Prometheus and KEDA)
