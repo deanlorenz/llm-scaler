@@ -83,7 +83,8 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 	utilizationShareWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareWithheldTotal,
 		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable, " +
-			"return-not-calm, return-pod-busy, return-role-short, donor-peak, awaiting-return, scale-down-band). Counted only while the optimizer acts.",
+			"return-not-calm, return-pod-busy, return-role-short, return-receiver-unplaceable, donor-peak, awaiting-return, " +
+			"scale-down-band). Counted only while the optimizer acts.",
 	}, append(slices.Clone(groupLabels), constants.LabelReason))
 	utilizationShareClaims = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareClaimsTotal,

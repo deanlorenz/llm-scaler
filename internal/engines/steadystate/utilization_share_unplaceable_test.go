@@ -151,10 +151,11 @@ func (f *fragFleet) run(cycles int) ([][]string, bool) {
 
 // The issue #236 layout: S1 and S2 hold four pods each on n2 and n3 beside
 // four GPUs of other pods, and one each on n4 beside six. No node can be
-// emptied for G. S1 and S2 are idle: their spare is returned while G stays
-// short. G reported no-compatible-donor while they held spare, nothing while
+// emptied for G. S1 and S2 are idle, but G is the only role short and no node
+// can hold its replica, so none of their spare is returned: they stay at 5.
+// G once reported no-compatible-donor while they held spare, nothing while
 // their returns released, then donors-at-floor -- the cause never changed.
-// It must carry one reason, the same every cycle, through all three phases.
+// It must carry one reason, the same every cycle.
 func TestUtilizationShareUnplaceableReceiverKeepsOneReason(t *testing.T) {
 	f := newFragFleet([]string{"n2", "n2", "n2", "n2", "n4"}, []string{"n3", "n3", "n3", "n3", "n4"})
 	seq, funded := f.run(12)
@@ -166,8 +167,9 @@ func TestUtilizationShareUnplaceableReceiverKeepsOneReason(t *testing.T) {
 	if funded {
 		t.Fatal("a transfer to G started: no node can hold its replica")
 	}
-	if f.held["S1"] != 1 || f.held["S2"] != 1 {
-		t.Fatalf("setup: S1=%d S2=%d, want both returned to their floor of 1", f.held["S1"], f.held["S2"])
+	if f.held["S1"] != 5 || f.held["S2"] != 5 || len(f.marked) != 0 {
+		t.Fatalf("setup: S1=%d S2=%d with %d pods marked, want both at 5 with nothing returned for an unplaceable G",
+			f.held["S1"], f.held["S2"], len(f.marked))
 	}
 	want := []string{constants.ScalingBlockedNoNodeFits}
 	for c, r := range seq {
