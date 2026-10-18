@@ -32,31 +32,95 @@ path](../../well-lit-paths/utilization-share/).
 - [ ] `kubectl`, `helm`, `jq`, `yq` and `make`, in a checkout of this
   repository.
 
-Check the starting state:
+Check the starting state. Every command here only reads:
 
 <!-- guide:prerequisites start -->
 ```bash
-# Every model server llm-d runs, with its namespace, the GPUs it requests and its node.
-kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
-  -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName,READY:.status.containerStatuses[*].ready'
+# Read-only. Tools, permissions, KEDA and the Prometheus the install would use.
+make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
 
-# One InferencePool, behind its own EPP, in each model namespace.
-kubectl get inferencepools.inference.networking.k8s.io -A
+# Read-only. Every llm-d model server on the cluster, its modelID, the InferencePool in front of it, and any ScaledObject it has. Writes a plan, applies nothing.
+make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
 
-# The GPU product each node carries. The budget is per product.
+# Read-only. Whether each model server drains on scale-down, and where it keeps its weights and compile caches. Writes a patch, applies nothing.
+make workload-patch SCOPE=cluster
+
+# The GPU product each node carries, and the GPUs each model server requests. The budget is per product.
 kubectl get nodes -L nvidia.com/gpu.product
+kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
+  -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName'
 ```
 <!-- guide:prerequisites end -->
 
-Expect model pods in at least two namespaces, all `true`, each with a GPU
-count, and one pool per namespace.
+What each one tells you, and what to change when it complains:
+
+**`check-prereqs`** ends with `Preflight passed`. It checks tools, your rights
+and the Prometheus it will use, and that KEDA is there or will be installed.
+At this scope it does not check each namespace's EPP; the plan below does
+that per model.
+
+**`scaledobjects-plan`** lists the model servers it found:
+
+```text
+  Discovered llm-d model servers (2):
+
+    APPLY  NAMESPACE  KIND        NAME            MODELID  MIN  MAX  COST  POLICY  FALLBACK
+    yes    team-a     Deployment  model-a-decode  model-a  1    10   10.0  -       (+fallback)
+    yes    team-b     Deployment  model-b-decode  model-b  1    10   10.0  -       (+fallback)
+```
+
+- **A model is missing.** Its pod template needs `llm-d.ai/role: decode` (or
+  `prefill`). llm-d's charts set it.
+- **`# inferencePool: (none)`** in `share-plan.yaml` means no InferencePool
+  selects those pods. Make the pool's selector match the pod labels.
+- **The `MODELID` is wrong.** It is read from `--served-model-name`, else
+  `--model`. Fix it in the plan, or fix the flag.
+- **`APPLY` reads `adopt`.** The model already has a ScaledObject. Adopting it
+  points that one at the scaling manager.
+
+**`workload-patch`** names each model server that is costly to scale, and
+writes `wva-workload-patch.yaml` with the fix. On a vLLM server with a drain
+hook but no shared caches, it reports:
+
+```text
+[WARNING]   team-a/model-a-decode RE-DOWNLOADS ITS WEIGHTS on every scale-up: vllm fetches model-a from Hugging Face, outside every volume it mounts.
+[WARNING]   team-a/model-a-decode COMPILES FROM NOTHING on every start: vllm keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset).
+[SUCCESS] Wrote wva-workload-patch.yaml (1 workload(s) need something).
+```
+
+- **No drain hook** (`preStop` and `terminationGracePeriodSeconds`): fix this
+  first. A transfer removes a donor pod, and without the hook its requests
+  are cut off.
+- **Weights or compile caches outside a volume**: each replica a transfer adds
+  starts slower. It works, but costs start time. The patch says which claim
+  to create (`make model-cache`, `make engine-cache`).
+- **`No vLLM or SGLang container found`**: it could not tell which container is
+  the engine, so it checked nothing for that model. Check the drain hook by
+  hand.
+
+Put the fixes in the chart values that own the pod spec. Applying the patch to
+the live objects (`WVA_WORKLOAD_PATCH_APPLY=true`) restarts the model servers.
+More: [Writing the
+patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch).
+
+**The last two commands** show one GPU product for the models that will share,
+and a GPU count on every model pod.
 
 ## Installation Instructions
 
 ### 1. Install with one budget for every namespace
 
-`ACCELERATOR` is the product from the last command above. `GPUS` is how many
-of them the models may hold together.
+Pick the budget:
+
+- **A quota**: a number of GPUs you set, for example the GPUs your team paid
+  for. The models never hold more, even when more are free.
+- **The cluster's GPUs** (the physical limiter): every GPU of the product that
+  exists and is free. Pick it when there is no number to set, and the models
+  may use whatever the nodes have. A GPU the models give up can be taken by any
+  other pod on the cluster.
+
+For a quota, `ACCELERATOR` is the product from the commands above and `GPUS`
+is how many of them the models may hold together.
 
 <!-- guide:deploy.vars start -->
 ```bash
@@ -77,12 +141,24 @@ make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true \
 `WVA_QUOTA_SCOPE=cluster` is what makes the namespaces share. Without it each
 namespace gets its own budget of `GPUS`, and nothing moves between them.
 
+For the cluster's GPUs instead:
+
+<!-- guide:deploy.physical start -->
+```bash
+# The same install, with the cluster's GPUs as the budget instead of a quota.
+make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true WVA_LIMITER=gpu-inventory
+```
+<!-- guide:deploy.physical end -->
+
+The controller must list nodes to count the GPUs. The cluster-scoped install
+grants that read; nothing else is needed. The budget is per product: the GPUs
+of that product on every node, less what other pods hold.
+
 ### 2. Register the models
 
 <!-- guide:deploy.register start -->
 ```bash
-# List every model server on the cluster in a plan, edit it, then apply it. Nothing scales until this runs.
-make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
+# Edit the plan the prerequisites wrote, then apply it. Nothing scales until this runs.
 # edit share-plan.yaml: apply: yes|no|adopt, the modelID, the replica bounds
 make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
 ```
@@ -90,7 +166,7 @@ make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
 
 In the plan:
 
-- Set `maxReplicas` so the models' maximums add up to more than `GPUS`.
+- Set `maxReplicas` so the models' maximums add up to more than the budget.
   Otherwise there is nothing to share.
 - A model that already has a ScaledObject shows `apply: adopt`. Adopt it rather
   than adding a second.
@@ -109,10 +185,15 @@ make utilization-share-check
 ```
 <!-- guide:deploy.check end -->
 
-It prints the accelerator names the controller resolves. Run it a minute or
-so after step 2: until the controller has sized the models it has logged no
+It prints the accelerator names the controller resolves, and fails if a model
+in any namespace has an accelerator it cannot resolve. Run it a minute or so
+after step 2: until the controller has sized the models it has logged no
 accelerator, and the check says so. If it warns that the quota has no key for
 one of them, re-run step 1 with that exact name.
+
+Under the cluster's GPUs it warns `limiter: gpu-inventory and no quota. The
+optimizer plans nothing here until the block sets physicalGroups`. That is
+expected before shadow; the shadow step below sets it.
 
 ### 4. Shadow, then active
 
@@ -123,9 +204,22 @@ make utilization-share-shadow
 ```
 <!-- guide:deploy.shadow end -->
 
+Under the cluster's GPUs, run this instead:
+
+<!-- guide:deploy.shadowphysical start -->
+```bash
+# Shadow under the cluster's GPUs. PHYSICAL_GROUPS=true is what makes the namespaces share them.
+make utilization-share-shadow PHYSICAL_GROUPS=true
+```
+<!-- guide:deploy.shadowphysical end -->
+
+Without `PHYSICAL_GROUPS=true` the optimizer forms no group under the
+physical limiter, and moves nothing. Activate keeps the setting.
+
 Leave it through each model's busy period, then read the `would rebalance`
 lines ([Verification](#verification)). `scope: cluster` in them means the
-namespaces share one budget.
+namespaces share one budget, and `budget` is its size: `GPUS`, or the GPUs of
+that product the nodes have.
 
 <!-- guide:deploy.active start -->
 ```bash
@@ -217,6 +311,10 @@ cluster](../install-cluster-wide/#cleanup).
 
 ## Details
 
+- **Under the cluster's GPUs**, a GPU a donor gives up can be taken by a pod
+  the scaling manager did not place. The transfer then times out filling, and
+  the receiver shows the blocked reason `release-taken`. Events and log lines still say "quota group";
+  under this limiter the group is the cluster's GPUs of one product.
 - **One budget per controller.** The quota caps what this controller places.
   It does not stop pods the scaling manager did not create. Back it with a
   Kubernetes `ResourceQuota` where that matters.

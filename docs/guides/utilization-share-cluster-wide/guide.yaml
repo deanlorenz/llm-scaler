@@ -1,19 +1,24 @@
 name: utilization-share-cluster-wide
 
 prerequisites:
+  install:
+    note: Read-only. Tools, permissions, KEDA and the Prometheus the install would use.
+    run: |
+      make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
   models:
-    note: Every model server llm-d runs, with its namespace, the GPUs it requests and its node.
+    note: Read-only. Every llm-d model server on the cluster, its modelID, the InferencePool in front of it, and any ScaledObject it has. Writes a plan, applies nothing.
     run: |
-      kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
-        -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName,READY:.status.containerStatuses[*].ready'
-  pools:
-    note: One InferencePool, behind its own EPP, in each model namespace.
+      make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
+  workloads:
+    note: Read-only. Whether each model server drains on scale-down, and where it keeps its weights and compile caches. Writes a patch, applies nothing.
     run: |
-      kubectl get inferencepools.inference.networking.k8s.io -A
+      make workload-patch SCOPE=cluster
   accelerators:
-    note: The GPU product each node carries. The budget is per product.
+    note: The GPU product each node carries, and the GPUs each model server requests. The budget is per product.
     run: |
       kubectl get nodes -L nvidia.com/gpu.product
+      kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
+        -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName'
 
 deploy:
   vars:
@@ -26,10 +31,13 @@ deploy:
     run: |
       make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true \
         WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
-  register:
-    note: List every model server on the cluster in a plan, edit it, then apply it. Nothing scales until this runs.
+  physical:
+    note: The same install, with the cluster's GPUs as the budget instead of a quota.
     run: |
-      make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
+      make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true WVA_LIMITER=gpu-inventory
+  register:
+    note: Edit the plan the prerequisites wrote, then apply it. Nothing scales until this runs.
+    run: |
       # edit share-plan.yaml: apply: yes|no|adopt, the modelID, the replica bounds
       make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
   check:
@@ -42,6 +50,10 @@ deploy:
     note: Shadow. It reports what it would move between namespaces, and moves nothing.
     run: |
       make utilization-share-shadow
+  shadowphysical:
+    note: Shadow under the cluster's GPUs. PHYSICAL_GROUPS=true is what makes the namespaces share them.
+    run: |
+      make utilization-share-shadow PHYSICAL_GROUPS=true
   active:
     note: Let it act, and let the controller move pods in every namespace that shares the budget.
     run: |

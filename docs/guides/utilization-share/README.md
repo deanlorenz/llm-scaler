@@ -168,8 +168,10 @@ cluster. Three things differ:
   releases can be taken by a pod the scaling manager did not place. That
   transfer ends `release-taken`.
 
-Only the quota benchmarks have been measured. The physical limiter has not been
-run with the optimizer on a cluster.
+Only the quota benchmarks have been measured. The physical limiter has been
+run with the optimizer only on kind with emulated GPUs, where transfers
+between two namespaces completed: [Share GPUs between models in different
+namespaces](../utilization-share-cluster-wide/) has the steps.
 
 ## Details
 
