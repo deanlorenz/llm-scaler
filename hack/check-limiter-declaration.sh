@@ -1026,6 +1026,9 @@ accel_case() {   # accel_case <WVA_QUOTAS> <warn|silent> <why>
         PATH="$STUB:$PATH"; export PATH
         KWROTE="$WORK/wrote"; KCALLS="$WORK/calls"; export KWROTE KCALLS
         NODE_JSON="$NODES"; export NODE_JSON
+        # Under pipefail, as deploy/install.sh runs it: a match that still
+        # warned came from a SIGPIPE only pipefail turns into a failure.
+        set -o pipefail
         WVA_QUOTAS="$1" warn_unadvertised_accelerators
     ) >/dev/null 2>"$WORK/accelerr"
     local said="" ; grep -q 'does not advertise' "$WORK/accelerr" && said=warn

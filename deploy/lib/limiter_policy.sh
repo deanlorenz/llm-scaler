@@ -354,9 +354,14 @@ warn_unadvertised_accelerators() {
             # product WVA cannot shorten (kind's NVIDIA-A100-PCIE-80GB)
             # the controller logs the full label, and this warned on
             # exactly the key it then told the reader to use.
+            #
+            # grep reads all of its input (no -q): the install runs under
+            # pipefail, and a grep that exits on the first match leaves the
+            # printf behind it writing to a closed pipe. Its SIGPIPE then
+            # failed the pipeline, and a name that matched warned anyway.
             { printf '%s\n' "$node_products"
               printf '%s\n' "$node_products" | tr '\055_.' '\n\n\n'; } \
-                | grep -qixF -- "$q_name" || unmatched="$unmatched $q_name"
+                | grep -ixF -- "$q_name" >/dev/null || unmatched="$unmatched $q_name"
         done
         [ "$reset_q_glob" = 1 ] && set +f
     fi
