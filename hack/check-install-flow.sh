@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=86
+EXPECT_CASES=87
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -205,8 +205,8 @@ else
         fail "KEDA 2.19.0 Ready must pass as present (rc=$rc state=$state)" "$out"
     fi
 
-    # The version of an existing KEDA: reported, never blocking. 2.18 and 2.19
-    # are supported (2.19 is what CI installs; 2.18 is what the benchmarks ran
+    # The version of an existing KEDA: reported, never blocking. 2.18, 2.19 and 2.21
+    # are supported (CI installs the default chart; 2.18 is what the benchmarks ran
     # on). other_warnings prints every [WARNING] line but the CVE advice, which
     # is the one warning a supported version may get.
     other_warnings() { printf '%s\n' "$out" | grep '\[WARNING\]' | grep -v "CVE-2026-77524" || true; }
@@ -228,12 +228,24 @@ else
         fail "KEDA 2.19.0 must get the CVE-2026-77524 advice (rc=$rc)" "$out"
     fi
 
+    # 2.21 is supported, and the CVE advice stops at the release that fixes it.
     OP_IMAGE=ghcr.io/kedacore/keda:2.21.0; keda_case
-    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA 2.21.0: untested, and not refused' \
-        && ! printf '%s' "$out" | grep -q "CVE-2026-77524"; then
-        ok "VERSION: KEDA 2.21.0 is untested, not refused, and has no CVE advice"
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA 2.21.0: supported (KEDA 2.18, 2.19 and 2.21' \
+        && ! printf '%s' "$out" | grep -q "CVE-2026-77524" && [ -z "$(other_warnings)" ]; then
+        ok "VERSION: KEDA 2.21.0 is supported, with no CVE advice and no warning"
     else
-        fail "KEDA 2.21.0 must be untested with rc 0 and no CVE advice (rc=$rc)" "$out"
+        fail "KEDA 2.21.0 must be supported with rc 0 and no CVE advice (rc=$rc)" "$out"
+    fi
+
+    # The advice says how to upgrade a KEDA that is there: re-running the
+    # installer never does.
+    OP_IMAGE=ghcr.io/kedacore/keda:2.20.2; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA 2.20.2: untested, and not refused' \
+        && printf '%s' "$out" | grep -q "carries CVE-2026-77524" \
+        && printf '%s' "$out" | grep -q "never upgrades a KEDA that is there.*helm upgrade keda kedacore/keda -n .* --version 2.21.0 --reuse-values"; then
+        ok "VERSION: KEDA 2.20.2 is untested, carries the CVE advice, and is given the helm upgrade"
+    else
+        fail "KEDA 2.20.2 must be untested, with the CVE advice and the helm upgrade command (rc=$rc)" "$out"
     fi
 
     OP_IMAGE=ghcr.io/kedacore/keda:2.16.1; keda_case

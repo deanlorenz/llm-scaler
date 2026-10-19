@@ -19,10 +19,16 @@ KEDA_FALLBACK_MIN_VERSION="${KEDA_FALLBACK_MIN_VERSION:-2.17}"
 # suites install chart kedacore/keda at install.sh's default KEDA_CHART_VERSION,
 # and hack/check-install-flow.sh fails when the two part.
 KEDA_TESTED_VERSION="2.19"
-# KEDA_SUPPORTED_VERSIONS are the minors reported as supported: the tested one,
-# and 2.18, which the benchmarks have run on. Nothing in the code needs either:
+# KEDA_SUPPORTED_VERSIONS are the minors reported as supported, in order and
+# each once: 2.18, which the benchmarks have run on; 2.19; 2.21, the first
+# release with the CVE-2026-77524 fix, which the kind suites have passed on;
+# and the tested one, whichever it is. Nothing in the code needs any of them:
 # any other version is reported as untested, and the install goes on.
-KEDA_SUPPORTED_VERSIONS="2.18 ${KEDA_TESTED_VERSION}"
+KEDA_SUPPORTED_VERSIONS="$(printf '%s\n' 2.18 2.19 2.21 "$KEDA_TESTED_VERSION" | sort -t. -k1,1n -k2,2n -u | paste -sd' ' -)"
+# wva_keda_supported_text echoes the supported minors as prose: "2.18, 2.19 and 2.21".
+wva_keda_supported_text() {
+    printf '%s\n' $KEDA_SUPPORTED_VERSIONS | paste -sd, - | sed 's/,\([^,]*\)$/ and \1/; s/,/, /g'
+}
 
 # CVE-2026-77524 (GHSA-637c-6jxx-4rwm): a tenant who may write a
 # TriggerAuthentication can make the KEDA operator send its own ServiceAccount
@@ -88,9 +94,9 @@ wva_keda_version_judge() {
     minor="$(printf '%s' "$v" | cut -d. -f1-2)"
     case " ${KEDA_SUPPORTED_VERSIONS} " in
         *" ${minor} "*)
-            log_info "${what}: supported (KEDA ${KEDA_SUPPORTED_VERSIONS// / and }; CI tests ${KEDA_TESTED_VERSION})." ;;
+            log_info "${what}: supported (KEDA $(wva_keda_supported_text); CI tests ${KEDA_TESTED_VERSION})." ;;
         *)
-            log_warning "${what}: untested, and not refused. Supported: KEDA ${KEDA_SUPPORTED_VERSIONS// / and } (CI tests ${KEDA_TESTED_VERSION}). The install goes on." ;;
+            log_warning "${what}: untested, and not refused. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}). The install goes on." ;;
     esac
     if [ "${WVA_KEDA_FALLBACK_WARNED:-false}" != true ] && ! version_at_least "$v" "$KEDA_FALLBACK_MIN_VERSION"; then
         WVA_KEDA_FALLBACK_WARNED=true
@@ -137,10 +143,10 @@ wva_keda_version_report() {
     fi
     wva_keda_operator_version
     if [ -z "$WVA_KEDA_VERSION" ]; then
-        log_warning "KEDA: could not check its version (${WVA_KEDA_VERSION_WHY}). The install goes on. Supported: KEDA ${KEDA_SUPPORTED_VERSIONS// / and } (CI tests ${KEDA_TESTED_VERSION}); a fallback needs ${KEDA_FALLBACK_MIN_VERSION} or later, and ${KEDA_CVE_ID} is fixed in ${KEDA_CVE_FIXED_VERSION}. Check by hand: kubectl get deploy -A -l ${KEDA_OPERATOR_LABEL_SELECTOR} -o wide"
+        log_warning "KEDA: could not check its version (${WVA_KEDA_VERSION_WHY}). The install goes on. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}); a fallback needs ${KEDA_FALLBACK_MIN_VERSION} or later, and ${KEDA_CVE_ID} is fixed in ${KEDA_CVE_FIXED_VERSION}. Check by hand: kubectl get deploy -A -l ${KEDA_OPERATOR_LABEL_SELECTOR} -o wide"
         return 0
     fi
-    wva_keda_version_judge "$WVA_KEDA_VERSION" "KEDA ${WVA_KEDA_VERSION}" "consider upgrading KEDA to ${KEDA_CVE_FIXED_VERSION} or later."
+    wva_keda_version_judge "$WVA_KEDA_VERSION" "KEDA ${WVA_KEDA_VERSION}" "consider upgrading KEDA to ${KEDA_CVE_FIXED_VERSION} or later. Re-running this installer never upgrades a KEDA that is there; a Helm-installed one upgrades with: helm upgrade ${KEDA_RELEASE_NAME:-keda} kedacore/keda -n ${KEDA_NAMESPACE:-keda-system} --version ${KEDA_CVE_FIXED_VERSION} --reuse-values"
 }
 
 # wva_keda_chart_version_report is the same judgement for the chart this run
@@ -149,7 +155,7 @@ wva_keda_chart_version_report() {
     [ "${WVA_KEDA_VERSION_REPORTED:-false}" = true ] && return 0
     WVA_KEDA_VERSION_REPORTED=true
     wva_keda_version_judge "${KEDA_CHART_VERSION:-}" "KEDA chart ${KEDA_CHART_VERSION:-} (this run installs it)" \
-        "consider KEDA_CHART_VERSION=${KEDA_CVE_FIXED_VERSION} or later, which CI does not test."
+        "consider KEDA_CHART_VERSION=${KEDA_CVE_FIXED_VERSION} or later."
 }
 
 # wva_keda_installs_itself reports whether THIS run installs KEDA (so its absence

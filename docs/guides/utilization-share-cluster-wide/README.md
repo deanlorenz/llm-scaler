@@ -585,7 +585,7 @@ remove them too, add `UNDEPLOY_SHARED=true`.
   and 16 again after an upgrade.
 - **OpenShift.** Install the Custom Metrics Autoscaler operator instead of
   KEDA, and drop `KEDA_HELM_INSTALL=true`.
-- **KEDA versions.** 2.18 and 2.19 are supported. See
+- **KEDA versions.** 2.18, 2.19 and 2.21 are supported. See
   [KEDA](../../reference/keda.md).
 - **Uninstall details:** [Install the scaling manager for the whole
   cluster](../install-cluster-wide/#cleanup) and

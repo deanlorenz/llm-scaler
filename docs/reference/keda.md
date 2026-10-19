@@ -7,11 +7,14 @@ when it installs one.
 
 ## Supported versions
 
-- **KEDA 2.19**: tested in CI. The kind e2e suites install chart
-  `kedacore/keda` 2.19.0, which is the installer's default
-  `KEDA_CHART_VERSION`.
-- **KEDA 2.18**: supported. The benchmarks have run on 2.18.1. CI does not run
-  it.
+- **KEDA 2.21**: supported. It is the first release with the
+  CVE-2026-77524 fix (below). The kind e2e suites pass on it. It supports
+  Kubernetes 1.34 to 1.36.
+- **KEDA 2.19**: supported. It supports Kubernetes 1.32 to 1.34.
+- **KEDA 2.18**: supported. The benchmarks have run on 2.18.1.
+- **Which one CI tests**: the installer's default `KEDA_CHART_VERSION`. The
+  kind e2e suites install chart `kedacore/keda` at that version, and
+  `make check-prereqs` prints it, as `CI tests <version>`.
 - **Any other version**: untested. Nothing in the code needs a minimum
   version, so the installer reports the version and goes on.
 - **Before 2.17**: ScaledObjects get no fallback, because
@@ -20,7 +23,7 @@ when it installs one.
   it. The installer reads that operator's own version and does not map it to a
   KEDA version.
 
-The code builds against the KEDA v2.21.0 Go module. CI does not run KEDA 2.21.
+The code builds against the KEDA v2.21.0 Go module.
 
 ### CVE-2026-77524
 
@@ -30,20 +33,34 @@ A tenant who may write a TriggerAuthentication can make the KEDA operator send
 its own ServiceAccount token to an address the tenant controls. KEDA 2.21.0
 fixes it.
 
-KEDA 2.18 and 2.19 are affected, and so is the chart the installer pins. The
-installer prints this as advice and does not stop. Consider upgrading to KEDA
-2.21.0 or later. Read KEDA 2.21's upgrade notes first: the release lists breaking
+KEDA 2.18 and 2.19 are affected. For any version below 2.21.0, the installer
+prints this as advice and does not stop. From 2.21.0 on it prints nothing. Read
+KEDA 2.21's upgrade notes before you upgrade: the release lists breaking
 changes.
+
+### Upgrading a KEDA the cluster already has
+
+Re-running the installer never upgrades a KEDA that is already there, even
+with `KEDA_HELM_INSTALL=true`. If this installer (or Helm) installed it,
+upgrade it with Helm:
+
+```bash
+helm repo update kedacore
+helm upgrade keda kedacore/keda -n keda-system --version 2.21.0 --reuse-values
+```
+
+Use your release name and namespace if they differ (`helm list -A | grep keda`).
+On OpenShift, upgrade the Custom Metrics Autoscaler operator instead.
 
 ## What the installer prints
 
 `make check-prereqs`, `make setup-prereqs` and `make deploy-wva` print one KEDA
 version line. None of these lines stops the install.
 
-- `KEDA 2.19.0: supported (KEDA 2.18 and 2.19; CI tests 2.19).`
-- `KEDA 2.21.0: untested, and not refused.` It names the supported versions.
+- `KEDA 2.21.0: supported (KEDA 2.18, 2.19 and 2.21; CI tests <version>).`
+- `KEDA 2.20.2: untested, and not refused.` It names the supported versions.
 - `KEDA 2.19.0 carries CVE-2026-77524 ... Advice only: consider upgrading KEDA
-  to 2.21.0 or later.`
+  to 2.21.0 or later.` It also prints the `helm upgrade` command above.
 - `KEDA: could not check its version (...)`. The version is unknown, which is
   not a pass. The reason is one of these:
   - Listing Deployments cluster-wide is not permitted for you.
@@ -54,8 +71,8 @@ version line. None of these lines stops the install.
   To check by hand, run
   `kubectl get deploy -A -l app.kubernetes.io/name=keda-operator -o wide`.
 - With `KEDA_HELM_INSTALL=true` and no KEDA on the cluster, the same judgement
-  covers the chart this run installs: `KEDA chart 2.19.0 (this run installs it):
-  supported`.
+  covers the chart this run installs: `KEDA chart <version> (this run installs
+  it): supported`.
 - On OpenShift: `KEDA: Custom Metrics Autoscaler <version>, untested`, read
   from its ClusterServiceVersion in `openshift-keda`. If that cannot be read,
   the line says so.
