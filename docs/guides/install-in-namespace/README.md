@@ -18,9 +18,13 @@ After that, the namespace owner installs and upgrades the controller.
   Kubernetes, `KEDA_HELM_INSTALL=true make setup-prereqs` installs it if missing.
   Supported versions, and what happens with an existing KEDA: [KEDA
   reference](../../reference/keda.md).
-- [ ] **A Prometheus** that scrapes the model servers and their EPP.
-- [ ] **The EPP's `flowControl` feature gate.** Add `featureGates: [flowControl]`
-  to the `EndpointPickerConfig` and restart the EPP. The install refuses without it.
+- [ ] **A Prometheus** with the Prometheus Operator. Where nothing scrapes the
+  model servers or their EPP yet, step 1 (`make setup-prereqs`) adds the
+  monitors.
+- [ ] **For scale-from-zero only: the EPP's `flowControl` feature gate.** Add
+  `featureGates: [flowControl]` to the `EndpointPickerConfig` and restart the
+  EPP. Without it the install warns and goes on, and a model at zero never
+  wakes.
 - [ ] **A cluster admin has run step 1**, or you are a cluster admin.
 
 <!-- guide:prerequisites start -->

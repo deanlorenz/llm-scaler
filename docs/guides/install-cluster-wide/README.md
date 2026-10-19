@@ -22,11 +22,13 @@ discovered and may not hold model servers yet.
   command to install it. On OpenShift, install the Custom Metrics Autoscaler
   operator first. Supported versions, and what happens with an existing KEDA:
   [KEDA reference](../../reference/keda.md).
-- [ ] A Prometheus that scrapes the model servers.
-- [ ] **The `flowControl` feature gate on every EPP.** The check below finds
-  every namespace with llm-d model servers or an InferencePool, and reports
-  each one. Where the gate is off, add this to the `EndpointPickerConfig` and
-  restart the EPP:
+- [ ] A Prometheus with the Prometheus Operator. Where nothing scrapes the
+  model servers or the EPP yet, `make setup-prereqs` adds the monitors.
+- [ ] **For scale-from-zero only: the `flowControl` feature gate on every
+  EPP.** The check below finds every namespace with llm-d model servers or an
+  InferencePool, and reports each one. Where the gate is off it warns and goes
+  on. To turn it on, add this to the `EndpointPickerConfig` and restart the
+  EPP:
 
   ```yaml
   featureGates:
