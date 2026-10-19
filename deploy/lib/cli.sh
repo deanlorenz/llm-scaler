@@ -98,7 +98,14 @@ Environment Variables:
                                docs/reference/prometheus.md.
   PROMETHEUS_CA_CERT_PATH      CA file the controller verifies Prometheus with. Mount it yourself.
                                Unset, a re-run keeps the one the controller runs with, for the
-                               same PROMETHEUS_URL.
+                               same PROMETHEUS_URL; with none, the installer copies the CA from
+                               the Prometheus TLS Secret into Secret wva-prometheus-ca and mounts it.
+  PROMETHEUS_SECRET_NAME, PROMETHEUS_SECRET_NS
+                               The Secret that CA is copied from (key ca.crt, else tls.crt; never
+                               the key). Default: the one the Prometheus CR's web.tlsConfig names.
+  PROMETHEUS_CA_FILE           A local CA file to copy instead.
+  PROMETHEUS_TLS_PROBE         false skips the in-cluster TLS probe (default: true).
+  PROMETHEUS_TLS_PROBE_IMAGE   curl image the probe runs (default: quay.io/curl/curl:8.11.1).
   DEPLOY_OPERATIONAL_DASHBOARD Publish the WVA Grafana dashboard (default: true). Works against an
                                existing Grafana — it is a sidecar-labelled ConfigMap.
   DASHBOARD_NS                 Namespace to publish the dashboard into (default: MONITORING_NAMESPACE)

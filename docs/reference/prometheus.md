@@ -169,28 +169,68 @@ Only those sources write or repoint the binding:
 ### TLS configuration
 
 **What ships:** the manager ConfigMap verifies (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"`).
-On Kubernetes the installer turns verification off for one Prometheus only: the
-kube-prometheus-stack it deploys itself (`DEPLOY_PROMETHEUS=true`, and a
-`PROMETHEUS_URL` naming `kube-prometheus-stack-prometheus.<MONITORING_NAMESPACE>.svc`).
-That stack serves a self-signed certificate that nothing mounts into the
-controller, so verifying would fail with `x509: certificate signed by unknown
-authority`. Another Prometheus or a Thanos in the same namespace is verified.
-
-Use the default URL for that stack. If you pass
-`PROMETHEUS_URL=https://prometheus-operated.<MONITORING_NAMESPACE>...` on a new
-install, it is verified, and the stack's certificate does not name that host,
-so the controller cannot connect.
+For a Prometheus run by the Prometheus Operator, the installer gives the
+controller the CA itself (next section), so the connection is verified with no
+flags. It turns verification off for one Prometheus only, and only when it
+cannot copy that CA: the kube-prometheus-stack it deploys itself
+(`DEPLOY_PROMETHEUS=true`, and a `PROMETHEUS_URL` naming
+`kube-prometheus-stack-prometheus.<MONITORING_NAMESPACE>.svc`).
 
 On an upgrade, a Prometheus the controller already ran unverified with no CA
-stays unverified (see the [upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
+stays unverified unless the installer can copy its CA (see the
+[upgrade note](upgrade-and-uninstall.md#prometheus-tls-verification-is-on-by-default)).
 
 Any other HTTPS Prometheus stays verified, because the controller sends it a
-token. If its certificate comes from a private CA, the controller cannot connect
+token. If its certificate comes from a private CA the installer cannot find,
+the install stops before it reports success, and the controller cannot connect
 until you do one of these:
 
-- mount the CA and re-run with `PROMETHEUS_CA_CERT_PATH=<file>` (steps below), or
+- name the CA: `PROMETHEUS_SECRET_NAME`/`PROMETHEUS_SECRET_NS` or
+  `PROMETHEUS_CA_FILE` (next section), or mount it yourself and re-run with
+  `PROMETHEUS_CA_CERT_PATH=<file>` (steps below), or
 - re-run the install with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true`, on a
   development cluster only.
+
+### Prometheus with TLS (e.g. kube-prometheus-stack on a managed GPU cloud)
+
+A kube-prometheus-stack with web TLS (`prometheus.prometheusSpec.web.tlsConfig`)
+needs no flags. The plain install command:
+
+```bash
+NAMESPACE=<namespace> make deploy-wva
+```
+
+does all of this:
+
+1. **Address.** Picks the Service the certificate names, normally
+   `<release>-kube-prometheus-stack-prometheus.<namespace>.svc[.cluster.local]`,
+   never `prometheus-operated` when the certificate does not name it
+   ([how the address is chosen](configuration.md#how-the-prometheus-address-is-chosen)).
+2. **CA.** Copies the CA from the Secret the Prometheus resource's
+   `web.tlsConfig` names: key `ca.crt`, else `tls.crt` (a self-signed serving
+   certificate is its own CA). Only certificates are copied, never `tls.key`.
+   The copy is Secret `wva-prometheus-ca` in the controller's namespace, mounted
+   read-only at `/etc/wva-prometheus-ca`, with
+   `PROMETHEUS_CA_CERT_PATH=/etc/wva-prometheus-ca/ca.crt` and verification on.
+3. **Probe.** Before it reports success, connects from a one-shot Pod in the
+   controller's namespace with that CA and verification on. A refused
+   certificate stops the install with the reason.
+
+The Secret it copies from lives in the monitoring namespace. The admin phase
+(`make setup-prereqs`, or a single-command install) can read it and makes the
+copy; a later `INSTALL_PHASE=wva` run by a namespace admin uses that copy. Only
+when no copy exists and the run may not read the source does it stop, printing
+the command an admin runs. It never falls back to skipping verification.
+
+Overrides, all optional:
+
+| Variable | Use |
+|---|---|
+| `PROMETHEUS_URL` | the address, used as given (and still checked) |
+| `PROMETHEUS_SECRET_NAME`, `PROMETHEUS_SECRET_NS` | the Secret to copy the CA from |
+| `PROMETHEUS_CA_FILE` | a local CA file to copy instead |
+| `PROMETHEUS_CA_CERT_PATH` | a CA you mount yourself; the installer copies nothing |
+| `PROMETHEUS_TLS_PROBE=false`, `PROMETHEUS_TLS_PROBE_IMAGE` | skip the probe, or run it with another curl image |
 
 To check whether this is your problem:
 

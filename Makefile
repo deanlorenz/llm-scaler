@@ -2937,6 +2937,13 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# a certificate naming the wrong host, a re-install that drops TLS, or a
 	@# foreign Secret overwritten all install cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-scaler-tls.sh
+	@echo "Checking which Prometheus address the installer picks, and that it verifies it..."
+	@# Runs the detection, the CA copy and the TLS check against a stubbed
+	@# kubectl and real certificates. prometheus-operated, which a
+	@# kube-prometheus-stack certificate does not name, was picked, reported as
+	@# found, and the controller crash-looped on the x509 name mismatch: all of
+	@# it parses.
+	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-prometheus-url.sh
 	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
 	@# evaluates the shipped rules on synthetic series.
 	@$(MAKE) --no-print-directory promtool

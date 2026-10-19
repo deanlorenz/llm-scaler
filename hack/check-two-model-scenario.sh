@@ -193,6 +193,12 @@ case "$args" in
   # is what Prometheus answers: the model_name labels that actually have a
   # flow-control series.
   *"get cm wva-manager-config"*) echo "PROMETHEUS_BASE_URL: \"${PROM_URL-https://prom.example:9090}\""; exit 0 ;;
+  # The preflight TLS probe of that Prometheus (curl with the controller's CA).
+  # TLSPROBE_EXIT is curl's exit code; TLSPROBE_OUT what it printed.
+  *"get pod tlsprobe-"*"jsonpath={.status.phase}"*)
+      [ "${TLSPROBE_EXIT:-0}" = 0 ] && echo "Succeeded" || echo "Failed"; exit 0 ;;
+  *"get pod tlsprobe-"*"exitCode"*) echo "${TLSPROBE_EXIT:-0}"; exit 0 ;;
+  *"logs tlsprobe-"*) echo "${TLSPROBE_OUT:-HTTP 302}"; exit 0 ;;
   *"get pod fcheck-"*"jsonpath={.status.phase}"*) echo "Succeeded"; exit 0 ;;
   *"logs fcheck-"*)
       # FCHECK_OUT stands in for whatever the probe printed, so a query that
@@ -714,6 +720,26 @@ elif ! printf '%s' "$OUT" | grep -q 'floor arm:.*2\.\.3 replicas'; then
     fail "preflight did not state the floor arm's range: $OUT"
 else
     ok "preflight states every arm's range, and that the ceiling is the same in all of them"
+fi
+
+# The controller's Prometheus, probed with the controller's TLS settings
+# before anything holds an accelerator: a certificate it would refuse fails
+# preflight, and the probe never skips verification.
+case_begin
+run_verb preflight
+if ! printf '%s' "$OUT" | grep -q "Prometheus TLS verified with the controller's settings"; then
+    fail "preflight did not probe Prometheus with the controller's TLS settings: $(printf '%s' "$OUT" | grep -i tls)"
+else
+    ok "preflight probes Prometheus with the controller's TLS settings"
+fi
+case_begin
+TLSPROBE_EXIT=60 TLSPROBE_OUT='curl: (60) SSL certificate problem: self-signed certificate' run_verb preflight
+if [ "$RC" -eq 0 ]; then
+    fail "preflight passed although curl, with the controller's CA, refused the Prometheus certificate"
+elif ! printf '%s' "$OUT" | grep -q 'do not verify'; then
+    fail "preflight failed on a refused certificate without saying so: $(printf '%s' "$OUT" | grep -i tls)"
+else
+    ok "preflight fails when the controller's TLS settings would not verify Prometheus"
 fi
 
 case_begin
@@ -1752,7 +1778,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=103
+CASES_EXPECTED=105
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
