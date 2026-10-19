@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
@@ -105,11 +107,24 @@ var _ = Describe("External scaler mutual TLS", Label("smoke", "full"), Ordered, 
 			}
 		}, 90*time.Second, 10*time.Second).Should(Succeed())
 
-		// No External metric could also mean KEDA built no HPA at all. KEDA
-		// builds one either way; on a refused metric spec it falls back to CPU.
-		By("KEDA did build the plaintext ScaledObject's HPA, on the CPU fallback")
+		// No External metric could also mean KEDA never looked at the object.
+		// So check that it did, and was refused. KEDA before 2.20 builds the
+		// HPA anyway, with no metrics, and the API server defaults it to CPU.
+		// KEDA 2.20 and later builds none: the reconcile fails with "no metric
+		// specs returned from scalers", is retried, and the ScaledObject reads
+		// Ready=False with reason ScaledObjectCheckFailed.
+		By("KEDA reconciled the plaintext ScaledObject and was refused: an HPA on the CPU fallback, or none and Ready=False")
 		latched, carried, why := hpaOnCPUDefault(cfg.LLMDNamespace, plainTarget)
-		Expect(latched).To(BeTrue(), "expected an HPA on the CPU fallback; carried %v %s", carried, why)
+		if latched {
+			return
+		}
+		so := &kedav1alpha1.ScaledObject{}
+		Expect(crClient.Get(ctx, client.ObjectKey{Namespace: cfg.LLMDNamespace, Name: plainTarget + "-so"}, so)).To(Succeed())
+		ready := so.Status.Conditions.GetReadyCondition()
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse),
+			"expected an HPA on the CPU fallback (KEDA < 2.20) or a ScaledObject that is not Ready (KEDA >= 2.20); HPA carried %v %s, Ready=%s %s: %s",
+			carried, why, ready.Status, ready.Reason, ready.Message)
+		Expect(ready.Reason).To(Equal("ScaledObjectCheckFailed"), "Ready=False for another reason: %s", ready.Message)
 	})
 })
 

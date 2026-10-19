@@ -250,7 +250,7 @@ error only marks the trigger failing and scales nothing, so a scale-to-zero
 model is safer without one. The plan table and the apply lines show
 `(no fallback: floor 0)` for those entries.
 
-`behavior` needs KEDA 2.17 or later (the installer pins 2.19). Once per plan or
+`behavior` needs KEDA 2.17 or later (the installer pins 2.21). Once per plan or
 apply the installer asks whether the ScaledObject schema has the field, first
 with `kubectl explain scaledobjects.spec.fallback.behavior`, which reads the
 published OpenAPI and works for any authenticated user, and then, if that
