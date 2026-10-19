@@ -9,7 +9,8 @@ in.
 
 ## Pin the version
 
-The default image is `ghcr.io/ev-shindin/llm-scaling-manager:main`. `:main` is a
+An install from a checkout of `main` deploys
+`ghcr.io/ev-shindin/llm-scaling-manager:main`. `:main` is a
 **floating** tag, rebuilt on every push to `main`, and the installer pulls it
 with `imagePullPolicy: Always`. Any pod restart (a node drain, an eviction, a
 leader change) can start different code from what you tested. Do not run
@@ -20,13 +21,15 @@ release. An image older than the manifests crash-loops on flags it does not
 know. Releases are listed on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
 the first is `v0.10.0-rc1`. A checked-out release deploys its own tag, so
-`IMG_TAG` below only makes that explicit.
+`IMG_TAG` below only makes that explicit. Each release's notes list its image
+digest; a digest names one build, and a tag could in principle be re-pushed.
 
 ```bash
 git checkout v0.10.0-rc1
 make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.0-rc1
-# or a digest
-make deploy-wva NAMESPACE=<namespace> IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>
+# or by digest (v0.10.0-rc1's, from its release notes)
+make deploy-wva NAMESPACE=<namespace> \
+  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:a2e10bd07c490a53cf3d6ba9d55642f96d5280f22ab925e78868b806d36f9e5a
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
 NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.0-rc1
 ```

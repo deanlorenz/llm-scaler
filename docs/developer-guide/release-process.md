@@ -64,16 +64,27 @@ cannot be released.
 
 ### 1. Push the tag
 
-Tag the merge commit of the release PR, not `origin/main` (another PR may have
-merged since) and not your local branch. The command checks that the tagged
-commit pins the release and is on `main`, and pushes only then:
+Tag the merge commit of the release PR, not the tip of `main` (another PR may
+have merged since) and not your local branch. The command checks that the tagged
+commit pins the release and is on `main`, and pushes only then.
+
+`REMOTE` is the name of your remote for `ev-shindin/llm-scaling-manager`
+(`git remote -v` lists them). In a clone of upstream WVA with this repository
+added as a second remote, it is not `origin`.
 
 ```bash
-git fetch origin
-git tag vX.Y.Z <merge commit of the release PR>
+REMOTE=<remote for ev-shindin/llm-scaling-manager>
+git fetch "$REMOTE"
+git tag -m "llm-scaling-manager vX.Y.Z" vX.Y.Z <merge commit of the release PR>
 git show vX.Y.Z:config/base/manager/kustomization.yaml | grep -x '  newTag: vX.Y.Z' \
-  && git merge-base --is-ancestor vX.Y.Z origin/main && git push origin vX.Y.Z
+  && git merge-base --is-ancestor vX.Y.Z "$REMOTE/main" && git push "$REMOTE" vX.Y.Z
 ```
+
+`-m` makes an annotated tag, and with `tag.gpgSign` set a signed one; without
+`-m`, a signing setup opens an editor for the tag message. The workflow reads
+the commit the tag points at, so a lightweight, annotated or signed tag all
+work. Push the tag by name: `git push --tags` would also push any upstream WVA
+tags your clone holds.
 
 The push starts [`ci-release.yaml`](../../.github/workflows/ci-release.yaml).
 Watch it in the **Actions** tab.
@@ -106,7 +117,7 @@ published.
 - Anything else: delete the tag, fix the problem with a PR to `main` that keeps
   `newTag: vX.Y.Z`, tag that PR's merge commit as in step 1, and repeat:
   ```bash
-  git push origin --delete vX.Y.Z && git tag -d vX.Y.Z
+  git push "$REMOTE" --delete vX.Y.Z && git tag -d vX.Y.Z
   ```
 
 **It failed at or after "Build and push the multi-arch image".** An image may
@@ -153,7 +164,13 @@ release run end to end without moving `latest`.
 
 ## Verifying a release
 
-Replace the owner `ev-shindin` with yours if you release from a fork.
+Replace the owner `ev-shindin` with yours if you release from a fork. The
+workflow signs with cosign v3; verify with cosign v3 or later, because cosign v2
+reports `no signatures found` for these images. With no cosign installed, run
+its image: `docker run --rm ghcr.io/sigstore/cosign/cosign:v3.0.6 verify ...`.
+
+Record the index digest in the release notes, so users can deploy by digest:
+`docker buildx imagetools inspect "$IMAGE:vX.Y.Z"` prints it as `Digest:`.
 
 ```bash
 IMAGE=ghcr.io/ev-shindin/llm-scaling-manager

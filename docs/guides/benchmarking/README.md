@@ -17,8 +17,9 @@ the dashboard, with no standup.
 - [ ] A GPU cluster.
 - [ ] A **ReadWriteMany** StorageClass for the model cache
   ([why](#the-model-cache-must-be-readwritemany)).
-- [ ] An `IMG` built from this branch. Released images reject a flag these
-  manifests pass ([why](#img-decides-what-is-measured)).
+- [ ] An `IMG` built from this branch, or a release image from a checkout of
+  the same release. Upstream WVA's images reject a flag these manifests pass
+  ([why](#img-decides-what-is-measured)).
 - [ ] Running Fast Model Actuation in the namespace? Read
   [FMA namespaces](#fma-namespaces) first.
 
@@ -219,10 +220,25 @@ volume it cannot attach. Many clusters' default StorageClass is RWO (kind's
 
 ### `IMG` decides what is measured
 
-Nothing in the results says which binary produced them. Released images reject
-`--external-scaler-bind-address`, which these manifests pass, so a run against
-one measures a CrashLoopBackOff. Set `IMG` to your own build whenever you change
-controller code.
+Nothing in the results says which binary produced them. Upstream WVA's images
+(`ghcr.io/llm-d/...`) reject `--external-scaler-bind-address`, which these
+manifests pass, so a run against one measures a CrashLoopBackOff. Set `IMG` to
+your own build whenever you change controller code.
+
+To benchmark a release of this project, check out its tag so the manifests
+match the image, and pin the image by tag or digest. The digest of each release
+is in its notes on the
+[Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases):
+
+```bash
+git checkout v0.10.0-rc1
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0-rc1
+# or the exact build
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:a2e10bd07c490a53cf3d6ba9d55642f96d5280f22ab925e78868b806d36f9e5a
+```
+
+`:main` is rebuilt on every push to `main`, so two runs against it a day apart
+may measure different code.
 
 ### Why the drain hook
 
