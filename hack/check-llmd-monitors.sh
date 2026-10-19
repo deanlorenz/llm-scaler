@@ -23,7 +23,7 @@ FAIL=0
 PASS=0
 # Every case reports ok or FAIL exactly once; a run that stops early must not
 # pass having checked less. Change this deliberately with the cases.
-EXPECT_CASES=14
+EXPECT_CASES=15
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -81,6 +81,9 @@ kubectl() {
     esac
     return 0
 }
+
+# The real wva_epp_scrapers, kept before it is stubbed below, for case 15.
+eval "real_wva_epp_scrapers() $(declare -f wva_epp_scrapers | tail -n +2)"
 
 # The discovery and conflict tests are the checks' own and have their own
 # fixtures; here they are set per case.
@@ -254,6 +257,28 @@ if grep -q 'delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.
     ok "undeploy removes exactly what setup marked, and cleanup calls it"
 else
     fail "undeploy must remove the marked monitors" "$(cat "$CALLS")"
+fi
+
+# 15. The PodMonitor setup adds for the model servers is not read as a monitor
+# that may scrape the EPP. It selects by matchExpressions, and counted, it made
+# every namespace setup had just served read "cannot tell", and the EPP got no
+# ServiceMonitor of its own. Found walking the guide on kind.
+kubectl() {
+    case "$*" in
+        "get svc optimized-baseline-epp -n team-a -o json") printf '%s' "$SVC_JSON" ;;
+        "get pods -n team-a -l "*) echo '{"items":[{"metadata":{"labels":{"app":"epp"}}}]}' ;;
+        "get servicemonitors -n team-a -o json") echo '{"items":[]}' ;;
+        "get podmonitors -n team-a -o json")
+            echo '{"items":[{"metadata":{"name":"wva-modelserver-metrics","labels":{"app.kubernetes.io/component":"modelserver-metrics"}},"spec":{"selector":{"matchExpressions":[{"key":"llm-d.ai/role","operator":"In","values":["decode","prefill"]}]}}},
+                            {"metadata":{"name":"other"},"spec":{"selector":{"matchExpressions":[{"key":"app","operator":"Exists"}]}}}]}' ;;
+    esac
+    return 0
+}
+got="$(real_wva_epp_scrapers team-a optimized-baseline-epp 2>&1)"
+if [ "$got" = "unevaluated:podmonitor/other" ]; then
+    ok "the model-server PodMonitor setup adds is not counted as a possible EPP scrape; another one still is"
+else
+    fail "only the foreign matchExpressions PodMonitor may be reported (got '$got')"
 fi
 
 total=$((PASS + FAIL))

@@ -940,7 +940,12 @@ wva_epp_scrapers() {
         | "unevaluated:" + $kind + "/" + $m.metadata.name'
 
     kubectl get servicemonitors -n "$ns" -o json 2>/dev/null         | jq -r --argjson l "$svc_labels" --arg kind servicemonitor "($subset), ($unevaluated)" 2>/dev/null
-    kubectl get podmonitors -n "$ns" -o json 2>/dev/null         | jq -r --argjson l "$pod_labels" --arg kind podmonitor "($subset), ($unevaluated)" 2>/dev/null
+    # WVA's own model-server PodMonitor selects the serving roles by
+    # matchExpressions and never the EPP. Counted, it read as "cannot tell
+    # whether the EPP is scraped" in every namespace setup had just given one.
+    kubectl get podmonitors -n "$ns" -o json 2>/dev/null \
+        | jq '.items |= map(select((.metadata.labels["app.kubernetes.io/component"] // "") != "modelserver-metrics"))' 2>/dev/null \
+        | jq -r --argjson l "$pod_labels" --arg kind podmonitor "($subset), ($unevaluated)" 2>/dev/null
 }
 
 # wva_report_epp_flowcontrol reports both EPP requirements and returns non-zero
@@ -1368,7 +1373,13 @@ wva_ensure_llmd_monitors() {
 
     for svc in $(wva_epp_services "$ns"); do
         monitors="$(wva_epp_scrapers "$ns" "$svc")"
-        [ -z "$monitors" ] || continue
+        if [ -n "$monitors" ]; then
+            # A monitor this cannot evaluate may already scrape it, and a second
+            # scrape of one target doubles every rate read from it.
+            printf '%s' "$monitors" | grep -q -v '^unevaluated:' \
+                || log_info "  $ns: $(printf '%s' "$monitors" | sed 's/^unevaluated://' | paste -sd, -) may already scrape $svc (it selects by matchExpressions), so no second monitor is added."
+            continue
+        fi
         if ! wva_epp_scrape_docs "$ns" "$svc" > "${TMPDIR:-/tmp}/wva-epp-scrape.$$.yaml"; then
             log_warning "  $ns: $svc names no metrics port (http-metrics or metrics), so no ServiceMonitor was added for it."
         elif kubectl apply -f "${TMPDIR:-/tmp}/wva-epp-scrape.$$.yaml" >/dev/null; then
