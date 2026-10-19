@@ -530,6 +530,23 @@ Installer:
   default `92.7.0`). A newer release already installed is kept, with a
   warning. Set the variable to install that exact version, including an older
   one.
+- **KEDA's chart is now 2.21.0** (`KEDA_CHART_VERSION`, was `2.19.0`). KEDA up
+  to 2.20.2 has CVE-2026-77524 (GHSA-637c-6jxx-4rwm): a TriggerAuthentication
+  can make the KEDA operator send its own ServiceAccount token to an address
+  its author controls. A new install with `KEDA_HELM_INSTALL=true` gets 2.21.0.
+  A re-run does **not** upgrade a KEDA that is already running: it finds KEDA
+  Ready and skips Helm. Upgrade it yourself, with the flags the installer uses:
+  ```bash
+  helm upgrade keda kedacore/keda --version 2.21.0 -n keda-system \
+    --set prometheus.metricServer.enabled=true --set prometheus.operator.enabled=true \
+    --wait --timeout=5m
+  ```
+  Existing ScaledObjects and the scaler's mutual TLS keep working across it;
+  KEDA's client certificate lives in a Secret the chart does not own. Before
+  upgrading a KEDA that also serves other tenants, read
+  [KEDA's 2.21 migration notes](https://keda.sh/docs/2.21/migration/): Vault
+  Kubernetes authentication and `boundServiceAccountToken` triggers now need an
+  explicit token audience. This project uses neither.
 - **`wva_learned_state_restores_total` has new `outcome` values.** `installed`
   and `rejected` are gone; the label is now `whole`, `args`, `prior`,
   `incomplete` or `differs`
