@@ -146,9 +146,11 @@ deploy_epp() {
 
     # Grant EPP SA permission to create tokenreviews/subjectaccessreviews so its
     # metrics endpoint authentication works (otherwise /metrics returns 500).
+    # One binding PER NAMESPACE: a single cluster-wide name was rebound to the
+    # last namespace installed, and every earlier EPP's /metrics went to 500.
     log_info "Applying EPP tokenreview RBAC..."
     kubectl apply -f "$_lib_dir/epp-tokenreview-rbac.yaml"
-    kubectl create clusterrolebinding optimized-baseline-epp-tokenreview \
+    kubectl create clusterrolebinding "optimized-baseline-epp-tokenreview-$NAMESPACE" \
         --clusterrole=optimized-baseline-epp-tokenreview \
         --serviceaccount="$NAMESPACE:optimized-baseline-epp" \
         --dry-run=client -o yaml | kubectl apply -f -
@@ -166,7 +168,13 @@ undeploy_epp() {
     log_info "Removing EPP infrastructure..."
     helm uninstall optimized-baseline -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
     kubectl delete secret llm-d-hf-token -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrolebinding "optimized-baseline-epp-tokenreview-$NAMESPACE" --ignore-not-found 2>/dev/null || true
+    # The name every namespace once shared.
     kubectl delete clusterrolebinding optimized-baseline-epp-tokenreview --ignore-not-found 2>/dev/null || true
-    kubectl delete clusterrole optimized-baseline-epp-tokenreview --ignore-not-found 2>/dev/null || true
+    # The role is shared; it goes with the last binding that uses it.
+    if ! kubectl get clusterrolebindings -o jsonpath='{.items[*].roleRef.name}' 2>/dev/null \
+        | tr ' ' '\n' | grep -qx optimized-baseline-epp-tokenreview; then
+        kubectl delete clusterrole optimized-baseline-epp-tokenreview --ignore-not-found 2>/dev/null || true
+    fi
     log_success "EPP infrastructure removed"
 }
