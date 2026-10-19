@@ -242,6 +242,23 @@ MAX_REPLICAS_B="${MAX_REPLICAS_B:-$MAX_REPLICAS}"
 # a shared cluster the scheduler otherwise spreads the small model's pods.
 # Preflight checks that node alone has the GPUs the run peaks at.
 BENCH_NODE="${BENCH_NODE:-}"
+# BENCH_NODES=<node>,<node>,...: the nodes every model replica may land on, by
+# node affinity, with no single-node pin. For a shared cluster where no one
+# node has the run's peak free but several have part of it. Preflight sums the
+# free GPUs over the list and checks that each node can hold one replica of
+# the larger model; the standup points the controller's gpu-inventory at the
+# list alone (WVA_NODE_SELECTOR), so it funds a replica only where one fits,
+# and the quota still bounds the total. Each arm records where its pods
+# landed (placement.json), and the report prints it: a 2-GPU replica needs 2
+# free GPUs on ONE node, so how the fleet fragments across the nodes decides
+# what the share arms can fund. Not together with BENCH_NODE.
+BENCH_NODES="${BENCH_NODES:-}"
+# BENCH_TOLERATE=<key>[=<value>][:<effect>],...: the taints model replicas may
+# tolerate. Empty by default, and nothing is ever tolerated by default:
+# preflight refuses a listed node that carries a NoSchedule or NoExecute taint
+# this does not name. A taint is somebody's decision about a node; naming it
+# here is the run's owner deciding to use the node anyway.
+BENCH_TOLERATE="${BENCH_TOLERATE:-}"
 # Whether the share arms need node data (a gpu-inventory limiter beside the
 # quota, node read and a cluster-wide pod list for the controller): auto means
 # when the two models' replicas differ in size, required always, off never.
@@ -338,6 +355,63 @@ case "$GATEWAY_REUSE" in
     auto|true|false) ;;
     *) die "GATEWAY_REUSE=$GATEWAY_REUSE: use auto (reuse the cluster's Istio when it runs one), true or false" ;;
 esac
+[ -z "$BENCH_NODE" ] || [ -z "$BENCH_NODES" ] || \
+    die "BENCH_NODE=$BENCH_NODE and BENCH_NODES=$BENCH_NODES are both set: one node, or a list"
+
+# bench_nodes: BENCH_NODES one per line, blanks and repeats dropped, in order.
+bench_nodes() {
+    printf '%s' "$BENCH_NODES" | tr ',' '\n' | tr -d ' \r' | awk 'NF && !seen[$0]++'
+}
+
+bench_nodes_csv() { bench_nodes | paste -sd, -; }
+
+# bench_node_selector: the label selector for the controller's gpu-inventory,
+# WVA_NODE_SELECTOR. Set-based, which labels.Parse accepts.
+bench_node_selector() { printf 'kubernetes.io/hostname in (%s)' "$(bench_nodes_csv)"; }
+
+# bench_nodes_problem: why BENCH_NODES is not a list of node names, or nothing.
+bench_nodes_problem() {
+    [ -n "$BENCH_NODES" ] || return 0
+    local n
+    [ -n "$(bench_nodes)" ] || { echo "BENCH_NODES=$BENCH_NODES names no node"; return; }
+    for n in $(bench_nodes); do
+        case "$n" in *[!a-z0-9.-]*) echo "BENCH_NODES: '$n' is not a node name" ;; esac
+    done
+}
+
+# tolerations_json: BENCH_TOLERATE as Kubernetes tolerations (a JSON array),
+# or nothing when it is empty. Returns 1, with the reason on stderr, for an
+# entry that names no key: a toleration without one tolerates EVERY taint.
+tolerations_json() {
+    [ -n "$BENCH_TOLERATE" ] || return 0
+    local entries=() e rest key val eff out=""
+    IFS=',' read -r -a entries <<< "$BENCH_TOLERATE"
+    for e in "${entries[@]}"; do
+        e="${e// /}"
+        [ -n "$e" ] || continue
+        rest="$e" eff=""
+        case "$rest" in *:*) eff="${rest##*:}"; rest="${rest%:*}" ;; esac
+        key="${rest%%=*}" val=""
+        case "$rest" in *=*) val="${rest#*=}" ;; esac
+        case "$key" in
+            ""|"*") echo "BENCH_TOLERATE entry '$e' names no taint key; a toleration without one tolerates every taint" >&2; return 1 ;;
+            *[!A-Za-z0-9./_-]*) echo "BENCH_TOLERATE entry '$e': '$key' is not a taint key" >&2; return 1 ;;
+        esac
+        case "$val" in
+            *[!A-Za-z0-9._-]*) echo "BENCH_TOLERATE entry '$e': '$val' is not a taint value" >&2; return 1 ;;
+        esac
+        case "$eff" in
+            ""|NoSchedule|PreferNoSchedule|NoExecute) ;;
+            *) echo "BENCH_TOLERATE entry '$e': the effect is NoSchedule, PreferNoSchedule or NoExecute, not '$eff'" >&2; return 1 ;;
+        esac
+        out="${out}$(jq -cn --arg k "$key" --arg v "$val" --arg e "$eff" '
+            {key: $k} + (if $v == "" then {operator: "Exists"} else {operator: "Equal", value: $v} end)
+            + (if $e == "" then {} else {effect: $e} end)')
+"
+    done
+    [ -n "$out" ] || { echo "BENCH_TOLERATE=$BENCH_TOLERATE names no taint" >&2; return 1; }
+    printf '%s' "$out" | jq -cs '.'
+}
 
 # The accelerators this run peaks at, and it is the SAME in both arms by
 # construction -- that is the point.
@@ -708,6 +782,147 @@ node_free_gpus() {
     rm -f "$nodes_f" "$pods_f"
 }
 
+# largest_replica_gpus: the GPUs one replica of the larger model holds.
+largest_replica_gpus() {
+    if [ "$PD_SINGLE_STACK" = 1 ] || scenario_is_pd; then echo "$GPUS_PER_REPLICA"; return; fi
+    local a b
+    a="$(model_gpus a)"; b="$(model_gpus b)"
+    if [ "$a" -ge "$b" ]; then echo "$a"; else echo "$b"; fi
+}
+
+# peak_pods <gpus>: the most model Pods the run can hold within <gpus>, each
+# model between MIN_REPLICAS and its ceiling at its own size. The quota's 7
+# GPUs hold 5 Pods at 2 + 1 x 4 GPUs, and each of them needs its CPU and
+# memory somewhere.
+peak_pods() {
+    local cap="$1"
+    if [ "$PD_SINGLE_STACK" = 1 ] || scenario_is_pd; then echo $(( cap / GPUS_PER_REPLICA )); return; fi
+    local ga gb a b best=0
+    ga="$(model_gpus a)"; gb="$(model_gpus b)"
+    for a in $(seq "$MIN_REPLICAS" "$MAX_REPLICAS_A"); do
+        for b in $(seq "$MIN_REPLICAS" "$MAX_REPLICAS_B"); do
+            [ $(( a * ga + b * gb )) -le "$cap" ] && [ $(( a + b )) -gt "$best" ] && best=$(( a + b ))
+        done
+    done
+    echo "$best"
+}
+
+# bench_nodes_fit: one JSON object per BENCH_NODES entry, in order -- whether
+# it exists, is Ready and schedulable, its free GPUs (allocatable less what
+# pods bound to it request), free CPU and memory, and the NoSchedule and
+# NoExecute taints that BENCH_TOLERATE does not tolerate. Nothing when the
+# cluster cannot be read. node.kubernetes.io/* taints are left to the Ready
+# and cordon checks, which say what they mean.
+bench_nodes_fit() {
+    local tols="$1" nodes_f pods_f names
+    names="$(bench_nodes | jq -R . | jq -cs .)"
+    nodes_f="$(mktemp)"; pods_f="$(mktemp)"
+    kc get nodes -o json > "$nodes_f" 2>/dev/null || { rm -f "$nodes_f" "$pods_f"; return 0; }
+    kc get pods -A -o json > "$pods_f" 2>/dev/null || echo '{"items":[]}' > "$pods_f"
+    jq -c --slurpfile p "$pods_f" --argjson names "$names" --argjson tols "${tols:-[]}" '
+        def cpu: if test("m$") then (sub("m$";"") | tonumber / 1000) else tonumber end;
+        def gi: if test("Ki$") then (sub("Ki$";"") | tonumber / 1048576)
+                elif test("Mi$") then (sub("Mi$";"") | tonumber / 1024)
+                elif test("Gi$") then (sub("Gi$";"") | tonumber)
+                else (tonumber / 1073741824) end;
+        def tolerates($t): .key == $t.key
+            and ((.operator // "Equal") == "Exists" or (.value // "") == ($t.value // ""))
+            and ((.effect // "") == "" or .effect == $t.effect);
+        [$p[0].items[] | select(.status.phase=="Running" or .status.phase=="Pending")
+         | select(.spec.nodeName != null)] as $bound
+        | (.items | map({(.metadata.name): .}) | add // {}) as $by
+        | $names[] as $n
+        | $by[$n] as $node
+        | if $node == null then {name: $n, found: false}
+          else
+            ([$bound[] | select(.spec.nodeName == $n)]) as $on
+            | {name: $n, found: true,
+               ready: ([$node.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0),
+               cordoned: ($node.spec.unschedulable == true),
+               gpu_alloc: ($node.status.allocatable["nvidia.com/gpu"] // "0" | tonumber),
+               gpu_free: (($node.status.allocatable["nvidia.com/gpu"] // "0" | tonumber)
+                          - ([$on[] | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0)),
+               cpu_free: (($node.status.allocatable.cpu // "0" | cpu)
+                          - ([$on[] | .spec.containers[].resources.requests.cpu // "0" | cpu] | add // 0)),
+               mem_free: (($node.status.allocatable.memory // "0" | gi)
+                          - ([$on[] | .spec.containers[].resources.requests.memory // "0" | gi] | add // 0)),
+               taints: [$node.spec.taints[]?
+                        | select(.effect == "NoSchedule" or .effect == "NoExecute")
+                        | select(.key | startswith("node.kubernetes.io/") | not)
+                        | . as $t | select([$tols[] | tolerates($t)] | any | not)
+                        | "\(.key)\(if (.value // "") != "" then "=" + .value else "" end):\(.effect)"]}
+          end' "$nodes_f" 2>/dev/null
+    rm -f "$nodes_f" "$pods_f"
+}
+
+# multi_node_preflight <peak GPUs>: the BENCH_NODES checks. Each listed node
+# must exist, be Ready, take Pods (no taint BENCH_TOLERATE does not name) and
+# hold at least one replica of the larger model -- its GPUs on that ONE node,
+# plus a decode Pod's CPU and memory. Together they must have the free GPUs the
+# run peaks at, and the CPU and memory for the Pods that peak can be. Returns 1
+# on any of it, having said which.
+multi_node_preflight() {
+    local want="$1" rc=0 tols fit big cpu mem
+    local bad
+    bad="$(bench_nodes_problem)"
+    if [ -n "$bad" ]; then printf '%s\n' "$bad" | while IFS= read -r l; do warn "$l"; done; return 1; fi
+    tols="$(tolerations_json)" || { warn "BENCH_TOLERATE=$BENCH_TOLERATE is refused (above)"; return 1; }
+    big="$(largest_replica_gpus)"
+    cpu="$(decode_cpu)"; mem="$(decode_mem_gi)"
+    case "$cpu" in *m) cpu=$(( ${cpu%m} / 1000 )) ;; esac
+    fit="$(bench_nodes_fit "$tols")"
+    [ -n "$fit" ] || { warn "BENCH_NODES: could not read the nodes and pods to check them"; return 1; }
+    info "BENCH_NODES=$(bench_nodes_csv): replicas may land on any of them; the larger model's replica takes ${big} GPU(s), and a decode Pod ${cpu} CPU / ${mem}Gi, on one node"
+    [ -z "$tols" ] || info "  tolerated, on these nodes only: $BENCH_TOLERATE"
+    local total=0 slots=0 bigslots=0 line name gfree cfree mfree pods_fit node_bigs
+    while IFS= read -r line; do
+        name="$(jq -r .name <<<"$line")"
+        if [ "$(jq -r .found <<<"$line")" != true ]; then
+            warn "BENCH_NODES: no node named $name"; rc=1; continue
+        fi
+        if [ "$(jq -r .ready <<<"$line")" != true ] || [ "$(jq -r .cordoned <<<"$line")" = true ]; then
+            warn "BENCH_NODES: $name is not Ready, or is cordoned: it takes no new Pods"; rc=1; continue
+        fi
+        if [ "$(jq -r '.gpu_alloc' <<<"$line")" -le 0 ]; then
+            warn "BENCH_NODES: $name has no accelerators"; rc=1; continue
+        fi
+        if [ "$(jq -r '.taints | length' <<<"$line")" -gt 0 ]; then
+            warn "BENCH_NODES: $name carries $(jq -r '.taints | join(", ")' <<<"$line"), which BENCH_TOLERATE does not name."
+            warn "  Nothing is tolerated by default. Name it in BENCH_TOLERATE only if this run may use that node; otherwise drop the node."
+            rc=1; continue
+        fi
+        gfree="$(jq -r '.gpu_free' <<<"$line")"
+        cfree="$(jq -r '.cpu_free | floor' <<<"$line")"
+        mfree="$(jq -r '.mem_free | floor' <<<"$line")"
+        pods_fit="$(jq -r --argjson c "$cpu" --argjson m "${mem:-64}" '[(.cpu_free / $c | floor), (.mem_free / $m | floor)] | min' <<<"$line")"
+        [ "$pods_fit" -ge 0 ] 2>/dev/null || pods_fit=0
+        node_bigs=$(( gfree / big ))
+        [ "$node_bigs" -le "$pods_fit" ] || node_bigs="$pods_fit"
+        if [ "$node_bigs" -lt 1 ]; then
+            warn "BENCH_NODES: $name has ${gfree} free GPU(s), ${cfree} free CPU and ${mfree}Gi free memory: it cannot hold one ${big}-GPU replica (${big} GPUs, ${cpu} CPU and ${mem}Gi on one node)"
+            rc=1; continue
+        fi
+        info "  $name: ${gfree} free GPU(s), ${cfree} CPU, ${mfree}Gi free: up to ${node_bigs} ${big}-GPU replica(s) at once"
+        total=$(( total + gfree ))
+        [ "$pods_fit" -le "$gfree" ] && slots=$(( slots + pods_fit )) || slots=$(( slots + gfree ))
+        bigslots=$(( bigslots + node_bigs ))
+    done <<< "$fit"
+    [ "$rc" -eq 0 ] || return 1
+    local need_pods
+    need_pods="$(peak_pods "$want")"
+    if [ "$total" -lt "$want" ]; then
+        warn "BENCH_NODES have ${total} free GPU(s) together and the run peaks at ${want}: add a node, or lower the quota or MAX_REPLICAS"
+        rc=1
+    elif [ "$slots" -lt "$need_pods" ]; then
+        warn "BENCH_NODES have ${total} free GPU(s) but CPU and memory for only ${slots} Pod(s), and the run can hold ${need_pods} at ${want} GPUs:"
+        warn "  lower DECODE_CPU/DECODE_MEMORY (the standup applies them), or add a node"
+        rc=1
+    else
+        ok "BENCH_NODES have ${total} free GPU(s) together; the run peaks at ${want} (up to ${need_pods} Pods), and room for ${bigslots} ${big}-GPU replica(s) at once"
+    fi
+    return "$rc"
+}
+
 verb_preflight() {
     need_ns
     local rc=0
@@ -807,10 +1022,18 @@ verb_preflight() {
         else
             ok "BENCH_NODE=$BENCH_NODE has ${node_free} free accelerator(s); the run peaks at ${want}"
         fi
+    elif [ -n "$BENCH_NODES" ]; then
+        # SEVERAL nodes: none needs the whole peak, but each must hold one
+        # replica of the larger model, and together they must hold the peak.
+        multi_node_preflight "$want" || rc=1
     else
         local best
         best="$(node_free_gpus)"
-        [ -n "$best" ] && info "  the node with the most free accelerators has ${best}; BENCH_NODE=<node> pins the run to one"
+        [ -n "$best" ] && info "  the node with the most free accelerators has ${best}; BENCH_NODE=<node> pins the run to one, BENCH_NODES=<node>,<node> spreads it over several"
+    fi
+    if [ -n "$BENCH_TOLERATE" ] && [ -z "$BENCH_NODES" ]; then
+        warn "BENCH_TOLERATE is set without BENCH_NODES: a toleration is only taken for nodes the run names"
+        rc=1
     fi
 
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
@@ -1001,8 +1224,15 @@ $size_problems"
             *) die "the models' replicas differ in size ($(model_gpus a) and $(model_gpus b) GPUs), so the share arms need node data, and WVA_LIMITER='${WVA_LIMITER:-}' declares no gpu-inventory limiter. Stand up with WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=<n>', or NODE_DATA=off to run without it (the small model can then never fund the large one)." ;;
         esac
     fi
+    local nodes_bad tols
+    nodes_bad="$(bench_nodes_problem)"
+    [ -z "$nodes_bad" ] || die "$nodes_bad"
+    [ -z "$BENCH_TOLERATE" ] || [ -n "$BENCH_NODES" ] || \
+        die "BENCH_TOLERATE is set without BENCH_NODES: a toleration is only taken for nodes the run names"
+    tols="$(tolerations_json)" || die "BENCH_TOLERATE=$BENCH_TOLERATE is refused (above)"
     if [ "$BENCH_SIM" = 1 ]; then
         sim_standup
+        apply_node_selector
         return
     fi
     # BOTH halves. `--spec` resolves a SPECIFICATION
@@ -1051,6 +1281,8 @@ $size_problems"
         BENCHMARK_DECODE_CPU="$DECODE_CPU" \
         BENCHMARK_DECODE_MEMORY="$DECODE_MEMORY" \
         BENCHMARK_DECODE_NODE="$BENCH_NODE" \
+        BENCHMARK_DECODE_NODES="$(bench_nodes_csv)" \
+        BENCHMARK_DECODE_TOLERATIONS="$tols" \
         BENCHMARK_ALLOW_EPP_REUSE="$allow_reuse" \
         BENCHMARK_NAMESPACE="$NS" \
         BENCHMARK_SPEC="$BENCH_SPEC" \
@@ -1088,8 +1320,37 @@ $size_problems"
     # rendered config against a running process, which is the comparison that
     # was got wrong in the first place.
     epp_restart
+    apply_node_selector
     verb_status
     ok "stacks stood up. Run 'verify' before any load."
+}
+
+# apply_node_selector: with BENCH_NODES, the controller's gpu-inventory counts
+# the listed nodes alone (WVA_NODE_SELECTOR), so the free GPUs it funds a
+# replica from are per node and on the run's nodes -- not the whole cluster's,
+# which would count GPUs on nodes the replicas may never land on. The quota
+# still bounds the total. Without BENCH_NODES nothing changes.
+apply_node_selector() {
+    [ -n "$BENCH_NODES" ] || return 0
+    local sel
+    sel="$(bench_node_selector)"
+    kc -n "$WVA_NS" set env deploy/wva-controller-manager WVA_NODE_SELECTOR="$sel" >/dev/null \
+        || die "could not set WVA_NODE_SELECTOR on $WVA_NS/wva-controller-manager"
+    kc -n "$WVA_NS" rollout status deploy/wva-controller-manager --timeout=300s >/dev/null \
+        || die "the controller did not come back after WVA_NODE_SELECTOR was set"
+    ok "the controller's gpu-inventory counts only $(bench_nodes_csv) (WVA_NODE_SELECTOR='$sel')"
+}
+
+# node_selector_problem: with BENCH_NODES, why the controller's gpu-inventory
+# is not counting exactly those nodes, or nothing.
+node_selector_problem() {
+    [ -n "$BENCH_NODES" ] || return 0
+    local ctl got want
+    ctl="$(kc get deploy wva-controller-manager -n "$WVA_NS" -o json 2>/dev/null)" || {
+        echo "could not read $WVA_NS/wva-controller-manager to check its WVA_NODE_SELECTOR"; return; }
+    got="$(jq -r '[.spec.template.spec.containers[].env[]? | select(.name == "WVA_NODE_SELECTOR") | .value] | first // ""' <<<"$ctl" 2>/dev/null)"
+    want="$(bench_node_selector)"
+    [ "$got" = "$want" ] || echo "the controller's gpu-inventory reads WVA_NODE_SELECTOR='${got}', not '${want}': it would fund replicas from GPUs on nodes this run does not use. Run standup again with the same BENCH_NODES, or: kubectl -n ${WVA_NS} set env deploy/wva-controller-manager WVA_NODE_SELECTOR='${want}'"
 }
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1565,23 @@ sim_manifest() {
         [ -z "$BENCH_NODE" ] || sel="$sel
         kubernetes.io/hostname: \"$BENCH_NODE\""
     fi
+    # BENCH_NODES: any of the listed nodes, by a required affinity term -- the
+    # shape the chart renders for the real stacks.
+    if [ -n "$BENCH_NODES" ]; then
+        sel="${sel:+$sel
+}      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: $(bench_nodes | jq -R . | jq -cs .)"
+    fi
+    local tols
+    tols="$(tolerations_json 2>/dev/null)" || tols=""
+    [ -z "$tols" ] || sel="${sel:+$sel
+}      tolerations: $tols"
     cat <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -2897,6 +3175,9 @@ verb_run() {
     # whose policy was never read measures the previous arm under a new name.
     if is_share_arm "$arm"; then
         check_node_data || die "arm $arm refused: the share arms of this run need node data (above). NODE_DATA=off runs without it, and then measures the small model never funding the large one."
+        local sel_bad
+        sel_bad="$(node_selector_problem)"
+        [ -z "$sel_bad" ] || die "arm $arm refused: $sel_bad"
         set_share_policy "$arm"
         wait_share_mode "$(share_arm_mode "$arm")" || \
             die "the controller is not running the optimizer mode arm $arm needs, so this arm would measure the wrong thing"
@@ -2921,10 +3202,14 @@ verb_run() {
     local out_dir
     out_dir="$(arm_dir "$arm")"
     mkdir -p "$out_dir"
-    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s,"max_replicas_a":%s,"max_replicas_b":%s,"gpus_per_replica_a":%s,"gpus_per_replica_b":%s}\n' \
+    # bench_nodes: the nodes the replicas could land on ("" when unrestricted
+    # or pinned to BENCH_NODE). Two arms on different node sets had different
+    # fragmentation to fund replicas from, and the report refuses them.
+    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s,"max_replicas_a":%s,"max_replicas_b":%s,"gpus_per_replica_a":%s,"gpus_per_replica_b":%s,"bench_nodes":"%s"}\n' \
         "$arm" "$ceiling" "$floor" "$([ "$arm" = pool ] && echo "$POOL_REPLICAS" || echo 0)" "$GPUS_PER_REPLICA" \
         "$MAX_PREFILL" "$MAX_DECODE" "$MIN_PREFILL" "$MIN_DECODE" \
         "$MAX_REPLICAS_A" "$MAX_REPLICAS_B" "$(model_gpus a)" "$(model_gpus b)" \
+        "${BENCH_NODE:-$(bench_nodes_csv)}" \
         > "$out_dir/budget.json"
     # The policy this arm ran under, kept with its results: the report refuses
     # two share arms whose limiters differ.
@@ -3183,6 +3468,16 @@ verb_run() {
         --seed "$SEED" --data "$LOAD_DATA" --prefix-groups "$PREFIX_GROUPS" \
         || die "could not convert the harness results for arm $arm. See $out_dir/loader.log"
     mv "$out_dir/requests.jsonl.meta.json" "$out_dir/meta.json"
+    # Where every pod of the arm landed, from the sampler's own record. On
+    # several nodes this is part of the result: a replica of N GPUs needs N
+    # free on one node, so the placement decides what could be funded.
+    if python3 "$HERE/two_model_share_report.py" --placement "$out_dir/gpus.jsonl" > "$out_dir/placement.json.tmp"; then
+        mv "$out_dir/placement.json.tmp" "$out_dir/placement.json"
+        info "arm $arm placement: $(python3 "$HERE/two_model_share_report.py" --placement-summary "$out_dir/placement.json")"
+    else
+        rm -f "$out_dir/placement.json.tmp"
+        warn "could not derive where arm $arm's pods landed from $out_dir/gpus.jsonl"
+    fi
     # From the meta, not from requests.jsonl: that file is empty by design now,
     # and "0 requests" on a healthy arm reads as a run that served nothing.
     ok "arm $arm: $(python3 -c "import json;m=json.load(open('$out_dir/meta.json'));print('%d issued, %d served' % (m['issued'], sum(w['overall']['n'] for w in m['windows'].values())))" 2>/dev/null || echo "results written"), $(wc -l < "$out_dir/gpus.jsonl" 2>/dev/null || echo 0) GPU samples in $out_dir"

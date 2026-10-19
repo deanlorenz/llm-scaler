@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from two_model_report import (  # noqa: E402  (beside this file, not installed)
     clip_series, gpu_series, integrate, load_meta, rise_stages, window_of)
+from two_model_share_report import load_placement, placement_table  # noqa: E402
 
 ARMS = ("today", "shadow", "share")
 OUTCOMES = ("done", "aborted", "fill-timeout", "wrong-pod", "cancelled", "redirected")
@@ -169,6 +170,7 @@ def load_arm(d, name):
         "metric_transfers": series(snap, "sum by (outcome)", "outcome"),
         "log": transfers_from_log(os.path.join(d, "controller.log")),
         "has_share_json": snap is not None,
+        "placement": load_placement(d),
     }
     for key in ("a", "b"):
         out["bursts"][key] = [
@@ -384,6 +386,15 @@ def report(data, reps, models, missing):
             g = a["gpu_seconds"]
             rel = "-" if not (g and base) else "%+.0f%%" % (100.0 * (g - base) / base)
             print("| %s | %s | %s | %s | %s |" % (r, arm, n0(g), n0(a["peak_gpus"]), rel))
+    print("")
+    print("## Placement")
+    print("")
+    print("Where each arm's pods landed. A replica of N GPUs needs N free GPUs on one node, "
+          "so on several nodes the placement decides what share could fund.")
+    print("")
+    rows = [("%s %s" % (r, arm), data[r][arm].get("placement")) for r in reps for arm in ARMS if data[r].get(arm)]
+    for line in placement_table(rows):
+        print(line)
     print("")
     print("## What this shows")
     print("")

@@ -786,12 +786,17 @@ BENCHMARK_ENGINE_CACHE_SEED ?= auto
 # drain hook and grace into every engine before it first starts, so the
 # workload patch after the standup finds nothing to roll and no model starts
 # twice; false leaves it to that patch, as before. BENCHMARK_DECODE_NODE pins
-# every engine role to one node (kubernetes.io/hostname).
+# every engine role to one node (kubernetes.io/hostname); BENCHMARK_DECODE_NODES
+# (a comma list) allows any of several, by node affinity; and
+# BENCHMARK_DECODE_TOLERATIONS (a JSON list) gives those roles tolerations,
+# never by default.
 BENCHMARK_GATEWAY_SKIP_INSTALL ?= false
 BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
 BENCHMARK_DECODE_CPU ?=
 BENCHMARK_DECODE_MEMORY ?=
 BENCHMARK_DECODE_NODE ?=
+BENCHMARK_DECODE_NODES ?=
+BENCHMARK_DECODE_TOLERATIONS ?=
 BENCHMARK_RENDER_DRAIN ?= true
 # How long one kubectl request in a benchmark recipe may take before it fails
 # with a reason. kubectl has none by default, and a get of model-pvc hung for
@@ -2026,6 +2031,8 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$(BENCHMARK_GATEWAY_PROVIDER_NAMESPACE)" \
 		BENCHMARK_DECODE_CPU="$(BENCHMARK_DECODE_CPU)" BENCHMARK_DECODE_MEMORY="$(BENCHMARK_DECODE_MEMORY)" \
 		BENCHMARK_DECODE_NODE="$(BENCHMARK_DECODE_NODE)" \
+		BENCHMARK_DECODE_NODES="$(BENCHMARK_DECODE_NODES)" \
+		BENCHMARK_DECODE_TOLERATIONS='$(BENCHMARK_DECODE_TOLERATIONS)' \
 		BENCHMARK_RENDER_DRAIN="$(BENCHMARK_RENDER_DRAIN)" \
 		bash hack/benchmark/scenario_overrides.sh "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"
 	@# Node-local weights, last of the scenario edits: the script refuses a

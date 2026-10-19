@@ -18,6 +18,13 @@
 #   BENCHMARK_DECODE_NODE=<node>
 #       Every engine role with its own resources pinned to that node
 #       (nodeSelector kubernetes.io/hostname).
+#   BENCHMARK_DECODE_NODES=<node>,<node>...
+#       Every engine role with its own resources allowed on ANY of those nodes,
+#       by node affinity (the role's acceleratorType, rendered by the chart as
+#       a required kubernetes.io/hostname In term). Not with BENCHMARK_DECODE_NODE.
+#   BENCHMARK_DECODE_TOLERATIONS=<JSON array>
+#       Tolerations for those same roles, exactly as given. Each must name a
+#       taint key: a toleration with no key tolerates every taint.
 #   BENCHMARK_RENDER_DRAIN=true (the default)
 #       The drain fields -- a preStop sleep of WVA_DRAIN_SLEEP_SECONDS (45) and
 #       terminationGracePeriodSeconds of WVA_DRAIN_GRACE_SECONDS (120) -- on every
@@ -35,6 +42,14 @@ log_error() { printf 'scenario_overrides: %s\n' "$1" >&2; exit 1; }
 SCENARIO="${1:?usage: scenario_overrides.sh <scenario.yaml>}"
 [ -f "$SCENARIO" ] || log_error "no scenario at ${SCENARIO}"
 command -v yq >/dev/null 2>&1 || log_error "yq is required (the standup edits the scenario with it)"
+# Refused before any edit, so a refusal leaves the copy as it was.
+[ -z "${BENCHMARK_DECODE_NODE:-}" ] || [ -z "${BENCHMARK_DECODE_NODES:-}" ] || \
+    log_error "BENCHMARK_DECODE_NODE and BENCHMARK_DECODE_NODES are both set: one node, or a list"
+if [ -n "${BENCHMARK_DECODE_TOLERATIONS:-}" ]; then
+    export TOLS="$BENCHMARK_DECODE_TOLERATIONS"
+    tols_ok="$(yq -p json -r 'type == "!!seq" and length > 0 and ([.[] | select(type != "!!map" or (.key // "") == "")] | length) == 0' <<< "$TOLS" 2>/dev/null || true)"
+    [ "$tols_ok" = true ] || log_error "BENCHMARK_DECODE_TOLERATIONS is not a list of tolerations that each name a taint key: '${TOLS}'"
+fi
 
 # The engine roles: every decode or prefill map that runs vLLM and is not
 # switched off. In the shipped scenarios that is the shared block; the
@@ -75,6 +90,45 @@ if [ -n "${BENCHMARK_DECODE_NODE:-}" ]; then
     [ "$n" -gt 0 ] || log_error "BENCHMARK_DECODE_NODE=${DECODE_NODE}, but ${SCENARIO} has no engine role with resources to pin"
     yq -i "(${PINNED} | .nodeSelector.\"kubernetes.io/hostname\") = strenv(DECODE_NODE)" "$SCENARIO"
     echo "node: ${n} engine role(s) pinned to ${DECODE_NODE}"
+fi
+
+# BENCHMARK_DECODE_NODES=<node>,<node>...: the same roles, allowed on any of
+# those nodes. A nodeSelector cannot say "one of these", so it goes in the
+# role's acceleratorType: the harness renders it as the chart's
+# acceleratorTypes, and the chart as a required node affinity term
+# (kubernetes.io/hostname In <nodes>). It REPLACES the product selector, which
+# is fine because the nodes are named: preflight checks each of them has
+# accelerators. labelValue is the first node, so the harness's resolver (which
+# acts on labelValue "auto") leaves it alone and its node-label check matches.
+if [ -n "${BENCHMARK_DECODE_NODES:-}" ]; then
+    nodes_json="" first=""
+    IFS=',' read -r -a node_list <<< "$BENCHMARK_DECODE_NODES"
+    for nd in "${node_list[@]}"; do
+        nd="${nd// /}"
+        [ -n "$nd" ] || continue
+        case "$nd" in *[!a-z0-9.-]*) log_error "not a node name: '${nd}'" ;; esac
+        [ -n "$first" ] || first="$nd"
+        nodes_json="${nodes_json:+$nodes_json,}\"${nd}\""
+    done
+    nodes_json="[${nodes_json}]"
+    [ -n "$first" ] || log_error "BENCHMARK_DECODE_NODES names no node"
+    export NODES_JSON="$nodes_json" FIRST_NODE="$first"
+    PINNED='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("resources"))'
+    n="$(yq -r "[${PINNED}] | length" "$SCENARIO")"
+    [ "$n" -gt 0 ] || log_error "BENCHMARK_DECODE_NODES=${BENCHMARK_DECODE_NODES}, but ${SCENARIO} has no engine role with resources to place"
+    yq -i "(${PINNED} | .acceleratorType) = {\"labelKey\": \"kubernetes.io/hostname\", \"labelValue\": strenv(FIRST_NODE), \"labelValues\": env(NODES_JSON)}" "$SCENARIO"
+    echo "nodes: ${n} engine role(s) may run on any of ${BENCHMARK_DECODE_NODES}"
+fi
+
+# BENCHMARK_DECODE_TOLERATIONS=<JSON array>: given, never defaulted. Each entry
+# must name a key; an empty key with operator Exists tolerates EVERY taint,
+# which is a decision about someone else's nodes nobody made here.
+if [ -n "${BENCHMARK_DECODE_TOLERATIONS:-}" ]; then
+    PINNED='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("resources"))'
+    n="$(yq -r "[${PINNED}] | length" "$SCENARIO")"
+    [ "$n" -gt 0 ] || log_error "BENCHMARK_DECODE_TOLERATIONS is set, but ${SCENARIO} has no engine role with resources to give them"
+    yq -i "(${PINNED} | .tolerations) = env(TOLS)" "$SCENARIO"
+    echo "tolerations: ${n} engine role(s) tolerate ${TOLS}"
 fi
 
 if [ "${BENCHMARK_RENDER_DRAIN:-true}" = "true" ]; then

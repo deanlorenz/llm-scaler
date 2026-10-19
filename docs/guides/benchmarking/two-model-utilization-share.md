@@ -237,6 +237,8 @@ What is new against the other runs:
   is the deliberate way past.
 - **One node.** `BENCH_NODE=<node>` pins every model replica to that node.
   `preflight` checks that node alone has the GPUs the run peaks at.
+- **Several nodes**, when no single node has the peak free
+  ([below](#on-several-nodes)).
 - **Repeats in one command.** `make benchmark-two-model-share-arms` runs
   `REPEATS` (2) rounds of today, shadow and share, each after a reset, a report
   per repeat, then `report-repeats`. Even repeats run the arms in reverse order.
@@ -263,6 +265,36 @@ TEARDOWN_ON_EXIT=1 make benchmark-two-model-share-arms
 
 Results land in `rep1/`, `rep2/` under the results directory, with
 `repeats.md` beside them.
+
+### On several nodes
+
+On a shared cluster, no node may have 7 free GPUs while several have 3 to 5.
+Name them in place of `BENCH_NODE`:
+
+```bash
+export BENCH_NODES=<node>,<node>,<node>
+make benchmark-two-model-preflight
+```
+
+- **Where replicas land.** On any listed node, by node affinity. The list
+  replaces the GPU product selector, so name nodes of one product.
+- **What `preflight` checks.** The listed nodes' free GPUs must add up to the
+  peak (the quota, 7). Each node must hold at least one replica of the larger
+  model: 2 free GPUs, plus a decode Pod's CPU and memory, on that one node.
+  Together they need the CPU and memory for every Pod the peak can hold.
+- **The controller's GPU count.** The standup sets the controller's
+  gpu-inventory to count only the listed nodes (`WVA_NODE_SELECTOR`), node by
+  node. The quota still caps the total at 7. Each share arm refuses a
+  controller that counts other nodes.
+- **Where they landed.** Each arm writes `placement.json`. The report gives
+  each node's GPUs and each model's replicas. Read it with the result. A 2-GPU
+  replica needs 2 free GPUs on one node, so one free GPU on each of two nodes
+  funds nothing, and `share` can fund less than on one node. The report refuses
+  to compare arms run on different node lists.
+- **Taints.** Nothing is tolerated by default. `preflight` refuses a listed
+  node with a `NoSchedule` or `NoExecute` taint. If the run may use that node,
+  name the taint: `BENCH_TOLERATE=<key>=<value>:<effect>` (a comma list; the
+  value and effect are optional). It applies only with `BENCH_NODES`.
 
 ### A dry run on kind
 
