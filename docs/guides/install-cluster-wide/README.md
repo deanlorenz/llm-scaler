@@ -23,9 +23,10 @@ discovered and may not hold model servers yet.
   operator first. Supported versions, and what happens with an existing KEDA:
   [KEDA reference](../../reference/keda.md).
 - [ ] A Prometheus that scrapes the model servers.
-- [ ] **The `flowControl` feature gate on every EPP.** The install checks only
-  the EPPs in the controller's own namespace, so check the others yourself.
-  Add this to each `EndpointPickerConfig` and restart the EPP:
+- [ ] **The `flowControl` feature gate on every EPP.** The check below finds
+  every namespace with llm-d model servers or an InferencePool, and reports
+  each one. Where the gate is off, add this to the `EndpointPickerConfig` and
+  restart the EPP:
 
   ```yaml
   featureGates:

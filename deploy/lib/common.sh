@@ -156,7 +156,7 @@ wva_install_scope() {
 wva_warn_unsupported_scope() {
     [ "$(wva_install_scope)" = "cluster" ] || return 0
     log_warning "WVA_SCOPE=cluster — one controller for every namespace. This is WIP and not the scenario currently supported end to end."
-    log_warning "  It is not disabled: if it works for you, keep using it. The checks below are written for a single namespace, so they may not fit."
+    log_warning "  It is not disabled: if it works for you, keep using it. The checks below run once for each namespace with llm-d model servers or an InferencePool."
     log_warning "  To install it without them:  SKIP_CHECKS=true"
 }
 

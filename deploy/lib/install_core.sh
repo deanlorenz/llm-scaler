@@ -515,8 +515,15 @@ main() {
         # SKIP_CHECKS=true is the way past both, and the only one. kind-emulator is
         # exempt: the e2e path builds its own stack in one sequence.
         if [ "$SKIP_CHECKS" != "true" ] && [ "${ENVIRONMENT:-}" != "kind-emulator" ]; then
-            wva_require_modelserver_metrics
-            wva_require_epp_metrics
+            if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
+                # Every namespace the controller would manage, as the preflight
+                # does: the controller's own namespace holds no model servers.
+                wva_check_managed_namespaces \
+                    || log_error "Refusing to continue — fix the namespaces above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
+            else
+                wva_require_modelserver_metrics
+                wva_require_epp_metrics
+            fi
         fi
     fi
 

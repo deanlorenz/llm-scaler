@@ -25,7 +25,7 @@ FAIL=0
 PASS=0
 # Every case reports ok or FAIL exactly once; a run that stops early must not
 # pass having checked less. Change this deliberately with the cases.
-EXPECT_CASES=12
+EXPECT_CASES=13
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -223,6 +223,14 @@ if grep -q 'wva_check_managed_namespaces' "$core" \
     ok "the --check path runs it at cluster scope, and refuses unless SKIP_CHECKS=true"
 else
     fail "install_core.sh's --check path must call wva_check_managed_namespaces at cluster scope"
+fi
+
+# 11b. The install path runs it too, so a passing check and a refusing install
+# cannot disagree about a namespace.
+if awk '/exempt: the e2e path builds its own stack/{d=1} d && /wva_check_managed_namespaces/{f=1} f && /log_error/{print; exit}' "$core" | grep -q 'fix the namespaces above'; then
+    ok "the install path runs it at cluster scope, and refuses on a failed namespace"
+else
+    fail "install_core.sh's install path must call wva_check_managed_namespaces at cluster scope"
 fi
 
 # 12. The reasons come from the lines the checks print.

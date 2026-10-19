@@ -238,7 +238,11 @@ verify_deployment() {
     # decisions, the HPA still reads healthy, and wva_unmeasured_queue — which
     # exists to catch exactly this class of blindness — is itself sourced from the
     # queue that is missing, so it reads 0.
-    wva_report_epp_flowcontrol || true
+    # Not at cluster scope: there the controller's namespace holds no EPP, and
+    # the preflight checked every managed namespace (wva_check_managed_namespaces).
+    if [ "$(wva_install_scope)" != "cluster" ] || [ -n "${WVA_WATCH_NS:-}" ]; then
+        wva_report_epp_flowcontrol || true
+    fi
 
     # --- Monitoring
     # Keyed on what is actually there, not on DEPLOY_PROMETHEUS. That flag is the
