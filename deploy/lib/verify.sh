@@ -553,7 +553,15 @@ wva_verify_scaler_wiring() {
     # not, and only a restart of its operator fixes it: said first, and no
     # re-wire offered.
     wva_scaler_keda_conn_state
-    if [ "$WVA_SCALER_KEDA_CONN" = stale ] || [ "$WVA_SCALER_KEDA_CONN" = copy ]; then
+    # A stale connection after a reinstall: KEDA is shared, so this names the
+    # restart and does not fail the install (wva_scaler_keda_stale_act), unless
+    # KEDA_RESTART=true lets it restart KEDA, after which wiring is checked.
+    if [ "$WVA_SCALER_KEDA_CONN" = stale ]; then
+        wva_scaler_keda_stale_act "$rows" || return 0
+        wva_scaler_wait_wired "$rows" "${WVA_VERIFY_WIRE_WAIT:-60}"
+        return
+    fi
+    if [ "$WVA_SCALER_KEDA_CONN" = copy ]; then
         log_warning "=================================================================="
         log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it and the HPA scales on the CPU default:"
         printf '%s\n' "$rows" | sed 's/^/    /' >&2
@@ -566,11 +574,17 @@ wva_verify_scaler_wiring() {
             || log_info "  Could not read these ScaledObjects or their HPAs, so whether KEDA wired the scaler's metric is not checked: $(printf '%s' "$WVA_SCALER_WIRE_UNKNOWN" | paste -sd' ' -)"
         return 0
     fi
+    # Read again: refusals may have started while it waited, which is the usual
+    # case for ScaledObjects created just now.
+    wva_scaler_keda_conn_state
+    if [ "$WVA_SCALER_KEDA_CONN" = stale ]; then
+        wva_scaler_keda_stale_act "$WVA_SCALER_UNWIRED" || return 0
+        wva_scaler_wait_wired "$rows" "${WVA_VERIFY_WIRE_WAIT:-60}"
+        return
+    fi
     log_warning "=================================================================="
     log_warning "KEDA did not wire the scaler's metric onto the HPA of these ScaledObjects. They read Ready, but the HPA scales on the CPU default and WVA's decisions reach nothing:"
     printf '%s' "$WVA_SCALER_UNWIRED" | sed 's/ .*//; s/^/    /' >&2
-    # Read again: refusals may have started while it waited.
-    wva_scaler_keda_conn_state
     if wva_scaler_keda_conn_report; then
         log_warning "=================================================================="
         return 1

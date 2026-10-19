@@ -272,7 +272,14 @@ case "$args" in
       # all-namespaces read (-A) returns it.
       *" -A "*AcceleratorNotResolved*) cat "$S/events.unresolved" "$S/events.unresolved.other" 2>/dev/null ;;
       *AcceleratorNotResolved*) cat "$S/events.unresolved" 2>/dev/null ;;
-      *type=Warning*) cat "$S/events.warning" 2>/dev/null ;;
+      # ev.<namespace>.<reason>: the names of that namespace's events.
+      *"reason=UtilizationShare"*)
+        r="${args##*reason=}"; r="${r%% *}"
+        cat "$S/ev.$ns.$r" 2>/dev/null ;;
+      # events.warning is team-a's; events.warning.<namespace> another's.
+      *type=Warning*)
+        if [ -e "$S/events.warning.$ns" ]; then cat "$S/events.warning.$ns"
+        elif [ "$ns" = team-a ]; then cat "$S/events.warning" 2>/dev/null; fi ;;
     esac
     exit 0 ;;
   *" get pods "*)
@@ -596,6 +603,34 @@ fresh "$TUNED_POLICY"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; echo 'LA
 vcase "status: reports the mode, warnings and marks" \
     eval '[ $RC -eq 0 ] && says "optimizer block: shadow" && says "UtilizationShareCancelled" && says "donor-0"'
 
+# Under a cluster budget the giver and the receiver sit in different
+# namespaces. Counting NAMESPACE alone reported "Giving events: 0" while a GPU
+# moved from team-b to team-a (seen walking the cross-namespace guide on kind).
+# team-d calls a pool and team-e another controller: not this budget's.
+us_events_fixture() {
+    printf '%s\n' \
+        'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+        'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+        'team-d wva-external-scaler.team-a.svc.cluster.local:9090 pool' \
+        'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
+    echo event/g1 > "$STATE/ev.team-b.UtilizationShareGiving"
+    echo event/r1 > "$STATE/ev.team-a.UtilizationShareReceiving"
+    echo event/r2 > "$STATE/ev.team-a.UtilizationShareReceived"
+    echo event/x > "$STATE/ev.team-e.UtilizationShareGiving"
+    printf 'LAST SEEN TYPE REASON\n1m Warning UtilizationShareCancelled deploy/b\n' > "$STATE/events.warning.team-b"
+}
+fresh "$CLUSTER_POLICY"; us_events_fixture; run status
+vcase "status, cluster budget: counts Giving, Receiving and Received in every namespace of the budget" \
+    eval '[ $RC -eq 0 ] && says "UtilizationShareGiving events: 1 (team-b 1)" && says "UtilizationShareReceiving events: 1 (team-a 1)" && says "UtilizationShareReceived events: 1 (team-a 1)" && says "namespaces of this budget: team-a team-b"'
+vcase "status, cluster budget: warnings from another namespace of the budget, and nothing from outside it" \
+    eval 'says "UtilizationShareCancelled deploy/b" && ! says "team-e"'
+fresh "$TUNED_POLICY"; us_events_fixture; run status
+vcase "status, quotas per namespace: counts NAMESPACE only" \
+    eval '[ $RC -eq 0 ] && says "UtilizationShareGiving events: 0" && says "UtilizationShareReceived events: 1 (team-a 1)" && ! says "namespaces of this budget"'
+fresh "$CLUSTER_POLICY"; us_events_fixture; touch "$STATE/sos.forbidden"; run status
+vcase "status, cluster budget: an unreadable ScaledObject list says so, and counts NAMESPACE" \
+    eval '[ $RC -eq 0 ] && says "other namespaces of this budget are unknown" && says "UtilizationShareGiving events: 0"'
+
 # --- the second review's findings ------------------------------------------
 expect "state: an optimizer that is not a map" "other:not-a-map plain" "$(printf 'optimizer: foo\n' | us_block_state)"
 ( cd "$WORK" && touch x && expect "state: a glob-like type is not expanded" "other:? plain" "$(printf 'optimizer:\n  type: "?"\n' | us_block_state)"; rm -f x )
@@ -700,7 +735,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=118
+CASES_EXPECTED=122
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

@@ -717,6 +717,28 @@ warn_ungranted_namespaces() {
     done
 }
 
+# us_shared_namespaces -- NS, then every other namespace that shares its
+# budget, by the rules warn_ungranted_namespaces applies: none under quotas per
+# namespace or a limiter that forms no group; else the namespaces whose
+# ScaledObjects call this controller, narrowed by clusterNamespaces and the
+# quota exclusions. Returns 1 when those ScaledObjects cannot be listed.
+us_shared_namespaces() {
+    local list ns only excluded
+    echo "$NS"
+    case "$(printf '%s\n' "$POLICY" | us_budget_scope)" in
+        namespace|none) return 0 ;;
+    esac
+    only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || return 1
+    excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || return 1
+    list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>/dev/null)" || return 1
+    for ns in $list; do
+        [ "$ns" != "$NS" ] || continue
+        if [ -n "$only" ] && ! grep -qxF -- "$ns" <<<"$only"; then continue; fi
+        if [ -n "$excluded" ] && ! grep -qxF -- "$ns" <<<"$excluded"; then continue; fi
+        echo "$ns"
+    done
+}
+
 # us_activate_cmd <ns> -- the make command that runs activate in <ns> for this
 # controller and policy.
 us_activate_cmd() {
@@ -755,7 +777,7 @@ verb_activate() {
 }
 
 verb_status() {
-    local state decisions ev names warnings
+    local state decisions ev names warnings namespaces ns n total per
     read_policy
     state="$(block_state)"
     info "policy: $POLICY_NS/$POLICY_CM; optimizer block: ${state% *}$( [ "${state#* }" = physical ] && echo ', physical groups' || true)"
@@ -771,11 +793,31 @@ verb_status() {
     else
         info "no utilization-share decision logged in the last 30 min (normal with no load: shadow logs only when its moves change)"
     fi
-    for ev in UtilizationShareGiving UtilizationShareReceived; do
-        kread names get events -n "$NS" --field-selector "reason=$ev" -o name || die "could not read events in $NS: $names"
-        info "$ev events: $(printf '%s' "$names" | grep -c . || true)"
+    # Every namespace of the budget, not only NS: under a cluster budget the
+    # giver and the receiver are usually in different namespaces, and counting
+    # NS alone reported 0 moves while GPUs were moving.
+    if ! namespaces="$(us_shared_namespaces)"; then
+        warn "could not list the ScaledObjects calling this controller, so the other namespaces of this budget are unknown; events below are for $NS only"
+        namespaces="$NS"
+    fi
+    [ "$(printf '%s\n' "$namespaces" | grep -c .)" -le 1 ] \
+        || info "events counted in the namespaces of this budget: $(printf '%s\n' "$namespaces" | paste -sd' ' -)"
+    for ev in UtilizationShareGiving UtilizationShareReceiving UtilizationShareReceived; do
+        total=0; per=""
+        for ns in $namespaces; do
+            kread names get events -n "$ns" --field-selector "reason=$ev" -o name || die "could not read events in $ns: $names"
+            n="$(printf '%s' "$names" | grep -c . || true)"
+            total=$((total + n))
+            [ "$n" -eq 0 ] || per="${per:+$per, }$ns $n"
+        done
+        info "$ev events: $total${per:+ ($per)}"
     done
-    kread warnings get events -n "$NS" --field-selector type=Warning || die "could not read events in $NS: $warnings"
+    warnings=""
+    for ns in $namespaces; do
+        kread names get events -n "$ns" --field-selector type=Warning || die "could not read events in $ns: $names"
+        [ -z "$names" ] || warnings="${warnings:+$warnings
+}$names"
+    done
     if grep -q UtilizationShare <<<"$warnings"; then
         warn "UtilizationShare warnings:"
         printf '%s\n' "$warnings" | grep UtilizationShare | sed 's/^/    /' >&2

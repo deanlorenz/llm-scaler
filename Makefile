@@ -921,10 +921,14 @@ workload-patch: ## Write a patch for model servers that do not drain on scale-do
 
 ## Apply a ScaledObject plan. With WVA_DEFAULT_SO_PLAN=<file> it applies exactly
 ## that file, edits included, and needs no terminal. Without one it re-discovers
-## and applies everything found.
+## and applies everything found. Then it checks KEDA wired each HPA, as
+## verify-deployment does: after a reinstall, KEDA's operator may still hold
+## its old connection, and only this step, the first to dial, can see it.
 .PHONY: scaledobjects-apply
 scaledobjects-apply: ## Apply a ScaledObject plan (this is what makes WVA scale anything). Per entry: apply: yes|no|adopt. WVA_DEFAULT_SO_PLAN=<edited file>, WVA_DEFAULT_SO_TEMPLATE=<file>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=true $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; install_default_scaledobjects'
+	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=true $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/scaledobject.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
+			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
+			wva_bootstrap_env; install_default_scaledobjects; rc=$$?; wva_verify_scaler_wiring || true; exit $$rc'
 
 ## Review the list in $EDITOR, then apply what you confirm. Needs a terminal;
 ## use scaledobjects-plan + scaledobjects-apply where there is none.
