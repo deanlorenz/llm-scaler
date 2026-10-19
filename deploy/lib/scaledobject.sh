@@ -1427,9 +1427,14 @@ so_workload_gaps() {
         (getpath($p) // {}) as $t
         | ([ $t.spec.containers[]?
              | ((.command // []) + (.args // []) | join(" ") | ascii_downcase) as $cmd
-             | select(((.image // "") | ascii_downcase | test("vllm|sglang"))
+             | select(((.image // "") | ascii_downcase | test("vllm|sglang|llm-d-inference-sim"))
                       or ($cmd | test("vllm serve|sglang\\.launch_server|sglang serve")))
            ] | first) as $e
+        # The llm-d inference simulator serves the vLLM API and is drained like
+        # an engine, so the drain half applies to it. It loads no weights and
+        # compiles nothing, so the cache halves do not: its argv is reported
+        # empty, which the weights half reads as no repository to fetch.
+        | ((($e.image // "") | ascii_downcase | test("llm-d-inference-sim"))) as $issim
         # Where the engine would find weights already on disk: every path it has
         # mounted. Used below to decide whether a cache is REAL, rather than
         # whether a volume merely exists somewhere in the pod.
@@ -1505,7 +1510,7 @@ so_workload_gaps() {
              elif ([ $mounts[] | select(. != null)
                      | select(. as $m | $dldir | (. == $m) or ($m == "/") or startswith($m + "/")) ] | length) > 0 then 1
              else 0 end),
-            $argv,
+            (if $issim then "" else $argv end),
             # cacheOnVolume, LAST and after argv on purpose: the readers are
             # `read -r ... argv cachevol`, and a field added before argv would
             # land inside it on every reader that was not updated.

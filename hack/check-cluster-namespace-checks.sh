@@ -25,7 +25,7 @@ FAIL=0
 PASS=0
 # Every case reports ok or FAIL exactly once; a run that stops early must not
 # pass having checked less. Change this deliberately with the cases.
-EXPECT_CASES=13
+EXPECT_CASES=14
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -54,6 +54,7 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '%s\n' "$
 #   POOL_NS      namespaces with an InferencePool
 #   FORBID_NS    namespaces whose Pods and ConfigMaps may not be read
 #   FLOW_OFF     namespaces whose EPP has the flowControl gate off
+#   UNSCRAPED_NS namespaces whose EPP nothing scrapes
 #   UNSURE_NS    namespaces whose EPP scrape cannot be confirmed
 CALLS="$WORK/calls.log"
 kubectl() {
@@ -98,7 +99,11 @@ wva_report_epp_flowcontrol() {
     esac
     case " ${FLOW_OFF:-} " in *" $ns "*)
         log_success "  EPP metrics: epp is scraped by servicemonitor/epp."
-        log_warning "  Router queue not enabled; please turn on flow control for EPP."
+        log_warning "  EPP flow control: off on epp. Not refused: scaling works without it. Two things do not:"
+        return 0 ;;
+    esac
+    case " ${UNSCRAPED_NS:-} " in *" $ns "*)
+        log_warning "  Router monitoring not enabled; please enable EPP metrics."
         return 1 ;;
     esac
     log_success "  EPP metrics: epp is scraped by servicemonitor/epp."
@@ -117,7 +122,7 @@ if ! declare -F wva_check_managed_namespaces >/dev/null; then
 fi
 
 # 1. Found, not named: model servers in team-a, only an InferencePool in team-b.
-ALL_LIST=yes MS_NS="team-a" POOL_NS="team-a team-b" FORBID_NS="" FLOW_OFF="" UNSURE_NS=""
+ALL_LIST=yes MS_NS="team-a" POOL_NS="team-a team-b" FORBID_NS="" FLOW_OFF="" UNSURE_NS="" UNSCRAPED_NS=""
 run_case
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Checking the 2 namespace(s)' \
     && printf '%s' "$out" | grep -q 'Namespaces: all 2 passed'; then
@@ -143,14 +148,26 @@ else
 fi
 
 # 4. One failing namespace fails the whole check, and the summary names why.
-FLOW_OFF="team-b"
+UNSCRAPED_NS="team-b"
 run_case
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'team-b: failed (EPP flow control off)' \
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'team-b: failed (EPP not scraped)' \
     && printf '%s' "$out" | grep -q 'team-a: passed' \
     && printf '%s' "$out" | grep -q 'Namespaces: 1 passed, 1 failed, 0 could not be checked'; then
-    ok "a namespace with flow control off fails, by name and reason; the other still passes"
+    ok "a namespace whose EPP nothing scrapes fails, by name and reason; the other still passes"
 else
-    fail "flow control off in team-b must fail the check and say so (rc=$rc)" "$out"
+    fail "an unscraped EPP in team-b must fail the check and say so (rc=$rc)" "$out"
+fi
+UNSCRAPED_NS=""
+
+# 4b. Flow control off is a note on a pass, never a failure: llm-d ships it off,
+# and only scale-from-zero needs it.
+FLOW_OFF="team-b"
+run_case
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'team-b: passed (EPP flow control off: no scale from zero)' \
+    && printf '%s' "$out" | grep -q 'Namespaces: all 2 passed'; then
+    ok "flow control off passes the namespace, and the summary says what it costs"
+else
+    fail "flow control off in team-b must pass with a note (rc=$rc)" "$out"
 fi
 FLOW_OFF=""
 

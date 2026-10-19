@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+#
+# Executes the llm-d monitor handling in deploy/lib/infra_monitoring.sh against
+# a stubbed kubectl:
+#
+#   - setup adds the model-server PodMonitor and the EPP ServiceMonitor a fresh
+#     llm-d install lacks, only where nothing scrapes the target yet, marked so
+#     undeploy removes exactly those (wva_ensure_llmd_monitors);
+#   - the checks report a monitor setup will add as work, not as a failure,
+#     when the run includes the admin phase (WVA_MONITORS_PLANNED);
+#   - an EPP with the flowControl gate off is a warning, never a refusal.
+#
+# A fresh llm-d install has no monitors and no flow-control gate, and the
+# preflight used to refuse it and hand the reader commands to run in every
+# namespace. Every case asserts something PRESENT, so a missing library fails.
+
+set -u
+
+# CHECK_ROOT runs the check against another tree -- how its negative control is
+# taken: point it at an extracted older deploy/ and the cases must fail.
+ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+FAIL=0
+PASS=0
+# Every case reports ok or FAIL exactly once; a run that stops early must not
+# pass having checked less. Change this deliberately with the cases.
+EXPECT_CASES=14
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+# Sourced through CR-stripped copies: a Windows checkout writes these as CRLF.
+for lib in common.sh scaledobject.sh infra_monitoring.sh install_core.sh cleanup.sh; do
+    tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib" 2>/dev/null || : > "$WORK/$lib"
+done
+mkdir -p "$WORK/config/modelserver-metrics"
+tr -d '\r' < "$ROOT/config/modelserver-metrics/modelserver-podmonitor.yaml" \
+    > "$WORK/config/modelserver-metrics/modelserver-podmonitor.yaml"
+
+for tool in jq yq; do
+    command -v "$tool" >/dev/null 2>&1 || { printf 'FATAL: %s is required.\n' "$tool" >&2; exit 1; }
+done
+
+BLUE='' GREEN='' YELLOW='' RED='' NC=''
+WVA_NS=workload-variant-autoscaler-system
+WVA_PROJECT="$WORK"
+ENVIRONMENT=kubernetes
+# shellcheck source=/dev/null
+for lib in common.sh scaledobject.sh infra_monitoring.sh; do . "$WORK/$lib"; done
+
+ok()   { PASS=$((PASS + 1)); echo "ok   $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/       /'; }
+
+# --- the stub -----------------------------------------------------------------
+#
+#   NO_CRDS        yes: the Prometheus Operator CRDs are absent
+#   PROM_JSON      the Prometheus CR listing
+#   APPLIED        every document handed to `kubectl apply -f`
+#   CALLS          every kubectl command line
+APPLIED="$WORK/applied.yaml"
+CALLS="$WORK/calls.log"
+NO_CRDS=no
+PROM_JSON='{"items":[{"spec":{"podMonitorSelector":{"matchLabels":{"release":"prom"}},"serviceMonitorSelector":{"matchLabels":{"release":"prom"}}}}]}'
+SVC_JSON='{"metadata":{"labels":{"app.kubernetes.io/name":"optimized-baseline-epp","helm.sh/chart":"x-1.0"}},"spec":{"ports":[{"name":"http","port":80},{"name":"http-metrics","port":9090}]}}'
+kubectl() {
+    echo "kubectl $*" >> "$CALLS"
+    case "$*" in
+        "get crd "*)
+            [ "$NO_CRDS" = yes ] && return 1
+            return 0 ;;
+        "get prometheuses.monitoring.coreos.com -A -o json")
+            printf '%s' "$PROM_JSON"; return 0 ;;
+        "get svc "*" -o json")
+            printf '%s' "$SVC_JSON"; return 0 ;;
+        "get podmonitor -n "*)
+            return 0 ;;
+        "apply -f -"*)
+            cat >> "$APPLIED"; echo "---" >> "$APPLIED"; return 0 ;;
+        "apply -f "*)
+            cat "$3" >> "$APPLIED"; echo "---" >> "$APPLIED"; return 0 ;;
+        "auth can-i "*)
+            echo yes; return 0 ;;
+    esac
+    return 0
+}
+
+# The discovery and conflict tests are the checks' own and have their own
+# fixtures; here they are set per case.
+SERVERS=1 MS_CONFLICT="" EPP_SVCS="optimized-baseline-epp" EPP_SCRAPERS="" FLOW_STATE=on
+wva_serving_workload_count() { echo "$SERVERS"; }
+wva_modelserver_scrape_conflict() { [ -z "$MS_CONFLICT" ] || echo "$MS_CONFLICT"; }
+wva_epp_services() { [ -z "$EPP_SVCS" ] || echo "$EPP_SVCS"; }
+wva_epp_scrapers() { [ -z "$EPP_SCRAPERS" ] || echo "$EPP_SCRAPERS"; }
+wva_epp_flowcontrol_state() { echo "$FLOW_STATE"; }
+
+reset() {
+    : > "$APPLIED"; : > "$CALLS"
+    NO_CRDS=no SERVERS=1 MS_CONFLICT="" EPP_SVCS="optimized-baseline-epp" EPP_SCRAPERS="" FLOW_STATE=on
+    WVA_LLMD_MONITORS_ADDED=()
+    WVA_MONITORS_PLANNED=false
+}
+
+# kind_doc echoes the applied document of kind $1.
+kind_doc() { yq "select(.kind == \"$1\")" "$APPLIED" 2>/dev/null; }
+
+if ! declare -F wva_ensure_llmd_monitors >/dev/null; then
+    fail "wva_ensure_llmd_monitors is not defined -- setup adds no monitors"
+fi
+
+# 1. A fresh llm-d namespace: both monitors are added.
+reset
+out="$(wva_ensure_llmd_monitors team-a 2>&1)"
+if [ "$(kind_doc PodMonitor | yq '.metadata.name')" = "wva-modelserver-metrics" ] \
+    && [ "$(kind_doc ServiceMonitor | yq '.metadata.name')" = "wva-epp-metrics" ] \
+    && printf '%s' "$out" | grep -q 'team-a: added PodMonitor wva-modelserver-metrics,ServiceMonitor wva-epp-metrics'; then
+    ok "a namespace with nothing scraped gets the PodMonitor and the EPP ServiceMonitor"
+else
+    fail "both monitors must be applied in a fresh namespace" "$out
+$(cat "$APPLIED")"
+fi
+
+# 2. Every object it applies is marked, in the namespace, and labelled for the
+# cluster's Prometheus (release=prom), or that Prometheus never scrapes it.
+marks="$(yq -N 'select(.kind != null) | .metadata.labels["llm-d.ai/applied-by"]' "$APPLIED" | sort -u)"
+nss="$(yq -N 'select(.kind != null and .kind != "ClusterRole" and .kind != "ClusterRoleBinding") | .metadata.namespace' "$APPLIED" | sort -u)"
+if [ "$marks" = "wva-setup-prereqs" ] && [ "$nss" = "team-a" ] \
+    && [ "$(kind_doc PodMonitor | yq '.metadata.labels.release')" = "prom" ] \
+    && [ "$(kind_doc ServiceMonitor | yq '.metadata.labels.release')" = "prom" ]; then
+    ok "every applied object is marked, namespaced to team-a, and carries the Prometheus selector label"
+else
+    fail "applied objects must be marked and labelled (marks='$marks' nss='$nss')" "$(cat "$APPLIED")"
+fi
+
+# 3. The EPP ServiceMonitor scrapes the metrics port with a token, and selects
+# the Service by its name label, never the chart version.
+sm="$(kind_doc ServiceMonitor)"
+if [ "$(printf '%s' "$sm" | yq '.spec.endpoints[0].port')" = "http-metrics" ] \
+    && [ "$(printf '%s' "$sm" | yq '.spec.endpoints[0].authorization.credentials.name')" = "wva-epp-metrics-scraper-token" ] \
+    && [ "$(printf '%s' "$sm" | yq '.spec.selector.matchLabels | keys | join(",")')" = "app.kubernetes.io/name" ]; then
+    ok "the EPP ServiceMonitor: port http-metrics, a bearer token, selected by name"
+else
+    fail "the EPP ServiceMonitor is wrong" "$sm"
+fi
+
+# 4. ...and the token's ServiceAccount may GET /metrics, which the EPP checks.
+crb="$(kind_doc ClusterRoleBinding)"
+if [ "$(printf '%s' "$crb" | yq '.subjects[0].namespace')" = "team-a" ] \
+    && [ "$(printf '%s' "$crb" | yq '.roleRef.name')" = "wva-epp-metrics-scraper" ] \
+    && [ "$(kind_doc ClusterRole | yq '.rules[0].nonResourceURLs[0]')" = "/metrics" ] \
+    && [ "$(kind_doc Secret | yq '.metadata.annotations["kubernetes.io/service-account.name"]')" = "wva-epp-metrics-scraper" ]; then
+    ok "the scrape identity: a token Secret, bound to GET /metrics, per namespace"
+else
+    fail "the scrape identity is wrong" "$(cat "$APPLIED")"
+fi
+
+# 5. Already scraped: nothing is added, so no target is scraped twice.
+reset; MS_CONFLICT="podmonitor/decode"; EPP_SCRAPERS="servicemonitor/epp"
+out="$(wva_ensure_llmd_monitors team-a 2>&1)"
+if [ ! -s "$APPLIED" ] && grep -q 'get svc\|get crd' "$CALLS"; then
+    ok "a namespace already scraped gets nothing added"
+else
+    fail "nothing may be applied over an existing scrape" "$out
+$(cat "$APPLIED")"
+fi
+
+# 6. No Prometheus Operator: says so, applies nothing, does not fail.
+reset; NO_CRDS=yes
+out="$(wva_ensure_llmd_monitors team-a 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ ! -s "$APPLIED" ] && printf '%s' "$out" | grep -q 'no Prometheus Operator CRDs'; then
+    ok "no Prometheus Operator CRDs: says so and applies nothing"
+else
+    fail "without the CRDs nothing is applied, and it says why (rc=$rc)" "$out"
+fi
+
+# 7. DEPLOY_LLMD_MONITORS=false turns it off.
+reset
+out="$(DEPLOY_LLMD_MONITORS=false wva_apply_llmd_monitors 2>&1)"
+if [ ! -s "$APPLIED" ] && ! printf '%s' "$out" | grep -q 'Adding the monitors' \
+    && declare -F wva_apply_llmd_monitors >/dev/null; then
+    ok "DEPLOY_LLMD_MONITORS=false adds nothing"
+else
+    fail "DEPLOY_LLMD_MONITORS=false must add nothing" "$out"
+fi
+
+# 8. An EPP with flow control off is a warning: the report passes.
+reset; EPP_SCRAPERS="servicemonitor/epp"; FLOW_STATE=off
+out="$( (WVA_WATCH_NS=team-a wva_report_epp_flowcontrol) 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'EPP flow control: off on optimized-baseline-epp. Not refused' \
+    && printf '%s' "$out" | grep -q 'never wakes'; then
+    ok "flow control off: a warning that says what it costs, and the check passes"
+else
+    fail "flow control off must warn and pass (rc=$rc)" "$out"
+fi
+
+# 9. An EPP nothing scrapes still fails the check when no setup will add it.
+reset; FLOW_STATE=on
+out="$( (WVA_WATCH_NS=team-a wva_report_epp_flowcontrol) 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'Router monitoring not enabled' \
+    && printf '%s' "$out" | grep -q 'make setup-prereqs'; then
+    ok "an unscraped EPP fails without the admin phase, and names the step that fixes it"
+else
+    fail "an unscraped EPP must fail when nothing will add its monitor (rc=$rc)" "$out"
+fi
+
+# 10. ...and is work, not a failure, when the admin phase will add it.
+reset; WVA_MONITORS_PLANNED=true
+out="$( (WVA_WATCH_NS=team-a wva_report_epp_flowcontrol) 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Setup adds ServiceMonitor wva-epp-metrics'; then
+    ok "an unscraped EPP passes as 'setup adds' when the admin phase runs"
+else
+    fail "a planned EPP monitor must pass and say setup adds it (rc=$rc)" "$out"
+fi
+
+# 11. The same for the model servers.
+reset; WVA_MONITORS_PLANNED=true
+out="$( (WVA_WATCH_NS=team-a wva_report_modelserver_metrics) 2>&1)"; rc=$?
+reset
+out2="$( (WVA_WATCH_NS=team-a wva_report_modelserver_metrics) 2>&1)"; rc2=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Setup adds PodMonitor wva-modelserver-metrics' \
+    && [ "$rc2" -ne 0 ] && printf '%s' "$out2" | grep -q 'Monitoring not enabled for your llm-d servers'; then
+    ok "unscraped model servers: 'setup adds' with the admin phase, a failure without"
+else
+    fail "the model-server report must follow WVA_MONITORS_PLANNED (rc=$rc rc2=$rc2)" "$out
+$out2"
+fi
+
+# 12. Planned only when the run includes the admin phase.
+. "$WORK/install_core.sh" 2>/dev/null
+got=""
+for ph in all prereqs wva; do
+    INSTALL_PHASE=$ph wva_set_monitors_planned
+    got="$got $ph=$WVA_MONITORS_PLANNED"
+done
+DEPLOY_LLMD_MONITORS=false INSTALL_PHASE=all wva_set_monitors_planned
+got="$got off=$WVA_MONITORS_PLANNED"
+if [ "$got" = " all=true prereqs=true wva=false off=false" ]; then
+    ok "planned for phases all and prereqs, not wva, not with DEPLOY_LLMD_MONITORS=false"
+else
+    fail "wva_set_monitors_planned is wrong:$got"
+fi
+
+# 13. Wired in: the prereqs phase adds them after the monitoring stack.
+if awk '/^wva_run_prereqs_phase\(\)/{f=1} f && /deploy_monitoring_stack/{m=NR} f && /wva_apply_llmd_monitors/{print (m && NR > m) ? "after" : "before"; exit}' "$WORK/install_core.sh" | grep -qx after; then
+    ok "the prereqs phase runs wva_apply_llmd_monitors after deploy_monitoring_stack"
+else
+    fail "wva_run_prereqs_phase must call wva_apply_llmd_monitors after deploy_monitoring_stack"
+fi
+
+# 14. Undeploy removes by the mark, and cleanup calls it.
+reset; WVA_SCOPE=cluster
+. "$WORK/common.sh"
+out="$(wva_remove_llmd_monitors 2>&1)"
+if grep -q 'delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.coreos.com,secrets,serviceaccounts -A -l llm-d.ai/applied-by=wva-setup-prereqs' "$CALLS" \
+    && grep -q 'delete clusterrolebindings,clusterroles -l llm-d.ai/applied-by=wva-setup-prereqs' "$CALLS" \
+    && grep -q 'wva_remove_llmd_monitors' "$WORK/cleanup.sh"; then
+    ok "undeploy removes exactly what setup marked, and cleanup calls it"
+else
+    fail "undeploy must remove the marked monitors" "$(cat "$CALLS")"
+fi
+
+total=$((PASS + FAIL))
+echo "check-llmd-monitors: $PASS passed, $FAIL failed"
+if [ "$total" -ne "$EXPECT_CASES" ]; then
+    echo "check-llmd-monitors: $total case(s) ran, $EXPECT_CASES expected -- the run did not finish, or a case was added without updating EXPECT_CASES"
+    exit 1
+fi
+[ "$FAIL" -eq 0 ]

@@ -2877,6 +2877,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/file_capture.sh
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-cluster-namespace-checks.sh
+	@bash -n hack/check-llmd-monitors.sh
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
@@ -3045,6 +3046,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking the cluster-scoped preflight checks every llm-d namespace..."
 	@# It used to check only the controller's namespace, and passed on nothing.
 	@bash hack/check-cluster-namespace-checks.sh
+	@echo "Checking setup adds the monitors a fresh llm-d lacks, and flow control off is a warning..."
+	@# A fresh llm-d install has neither, and the preflight used to refuse it.
+	@bash hack/check-llmd-monitors.sh
 	@echo "Checking every image the e2e Go code names has a registry host..."
 	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
 	@bash hack/check-e2e-images.sh

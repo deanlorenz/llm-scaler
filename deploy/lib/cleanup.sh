@@ -319,6 +319,11 @@ cleanup() {
 
     if [ "$DEPLOY_WVA" = "true" ]; then
         undeploy_wva_controller
+        # The monitors setup added in the llm-d namespaces, by their mark only:
+        # a monitor someone applied themselves carries none and stays.
+        if declare -F wva_remove_llmd_monitors >/dev/null; then
+            wva_remove_llmd_monitors
+        fi
     fi
 
     # Delete namespaces if requested
@@ -355,6 +360,7 @@ cleanup() {
     fi
     echo "Removed components:"
     [ "$DEPLOY_WVA" = "true" ] && echo "✓ WVA Controller (its namespaced objects, and the ClusterRoles and ClusterRoleBindings suffixed for $WVA_NS)"
+    [ "$DEPLOY_WVA" = "true" ] && echo "✓ The monitors setup added in the llm-d namespaces (label ${WVA_LLMD_MONITOR_MARK:-llm-d.ai/applied-by=wva-setup-prereqs})"
     if [ "${UNDEPLOY_SHARED:-false}" = "true" ]; then
         [ "$SCALER_BACKEND" = "keda" ] && echo "✓ KEDA"
         [ "$DEPLOY_PROMETHEUS" = "true" ] && echo "✓ Prometheus Stack"

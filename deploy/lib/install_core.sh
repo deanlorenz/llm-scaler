@@ -233,6 +233,11 @@ print_prereqs_summary() {
         skipped)           echo "    KEDA: not managed by this install (SCALER_BACKEND=${SCALER_BACKEND:-})" ;;
         *)                 echo "    KEDA: could not be verified (see the warning above)" ;;
     esac
+    # The monitors added in the llm-d namespaces (wva_apply_llmd_monitors).
+    local added
+    for added in ${WVA_LLMD_MONITORS_ADDED[@]+"${WVA_LLMD_MONITORS_ADDED[@]}"}; do
+        echo "    Monitors added in $added"
+    done
     if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then
         echo ""
         case "${WVA_SCALER_NP_STATE:-}" in
@@ -259,6 +264,20 @@ print_prereqs_summary() {
     echo ""
 }
 
+# wva_set_monitors_planned sets WVA_MONITORS_PLANNED=true when this run (or,
+# for the preflight, the install it previews) includes the admin phase and
+# that phase adds missing monitors. The checks then report a missing monitor as
+# work the phase does rather than refusing over it. Call it after
+# wva_resolve_install_phase.
+wva_set_monitors_planned() {
+    WVA_MONITORS_PLANNED=false
+    wva_llmd_monitors_wanted || return 0
+    case "${INSTALL_PHASE:-all}" in
+        all|prereqs) WVA_MONITORS_PLANNED=true ;;
+    esac
+    return 0
+}
+
 # wva_run_prereqs_phase runs the cluster-admin half, in dependency order.
 #
 # The scaler backend comes BEFORE the controller. It used to come last, so a
@@ -271,6 +290,13 @@ wva_run_prereqs_phase() {
     create_namespaces
 
     deploy_monitoring_stack
+
+    # The model-server and EPP monitors llm-d did not install, in each llm-d
+    # namespace. After the monitoring stack, whose CRDs they need; before the
+    # controller, which reads what they scrape.
+    if [ "$DEPLOY_WVA" = "true" ]; then
+        wva_apply_llmd_monitors
+    fi
 
     deploy_scaler_backend
 
@@ -394,6 +420,9 @@ main() {
         # without it, and the install checks it at the same point.
         check_keda_prerequisite
         wva_report_prometheus
+        # The monitors the admin phase adds are reported as work it will do,
+        # not as failures, when the install would run that phase.
+        wva_set_monitors_planned
         # "Prometheus: <url>" answers whether an endpoint resolved, which reads as
         # though it answered whether the metrics WVA needs are in it. They are
         # different questions and only the second one decides whether WVA can work.
@@ -515,6 +544,9 @@ main() {
         # SKIP_CHECKS=true is the way past both, and the only one. kind-emulator is
         # exempt: the e2e path builds its own stack in one sequence.
         if [ "$SKIP_CHECKS" != "true" ] && [ "${ENVIRONMENT:-}" != "kind-emulator" ]; then
+            # Missing monitors are added by the prereqs phase below, when this
+            # run includes it (wva_apply_llmd_monitors).
+            wva_set_monitors_planned
             if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
                 # Every namespace the controller would manage, as the preflight
                 # does: the controller's own namespace holds no model servers.
