@@ -33,6 +33,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| `x509: certificate is valid for ..., not ...` | the controller log at startup | a Prometheus address its certificate does not name | [certificate name mismatch](#prometheus-certificate-name-mismatch) |
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off or keeping the old client certificate after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
@@ -1052,7 +1053,34 @@ kill %1
 | pod restarts (`CrashLoopBackOff`) at startup, log `Shutdown requested during startup` after Prometheus connection errors, exit code 143 (read it with `kubectl get pod <pod> -n "$NS" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'`) | the controller cannot reach Prometheus at startup and keeps retrying. Its health endpoint is not served yet, so the startup probe kills it after about 60s and the pod restarts | make Prometheus reachable: check the URL, TLS settings and network policy ([Prometheus](prometheus.md#configuration)). The restarts stop once it connects |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
-| `CrashLoopBackOff`, `x509: certificate signed by unknown authority` | verification is on by default now, and a private CA signed the Prometheus certificate | mount the CA, then re-run the install with `PROMETHEUS_CA_CERT_PATH=<file>` and every other variable you installed with. The re-run restarts the controller ([TLS configuration](prometheus.md#tls-configuration)) |
+| `CrashLoopBackOff`, `x509: certificate signed by unknown authority` | verification is on by default now, and a private CA signed the Prometheus certificate | re-run the install: it copies the CA from the Prometheus TLS Secret and mounts it. If it cannot read that Secret it names the command an admin runs ([Prometheus with TLS](prometheus.md#prometheus-with-tls-eg-kube-prometheus-stack-on-a-managed-gpu-cloud)) |
+| `CrashLoopBackOff`, `x509: certificate is valid for <names>, not <host>` | the controller trusts the certificate, but it was issued for other names than the host in `PROMETHEUS_BASE_URL` | [Prometheus certificate name mismatch](#prometheus-certificate-name-mismatch) |
+
+### Prometheus certificate name mismatch
+
+**Symptom**: the controller exits at startup with
+
+```text
+x509: certificate is valid for llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc, ..., not prometheus-operated.llm-d-monitoring.svc.cluster.local
+```
+
+The CA is fine; the address is not. A kube-prometheus-stack issues its
+certificate for its own Service, `<release>-kube-prometheus-stack-prometheus`,
+and not for `prometheus-operated`, which installers before this fix picked.
+
+**Fix**: re-run the install. It now picks the Service the certificate names and
+checks the name before it reports success
+([how the address is chosen](configuration.md#how-the-prometheus-address-is-chosen)).
+To choose the address yourself, pass one of the names from the error:
+
+```bash
+PROMETHEUS_URL=https://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc:9090 \
+  NAMESPACE=<namespace> make deploy-wva
+```
+
+Add every other variable you installed with. The re-run restarts the
+controller. The installer stops with the same names if you pass a
+`PROMETHEUS_URL` the certificate does not name.
 
 ## Cluster policy is not applied (policy namespace unverified)
 

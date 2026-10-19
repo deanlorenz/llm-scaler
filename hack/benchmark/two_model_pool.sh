@@ -960,6 +960,10 @@ verb_preflight() {
         rc=1
     fi
 
+    # The controller's Prometheus, with the controller's TLS settings, before
+    # anything holds an accelerator.
+    prom_tls_preflight || rc=1
+
     [ "$rc" -eq 0 ] && ok "preflight passed" || warn "preflight found problems (above)"
     return "$rc"
 }
@@ -1488,6 +1492,115 @@ prometheus_base_url() {
         | sed -n 's/^PROMETHEUS_BASE_URL: *"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' | head -1
 }
 
+# prometheus_tls_setting <KEY> echoes one PROMETHEUS_* key of the controller's
+# config.yaml, unquoted, or nothing.
+prometheus_tls_setting() {
+    kc -n "$WVA_NS" get cm wva-manager-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null \
+        | sed -n "s/^$1: *\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" | head -1
+}
+
+# prom_tls_env sets PROM_TLS_ENV to the --env arguments a query Pod needs to
+# reach Prometheus with the controller's own TLS settings: PROM_CA_B64, the CA
+# it verifies with (base64 of key ca.crt of the Secret mounted at its
+# PROMETHEUS_CA_CERT_PATH -- wva-prometheus-ca when the installer copied it,
+# PROM_CA_SECRET to name another), and PROM_TLS_VERIFY=false only when the
+# controller itself does not verify. The CA travels as an environment value,
+# not a volume, because the query Pods run in NS and the Secret in WVA_NS.
+prom_tls_env() {
+    PROM_TLS_ENV=()
+    local ca_path secret="${PROM_CA_SECRET:-}" b64=""
+    if [ "$(prometheus_tls_setting PROMETHEUS_TLS_INSECURE_SKIP_VERIFY)" = "true" ]; then
+        PROM_TLS_ENV=(--env=PROM_TLS_VERIFY=false)
+        return 0
+    fi
+    ca_path="$(prometheus_tls_setting PROMETHEUS_CA_CERT_PATH)"
+    if [ -z "$secret" ] && [ -n "$ca_path" ]; then
+        secret="$(kc -n "$WVA_NS" get deployment wva-controller-manager -o json 2>/dev/null | jq -r --arg ca "$ca_path" '
+            .spec.template.spec as $s
+            | ((($s.containers | map(select(.name == "manager")) | .[0]) // $s.containers[0]).volumeMounts // [])
+            | map(select(. as $m | $ca | startswith(($m.mountPath | rtrimstr("/")) + "/")))
+            | sort_by(.mountPath | length) | last // empty | .name as $v
+            | $s.volumes[] | select(.name == $v) | .secret.secretName // empty' 2>/dev/null)"
+    fi
+    if [ -n "$secret" ]; then
+        b64="$(kc -n "$WVA_NS" get secret "$secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null)"
+    fi
+    if [ -n "$ca_path" ] && [ -z "$b64" ]; then
+        warn "could not read the CA the controller verifies Prometheus with (${secret:-no Secret found for $ca_path} in $WVA_NS);"
+        warn "  query Pods verify against the public roots only. Set PROM_CA_SECRET=<secret with ca.crt in $WVA_NS>."
+    fi
+    [ -z "$b64" ] || PROM_TLS_ENV=("--env=PROM_CA_B64=$b64")
+}
+
+# PROM_TLS_PY is the Python a query Pod builds its TLS context with, from
+# PROM_TLS_ENV. Chain and hostname are verified. The one check relaxed is
+# VERIFY_X509_STRICT (on by default since Python 3.13): it also rejects a CA
+# certificate without a keyUsage extension, which the self-signed certificate
+# a kube-prometheus-stack is commonly served with lacks, and which Go -- the
+# controller -- accepts. PROM_TLS_VERIFY=false mirrors a controller that
+# itself runs with PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true.
+PROM_TLS_PY='import base64, os, ssl
+if os.environ.get("PROM_TLS_VERIFY") == "false":
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+else:
+    ctx = ssl.create_default_context(cadata=base64.b64decode(os.environ.get("PROM_CA_B64", "")).decode() or None)
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)'
+
+# prom_tls_preflight connects to the controller's Prometheus from a Pod in NS
+# with the controller's TLS settings -- curl --cacert with its CA, never -k --
+# before anything holds an accelerator. A certificate that would be refused
+# fails preflight; a probe that could not run says so and does not.
+PROM_TLS_PROBE_IMAGE="${PROM_TLS_PROBE_IMAGE:-quay.io/curl/curl:8.11.1}"
+prom_tls_preflight() {
+    local url pod phase="" code="" out="" waited=0
+    url="$(prometheus_base_url)"
+    if [ -z "$url" ]; then
+        info "no controller config in $WVA_NS yet: the installer probes the Prometheus TLS connection when it installs"
+        return 0
+    fi
+    case "$url" in https://*) ;; *) return 0 ;; esac
+    prom_tls_env
+    if [ "${PROM_TLS_ENV[*]:-}" = "--env=PROM_TLS_VERIFY=false" ]; then
+        warn "the controller does not verify $url (PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true); nothing to probe"
+        return 0
+    fi
+    pod="tlsprobe-$(date +%s)-$RANDOM"
+    k run "$pod" --restart=Never --quiet --image="$PROM_TLS_PROBE_IMAGE" ${PROM_TLS_ENV[@]+"${PROM_TLS_ENV[@]}"} \
+        --env="PROM_URL=$url" --command -- sh -c '
+if [ -n "${PROM_CA_B64:-}" ]; then
+    printf %s "$PROM_CA_B64" | base64 -d > /tmp/ca.crt || exit 2
+    set -- --cacert /tmp/ca.crt
+fi
+exec curl -sS -o /dev/null -w "HTTP %{http_code}" --max-time 15 "$@" "$PROM_URL"' >/dev/null 2>&1 \
+        || { warn "could not start a Prometheus TLS probe Pod in $NS; not checked"; return 0; }
+    while [ "$waited" -lt 120 ]; do
+        phase="$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)"
+        case "$phase" in Succeeded|Failed) break ;; esac
+        sleep 2
+        waited=$((waited + 2))
+    done
+    code="$(k get pod "$pod" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)"
+    out="$(k logs "$pod" 2>/dev/null)"
+    if printf '%s\n' "$out" | grep -q '^curl: ('; then
+        out="$(printf '%s\n' "$out" | grep -m1 '^curl: (')"
+    else
+        out="$(printf '%s\n' "$out" | tail -1)"
+    fi
+    k delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    case "$phase:$code" in
+        Succeeded:0)
+            ok "Prometheus TLS verified with the controller's settings: $url (${out:-no answer})"
+            return 0 ;;
+        Failed:51|Failed:60|Failed:77)
+            warn "the controller's TLS settings do not verify $url: $out"
+            warn "  re-run the installer, which copies the Prometheus CA and picks an address its certificate names"
+            return 1 ;;
+        *)
+            warn "could not complete the Prometheus TLS probe (phase ${phase:-unknown}, exit ${code:-none}: ${out:-no output}); not a verdict"
+            return 0 ;;
+    esac
+}
+
 # THE FLOW-CONTROL QUEUE MUST EXIST AS A SERIES, not as a line in a ConfigMap.
 #
 # This is the check that was missing. `featureGates: [flowControl]` was present
@@ -1522,10 +1635,11 @@ verify_flow_control() {
     local q out pod
     q='sum by (model_name) (llm_d_epp_flow_control_queue_size) or sum by (model_name) (inference_extension_flow_control_queue_size)'
     pod="fcheck-$(date +%s)-$RANDOM"
-    k run "$pod" --restart=Never --quiet --image="$(load_image)" --command -- \
+    prom_tls_env
+    k run "$pod" --restart=Never --quiet --image="$(load_image)" ${PROM_TLS_ENV[@]+"${PROM_TLS_ENV[@]}"} --command -- \
         python3 -c "
-import json,ssl,time,urllib.parse,urllib.request
-ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+import json,time,urllib.parse,urllib.request
+$PROM_TLS_PY
 url='$url'+'/api/v1/query?'+urllib.parse.urlencode({'query':'''$q'''})
 deadline=time.time()+180
 while time.time()<deadline:
@@ -1597,14 +1711,12 @@ prom_queries() {
     [ -n "$url" ] || { warn "could not read PROMETHEUS_BASE_URL from wva-manager-config in $WVA_NS"; return 1; }
     local queries; queries="$(jq -cn '$ARGS.positional' --args "$@")"
     local pod="pquery-$(date +%s)-$RANDOM"
-    k run "$pod" --restart=Never --quiet --image="$(load_image)" \
+    prom_tls_env
+    k run "$pod" --restart=Never --quiet --image="$(load_image)" ${PROM_TLS_ENV[@]+"${PROM_TLS_ENV[@]}"} \
         --env="PROM_URL=$url" --env="QUERIES=$queries" --env="EVAL_TIME=$eval_time" \
         --command -- python3 -c '
-import json, os, ssl, urllib.parse, urllib.request
-# The in-cluster Prometheus usually serves a self-signed certificate, and the
-# controller reads it the same way. No credential is sent; the worst a spoofed
-# answer can do is mislabel this benchmark.
-ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+import json, os, urllib.parse, urllib.request
+'"$PROM_TLS_PY"'
 out = {}
 for q in json.loads(os.environ["QUERIES"]):
     params = {"query": q}

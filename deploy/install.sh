@@ -46,6 +46,11 @@ export WVA_NS_EXPLICIT NAMESPACE_EXPLICIT
 NAMESPACE=${NAMESPACE:-"llm-d-optimized-baseline"}
 MONITORING_NAMESPACE=${MONITORING_NAMESPACE:-"workload-variant-autoscaler-monitoring"}
 WVA_NS=${WVA_NS:-"workload-variant-autoscaler-system"}
+# Set by the caller, the Prometheus TLS Secret is where the controller's CA is
+# copied from (wva_prometheus_ca_source); unset, the Prometheus CR names it.
+PROMETHEUS_SECRET_NAME_EXPLICIT=${PROMETHEUS_SECRET_NAME:-}
+PROMETHEUS_SECRET_NS_EXPLICIT=${PROMETHEUS_SECRET_NS:-}
+export PROMETHEUS_SECRET_NAME_EXPLICIT PROMETHEUS_SECRET_NS_EXPLICIT
 PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 
 # WVA Configuration (required when DEPLOY_WVA=true)
