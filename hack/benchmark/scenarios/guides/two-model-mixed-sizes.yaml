@@ -5,7 +5,10 @@
 # Qwen/Qwen3-8B at one GPU per replica. It is the real-GPU stand-in for a large
 # model beside small ones under one quota: the utilization-share optimizer can
 # fund a 2-GPU replica only from two 1-GPU replicas on one node, which needs
-# node data (a gpu-inventory limiter beside the quota).
+# node data (a gpu-inventory limiter beside the quota). The driver places the
+# replicas on the standup's copy: BENCH_NODE pins them to one node, and
+# BENCH_NODES lets them land on any of several (a hostname affinity in each
+# stack's acceleratorType); this file names no node.
 #
 # Stack A's name is the path prefix (`/qwen3-30b-a3b/v1/...`), so drive it with
 # STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8. The driver reads each

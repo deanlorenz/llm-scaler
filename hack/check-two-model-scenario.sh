@@ -92,6 +92,14 @@ case "$args" in
   # The controller, which decides whether the policy is the benchmark's own:
   # namespace-scoped (the standup's install) unless CTL_SCOPE says otherwise.
   *"get deploy wva-controller-manager"*"-o json"*)
+      # CTL_NODE_SELECTOR: the gpu-inventory node selector the controller runs with.
+      if [ -n "${CTL_NODE_SELECTOR:-}" ]; then
+        echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
+               "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}},
+                      {"name":"WVA_WATCH_NAMESPACE","value":"$(POD_NAMESPACE)"},
+                      {"name":"WVA_NODE_SELECTOR","value":"'"$CTL_NODE_SELECTOR"'"}]}]}}}}'
+        exit 0
+      fi
       case "${CTL_SCOPE:-own}" in
         own) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
                "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}},
@@ -255,7 +263,20 @@ case "$args" in
       exit 0 ;;
   *"get nodes -o json"*)
       n="${NODE_GPUS:-8}"
-      if [ "${MIXED_ACCEL:-0}" = "1" ]; then
+      if [ -n "${MULTI_NODES:-}" ]; then
+        # MULTI_NODES=<name>=<gpus>,...: several H200 nodes. NODE_TAINTS=
+        # <name>=<key>=<value>:<effect>: one taint on one of them.
+        items=""
+        for e in $(printf '%s' "$MULTI_NODES" | tr ',' ' '); do
+          nm="${e%%=*}"; g="${e#*=}"; taints=""
+          case "${NODE_TAINTS:-}" in
+            "$nm="*) t="${NODE_TAINTS#*=}"; kv="${t%:*}"
+                     taints=",\"taints\":[{\"key\":\"${kv%%=*}\",\"value\":\"${kv#*=}\",\"effect\":\"${t##*:}\"}]" ;;
+          esac
+          items="${items:+$items,}{\"spec\":{\"x\":1${taints}},\"status\":{\"allocatable\":{\"cpu\":\"${NODE_CPU:-127}\",\"memory\":\"2000000000Ki\",\"nvidia.com/gpu\":\"$g\"},\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]},\"metadata\":{\"name\":\"$nm\",\"labels\":{\"gpu.nvidia.com/model\":\"H200\"}}}"
+        done
+        echo "{\"items\":[${items}]}"
+      elif [ "${MIXED_ACCEL:-0}" = "1" ]; then
         echo '{"items":[
           {"spec":{},"status":{"allocatable":{"cpu":"'"${NODE_CPU:-127}"'","memory":"2000000000Ki","nvidia.com/gpu":"'"$n"'"},"conditions":[{"type":"Ready","status":"True"}]},
            "metadata":{"name":"n1","labels":{"gpu.nvidia.com/model":"H200"}}},
@@ -278,6 +299,10 @@ case "$args" in
       if [ -n "${BOUND_GPUS:-}" ]; then
         items="${items:+$items,}{\"metadata\":{\"name\":\"bound\",\"namespace\":\"other-team\"},\"spec\":{\"nodeName\":\"n1\",\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"${BOUND_GPUS}\",\"cpu\":\"1\"}}}]},\"status\":{\"phase\":\"Running\"}}"
       fi
+      # BOUND_ON=<node>=<gpus>,...: another team's Running pod on each node.
+      for e in $(printf '%s' "${BOUND_ON:-}" | tr ',' ' '); do
+        items="${items:+$items,}{\"metadata\":{\"name\":\"bound-${e%%=*}\",\"namespace\":\"other-team\"},\"spec\":{\"nodeName\":\"${e%%=*}\",\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"${e#*=}\",\"cpu\":\"1\"}}}]},\"status\":{\"phase\":\"Running\"}}"
+      done
       echo "{\"items\":[${items}]}"
       exit 0 ;;
   # GWCLASS=1: the cluster already runs Istio (an istio.io GatewayClass).
@@ -1646,6 +1671,122 @@ else
     ok "a pinned node with fewer free accelerators than the run peaks at is refused"
 fi
 
+# The single-node path, unchanged: a node with the peak free passes on its own
+# count, and nothing of the multi-node path runs.
+case_begin
+mixed_verb NODE_GPUS=8 BENCH_NODE=n1 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_NODE=n1 has 8 free accelerator(s); the run peaks at 7'; then
+    fail "a pinned node with the peak free was not accepted on its own count (rc=$RC): $(printf '%s' "$OUT" | grep BENCH_NODE)"
+elif printf '%s' "$OUT" | grep -q 'BENCH_NODES'; then
+    fail "the single-node path ran multi-node checks: $(printf '%s' "$OUT" | grep BENCH_NODES)"
+else
+    ok "BENCH_NODE alone is checked as before, and only it"
+fi
+
+# SEVERAL nodes. Free 3 + 4 + 2 = 9 for a 7-GPU quota, each with room for a
+# 2-GPU replica: no node has the peak, and the run still fits.
+MULTI3='MULTI_NODES=n1=8,n2=8,n3=8'
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=5,n2=4,n3=6 BENCH_NODES=n1,n2,n3 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_NODES have 9 free GPU(s) together; the run peaks at 7'; then
+    fail "three nodes with 3 + 4 + 2 free were not accepted for a 7-GPU run (rc=$RC): $(printf '%s' "$OUT" | grep -E 'BENCH_NODES|n[123]:')"
+elif printf '%s' "$OUT" | grep -q 'WARN.*BENCH_NODES'; then
+    fail "a fitting node list still drew a BENCH_NODES warning: $(printf '%s' "$OUT" | grep 'WARN.*BENCH_NODES')"
+elif ! printf '%s' "$OUT" | grep -q 'n2: 4 free GPU(s).*up to 2 2-GPU replica(s)'; then
+    fail "preflight did not say what each node holds: $(printf '%s' "$OUT" | grep 'n2:')"
+else
+    ok "several nodes whose free GPUs add up to the peak pass, each with its own count"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=5,n2=6,n3=7 BENCH_NODES=n1,n2 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_NODES have 5 free GPU(s) together and the run peaks at 7'; then
+    fail "two nodes with 3 + 2 free were not refused for a 7-GPU run (rc=$RC): $(printf '%s' "$OUT" | grep BENCH_NODES)"
+else
+    ok "a node list whose free GPUs add up to less than the peak is refused"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=2,n2=7 BENCH_NODES=n1,n2 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'n2 has 1 free GPU(s).*cannot hold one 2-GPU replica'; then
+    fail "a node with 1 free GPU was accepted for a run whose larger replica takes 2 (rc=$RC): $(printf '%s' "$OUT" | grep -E 'n2|BENCH_NODES')"
+else
+    ok "a listed node that cannot hold one 2-GPU replica is refused, even when the total is enough"
+fi
+
+case_begin
+mixed_verb "$MULTI3" NODE_CPU=20 BOUND_ON=n1=5,n2=4,n3=6 BENCH_NODES=n1,n2,n3 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'CPU and memory for only 3 Pod(s), and the run can hold 5'; then
+    fail "nodes with GPUs but CPU for one decode Pod each were not refused (rc=$RC): $(printf '%s' "$OUT" | grep -E 'BENCH_NODES|CPU')"
+else
+    ok "the listed nodes must have the CPU and memory for the Pods the peak can be"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=4,n2=4 BENCH_NODES=n1,n9 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_NODES: no node named n9'; then
+    fail "a listed node that does not exist was not refused (rc=$RC): $(printf '%s' "$OUT" | grep BENCH_NODES)"
+else
+    ok "a listed node that does not exist is refused by name"
+fi
+
+case_begin
+mixed_verb NODE_GPUS=8 BENCH_NODE=n1 BENCH_NODES=n1,n2 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'are both set: one node, or a list'; then
+    fail "BENCH_NODE and BENCH_NODES together were not refused (rc=$RC)"
+else
+    ok "BENCH_NODE and BENCH_NODES together are refused"
+fi
+
+# TAINTS: never tolerated by default, only when named.
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=4,n2=4 NODE_TAINTS='n2=dedicated=gpu:NoSchedule' BENCH_NODES=n1,n2 WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'n2 carries dedicated=gpu:NoSchedule, which BENCH_TOLERATE does not name'; then
+    fail "a tainted listed node was not refused by default (rc=$RC): $(printf '%s' "$OUT" | grep -E 'n2|taint')"
+else
+    ok "a listed node with a taint nobody named is refused, not tolerated"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=4,n2=4 NODE_TAINTS='n2=dedicated=gpu:NoSchedule' BENCH_NODES=n1,n2 \
+    BENCH_TOLERATE='dedicated=gpu:NoSchedule' WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q 'which BENCH_TOLERATE does not name' || ! printf '%s' "$OUT" | grep -q 'BENCH_NODES have 8 free GPU(s) together'; then
+    fail "a taint named in BENCH_TOLERATE still refused the node (rc=$RC): $(printf '%s' "$OUT" | grep -E 'n2|BENCH_')"
+else
+    ok "a taint named in BENCH_TOLERATE is tolerated, on the listed nodes"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=4,n2=4 NODE_TAINTS='n2=dedicated=gpu:NoSchedule' BENCH_NODES=n1,n2 \
+    BENCH_TOLERATE='dedicated=other:NoSchedule' WVA_QUOTAS='H200=7' preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'n2 carries dedicated=gpu:NoSchedule'; then
+    fail "a toleration for another value of the key let the node through (rc=$RC)"
+else
+    ok "a toleration for another value of the taint does not cover it"
+fi
+
+case_begin
+mixed_verb "$MULTI3" BOUND_ON=n1=4,n2=4 BENCH_NODES=n1,n2 BENCH_TOLERATE='*' WVA_QUOTAS='H200=7' preflight
+out1="$OUT" rc1="$RC"
+mixed_verb NODE_GPUS=8 BENCH_TOLERATE='dedicated' WVA_QUOTAS='H200=7' preflight
+if [ "$rc1" -eq 0 ] || ! printf '%s' "$out1" | grep -q 'names no taint key'; then
+    fail "BENCH_TOLERATE='*' (every taint) was not refused (rc=$rc1)"
+elif [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'BENCH_TOLERATE is set without BENCH_NODES'; then
+    fail "BENCH_TOLERATE without BENCH_NODES was not refused (rc=$RC)"
+else
+    ok "a toleration of every taint, and a toleration for no named nodes, are refused"
+fi
+
+case_begin
+mixed_verb BENCH_NODES=n1,n2 BENCH_TOLERATE='*' WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='H200=7' standup
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'names no taint key'; then
+    fail "standup took BENCH_TOLERATE='*' (rc=$RC): $(printf '%s' "$OUT" | tail -2)"
+elif grep -q '^MAKE\[' "$CALLS"; then
+    fail "standup refused the toleration only after starting the harness"
+else
+    ok "standup refuses a toleration of every taint before anything is stood up"
+fi
+
 # Sourced: what the functions render and patch, per model.
 case_begin
 got="$( (BENCH_SPEC=guides/two-model-mixed-sizes STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 BENCH_NODE=n1 \
@@ -1658,6 +1799,77 @@ elif ! printf '%s\n' "$got" | grep -q '"Qwen/Qwen3-30B-A3B-FP8"'; then
     fail "the simulator does not serve model A's name, so the loader would ask it for a model it does not have"
 else
     ok "the simulator stack takes the model's own GPUs per replica and the pins"
+fi
+
+case_begin
+got="$( (BENCH_SPEC=guides/two-model-mixed-sizes STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 BENCH_NODE= BENCH_NODES=n1,n2 \
+         BENCH_TOLERATE= SIM_GPU_PRODUCT=NVIDIA-H200; sim_manifest a) 2>&1)"
+got_tol="$( (BENCH_SPEC=guides/two-model-mixed-sizes STACK_A=qwen3-30b-a3b MODEL_A=Qwen/Qwen3-30B-A3B-FP8 BENCH_NODE= BENCH_NODES=n1,n2 \
+         BENCH_TOLERATE='dedicated=gpu:NoSchedule' SIM_GPU_PRODUCT=; sim_manifest a) 2>&1)"
+if printf '%s\n' "$got" | grep -q 'kubernetes.io/hostname: '; then
+    fail "BENCH_NODES pinned the simulator to one node: $(printf '%s\n' "$got" | grep hostname)"
+elif ! printf '%s\n' "$got" | grep -q 'values: \["n1","n2"\]' || ! printf '%s\n' "$got" | grep -q 'operator: In'; then
+    fail "the simulator stack may not land on any of BENCH_NODES: $(printf '%s\n' "$got" | grep -A8 affinity)"
+elif printf '%s\n' "$got" | grep -q 'tolerations'; then
+    fail "the simulator stack tolerates a taint nobody named: $(printf '%s\n' "$got" | grep tolerations)"
+elif ! printf '%s\n' "$got_tol" | grep -q 'tolerations: \[{"key":"dedicated","operator":"Equal","value":"gpu","effect":"NoSchedule"}\]'; then
+    fail "the simulator stack does not take the toleration BENCH_TOLERATE names: $(printf '%s\n' "$got_tol" | grep -A1 tolerations)"
+elif command -v yq >/dev/null 2>&1 && \
+     [ "$(printf '%s\n' "$got_tol" | yq -r 'select(.kind == "Deployment") | .spec.template.spec | [.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[1], .tolerations[0].key] | join(",")' 2>&1)" != "n2,dedicated" ]; then
+    fail "the simulator Deployment does not parse to the affinity and toleration it prints: $(printf '%s\n' "$got_tol" | yq -r 'select(.kind == "Deployment") | .spec.template.spec' 2>&1 | head -20)"
+else
+    ok "BENCH_NODES places the simulator by affinity on any listed node, with a toleration only when named"
+fi
+
+# The share arms on several nodes: the controller's gpu-inventory must count
+# exactly the listed nodes, or it funds replicas from GPUs the run never uses.
+case_begin
+mixed_verb POLICY_TEXT="$BOTH_LIMITERS" CAN_NODES=yes CAN_PODS=yes BENCH_NODES=n1,n2 run today
+out1="$OUT" rc1="$RC" calls1="$(cat "$CALLS")"
+mixed_verb POLICY_TEXT="$BOTH_LIMITERS" CAN_NODES=yes CAN_PODS=yes BENCH_NODES=n1,n2 \
+    CTL_NODE_SELECTOR='kubernetes.io/hostname in (n1,n2)' run today
+if [ "$rc1" -eq 0 ] || ! printf '%s' "$out1" | grep -q "reads WVA_NODE_SELECTOR='', not 'kubernetes.io/hostname in (n1,n2)'"; then
+    fail "a share arm on BENCH_NODES ran with a controller counting every node (rc=$rc1): $(printf '%s' "$out1" | tail -2)"
+elif printf '%s' "$calls1" | grep -q 'patch configmap wva-scaling-policy-config'; then
+    fail "the arm wrote its policy before refusing the node selector"
+elif ! grep -q 'patch configmap wva-scaling-policy-config' "$CALLS"; then
+    fail "with the controller counting the listed nodes the arm did not go on: $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a share arm on several nodes needs the controller's gpu-inventory on exactly those nodes"
+fi
+
+# Placement, from a sampler file: two nodes, a 2-GPU model on one of them.
+case_begin
+PL="$WORK/placement"; mkdir -p "$PL"
+cat > "$PL/gpus.jsonl" <<'EOF'
+{"ts": 1, "pods": [{"name": "a-1", "node": "n1", "gpus": 2, "model": "qwen3-30b-a3b"}, {"name": "b-1", "node": "n2", "gpus": 1, "model": "qwen3-8b"}]}
+{"ts": 2, "failed": true}
+{"ts": 3, "pods": [{"name": "a-1", "node": "n1", "gpus": 2, "model": "qwen3-30b-a3b"}, {"name": "a-2", "node": "n1", "gpus": 2, "model": "qwen3-30b-a3b"}, {"name": "b-1", "node": "n2", "gpus": 1, "model": "qwen3-8b"}, {"name": "b-2", "node": "n2", "gpus": 1, "model": "qwen3-8b"}]}
+EOF
+if ! python3 "$ROOT/hack/benchmark/two_model_share_report.py" --placement "$PL/gpus.jsonl" > "$PL/placement.json"; then
+    fail "the placement of a two-node sampler file could not be derived"
+elif ! sum="$(python3 "$ROOT/hack/benchmark/two_model_share_report.py" --placement-summary "$PL/placement.json")" || \
+     [ "$sum" != "n1: up to 4 GPU(s) (qwen3-30b-a3b x2); n2: up to 2 GPU(s) (qwen3-8b x2)" ]; then
+    fail "the placement summary is wrong: '$sum'"
+elif ! python3 - "$ROOT/hack/benchmark" "$PL/placement.json" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import two_model_share_report as s
+import two_model_report as r
+t = "\n".join(s.placement_table([("share", json.load(open(sys.argv[2])))]))
+assert "| share | n1 | 4 | qwen3-30b-a3b: 2 | 2 |" in t, t
+r.BASELINE = "today"
+base = {"max_replicas_per_model": 3, "gpus_per_replica": 1, "bench_nodes": "n1,n2"}
+a = {"name": "today", "budget": base}
+same = {"name": "share", "budget": dict(base)}
+other = {"name": "share", "budget": dict(base, bench_nodes="n1,n3")}
+assert r.budget_problem(a, same) is None
+assert "ran on nodes" in r.budget_problem(a, other)
+PY
+then
+    fail "the placement table or the node-set guard of the report is wrong (above)"
+else
+    ok "each arm's placement is derived per node and printed, and arms on other nodes are refused"
 fi
 
 case_begin
@@ -1778,7 +1990,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=105
+CASES_EXPECTED=120
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -354,6 +354,13 @@ def budget_problem(a, b):
             return ("the %s arm ran with %s=%s against the %s arm's %s: its roles were "
                     "bounded differently, so its TTFT differs for a reason that is not "
                     "the thing under test." % (b["name"], key, bb[key], BASELINE, ba[key]))
+    # The nodes the replicas could land on (BENCH_NODE or BENCH_NODES). Another
+    # set of nodes fragments the free GPUs differently, and on several nodes
+    # that decides what a replica can be funded from.
+    if "bench_nodes" in ba and "bench_nodes" in bb and ba["bench_nodes"] != bb["bench_nodes"]:
+        return ("the %s arm ran on nodes '%s' against the %s arm's '%s': its replicas "
+                "could land on other nodes, so its TTFT differs for a reason that is not "
+                "the thing under test." % (b["name"], bb["bench_nodes"], BASELINE, ba["bench_nodes"]))
     if (bb["max_replicas_per_model"] != ba["max_replicas_per_model"]
             or bb["gpus_per_replica"] != ba["gpus_per_replica"]):
         return ("the %s arm capped each model at %d replicas of %d accelerator(s) against "

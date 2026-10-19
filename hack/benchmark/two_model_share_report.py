@@ -18,6 +18,12 @@ It refuses, rather than reports, three runs that would mislead:
 
 `--rewrite-policy ARM` is the other half: it rewrites a policy's `optimizer:`
 block for an arm (stdin to stdout), and is what the driver runs before each arm.
+
+`--placement GPUS_JSONL` prints where an arm's pods landed, from the sampler's
+own record, as JSON (the driver keeps it as placement.json), and
+`--placement-summary PLACEMENT_JSON` one line of it. The report prints the
+placement of every arm: across several nodes a replica of N GPUs needs N free
+on one node, so where the fleet landed decides what the optimizer could fund.
 """
 
 import argparse
@@ -74,6 +80,93 @@ def scalar(snap, prefix):
     return None
 
 
+def placement(gpus_jsonl):
+    """Where an arm's pods landed, from its sampler's file.
+
+    {"nodes": {node: {"peak_gpus": most GPUs held there at once,
+                      "models": {model: {"pods": distinct pods seen,
+                                         "peak_replicas": most at once}}}},
+     "pods": {pod: {"node", "model", "gpus"}}, "samples": n}
+
+    Only Running pods holding an accelerator are sampled, which is what held
+    one. A sample the sampler marked failed or stalled carries no pods.
+    """
+    nodes, pods, samples = {}, {}, 0
+    with open(gpus_jsonl) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                s = json.loads(line)
+            except ValueError:
+                continue
+            if "pods" not in s:
+                continue
+            samples += 1
+            held, count = {}, {}
+            for p in s["pods"]:
+                node = p.get("node") or "?"
+                model = p.get("model") or p.get("pool") or "?"
+                gpus = p.get("gpus") or 0
+                pods.setdefault(p.get("name", "?"), {"node": node, "model": model, "gpus": gpus})
+                held[node] = held.get(node, 0) + gpus
+                count[(node, model)] = count.get((node, model), 0) + 1
+            for node, g in held.items():
+                n = nodes.setdefault(node, {"peak_gpus": 0, "models": {}})
+                n["peak_gpus"] = max(n["peak_gpus"], g)
+            for (node, model), c in count.items():
+                m = nodes[node]["models"].setdefault(model, {"pods": 0, "peak_replicas": 0})
+                m["peak_replicas"] = max(m["peak_replicas"], c)
+    for info in pods.values():
+        m = nodes.setdefault(info["node"], {"peak_gpus": 0, "models": {}})["models"].setdefault(
+            info["model"], {"pods": 0, "peak_replicas": 0})
+        m["pods"] += 1
+    return {"nodes": nodes, "pods": pods, "samples": samples}
+
+
+def placement_summary(pl):
+    """One line: per node, the GPUs held there at most and each model's replicas."""
+    if not pl or not pl.get("nodes"):
+        return "no pod held an accelerator in any sample"
+    parts = []
+    for node in sorted(pl["nodes"]):
+        n = pl["nodes"][node]
+        models = ", ".join("%s x%d" % (m, v["peak_replicas"]) for m, v in sorted(n["models"].items()))
+        parts.append("%s: up to %d GPU(s) (%s)" % (node, n["peak_gpus"], models))
+    return "; ".join(parts)
+
+
+def load_placement(d):
+    """The arm's placement.json, else derived from its gpus.jsonl, else None."""
+    try:
+        with open(os.path.join(d, "placement.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        pass
+    try:
+        return placement(os.path.join(d, "gpus.jsonl"))
+    except OSError:
+        return None
+
+
+def placement_table(rows):
+    """rows: [(label, placement or None)]. A markdown table, a line per node."""
+    out = ["| arm | node | most GPUs held at once | replicas at once, by model | pods seen |",
+           "| --- | --- | --- | --- | --- |"]
+    for label, pl in rows:
+        if not pl or not pl.get("nodes"):
+            out.append("| %s | - | - | no placement recorded | - |" % label)
+            continue
+        for node in sorted(pl["nodes"]):
+            n = pl["nodes"][node]
+            out.append("| %s | %s | %d | %s | %d |" % (
+                label, node, n["peak_gpus"],
+                ", ".join("%s: %d" % (m, v["peak_replicas"]) for m, v in sorted(n["models"].items())),
+                sum(v["pods"] for v in n["models"].values())))
+    return out
+
+
 def load_arm(root, arm):
     d = os.path.join(root, arm)
     if not os.path.isfile(os.path.join(d, "meta.json")):
@@ -97,6 +190,7 @@ def load_arm(root, arm):
         "blocked": series(snap, "sum by (reason)", "reason"),
         "planned": scalar(snap, "count_over_time((max("),
         "modes": series(snap, "min by (mode)", "mode"),
+        "placement": load_placement(d),
     }
 
 
@@ -165,6 +259,15 @@ def report(arms):
           "that differs from today by as much as share does says the run's spread is "
           "larger than the effect.")
     print("")
+    print("## Placement")
+    print("")
+    print("Where each arm's pods landed, from its GPU sampler. A replica of N GPUs needs N "
+          "free GPUs on one node, so on several nodes this decides what the optimizer could "
+          "fund: GPUs free on two nodes, one each, fund no 2-GPU replica.")
+    print("")
+    for line in placement_table([(a["name"], a.get("placement")) for a in arms]):
+        print(line)
+    print("")
 
 
 def main(argv):
@@ -173,7 +276,31 @@ def main(argv):
     p.add_argument("--out-root", help="the directory holding today/, shadow/ and share/")
     p.add_argument("--rewrite-policy", metavar="ARM",
                    help="rewrite the policy on stdin for ARM and print it")
+    p.add_argument("--placement", metavar="GPUS_JSONL",
+                   help="print where the arm's pods landed, as JSON")
+    p.add_argument("--placement-summary", metavar="PLACEMENT_JSON",
+                   help="print one line of a placement.json")
     args = p.parse_args(argv)
+    if args.placement:
+        try:
+            pl = placement(args.placement)
+        except OSError as e:
+            print(e, file=sys.stderr)
+            return 1
+        if not pl["samples"]:
+            print("%s has no sample with pods in it" % args.placement, file=sys.stderr)
+            return 1
+        json.dump(pl, sys.stdout, indent=1, sort_keys=True)
+        print("")
+        return 0
+    if args.placement_summary:
+        try:
+            with open(args.placement_summary) as fh:
+                print(placement_summary(json.load(fh)))
+        except (OSError, ValueError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        return 0
     if args.rewrite_policy:
         try:
             sys.stdout.write(rewrite_policy(sys.stdin.read(), args.rewrite_policy))

@@ -151,7 +151,40 @@ fi
 refuse "a node name that is not one" "$SCEN/two-model-mixed-sizes.yaml" "BENCHMARK_DECODE_NODE=n1;x"
 refuse "a node pin on a scenario with no engine resources" "$T/bare.yaml" BENCHMARK_DECODE_NODE=n1
 
-CASES_EXPECTED=28
+# BENCHMARK_DECODE_NODES: the stacks' engines on any of several nodes, by the
+# role's acceleratorType (the chart's required hostname In term), no pin, and
+# no toleration unless one is given.
+cp "$SCEN/two-model-mixed-sizes.yaml" "$T/nodes.yaml"
+if BENCHMARK_RENDER_DRAIN=false BENCHMARK_DECODE_NODES="gpu-1, gpu-2" bash "$SCRIPT" "$T/nodes.yaml" > "$T/nodes.out" 2>&1; then
+    got="$(yq -r '[.scenario[].modelservice.decode.acceleratorType | .labelKey + "=" + .labelValue + "/" + (.labelValues | join("+"))] | join(",")' "$T/nodes.yaml")"
+    pins="$(yq -r '[.. | select(type == "!!map" and has("nodeSelector"))] | length' "$T/nodes.yaml")"
+    tols="$(yq -r '[.. | select(type == "!!map" and has("tolerations"))] | length' "$T/nodes.yaml")"
+    shared="$(yq -r '.shared.modelservice.decode.acceleratorType // "none"' "$T/nodes.yaml")"
+    if [ "$got" = "kubernetes.io/hostname=gpu-1/gpu-1+gpu-2,kubernetes.io/hostname=gpu-1/gpu-1+gpu-2" ] \
+        && [ "$pins" = 0 ] && [ "$tols" = 0 ] && [ "$shared" = none ]; then
+        ok "BENCHMARK_DECODE_NODES lets both stacks' engines land on any listed node, with no pin and no toleration"
+    else
+        fail "BENCHMARK_DECODE_NODES rendered '$got' (nodeSelectors: $pins, tolerations: $tols, shared: $shared)"
+    fi
+else
+    fail "BENCHMARK_DECODE_NODES refused on the mixed-sizes scenario: $(cat "$T/nodes.out")"
+fi
+cp "$SCEN/two-model-mixed-sizes.yaml" "$T/tols.yaml"
+if BENCHMARK_RENDER_DRAIN=false BENCHMARK_DECODE_NODES=gpu-1 \
+    BENCHMARK_DECODE_TOLERATIONS='[{"key":"dedicated","operator":"Equal","value":"gpu","effect":"NoSchedule"}]' \
+    bash "$SCRIPT" "$T/tols.yaml" > "$T/tols.out" 2>&1; then
+    got="$(yq -r '[.scenario[].modelservice.decode.tolerations[] | .key + "=" + .value + ":" + .effect] | join(",")' "$T/tols.yaml")"
+    [ "$got" = "dedicated=gpu:NoSchedule,dedicated=gpu:NoSchedule" ] && ok "BENCHMARK_DECODE_TOLERATIONS gives both stacks' engines exactly the toleration named" \
+        || fail "BENCHMARK_DECODE_TOLERATIONS rendered '$got'"
+else
+    fail "BENCHMARK_DECODE_TOLERATIONS refused: $(cat "$T/tols.out")"
+fi
+refuse "BENCHMARK_DECODE_NODE and BENCHMARK_DECODE_NODES together" "$SCEN/two-model-mixed-sizes.yaml" BENCHMARK_DECODE_NODE=n1 BENCHMARK_DECODE_NODES=n1,n2
+refuse "a node list with a name that is not one" "$SCEN/two-model-mixed-sizes.yaml" "BENCHMARK_DECODE_NODES=n1,n2;x"
+refuse "a toleration with no key (it tolerates every taint)" "$SCEN/two-model-mixed-sizes.yaml" 'BENCHMARK_DECODE_TOLERATIONS=[{"operator":"Exists"}]'
+refuse "tolerations that are not a list" "$SCEN/two-model-mixed-sizes.yaml" 'BENCHMARK_DECODE_TOLERATIONS={"key":"x"}'
+
+CASES_EXPECTED=34
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     echo "FAIL $CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
     FAIL=$((FAIL + 1))
