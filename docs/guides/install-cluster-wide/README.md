@@ -20,11 +20,15 @@ discovered and may not hold model servers yet.
 - [ ] llm-d model servers somewhere on the cluster.
 - [ ] **KEDA.** On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy
   command to install it. On OpenShift, install the Custom Metrics Autoscaler
-  operator first.
-- [ ] A Prometheus that scrapes the model servers.
-- [ ] **The `flowControl` feature gate on every EPP.** The install checks only
-  the EPPs in the controller's own namespace, so check the others yourself.
-  Add this to each `EndpointPickerConfig` and restart the EPP:
+  operator first. Supported versions, and what happens with an existing KEDA:
+  [KEDA reference](../../reference/keda.md).
+- [ ] A Prometheus with the Prometheus Operator. Where nothing scrapes the
+  model servers or the EPP yet, `make setup-prereqs` adds the monitors.
+- [ ] **For scale-from-zero only: the `flowControl` feature gate on every
+  EPP.** The check below finds every namespace with llm-d model servers or an
+  InferencePool, and reports each one. Where the gate is off it warns and goes
+  on. To turn it on, add this to the `EndpointPickerConfig` and restart the
+  EPP:
 
   ```yaml
   featureGates:

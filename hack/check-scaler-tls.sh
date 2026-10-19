@@ -1060,7 +1060,21 @@ so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAu
 run wva_scaler_tls_undeploy STUB_CM=absent
 # After the reinstall, not before: a restart with the ClusterTriggerAuthentication
 # gone rebuilds the pooled TLS address with empty auth parameters, in plaintext.
-ok 'grep -q "install this scaler in $NS again, restart it after the install:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "Before installing" "$WORK/warnings"' "uninstall with a ScaledObject on the TLS address: no restart-after-reinstall notice: $(cat "$WORK/warnings")"
+ok 'grep -q "keeps a connection with the old client certificate until it restarts" "$WORK/info" && ! grep -q "this uninstall restarts it" "$WORK/info" && ! grep -q "^rollout restart" "$WORK/kubectl.log"' "uninstall with a ScaledObject on the TLS address, default: promised or ran a KEDA restart: $(cat "$WORK/info" "$WORK/warnings")"
+# The restart itself, after the ScaledObjects. KEDA is shared, so by default
+# the uninstall never restarts it: it says so and gives the command, and the
+# reinstall finds the stale connection (the verify cases below). With
+# KEDA_RESTART=true it restarts KEDA, but not while a ScaledObject is still on
+# the TLS address: KEDA would rebuild it with no auth.
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true
+ok '! grep -q "^rollout restart" "$WORK/kubectl.log" && grep -q "KEDA_RESTART=true lets the uninstall do it" "$WORK/info" && grep -q "the install finds that connection and prints the restart" "$WORK/info" && grep -q "kubectl rollout restart deployment/keda-operator -n keda" "$WORK/info"' "uninstall, default: restarted KEDA, or did not say how: $(cat "$WORK/info" "$WORK/warnings"; cat "$WORK/kubectl.log")"
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true KEDA_RESTART=true
+ok 'grep -q "install this scaler in $NS again, restart it after the install:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "^rollout restart" "$WORK/kubectl.log"' "KEDA_RESTART=true, a ScaledObject still on the TLS address: KEDA restarted anyway, or no restart-after-reinstall notice: $(cat "$WORK/warnings"; cat "$WORK/kubectl.log")"
+rm -f "$WORK/so.json"
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true KEDA_RESTART=true
+ok 'grep -q "^rollout restart deployment/keda-operator -n keda" "$WORK/kubectl.log" && grep -q "Restarted KEDA.s operator in keda" "$WORK/info"' "KEDA_RESTART=true, no ScaledObject left: the uninstall did not restart KEDA: $(cat "$WORK/info" "$WORK/warnings"; cat "$WORK/kubectl.log")"
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true
+ok '! grep -q "^rollout restart" "$WORK/kubectl.log"' "uninstall, default, no ScaledObject left: restarted KEDA: $(cat "$WORK/kubectl.log")"
 
 echo "== undeploy removes KEDA's copy where the marker says it went"
 reset_store
@@ -1602,16 +1616,32 @@ stale_case() {
 }
 RESTART="rollout restart deployment/keda-operator -n keda"
 
-echo "== verify: refusals for an unknown authority from KEDA's Pod: fails, names the restart, no re-wire"
+echo "== verify: refusals for an unknown authority from KEDA's Pod: names the ScaledObjects and the restart, does not restart KEDA, does not fail"
+# KEDA is shared: by default the install does not restart it, and does not
+# fail over it either. It names what stays unwired and the exact command.
 stale_case
 refusal_line 10.128.5.168
 run wva_verify_scaler_wiring STUB_UNWIRED=always
-ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "keda-operator-7f9c" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "verify, stale KEDA connection: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+ok '[ "$RC" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "keda-operator-7f9c" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "stay unwired" "$WORK/warnings" && grep -q "Not restarted" "$WORK/warnings" && ! grep -q "^rollout restart" "$WORK/kubectl.log"' "verify, stale KEDA connection, default: exit $RC (want 0), warnings $(cat "$WORK/warnings"), kubectl $(grep rollout "$WORK/kubectl.log")"
 ok '! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "Change it again" "$WORK/warnings"' "verify, stale KEDA connection: still offers the re-wire: $(cat "$WORK/stderr")"
-# A ScaledObject KEDA wired before the reinstall fails the same way: every
-# call on the connection is refused.
+# A ScaledObject KEDA wired before the reinstall is refused the same way.
 run wva_verify_scaler_wiring
-ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings"' "verify, stale KEDA connection with a wired HPA: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+ok '[ "$RC" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings"' "verify, stale KEDA connection with a wired HPA: exit $RC (want 0), warnings $(cat "$WORK/warnings")"
+# KEDA_RESTART=true: the install restarts KEDA's operator itself.
+run wva_verify_scaler_wiring STUB_UNWIRED=always KEDA_RESTART=true
+ok 'grep -q "^rollout restart deployment/keda-operator -n keda" "$WORK/kubectl.log" && grep -q "KEDA_RESTART=true: restarted KEDA.s operator in keda" "$WORK/info" && ! grep -q "Not restarted" "$WORK/warnings"' "verify, stale KEDA connection, KEDA_RESTART=true: KEDA not restarted: $(cat "$WORK/info" "$WORK/warnings"; grep rollout "$WORK/kubectl.log")"
+
+echo "== verify: KEDA refusing the scaler's new certificate (bad certificate) is the same stale connection"
+# The other direction, measured on kind after an uninstall and reinstall: KEDA,
+# holding the CA it cached, rejects the controller's new serving certificate,
+# and the controller logs "remote error: tls: bad certificate".
+stale_case
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' 2026-10-19T09:42:57Z INFO external-scaler scaler/refusal_log.go:118 \
+    'KEDA external scaler refused a TLS handshake; this client reaches no call' \
+    '{"remote": "10.128.5.168:45482", "reason": "remote error: tls: bad certificate", "refusedSinceLastLine": 1}' \
+    >>"$WORK/ctrl.log"
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && ! grep -q "Change it again" "$WORK/warnings"' "verify, KEDA refusing the new serving certificate: exit $RC (want 0), warnings $(cat "$WORK/warnings")"
 
 echo "== verify: the certificate KEDA was given is not from the current CA: setup-prereqs and the restart"
 stale_case
@@ -1644,7 +1674,7 @@ stale_case
 refusal_line 10.128.5.168
 run 'wva_scaler_ensure_wired apps/app-so' STUB_UNWIRED=always WVA_SCALER_REWIRE_TRIES=3
 REWIRES="$(grep -c "^patch scaledobject" "$WORK/patches")"
-ok '[ "$RC" = 1 ] && [ "$REWIRES" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && ! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "change it again" "$WORK/warnings"' "re-wire, stale KEDA connection: exit $RC, $REWIRES re-wire patches (want 0), warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+ok '[ "$RC" = 1 ] && [ "$REWIRES" = 0 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && grep -q "Not restarted" "$WORK/warnings" && ! grep -q "^rollout restart" "$WORK/kubectl.log" && ! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "change it again" "$WORK/warnings"' "re-wire, stale KEDA connection: exit $RC, $REWIRES re-wire patches (want 0), warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
 run 'wva_scaler_ensure_wired apps/app-so' STUB_UNWIRED=always WVA_SCALER_REWIRE_TRIES=2 STUB_LOGS=FORBIDDEN
 REWIRES="$(grep -c "^patch scaledobject" "$WORK/patches")"
 ok '[ "$RC" = 1 ] && [ "$REWIRES" = 2 ] && grep -q "$RESTART" "$WORK/warnings" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "re-wire, log unreadable: exit $RC, $REWIRES re-wire patches (want 2), both fixes not listed: warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"

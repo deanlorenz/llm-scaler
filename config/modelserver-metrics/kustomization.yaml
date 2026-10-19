@@ -1,12 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Scrapes the llm-d model servers WVA sizes. A FALLBACK, applied BY HAND.
+# Scrapes the llm-d model servers WVA sizes.
 #
-# The installer never applies this. It reports when nothing scrapes the model
-# servers and prints llm-d's command first and this one second —
-# wva_report_modelserver_metrics in deploy/lib/infra_monitoring.sh records why
-# creating it was removed: ownership, cleanup, drift.
+# `make setup-prereqs` applies this, marked llm-d.ai/applied-by=wva-setup-prereqs,
+# in each llm-d namespace where nothing scrapes the model servers yet, and
+# `undeploy-wva` removes it again by that mark (wva_ensure_llmd_monitors in
+# deploy/lib/infra_monitoring.sh). DEPLOY_LLMD_MONITORS=false turns that off.
 #
 # PREFER llm-d's, which is where this is maintained:
 #
@@ -14,8 +14,8 @@ kind: Kustomization
 #   kubectl apply -n <ns> -k $REPO_ROOT/guides/recipes/modelserver/components/monitoring-pd
 #
 # This file is for a reader with no llm-d checkout to hand. It goes into the
-# WORKLOAD namespace, and nothing removes it again: `undeploy-wva` deletes what the
-# WVA overlay renders, and a hand-applied object is not part of that.
+# WORKLOAD namespace. Applied by hand it carries no mark, so `undeploy-wva`
+# leaves it in place.
 #
 # WVA's whole capacity model reads vllm:* series (num_requests_waiting,
 # kv_cache_usage_perc, time_per_output_token_seconds, …), so without these there is

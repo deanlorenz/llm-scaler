@@ -76,7 +76,7 @@ them and an uninstall removes only its own.
 | RoleBinding `wva-policy-reader-<hash>` in `wva-policy` | only when `wva-policy` exists; lets the controller read the cluster policy |
 | NetworkPolicy `wva-external-scaler` | admits the scaler port `:9090` from KEDA's namespace only ([when it is written](#the-scaler-networkpolicy)) |
 | Prometheus | Kubernetes only, and only if the cluster has none |
-| KEDA | Kubernetes only, with `KEDA_HELM_INSTALL=true`. On OpenShift, install the Custom Metrics Autoscaler operator first |
+| KEDA | Kubernetes only, with `KEDA_HELM_INSTALL=true`. On OpenShift, install the Custom Metrics Autoscaler operator first. Versions: [KEDA reference](../../reference/keda.md) |
 
 Whoever can read Secrets in the controller's namespace holds
 `wva-epp-metrics-token`. In the tenant-owned shape that is the tenant, and the

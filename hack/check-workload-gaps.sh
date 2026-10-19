@@ -368,6 +368,22 @@ assert_field 1 "server"
 assert_field 2 "0"      # the ENGINE's hook count, which is what decides
 [ "$FAILED" -eq "$before" ] && ok
 
+CASE="llm-d inference simulator: an engine for the drain half, no cache halves"
+reset
+FIXTURE='{"spec":{"template":{"spec":{"containers":[
+  {"name":"vllm","image":"ghcr.io/llm-d/llm-d-inference-sim:v0.9.0",
+   "args":["--model","model-a","--port","8000"]}]}}}}'
+before=$FAILED
+assert_field 1 "vllm"   # it was skipped as no engine at all
+assert_field 2 "0"
+assert_field 6 ""       # no argv: it fetches no weights
+assert_field 7 ""       # not vLLM: no compile caches
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "preStop"
+assert_not_contains "$doc" "HF_HOME"
+assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+[ "$FAILED" -eq "$before" ] && ok
+
 CASE="a PVC mounted with no HF_HOME does not make weights persist"
 reset; f_mount_without_hf_home
 before=$FAILED

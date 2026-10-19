@@ -15,6 +15,149 @@
 # up front, as a warning, rather than leaving it to the first plan.
 KEDA_FALLBACK_MIN_VERSION="${KEDA_FALLBACK_MIN_VERSION:-2.17}"
 
+# KEDA_TESTED_VERSION is the KEDA minor the e2e suites run against: CI's kind
+# suites install chart kedacore/keda at install.sh's default KEDA_CHART_VERSION,
+# and hack/check-install-flow.sh fails when the two part.
+KEDA_TESTED_VERSION="2.21"
+# KEDA_SUPPORTED_VERSIONS are the minors reported as supported, in order and
+# each once: 2.18, which the benchmarks have run on; 2.19; 2.21, the first
+# release with the CVE-2026-77524 fix, which the kind suites have passed on;
+# and the tested one, whichever it is. Nothing in the code needs any of them:
+# any other version is reported as untested, and the install goes on.
+KEDA_SUPPORTED_VERSIONS="$(printf '%s\n' 2.18 2.19 2.21 "$KEDA_TESTED_VERSION" | sort -t. -k1,1n -k2,2n -u | paste -sd' ' -)"
+# wva_keda_supported_text echoes the supported minors as prose: "2.18, 2.19 and 2.21".
+wva_keda_supported_text() {
+    printf '%s\n' $KEDA_SUPPORTED_VERSIONS | paste -sd, - | sed 's/,\([^,]*\)$/ and \1/; s/,/, /g'
+}
+
+# CVE-2026-77524 (GHSA-637c-6jxx-4rwm): a tenant who may write a
+# TriggerAuthentication can make the KEDA operator send its own ServiceAccount
+# token to an address the tenant controls. The advisory lists the operator up to
+# 2.20.2; KEDA 2.21.0 fixes it.
+KEDA_CVE_ID="CVE-2026-77524"
+KEDA_CVE_FIXED_VERSION="2.21.0"
+
+# The namespace OpenShift's Custom Metrics Autoscaler runs in, where its
+# ClusterServiceVersion carries the version.
+KEDA_CMA_NAMESPACE="${KEDA_CMA_NAMESPACE:-openshift-keda}"
+
+# wva_keda_operator_version sets WVA_KEDA_VERSION to the KEDA operator's version
+# (no leading v), read from the image tag of the operator Deployment found
+# cluster-wide by KEDA_OPERATOR_LABEL_SELECTOR. When it cannot be read it is
+# empty, and WVA_KEDA_VERSION_WHY says why: Forbidden is "could not check",
+# never absent and never a pass.
+wva_keda_operator_version() {
+    local out rc=0 image tag
+    WVA_KEDA_VERSION=""
+    WVA_KEDA_VERSION_WHY=""
+    out="$(kubectl get deployments -A -l "$KEDA_OPERATOR_LABEL_SELECTOR" \
+        -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if printf '%s' "$out" | grep -qi 'forbidden'; then
+            WVA_KEDA_VERSION_WHY="listing Deployments cluster-wide is not permitted for you"
+        else
+            WVA_KEDA_VERSION_WHY="reading the operator Deployment failed: $(printf '%s\n' "$out" | head -1)"
+        fi
+        return 0
+    fi
+    image="$(printf '%s' "$out" | tr -d '[:space:]')"
+    if [ -z "$image" ]; then
+        WVA_KEDA_VERSION_WHY="no Deployment labelled $KEDA_OPERATOR_LABEL_SELECTOR was found (other distributions label it differently)"
+        return 0
+    fi
+    case "$image" in
+        *@*)
+            WVA_KEDA_VERSION_WHY="the operator image $image is pinned by digest, which names no version"
+            return 0 ;;
+    esac
+    # The tag is after the last ':' of the last path segment, so a registry
+    # port (host:5000/keda) is not read as one.
+    tag="${image##*/}"
+    case "$tag" in
+        *:*) tag="${tag##*:}" ;;
+        *)   tag="" ;;
+    esac
+    tag="${tag#v}"
+    if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        WVA_KEDA_VERSION_WHY="the operator image $image has no version tag (${tag:-none})"
+        return 0
+    fi
+    WVA_KEDA_VERSION="$tag"
+}
+
+# wva_keda_version_judge <version> <what> <advice> reports a KEDA version:
+# supported, or untested; too old for a fallback; carrying KEDA_CVE_ID. It is
+# information only and always returns 0: KEDA's external-push trigger is far
+# older than any of these, so no version is refused.
+wva_keda_version_judge() {
+    local v="$1" what="$2" advice="$3" minor
+    minor="$(printf '%s' "$v" | cut -d. -f1-2)"
+    case " ${KEDA_SUPPORTED_VERSIONS} " in
+        *" ${minor} "*)
+            log_info "${what}: supported (KEDA $(wva_keda_supported_text); CI tests ${KEDA_TESTED_VERSION})." ;;
+        *)
+            log_warning "${what}: untested, and not refused. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}). The install goes on." ;;
+    esac
+    if [ "${WVA_KEDA_FALLBACK_WARNED:-false}" != true ] && ! version_at_least "$v" "$KEDA_FALLBACK_MIN_VERSION"; then
+        WVA_KEDA_FALLBACK_WARNED=true
+        wva_keda_old_warning "the operator is ${v}"
+    fi
+    if ! version_at_least "$v" "$KEDA_CVE_FIXED_VERSION"; then
+        log_warning "${what} carries ${KEDA_CVE_ID}: a tenant who may write a TriggerAuthentication can obtain the KEDA operator's ServiceAccount token. Advice only: ${advice}"
+    fi
+    return 0
+}
+
+# wva_keda_cma_version_report reports OpenShift's Custom Metrics Autoscaler
+# version from its ClusterServiceVersion. Its versions are Red Hat's and CI pins
+# none, so it is reported and not compared with KEDA's.
+wva_keda_cma_version_report() {
+    local out rc=0 v
+    out="$(kubectl get csv -n "$KEDA_CMA_NAMESPACE" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.version}{"\n"}{end}' 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if printf '%s' "$out" | grep -qi 'forbidden'; then
+            log_warning "KEDA: could not check the Custom Metrics Autoscaler version (reading ClusterServiceVersions in $KEDA_CMA_NAMESPACE is not permitted for you)."
+        else
+            log_warning "KEDA: could not check the Custom Metrics Autoscaler version: $(printf '%s\n' "$out" | head -1)"
+        fi
+        return 0
+    fi
+    v="$(printf '%s\n' "$out" | awk '$1 ~ /^custom-metrics-autoscaler/ { print $2; exit }')"
+    if [ -z "$v" ]; then
+        log_warning "KEDA: could not check the Custom Metrics Autoscaler version (no custom-metrics-autoscaler ClusterServiceVersion in $KEDA_CMA_NAMESPACE)."
+        return 0
+    fi
+    log_warning "KEDA: Custom Metrics Autoscaler ${v}, untested: CI pins no version of it, and this install does not map it to a KEDA version. Check its release notes for fallback.behavior (KEDA ${KEDA_FALLBACK_MIN_VERSION}) and ${KEDA_CVE_ID} (fixed in KEDA ${KEDA_CVE_FIXED_VERSION})."
+}
+
+# wva_keda_version_report reports the version of a KEDA that is already on the
+# cluster, once per run: the preflight and deploy_keda both call it, and
+# SKIP_CHECKS=true skips the first.
+wva_keda_version_report() {
+    [ "${WVA_KEDA_VERSION_REPORTED:-false}" = true ] && return 0
+    WVA_KEDA_VERSION_REPORTED=true
+    if [ "${ENVIRONMENT:-kubernetes}" = openshift ]; then
+        wva_keda_cma_version_report
+        return 0
+    fi
+    wva_keda_operator_version
+    if [ -z "$WVA_KEDA_VERSION" ]; then
+        log_warning "KEDA: could not check its version (${WVA_KEDA_VERSION_WHY}). The install goes on. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}); a fallback needs ${KEDA_FALLBACK_MIN_VERSION} or later, and ${KEDA_CVE_ID} is fixed in ${KEDA_CVE_FIXED_VERSION}. Check by hand: kubectl get deploy -A -l ${KEDA_OPERATOR_LABEL_SELECTOR} -o wide"
+        return 0
+    fi
+    wva_keda_version_judge "$WVA_KEDA_VERSION" "KEDA ${WVA_KEDA_VERSION}" "consider upgrading KEDA to ${KEDA_CVE_FIXED_VERSION} or later. Re-running this installer never upgrades a KEDA that is there; a Helm-installed one upgrades with: helm upgrade ${KEDA_RELEASE_NAME:-keda} kedacore/keda -n ${KEDA_NAMESPACE:-keda-system} --version ${KEDA_CVE_FIXED_VERSION} --reuse-values"
+}
+
+# wva_keda_chart_version_report is the same judgement for the chart this run
+# installs, once per run.
+wva_keda_chart_version_report() {
+    [ "${WVA_KEDA_VERSION_REPORTED:-false}" = true ] && return 0
+    WVA_KEDA_VERSION_REPORTED=true
+    wva_keda_version_judge "${KEDA_CHART_VERSION:-}" "KEDA chart ${KEDA_CHART_VERSION:-} (this run installs it)" \
+        "consider KEDA_CHART_VERSION=${KEDA_CVE_FIXED_VERSION} or later."
+}
+
 # wva_keda_installs_itself reports whether THIS run installs KEDA (so its absence
 # now is expected, not a fault): kind-emulator always goes the Helm path, and
 # Kubernetes does when KEDA_HELM_INSTALL=true. Never the controller-only phase
@@ -92,12 +235,14 @@ check_keda_prerequisite() {
         if printf '%s' "$probe" | grep -qi 'forbidden'; then
             log_warning "KEDA: cannot verify (reading CustomResourceDefinitions is not permitted for you), so this install assumes KEDA is present."
             log_warning "  If it is not, ScaledObjects stay unready and nothing scales. A cluster admin can confirm: kubectl get crd scaledobjects.keda.sh"
+            wva_keda_version_report
             return 0
         fi
         if printf '%s' "$probe" | grep -qiE 'notfound|not found'; then
             if wva_keda_installs_itself; then
                 WVA_KEDA_STATE=absent-installing
                 log_info "KEDA: not on the cluster yet; this run installs it (chart kedacore/keda ${KEDA_CHART_VERSION:-})."
+                wva_keda_chart_version_report
                 return 0
             fi
             WVA_KEDA_STATE=absent
@@ -120,21 +265,12 @@ Nothing has been applied. Fix cluster access, or skip the check with SKIP_CHECKS
     # The operator. Its pod labels differ between distributions (OpenShift's
     # Custom Metrics Autoscaler is one), so only a definite answer is fatal:
     # operator pods that exist and are none of them Ready.
-    local ready_rc=0 image version=""
+    local ready_rc=0
     wva_any_pod_ready -A "$KEDA_OPERATOR_LABEL_SELECTOR" || ready_rc=$?
     case "$ready_rc" in
         0)
-            image="$(kubectl get pods -A -l "$KEDA_OPERATOR_LABEL_SELECTOR" -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true)"
-            case "$image" in
-                *@*) : ;;                                   # digest: no version in it
-                *:*) version="${image##*:}"; version="${version#v}" ;;
-            esac
-            if [ -z "$old" ] && [ -n "$version" ] && [[ "$version" =~ ^[0-9]+\.[0-9]+ ]] \
-                && ! version_at_least "$version" "$KEDA_FALLBACK_MIN_VERSION"; then
-                old="the operator is ${version}"
-            fi
             WVA_KEDA_STATE=present
-            log_success "KEDA: ScaledObject CRD present, operator Ready${version:+ (version $version)}"
+            log_success "KEDA: ScaledObject CRD present, operator Ready"
             ;;
         1)
             if wva_pods_exist -A "$KEDA_OPERATOR_LABEL_SELECTOR"; then
@@ -156,8 +292,12 @@ Nothing has been applied. Fix cluster access, or skip the check with SKIP_CHECKS
             ;;
     esac
     if [ -n "$old" ]; then
+        WVA_KEDA_FALLBACK_WARNED=true
         wva_keda_old_warning "$old"
     fi
+    # The version of the KEDA this install will use. A version it cannot read
+    # is a warning that says so, never a pass.
+    wva_keda_version_report
     return 0
 }
 
@@ -172,6 +312,7 @@ deploy_keda() {
         if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
             WVA_KEDA_STATE=present
             log_success "KEDA ScaledObject CRD is available on the cluster"
+            wva_keda_version_report
         else
             log_error "OpenShift: scaledobjects.keda.sh CRD not found (SCALER_BACKEND=keda).
 
@@ -199,9 +340,11 @@ $(wva_keda_absent_advice)"
             # skipped the preflight that would otherwise have set it.
             WVA_KEDA_STATE=present
             log_success "KEDA ScaledObject CRD is available on the cluster"
+            wva_keda_version_report
         elif printf '%s' "$keda_probe" | grep -qi 'forbidden'; then
             log_warning "Cannot check for the KEDA CRD (reading cluster-scoped CRDs is not permitted for you), so this install assumes KEDA is present."
             log_warning "  If it is not, ScaledObjects will stay unready and nothing will scale. Confirm with whoever administers the cluster."
+            wva_keda_version_report
         else
             log_error "Kubernetes: scaledobjects.keda.sh CRD not found.
 
@@ -222,6 +365,7 @@ $(wva_keda_absent_advice)"
             if kubectl get apiservice "$EXTERNAL_METRICS_APISERVICE_NAME" >/dev/null 2>&1; then
                 WVA_KEDA_STATE=present
                 log_success "KEDA CRD, operator, and metrics APIService detected — skipping helm install"
+                wva_keda_version_report
                 return
             fi
         fi
@@ -233,12 +377,14 @@ $(wva_keda_absent_advice)"
             if [ "$keda_cr_managed_by" != "Helm" ]; then
                 WVA_KEDA_STATE=present
                 log_info "KEDA CRD present and ClusterRole keda-operator is not Helm-managed — skipping Helm install (pre-installed KEDA)"
+                wva_keda_version_report
                 return
             fi
         fi
         log_warning "KEDA ScaledObject CRD found but operator or metrics APIService not detected; proceeding with helm install"
     fi
 
+    wva_keda_chart_version_report
     kubectl create namespace "$KEDA_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
     helm repo add kedacore https://kedacore.github.io/charts 2>/dev/null || true

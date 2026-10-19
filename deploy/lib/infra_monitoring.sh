@@ -101,9 +101,10 @@ deploy_fma_launcher_podmonitor() {
 # available for model, skipping analysis" every cycle and held at minReplicas,
 # which on the HPA is indistinguishable from a correct decision: `1/1 (avg)`.
 #
-# So: verify it, and confirm afterwards that series actually arrived. The fix
-# itself is applied by hand, never by this script — see wva_report_modelserver_metrics
-# below for why creating the PodMonitor automatically was tried and reverted.
+# So: verify it, and confirm afterwards that series actually arrived. The admin
+# phase adds the PodMonitor where nothing scrapes the servers yet
+# (wva_ensure_llmd_monitors, at the end of this file, says how the reasons it was
+# once removed for are met).
 
 # wva_modelserver_scrape_conflict echoes any monitor in $1, other than WVA's own,
 # that already scrapes the model servers.
@@ -250,7 +251,14 @@ wva_report_modelserver_metrics() {
         log_success "  Model-server metrics: WVA's own PodMonitor is in place."
         return 0
     fi
+    # The admin phase adds it (wva_ensure_llmd_monitors), so a missing one is
+    # work that step does, not a reason to stop before it.
+    if [ "${WVA_MONITORS_PLANNED:-false}" = true ]; then
+        log_info "  Model-server metrics: nothing scrapes them yet. Setup adds PodMonitor wva-modelserver-metrics here."
+        return 0
+    fi
     log_warning "  Monitoring not enabled for your llm-d servers; please enable Model-server metrics."
+    log_warning "    The cluster-admin step adds it for you:  make setup-prereqs (with the same SCOPE)"
     log_warning "    This is llm-d's step 3, \"(Optional) Enable monitoring\" — optional for llm-d, required for WVA."
     log_warning "      From an llm-d checkout:"
     log_warning "        kubectl apply -n $ns -k \$REPO_ROOT/guides/recipes/modelserver/components/monitoring"
@@ -281,28 +289,9 @@ wva_require_modelserver_metrics() {
     log_error "Refusing to continue — fix monitoring above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
 }
 
-# There is deliberately no wva_ensure_modelserver_metrics — the installer does not
-# create this object, it only reports that it is missing.
-#
-# An earlier version did create it, in the prereqs phase, and the reasoning for
-# removing it is worth keeping:
-#
-#   ownership   the PodMonitor scrapes llm-d's pods and is DEFINED by llm-d
-#               (guides/recipes/modelserver/components/monitoring). WVA creating it
-#               means WVA owns an object about someone else's workload, in someone
-#               else's namespace.
-#   cleanup     and would then leak it. cleanup.sh deletes what the WVA overlay
-#               renders; anything applied separately with `kubectl apply -k` into
-#               the workload namespace survives `undeploy-wva`. The FMA launcher
-#               PodMonitor above already has this problem; adding a second was the
-#               wrong direction.
-#   drift       our copy silently falls behind if llm-d changes the port name or
-#               adds relabelings for a new server shape.
-#
-# The check is the half that carried the value anyway: this defect's whole cost was
-# that nothing said the metrics were missing, not that the object was hard to
-# create. Naming the problem and printing llm-d's own command is a ten-second fix
-# for the reader, and leaves the manifest owned by the project that defines it.
+# The object itself is added by the admin phase, not here: see
+# wva_ensure_llmd_monitors at the end of this file. It was once created and then
+# removed, over ownership, cleanup and drift; that function says how each is met.
 
 foreign_prometheus() {
     kubectl get crd prometheuses.monitoring.coreos.com >/dev/null 2>&1 || return 0
@@ -1171,7 +1160,12 @@ wva_epp_scrapers() {
         | "unevaluated:" + $kind + "/" + $m.metadata.name'
 
     kubectl get servicemonitors -n "$ns" -o json 2>/dev/null         | jq -r --argjson l "$svc_labels" --arg kind servicemonitor "($subset), ($unevaluated)" 2>/dev/null
-    kubectl get podmonitors -n "$ns" -o json 2>/dev/null         | jq -r --argjson l "$pod_labels" --arg kind podmonitor "($subset), ($unevaluated)" 2>/dev/null
+    # WVA's own model-server PodMonitor selects the serving roles by
+    # matchExpressions and never the EPP. Counted, it read as "cannot tell
+    # whether the EPP is scraped" in every namespace setup had just given one.
+    kubectl get podmonitors -n "$ns" -o json 2>/dev/null \
+        | jq '.items |= map(select((.metadata.labels["app.kubernetes.io/component"] // "") != "modelserver-metrics"))' 2>/dev/null \
+        | jq -r --argjson l "$pod_labels" --arg kind podmonitor "($subset), ($unevaluated)" 2>/dev/null
 }
 
 # wva_report_epp_flowcontrol reports both EPP requirements and returns non-zero
@@ -1190,7 +1184,7 @@ wva_epp_scrapers() {
 # fallback. So "the gate is on" and "the EPP is scraped" are both required, and
 # neither implies the other.
 wva_report_epp_flowcontrol() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" svc state scrapers unevaluated any=false missing=0 unconfirmed=0
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" svc state scrapers unevaluated any=false missing=0 unconfirmed=0 degraded=0
 
     for svc in $(wva_epp_services "$ns"); do
         any=true
@@ -1211,10 +1205,15 @@ wva_report_epp_flowcontrol() {
             log_warning "  EPP metrics: cannot tell whether $svc is scraped — $unevaluated select by matchExpressions, which this check does not evaluate."
             log_warning "    Not treated as missing: refusing an install over a selector form this script declines to read would block a correctly monitored cluster."
             log_warning "    Confirm by hand:  kubectl get --raw /api/v1/namespaces/$ns/services/$svc:metrics/proxy/metrics | head"
+        elif [ "${WVA_MONITORS_PLANNED:-false}" = true ]; then
+            # Added by the admin phase (wva_ensure_llmd_monitors), like the
+            # model-server PodMonitor above.
+            log_info "  EPP metrics: nothing scrapes $svc yet. Setup adds ServiceMonitor ${WVA_EPP_SCRAPE_NAME} here."
         else
             missing=$((missing + 1))
             log_warning "  Router monitoring not enabled; please enable EPP metrics."
-            log_warning "    llm-d ships the monitors: kubectl apply -n $ns -k \$REPO_ROOT/guides/recipes/observability"
+            log_warning "    The cluster-admin step adds it for you:  make setup-prereqs (with the same SCOPE)"
+            log_warning "    Or llm-d's own: re-run the router install with guides/recipes/router/features/monitoring.values.yaml"
         fi
 
         state=$(wva_epp_flowcontrol_state "$ns" "$svc")
@@ -1222,14 +1221,22 @@ wva_report_epp_flowcontrol() {
             on)
                 log_success "  EPP flow control: enabled on $svc (its config declares featureGates: [flowControl])." ;;
             off)
-                missing=$((missing + 1))
-                log_warning "  Router queue not enabled; please turn on flow control for EPP."
-                log_warning "    Enable it in the EPP's EndpointPickerConfig:"
+                # A warning, not a refusal. Nothing but scale-from-zero needs
+                # the gate: the arrival rate falls back to the EPP's placements
+                # (throughput_analyzer.go, arrivalPlacementRate) and the
+                # scheduler queue is optional to the saturation analyzer. llm-d
+                # ships the gate off (flow control is an explicit opt-in), so
+                # refusing here blocked every fresh llm-d install for a feature
+                # most of them do not use. The installer does not turn it on:
+                # the gate is a line inside the router's Helm values, and an
+                # edit made beside Helm is reverted by its next upgrade.
+                degraded=$((degraded + 1))
+                log_warning "  EPP flow control: off on $svc. Not refused: scaling works without it. Two things do not:"
+                log_warning "    a model at zero replicas never wakes, and the arrival rate reads low while a model is saturated."
+                log_warning "    To turn it on, add to the EPP's EndpointPickerConfig, re-run your llm-d router install, then restart the EPP:"
                 log_warning "        featureGates:"
                 log_warning "        - flowControl"
-                log_warning "    llm-d documents it in guides/flow-control/tuning.md, and ships a ready router values file for this path:"
-                log_warning "        guides/workload-autoscaling/keda-epp-queue/<guide>/router.values.yaml"
-                log_warning "    Re-run your llm-d router install with that layered on, then restart the EPP." ;;
+                log_warning "    llm-d ships a ready file: guides/workload-autoscaling/keda-epp/<guide>/router.values.yaml" ;;
             nopod)
                 # No EPP pod at this instant. A restarting or scaled-to-zero EPP is
                 # not a gate that is off, and refusing the install for it would block
@@ -1269,4 +1276,377 @@ wva_report_epp_flowcontrol() {
 wva_require_epp_metrics() {
     wva_report_epp_flowcontrol && return 0
     log_error "Refusing to continue — fix the EPP above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
+}
+
+# wva_inferencepool_namespaces echoes every namespace that has an InferencePool,
+# in either API group (the same two wva_epp_services reads).
+wva_inferencepool_namespaces() {
+    local kind
+    for kind in inferencepools.inference.networking.k8s.io inferencepools.inference.networking.x-k8s.io; do
+        kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true
+    done | grep -v '^$' | sort -u || true
+}
+
+# wva_ns_check_reasons echoes, comma-separated, what the per-namespace checks in
+# $1 (their output) found missing. Read from the lines the checks print, so the
+# summary cannot name a failure the details above it do not show.
+wva_ns_check_reasons() {
+    local out="$1" reasons=()
+    case "$out" in *"Monitoring not enabled for your llm-d servers"*) reasons+=("model servers not scraped") ;; esac
+    case "$out" in *"Router monitoring not enabled"*) reasons+=("EPP not scraped") ;; esac
+    case "$out" in *"could not read"*"plugins config"*) reasons+=("EPP config unreadable") ;; esac
+    local IFS=,
+    printf '%s' "${reasons[*]}" | sed 's/,/, /g'
+}
+
+# wva_ns_check_notes echoes, comma-separated, what the checks in $1 found that
+# does not fail a namespace: monitors the admin phase will add, and an EPP with
+# flow control off. Read from the checks' own lines, like wva_ns_check_reasons.
+wva_ns_check_notes() {
+    local out="$1" notes=()
+    case "$out" in *"Setup adds PodMonitor"*) notes+=("setup adds the model-server PodMonitor") ;; esac
+    case "$out" in *"Setup adds ServiceMonitor"*) notes+=("setup adds the EPP ServiceMonitor") ;; esac
+    case "$out" in *"EPP flow control: off"*) notes+=("EPP flow control off: no scale from zero") ;; esac
+    local IFS=,
+    printf '%s' "${notes[*]}" | sed 's/,/, /g'
+}
+
+# wva_llmd_namespaces echoes every namespace with llm-d model servers or an
+# InferencePool: the namespaces a cluster-scoped controller manages.
+wva_llmd_namespaces() {
+    { wva_namespaces_with_model_servers; wva_inferencepool_namespaces; } | grep -v '^$' | sort -u || true
+}
+
+# wva_check_managed_namespaces runs the per-namespace checks of a cluster-scoped
+# install against every namespace it would manage, found rather than named: every
+# namespace with llm-d model servers or an InferencePool.
+#
+# The checks are the namespace-scoped install's own (wva_report_modelserver_metrics
+# and wva_report_epp_flowcontrol), run once per namespace with WVA_WATCH_NS set to
+# it. A cluster-scoped preflight used to run them once, against the controller's
+# namespace, which holds no model servers -- so it passed having checked nothing.
+#
+# Output is grouped per namespace, then one summary line per namespace and an
+# overall line. A namespace this identity may not read is "could not check",
+# never passed: FORBIDDEN IS NOT ABSENT. Returns 1 when any namespace FAILED;
+# "could not check" does not fail, the same rule the checks themselves apply to a
+# signal they could not confirm.
+wva_check_managed_namespaces() {
+    local namespaces ns out rc reasons notes count
+    local passed=0 failed=0 unchecked=0 summary=()
+
+    if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
+        log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
+        log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
+        return 0
+    fi
+
+    namespaces="$(wva_llmd_namespaces)"
+    if [ -z "$namespaces" ]; then
+        log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
+        return 0
+    fi
+    count="$(printf '%s\n' "$namespaces" | grep -c .)"
+    log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
+
+    for ns in $namespaces; do
+        echo "" >&2
+        log_info "Namespace $ns"
+        if ! kubectl auth can-i list pods -n "$ns" >/dev/null 2>&1 \
+            || ! kubectl auth can-i get configmaps -n "$ns" >/dev/null 2>&1; then
+            log_warning "  Could not check $ns: reading its Pods or ConfigMaps is not permitted for you."
+            unchecked=$((unchecked + 1))
+            summary+=("could not check|$ns|reading it is not permitted for you")
+            continue
+        fi
+        rc=0
+        out="$( (WVA_WATCH_NS="$ns"; wva_report_modelserver_metrics) 2>&1 )" || rc=1
+        out="${out}
+$( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
+        printf '%s\n' "$out" | grep -v '^$' >&2 || true
+        if [ "$rc" -ne 0 ]; then
+            reasons="$(wva_ns_check_reasons "$out")"
+            log_warning "  $ns: failed${reasons:+ ($reasons)}. Fix what is listed above."
+            failed=$((failed + 1))
+            summary+=("failed|$ns|${reasons:-see above}")
+        elif printf '%s' "$out" | grep -qE 'cannot tell whether|could not be confirmed|no running pod behind'; then
+            log_warning "  $ns: could not check everything. See above."
+            unchecked=$((unchecked + 1))
+            summary+=("could not check|$ns|some signals could not be confirmed")
+        else
+            notes="$(wva_ns_check_notes "$out")"
+            log_success "  $ns: passed${notes:+ ($notes)}."
+            passed=$((passed + 1))
+            summary+=("passed|$ns|$notes")
+        fi
+    done
+
+    echo "" >&2
+    log_info "Namespace summary:"
+    local row status name why
+    for row in "${summary[@]}"; do
+        status="${row%%|*}"; row="${row#*|}"
+        name="${row%%|*}"; why="${row#*|}"
+        case "$status" in
+            passed) log_success "  $name: passed${why:+ ($why)}" ;;
+            *)      log_warning "  $name: ${status}${why:+ ($why)}" ;;
+        esac
+    done
+    if [ "$failed" -gt 0 ]; then
+        log_warning "Namespaces: $passed passed, $failed failed, $unchecked could not be checked."
+        return 1
+    fi
+    if [ "$unchecked" -gt 0 ]; then
+        log_warning "Namespaces: $passed passed, $unchecked could not be checked. Those are not passes."
+        return 0
+    fi
+    log_success "Namespaces: all $passed passed."
+    return 0
+}
+
+# --- Monitors in the llm-d namespaces, added by the admin phase ---------------
+#
+# A fresh llm-d install scrapes nothing: llm-d's monitoring step is optional,
+# and its router chart ships prometheus.enabled=false. WVA cannot size anything
+# without the model-server series, nor read the arrival rate without the EPP's.
+# The checks used to stop there and print commands for the reader to run in
+# every namespace; the admin phase now adds what is missing itself.
+#
+# What used to argue against this, and how each is met:
+#   ownership  only where NOTHING scrapes the target yet (the same conflict
+#              tests the checks use), so an existing scrape is never doubled.
+#   cleanup    every object carries WVA_LLMD_MONITOR_MARK, and undeploy-wva
+#              removes exactly those (wva_remove_llmd_monitors). An object
+#              applied by hand from config/modelserver-metrics has no mark and
+#              is left alone.
+#   drift      the PodMonitor is config/modelserver-metrics, which mirrors
+#              llm-d's; the EPP ServiceMonitor scrapes the port and path the
+#              router chart's own ServiceMonitor names (http-metrics, /metrics).
+#
+# DEPLOY_LLMD_MONITORS=false turns it off. The EPP flow-control gate is not
+# applied here: it is a line inside the router's Helm values, and an edit made
+# beside Helm is reverted by the next upgrade (see wva_report_epp_flowcontrol).
+
+WVA_LLMD_MONITOR_MARK_KEY="llm-d.ai/applied-by"
+WVA_LLMD_MONITOR_MARK_VAL="wva-setup-prereqs"
+WVA_LLMD_MONITOR_MARK="${WVA_LLMD_MONITOR_MARK_KEY}=${WVA_LLMD_MONITOR_MARK_VAL}"
+# The EPP ServiceMonitor, and the identity Prometheus scrapes it as. The EPP
+# authenticates /metrics (a TokenReview, then a SubjectAccessReview for GET
+# /metrics), so the scrape carries a ServiceAccount token, as the router chart's
+# own ServiceMonitor does with auth on.
+WVA_EPP_SCRAPE_NAME="wva-epp-metrics"
+WVA_EPP_SCRAPE_SA="wva-epp-metrics-scraper"
+WVA_EPP_SCRAPE_ROLE="wva-epp-metrics-scraper"
+
+# wva_llmd_monitors_wanted reports whether this run adds missing monitors.
+# Not on kind-emulator: the e2e path builds its own stack.
+wva_llmd_monitors_wanted() {
+    [ "${DEPLOY_LLMD_MONITORS:-true}" = true ] && [ "${ENVIRONMENT:-}" != kind-emulator ]
+}
+
+# wva_monitor_namespaces echoes the namespaces whose monitors this install
+# looks after: every llm-d namespace at cluster scope, else the watched one.
+wva_monitor_namespaces() {
+    if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
+        wva_llmd_namespaces
+    else
+        echo "${WVA_WATCH_NS:-$WVA_NS}"
+    fi
+}
+
+# wva_prometheus_selector_labels echoes, as JSON, the matchLabels of the
+# selector $1 (podMonitorSelector or serviceMonitorSelector) of the cluster's
+# Prometheus, when there is exactly one. A kube-prometheus-stack installed with
+# its defaults selects only monitors labelled release=<its release>, and a
+# monitor without that label is never scraped, silently. With none, or several,
+# '{}': there is no single answer to copy.
+wva_prometheus_selector_labels() {
+    kubectl get prometheuses.monitoring.coreos.com -A -o json 2>/dev/null \
+        | jq -c --arg f "$1" '[.items[]? | (.spec[$f].matchLabels // {})]
+                              | if length == 1 then .[0] else {} end' 2>/dev/null \
+        || echo '{}'
+}
+
+# wva_apply_modelserver_podmonitor applies config/modelserver-metrics in $1,
+# marked, and labelled for the cluster's Prometheus.
+wva_apply_modelserver_podmonitor() {
+    local ns="$1" labels
+    labels="$(wva_prometheus_selector_labels podMonitorSelector)"
+    [ -n "$labels" ] || labels='{}'
+    NS="$ns" LABELS="$labels" MK="$WVA_LLMD_MONITOR_MARK_KEY" MV="$WVA_LLMD_MONITOR_MARK_VAL" \
+        yq '.metadata.namespace = strenv(NS)
+            | .metadata.labels += (strenv(LABELS) | from_yaml)
+            | .metadata.labels[strenv(MK)] = strenv(MV)' \
+            "$WVA_PROJECT/config/modelserver-metrics/modelserver-podmonitor.yaml" \
+        | kubectl apply -f - >/dev/null
+}
+
+# wva_epp_scrape_docs renders, for the EPP behind Service $2 in $1, the
+# ServiceMonitor and the identity it scrapes as. Echoes nothing (and returns
+# 1) when the Service names no metrics port.
+wva_epp_scrape_docs() {
+    local ns="$1" svc="$2" svc_json port sel labels
+    svc_json="$(kubectl get svc "$svc" -n "$ns" -o json 2>/dev/null)" || return 1
+    [ -n "$svc_json" ] || return 1
+    # The port the router chart names for metrics; `metrics` in older charts.
+    port="$(printf '%s' "$svc_json" | jq -r '[.spec.ports[]? | .name // empty
+        | select(. == "http-metrics" or . == "metrics")] | first // empty')"
+    [ -n "$port" ] || return 1
+    # The Service's name label, as the chart's own ServiceMonitor selects it;
+    # every label when it has none. Never the chart version label, which an
+    # upgrade changes and would leave the monitor selecting nothing.
+    sel="$(printf '%s' "$svc_json" | jq -c '(.metadata.labels // {}) as $l
+        | if $l["app.kubernetes.io/name"] then {"app.kubernetes.io/name": $l["app.kubernetes.io/name"]}
+          else ($l | with_entries(select(.key != "helm.sh/chart" and .key != "app.kubernetes.io/version"))) end')"
+    [ "$sel" != "{}" ] || return 1
+    labels="$(wva_prometheus_selector_labels serviceMonitorSelector)"
+    [ -n "$labels" ] || labels='{}'
+    labels="$(jq -c --arg k "$WVA_LLMD_MONITOR_MARK_KEY" --arg v "$WVA_LLMD_MONITOR_MARK_VAL" \
+        '. + {"app.kubernetes.io/name": "workload-variant-autoscaler", "app.kubernetes.io/component": "epp-metrics"} + {($k): $v}' <<< "$labels")"
+    cat <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${WVA_EPP_SCRAPE_SA}
+  namespace: ${ns}
+  labels: ${labels}
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: ${WVA_EPP_SCRAPE_SA}-token
+  namespace: ${ns}
+  labels: ${labels}
+  annotations:
+    kubernetes.io/service-account.name: ${WVA_EPP_SCRAPE_SA}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${WVA_EPP_SCRAPE_ROLE}
+  labels: ${labels}
+rules:
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${WVA_EPP_SCRAPE_ROLE}-${ns}
+  labels: ${labels}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${WVA_EPP_SCRAPE_ROLE}
+subjects:
+- kind: ServiceAccount
+  name: ${WVA_EPP_SCRAPE_SA}
+  namespace: ${ns}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ${WVA_EPP_SCRAPE_NAME}
+  namespace: ${ns}
+  labels: ${labels}
+spec:
+  selector:
+    matchLabels: ${sel}
+  endpoints:
+  - port: ${port}
+    path: /metrics
+    interval: 10s
+    authorization:
+      type: Bearer
+      credentials:
+        name: ${WVA_EPP_SCRAPE_SA}-token
+        key: token
+EOF
+}
+
+# wva_ensure_llmd_monitors adds, in namespace $1, the monitors the checks would
+# report missing: the model-server PodMonitor, and a ServiceMonitor for each
+# EPP. Only where nothing scrapes the target yet. Appends what it added to
+# WVA_LLMD_MONITORS_ADDED. Never fatal: the checks that follow say what is
+# still missing.
+wva_ensure_llmd_monitors() {
+    local ns="$1" servers conflict svc monitors added=()
+
+    if ! kubectl get crd podmonitors.monitoring.coreos.com >/dev/null 2>&1 \
+        || ! kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
+        log_warning "  $ns: no Prometheus Operator CRDs, so no monitors can be added. Install a Prometheus Operator, or let this install deploy one."
+        return 0
+    fi
+
+    servers="$(wva_serving_workload_count "$ns")"
+    if [ "${servers:-0}" -gt 0 ] \
+        && [ -z "$(wva_modelserver_scrape_conflict "$ns")" ] \
+        && ! kubectl get podmonitor -n "$ns" -l app.kubernetes.io/component=modelserver-metrics \
+             --no-headers 2>/dev/null | grep -q .; then
+        if wva_apply_modelserver_podmonitor "$ns"; then
+            added+=("PodMonitor wva-modelserver-metrics")
+        else
+            log_warning "  $ns: could not add PodMonitor wva-modelserver-metrics."
+        fi
+    fi
+
+    for svc in $(wva_epp_services "$ns"); do
+        monitors="$(wva_epp_scrapers "$ns" "$svc")"
+        if [ -n "$monitors" ]; then
+            # A monitor this cannot evaluate may already scrape it, and a second
+            # scrape of one target doubles every rate read from it.
+            printf '%s' "$monitors" | grep -q -v '^unevaluated:' \
+                || log_info "  $ns: $(printf '%s' "$monitors" | sed 's/^unevaluated://' | paste -sd, -) may already scrape $svc (it selects by matchExpressions), so no second monitor is added."
+            continue
+        fi
+        if ! wva_epp_scrape_docs "$ns" "$svc" > "${TMPDIR:-/tmp}/wva-epp-scrape.$$.yaml"; then
+            log_warning "  $ns: $svc names no metrics port (http-metrics or metrics), so no ServiceMonitor was added for it."
+        elif kubectl apply -f "${TMPDIR:-/tmp}/wva-epp-scrape.$$.yaml" >/dev/null; then
+            added+=("ServiceMonitor ${WVA_EPP_SCRAPE_NAME} for $svc")
+        else
+            log_warning "  $ns: could not add ServiceMonitor ${WVA_EPP_SCRAPE_NAME} for $svc."
+        fi
+        rm -f "${TMPDIR:-/tmp}/wva-epp-scrape.$$.yaml"
+    done
+
+    if [ "${#added[@]}" -gt 0 ]; then
+        local list
+        list="$(printf '%s\n' "${added[@]}" | paste -sd, - | sed 's/,/, /g')"
+        log_success "  $ns: added $list"
+        WVA_LLMD_MONITORS_ADDED+=("$ns: $list")
+    fi
+    return 0
+}
+
+# wva_apply_llmd_monitors runs wva_ensure_llmd_monitors in every namespace this
+# install looks after, when wanted. Called by the admin phase, after the
+# monitoring stack (whose CRDs the monitors need).
+wva_apply_llmd_monitors() {
+    wva_llmd_monitors_wanted || return 0
+    local ns
+    WVA_LLMD_MONITORS_ADDED=()
+    log_info "Adding the monitors llm-d did not install (DEPLOY_LLMD_MONITORS=false skips this):"
+    for ns in $(wva_monitor_namespaces); do
+        [ -n "$ns" ] || continue
+        wva_ensure_llmd_monitors "$ns"
+    done
+    [ "${#WVA_LLMD_MONITORS_ADDED[@]}" -gt 0 ] || log_info "  None needed: every model server and EPP is already scraped."
+}
+
+# wva_remove_llmd_monitors deletes what wva_apply_llmd_monitors added, by its
+# mark: in every namespace at cluster scope, else in the watched one. The
+# shared ClusterRole goes only with a cluster-scoped install, the last user.
+wva_remove_llmd_monitors() {
+    local where=(-A) ns
+    if [ "$(wva_install_scope)" != "cluster" ] || [ -n "${WVA_WATCH_NS:-}" ]; then
+        ns="${WVA_WATCH_NS:-$WVA_NS}"
+        where=(-n "$ns")
+        kubectl delete clusterrolebinding "${WVA_EPP_SCRAPE_ROLE}-${ns}" --ignore-not-found >/dev/null 2>&1 || true
+    else
+        kubectl delete clusterrolebindings,clusterroles -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
+    fi
+    kubectl delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.coreos.com,secrets,serviceaccounts \
+        "${where[@]}" -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
+    log_info "Removed the monitors setup added in the llm-d namespaces (label $WVA_LLMD_MONITOR_MARK)."
 }

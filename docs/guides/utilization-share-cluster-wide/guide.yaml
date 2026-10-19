@@ -1,94 +1,100 @@
 name: utilization-share-cluster-wide
 
-prerequisites:
-  install:
-    note: Read-only. Tools, permissions, KEDA and the Prometheus the install would use.
+steps:
+  tools:
+    note: Prints nothing when every tool is there.
     run: |
-      make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
-  models:
-    note: Read-only. Every llm-d model server on the cluster, its modelID, the InferencePool in front of it, and any ScaledObject it has. Writes a plan, applies nothing.
+      for t in kubectl helm git jq yq make openssl; do command -v $t >/dev/null || echo "missing: $t"; done
+  admin:
+    note: Prints yes for a cluster admin.
     run: |
-      make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
-  workloads:
-    note: Read-only. Whether each model server drains on scale-down, and where it keeps its weights and compile caches. Writes a patch, applies nothing.
+      kubectl auth can-i '*' '*' --all-namespaces
+  pools:
+    note: One InferencePool in each model namespace.
     run: |
-      make workload-patch SCOPE=cluster
-  accelerators:
-    note: The GPU product each node carries, and the GPUs each model server requests. The budget is per product.
+      kubectl get inferencepools -A
+  podgpus:
+    note: The GPUs each model pod asks for, and the node it runs on.
     run: |
-      kubectl get nodes -L nvidia.com/gpu.product
       kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
         -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName'
-
-deploy:
+  products:
+    note: The GPU product of each node.
+    run: |
+      kubectl get nodes -L nvidia.com/gpu.product
+  check:
+    note: Read-only. Checks the tools, your rights, KEDA, Prometheus, and every namespace that runs llm-d.
+    run: |
+      make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
+  setup:
+    note: Cluster admin, once. Installs KEDA only if the cluster has none.
+    run: |
+      make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
   vars:
-    note: The GPU product the models run on, and how many of its GPUs they may hold together.
+    note: "Option A: quota. The GPU product from step 5, and how many of its GPUs the models may hold together."
     run: |
       export ACCELERATOR=<gpu product>
       export GPUS=<gpus>
   install:
-    note: One controller for every namespace, with one GPU budget they all share. Installs KEDA; on OpenShift, drop KEDA_HELM_INSTALL.
+    note: "Option A: quota. The scaling manager, with one GPU budget for every namespace."
     run: |
-      make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true \
+      make deploy-wva SCOPE=cluster INSTALL_PHASE=wva \
         WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
-  physical:
-    note: The same install, with the cluster's GPUs as the budget instead of a quota.
+  installphysical:
+    note: "Option B: the cluster's GPUs. The scaling manager, with the free GPUs on the nodes as the budget."
     run: |
-      make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true WVA_LIMITER=gpu-inventory
+      make deploy-wva SCOPE=cluster INSTALL_PHASE=wva WVA_LIMITER=gpu-inventory
+  plan:
+    note: Read-only. Lists the model servers and writes a plan. Applies nothing.
+    run: |
+      make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
+  workloads:
+    note: Read-only. Checks that each model server can be scaled safely. Applies nothing.
+    run: |
+      make workload-patch SCOPE=cluster
   register:
-    note: Edit the plan the prerequisites wrote, then apply it. Nothing scales until this runs.
+    note: Applies the plan. One ScaledObject for each model server.
     run: |
-      # edit share-plan.yaml: apply: yes|no|adopt, the modelID, the replica bounds
       make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
-  check:
-    note: Name one model namespace and the controller's. Checks the budget and that every accelerator resolves.
+  names:
+    note: One model namespace, for the commands that follow, and the controller's.
     run: |
       export NAMESPACE=<one model namespace>
       export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
+  budget:
+    note: Read-only. Is there a budget to share, and does the GPU product resolve.
+    run: |
       make utilization-share-check
   shadow:
-    note: Shadow. It reports what it would move between namespaces, and moves nothing.
+    note: "Option A: quota. Shadow: it reports what it would move, and moves nothing."
     run: |
       make utilization-share-shadow
   shadowphysical:
-    note: Shadow under the cluster's GPUs. PHYSICAL_GROUPS=true is what makes the namespaces share them.
+    note: "Option B: the cluster's GPUs. Shadow, planning across the nodes' GPUs; it moves nothing."
     run: |
       make utilization-share-shadow PHYSICAL_GROUPS=true
-  active:
-    note: Let it act, and let the controller move pods in every namespace that shares the budget.
+  status:
+    note: Read-only. The mode and the recent decisions.
+    run: |
+      make utilization-share-status
+  activate:
+    note: Let it act in every namespace that shares the budget.
     run: |
       make utilization-share-activate GRANT_SHARED=true
-
-verify:
-  status:
-    note: The mode, recent decisions and marked pods. Run it for each model namespace.
-    run: |
-      make utilization-share-status NAMESPACE=<model namespace>
   events:
-    note: Transfers between namespaces, from both ends, oldest first.
+    note: GPUs moving between namespaces, oldest first.
     run: |
       kubectl get events -A --sort-by=.lastTimestamp | grep UtilizationShare
   log:
     note: The optimizer's decisions, from the controller's log.
     run: |
       kubectl logs -n ${CONTROLLER_NAMESPACE} deploy/wva-controller-manager --tail=-1 \
-        | grep -E 'Utilization share: (would rebalance|rebalancing|transfer (started|ended|cancelled)|released, raising the receiver)'
-  metrics:
-    note: The optimizer's metrics, read from the controller.
-    run: |
-      TOKEN=$(kubectl get secret wva-epp-metrics-token -n ${CONTROLLER_NAMESPACE} -o jsonpath='{.data.token}' | base64 -d)
-      kubectl port-forward -n ${CONTROLLER_NAMESPACE} svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
-      sleep 2
-      curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics \
-        | grep -E '^wva_utilization_share_(mode|spare_gpus|headroom|replicas_to_move|transfers_total)'
-      kill $PF
-
-cleanup:
+        | grep -E 'Utilization share: (rebalancing|transfer (started|ended|cancelled))'
   disable:
     note: Turn the optimizer off. The budget stays.
     run: |
       make utilization-share-off
   uninstall:
-    note: Remove the scaling manager. The model servers keep serving.
+    note: Remove the scaling manager. The models keep serving; KEDA and Prometheus stay.
     run: |
       make undeploy-wva SCOPE=cluster
