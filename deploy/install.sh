@@ -144,7 +144,7 @@ KEDA_NAMESPACE_EXPLICIT=false
 [ -n "${KEDA_NAMESPACE:-}" ] && KEDA_NAMESPACE_EXPLICIT=true
 KEDA_NAMESPACE=${KEDA_NAMESPACE:-keda-system}
 # Pinned for reproducible Helm installs (used when deploy_keda actually runs helm upgrade).
-KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.19.0}
+KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.21.0}
 # On kubernetes: default false (cluster-managed KEDA); kind-emulator flows often set true or use cluster path.
 KEDA_HELM_INSTALL=${KEDA_HELM_INSTALL:-false}
 

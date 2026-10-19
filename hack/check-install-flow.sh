@@ -34,7 +34,7 @@ done
 BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
 unset WVA_SCOPE WVA_WATCH_NS WVA_LIMITER KEDA_HELM_INSTALL SCALER_BACKEND ENVIRONMENT
 WVA_NS="wva-system"
-KEDA_CHART_VERSION="2.19.0"
+KEDA_CHART_VERSION="2.21.0"
 KEDA_NAMESPACE="keda-system"
 REQUIRED_TOOLS=(kubectl)
 # shellcheck disable=SC1090
@@ -77,7 +77,7 @@ kubectl() {
                 *)         echo 'pod/keda-operator-abc'; return 0 ;;
             esac ;;
         "get pods -A -l app.kubernetes.io/name=keda-operator -o jsonpath={.items[0].spec.containers[0].image}"*)
-            echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.19.0}"; return 0 ;;
+            echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.21.0}"; return 0 ;;
     esac
     return 0
 }
@@ -188,11 +188,11 @@ else
         fail "an operator older than ${KEDA_FALLBACK_MIN_VERSION:-2.17} must warn and continue (rc=$rc state=$state)" "$out"
     fi
 
-    OP_IMAGE=ghcr.io/kedacore/keda:2.19.0; keda_case
+    OP_IMAGE=ghcr.io/kedacore/keda:2.21.0; keda_case
     if [ "$rc" -eq 0 ] && [ "$state" = present ]; then
-        ok "KEDA 2.19.0 with a Ready operator is present"
+        ok "KEDA 2.21.0 with a Ready operator is present"
     else
-        fail "KEDA 2.19.0 Ready must pass as present (rc=$rc state=$state)" "$out"
+        fail "KEDA 2.21.0 Ready must pass as present (rc=$rc state=$state)" "$out"
     fi
 
     OP_READY=False; keda_case
