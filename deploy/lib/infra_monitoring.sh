@@ -1391,9 +1391,10 @@ wva_ensure_llmd_monitors() {
     done
 
     if [ "${#added[@]}" -gt 0 ]; then
-        local IFS=,
-        log_success "  $ns: added ${added[*]}"
-        WVA_LLMD_MONITORS_ADDED+=("$ns: ${added[*]}")
+        local list
+        list="$(printf '%s\n' "${added[@]}" | paste -sd, - | sed 's/,/, /g')"
+        log_success "  $ns: added $list"
+        WVA_LLMD_MONITORS_ADDED+=("$ns: $list")
     fi
     return 0
 }

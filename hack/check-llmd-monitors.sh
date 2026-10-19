@@ -113,7 +113,7 @@ reset
 out="$(wva_ensure_llmd_monitors team-a 2>&1)"
 if [ "$(kind_doc PodMonitor | yq '.metadata.name')" = "wva-modelserver-metrics" ] \
     && [ "$(kind_doc ServiceMonitor | yq '.metadata.name')" = "wva-epp-metrics" ] \
-    && printf '%s' "$out" | grep -q 'team-a: added PodMonitor wva-modelserver-metrics,ServiceMonitor wva-epp-metrics'; then
+    && printf '%s' "$out" | grep -q 'team-a: added PodMonitor wva-modelserver-metrics, ServiceMonitor wva-epp-metrics'; then
     ok "a namespace with nothing scraped gets the PodMonitor and the EPP ServiceMonitor"
 else
     fail "both monitors must be applied in a fresh namespace" "$out
