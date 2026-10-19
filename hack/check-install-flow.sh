@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=71
+EXPECT_CASES=86
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -50,7 +50,8 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '%s\n' "$
 # Driven by variables, so each case states the cluster it describes:
 #   CRD_MODE      absent | forbidden | old | new | error
 #   OP_READY      True | False | none | forbidden    (keda-operator pods)
-#   OP_IMAGE      the operator image
+#   OP_IMAGE      the operator Deployment's image, or forbidden
+#   CSV_MODE      ok | forbidden | none    (OpenShift Custom Metrics Autoscaler)
 #   KUBECTL_LOG   every call is appended here, for cases that assert on calls
 KUBECTL_LOG="$WORK/kubectl.log"
 kubectl() {
@@ -76,8 +77,17 @@ kubectl() {
                 none)      echo ''; return 0 ;;
                 *)         echo 'pod/keda-operator-abc'; return 0 ;;
             esac ;;
-        "get pods -A -l app.kubernetes.io/name=keda-operator -o jsonpath={.items[0].spec.containers[0].image}"*)
-            echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.19.0}"; return 0 ;;
+        "get deployments -A -l app.kubernetes.io/name=keda-operator -o jsonpath={.items[0].spec.template.spec.containers[0].image}"*)
+            case "${OP_IMAGE:-}" in
+                forbidden) echo 'Error from server (Forbidden): deployments.apps is forbidden: User "u" cannot list resource "deployments" in API group "apps" at the cluster scope' >&2; return 1 ;;
+                *)         echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.19.0}"; return 0 ;;
+            esac ;;
+        "get csv -n openshift-keda"*)
+            case "${CSV_MODE:-ok}" in
+                forbidden) echo 'Error from server (Forbidden): clusterserviceversions.operators.coreos.com is forbidden' >&2; return 1 ;;
+                none)      echo ''; return 0 ;;
+                *)         echo 'custom-metrics-autoscaler.v2.17.2-1 2.17.2-1'; return 0 ;;
+            esac ;;
     esac
     return 0
 }
@@ -193,6 +203,127 @@ else
         ok "KEDA 2.19.0 with a Ready operator is present"
     else
         fail "KEDA 2.19.0 Ready must pass as present (rc=$rc state=$state)" "$out"
+    fi
+
+    # The version of an existing KEDA: reported, never blocking. 2.18 and 2.19
+    # are supported (2.19 is what CI installs; 2.18 is what the benchmarks ran
+    # on). other_warnings prints every [WARNING] line but the CVE advice, which
+    # is the one warning a supported version may get.
+    other_warnings() { printf '%s\n' "$out" | grep '\[WARNING\]' | grep -v "CVE-2026-77524" || true; }
+    for v in 2.18.1 2.19.0; do
+        OP_IMAGE=ghcr.io/kedacore/keda:$v; keda_case
+        if [ "$rc" -eq 0 ] && [ "$state" = present ] \
+            && printf '%s' "$out" | grep -q "KEDA $v: supported" \
+            && [ -z "$(other_warnings)" ]; then
+            ok "VERSION: KEDA $v is supported, rc 0, no warning but the CVE advice"
+        else
+            fail "KEDA $v must be reported supported with rc 0 and no other warning (rc=$rc state=$state)" "$out"
+        fi
+    done
+
+    OP_IMAGE=ghcr.io/kedacore/keda:2.19.0; keda_case
+    if printf '%s' "$out" | grep -q "carries CVE-2026-77524.*Advice only: consider upgrading KEDA to 2.21.0"; then
+        ok "VERSION: KEDA 2.19.0 gets the CVE-2026-77524 advice, as advice"
+    else
+        fail "KEDA 2.19.0 must get the CVE-2026-77524 advice (rc=$rc)" "$out"
+    fi
+
+    OP_IMAGE=ghcr.io/kedacore/keda:2.21.0; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA 2.21.0: untested, and not refused' \
+        && ! printf '%s' "$out" | grep -q "CVE-2026-77524"; then
+        ok "VERSION: KEDA 2.21.0 is untested, not refused, and has no CVE advice"
+    else
+        fail "KEDA 2.21.0 must be untested with rc 0 and no CVE advice (rc=$rc)" "$out"
+    fi
+
+    OP_IMAGE=ghcr.io/kedacore/keda:2.16.1; keda_case
+    if [ "$rc" -eq 0 ] && [ "$state" = present ] && printf '%s' "$out" | grep -q 'KEDA 2.16.1: untested, and not refused' \
+        && [ "$(printf '%s\n' "$out" | grep -c 'NO fallback')" -eq 1 ]; then
+        ok "VERSION: KEDA 2.16.1 (too old for a fallback) is untested, warned once about the fallback, and not refused"
+    else
+        fail "KEDA 2.16.1 must be untested with one fallback warning and rc 0 (rc=$rc state=$state)" "$out"
+    fi
+
+    OP_IMAGE=forbidden; keda_case
+    if [ "$rc" -eq 0 ] && [ "$state" = present ] \
+        && printf '%s' "$out" | grep -q 'could not check its version (listing Deployments cluster-wide is not permitted' \
+        && ! printf '%s' "$out" | grep -q ': supported'; then
+        ok "VERSION: a Forbidden operator Deployment is 'could not check', never supported"
+    else
+        fail "a Forbidden version read must warn it could not check, and not pass as supported (rc=$rc)" "$out"
+    fi
+
+    OP_IMAGE=ghcr.io/kedacore/keda:latest; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'could not check its version (the operator image ghcr.io/kedacore/keda:latest has no version tag (latest))' \
+        && ! printf '%s' "$out" | grep -q ': supported'; then
+        ok "VERSION: a non-semver tag (latest) is 'could not check', never supported"
+    else
+        fail "a non-semver tag must warn it could not check (rc=$rc)" "$out"
+    fi
+
+    OP_IMAGE=ghcr.io/kedacore/keda@sha256:0123abcd; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'pinned by digest, which names no version'; then
+        ok "VERSION: a digest-pinned image is 'could not check'"
+    else
+        fail "a digest-pinned image must warn it could not check (rc=$rc)" "$out"
+    fi
+
+    OP_IMAGE=registry.local:5000/keda; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'has no version tag (none)'; then
+        ok "VERSION: a registry port is not read as a version tag"
+    else
+        fail "registry.local:5000/keda must have no version tag (rc=$rc)" "$out"
+    fi
+    OP_IMAGE=ghcr.io/kedacore/keda:2.19.0
+
+    # Reported once: the preflight and deploy_keda both reach it in one run.
+    : > "$KUBECTL_LOG"
+    out="$( (check_keda_prerequisite; deploy_keda) 2>&1 )"; rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | grep -c 'KEDA 2.19.0: supported')" -eq 1 ]; then
+        ok "VERSION: the preflight and deploy_keda report the version once"
+    else
+        fail "the version must be reported exactly once per run (rc=$rc)" "$out"
+    fi
+
+    # SKIP_CHECKS=true skips the preflight; deploy_keda still reports it.
+    out="$( (deploy_keda) 2>&1 )"; rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA 2.19.0: supported'; then
+        ok "VERSION: deploy_keda reports an existing KEDA's version without the preflight"
+    else
+        fail "deploy_keda must report the version of the KEDA it finds (rc=$rc)" "$out"
+    fi
+
+    # The chart this run installs gets the same judgement.
+    KEDA_HELM_INSTALL=true; CRD_MODE=absent; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA chart 2.19.0 (this run installs it): supported' \
+        && printf '%s' "$out" | grep -q 'consider KEDA_CHART_VERSION=2.21.0'; then
+        ok "VERSION: the chart KEDA_HELM_INSTALL=true installs is reported, with the CVE advice"
+    else
+        fail "the chart this run installs must be reported (rc=$rc)" "$out"
+    fi
+    KEDA_HELM_INSTALL=false; CRD_MODE=new
+
+    # OpenShift: the Custom Metrics Autoscaler's own version, not compared.
+    ENVIRONMENT=openshift; CSV_MODE=ok; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Custom Metrics Autoscaler 2.17.2-1, untested'; then
+        ok "VERSION: OpenShift reports the Custom Metrics Autoscaler version, untested"
+    else
+        fail "OpenShift must report the CMA version (rc=$rc)" "$out"
+    fi
+    CSV_MODE=forbidden; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'could not check the Custom Metrics Autoscaler version (reading ClusterServiceVersions'; then
+        ok "VERSION: an unreadable Custom Metrics Autoscaler version is 'could not check'"
+    else
+        fail "a Forbidden CSV read must warn it could not check (rc=$rc)" "$out"
+    fi
+    ENVIRONMENT=kubernetes; CSV_MODE=ok
+
+    # The tested minor is the one CI installs: install.sh's default chart.
+    chart_default="$(sed -n 's/^KEDA_CHART_VERSION=\${KEDA_CHART_VERSION:-\([0-9.]*\)}.*/\1/p' "$ROOT/deploy/install.sh" | tr -d '\r')"
+    if [ -n "$chart_default" ] && [ "${chart_default%.*}" = "${KEDA_TESTED_VERSION:-}" ]; then
+        ok "VERSION: KEDA_TESTED_VERSION ($KEDA_TESTED_VERSION) is the minor of install.sh's default chart ($chart_default)"
+    else
+        fail "KEDA_TESTED_VERSION (${KEDA_TESTED_VERSION:-unset}) must match install.sh's default KEDA_CHART_VERSION (${chart_default:-not found})"
     fi
 
     OP_READY=False; keda_case

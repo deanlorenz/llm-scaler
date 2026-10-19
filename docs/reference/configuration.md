@@ -71,7 +71,8 @@ from the release notes. See
 | `WVA_SCALER_TLS_PROVIDER` | Who issues those certificates: `cert-manager`, `openssl` (a private CA the installer keeps in a Secret), or `auto` — cert-manager when it is installed. On OpenShift the serving certificate always comes from the service CA. Unset, a re-install keeps the running controller's provider | `auto` |
 | `WVA_SCALER_TLS_MIGRATE` | `true` moves the ScaledObjects that name this scaler with it when its TLS mode changes: to `wva-external-scaler.<ns>.svc:9090` with KEDA's `authenticationRef`, or back. Without it, such ScaledObjects keep the default on plaintext, and make an explicit `WVA_SCALER_TLS` a refusal | `false` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
-| `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
+| `KEDA_CHART_VERSION` | KEDA Helm chart version. [Supported versions](keda.md#supported-versions) | `2.19.0` |
+| `KEDA_CMA_NAMESPACE` | OpenShift: where the installer reads the Custom Metrics Autoscaler's version, for its [version line](keda.md#what-the-installer-prints) | `openshift-keda` |
 | `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus. Unset, a newer release already installed is kept rather than downgraded, with a warning | `92.7.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |

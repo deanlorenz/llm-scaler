@@ -15,51 +15,116 @@ For one namespace, or to read what this costs first, see [Turn on the
 utilization-share optimizer, safely](../utilization-share/) and [the well-lit
 path](../../well-lit-paths/utilization-share/).
 
-## Prerequisites
+The order:
 
-- [ ] Cluster-admin rights.
-- [ ] **llm-d serving in two or more namespaces.** Each namespace has its model
-  servers and its own EPP and InferencePool, as llm-d's guides install them.
-- [ ] **Every model server requests its GPUs** (`nvidia.com/gpu` in its
-  limits). The budget counts these.
-- [ ] **The models that share run on one GPU product.** The budget is per
-  product.
-- [ ] **Model servers drain on termination** (a `preStop` hook and
-  `terminationGracePeriodSeconds`). A transfer removes a donor pod through an
-  ordinary scale-down.
-- [ ] A Prometheus that scrapes the model servers. With none on the cluster,
-  the install deploys one, which picks up llm-d's PodMonitors.
-- [ ] `kubectl`, `helm`, `jq`, `yq` and `make`, in a checkout of this
-  repository.
+1. Confirm what you must already have. The installer does not install these.
+2. Run the read-only checks.
+3. Install the prerequisites the installer provides. This is the cluster-admin
+   phase.
+4. Install the scaling manager with the budget, register the models, shadow,
+   then activate.
 
-Check the starting state. Every command here only reads:
+## 1. What you must already have
 
-<!-- guide:prerequisites start -->
+The installer does not install these. Each line below checks one.
+
+<!-- guide:prerequisites.have start -->
 ```bash
-# Read-only. Tools, permissions, KEDA and the Prometheus the install would use.
-make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
+# Cluster-admin rights, for the one-time setup in step 3. Prints yes.
+kubectl auth can-i '*' '*' --all-namespaces
+
+# llm-d serving in two or more namespaces, each with its own InferencePool and EPP. Lists a pool in every model namespace.
+kubectl get inferencepools -A
+
+# The models that share run on one GPU product, and every model server requests its GPUs. One product name; a number in GPUS on every pod.
+kubectl get nodes -L nvidia.com/gpu.product
+kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
+  -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName'
+
+# Only if the cluster already has KEDA. Found means the installer uses it; NotFound means step 3 installs one.
+kubectl get crd scaledobjects.keda.sh
+kubectl get deploy -A -l app.kubernetes.io/name=keda-operator \
+  -o custom-columns='NAMESPACE:.metadata.namespace,IMAGE:.spec.template.spec.containers[0].image'
+
+# The tools, in a checkout of this repository. Prints nothing when all are there.
+for t in kubectl helm git jq yq make openssl; do command -v $t >/dev/null || echo "missing: $t"; done
+```
+<!-- guide:prerequisites.have end -->
+
+Two more things you must already have. Step 2 checks them:
+
+- **The `flowControl` feature gate on every EPP.** `make check-prereqs
+  NAMESPACE=<model namespace>` reports it for each namespace.
+- **Model servers that drain on termination**, with a `preStop` hook and
+  `terminationGracePeriodSeconds`. A transfer removes a donor pod through an
+  ordinary scale-down. `make workload-patch` reports this.
+
+**KEDA.** If the cluster already has KEDA, leave `KEDA_HELM_INSTALL` off (the
+default). The installer then uses that KEDA and never installs a second one. If
+the cluster has none, step 3 installs it on Kubernetes. On OpenShift, install
+the Custom Metrics Autoscaler operator and its KedaController in
+`openshift-keda` first.
+
+KEDA 2.18 and 2.19 are supported, and CI tests 2.19. Any other version is
+untested but not refused. Before 2.17, ScaledObjects get no fallback. KEDA up
+to 2.20.2 has CVE-2026-77524, which is fixed in 2.21.0. Consider upgrading. The
+installer prints the version it finds and never stops on it. Details: [KEDA
+reference](../../reference/keda.md).
+
+A Prometheus that scrapes the model servers is not on this list. Step 3
+deploys one if the cluster has none.
+
+## 2. Check
+
+Every command here only reads. Run them once:
+
+<!-- guide:prerequisites.check start -->
+```bash
+# Read-only. Tools, your rights, KEDA and the Prometheus the install would use. With no KEDA on the cluster, add KEDA_HELM_INSTALL=true.
+make check-prereqs SCOPE=cluster
+
+# Read-only. One model namespace, its EPP included. Run it for each model namespace.
+make check-prereqs NAMESPACE=<model namespace>
 
 # Read-only. Every llm-d model server on the cluster, its modelID, the InferencePool in front of it, and any ScaledObject it has. Writes a plan, applies nothing.
 make scaledobjects-plan SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
 
 # Read-only. Whether each model server drains on scale-down, and where it keeps its weights and compile caches. Writes a patch, applies nothing.
 make workload-patch SCOPE=cluster
-
-# The GPU product each node carries, and the GPUs each model server requests. The budget is per product.
-kubectl get nodes -L nvidia.com/gpu.product
-kubectl get pods -A -l 'llm-d.ai/role in (decode,prefill)' \
-  -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu,NODE:.spec.nodeName'
 ```
-<!-- guide:prerequisites end -->
+<!-- guide:prerequisites.check end -->
 
-What each one tells you, and what to change when it complains:
+### `check-prereqs SCOPE=cluster`
 
-**`check-prereqs`** ends with `Preflight passed`. It checks tools, your rights
-and the Prometheus it will use, and that KEDA is there or will be installed.
-At this scope it does not check each namespace's EPP; the plan below does
-that per model.
+A pass ends with `Preflight passed`. It checks the tools, your rights, the
+Prometheus the install will use, and KEDA. It does not check each namespace's
+EPP at this scope.
 
-**`scaledobjects-plan`** lists the model servers it found:
+What to fix:
+
+- **KEDA is not installed.** There is no KEDA and no `KEDA_HELM_INSTALL=true`.
+  Add `KEDA_HELM_INSTALL=true` to this check and to step 3, or install KEDA
+  yourself.
+- **A KEDA version line.** The line reports the version of the KEDA it found.
+  Each version line is advice, and none fails the check. See [what the
+  installer prints](../../reference/keda.md#what-the-installer-prints).
+- **A missing tool, or a permission.** Install the tool, or run as a
+  cluster admin.
+
+### `check-prereqs NAMESPACE=<model namespace>`
+
+A pass ends with `Preflight passed`. Run it once for each model namespace. If it
+reports that `flowControl` is off on the EPP, add this to that EPP's
+`EndpointPickerConfig` and restart the EPP:
+
+```yaml
+featureGates:
+- flowControl
+```
+
+### `scaledobjects-plan`
+
+A pass lists every model server it found:
 
 ```text
   Discovered llm-d model servers (2):
@@ -69,6 +134,8 @@ that per model.
     yes    team-b     Deployment  model-b-decode  model-b  1    10   10.0  -       (+fallback)
 ```
 
+What to fix:
+
 - **A model is missing.** Its pod template needs `llm-d.ai/role: decode` (or
   `prefill`). llm-d's charts set it.
 - **`# inferencePool: (none)`** in `share-plan.yaml` means no InferencePool
@@ -77,12 +144,15 @@ that per model.
   `--model`. Fix it in the plan, or fix the flag.
 - **`APPLY` reads `adopt`.** The model already has a ScaledObject. Adopting it
   points that one at the scaling manager.
-- **`(no fallback: KEDA version unknown)`** before KEDA is installed. Nothing
-  to fix: the apply in step 2 reads KEDA again and adds the fallback.
+- **`(no fallback: KEDA version unknown)`** appears before KEDA is installed.
+  Nothing to fix: the apply in step 5 reads KEDA again and adds the fallback.
+  On a KEDA older than 2.17 the plan writes no fallback at all.
 
-**`workload-patch`** names each model server that is costly to scale, and
-writes `wva-workload-patch.yaml` with the fix. On a vLLM server with a drain
-hook but no shared caches, it reports:
+### `workload-patch`
+
+A pass names no model server. Otherwise it names each model server that is
+costly to scale, and writes `wva-workload-patch.yaml` with the fix. On a vLLM
+server with a drain hook but no shared caches, it reports:
 
 ```text
 [WARNING]   team-a/model-a-decode RE-DOWNLOADS ITS WEIGHTS on every scale-up: vllm fetches model-a from Hugging Face, outside every volume it mounts.
@@ -90,14 +160,16 @@ hook but no shared caches, it reports:
 [SUCCESS] Wrote wva-workload-patch.yaml (1 workload(s) need something).
 ```
 
-- **No drain hook** (`preStop` and `terminationGracePeriodSeconds`): fix this
-  first. A transfer removes a donor pod, and without the hook its requests
-  are cut off.
-- **Weights or compile caches outside a volume**: each replica a transfer adds
-  starts slower. It works, but costs start time. The patch says which claim
-  to create (`make model-cache`, `make engine-cache`).
-- **`No vLLM or SGLang container found`**: it could not tell which container is
-  the engine, so it checked nothing for that model. Check the drain hook by
+What to fix:
+
+- **No drain hook** (`preStop` and `terminationGracePeriodSeconds`). Fix this
+  first. A transfer removes a donor pod, and without the hook that pod's
+  requests are cut off.
+- **Weights or compile caches outside a volume.** Each replica that a transfer
+  adds starts slower. It works, but it costs start time. The patch says which
+  claim to create (`make model-cache`, `make engine-cache`).
+- **`No vLLM or SGLang container found`.** It could not tell which container
+  is the engine, so it checked nothing for that model. Check the drain hook by
   hand.
 
 Put the fixes in the chart values that own the pod spec. Applying the patch to
@@ -105,12 +177,47 @@ the live objects (`WVA_WORKLOAD_PATCH_APPLY=true`) restarts the model servers.
 More: [Writing the
 patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch).
 
-**The last two commands** show one GPU product for the models that will share,
-and a GPU count on every model pod.
+## 3. Install the prerequisites the installer provides
 
-## Installation Instructions
+This is the cluster-admin phase of the installer. It runs once and installs
+everything except the scaling manager itself:
 
-### 1. Install with one budget for every namespace
+- the controller's namespace and the monitoring namespace
+- the cluster RBAC, including the node read the cluster's-GPUs budget needs
+- a Prometheus, only when the cluster has none. An existing one is used.
+- KEDA, only with `KEDA_HELM_INSTALL=true` and no KEDA on the cluster
+- KEDA's side of the scaler's mutual TLS: a client certificate in KEDA's
+  namespace, and a ClusterTriggerAuthentication
+
+Run one of these:
+
+<!-- guide:prerequisites.setup start -->
+```bash
+# The cluster-admin phase, with the KEDA the cluster already has. Namespaces, cluster RBAC, Prometheus when there is none, and KEDA's side of the scaler TLS.
+make setup-prereqs SCOPE=cluster
+
+# The same, on a cluster with no KEDA. Also installs KEDA with Helm. Not on OpenShift.
+make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
+```
+<!-- guide:prerequisites.setup end -->
+
+It ends with `Prerequisites ready for <namespace>` and one KEDA line:
+
+- `KEDA: already on the cluster` means it used your KEDA.
+- `KEDA: installed by this run (Helm)` means it installed one.
+
+What to fix:
+
+- **It cannot tell where KEDA runs.** The scaler then stays on plaintext.
+  Re-run with `KEDA_NAMESPACE=<the namespace KEDA runs in>`.
+- **It asks you to restart KEDA's operator.** Run the `kubectl rollout restart`
+  command it prints. KEDA keeps an old client certificate until it restarts.
+- **It warns that no Prometheus may scrape the controller.** This happens when
+  you have your own Prometheus. Re-run with `PROMETHEUS_SA=<namespace>/<serviceaccount>`.
+
+More on an existing KEDA: [KEDA reference](../../reference/keda.md#a-keda-the-cluster-already-has).
+
+## 4. Install the scaling manager with one budget
 
 Pick the budget:
 
@@ -121,8 +228,8 @@ Pick the budget:
   may use whatever the nodes have. A GPU the models give up can be taken by any
   other pod on the cluster.
 
-For a quota, `ACCELERATOR` is the product from the commands above and `GPUS`
-is how many of them the models may hold together.
+For a quota, `ACCELERATOR` is the product from step 1 and `GPUS` is how many of
+them the models may hold together.
 
 <!-- guide:deploy.vars start -->
 ```bash
@@ -134,8 +241,8 @@ export GPUS=<gpus>
 
 <!-- guide:deploy.install start -->
 ```bash
-# One controller for every namespace, with one GPU budget they all share. Installs KEDA; on OpenShift, drop KEDA_HELM_INSTALL.
-make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true \
+# The controller only, for every namespace, with one GPU budget they all share. Step 3 installed everything else.
+make deploy-wva SCOPE=cluster INSTALL_PHASE=wva \
   WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
 ```
 <!-- guide:deploy.install end -->
@@ -143,24 +250,27 @@ make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true \
 `WVA_QUOTA_SCOPE=cluster` is what makes the namespaces share. Without it each
 namespace gets its own budget of `GPUS`, and nothing moves between them.
 
+`INSTALL_PHASE=wva` installs only the controller. If step 3 left something
+out, it stops and names what is missing.
+
 For the cluster's GPUs instead:
 
 <!-- guide:deploy.physical start -->
 ```bash
 # The same install, with the cluster's GPUs as the budget instead of a quota.
-make deploy-wva SCOPE=cluster KEDA_HELM_INSTALL=true WVA_LIMITER=gpu-inventory
+make deploy-wva SCOPE=cluster INSTALL_PHASE=wva WVA_LIMITER=gpu-inventory
 ```
 <!-- guide:deploy.physical end -->
 
-The controller must list nodes to count the GPUs. The cluster-scoped install
-grants that read; nothing else is needed. The budget is per product: the GPUs
-of that product on every node, less what other pods hold.
+The controller must list nodes to count the GPUs, and step 3 granted that. The
+budget is per product: the GPUs of that product on every node, less what other
+pods hold.
 
-### 2. Register the models
+## 5. Register the models
 
 <!-- guide:deploy.register start -->
 ```bash
-# Edit the plan the prerequisites wrote, then apply it. Nothing scales until this runs.
+# Edit the plan step 2 wrote, then apply it. Nothing scales until this runs.
 # edit share-plan.yaml: apply: yes|no|adopt, the modelID, the replica bounds
 make scaledobjects-apply SCOPE=cluster WVA_DEFAULT_SO_PLAN=share-plan.yaml
 ```
@@ -176,7 +286,7 @@ In the plan:
 - Each entry shows the InferencePool it found. `(none)` means no pool selects
   those pods.
 
-### 3. Check the budget
+## 6. Check the budget
 
 <!-- guide:deploy.check start -->
 ```bash
@@ -189,15 +299,15 @@ make utilization-share-check
 
 It prints the accelerator names the controller resolves, and fails if a model
 in any namespace has an accelerator it cannot resolve. Run it a minute or so
-after step 2: until the controller has sized the models it has logged no
+after step 5: until the controller has sized the models it has logged no
 accelerator, and the check says so. If it warns that the quota has no key for
-one of them, re-run step 1 with that exact name.
+one of them, re-run step 4 with that exact name.
 
 Under the cluster's GPUs it warns `limiter: gpu-inventory and no quota. The
 optimizer plans nothing here until the block sets physicalGroups`. That is
 expected before shadow; the shadow step below sets it.
 
-### 4. Shadow, then active
+## 7. Shadow, then active
 
 <!-- guide:deploy.shadow start -->
 ```bash
@@ -301,22 +411,27 @@ make utilization-share-off
 
 <!-- guide:cleanup.uninstall start -->
 ```bash
-# Remove the scaling manager. The model servers keep serving.
+# Remove the scaling manager. The model servers keep serving; KEDA and Prometheus stay.
 make undeploy-wva SCOPE=cluster
 ```
 <!-- guide:cleanup.uninstall end -->
 
 The ScaledObjects the install created are deleted, and KEDA puts each model
 back to the replica count it had before. Adopted ones are kept and listed.
-Details: [Install the scaling manager for the whole
-cluster](../install-cluster-wide/#cleanup).
+
+KEDA is never removed, whether it was yours or step 3 installed it. The
+uninstall removes only the ClusterTriggerAuthentication and certificate copy it
+wrote in KEDA's namespace. Details: [Install the scaling manager for the whole
+cluster](../install-cluster-wide/#cleanup) and [KEDA
+reference](../../reference/keda.md#uninstall).
 
 ## Details
 
-- **Under the cluster's GPUs**, a GPU a donor gives up can be taken by a pod
-  the scaling manager did not place. The transfer then times out filling, and
-  the receiver shows the blocked reason `release-taken`. Events and log lines still say "quota group";
-  under this limiter the group is the cluster's GPUs of one product.
+- **Under the cluster's GPUs**, a GPU that a donor gives up can be taken by a
+  pod the scaling manager did not place. The transfer then times out while
+  filling, and the receiver shows the blocked reason `release-taken`. Events
+  and log lines still say "quota group"; under this limiter the group is the
+  cluster's GPUs of one product.
 - **One budget per controller.** The quota caps what this controller places.
   It does not stop pods the scaling manager did not create. Back it with a
   Kubernetes `ResourceQuota` where that matters.
@@ -328,11 +443,9 @@ cluster](../install-cluster-wide/#cleanup).
 - **Without `GRANT_SHARED=true`**, activate grants only `NAMESPACE` and prints
   the command to run in each other namespace. A namespace without the grant
   cannot give GPUs.
-- **Your own Prometheus.** The install uses it, and warns that no Prometheus
-  may scrape the controller's `/metrics`. Until one may, the `wva_*` series
-  are only on the controller's endpoint (the metrics block above). To grant
-  it: `PROMETHEUS_SA=<namespace>/<serviceaccount> make setup-prereqs
-  SCOPE=cluster`.
+- **Your own Prometheus.** The install uses it. Until that Prometheus may scrape
+  the controller's `/metrics`, the `wva_*` series are only on the controller's
+  endpoint (the metrics block above). Step 3 says how to grant it.
 - **Registering resizes.** Once a model is registered, a model with more
   replicas than its load needs drops to what it needs, after its scale-down
   window. Nothing restarts; a replica that goes drains first.

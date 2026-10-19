@@ -20,7 +20,8 @@ discovered and may not hold model servers yet.
 - [ ] llm-d model servers somewhere on the cluster.
 - [ ] **KEDA.** On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy
   command to install it. On OpenShift, install the Custom Metrics Autoscaler
-  operator first.
+  operator first. Supported versions, and what happens with an existing KEDA:
+  [KEDA reference](../../reference/keda.md).
 - [ ] A Prometheus that scrapes the model servers.
 - [ ] **The `flowControl` feature gate on every EPP.** The install checks only
   the EPPs in the controller's own namespace, so check the others yourself.

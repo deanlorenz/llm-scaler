@@ -16,6 +16,8 @@ After that, the namespace owner installs and upgrades the controller.
   namespace. No model yet? [Install a small llm-d model](../install-small-model/).
 - [ ] **KEDA.** On OpenShift, install the Custom Metrics Autoscaler operator. On
   Kubernetes, `KEDA_HELM_INSTALL=true make setup-prereqs` installs it if missing.
+  Supported versions, and what happens with an existing KEDA: [KEDA
+  reference](../../reference/keda.md).
 - [ ] **A Prometheus** that scrapes the model servers and their EPP.
 - [ ] **The EPP's `flowControl` feature gate.** Add `featureGates: [flowControl]`
   to the `EndpointPickerConfig` and restart the EPP. The install refuses without it.
