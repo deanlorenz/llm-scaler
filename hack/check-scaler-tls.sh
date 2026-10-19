@@ -1060,7 +1060,19 @@ so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAu
 run wva_scaler_tls_undeploy STUB_CM=absent
 # After the reinstall, not before: a restart with the ClusterTriggerAuthentication
 # gone rebuilds the pooled TLS address with empty auth parameters, in plaintext.
-ok 'grep -q "install this scaler in $NS again, restart it after the install:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "Before installing" "$WORK/warnings"' "uninstall with a ScaledObject on the TLS address: no restart-after-reinstall notice: $(cat "$WORK/warnings")"
+ok 'grep -q "This uninstall restarts it once the ScaledObjects are removed" "$WORK/info" && ! grep -q "^rollout restart" "$WORK/kubectl.log"' "uninstall with a ScaledObject on the TLS address: no notice that the uninstall restarts KEDA, or it restarted before the ScaledObjects went: $(cat "$WORK/info" "$WORK/warnings")"
+# The restart itself, after the ScaledObjects: with one still on the TLS
+# address, KEDA would rebuild it with no auth, so the restart waits for the
+# reinstall; with none left, the uninstall restarts KEDA so a reinstall here is
+# not refused. Found reinstalling on kind: every handshake refused, every HPA on
+# the CPU default, until KEDA was restarted by hand.
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true
+ok 'grep -q "install this scaler in $NS again, restart it after the install:  kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "^rollout restart" "$WORK/kubectl.log"' "a ScaledObject still on the TLS address: KEDA restarted anyway, or no restart-after-reinstall notice: $(cat "$WORK/warnings"; cat "$WORK/kubectl.log")"
+rm -f "$WORK/so.json"
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true
+ok 'grep -q "^rollout restart deployment/keda-operator -n keda" "$WORK/kubectl.log" && grep -q "Restarted KEDA.s operator in keda" "$WORK/info"' "no ScaledObject left: the uninstall did not restart KEDA: $(cat "$WORK/info" "$WORK/warnings"; cat "$WORK/kubectl.log")"
+run 'wva_scaler_keda_restart_after_undeploy' WVA_SCALER_KEDA_RESTART_WANTED=true KEDA_RESTART=false
+ok '! grep -q "^rollout restart" "$WORK/kubectl.log" && grep -q "KEDA_RESTART=false" "$WORK/warnings"' "KEDA_RESTART=false still restarted KEDA: $(cat "$WORK/kubectl.log")"
 
 echo "== undeploy removes KEDA's copy where the marker says it went"
 reset_store
@@ -1612,6 +1624,18 @@ ok '! grep -q "kubectl patch scaledobject" "$WORK/stderr" && ! grep -q "Change i
 # call on the connection is refused.
 run wva_verify_scaler_wiring
 ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings"' "verify, stale KEDA connection with a wired HPA: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+
+echo "== verify: KEDA refusing the scaler's new certificate (bad certificate) is the same stale connection"
+# The other direction, measured on kind after an uninstall and reinstall: KEDA,
+# holding the CA it cached, rejects the controller's new serving certificate,
+# and the controller logs "remote error: tls: bad certificate".
+stale_case
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' 2026-10-19T09:42:57Z INFO external-scaler scaler/refusal_log.go:118 \
+    'KEDA external scaler refused a TLS handshake; this client reaches no call' \
+    '{"remote": "10.128.5.168:45482", "reason": "remote error: tls: bad certificate", "refusedSinceLastLine": 1}' \
+    >>"$WORK/ctrl.log"
+run wva_verify_scaler_wiring STUB_UNWIRED=always
+ok '[ "$RC" = 1 ] && grep -q "still presents an OLD client certificate" "$WORK/warnings" && grep -q "$RESTART" "$WORK/warnings" && ! grep -q "Change it again" "$WORK/warnings"' "verify, KEDA refusing the new serving certificate: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
 
 echo "== verify: the certificate KEDA was given is not from the current CA: setup-prereqs and the restart"
 stale_case

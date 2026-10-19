@@ -992,6 +992,34 @@ wva_scaler_keda_restart_cmd() {
     printf 'kubectl rollout restart deployment/keda-operator -n %s\n' "$(wva_scaler_keda_operator_ns)"
 }
 
+# wva_scaler_keda_restart_after_undeploy restarts KEDA's operator when the
+# uninstall removed KEDA's side of the scaler TLS while ScaledObjects used it
+# (WVA_SCALER_KEDA_RESTART_WANTED). Call it after the ScaledObjects are gone.
+# KEDA_RESTART=false leaves it to the reader, with the command.
+wva_scaler_keda_restart_after_undeploy() {
+    [ "${WVA_SCALER_KEDA_RESTART_WANTED:-false}" = true ] || return 0
+    local ns rows rc=0
+    ns="$(wva_scaler_keda_operator_ns)"
+    # Only with no ScaledObject left on the TLS address. One that stays (adopted,
+    # or made by someone else) would have KEDA rebuild the pooled address on
+    # restart with the ClusterTriggerAuthentication gone: empty auth, plaintext.
+    # Then the restart belongs after the reinstall, as it always did.
+    rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
+    if [ "$rc" != 0 ] || [ -n "$rows" ]; then
+        log_warning "ScaledObjects still use the scaler's TLS address$([ "$rc" != 0 ] && printf ' (or they cannot be listed)'), so KEDA's operator is not restarted now. If you install this scaler in $WVA_NS again, restart it after the install:  $(wva_scaler_keda_restart_cmd)"
+        return 0
+    fi
+    if [ "${KEDA_RESTART:-true}" != true ]; then
+        log_warning "KEDA_RESTART=false: KEDA's operator still holds a connection with the old client certificate. Before installing this scaler in $WVA_NS again, restart it:  $(wva_scaler_keda_restart_cmd)"
+        return 0
+    fi
+    if kubectl rollout restart deployment/keda-operator -n "$ns" >/dev/null 2>&1; then
+        log_success "Restarted KEDA's operator in $ns, so a reinstall here gets a new connection to the scaler."
+    else
+        log_warning "Could not restart KEDA's operator in $ns. Before installing this scaler in $WVA_NS again, restart it:  $(wva_scaler_keda_restart_cmd)"
+    fi
+}
+
 # wva_scaler_keda_operator_may_run succeeds unless KEDA's operator Deployment is
 # known to be absent: a Deployment that cannot be read may be running.
 wva_scaler_keda_operator_may_run() {
@@ -1522,7 +1550,12 @@ wva_scaler_keda_conn_state() {
     fi
     # The remote host of each refusal for an unknown authority, port and IPv6
     # brackets dropped. Console and JSON log lines both quote the field.
-    hosts="$(printf '%s\n' "$logs" | grep -F 'refused a TLS handshake' | grep -F 'unknown authority' \
+    # Both directions of the same stale connection: the controller refusing
+    # KEDA's old client certificate ("unknown authority"), and KEDA refusing the
+    # controller's new serving certificate with the CA it cached, which the
+    # controller logs as "remote error: tls: bad certificate". Seen on kind
+    # after an uninstall and a reinstall.
+    hosts="$(printf '%s\n' "$logs" | grep -F 'refused a TLS handshake' | grep -E 'unknown authority|bad certificate' \
         | sed -n 's/.*"remote": *"\([^"]*\)".*/\1/p' | sed 's/:[0-9]*$//; s/^\[//; s/\]$//' | sort -u)" || hosts=""
     if [ -z "$hosts" ]; then
         WVA_SCALER_KEDA_CONN=none
@@ -2027,7 +2060,13 @@ wva_scaler_tls_undeploy() {
         local tls_rows tls_rc=0
         tls_rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || tls_rc=$?
         if [ "$tls_rc" != 0 ] || [ -n "$tls_rows" ]; then
-            log_warning "KEDA's side of the scaler TLS is removed, but ScaledObjects used the TLS address$([ "$tls_rc" != 0 ] && printf ' (or they cannot be listed)'), so KEDA's operator keeps a connection with the old client certificate until it restarts. If you install this scaler in $WVA_NS again, restart it after the install:  $(wva_scaler_keda_restart_cmd)"
+            # The uninstall restarts it once those ScaledObjects are gone
+            # (wva_scaler_keda_restart_after_undeploy): with nothing left to
+            # dial the address, the restart drops the old connection, and a
+            # reinstall then builds a new one. Left to the reader, a reinstall
+            # here had every handshake refused and every HPA on the CPU default.
+            WVA_SCALER_KEDA_RESTART_WANTED=true
+            log_info "KEDA's side of the scaler TLS is removed, but ScaledObjects used the TLS address$([ "$tls_rc" != 0 ] && printf ' (or they cannot be listed)'), so KEDA's operator keeps a connection with the old client certificate until it restarts. This uninstall restarts it once the ScaledObjects are removed (KEDA_RESTART=false skips that)."
         fi
     fi
 }
