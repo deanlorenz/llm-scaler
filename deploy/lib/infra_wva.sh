@@ -99,6 +99,16 @@ wva_resolve_prometheus_url() {
         log_info "Using the Prometheus already on this cluster: $detected"
         log_info "  (the default names the one this installer would deploy; pass PROMETHEUS_URL=<url> to override)"
         PROMETHEUS_URL="$detected"
+    elif [ -z "$detected" ] && [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] && [ -n "${WVA_LIVE_PROM_URL:-}" ] \
+        && [ "${WVA_LIVE_PROM_URL%/}" != "${PROMETHEUS_URL%/}" ]; then
+        # Nothing found is often nothing this identity may list: a namespace
+        # admin cannot list Prometheus resources cluster-wide. The address the
+        # controller runs with -- settled by an earlier install, usually the
+        # admin's -- is a better answer than the shipped default, which names
+        # a Prometheus this installer would deploy.
+        log_info "Keeping the Prometheus the controller runs with: $WVA_LIVE_PROM_URL"
+        log_info "  (no Prometheus found that you may list; pass PROMETHEUS_URL=<url> to change it)"
+        PROMETHEUS_URL="$WVA_LIVE_PROM_URL"
     fi
     WVA_PROMETHEUS_URL_RESOLVED=1
 }
@@ -465,6 +475,13 @@ wva_prometheus_skip_verify() {
         printf 'false'
         return 0
     fi
+    # The CA this install copied and mounts (wva_sync_prometheus_ca) is
+    # something to verify against, as an explicit path is, and the install
+    # probes the connection with it before reporting success.
+    if [ -n "${WVA_PROM_CA_MOUNT:-}" ]; then
+        printf 'false'
+        return 0
+    fi
     if [ -n "$(wva_prometheus_ca_path)" ]; then
         if [ "${WVA_LIVE_SKIP_VERIFY:-}" = "true" ]; then printf 'true'; else printf 'false'; fi
         return 0
@@ -497,16 +514,237 @@ wva_prometheus_ca_path() {
         printf '%s' "$PROMETHEUS_CA_CERT_PATH"
         return 0
     fi
-    if [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] && [ -n "${WVA_LIVE_CA_PATH:-}" ] && wva_same_prometheus_as_live; then
+    # The installer's own copy is kept only while it is mounted: the volume
+    # comes from this render (wva_append_prometheus_ca_mount_patch), and a path
+    # with no volume behind it is a controller that cannot read its CA.
+    if [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] && [ -n "${WVA_LIVE_CA_PATH:-}" ] \
+        && [ "$WVA_LIVE_CA_PATH" != "$WVA_PROM_CA_DIR/ca.crt" ] && wva_same_prometheus_as_live; then
         printf '%s' "$WVA_LIVE_CA_PATH"
+        return 0
     fi
+    [ -z "${WVA_PROM_CA_MOUNT:-}" ] || printf '%s' "$WVA_PROM_CA_DIR/ca.crt"
     return 0
+}
+
+# The CA this install copies for the controller: Secret WVA_PROM_CA_SECRET in
+# WVA_NS, key ca.crt, mounted read-only at WVA_PROM_CA_DIR.
+# WVA_PROM_CA_MOUNT is "1" once wva_sync_prometheus_ca has settled that the
+# controller mounts it; WVA_PROM_CA_ERR holds why a source could not be read.
+WVA_PROM_CA_SECRET=wva-prometheus-ca
+WVA_PROM_CA_DIR=/etc/wva-prometheus-ca
+WVA_PROM_CA_MOUNT=""
+WVA_PROM_CA_ERR=""
+
+# wva_prometheus_ca_source echoes where the Prometheus CA is copied from, as
+# "<secret|configmap> <namespace> <name> <certificate key>" or "file <path>":
+# PROMETHEUS_CA_FILE, else PROMETHEUS_SECRET_NAME/PROMETHEUS_SECRET_NS set by
+# the caller, else what the Prometheus CR behind PROMETHEUS_URL serves its
+# certificate from (spec.web.tlsConfig.cert). Nothing when none is known.
+wva_prometheus_ca_source() {
+    local ns cr ref
+    if [ -n "${PROMETHEUS_CA_FILE:-}" ]; then
+        printf 'file %s\n' "$PROMETHEUS_CA_FILE"
+        return 0
+    fi
+    if [ -n "${PROMETHEUS_SECRET_NAME_EXPLICIT:-}" ]; then
+        printf 'secret %s %s tls.crt\n' \
+            "${PROMETHEUS_SECRET_NS_EXPLICIT:-${PROMETHEUS_SECRET_NS:-${MONITORING_NAMESPACE:-}}}" "$PROMETHEUS_SECRET_NAME_EXPLICIT"
+        return 0
+    fi
+    read -r ns cr <<< "$(wva_prometheus_cr_for_url "${PROMETHEUS_URL:-}")"
+    [ -n "${cr:-}" ] || return 0
+    ref="$(wva_prometheus_cert_ref "$ns" "$cr")"
+    [ -n "$ref" ] || return 0
+    set -- $ref
+    printf '%s %s %s %s\n' "$1" "$ns" "$2" "$3"
+}
+
+# wva_read_prometheus_ca writes to stdout the CA certificates held by source
+# $1..$4 (see wva_prometheus_ca_source): key ca.crt when it has one, else the
+# certificate key -- a self-signed serving certificate is its own CA. Only
+# those keys are read, never the private key, and only CERTIFICATE blocks
+# leave: a bundle that also carries a key gives up the certificates alone.
+# Fails with WVA_PROM_CA_ERR set; a Forbidden read is an error, not "no CA".
+wva_read_prometheus_ca() {
+    local kind="$1" ns="$2" obj="${3:-}" key="${4:-tls.crt}" k pem="" rc
+    WVA_PROM_CA_ERR=""
+    if [ "$kind" = file ]; then
+        if [ ! -r "$ns" ]; then
+            WVA_PROM_CA_ERR="PROMETHEUS_CA_FILE=$ns is not readable"
+            return 1
+        fi
+        pem="$(cat "$ns")"
+    else
+        for k in ca.crt "$key"; do
+            rc=0
+            kc_capture get "$kind" "$obj" -n "$ns" -o "jsonpath={.data.${k//./\\.}}" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                WVA_PROM_CA_ERR="$(printf '%s\n' "$KC_ERR" | head -1)"
+                [ -n "$WVA_PROM_CA_ERR" ] || WVA_PROM_CA_ERR="kubectl exited $rc"
+                return 1
+            fi
+            pem="$KC_OUT"
+            [ -n "$pem" ] || continue
+            if [ "$kind" = secret ]; then
+                pem="$(printf '%s' "$pem" | base64 -d 2>/dev/null)" || pem=""
+            fi
+            [ -z "$pem" ] || break
+        done
+    fi
+    pem="$(printf '%s\n' "$pem" | awk '/-----BEGIN CERTIFICATE-----/ { p = 1 } p { print } /-----END CERTIFICATE-----/ { p = 0 }')"
+    if [ -z "$pem" ]; then
+        WVA_PROM_CA_ERR="$kind ${obj:+$ns/$obj }holds no certificate under ca.crt or $key"
+        return 1
+    fi
+    printf '%s\n' "$pem"
+}
+
+# wva_sync_prometheus_ca gives the controller the CA of the HTTPS Prometheus
+# it verifies, with nothing done by hand: it copies the CA certificate from the
+# Prometheus TLS Secret into Secret WVA_PROM_CA_SECRET in WVA_NS, and sets
+# WVA_PROM_CA_MOUNT so the overlay mounts it and the config points
+# PROMETHEUS_CA_CERT_PATH at it.
+#
+# Before this, a kube-prometheus-stack with web TLS needed three manual steps
+# (a Secret, a volume patched onto the Deployment, a re-run with the path), and
+# without them the controller verified against the public roots and could not
+# connect.
+#
+# The source Secret lives in the monitoring namespace, which the admin phase
+# (setup-prereqs, or INSTALL_PHASE=all) can read and a namespace admin usually
+# cannot. So the admin phase makes the copy, and the controller phase uses
+# that copy when it cannot read the source itself. Only when neither can it
+# stops, naming what an admin runs. It never turns verification off instead.
+#
+# Not when the caller decided: PROMETHEUS_CA_CERT_PATH (mounted by them),
+# PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true; nor the CA path a live controller
+# verifies this Prometheus with; nor OpenShift, whose overlay mounts the
+# service CA; nor plain http://.
+wva_sync_prometheus_ca() {
+    WVA_PROM_CA_MOUNT=""
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    case "${PROMETHEUS_URL:-}" in https://*) ;; *) return 0 ;; esac
+    [ "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" != "true" ] || return 0
+    [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] || return 0
+    if [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] && [ -n "${WVA_LIVE_CA_PATH:-}" ] \
+        && [ "$WVA_LIVE_CA_PATH" != "$WVA_PROM_CA_DIR/ca.crt" ] && wva_same_prometheus_as_live; then
+        return 0
+    fi
+
+    local src kind ns obj key tmp rc=0 owner
+    src="$(wva_prometheus_ca_source)"
+    if [ -n "$src" ]; then
+        read -r kind ns obj key <<< "$src"
+        tmp="$(mktemp)"
+        if wva_read_prometheus_ca "$kind" "$ns" "$obj" "$key" > "$tmp"; then
+            kc_capture get secret "$WVA_PROM_CA_SECRET" -n "$WVA_NS" \
+                -o 'jsonpath={.metadata.labels.app\.kubernetes\.io/managed-by}' || rc=$?
+            if [ "$rc" -eq 0 ] && [ "$KC_OUT" != "wva-installer" ]; then
+                rm -f "$tmp"
+                log_info "Prometheus CA: Secret $WVA_PROM_CA_SECRET in $WVA_NS was not made by this installer; mounting it as it is."
+                WVA_PROM_CA_MOUNT=1
+                return 0
+            fi
+            local b64
+            b64="$(base64 < "$tmp" | tr -d '\n')"
+            if kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${WVA_PROM_CA_SECRET}
+  namespace: ${WVA_NS}
+  labels:
+    app.kubernetes.io/managed-by: wva-installer
+type: Opaque
+data:
+  ca.crt: ${b64}
+EOF
+            then
+                rm -f "$tmp"
+                log_success "Prometheus CA: copied from $kind $ns${obj:+/$obj} into Secret $WVA_PROM_CA_SECRET in $WVA_NS (the certificate only); the controller verifies with it."
+                WVA_PROM_CA_MOUNT=1
+                return 0
+            fi
+            WVA_PROM_CA_ERR="could not write Secret $WVA_PROM_CA_SECRET in $WVA_NS (see the error above)"
+        fi
+        rm -f "$tmp"
+    fi
+
+    # A copy made earlier -- by the admin phase -- serves when the source is
+    # not readable now.
+    if kubectl get secret "$WVA_PROM_CA_SECRET" -n "$WVA_NS" >/dev/null 2>&1; then
+        log_info "Prometheus CA: using Secret $WVA_PROM_CA_SECRET in $WVA_NS, copied earlier${WVA_PROM_CA_ERR:+ (the source cannot be read now: $WVA_PROM_CA_ERR)}."
+        WVA_PROM_CA_MOUNT=1
+        return 0
+    fi
+    # No TLS Secret known at all: the public roots, and the probe says
+    # whether they are enough.
+    [ -n "$src" ] || return 0
+
+    local fetch
+    case "$kind" in
+        file) fetch="cp $ns ca.crt" ;;
+        secret) fetch="kubectl get secret $obj -n $ns -o jsonpath='{.data.${key//./\\.}}' | base64 -d > ca.crt" ;;
+        *) fetch="kubectl get configmap $obj -n $ns -o jsonpath='{.data.${key//./\\.}}' > ca.crt" ;;
+    esac
+    log_error "Cannot give the controller the Prometheus CA: ${WVA_PROM_CA_ERR:-the source could not be read}.
+  The controller verifies $PROMETHEUS_URL, so it needs the CA, and no copy exists in $WVA_NS yet.
+  A cluster admin's prerequisites phase makes the copy:
+    $(wva_make_cmd setup-prereqs)
+  or the admin copies the certificate alone (never the key):
+    $fetch
+    kubectl create secret generic $WVA_PROM_CA_SECRET -n $WVA_NS --from-file=ca.crt=ca.crt
+  Then re-run this install."
+}
+
+# wva_append_prometheus_ca_mount_patch mounts Secret WVA_PROM_CA_SECRET into
+# the manager container at WVA_PROM_CA_DIR, read-only, in kustomization $1,
+# when wva_sync_prometheus_ca settled that it should.
+wva_append_prometheus_ca_mount_patch() {
+    local kustomization="$1"
+    [ -n "${WVA_PROM_CA_MOUNT:-}" ] || return 0
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    cat >> "$kustomization" <<PATCH
+- patch: |-
+    - op: test
+      path: /spec/template/spec/containers/0/name
+      value: manager
+    - op: add
+      path: /spec/template/spec/containers/0/volumeMounts/-
+      value: {name: wva-prometheus-ca, mountPath: ${WVA_PROM_CA_DIR}, readOnly: true}
+    - op: add
+      path: /spec/template/spec/volumes/-
+      value: {name: wva-prometheus-ca, secret: {secretName: ${WVA_PROM_CA_SECRET}, items: [{key: ca.crt, path: ca.crt}]}}
+  target:
+    kind: Deployment
+    name: wva-controller-manager
+PATCH
 }
 
 # wva_same_prometheus_as_live reports whether PROMETHEUS_URL is the Prometheus
 # the live config names. A trailing slash does not make a different Prometheus.
+#
+# Nor does the Service in front of it. Detection used to answer
+# prometheus-operated.<ns>, and now answers the Service the certificate names
+# (wva_pick_prometheus_service) -- the same Prometheus. Read as a new one, a
+# re-run dropped the CA the controller verified it with, and verification on
+# with no CA is a controller that cannot connect. Only for a detected URL: one
+# the caller set is the caller's decision.
 wva_same_prometheus_as_live() {
-    [ -n "${WVA_LIVE_PROM_URL:-}" ] && [ "${WVA_LIVE_PROM_URL%/}" = "${PROMETHEUS_URL%/}" ]
+    [ -n "${WVA_LIVE_PROM_URL:-}" ] || return 1
+    [ "${WVA_LIVE_PROM_URL%/}" != "${PROMETHEUS_URL%/}" ] || return 0
+    [ -z "${PROMETHEUS_URL_EXPLICIT:-}" ] || return 1
+    local live_host="${WVA_LIVE_PROM_URL#*://}" ns
+    live_host="${live_host%%/*}"
+    live_host="${live_host%%:*}"
+    ns="$(wva_prometheus_url_namespace "$WVA_LIVE_PROM_URL")"
+    [ -n "$ns" ] || return 1
+    case "$live_host" in
+        "prometheus-operated.$ns.svc"|"prometheus-operated.$ns.svc.cluster.local") ;;
+        *) return 1 ;;
+    esac
+    [ "${WVA_LIVE_PROM_URL%%://*}" = "${PROMETHEUS_URL%%://*}" ] \
+        && [ "$(wva_prometheus_url_namespace "${PROMETHEUS_URL:-}")" = "$ns" ]
 }
 
 # wva_prometheus_is_own_stack reports whether PROMETHEUS_URL is the
@@ -657,8 +895,16 @@ wva_rerun_install_vars() {
 wva_rerun_cmd() {
     local phase="" kv
     local -a vars=()
+    local arg skip
     while IFS= read -r kv; do
-        [ -z "$kv" ] || vars+=("$kv")
+        [ -n "$kv" ] || continue
+        # A variable the arguments set again is theirs to set: printed twice,
+        # the command reads as though both values counted.
+        skip=""
+        for arg in "$@"; do
+            [ "${arg%%=*}" != "${kv%%=*}" ] || skip=1
+        done
+        [ -n "$skip" ] || vars+=("$kv")
     done <<< "$(wva_rerun_install_vars)"
     [ "${INSTALL_PHASE_EXPLICIT:-}" != "wva" ] || phase="INSTALL_PHASE=wva"
     wva_make_cmd deploy-wva ${vars[@]+"${vars[@]}"} ${phase:+"$phase"} "$@"
@@ -682,6 +928,7 @@ wva_refuse_unknown_prometheus_tls() {
     [ "${WVA_LIVE_PROM_TLS:-}" = "unknown" ] || return 0
     [ -z "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ] || return 0
     [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] || return 0
+    [ -z "${WVA_PROM_CA_MOUNT:-}" ] || return 0
     [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
     wva_resolve_prometheus_url
     case "${PROMETHEUS_URL:-}" in
@@ -703,6 +950,14 @@ wva_refuse_unknown_prometheus_tls() {
 wva_hint_untrusted_prometheus_cert() {
     [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
     printf '%s\n' "$1" | grep -qE 'x509|certificate signed by unknown authority' || return 0
+    # A certificate for another host is not fixed by a CA: the controller
+    # trusts it and still refuses it. Name the hosts it is valid for instead.
+    if printf '%s\n' "$1" | grep -qE 'certificate is valid for|not valid for any names'; then
+        log_warning "  The Prometheus certificate does not name the host the controller connects to. Point it at a name the"
+        log_warning "  certificate holds (listed in the x509 line above):  $(wva_rerun_cmd 'PROMETHEUS_URL=https://<name>:<port>')"
+        log_warning "  See docs/reference/troubleshooting.md#prometheus-certificate-name-mismatch."
+        return 0
+    fi
     log_warning "  The controller does not trust the Prometheus certificate. Fix it one of two ways:"
     log_warning "    1. Mount the CA into the controller, then re-run with its path (docs/reference/prometheus.md#tls-configuration):"
     log_warning "         $(wva_rerun_cmd 'PROMETHEUS_CA_CERT_PATH=<file>')"
@@ -721,7 +976,7 @@ wva_warn_prometheus_tls_upgrade() {
         https://*) ;;
         *) return 0 ;;
     esac
-    if [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] && [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] \
+    if [ -z "${PROMETHEUS_CA_CERT_PATH:-}" ] && [ -z "${WVA_PROM_CA_MOUNT:-}" ] && [ "${WVA_LIVE_PROM_TLS:-}" = "read" ] \
         && [ -n "${WVA_LIVE_CA_PATH:-}" ] && ! wva_same_prometheus_as_live; then
         log_warning "=================================================================="
         log_warning "The controller verified ${WVA_LIVE_PROM_URL:-its old Prometheus} with the CA at $WVA_LIVE_CA_PATH."
@@ -1173,8 +1428,206 @@ wva_write_prometheus_settings() {
     wva_warn_prometheus_tls_upgrade
     # Read back what the controller will actually run with, after every patch
     # above, rather than reasoning about which of them applied.
-    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+    local cfg
+    cfg="$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
         -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    wva_warn_prometheus_tls "$cfg"
+    wva_verify_prometheus_tls "$cfg"
+}
+
+# wva_verify_prometheus_tls stops the install when the controller, with the
+# manager config $1 it will run with, cannot verify the Prometheus certificate.
+#
+# The install used to print "Prometheus: <url>" as a success and leave the
+# controller to find out: it exits in ValidatePrometheusAPI, and the x509 line
+# that says why is in a log nobody was told to read. Two checks, both only for
+# an HTTPS Prometheus the controller verifies, and not on OpenShift, whose
+# overlay mounts the service CA and takes no TLS settings from here:
+#
+#   1. the certificate the Prometheus CR serves, read from its Secret or
+#      ConfigMap, must name the host (wva_prometheus_cert_check). Known not to,
+#      the install stops; not knowable, it goes on to the probe.
+#   2. a one-shot Pod in the controller's namespace connects with curl, with
+#      the CA the controller is given (the same volume, at the same path) or
+#      the public roots, and no option that skips verification
+#      (wva_probe_prometheus_tls). A refused certificate stops the install;
+#      a probe that could not run is a warning that says why.
+#
+# PROMETHEUS_TLS_PROBE=false skips the probe -- for a cluster that cannot pull
+# its image (PROMETHEUS_TLS_PROBE_IMAGE) -- but never the certificate check.
+wva_verify_prometheus_tls() {
+    local cfg="$1" url skip ca sn rc=0
+    [ -n "$cfg" ] || return 0
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    url="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null || true)"
+    skip="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null || true)"
+    ca="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null || true)"
+    sn="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_SERVER_NAME // ""' 2>/dev/null || true)"
+    case "$url" in https://*) ;; *) return 0 ;; esac
+    [ "$skip" != "true" ] || return 0
+
+    wva_prometheus_cert_check "$url" "$sn" || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        local host="${url#*://}"
+        host="${host%%/*}"
+        host="${host##*@}"
+        host="${sn:-${host%%:*}}"
+        log_warning "=================================================================="
+        log_warning "The Prometheus certificate does not name $host, and the controller verifies it, so it cannot connect:"
+        log_warning "  it would exit with \"x509: certificate is valid for ${WVA_PROM_CERT_NAMES}, not $host\"."
+        wva_prometheus_cert_name_advice "$url"
+        log_warning "=================================================================="
+        log_error "Prometheus at $url: its certificate does not name the host the controller verifies (see above)."
+    fi
+    if [ "${PROMETHEUS_TLS_PROBE:-true}" = "false" ]; then
+        log_info "Not probing the Prometheus TLS connection (PROMETHEUS_TLS_PROBE=false)."
+        return 0
+    fi
+    wva_probe_prometheus_tls "$url" "$ca" "$sn"
+}
+
+# wva_probe_prometheus_tls connects to Prometheus URL $1 from a one-shot Pod in
+# $WVA_NS the way the controller will: verifying the certificate against CA
+# file $2 -- mounted from the controller Deployment's own volume, at its own
+# path -- or the public roots when $2 is empty, for host $3 when set
+# (PROMETHEUS_SERVER_NAME) else the URL's host. Never with an option that
+# skips verification.
+#
+# Only a refused certificate (curl exit 51 or 60) stops the install. Anything
+# else -- the Pod is Forbidden, its image cannot be pulled, a NetworkPolicy
+# admits the controller but not this Pod, Prometheus wants a client
+# certificate -- says the probe could not tell, which is not the same as the
+# connection failing, and is a warning that names the reason.
+wva_probe_prometheus_tls() {
+    local url="$1" ca="$2" sn="$3" image pod deploy mount manifest rc=0 phase="" code="" out="" i hostport trust="the public roots"
+    [ -z "$ca" ] || trust="the CA at $ca"
+    image="${PROMETHEUS_TLS_PROBE_IMAGE:-quay.io/curl/curl:8.11.1}"
+    pod="wva-prometheus-tls-probe"
+    kc_capture get deployment wva-controller-manager -n "$WVA_NS" -o json || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_warning "Could not probe the Prometheus TLS connection: cannot read deployment/wva-controller-manager in $WVA_NS (${KC_ERR:-kubectl exited $rc}), so the CA it mounts is unknown."
+        return 0
+    fi
+    deploy="$KC_OUT"
+
+    # The volume mount that holds the CA file: the longest mountPath it is
+    # under, or the subPath mount at exactly its path.
+    if [ -n "$ca" ]; then
+        mount="$(printf '%s' "$deploy" | jq -c --arg ca "$ca" '
+            .spec.template.spec.containers as $cs
+            | (($cs | map(select(.name == "manager")) | .[0]) // $cs[0]).volumeMounts // []
+            | map(select(. as $m | ($m.subPath // "") as $sp
+                | if $sp != "" then $ca == $m.mountPath
+                  else ($ca | startswith(($m.mountPath | rtrimstr("/")) + "/")) end))
+            | sort_by(.mountPath | length) | last // empty' 2>/dev/null)" || mount=""
+        if [ -z "$mount" ]; then
+            log_warning "=================================================================="
+            log_warning "PROMETHEUS_CA_CERT_PATH is $ca, but the controller mounts no volume that holds it."
+            log_warning "  It will fail to read the CA and exit. Mount the CA first, then re-run (docs/reference/prometheus.md#tls-configuration)."
+            log_warning "=================================================================="
+            return 0
+        fi
+    fi
+
+    hostport="${url#*://}"
+    hostport="${hostport%%/*}"
+    hostport="${hostport##*@}"
+    case "$hostport" in *:*) ;; *) hostport="$hostport:443" ;; esac
+    if ! manifest="$(printf '%s' "$deploy" | jq -c --arg pod "$pod" --arg img "$image" \
+        --arg url "$url" --arg ca "$ca" --arg sn "$sn" --arg hp "$hostport" --argjson m "${mount:-null}" '
+        .spec.template.spec as $t
+        | ($hp | split(":") | last) as $port
+        | (if $sn != "" then ($url | sub("^https://[^/]+"; "https://" + $sn + ":" + $port)) else $url end) as $target
+        | {apiVersion: "v1", kind: "Pod",
+           metadata: {name: $pod, labels: {"app.kubernetes.io/name": "wva-prometheus-tls-probe",
+                                           "app.kubernetes.io/part-of": "wva"}},
+           spec: {restartPolicy: "Never", activeDeadlineSeconds: 120,
+                  automountServiceAccountToken: false, enableServiceLinks: false,
+                  nodeSelector: ($t.nodeSelector // {}), tolerations: ($t.tolerations // []),
+                  securityContext: (($t.securityContext // {}) + {runAsNonRoot: true, seccompProfile: {type: "RuntimeDefault"}}
+                                    | if .runAsUser then . else .runAsUser = 65532 end),
+                  volumes: (if $m then [($t.volumes // [])[] | select(.name == $m.name)] else [] end),
+                  containers: [{name: "probe", image: $img,
+                      command: (["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "15"]
+                                + (if $ca != "" then ["--cacert", $ca] else [] end)
+                                + (if $sn != "" then ["--connect-to", ($sn + ":" + $port + ":" + $hp)] else [] end)
+                                + [$target]),
+                      resources: {requests: {cpu: "10m", memory: "16Mi"}, limits: {cpu: "100m", memory: "64Mi"}},
+                      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                                        capabilities: {drop: ["ALL"]}},
+                      volumeMounts: (if $m then [$m + {readOnly: true}] else [] end)}]}}' 2>/dev/null)" \
+        || [ -z "$manifest" ]; then
+        log_warning "Could not probe the Prometheus TLS connection: building the probe Pod from deployment/wva-controller-manager failed."
+        return 0
+    fi
+
+    kubectl delete pod "$pod" -n "$WVA_NS" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    rc=0
+    kc_capture create -n "$WVA_NS" -f - <<< "$manifest" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_warning "Could not probe the Prometheus TLS connection from inside the cluster: creating a Pod in $WVA_NS was refused (${KC_ERR:-kubectl exited $rc})."
+        log_warning "  The controller's own connection is not checked until it starts. If it does not become ready, read its log for x509."
+        return 0
+    fi
+    log_info "Probing the Prometheus TLS connection from inside the cluster (Pod $pod, $trust, no verification skipped)..."
+    for i in $(seq 1 "${PROMETHEUS_TLS_PROBE_TIMEOUT:-90}"); do
+        phase="$(kubectl get pod "$pod" -n "$WVA_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        case "$phase" in Succeeded|Failed) break ;; esac
+        if kubectl get pod "$pod" -n "$WVA_NS" \
+            -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null \
+            | grep -qE 'ErrImagePull|ImagePullBackOff|InvalidImageName'; then
+            phase=ImagePull
+            break
+        fi
+        sleep 1
+    done
+    code="$(kubectl get pod "$pod" -n "$WVA_NS" \
+        -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)"
+    # curl's own error line when there is one (a refusal runs to several lines
+    # of advice), else what -w printed: the HTTP status.
+    out="$(kubectl logs "$pod" -n "$WVA_NS" 2>/dev/null || true)"
+    if printf '%s\n' "$out" | grep -q '^curl: ('; then
+        out="$(printf '%s\n' "$out" | grep -m1 '^curl: (')"
+    else
+        out="$(printf '%s\n' "$out" | tail -1)"
+    fi
+    kubectl delete pod "$pod" -n "$WVA_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+    case "$phase:$code" in
+        Succeeded:0)
+            log_success "Prometheus TLS verified from inside the cluster: $url ($trust; HTTP ${out:-?})"
+            return 0 ;;
+        ImagePull:*)
+            log_warning "Could not probe the Prometheus TLS connection: the probe image $image cannot be pulled here."
+            log_warning "  Set PROMETHEUS_TLS_PROBE_IMAGE to a curl image this cluster can pull, or PROMETHEUS_TLS_PROBE=false to skip the probe."
+            return 0 ;;
+        Failed:51|Failed:60)
+            WVA_PROM_CERT_NAMES="" WVA_PROM_CERT_SUGGEST=""
+            wva_prometheus_cert_check "$url" "$sn" >/dev/null 2>&1 || true
+            log_warning "=================================================================="
+            log_warning "The controller will not be able to verify the Prometheus certificate at $url:"
+            log_warning "  curl, from a Pod in $WVA_NS with $trust: $out"
+            if printf '%s' "$out" | grep -qiE 'subject name|does not match|not match target host'; then
+                wva_prometheus_cert_name_advice "$url"
+            else
+                log_warning "  The certificate is signed by a CA the controller is not given. The installer copies it from the"
+                log_warning "  Prometheus TLS Secret when it may read it; a cluster admin's prerequisites phase makes that copy:"
+                log_warning "    $(wva_make_cmd setup-prereqs)"
+                log_warning "  or name it: PROMETHEUS_SECRET_NAME/PROMETHEUS_SECRET_NS, or PROMETHEUS_CA_FILE=<file>"
+                log_warning "  (docs/reference/prometheus.md#prometheus-with-tls-eg-kube-prometheus-stack-on-a-managed-gpu-cloud)."
+            fi
+            log_warning "=================================================================="
+            log_error "Prometheus at $url: the controller cannot verify its certificate (see above)."
+            ;;
+        Failed:6)
+            log_warning "Prometheus at $url does not resolve from $WVA_NS: $out"
+            log_error "Prometheus at $url: no such host in the cluster, so the controller cannot reach it. Pass PROMETHEUS_URL=<url> naming a Service that exists."
+            ;;
+        *)
+            log_warning "Could not complete the Prometheus TLS probe (phase ${phase:-unknown}, curl exit ${code:-none}${out:+: $out})."
+            log_warning "  Not a verdict on the certificate: a NetworkPolicy that admits only the controller, or a Prometheus that wants a client certificate, ends the probe the same way."
+            return 0 ;;
+    esac
 }
 
 # wva_restart_on_prometheus_change restarts the controller when a PROMETHEUS_*
@@ -1347,8 +1800,12 @@ EOF
         wva_read_live_prometheus_tls "$WVA_NS"
     fi
     wva_resolve_prometheus_url
+    # The Prometheus CA, copied and mounted before the render, so the config and
+    # the Deployment the first apply creates already verify with it.
+    wva_sync_prometheus_ca
     wva_refuse_unknown_prometheus_tls
     wva_render_manager_config_patch "$tmp_overlay"
+    wva_append_prometheus_ca_mount_patch "$tmp_overlay/kustomization.yaml"
 
     # Who may call the external scaler: KEDA's namespace only, unless opted out.
     wva_append_scaler_networkpolicy_patch "$tmp_overlay/kustomization.yaml"

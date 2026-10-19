@@ -73,7 +73,7 @@ from the release notes. See
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_RESTART` | Let the installer restart KEDA's operator (`kubectl rollout restart deployment/keda-operator`). After an uninstall and a reinstall in the same namespace, KEDA keeps its old connection to the scaler and every call is refused, so the ScaledObjects stay unwired. `scaledobjects-apply`, `deploy-wva` and `verify-deployment` detect that and name the ScaledObjects and the command. With `true` they restart KEDA, and `undeploy-wva` restarts it once its ScaledObjects are gone; with `false` nothing restarts KEDA, which is shared, and the install goes on with the warning | `false` |
 | `DEPLOY_LLMD_MONITORS` | In the admin phase (`setup-prereqs`, or `INSTALL_PHASE=all`), add a model-server PodMonitor and an EPP ServiceMonitor in each llm-d namespace where nothing scrapes them yet. Each object is labelled `llm-d.ai/applied-by=wva-setup-prereqs`, and `undeploy-wva` removes exactly those. `false` adds nothing, and the preflight then refuses a namespace that is not scraped | `true` |
-| `KEDA_CHART_VERSION` | KEDA Helm chart version. [Supported versions](keda.md#supported-versions) | `2.19.0` |
+| `KEDA_CHART_VERSION` | KEDA Helm chart version. [Supported versions](keda.md#supported-versions) | `2.21.0` |
 | `KEDA_CMA_NAMESPACE` | OpenShift: where the installer reads the Custom Metrics Autoscaler's version, for its [version line](keda.md#what-the-installer-prints) | `openshift-keda` |
 | `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus. Unset, a newer release already installed is kept rather than downgraded, with a warning | `92.7.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
@@ -302,11 +302,41 @@ shipped default and **exits at startup** if nothing answers there
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
+| `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090`. Set, it is used as given. Unset, the installer picks one; see [How the Prometheus address is chosen](#how-the-prometheus-address-is-chosen) | detected |
 | `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset, the installer picks only from sources you set, never an auto-detected Prometheus or `default`, and otherwise creates no binding and says so (`--check` lists it as optional). A `make setup-prereqs` re-run without it keeps an existing binding; `make deploy-wva` never touches it. Full rules: [who `metrics-reader` is bound to](security-model.md#namespace-scoped-kubernetes) | none |
 | `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified, and when it verifies with no CA set; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `false`; `true` for the Prometheus this install deploys or, on an upgrade, a Prometheus the controller already ran unverified with no CA. See [TLS configuration](prometheus.md#tls-configuration) |
-| `PROMETHEUS_CA_CERT_PATH` | File, inside the controller, of the CA that signed the Prometheus certificate. You mount it ([TLS configuration](prometheus.md#tls-configuration)); setting it turns verification on. Unset, a re-run keeps the one the controller runs with | unset |
+| `PROMETHEUS_CA_CERT_PATH` | File, inside the controller, of the CA that signed the Prometheus certificate. Set, you mount it yourself and the installer copies nothing. Unset, a re-run keeps the one the controller runs with; otherwise the installer copies the CA and mounts it at `/etc/wva-prometheus-ca/ca.crt` ([Prometheus with TLS](prometheus.md#prometheus-with-tls-eg-kube-prometheus-stack-on-a-managed-gpu-cloud)) | unset |
+| `PROMETHEUS_SECRET_NAME`, `PROMETHEUS_SECRET_NS` | The Secret the installer copies the Prometheus CA from (key `ca.crt`, else `tls.crt`; never the key) | the Secret the Prometheus resource's `web.tlsConfig` names |
+| `PROMETHEUS_CA_FILE` | A local CA file to copy instead of a Secret | unset |
+| `PROMETHEUS_TLS_PROBE` | `false` skips the in-cluster TLS probe the install runs before it reports success. The certificate name check still runs | `true` |
+| `PROMETHEUS_TLS_PROBE_IMAGE` | The curl image that probe runs, for a cluster that cannot pull the default | `quay.io/curl/curl:8.11.1` |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
+
+### How the Prometheus address is chosen
+
+1. `PROMETHEUS_URL`, when you set it. It is used as given, and still checked
+   (step 4).
+2. On OpenShift, the Thanos Querier at its fixed address.
+3. Otherwise the first Prometheus resource (Prometheus Operator) on the cluster,
+   reached through a Service its certificate names. The controller verifies the
+   certificate, so the host must be one of its names:
+   - the installer reads the certificate from the Secret or ConfigMap the
+     Prometheus resource's `web.tlsConfig` names (the certificate only), and
+     takes the first Service that routes to that Prometheus and whose
+     `<service>.<namespace>.svc.cluster.local` or `<service>.<namespace>.svc`
+     the certificate names;
+   - the Prometheus's own Service comes before `prometheus-operated`. A
+     kube-prometheus-stack serves its certificate for
+     `<release>-kube-prometheus-stack-prometheus`, not for `prometheus-operated`;
+   - when the certificate cannot be read (no TLS, or you may not read it), its
+     own Service, then `prometheus-operated`.
+4. Before it reports success, the install checks the choice. A certificate
+   known not to name the host stops the install with the names it holds and the
+   `PROMETHEUS_URL` to use. Then a one-shot Pod in the controller's namespace
+   connects with curl, with the CA the controller gets and no option that skips
+   verification. A refused certificate stops the install; a probe that cannot
+   run (Pod creation Forbidden, image not pullable, a NetworkPolicy) is a
+   warning that says so.
 
 ## Which namespace is which
 

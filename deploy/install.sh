@@ -46,6 +46,11 @@ export WVA_NS_EXPLICIT NAMESPACE_EXPLICIT
 NAMESPACE=${NAMESPACE:-"llm-d-optimized-baseline"}
 MONITORING_NAMESPACE=${MONITORING_NAMESPACE:-"workload-variant-autoscaler-monitoring"}
 WVA_NS=${WVA_NS:-"workload-variant-autoscaler-system"}
+# Set by the caller, the Prometheus TLS Secret is where the controller's CA is
+# copied from (wva_prometheus_ca_source); unset, the Prometheus CR names it.
+PROMETHEUS_SECRET_NAME_EXPLICIT=${PROMETHEUS_SECRET_NAME:-}
+PROMETHEUS_SECRET_NS_EXPLICIT=${PROMETHEUS_SECRET_NS:-}
+export PROMETHEUS_SECRET_NAME_EXPLICIT PROMETHEUS_SECRET_NS_EXPLICIT
 PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 
 # WVA Configuration (required when DEPLOY_WVA=true)
@@ -144,7 +149,7 @@ KEDA_NAMESPACE_EXPLICIT=false
 [ -n "${KEDA_NAMESPACE:-}" ] && KEDA_NAMESPACE_EXPLICIT=true
 KEDA_NAMESPACE=${KEDA_NAMESPACE:-keda-system}
 # Pinned for reproducible Helm installs (used when deploy_keda actually runs helm upgrade).
-KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.19.0}
+KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.21.0}
 # On kubernetes: default false (cluster-managed KEDA); kind-emulator flows often set true or use cluster path.
 KEDA_HELM_INSTALL=${KEDA_HELM_INSTALL:-false}
 

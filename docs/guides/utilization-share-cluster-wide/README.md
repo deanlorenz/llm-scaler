@@ -147,7 +147,7 @@ make check-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
 You should see every namespace pass, and `Preflight passed` at the end:
 
 ```text
-[INFO] KEDA: not on the cluster yet; this run installs it (chart kedacore/keda 2.19.0).
+[INFO] KEDA: not on the cluster yet; this run installs it (chart kedacore/keda 2.21.0).
 [SUCCESS] Prometheus: http://prometheus-operated.monitoring.svc.cluster.local:9090
 [INFO] Checking the 2 namespace(s) with llm-d model servers or an InferencePool:
 

@@ -158,6 +158,14 @@ EOF
         wva_scaler_tls_undeploy
     fi
 
+    # The Prometheus CA copy (wva_sync_prometheus_ca), likewise written beside
+    # the overlay; only when this installer made it.
+    if [ "$(kubectl get secret wva-prometheus-ca -n "$WVA_NS" \
+        -o 'jsonpath={.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)" = "wva-installer" ]; then
+        kubectl delete secret wva-prometheus-ca -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 \
+            || log_warning "Could not delete Secret wva-prometheus-ca in $WVA_NS (the Prometheus CA copy)."
+    fi
+
     # The pod-write grant deploy/warmpool.sh, utilization-share activate and
     # an upgrade made in workload namespaces. Not rendered, so the delete
     # above never names it. See lib/pod_writer.sh. Removed after that delete,

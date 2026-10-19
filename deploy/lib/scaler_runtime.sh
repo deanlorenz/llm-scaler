@@ -18,7 +18,7 @@ KEDA_FALLBACK_MIN_VERSION="${KEDA_FALLBACK_MIN_VERSION:-2.17}"
 # KEDA_TESTED_VERSION is the KEDA minor the e2e suites run against: CI's kind
 # suites install chart kedacore/keda at install.sh's default KEDA_CHART_VERSION,
 # and hack/check-install-flow.sh fails when the two part.
-KEDA_TESTED_VERSION="2.19"
+KEDA_TESTED_VERSION="2.21"
 # KEDA_SUPPORTED_VERSIONS are the minors reported as supported, in order and
 # each once: 2.18, which the benchmarks have run on; 2.19; 2.21, the first
 # release with the CVE-2026-77524 fix, which the kind suites have passed on;

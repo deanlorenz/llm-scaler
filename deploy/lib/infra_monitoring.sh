@@ -558,27 +558,11 @@ wva_detect_prometheus_url() {
         return 0
     fi
 
-    # A Prometheus Operator install: every Prometheus CR gets a `prometheus-operated`
-    # Service in its own namespace, whatever the release is called — so this holds
-    # for kube-prometheus-stack and for a hand-rolled operator install alike.
+    # A Prometheus Operator install: the first Prometheus CR with a Service in
+    # front of it. Which Service is wva_pick_prometheus_service's decision.
     while read -r ns name; do
         [ -n "$ns" ] || continue
-        if kubectl get svc prometheus-operated -n "$ns" >/dev/null 2>&1; then
-            port="$(kubectl get svc prometheus-operated -n "$ns" \
-                -o jsonpath='{.spec.ports[?(@.name=="web")].port}' 2>/dev/null || true)"
-            # The scheme comes from the Prometheus CR, not from the port number. A
-            # Prometheus with spec.web.tlsConfig serves HTTPS on its ordinary 9090 —
-            # which is what this repo's own kube-prometheus-stack install produces —
-            # so calling it http:// pointed WVA at a TLS port in plaintext. Worse than
-            # the reset that would cause: the controller refuses an http:// Prometheus
-            # outright, while the pod that had already started kept running on the old
-            # value. The install went green and the next restart CrashLoopBackOff-ed.
-            scheme=http
-            if [ -n "$(kubectl get prometheuses.monitoring.coreos.com "$name" -n "$ns" \
-                -o jsonpath='{.spec.web.tlsConfig}' 2>/dev/null || true)" ]; then
-                scheme=https
-            fi
-            echo "${scheme}://prometheus-operated.${ns}.svc.cluster.local:${port:-9090}"
+        if wva_pick_prometheus_service "$ns" "$name"; then
             return 0
         fi
     done < <(kubectl get prometheuses.monitoring.coreos.com -A \
@@ -605,6 +589,209 @@ wva_detect_prometheus_url() {
     done
 
     return 0
+}
+
+# wva_pick_prometheus_service echoes the URL of the Service to reach Prometheus
+# CR $2 in namespace $1 by, or fails when no Service routes to it.
+#
+# The controller verifies the Prometheus certificate, so the host must be a name
+# that certificate carries. Every Prometheus CR gets a `prometheus-operated`
+# Service, but a certificate rarely names it: a kube-prometheus-stack serves
+# <release>-kube-prometheus-stack-prometheus, and that is the name its
+# certificate is issued for. Picking prometheus-operated there gave a controller
+# that crash-looped on "x509: certificate is valid for
+# llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc, ..., not
+# prometheus-operated.llm-d-monitoring.svc.cluster.local", while the install
+# reported that Prometheus as found.
+#
+# So: when the certificate can be read, the first Service (the CR's own before
+# prometheus-operated) with a host form it names -- .svc.cluster.local, then
+# .svc. When it cannot (no tlsConfig, a Forbidden read, no openssl), the CR's
+# own Service, then prometheus-operated.
+#
+# The scheme comes from the Prometheus CR, not from the port number. A
+# Prometheus with spec.web.tlsConfig serves HTTPS on its ordinary 9090 --
+# which is what this repo's own kube-prometheus-stack install produces -- so
+# calling it http:// pointed WVA at a TLS port in plaintext.
+wva_pick_prometheus_service() {
+    local ns="$1" name="$2" scheme=http services names svc port host
+    services="$(wva_prometheus_services "$ns" "$name")"
+    [ -n "$services" ] || return 1
+    if [ -n "$(kubectl get prometheuses.monitoring.coreos.com "$name" -n "$ns" \
+        -o jsonpath='{.spec.web.tlsConfig}' 2>/dev/null || true)" ]; then
+        scheme=https
+    fi
+    if [ "$scheme" = https ] && names="$(wva_prometheus_cert_names "$ns" "$name")"; then
+        while read -r svc port; do
+            for host in "$svc.$ns.svc.cluster.local" "$svc.$ns.svc"; do
+                if wva_cert_name_covers "$host" "$names"; then
+                    echo "https://$host:$port"
+                    return 0
+                fi
+            done
+        done <<< "$services"
+    fi
+    read -r svc port <<< "$services"
+    echo "$scheme://$svc.$ns.svc.cluster.local:$port"
+}
+
+# wva_prometheus_services echoes "<service> <port>", one per line, for each
+# Service in namespace $1 that routes to Prometheus CR $2: first the CR's own
+# (a selector naming it, operator.prometheus.io/name or the older prometheus
+# label), sorted by name, then prometheus-operated, which the operator makes
+# for every CR. The port is the one named http-web or web, else the first.
+wva_prometheus_services() {
+    local ns="$1" name="$2" port
+    kubectl get svc -n "$ns" -o json 2>/dev/null | jq -r --arg n "$name" '
+        [.items[]
+         | select(.metadata.name != "prometheus-operated")
+         | select(((.spec.selector // {})["operator.prometheus.io/name"] // (.spec.selector // {}).prometheus // "") == $n)]
+        | sort_by(.metadata.name)[]
+        | (.spec.ports // []) as $p
+        | .metadata.name + " " + ((($p | map(select(.name == "http-web" or .name == "web")) | .[0]) // $p[0] // {}).port // 9090 | tostring)' 2>/dev/null || true
+    if kubectl get svc prometheus-operated -n "$ns" >/dev/null 2>&1; then
+        port="$(kubectl get svc prometheus-operated -n "$ns" \
+            -o jsonpath='{.spec.ports[?(@.name=="web")].port}' 2>/dev/null || true)"
+        echo "prometheus-operated ${port:-9090}"
+    fi
+}
+
+# wva_prometheus_cert_names echoes the DNS names on the certificate Prometheus
+# CR $2 in namespace $1 serves, one per line, from the Secret or ConfigMap its
+# spec.web.tlsConfig.cert names. It reads that one key -- the public
+# certificate -- and never the private key the CR names beside it. Fails when
+# the CR has no such certificate, it cannot be read (Forbidden included: a read
+# that was refused is not a certificate without names), or it names no host.
+wva_prometheus_cert_names() {
+    local ns="$1" name="$2" ref kind obj key pem names
+    ref="$(wva_prometheus_cert_ref "$ns" "$name")"
+    [ -n "$ref" ] || return 1
+    read -r kind obj key <<< "$ref"
+    [ -n "$key" ] || return 1
+    pem="$(kubectl get "$kind" "$obj" -n "$ns" -o "jsonpath={.data.${key//./\\.}}" 2>/dev/null)" || return 1
+    [ -n "$pem" ] || return 1
+    if [ "$kind" = secret ]; then
+        pem="$(printf '%s' "$pem" | base64 -d 2>/dev/null)" || return 1
+    fi
+    names="$(wva_cert_dns_names "$pem")"
+    [ -n "$names" ] || return 1
+    printf '%s\n' "$names"
+}
+
+# wva_prometheus_cert_ref echoes "<secret|configmap> <name> <key>": where the
+# certificate Prometheus CR $2 in namespace $1 serves is stored, from its
+# spec.web.tlsConfig.cert. Nothing when it has none, or the CR cannot be read.
+wva_prometheus_cert_ref() {
+    kubectl get prometheuses.monitoring.coreos.com "$2" -n "$1" -o json 2>/dev/null \
+        | jq -r '.spec.web.tlsConfig.cert // {}
+            | if .secret.name then "secret " + .secret.name + " " + (.secret.key // "tls.crt")
+              elif .configMap.name then "configmap " + .configMap.name + " " + (.configMap.key // "tls.crt")
+              else empty end' 2>/dev/null || true
+}
+
+# wva_cert_dns_names echoes the DNS subject alternative names of PEM
+# certificate $1, one per line. Go verifies the host against these alone; the
+# common name has not counted since Go 1.15.
+wva_cert_dns_names() {
+    printf '%s\n' "$1" | openssl x509 -noout -text 2>/dev/null \
+        | awk '/X509v3 Subject Alternative Name/ { getline; print; exit }' \
+        | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p'
+}
+
+# wva_cert_name_covers reports whether one of the certificate names in $2 (one
+# per line) covers host $1: equal ignoring case, or a "*." wildcard standing for
+# exactly one leftmost label, as Go matches them.
+wva_cert_name_covers() {
+    local host name label
+    host="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    label="${host%%.*}"
+    while IFS= read -r name; do
+        name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+        [ -n "$name" ] || continue
+        [ "$name" != "$host" ] || return 0
+        case "$name" in
+            \*.*) [ -n "$label" ] && [ "$host" != "$label" ] && [ "$host" = "$label.${name#\*.}" ] && return 0 ;;
+        esac
+    done <<< "$2"
+    return 1
+}
+
+# wva_prometheus_cert_check reports whether the certificate of the Prometheus
+# that URL $1 reaches names the host the controller verifies: $2 (the
+# PROMETHEUS_SERVER_NAME it runs with) when set, else the URL's host.
+#   0  a Prometheus certificate read in that namespace names it
+#   1  the Service the URL names routes to a Prometheus CR whose certificate
+#      was read and does not name it: the controller cannot connect
+#   2  cannot tell -- not https, not a cluster Service, a Service that is not
+#      a Prometheus CR's (a Thanos has a certificate of its own), or a
+#      certificate that cannot be read
+# Sets WVA_PROM_CERT_NAMES to the names read, comma-separated, and
+# WVA_PROM_CERT_SUGGEST to a URL for a Service there whose host they name.
+WVA_PROM_CERT_NAMES=""
+WVA_PROM_CERT_SUGGEST=""
+wva_prometheus_cert_check() {
+    local url="$1" host ns svc cr names services s p h rc=2
+    WVA_PROM_CERT_NAMES="" WVA_PROM_CERT_SUGGEST=""
+    case "$url" in https://*) ;; *) return 2 ;; esac
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host##*@}"
+    host="${host%%:*}"
+    svc="${host%%.*}"
+    ns="$(wva_prometheus_url_namespace "$url")"
+    [ -n "$ns" ] || return 2
+    case "$host" in
+        "$svc.$ns.svc"|"$svc.$ns.svc.cluster.local") ;;
+        *) return 2 ;;
+    esac
+    [ -z "${2:-}" ] || host="$2"
+    while read -r cr; do
+        [ -n "$cr" ] || continue
+        services="$(wva_prometheus_services "$ns" "$cr")"
+        printf '%s\n' "$services" | awk -v s="$svc" '$1 == s { found = 1 } END { exit !found }' || continue
+        names="$(wva_prometheus_cert_names "$ns" "$cr")" || continue
+        WVA_PROM_CERT_NAMES="$(printf '%s\n' "$names" | paste -sd, - | sed 's/,/, /g')"
+        if wva_cert_name_covers "$host" "$names"; then
+            return 0
+        fi
+        rc=1
+        while read -r s p; do
+            for h in "$s.$ns.svc.cluster.local" "$s.$ns.svc"; do
+                if wva_cert_name_covers "$h" "$names"; then
+                    WVA_PROM_CERT_SUGGEST="https://$h:$p"
+                    break 2
+                fi
+            done
+        done <<< "$services"
+    done < <(kubectl get prometheuses.monitoring.coreos.com -n "$ns" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    return "$rc"
+}
+
+# wva_prometheus_cr_for_url echoes "<namespace> <prometheus-cr>" for the
+# Prometheus CR whose Service URL $1 names -- its own Service or
+# prometheus-operated -- or nothing.
+wva_prometheus_cr_for_url() {
+    local url="$1" host ns svc cr
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host##*@}"
+    host="${host%%:*}"
+    svc="${host%%.*}"
+    ns="$(wva_prometheus_url_namespace "$url")"
+    [ -n "$ns" ] || return 0
+    case "$host" in
+        "$svc.$ns.svc"|"$svc.$ns.svc.cluster.local") ;;
+        *) return 0 ;;
+    esac
+    while read -r cr; do
+        [ -n "$cr" ] || continue
+        if wva_prometheus_services "$ns" "$cr" | awk -v s="$svc" '$1 == s { found = 1 } END { exit !found }'; then
+            printf '%s %s\n' "$ns" "$cr"
+            return 0
+        fi
+    done < <(kubectl get prometheuses.monitoring.coreos.com -n "$ns" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 }
 
 # wva_is_openshift reports whether this is an OpenShift cluster.
@@ -646,10 +833,17 @@ wva_report_prometheus() {
     local detected
     if [ -n "${PROMETHEUS_URL_EXPLICIT:-}" ]; then
         log_info "Prometheus: $PROMETHEUS_URL_EXPLICIT (you set PROMETHEUS_URL)"
+        wva_report_prometheus_cert_name "$PROMETHEUS_URL_EXPLICIT"
         return 0
     fi
     detected="$(wva_detect_prometheus_url)"
     if [ -n "$detected" ]; then
+        # Found is not usable: a certificate that does not name the host is a
+        # controller that cannot connect, so it is not reported as a success.
+        if ! wva_report_prometheus_cert_name "$detected"; then
+            log_warning "Prometheus: $detected (found, but see the certificate warning above)"
+            return 0
+        fi
         log_success "Prometheus: $detected"
         if wva_is_openshift; then
             log_info "  OpenShift's Thanos Querier — a fixed address, so this needs no permission to know."
@@ -666,6 +860,32 @@ wva_report_prometheus() {
         return 0
     fi
     log_warning "No Prometheus found on this cluster. The install will deploy one (DEPLOY_PROMETHEUS=true), or pass PROMETHEUS_URL=<url> to point at one outside the cluster."
+}
+
+# wva_report_prometheus_cert_name warns, and fails, when the certificate of
+# the Prometheus URL $1 reaches is known not to name its host. Anything it
+# cannot tell passes: the install probes the connection itself later
+# (wva_verify_prometheus_tls).
+wva_report_prometheus_cert_name() {
+    local rc=0
+    wva_prometheus_cert_check "$1" || rc=$?
+    [ "$rc" -eq 1 ] || return 0
+    log_warning "The Prometheus certificate does not name the host in $1, so a controller that verifies it cannot connect."
+    wva_prometheus_cert_name_advice "$1"
+    return 1
+}
+
+# wva_prometheus_cert_name_advice prints the names the Prometheus certificate
+# holds (WVA_PROM_CERT_NAMES, from wva_prometheus_cert_check) and how to point
+# the controller at one of them.
+wva_prometheus_cert_name_advice() {
+    log_warning "  The certificate is valid for: ${WVA_PROM_CERT_NAMES:-names that could not be read}"
+    if [ -n "$WVA_PROM_CERT_SUGGEST" ]; then
+        log_warning "  Re-run with the Service it names:  $(wva_rerun_cmd "PROMETHEUS_URL=$WVA_PROM_CERT_SUGGEST")"
+    else
+        log_warning "  Re-run with PROMETHEUS_URL=https://<one of those names>:<port>, a Service in front of that Prometheus."
+    fi
+    log_warning "  See docs/reference/troubleshooting.md#prometheus-certificate-name-mismatch."
 }
 
 deploy_monitoring_stack() {

@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=87
+EXPECT_CASES=88
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -34,7 +34,7 @@ done
 BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
 unset WVA_SCOPE WVA_WATCH_NS WVA_LIMITER KEDA_HELM_INSTALL SCALER_BACKEND ENVIRONMENT
 WVA_NS="wva-system"
-KEDA_CHART_VERSION="2.19.0"
+KEDA_CHART_VERSION="2.21.0"
 KEDA_NAMESPACE="keda-system"
 REQUIRED_TOOLS=(kubectl)
 # shellcheck disable=SC1090
@@ -80,7 +80,7 @@ kubectl() {
         "get deployments -A -l app.kubernetes.io/name=keda-operator -o jsonpath={.items[0].spec.template.spec.containers[0].image}"*)
             case "${OP_IMAGE:-}" in
                 forbidden) echo 'Error from server (Forbidden): deployments.apps is forbidden: User "u" cannot list resource "deployments" in API group "apps" at the cluster scope' >&2; return 1 ;;
-                *)         echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.19.0}"; return 0 ;;
+                *)         echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.21.0}"; return 0 ;;
             esac ;;
         "get csv -n openshift-keda"*)
             case "${CSV_MODE:-ok}" in
@@ -88,6 +88,8 @@ kubectl() {
                 none)      echo ''; return 0 ;;
                 *)         echo 'custom-metrics-autoscaler.v2.17.2-1 2.17.2-1'; return 0 ;;
             esac ;;
+        "get pods -A -l app.kubernetes.io/name=keda-operator -o jsonpath={.items[0].spec.containers[0].image}"*)
+            echo "${OP_IMAGE:-ghcr.io/kedacore/keda:2.21.0}"; return 0 ;;
     esac
     return 0
 }
@@ -198,11 +200,11 @@ else
         fail "an operator older than ${KEDA_FALLBACK_MIN_VERSION:-2.17} must warn and continue (rc=$rc state=$state)" "$out"
     fi
 
-    OP_IMAGE=ghcr.io/kedacore/keda:2.19.0; keda_case
+    OP_IMAGE=ghcr.io/kedacore/keda:2.21.0; keda_case
     if [ "$rc" -eq 0 ] && [ "$state" = present ]; then
-        ok "KEDA 2.19.0 with a Ready operator is present"
+        ok "KEDA 2.21.0 with a Ready operator is present"
     else
-        fail "KEDA 2.19.0 Ready must pass as present (rc=$rc state=$state)" "$out"
+        fail "KEDA 2.21.0 Ready must pass as present (rc=$rc state=$state)" "$out"
     fi
 
     # The version of an existing KEDA: reported, never blocking. 2.18, 2.19 and 2.21
@@ -305,13 +307,21 @@ else
         fail "deploy_keda must report the version of the KEDA it finds (rc=$rc)" "$out"
     fi
 
-    # The chart this run installs gets the same judgement.
+    # The chart this run installs gets the same judgement: the default chart
+    # is supported and carries no CVE advice; an older pinned one gets it.
     KEDA_HELM_INSTALL=true; CRD_MODE=absent; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA chart 2.21.0 (this run installs it): supported' \
+        && ! printf '%s' "$out" | grep -q 'CVE-2026-77524'; then
+        ok "VERSION: the default chart KEDA_HELM_INSTALL=true installs is reported supported, with no CVE advice"
+    else
+        fail "the default chart this run installs must be reported supported without CVE advice (rc=$rc)" "$out"
+    fi
+    KEDA_CHART_VERSION=2.19.0; keda_case; KEDA_CHART_VERSION=2.21.0
     if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA chart 2.19.0 (this run installs it): supported' \
         && printf '%s' "$out" | grep -q 'consider KEDA_CHART_VERSION=2.21.0'; then
-        ok "VERSION: the chart KEDA_HELM_INSTALL=true installs is reported, with the CVE advice"
+        ok "VERSION: a pinned 2.19.0 chart is reported supported, with the CVE advice"
     else
-        fail "the chart this run installs must be reported (rc=$rc)" "$out"
+        fail "a pinned 2.19.0 chart must be reported with the CVE advice (rc=$rc)" "$out"
     fi
     KEDA_HELM_INSTALL=false; CRD_MODE=new
 
