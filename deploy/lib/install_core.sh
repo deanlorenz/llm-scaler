@@ -400,7 +400,15 @@ main() {
         # Gated on SKIP_CHECKS so the escape hatch these messages advertise is real
         # here too: they say "install without the checks: SKIP_CHECKS=true", and a
         # preflight that refused anyway would be telling the reader something false.
-        if [ "$SKIP_CHECKS" != "true" ]; then
+        if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
+            # A cluster-scoped controller manages every namespace, so the same
+            # checks run once per namespace it would manage, found rather than
+            # named. Run against WVA_NS they checked the controller's own
+            # namespace, which holds no model servers, and passed on nothing.
+            if ! wva_check_managed_namespaces && [ "$SKIP_CHECKS" != "true" ]; then
+                log_error "Refusing to continue — fix the namespaces above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
+            fi
+        elif [ "$SKIP_CHECKS" != "true" ]; then
             wva_require_modelserver_metrics
             # The other half of "can WVA see anything": the model servers supply the
             # engine metrics, the EPP supplies the scheduler queue. Missing either is

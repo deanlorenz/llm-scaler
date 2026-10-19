@@ -1050,3 +1050,111 @@ wva_require_epp_metrics() {
     wva_report_epp_flowcontrol && return 0
     log_error "Refusing to continue — fix the EPP above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
 }
+
+# wva_inferencepool_namespaces echoes every namespace that has an InferencePool,
+# in either API group (the same two wva_epp_services reads).
+wva_inferencepool_namespaces() {
+    local kind
+    for kind in inferencepools.inference.networking.k8s.io inferencepools.inference.networking.x-k8s.io; do
+        kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true
+    done | grep -v '^$' | sort -u || true
+}
+
+# wva_ns_check_reasons echoes, comma-separated, what the per-namespace checks in
+# $1 (their output) found missing. Read from the lines the checks print, so the
+# summary cannot name a failure the details above it do not show.
+wva_ns_check_reasons() {
+    local out="$1" reasons=()
+    case "$out" in *"Monitoring not enabled for your llm-d servers"*) reasons+=("model servers not scraped") ;; esac
+    case "$out" in *"Router monitoring not enabled"*) reasons+=("EPP not scraped") ;; esac
+    case "$out" in *"Router queue not enabled"*) reasons+=("EPP flow control off") ;; esac
+    case "$out" in *"could not read"*"plugins config"*) reasons+=("EPP config unreadable") ;; esac
+    local IFS=,
+    printf '%s' "${reasons[*]}" | sed 's/,/, /g'
+}
+
+# wva_check_managed_namespaces runs the per-namespace checks of a cluster-scoped
+# install against every namespace it would manage, found rather than named: every
+# namespace with llm-d model servers or an InferencePool.
+#
+# The checks are the namespace-scoped install's own (wva_report_modelserver_metrics
+# and wva_report_epp_flowcontrol), run once per namespace with WVA_WATCH_NS set to
+# it. A cluster-scoped preflight used to run them once, against the controller's
+# namespace, which holds no model servers -- so it passed having checked nothing.
+#
+# Output is grouped per namespace, then one summary line per namespace and an
+# overall line. A namespace this identity may not read is "could not check",
+# never passed: FORBIDDEN IS NOT ABSENT. Returns 1 when any namespace FAILED;
+# "could not check" does not fail, the same rule the checks themselves apply to a
+# signal they could not confirm.
+wva_check_managed_namespaces() {
+    local namespaces ns out rc reasons count
+    local passed=0 failed=0 unchecked=0 summary=()
+
+    if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
+        log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
+        log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
+        return 0
+    fi
+
+    namespaces="$( { wva_namespaces_with_model_servers; wva_inferencepool_namespaces; } | grep -v '^$' | sort -u || true)"
+    if [ -z "$namespaces" ]; then
+        log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
+        return 0
+    fi
+    count="$(printf '%s\n' "$namespaces" | grep -c .)"
+    log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
+
+    for ns in $namespaces; do
+        echo "" >&2
+        log_info "Namespace $ns"
+        if ! kubectl auth can-i list pods -n "$ns" >/dev/null 2>&1 \
+            || ! kubectl auth can-i get configmaps -n "$ns" >/dev/null 2>&1; then
+            log_warning "  Could not check $ns: reading its Pods or ConfigMaps is not permitted for you."
+            unchecked=$((unchecked + 1))
+            summary+=("could not check|$ns|reading it is not permitted for you")
+            continue
+        fi
+        rc=0
+        out="$( (WVA_WATCH_NS="$ns"; wva_report_modelserver_metrics) 2>&1 )" || rc=1
+        out="${out}
+$( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
+        printf '%s\n' "$out" | grep -v '^$' >&2 || true
+        if [ "$rc" -ne 0 ]; then
+            reasons="$(wva_ns_check_reasons "$out")"
+            log_warning "  $ns: failed${reasons:+ ($reasons)}. Fix what is listed above."
+            failed=$((failed + 1))
+            summary+=("failed|$ns|${reasons:-see above}")
+        elif printf '%s' "$out" | grep -qE 'cannot tell whether|could not be confirmed|no running pod behind'; then
+            log_warning "  $ns: could not check everything. See above."
+            unchecked=$((unchecked + 1))
+            summary+=("could not check|$ns|some signals could not be confirmed")
+        else
+            log_success "  $ns: passed."
+            passed=$((passed + 1))
+            summary+=("passed|$ns|")
+        fi
+    done
+
+    echo "" >&2
+    log_info "Namespace summary:"
+    local row status name why
+    for row in "${summary[@]}"; do
+        status="${row%%|*}"; row="${row#*|}"
+        name="${row%%|*}"; why="${row#*|}"
+        case "$status" in
+            passed) log_success "  $name: passed" ;;
+            *)      log_warning "  $name: ${status}${why:+ ($why)}" ;;
+        esac
+    done
+    if [ "$failed" -gt 0 ]; then
+        log_warning "Namespaces: $passed passed, $failed failed, $unchecked could not be checked."
+        return 1
+    fi
+    if [ "$unchecked" -gt 0 ]; then
+        log_warning "Namespaces: $passed passed, $unchecked could not be checked. Those are not passes."
+        return 0
+    fi
+    log_success "Namespaces: all $passed passed."
+    return 0
+}
