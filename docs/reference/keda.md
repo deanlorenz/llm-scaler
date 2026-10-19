@@ -125,8 +125,7 @@ plaintext. With `WVA_SCALER_TLS=true`, it refuses instead. Set
 
 Sometimes the installer writes KEDA's side for the first time while KEDA is
 already running. It then prints a warning and the command to restart KEDA's
-operator. On a reinstall, KEDA keeps the old client certificate until its
-operator restarts.
+operator. On a reinstall, KEDA keeps its old connection to the scaler until its operator restarts, and every call is refused. The installer never restarts KEDA's operator on its own, because other workloads share it. `make scaledobjects-apply`, `make deploy-wva` and `make verify-deployment` detect the stale connection, list the ScaledObjects that stay unwired, and print the restart command. With `KEDA_RESTART=true` they restart KEDA, and so does `make undeploy-wva` once its ScaledObjects are gone.
 
 ## Uninstall
 

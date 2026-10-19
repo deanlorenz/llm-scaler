@@ -127,7 +127,8 @@ cwr-kind-worker          Ready    <none>          2m27s   v1.32.0   NVIDIA-A100-
 cwr-kind-worker2         Ready    <none>          2m27s   v1.32.0
 ```
 
-Write down the product of the nodes the models run on. You need it in step 8.
+Write down the product of the nodes the models run on. Option A in step 8
+needs it.
 
 ## Install
 
@@ -224,31 +225,44 @@ If not:
 
 ### Step 8: Choose the budget
 
-Set the GPU product from step 5, and how many of its GPUs the models may hold
-together.
+The budget is how many GPUs the models may hold together. Pick one option.
+Steps 9, 14 and 15 then have a part for each; every other step is the same.
+
+- **Option A: quota.** A GPU count you set. Pick it when the models get a
+  fixed share of a cluster that other work also uses.
+- **Option B: the cluster's GPUs** (`gpu-inventory`). Whatever the nodes
+  have, less what other pods hold. Pick it when the nodes are for these
+  models, or when you want every free GPU used.
+
+For option A, set the GPU product from step 5, and how many of its GPUs the
+models may hold together:
 
 <!-- guide:steps.vars start -->
 ```bash
-# The GPU product from step 5, and how many of its GPUs the models may hold together.
+# Option A: quota. The GPU product from step 5, and how many of its GPUs the models may hold together.
 export ACCELERATOR=<gpu product>
 export GPUS=<gpus>
 ```
 <!-- guide:steps.vars end -->
 
-This prints nothing.
+This prints nothing. Option B needs no settings.
 
 ### Step 9: Install the scaling manager
 
+It takes about 2 minutes.
+
+**Option A: quota.**
+
 <!-- guide:steps.install start -->
 ```bash
-# The scaling manager, with one GPU budget for every namespace.
+# Option A: quota. The scaling manager, with one GPU budget for every namespace.
 make deploy-wva SCOPE=cluster INSTALL_PHASE=wva \
   WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
 ```
 <!-- guide:steps.install end -->
 
-It takes about 2 minutes. You should see every namespace pass, the budget,
-and `Deployment on kubernetes complete!`:
+You should see every namespace pass, the quota, and `Deployment on kubernetes
+complete!`:
 
 ```text
 [SUCCESS]   team-a: passed (EPP flow control off: no scale from zero)
@@ -264,23 +278,36 @@ and `Deployment on kubernetes complete!`:
 [SUCCESS] Deployment on kubernetes complete!
 ```
 
+**Option B: the cluster's GPUs.**
+
+<!-- guide:steps.installphysical start -->
+```bash
+# Option B: the cluster's GPUs. The scaling manager, with the free GPUs on the nodes as the budget.
+make deploy-wva SCOPE=cluster INSTALL_PHASE=wva WVA_LIMITER=gpu-inventory
+```
+<!-- guide:steps.installphysical end -->
+
+You should see every namespace pass, the `gpu-inventory` limiter, and
+`Deployment on kubernetes complete!`:
+
+```text
+[SUCCESS] The controller can list nodes, which the gpu-inventory limiter requires
+...
+[SUCCESS] Namespaces: all 2 passed.
+...
+[WARNING] Scaling is now bounded by every limiter in 'gpu-inventory' (declared in workload-variant-autoscaler-system/wva-scaling-policy-config):
+    - type: gpu-inventory
+...
+[SUCCESS] Deployment on kubernetes complete!
+```
+
 If not:
 
 - **It says the prerequisites are missing.** Run step 7 first.
 - **A namespace `failed` with `make setup-prereqs` in its fix.** Step 7 has
   not added that namespace's monitors yet. Run step 7 again.
-- **It warns that the quota key matches no node.** Use the exact product
-  from step 5.
-
-To use every free GPU of the product instead of a fixed number, run this
-instead. It needs no step 8.
-
-<!-- guide:steps.installphysical start -->
-```bash
-# The same, with the cluster's free GPUs as the budget instead of a number.
-make deploy-wva SCOPE=cluster INSTALL_PHASE=wva WVA_LIMITER=gpu-inventory
-```
-<!-- guide:steps.installphysical end -->
+- **Option A: it warns that the quota key matches no node.** Use the exact
+  product from step 5.
 
 ## Register the models
 
@@ -353,6 +380,22 @@ You should see one ScaledObject for each model:
 If a model shows `adopt`, it already has a ScaledObject. Keep `adopt`, so the
 model does not get a second one.
 
+If you installed the scaling manager here before (step 19, then again), you
+may instead see:
+
+```text
+[WARNING] KEDA's operator still holds its connection to the scaler from before a reinstall, so every call it makes is refused. These ScaledObjects stay unwired, with their HPAs on the CPU default and WVA's decisions reaching nothing, until KEDA's operator restarts:
+    team-a/model-a-decode-wva
+    team-b/model-b-decode-wva
+[WARNING]   Cause: ... Restart KEDA's operator:  kubectl rollout restart deployment/keda-operator -n keda-system
+[WARNING]   Not restarted: KEDA's operator is shared with everything else that uses KEDA. The install goes on. ...
+```
+
+KEDA keeps one connection per scaler and never closes it. Restart KEDA's
+operator with the command it prints. That briefly pauses scaling for
+everything else on the cluster that uses KEDA, so it is your call; with
+`KEDA_RESTART=true`, step 12 runs the restart itself.
+
 ## Turn on sharing
 
 ### Step 13: Name a model namespace
@@ -380,10 +423,23 @@ make utilization-share-check
 ```
 <!-- guide:steps.budget end -->
 
-You should see the GPU product, and no `[FAIL]`:
+**Option A: quota.** You should see the quota, the GPU product, and no
+`[FAIL]`:
 
 ```text
 [OK]   limiter: quota; the optimizer shares each quota group
+  ...
+  accelerators the controller resolves: NVIDIA-A100-PCIE-80GB
+[OK]   no AcceleratorNotResolved events
+  optimizer block: none (today's optimizer). Next: shadow
+```
+
+**Option B: the cluster's GPUs.** You should see the GPU product, no `[FAIL]`,
+and one expected `[WARN]`: the optimizer plans nothing for this limiter until
+step 15 turns on physical groups.
+
+```text
+[WARN] limiter: gpu-inventory and no quota. The optimizer plans nothing here until the block sets physicalGroups: run shadow with --physical-groups (PHYSICAL_GROUPS=true)
   ...
   accelerators the controller resolves: NVIDIA-A100-PCIE-80GB
 [OK]   no AcceleratorNotResolved events
@@ -394,32 +450,33 @@ If not:
 
 - **`the controller has logged no accelerator yet`.** Wait another minute and
   run it again.
-- **`limiter: gpu-inventory and no quota`.** Expected when you chose the
-  cluster's free GPUs in step 9. Step 15 has the command for that case.
-- **The quota has no key for a product.** Run steps 8 and 9 again with that
-  exact name.
+- **Option A: the quota has no key for a product.** Run steps 8 and 9 again
+  with that exact name.
 
 ### Step 15: Turn on shadow
 
 In shadow, the optimizer reports what it would move. It moves nothing.
 
+**Option A: quota.**
+
 <!-- guide:steps.shadow start -->
 ```bash
-# Shadow. It reports what it would move, and moves nothing.
+# Option A: quota. Shadow: it reports what it would move, and moves nothing.
 make utilization-share-shadow
 ```
 <!-- guide:steps.shadow end -->
 
-If you chose the cluster's free GPUs in step 9, run this instead:
+**Option B: the cluster's GPUs.** `PHYSICAL_GROUPS=true` lets the optimizer
+plan across the nodes' GPUs.
 
 <!-- guide:steps.shadowphysical start -->
 ```bash
-# Shadow, when the budget is the cluster's GPUs.
+# Option B: the cluster's GPUs. Shadow, planning across the nodes' GPUs; it moves nothing.
 make utilization-share-shadow PHYSICAL_GROUPS=true
 ```
 <!-- guide:steps.shadowphysical end -->
 
-You should see:
+For either, you should see:
 
 ```text
   wrote the optimizer block (shadow) into workload-variant-autoscaler-system/wva-scaling-policy-config
@@ -436,14 +493,29 @@ make utilization-share-status
 ```
 <!-- guide:steps.status end -->
 
-You should see `mode shadow` and no warnings:
+You should see `mode shadow` and no warnings. With option A the limiter reads
+`quota/install-quota`:
 
 ```text
   policy: workload-variant-autoscaler-system/wva-scaling-policy-config; optimizer block: shadow
   controller: mode shadow, limiter quota/install-quota, policy version 2980 accepted=true, ...
   log: ... Utilization share: would rebalance (shadow) {"accelerator": "NVIDIA-A100-PCIE-80GB", "scope": "cluster", "budget": 4, ...
+  events counted in the namespaces of this budget: team-a team-b
+  UtilizationShareGiving events: 0
+  UtilizationShareReceiving events: 0
+  UtilizationShareReceived events: 0
 [OK]   no UtilizationShare warnings
 ```
+
+With option B, the block and the limiter read:
+
+```text
+  policy: workload-variant-autoscaler-system/wva-scaling-policy-config; optimizer block: shadow, physical groups
+  controller: mode shadow, limiter inventory/gpu-inventory, policy version 4746 accepted=true, ...
+```
+
+Run step 14 again and option B's `[WARN]` is gone:
+`[OK]   limiter: gpu-inventory, and the block plans physical groups`.
 
 ### Step 16: Activate
 
@@ -484,6 +556,15 @@ You should see `UtilizationShareGiving` on the model that gives a GPU, and
 ```text
 team-b   4m46s   Normal   UtilizationShareGiving      deployment/model-b-decode   Utilization share: giving one replica (1 GPUs) to a model in another namespace of its quota group ...
 team-a   4m46s   Normal   UtilizationShareReceiving   deployment/model-a-decode   Utilization share: receiving 1 GPUs from a model in another namespace of its quota group ...
+```
+
+The status command from step 15 now counts them, across every namespace of
+the budget:
+
+```text
+  events counted in the namespaces of this budget: team-a team-b
+  UtilizationShareGiving events: 1 (team-b 1)
+  UtilizationShareReceiving events: 1 (team-a 1)
 ```
 
 A move waits for the giver's scale-down window, 300 seconds by default. If
@@ -542,15 +623,16 @@ You should see each ScaledObject and the added monitors removed, and
 [INFO]   KEDA restores each workload to its pre-autoscaling replica count as these go.
 [SUCCESS] WVA uninstalled
 [INFO] Removed the monitors setup added in the llm-d namespaces (label llm-d.ai/applied-by=wva-setup-prereqs).
-[SUCCESS] Restarted KEDA's operator in keda-system, so a reinstall here gets a new connection to the scaler.
-...
+[INFO] KEDA's operator is not restarted (it is shared; KEDA_RESTART=true lets the uninstall do it). It keeps its connection to the removed scaler. If you install this scaler in workload-variant-autoscaler-system again, the install finds that connection and prints the restart. To restart it now:  kubectl rollout restart deployment/keda-operator -n keda-system
 [SUCCESS] Undeployment complete!
 ```
 
 The models keep serving. KEDA returns each one to the replica count it had
-before step 12. It restarts KEDA's operator, which drops its connection to the
-removed scaler; `KEDA_RESTART=false` skips that. KEDA and Prometheus stay. To
-remove them too, add `UNDEPLOY_SHARED=true`.
+before step 12. KEDA and Prometheus stay. To remove them too, add
+`UNDEPLOY_SHARED=true`.
+
+KEDA's operator is not restarted, because other workloads share it. If you
+install again here later, step 12 tells you to restart it then.
 
 ## Details
 

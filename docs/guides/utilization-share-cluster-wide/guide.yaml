@@ -31,17 +31,17 @@ steps:
     run: |
       make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
   vars:
-    note: The GPU product from step 5, and how many of its GPUs the models may hold together.
+    note: "Option A: quota. The GPU product from step 5, and how many of its GPUs the models may hold together."
     run: |
       export ACCELERATOR=<gpu product>
       export GPUS=<gpus>
   install:
-    note: The scaling manager, with one GPU budget for every namespace.
+    note: "Option A: quota. The scaling manager, with one GPU budget for every namespace."
     run: |
       make deploy-wva SCOPE=cluster INSTALL_PHASE=wva \
         WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
   installphysical:
-    note: The same, with the cluster's free GPUs as the budget instead of a number.
+    note: "Option B: the cluster's GPUs. The scaling manager, with the free GPUs on the nodes as the budget."
     run: |
       make deploy-wva SCOPE=cluster INSTALL_PHASE=wva WVA_LIMITER=gpu-inventory
   plan:
@@ -66,11 +66,11 @@ steps:
     run: |
       make utilization-share-check
   shadow:
-    note: Shadow. It reports what it would move, and moves nothing.
+    note: "Option A: quota. Shadow: it reports what it would move, and moves nothing."
     run: |
       make utilization-share-shadow
   shadowphysical:
-    note: Shadow, when the budget is the cluster's GPUs.
+    note: "Option B: the cluster's GPUs. Shadow, planning across the nodes' GPUs; it moves nothing."
     run: |
       make utilization-share-shadow PHYSICAL_GROUPS=true
   status:
