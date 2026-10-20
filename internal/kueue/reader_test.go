@@ -381,6 +381,50 @@ var _ = Describe("Reader", func() {
 		Expect(snap.Cluster).To(Equal(config.ExternalCaps{Untyped: 6, HasUntyped: true}))
 	})
 
+	It("lists LocalQueues in each of several watched namespaces, and nowhere else", func() {
+		c := newFakeClient(v,
+			flavor(v, "h100", nil),
+			clusterQueue(v, "cq", flavorQuotas("h100", quota("nvidia.com/gpu", "6"))),
+			localQueue(v, "team-a", "lq", "cq"),
+			localQueue(v, "team-b", "lq", "cq"),
+			localQueue(v, "team-c", "lq", "cq"),
+		)
+		snap, err := NewReader(c, Options{Namespace: "team-a,team-b"}).Quotas(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snap.Namespace).To(HaveLen(2))
+		Expect(snap.Namespace).To(HaveKey("team-a"))
+		Expect(snap.Namespace).To(HaveKey("team-b"))
+		Expect(snap.Cluster).To(Equal(config.ExternalCaps{Untyped: 6, HasUntyped: true}))
+	})
+
+	It("skips one Forbidden namespace of several, and keeps the others' grants", func() {
+		objs := []client.Object{
+			flavor(v, "h100", nil),
+			clusterQueue(v, "cq", flavorQuotas("h100", quota("nvidia.com/gpu", "6"))),
+			localQueue(v, "team-a", "lq", "cq"),
+			localQueue(v, "team-b", "lq", "cq"),
+		}
+		denyB := func() client.Client {
+			return fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(kueueMapper(v)).
+				WithObjects(objs...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindLocalQueue+"List" &&
+							(&client.ListOptions{}).ApplyOptions(opts).Namespace == "team-b" {
+							return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "localqueues"}, "", errors.New("RoleBinding deleted"))
+						}
+						return cl.List(ctx, list, opts...)
+					},
+				}).Build()
+		}
+		snap, err := NewReader(denyB(), Options{Namespace: "team-a,team-b"}).Quotas(ctx)
+		Expect(err).NotTo(HaveOccurred(), "one Forbidden namespace must not fail every namespace's read")
+		Expect(snap.Namespace).To(HaveKey("team-a"))
+		Expect(snap.Namespace).NotTo(HaveKey("team-b"), "the Forbidden namespace gets no grant")
+		_, err = NewReader(denyB(), Options{Namespace: "team-b"}).Quotas(ctx)
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "with one namespace, Forbidden stays an error")
+	})
+
 	It("clamps a huge nominalQuota and accepts numeric quantities", func() {
 		c := newFakeClient(v,
 			flavor(v, "h100", map[string]interface{}{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"}),

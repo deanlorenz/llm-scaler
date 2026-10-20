@@ -49,15 +49,28 @@ wva_watch_rbac_names() {
 # The Role is a copy of the rendered one rather than a second definition, so it
 # cannot drift from the permissions the controller actually needs.
 wva_apply_watch_namespace_rbac() {
-    local tmp_overlay="$1" role binding rendered
+    local tmp_overlay="$1" role binding rendered ns prune_after=""
     [ -n "${WVA_WATCH_NS:-}" ] || return 0
+    if wva_watch_is_multi; then
+        # The same Role and RoleBinding in each managed namespace, and nowhere
+        # else: least privilege is the list, not the cluster.
+        for ns in $(wva_watch_words); do
+            (WVA_WATCH_NS="$ns" WVA_WATCH_GRANT_INNER=1; wva_apply_watch_namespace_rbac "$tmp_overlay") || exit 1
+        done
+        wva_prune_unlisted_namespaces
+        return 0
+    fi
     [ "$WVA_WATCH_NS" != "$WVA_NS" ] || return 0
+    # A list shrunk to one namespace: the others it set up go too.
+    [ -n "${WVA_WATCH_GRANT_INNER:-}" ] || prune_after=1
 
     read -r role binding <<< "$(wva_watch_rbac_names)"
-    rendered=$(kubectl kustomize "$tmp_overlay" 2>/dev/null         | WVA_TARGET_NS="$WVA_WATCH_NS" WVA_ROLE_NAME="$role" yq '
+    rendered=$(kubectl kustomize "$tmp_overlay" 2>/dev/null         | WVA_TARGET_NS="$WVA_WATCH_NS" WVA_ROLE_NAME="$role" \
+            WVA_GRANT_KEY="$WVA_WATCH_GRANT_KEY" WVA_GRANT_VAL="$(wva_ns_suffix "$WVA_NS")" yq '
             select(.kind == "Role" and (.metadata.name | test("manager-role$")))
             | .metadata.name = strenv(WVA_ROLE_NAME)
-            | .metadata.namespace = strenv(WVA_TARGET_NS)') || true
+            | .metadata.namespace = strenv(WVA_TARGET_NS)
+            | .metadata.labels[strenv(WVA_GRANT_KEY)] = strenv(WVA_GRANT_VAL)') || true
     if [ -z "$rendered" ]; then
         log_error "Could not find the manager Role in the rendered overlay, so the controller would have no permissions in $WVA_WATCH_NS. Refusing to install a controller that cannot read the namespace it manages."
     fi
@@ -73,6 +86,7 @@ metadata:
   namespace: ${WVA_WATCH_NS}
   labels:
     app.kubernetes.io/managed-by: llm-scaling-manager
+    ${WVA_WATCH_GRANT_KEY}: "$(wva_ns_suffix "$WVA_NS")"
 subjects:
 - kind: ServiceAccount
   name: wva-controller-manager
@@ -83,6 +97,113 @@ roleRef:
   name: ${role}
 EOF
     log_success "  Role/$role and RoleBinding/$binding in $WVA_WATCH_NS"
+    [ -z "${prune_after:-}" ] || wva_prune_unlisted_namespaces
+}
+
+# WVA_WATCH_GRANT_KEY labels the manager Role and RoleBinding this install
+# writes in a namespace it manages from outside; the value is the suffix of the
+# controller's namespace (wva_ns_suffix), so each install finds only its own.
+WVA_WATCH_GRANT_KEY="llm-d.ai/watch-grant-for"
+
+# wva_granted_namespaces echoes, one per line, every namespace holding a manager
+# RoleBinding this install labelled as its own. Fails when RoleBindings cannot
+# be listed cluster-wide: an unreadable list is not an empty one.
+wva_granted_namespaces() {
+    local out
+    out="$(kubectl get rolebindings -A -l "${WVA_WATCH_GRANT_KEY}=$(wva_ns_suffix "$WVA_NS")" \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    printf '%s\n' "$out" | grep -v '^$' | sort -u || true
+}
+
+# wva_revoke_namespace removes from namespace $1 what this install added there:
+# its labelled manager Role and RoleBinding, and the monitors setup added for
+# it (the monitor mark plus this install's owner label). Nothing else.
+wva_revoke_namespace() {
+    local ns="$1" sel
+    sel="${WVA_WATCH_GRANT_KEY}=$(wva_ns_suffix "$WVA_NS")"
+    kubectl delete rolebindings,roles -n "$ns" -l "$sel" --ignore-not-found >/dev/null 2>&1 || true
+    if [ -n "${WVA_LLMD_MONITOR_MARK:-}" ]; then
+        kubectl delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.coreos.com,secrets,serviceaccounts \
+            -n "$ns" -l "${WVA_LLMD_MONITOR_MARK},${WVA_LLMD_MONITOR_OWNER_KEY}=${WVA_NS}" --ignore-not-found >/dev/null 2>&1 || true
+        kubectl delete clusterrolebinding "${WVA_EPP_SCRAPE_ROLE:-wva-epp-metrics-scraper}-${ns}" --ignore-not-found >/dev/null 2>&1 || true
+    fi
+}
+
+# wva_prune_unlisted_namespaces revokes this install's grants and monitors in
+# every namespace it set up before and no longer lists (WVA_WATCH_NS). Shrinking
+# the list must shrink the controller's rights: a namespace taken out of it is
+# one the controller may no longer touch.
+wva_prune_unlisted_namespaces() {
+    local granted ns
+    if ! granted="$(wva_granted_namespaces 2>/dev/null)"; then
+        log_warning "Could not list RoleBindings cluster-wide, so namespaces dropped from WVA_WATCH_NS may keep this controller's grants. Find them: kubectl get rolebindings -A -l ${WVA_WATCH_GRANT_KEY}=$(wva_ns_suffix "$WVA_NS")"
+        return 0
+    fi
+    for ns in $granted; do
+        wva_watch_list | grep -qxF -- "$ns" && continue
+        wva_revoke_namespace "$ns"
+        log_success "  Removed this controller's Role, RoleBinding and monitors in $ns, which WVA_WATCH_NS no longer lists"
+    done
+}
+
+# wva_pod_list_names echoes "<clusterrole> <clusterrolebinding>": the cluster-wide
+# Pod list a namespace-scoped controller in WVA_NS gets beside gpu-inventory.
+wva_pod_list_names() {
+    local suffix
+    suffix="$(wva_ns_suffix "$WVA_NS")"
+    printf 'wva-pod-list-role-%s wva-pod-list-rolebinding-%s\n' "$suffix" "$suffix"
+}
+
+# wva_apply_pod_list_grant gives a namespace-scoped controller list on Pods in
+# every namespace when its limiters hold gpu-inventory (option B: a quota for
+# the budget, the cluster's GPUs for placement). The inventory counts the GPUs
+# every Pod on a node holds; through its Role alone it sees only its own
+# namespaces' Pods, and another tenant's GPUs on the same node read as free.
+# Read-only: list, nothing else, and on Pods only. Admin phase only.
+wva_apply_pod_list_grant() {
+    [ "$(wva_install_scope)" = namespace ] || return 0
+    [ -n "${WVA_LIMITER:-}" ] || return 0
+    limiter_set_has "$(wva_limiter_set)" physical || return 0
+    local role binding
+    read -r role binding <<< "$(wva_pod_list_names)"
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${role}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+    app.kubernetes.io/managed-by: llm-scaling-manager
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${binding}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+    app.kubernetes.io/managed-by: llm-scaling-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${role}
+subjects:
+- kind: ServiceAccount
+  name: wva-controller-manager
+  namespace: ${WVA_NS}
+EOF
+    log_success "  ClusterRole/$role: list Pods in every namespace, so gpu-inventory sees the GPUs other namespaces hold on the same nodes"
+}
+
+# wva_revoke_pod_list_grant removes what wva_apply_pod_list_grant wrote.
+wva_revoke_pod_list_grant() {
+    local role binding
+    read -r role binding <<< "$(wva_pod_list_names)"
+    kubectl delete clusterrolebinding "$binding" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete clusterrole "$role" --ignore-not-found >/dev/null 2>&1 || true
 }
 
 # wva_resolve_prometheus_url settles which Prometheus this install points at.
@@ -1296,6 +1417,10 @@ wva_append_install_kueue_reader_scope_patch() {
     WVA_KUEUE_READER_NAMES="$managed"
     case "${WVA_APPLY_SCOPE:-all}" in
         all|prereqs)
+            # The namespaces this install managed before (its labelled grants):
+            # one no longer listed loses its name here, so a shrunk list
+            # shrinks the read instead of keeping the old names forever.
+            WVA_KUEUE_READER_PREVIOUS="$(wva_granted_namespaces 2>/dev/null | tr '\n' ' ' || true)"
             wva_kueue_reader_names "$ns" "$managed" \
                 || log_error "Could not read ClusterRole wva-kueue-reader-role-$(wva_ns_suffix "$ns") ($KC_ERR). Refusing to rewrite it without knowing which Namespaces it already names: the rewrite could take one away."
             ;;
@@ -1759,9 +1884,16 @@ EOF
     # lingers, and `undeploy` removes both.
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
     if [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+        # Every managed namespace by name: one, or each of a list. The Kueue and
+        # Namespace reads stay narrowed to exactly those (and the policy names).
+        local managed_words managed_labels="" m
+        managed_words="$(wva_watch_words)"
+        for m in $managed_words; do managed_labels="$managed_labels $(wva_managed_policy_label "$m")"; done
+        # shellcheck disable=SC2086 # one word per Namespace name
+        wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "$managed_words"
+        # shellcheck disable=SC2086 # one word per Namespace name
         wva_append_policy_namespace_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" \
-            "${WVA_WATCH_NS:-$WVA_NS}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$WVA_NS}")"
+            $managed_words "${WVA_POLICY_NS:-}" $managed_labels
         if wva_kueue_reader_unneeded; then
             log_info "WVA_LIMITER=none and no policy this controller reads uses Kueue: the Kueue reader (ClusterRole wva-kueue-reader-role-$(wva_ns_suffix "$WVA_NS")) is not created"
             wva_append_kueue_reader_delete "$tmp_overlay/kustomization.yaml" "$WVA_NS"
@@ -1857,10 +1989,15 @@ EOF
         if [ "$(wva_install_scope)" != "namespace" ]; then
             log_error "WVA_WATCH_NS only applies to a namespace-scoped install (WVA_SCOPE=namespace). A cluster-scoped controller manages every namespace."
         fi
-        if ! kubectl get namespace "$WVA_WATCH_NS" >/dev/null 2>&1; then
-            log_error "WVA_WATCH_NS=$WVA_WATCH_NS does not exist. Create the tenant namespace before installing."
-        fi
-        if [ "$WVA_WATCH_NS" = "$WVA_NS" ]; then
+        local watched
+        for watched in $(wva_watch_words); do
+            if ! kubectl get namespace "$watched" >/dev/null 2>&1; then
+                log_error "WVA_WATCH_NS: namespace $watched does not exist. Create the tenant namespace before installing."
+            fi
+        done
+        if wva_watch_is_multi; then
+            log_info "Controller runs in $WVA_NS and manages $(wva_watch_words | sed 's/ /, /g')"
+        elif [ "$WVA_WATCH_NS" = "$WVA_NS" ]; then
             log_warning "WVA_WATCH_NS equals WVA_NS: the controller runs in the namespace it manages. If that namespace belongs to a tenant, they own this Deployment and can lift any limit set on them."
         else
             log_info "Controller runs in $WVA_NS and manages $WVA_WATCH_NS"
@@ -1914,7 +2051,10 @@ EOF
     esac
 
     case "${WVA_APPLY_SCOPE:-all}" in
-        all|prereqs) wva_apply_watch_namespace_rbac "$tmp_overlay" ;;
+        all|prereqs)
+            wva_apply_watch_namespace_rbac "$tmp_overlay"
+            wva_apply_pod_list_grant
+            ;;
     esac
 
     # Before the apply that takes `patch` on pods out of the ClusterRole: an

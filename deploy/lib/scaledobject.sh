@@ -2132,7 +2132,8 @@ so_target_namespaces() {
         # is the out-of-reach shape spelled the obvious way, and it scanned the
         # controller's own empty namespace.
         wva) if [ -n "${WVA_WATCH_NS:-}" ]; then
-                 echo "$WVA_WATCH_NS"
+                 # One, or each of a list (wva_watch_list).
+                 wva_watch_list
              elif [ -n "${NAMESPACE_EXPLICIT:-}" ] && [ "$(wva_install_scope)" = namespace ]; then
                  echo "$NAMESPACE_EXPLICIT"
              else

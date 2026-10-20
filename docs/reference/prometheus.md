@@ -972,6 +972,12 @@ across a restart, are otherwise visible only in the logs.
 - **Labels**: optional `controller_instance`
 - **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
 
+### `wva_watch_namespace_unreadable`
+- **Type**: Gauge
+- **Description**: `1` for each namespace a namespace-scoped controller managing a list (`--watch-namespace=a,b`) is told to watch and may not read: `reason="forbidden"` when its RoleBinding there is gone, `reason="namespace-not-found"` when the namespace is. The controller starts and keeps managing the namespaces it can read, leaves this one unmanaged, and asks again every minute; once it may read it again, it restarts to cache it. Absent for a namespace it reads, and on a controller that watches one namespace or all.
+- **Labels**: `namespace`, `reason`, optional `controller_instance`
+- **Use Case**: alert on any series: a team's models are not being scaled. Restore the Role and RoleBinding there (`make setup-prereqs`), or take the namespace out of `WVA_WATCH_NS`.
+
 ### `wva_config_rejected_entries`
 - **Type**: Gauge
 - **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one. The series is removed when the ConfigMap is deleted.

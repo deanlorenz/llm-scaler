@@ -1332,22 +1332,33 @@ wva_llmd_namespaces() {
 # "could not check" does not fail, the same rule the checks themselves apply to a
 # signal they could not confirm.
 wva_check_managed_namespaces() {
-    local namespaces ns out rc reasons notes count
+    local namespaces ns out rc reasons notes count listed=false
     local passed=0 failed=0 unchecked=0 summary=()
 
-    if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
-        log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
-        log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
-        return 0
-    fi
+    # A namespace-scoped controller that manages a listed few: those, as named
+    # (WVA_WATCH_NS, already settled from `auto` by wva_resolve_watch_namespaces).
+    # A listed namespace with no llm-d in it fails: the controller would manage
+    # nothing there, which the single-namespace check refuses too.
+    if [ "$(wva_install_scope)" = namespace ] && declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        listed=true
+        namespaces="$(wva_watch_list)"
+        count="$(printf '%s\n' "$namespaces" | grep -c .)"
+        log_info "Checking the $count namespace(s) this controller manages (WVA_WATCH_NS):"
+    else
+        if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
+            log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
+            log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
+            return 0
+        fi
 
-    namespaces="$(wva_llmd_namespaces)"
-    if [ -z "$namespaces" ]; then
-        log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
-        return 0
+        namespaces="$(wva_llmd_namespaces)"
+        if [ -z "$namespaces" ]; then
+            log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
+            return 0
+        fi
+        count="$(printf '%s\n' "$namespaces" | grep -c .)"
+        log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
     fi
-    count="$(printf '%s\n' "$namespaces" | grep -c .)"
-    log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
 
     for ns in $namespaces; do
         echo "" >&2
@@ -1357,6 +1368,13 @@ wva_check_managed_namespaces() {
             log_warning "  Could not check $ns: reading its Pods or ConfigMaps is not permitted for you."
             unchecked=$((unchecked + 1))
             summary+=("could not check|$ns|reading it is not permitted for you")
+            continue
+        fi
+        if [ "$listed" = true ] && [ "$(wva_serving_workload_count "$ns")" = 0 ] \
+            && [ -z "$(wva_epp_services "$ns" 2>/dev/null)" ]; then
+            log_warning "  No llm-d found in $ns: no model servers and no InferencePool. Install llm-d there, or leave it out of WVA_WATCH_NS."
+            failed=$((failed + 1))
+            summary+=("failed|$ns|no llm-d model servers")
             continue
         fi
         rc=0
@@ -1430,6 +1448,10 @@ $( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
 WVA_LLMD_MONITOR_MARK_KEY="llm-d.ai/applied-by"
 WVA_LLMD_MONITOR_MARK_VAL="wva-setup-prereqs"
 WVA_LLMD_MONITOR_MARK="${WVA_LLMD_MONITOR_MARK_KEY}=${WVA_LLMD_MONITOR_MARK_VAL}"
+# Which install added a monitor: the controller's namespace. Set beside the
+# mark, so a controller that stops managing a namespace removes only its own
+# (wva_prune_unlisted_namespaces) and never another install's.
+WVA_LLMD_MONITOR_OWNER_KEY="llm-d.ai/applied-for"
 # The EPP ServiceMonitor, and the identity Prometheus scrapes it as. The EPP
 # authenticates /metrics (a TokenReview, then a SubjectAccessReview for GET
 # /metrics), so the scrape carries a ServiceAccount token, as the router chart's
@@ -1449,6 +1471,8 @@ wva_llmd_monitors_wanted() {
 wva_monitor_namespaces() {
     if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
         wva_llmd_namespaces
+    elif declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        wva_watch_list
     else
         echo "${WVA_WATCH_NS:-$WVA_NS}"
     fi
@@ -1474,9 +1498,11 @@ wva_apply_modelserver_podmonitor() {
     labels="$(wva_prometheus_selector_labels podMonitorSelector)"
     [ -n "$labels" ] || labels='{}'
     NS="$ns" LABELS="$labels" MK="$WVA_LLMD_MONITOR_MARK_KEY" MV="$WVA_LLMD_MONITOR_MARK_VAL" \
+        OK="$WVA_LLMD_MONITOR_OWNER_KEY" OV="$WVA_NS" \
         yq '.metadata.namespace = strenv(NS)
             | .metadata.labels += (strenv(LABELS) | from_yaml)
-            | .metadata.labels[strenv(MK)] = strenv(MV)' \
+            | .metadata.labels[strenv(MK)] = strenv(MV)
+            | .metadata.labels[strenv(OK)] = strenv(OV)' \
             "$WVA_PROJECT/config/modelserver-metrics/modelserver-podmonitor.yaml" \
         | kubectl apply -f - >/dev/null
 }
@@ -1502,7 +1528,8 @@ wva_epp_scrape_docs() {
     labels="$(wva_prometheus_selector_labels serviceMonitorSelector)"
     [ -n "$labels" ] || labels='{}'
     labels="$(jq -c --arg k "$WVA_LLMD_MONITOR_MARK_KEY" --arg v "$WVA_LLMD_MONITOR_MARK_VAL" \
-        '. + {"app.kubernetes.io/name": "workload-variant-autoscaler", "app.kubernetes.io/component": "epp-metrics"} + {($k): $v}' <<< "$labels")"
+        --arg ok "$WVA_LLMD_MONITOR_OWNER_KEY" --arg ov "$WVA_NS" \
+        '. + {"app.kubernetes.io/name": "workload-variant-autoscaler", "app.kubernetes.io/component": "epp-metrics"} + {($k): $v, ($ok): $ov}' <<< "$labels")"
     cat <<EOF
 apiVersion: v1
 kind: ServiceAccount
@@ -1639,14 +1666,37 @@ wva_apply_llmd_monitors() {
 # shared ClusterRole goes only with a cluster-scoped install, the last user.
 wva_remove_llmd_monitors() {
     local where=(-A) ns
+    if declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        # One controller, several managed namespaces: the same removal in each.
+        for ns in $(wva_watch_words); do
+            (WVA_WATCH_NS="$ns"; wva_remove_llmd_monitors) || true
+        done
+        return 0
+    fi
     if [ "$(wva_install_scope)" != "cluster" ] || [ -n "${WVA_WATCH_NS:-}" ]; then
         ns="${WVA_WATCH_NS:-$WVA_NS}"
         where=(-n "$ns")
         kubectl delete clusterrolebinding "${WVA_EPP_SCRAPE_ROLE}-${ns}" --ignore-not-found >/dev/null 2>&1 || true
+        # The shared ClusterRole goes with its last binding: one still bound
+        # (another namespace's EPP monitor) keeps it. A list that cannot be read
+        # keeps it too.
+        local bound
+        if bound="$(kubectl get clusterrolebindings -o jsonpath='{range .items[*]}{.roleRef.name}{"\n"}{end}' 2>/dev/null)" \
+            && ! printf '%s\n' "$bound" | grep -qxF -- "$WVA_EPP_SCRAPE_ROLE"; then
+            # Only our own: the ClusterRole setup labelled, never one of that name it did not write.
+            if kubectl get clusterroles -l "$WVA_LLMD_MONITOR_MARK" -o name 2>/dev/null \
+                | grep -qxF -- "clusterrole.rbac.authorization.k8s.io/$WVA_EPP_SCRAPE_ROLE"; then
+                kubectl delete clusterrole "$WVA_EPP_SCRAPE_ROLE" --ignore-not-found >/dev/null 2>&1 || true
+            fi
+        fi
     else
         kubectl delete clusterrolebindings,clusterroles -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
     fi
     kubectl delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.coreos.com,secrets,serviceaccounts \
         "${where[@]}" -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
-    log_info "Removed the monitors setup added in the llm-d namespaces (label $WVA_LLMD_MONITOR_MARK)."
+    if [ -n "${ns:-}" ]; then
+        log_info "Removed the monitors setup added in $ns (label $WVA_LLMD_MONITOR_MARK)."
+    else
+        log_info "Removed the monitors setup added in the llm-d namespaces (label $WVA_LLMD_MONITOR_MARK)."
+    fi
 }

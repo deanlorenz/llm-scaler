@@ -812,11 +812,16 @@ pl_cohort_root() {
 # (`*`) or an unknown one (`-`) manages more than one namespace, and a read
 # that fails is not an empty answer.
 pl_cohorts_of() {
-    local managed="$1" cq cqs cohorts=""
+    local managed="$1" cq cqs="" cohorts="" one
     case "$managed" in '*'|-|'') return 1 ;; esac
-    kc_capture get localqueues.kueue.x-k8s.io -n "$managed" \
-        -o jsonpath='{range .items[*]}{.spec.clusterQueue}{"\n"}{end}' || return 1
-    cqs="$(printf '%s\n' "$KC_OUT" | sort -u)"
+    # A controller that manages a list: the cohorts of every namespace in it.
+    for one in $(printf '%s' "$managed" | tr ',' ' '); do
+        kc_capture get localqueues.kueue.x-k8s.io -n "$one" \
+            -o jsonpath='{range .items[*]}{.spec.clusterQueue}{"\n"}{end}' || return 1
+        cqs="$cqs
+$KC_OUT"
+    done
+    cqs="$(printf '%s\n' "$cqs" | grep -v '^$' | sort -u)"
     for cq in $cqs; do
         # cohortName in v1beta2, cohort in v1beta1: one of them is set.
         kc_capture get clusterqueues.kueue.x-k8s.io "$cq" \
@@ -1245,7 +1250,14 @@ pl_policy_is_live() {
     case "$1" in
         '*'|-|'') return 0 ;;
     esac
-    [ "$1" = "$2" ]
+    # A controller that manages a list caches its own namespace too
+    # (cmd/main.go cacheNamespaces), so a policy there, or in any namespace it
+    # manages, is live. $3, when given, is the controller's own namespace.
+    case ",$1," in *",$2,"*) return 0 ;; esac
+    case "$1" in
+        *,*) [ -n "${3:-}" ] && [ "$2" = "$3" ] ;;
+        *) return 1 ;;
+    esac
 }
 
 # pl_ensure_namespace creates Namespace $1 if it is absent, and ends the
@@ -1391,7 +1403,7 @@ enable_physical_limiter() {
         # from sees the edit this command is about to make only at its next
         # start (pl_policy_is_live), so it is restarted after the write.
         case "$restart" in
-            no|unknown) pl_policy_is_live "$managed" "$cm_ns" || restart=not-watched ;;
+            no|unknown) pl_policy_is_live "$managed" "$cm_ns" "$ns" || restart=not-watched ;;
         esac
         plan="${plan}${ns} ${deploy} ${sa} ${cm_ns} ${src} ${restart} ${managed}"$'\n'
     done 3<<< "$PL_GRANT"
@@ -1626,7 +1638,7 @@ disable_physical_limiter() {
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
         # One that does not watch its policy namespace sees the removal only
         # when it restarts (pl_policy_is_live).
-        pl_policy_is_live "$managed" "$cm_ns" || to_restart="$to_restart $ns/$deploy/$cm_ns"
+        pl_policy_is_live "$managed" "$cm_ns" "$ns" || to_restart="$to_restart $ns/$deploy/$cm_ns"
         reads_from="$reads_from $ns/$cm_ns"
     done 3<<< "$PL_GRANT"
     # The well-known namespace too, even with no controller reading it today: a

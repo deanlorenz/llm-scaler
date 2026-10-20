@@ -73,6 +73,8 @@ type infrastructureConfig struct {
 	restTimeout          time.Duration
 	secureMetrics        bool
 	watchNamespace       string
+	// unreadableNamespaces are watched namespaces found unreadable at startup.
+	unreadableNamespaces []string
 	loggerVerbosity      int
 	optimizationInterval time.Duration
 	// How long the saturation analyzer keeps what it has learned. Three
@@ -225,12 +227,65 @@ func (c *Config) SecureMetrics() bool {
 	return c.infrastructure.secureMetrics
 }
 
-// WatchNamespace returns the namespace to watch (empty = all namespaces).
-// Thread-safe.
+// WatchNamespace returns --watch-namespace as given: empty for every
+// namespace, else one namespace or a comma-separated list. Callers that act on
+// each namespace use WatchNamespaces; this form is for "is the controller
+// namespace-scoped" tests and for logging. Thread-safe.
 func (c *Config) WatchNamespace() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.infrastructure.watchNamespace
+}
+
+// WatchNamespaces returns the namespaces this controller manages, in the order
+// given, without blanks or repeats: nil for a cluster-scoped controller.
+// Thread-safe.
+func (c *Config) WatchNamespaces() []string {
+	return ParseWatchNamespaces(c.WatchNamespace())
+}
+
+// Watches reports whether namespace is one this namespace-scoped controller
+// manages. False for every namespace on a cluster-scoped controller, which
+// manages them all by other rules. Thread-safe.
+func (c *Config) Watches(namespace string) bool {
+	return namespace != "" && slices.Contains(c.WatchNamespaces(), namespace)
+}
+
+// NormalizeWatchNamespace is the parsed list of raw joined by commas: "" for
+// a value that names no namespace (blank, spaces, only commas).
+func NormalizeWatchNamespace(raw string) string {
+	return strings.Join(ParseWatchNamespaces(raw), ",")
+}
+
+// SetUnreadableNamespaces records the watched namespaces this controller may
+// not read, found at startup: they stay in WatchNamespaces (the controller is
+// still namespace-scoped, and still bound to them), and Unreadable reports
+// them so a read that would fail is not made. Thread-safe.
+func (c *Config) SetUnreadableNamespaces(namespaces []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infrastructure.unreadableNamespaces = slices.Clone(namespaces)
+}
+
+// Unreadable reports whether namespace is a watched namespace found
+// unreadable at startup. Thread-safe.
+func (c *Config) Unreadable(namespace string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return slices.Contains(c.infrastructure.unreadableNamespaces, namespace)
+}
+
+// ParseWatchNamespaces splits a --watch-namespace value on commas, trimming
+// spaces and dropping blanks and repeats. Empty in, nil out.
+func ParseWatchNamespaces(raw string) []string {
+	var out []string
+	for _, ns := range strings.Split(raw, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns != "" && !slices.Contains(out, ns) {
+			out = append(out, ns)
+		}
+	}
+	return out
 }
 
 // LoggerVerbosity returns the logger verbosity level.
@@ -608,7 +663,7 @@ func (c *Config) setPrometheusBaseURLForTesting(baseURL string) {
 func SetWatchNamespaceForTest(c *Config, ns string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.infrastructure.watchNamespace = ns
+	c.infrastructure.watchNamespace = NormalizeWatchNamespace(ns)
 }
 
 // SetOptimizationIntervalForTest overrides the optimization interval on a test
@@ -863,8 +918,8 @@ func (c *Config) HasClusterQuota() bool {
 	})
 }
 
-// ClusterQuotaPerController reports whether this controller manages one
-// namespace and enforces a quota entry of scope: cluster. Such a quota is
+// ClusterQuotaPerController reports whether this controller is
+// namespace-scoped (one namespace or a listed few) and enforces a quota entry of scope: cluster. Such a quota is
 // charged what THIS controller's variants hold, so N namespace-scoped
 // controllers reading one shared cluster quota of Q may together hold N x Q:
 // the cap is per controller, not per cluster. Callers log

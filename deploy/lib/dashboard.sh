@@ -344,7 +344,21 @@ Grafana and point it at the Prometheus WVA already uses:
 # So ask the question that actually decides it: are the model servers here? That
 # is the same count the preflight reports, on the same markers discovery uses.
 wva_dashboard_resolve_ns() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" watched elsewhere
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" watched elsewhere one
+
+    # A controller that manages a list: the dashboard is per namespace (the
+    # datasource pins one), so it is built for the first listed namespace with
+    # model servers, and the others are named.
+    case "$ns" in
+        *,*)
+            for one in $(printf '%s' "$ns" | tr ',' ' '); do
+                if [ "$(wva_serving_workload_count "$one")" != 0 ]; then
+                    log_info "The controller manages ${ns//,/, }; building the dashboard for $one. For another: make dashboard NAMESPACE=<one of them>"
+                    printf '%s' "$one"
+                    return 0
+                fi
+            done ;;
+    esac
 
     [ "$(wva_serving_workload_count "$ns")" != 0 ] && { printf '%s' "$ns"; return 0; }
 
@@ -354,6 +368,9 @@ wva_dashboard_resolve_ns() {
     watched="$(kubectl get deploy -n "$WVA_NS" -l app.kubernetes.io/name=workload-variant-autoscaler         -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="WVA_WATCH_NAMESPACE")].value}' 2>/dev/null || true)"
     case "$watched" in
         ''|'$(POD_NAMESPACE)'|"$ns") watched="" ;;
+    esac
+    case "$watched" in
+        *,*) (WVA_WATCH_NS="$watched"; wva_dashboard_resolve_ns) && return 0 ;;
     esac
     if [ -n "$watched" ] && [ "$(wva_serving_workload_count "$watched")" != 0 ]; then
         log_info "No model servers in $ns; the controller there watches $watched, which has them. Building the dashboard for $watched."

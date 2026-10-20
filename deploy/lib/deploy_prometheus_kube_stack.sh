@@ -65,30 +65,43 @@ deploy_prometheus_kube_stack() {
         helm repo update
     fi
 
-    log_info "Creating self-signed TLS certificate for Prometheus"
-    openssl req -x509 -newkey rsa:2048 -nodes \
-        -keyout /tmp/prometheus-tls.key \
-        -out /tmp/prometheus-tls.crt \
-        -days 365 \
-        -subj "/CN=prometheus" \
-        -addext "subjectAltName=DNS:kube-prometheus-stack-prometheus.${MONITORING_NAMESPACE}.svc.cluster.local,DNS:kube-prometheus-stack-prometheus.${MONITORING_NAMESPACE}.svc,DNS:prometheus,DNS:localhost" \
-        &> /dev/null
+    # A re-run keeps the certificate already there while it has 30 days left.
+    # A new one on every run made Prometheus serve the old certificate until it
+    # reloaded the Secret, while the controller had already been given the new
+    # CA: a re-run of setup-prereqs followed by an install failed the TLS probe.
+    local existing_crt
+    existing_crt="$(kubectl get secret "$PROMETHEUS_SECRET_NAME" -n "$MONITORING_NAMESPACE" \
+        -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+    if [ -n "$existing_crt" ] && printf '%s\n' "$existing_crt" | openssl x509 -noout -checkend 2592000 >/dev/null 2>&1 \
+        && printf '%s\n' "$existing_crt" | openssl x509 -noout -text 2>/dev/null \
+            | grep -q "DNS:kube-prometheus-stack-prometheus.${MONITORING_NAMESPACE}.svc"; then
+        log_info "Keeping the Prometheus TLS certificate in $MONITORING_NAMESPACE/$PROMETHEUS_SECRET_NAME (valid for 30 days or more)"
+    else
+        log_info "Creating self-signed TLS certificate for Prometheus"
+        openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /tmp/prometheus-tls.key \
+            -out /tmp/prometheus-tls.crt \
+            -days 365 \
+            -subj "/CN=prometheus" \
+            -addext "subjectAltName=DNS:kube-prometheus-stack-prometheus.${MONITORING_NAMESPACE}.svc.cluster.local,DNS:kube-prometheus-stack-prometheus.${MONITORING_NAMESPACE}.svc,DNS:prometheus,DNS:localhost" \
+            &> /dev/null
 
-    log_info "Creating Kubernetes secret for Prometheus TLS"
-    # Not `&> /dev/null`. This apply failing is how the install learns the
-    # monitoring namespace is missing, and suppressing its output turned that into
-    # a bare exit under `set -e`: the last thing printed was "Creating Kubernetes
-    # secret for Prometheus TLS" and there was no error anywhere.
-    if ! kubectl create secret tls "$PROMETHEUS_SECRET_NAME" \
-        --cert=/tmp/prometheus-tls.crt \
-        --key=/tmp/prometheus-tls.key \
-        -n "$MONITORING_NAMESPACE" \
-        --dry-run=client -o yaml | kubectl apply -f -; then
+        log_info "Creating Kubernetes secret for Prometheus TLS"
+        # Not `&> /dev/null`. This apply failing is how the install learns the
+        # monitoring namespace is missing, and suppressing its output turned that into
+        # a bare exit under `set -e`: the last thing printed was "Creating Kubernetes
+        # secret for Prometheus TLS" and there was no error anywhere.
+        if ! kubectl create secret tls "$PROMETHEUS_SECRET_NAME" \
+            --cert=/tmp/prometheus-tls.crt \
+            --key=/tmp/prometheus-tls.key \
+            -n "$MONITORING_NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -; then
+            rm -f /tmp/prometheus-tls.key /tmp/prometheus-tls.crt
+            log_error "Could not create the Prometheus TLS secret in $MONITORING_NAMESPACE (see the error above)."
+        fi
+
         rm -f /tmp/prometheus-tls.key /tmp/prometheus-tls.crt
-        log_error "Could not create the Prometheus TLS secret in $MONITORING_NAMESPACE (see the error above)."
     fi
-
-    rm -f /tmp/prometheus-tls.key /tmp/prometheus-tls.crt
 
     log_info "Installing kube-prometheus-stack with TLS configuration"
     install_operational_dashboard

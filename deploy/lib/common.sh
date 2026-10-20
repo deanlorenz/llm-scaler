@@ -88,11 +88,183 @@ wva_make_cmd() {
     for kv in "$@"; do pre="$pre$kv "; done
     if [ "$(wva_install_scope)" = cluster ]; then
         printf '%smake %s SCOPE=cluster WVA_NS=%s\n' "$pre" "$target" "$WVA_NS"
+    elif wva_watch_is_multi; then
+        printf '%smake %s WVA_NS=%s WVA_WATCH_NS=%s\n' "$pre" "$target" "$WVA_NS" "$WVA_WATCH_NS"
     elif [ -n "${WVA_WATCH_NS:-}" ] && [ "$WVA_WATCH_NS" != "$WVA_NS" ]; then
         printf '%sNAMESPACE=%s make %s WVA_NS=%s WVA_WATCH_NS=%s\n' "$pre" "$WVA_WATCH_NS" "$target" "$WVA_NS" "$WVA_WATCH_NS"
     else
         printf '%sNAMESPACE=%s make %s\n' "$pre" "$WVA_NS" "$target"
     fi
+}
+
+# --- Several managed namespaces ----------------------------------------------
+#
+# WVA_WATCH_NS names the namespaces a namespace-scoped controller MANAGES when
+# they differ from the one it runs in: one namespace, a comma-separated list
+# (team-a,team-b), or `auto` -- every namespace with llm-d model servers or an
+# InferencePool, found once at install time and written into the Deployment.
+# The controller caches exactly those namespaces and its own, and the prereqs
+# phase gives it its manager Role in each, nowhere else.
+#
+# The single-namespace steps read `${WVA_WATCH_NS:-$WVA_NS}`. Each one that acts
+# on a namespace runs once per listed namespace with WVA_WATCH_NS set to it, the
+# way wva_check_managed_namespaces already ran them for a cluster-scoped install.
+
+# wva_watch_list echoes the managed namespaces, one per line: the WVA_WATCH_NS
+# list, else WVA_NS.
+wva_watch_list() {
+    if [ -n "${WVA_WATCH_NS:-}" ]; then
+        printf '%s\n' "$WVA_WATCH_NS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true
+    else
+        printf '%s\n' "$WVA_NS"
+    fi
+}
+
+# wva_watch_words echoes the managed namespaces on one line, space-separated.
+wva_watch_words() {
+    wva_watch_list | paste -sd' ' -
+}
+
+# wva_watch_is_multi reports whether WVA_WATCH_NS lists more than one namespace.
+wva_watch_is_multi() {
+    case "${WVA_WATCH_NS:-}" in *,*) ;; *) return 1 ;; esac
+    [ "$(wva_watch_list | grep -c .)" -gt 1 ]
+}
+
+# wva_discover_watch_namespaces echoes every namespace with llm-d model servers
+# or an InferencePool, one per line, sorted. Empty when there are none.
+wva_discover_watch_namespaces() {
+    {
+        if declare -F wva_namespaces_with_model_servers >/dev/null; then
+            wva_namespaces_with_model_servers 2>/dev/null || true
+        fi
+        local kind
+        for kind in inferencepools.inference.networking.k8s.io inferencepools.inference.networking.x-k8s.io; do
+            kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true
+        done
+    } | grep -v '^$' | sort -u || true
+}
+
+# wva_excluded_namespaces echoes every namespace annotated
+# wva.llmd.ai/exclude=true, one per line. Empty when Namespaces cannot be read.
+wva_excluded_namespaces() {
+    kubectl get namespaces -o json 2>/dev/null \
+        | jq -r '.items[] | select((.metadata.annotations // {})["wva.llmd.ai/exclude"] == "true") | .metadata.name' 2>/dev/null || true
+}
+
+# wva_managed_by_others echoes `<namespace> <controller namespace>` for every
+# namespace another WVA controller (not the one in WVA_NS) manages by name: a
+# self-managed controller its own, an out-of-reach one each of its
+# WATCH_NAMESPACE list. Read from the Deployments' WVA_WATCH_NAMESPACE env, as
+# the installer writes it. Empty when Deployments cannot be listed.
+wva_managed_by_others() {
+    kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler -o json 2>/dev/null \
+        | jq -r --arg own "$WVA_NS" '.items[]
+            | select(.metadata.namespace != $own)
+            | .metadata.namespace as $ns
+            | ([.spec.template.spec.containers[]? | select(.name == "manager") | .env[]? | select(.name == "WVA_WATCH_NAMESPACE") | .value // ""][0] // "") as $w
+            | (if $w == "" or $w == "$(POD_NAMESPACE)" then $ns else $w end)
+            | split(",")[] | select(. != "") | . + " " + $ns' 2>/dev/null || true
+}
+
+# wva_resolve_watch_namespaces settles WVA_WATCH_NS: `auto` becomes the list it
+# finds, a list is trimmed and de-duplicated, and every name is checked to be a
+# namespace name. `auto` skips a namespace annotated wva.llmd.ai/exclude=true
+# and one another controller already manages, each with a warning. Refuses a
+# list on a cluster-scoped install (it manages every namespace already), a list
+# that holds WVA_NS (the controller runs outside the namespaces it manages; WVA_NS
+# defaults to workload-variant-autoscaler-system), and `auto` that finds nothing
+# or may not look.
+wva_resolve_watch_namespaces() {
+    [ -n "${WVA_WATCH_NS:-}" ] || return 0
+    local list n
+    if [ "$WVA_WATCH_NS" = auto ]; then
+        if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
+            log_error "WVA_WATCH_NS=auto finds the namespaces running llm-d by listing workloads cluster-wide, which is not permitted for you. Name them instead: WVA_WATCH_NS=<namespace>,<namespace>"
+        fi
+        local found excluded others n owner
+        found="$(wva_discover_watch_namespaces | grep -vxF -- "$WVA_NS" || true)"
+        # A namespace that opted out (wva.llmd.ai/exclude: "true") is never
+        # taken by discovery; name it to manage it anyway.
+        excluded="$(wva_excluded_namespaces)"
+        # Nor one another install already manages: two controllers deciding for
+        # the same workloads is the conflict check_single_installation refuses,
+        # and discovery must not create it silently.
+        others="$(wva_managed_by_others)"
+        list=""
+        for n in $found; do
+            if printf '%s\n' "$excluded" | grep -qxF -- "$n"; then
+                log_warning "WVA_WATCH_NS=auto: skipping $n, annotated wva.llmd.ai/exclude=true. Name it in WVA_WATCH_NS to manage it anyway."
+                continue
+            fi
+            owner="$(printf '%s\n' "$others" | awk -v n="$n" '$1 == n {print $2; exit}')"
+            if [ -n "$owner" ]; then
+                log_warning "WVA_WATCH_NS=auto: skipping $n, already managed by the controller in $owner. Name it in WVA_WATCH_NS only after removing it from that controller."
+                continue
+            fi
+            list="${list:+$list,}$n"
+        done
+        [ -n "$list" ] || log_error "WVA_WATCH_NS=auto found no namespace with llm-d model servers or an InferencePool that is not excluded or managed by another controller. Install llm-d first, or name the namespaces: WVA_WATCH_NS=<namespace>,<namespace>"
+        WVA_WATCH_NS_SOURCE=discovered
+    else
+        list="$(wva_watch_list | awk '!seen[$0]++' | paste -sd, -)"
+        WVA_WATCH_NS_SOURCE=named
+    fi
+    for n in $(printf '%s' "$list" | tr ',' ' '); do
+        case "$n" in
+            *[!a-z0-9-]*|-*|*-) log_error "WVA_WATCH_NS: '$n' is not a namespace name (lowercase letters, digits and '-')." ;;
+        esac
+    done
+    WVA_WATCH_NS="$list"
+    export WVA_WATCH_NS WVA_WATCH_NS_SOURCE
+    wva_watch_is_multi || return 0
+    if [ "$(wva_install_scope)" != namespace ]; then
+        log_error "WVA_WATCH_NS lists several namespaces, which only a namespace-scoped install takes (WVA_SCOPE=namespace). A cluster-scoped controller manages every namespace."
+    fi
+    # The controller in one of the namespaces it manages would be owned by that
+    # namespace's tenant, who could then lift any bound on the others.
+    if wva_watch_list | grep -qxF -- "$WVA_NS"; then
+        log_error "WVA_WATCH_NS ($WVA_WATCH_NS) includes $WVA_NS, the namespace the controller runs in. A controller that manages several namespaces runs in a namespace of its own: set WVA_NS to one that is not in the list."
+    fi
+    # gpu-inventory alone would make the cluster's free GPUs this controller's
+    # budget, and every namespace-scoped controller would plan the same free
+    # GPUs. Beside a quota it only places; the quota is the budget.
+    local lset
+    if [ -n "${WVA_LIMITER:-}" ] && lset="$(limiter_types_of "$WVA_LIMITER" 2>/dev/null)" \
+        && limiter_set_has "$lset" physical && ! limiter_set_has "$lset" quota; then
+        log_error "WVA_LIMITER=$WVA_LIMITER on a controller that manages a list of namespaces: gpu-inventory alone is refused, because two namespace-scoped controllers would plan the same free GPUs. Bound the budget with a quota and keep gpu-inventory for placement: WVA_LIMITER=gpu-inventory,quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS=<product>=<gpus>"
+    fi
+}
+
+# wva_watch_is_listed reports whether WVA_WATCH_NS is a list or `auto` -- the
+# shape where NAMESPACE names no single managed namespace.
+wva_watch_is_listed() {
+    case "${WVA_WATCH_NS:-}" in *,*|auto) return 0 ;; esac
+    # `auto` that found a single namespace is still one the caller did not name.
+    [ "${WVA_WATCH_NS_SOURCE:-}" = discovered ]
+}
+
+# wva_adopt_live_watch_namespaces sets WVA_WATCH_NS, for the commands that plan
+# and apply ScaledObjects, to the namespaces the installed controller in WVA_NS
+# manages, when the caller named none (or said `auto`) and named no NAMESPACE.
+# Read from the Deployment, so a plan registers exactly what the controller
+# watches: a namespace found later, and not watched, is not registered.
+wva_adopt_live_watch_namespaces() {
+    [ "$(wva_install_scope)" = namespace ] || return 0
+    [ -z "${NAMESPACE_EXPLICIT:-}" ] || return 0
+    case "${WVA_WATCH_NS:-}" in ''|auto) ;; *) return 0 ;; esac
+    local live
+    live="$(kubectl get deploy wva-controller-manager -n "$WVA_NS" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WVA_WATCH_NAMESPACE")].value}' 2>/dev/null || true)"
+    # Only a list, or for `auto` any name: a single out-of-reach namespace with
+    # WVA_WATCH_NS unset keeps the behaviour it had.
+    case "$live" in
+        ''|'$(POD_NAMESPACE)'|"$WVA_NS") return 0 ;;
+        *,*) ;;
+        *) [ "${WVA_WATCH_NS:-}" = auto ] || return 0 ;;
+    esac
+    WVA_WATCH_NS="$live"
+    export WVA_WATCH_NS
 }
 
 # wva_install_scope echoes the install scope: "cluster" or "namespace".
@@ -519,8 +691,21 @@ wva_kueue_reader_names() {
     local -a all
     # read -a, not an unquoted expansion: a `*` in a hand-edited role must not
     # glob into the names of files in the working directory.
+    # $2 may name several managed namespaces, comma- or space-separated (a
+    # controller that manages a list). Split it first: as one word it failed the
+    # name check below and was dropped, narrowing the read to what the role held.
+    managed="$(printf '%s' "$managed" | tr ',' ' ')"
+    # A kept name that was a managed namespace of this install before, and is
+    # not one now, is the list shrinking: recompute, do not merge.
+    local dropped="" g
+    if [ -n "${WVA_KUEUE_READER_PREVIOUS:-}" ]; then
+        for g in $WVA_KUEUE_READER_PREVIOUS; do
+            case " $managed " in *" $g "*) ;; *) dropped="$dropped $g " ;; esac
+        done
+    fi
     read -r -a all <<< "$managed $(printf '%s' "$existing" | tr '\n' ' ')"
     for n in "${all[@]}"; do
+        case "$dropped" in *" $n "*) continue ;; esac
         case "$n" in ''|*[!a-z0-9-]*) continue ;; esac
         case "$seen" in *" $n "*) continue ;; esac
         seen="$seen$n "
@@ -859,12 +1044,18 @@ wva_prereq_kind_filter() {
 # ${VAR-…} without the colon, so an explicitly empty value set by install.sh is
 # left alone: a nested call must not re-capture a WVA_NS that a default filled in.
 wva_bootstrap_env() {
+    # CONTROLLER_NAMESPACE names the controller's namespace too (see install.sh).
+    WVA_NS=${WVA_NS:-${CONTROLLER_NAMESPACE:-}}
     WVA_NS_EXPLICIT=${WVA_NS_EXPLICIT-${WVA_NS:-}}
     NAMESPACE_EXPLICIT=${NAMESPACE_EXPLICIT-${NAMESPACE:-}}
     export WVA_NS_EXPLICIT NAMESPACE_EXPLICIT
     WVA_NS=${WVA_NS:-workload-variant-autoscaler-system}
     export WVA_NS
     wva_resolve_namespace
+    # The namespaces the installed controller manages, when it manages several
+    # and the caller named none: the plan and the apply register exactly those.
+    wva_adopt_live_watch_namespaces
+    wva_resolve_watch_namespaces
     # NOT wva_require_namespace. wva_bootstrap_env is shared with the read-only
     # tooling -- so-list, so-park, so-freeze, so-resume, scaledobjects-plan,
     # dashboard -- and requiring the managed namespace here refused all of them:
@@ -905,6 +1096,17 @@ wva_bootstrap_env() {
 wva_require_namespace() {
     [ "$(wva_install_scope)" = "namespace" ] || return 0
     [ -z "${NAMESPACE_EXPLICIT:-}" ] || return 0
+    # A controller that manages a list (or `auto`) is told its namespaces by
+    # WVA_WATCH_NS; NAMESPACE would name only one of them.
+    if declare -F wva_watch_is_listed >/dev/null && wva_watch_is_listed; then
+        return 0
+    fi
+    # WVA_WATCH_NS naming one namespace outside WVA_NS names it too: the managed
+    # namespace was given, so there is nothing to guess. A list shrunk to one
+    # namespace on a re-install lands here.
+    if [ -n "${WVA_WATCH_NS:-}" ] && [ "$WVA_WATCH_NS" != "$WVA_NS" ]; then
+        return 0
+    fi
     # kind-emulator provisions llm-d, the EPP and WVA in one sequence and owns its own
     # namespaces: `make deploy-e2e-infra` calls install.sh with no NAMESPACE on
     # purpose, using the controller-namespace defaults. Requiring it there would break
@@ -1037,9 +1239,14 @@ wva_render_manifests() {
         # infra_wva.sh; none of them renders, so the guard never decides an
         # install.
         if [ "$(wva_install_scope)" = "namespace" ] && declare -F wva_append_kueue_reader_scope_patch >/dev/null; then
-            wva_append_kueue_reader_scope_patch "$tmp/kustomization.yaml" "$ns" "${WVA_WATCH_NS:-$ns}"
+            local managed_words managed_labels="" m
+            managed_words="$(WVA_NS="$ns" wva_watch_words)"
+            for m in $managed_words; do managed_labels="$managed_labels $(wva_managed_policy_label "$m")"; done
+            # shellcheck disable=SC2086 # one word per Namespace name
+            wva_append_kueue_reader_scope_patch "$tmp/kustomization.yaml" "$ns" $managed_words
+            # shellcheck disable=SC2086 # one word per Namespace name
             wva_append_policy_namespace_reader_scope_patch "$tmp/kustomization.yaml" "$ns" \
-                "${WVA_WATCH_NS:-$ns}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$ns}")"
+                $managed_words "${WVA_POLICY_NS:-}" $managed_labels
             if wva_kueue_reader_unneeded; then
                 wva_append_kueue_reader_delete "$tmp/kustomization.yaml" "$ns"
             fi

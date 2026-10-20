@@ -78,6 +78,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool"
 	warmpoolpolicy "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/policy"
 	warmpoolpool "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/pool"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/watchns"
 	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
@@ -278,7 +279,7 @@ func main() {
 	flag.String("metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.String("metrics-cert-key", "tls.key", "The name of the metrics key file.")
 	flag.String("watch-namespace", "",
-		"Namespace to watch for updates. If unspecified, all namespaces are watched.")
+		"Namespace to watch for updates, or a comma-separated list of them. If unspecified, all namespaces are watched.")
 
 	externalScalerBindAddress := flag.String("external-scaler-bind-address", ":9090",
 		"The address the KEDA external scaler gRPC service binds to. "+
@@ -531,11 +532,30 @@ func main() {
 	mgrOptions := managerOptions(cfg, metricsServerOptions, webhookServer)
 
 	watchNS := cfg.WatchNamespace()
-	if watchNS != "" {
-		setupLog.Info("Watching single namespace", "namespace", watchNS)
-		namespaces := map[string]cache.Config{
-			watchNS: {},
+	// The watched namespaces this controller may read now. One it may not --
+	// its RoleBinding deleted, or the namespace gone -- would hold every
+	// informer, and so the whole controller, short of Ready. It is left out of
+	// the cache, reported (wva_watch_namespace_unreadable, the log), and asked
+	// again by watchns.Prober, which restarts the manager when the set
+	// changes.
+	var unreadableWatched map[string]string
+	// One watched namespace is cached as before, readable or not: there are no
+	// others to keep running.
+	readableWatched := cfg.WatchNamespaces()
+	if len(readableWatched) > 1 {
+		readableWatched, unreadableWatched = watchns.Split(signalCtx, policyProbe, cfg.WatchNamespaces())
+		blocked := make([]string, 0, len(unreadableWatched))
+		for ns, why := range unreadableWatched {
+			blocked = append(blocked, ns)
+			setupLog.Error(nil, "A watched namespace cannot be read; it is left unmanaged and the others run. Restore the controller's Role and RoleBinding there (make setup-prereqs), or take it out of WVA_WATCH_NS",
+				"namespace", ns, "reason", why)
 		}
+		cfg.SetUnreadableNamespaces(blocked)
+	}
+	if watchNS != "" {
+		namespaces := cacheNamespaces(readableWatched, config.SystemNamespace())
+		setupLog.Info("Watching namespaces", "namespaces", readableWatched, "unreadable", unreadableWatched,
+			"controllerNamespace", config.SystemNamespace())
 		// The policy namespace is deliberately NOT added to the cache.
 		//
 		// Adding it starts an informer, and an informer that cannot list its
@@ -1080,15 +1100,16 @@ func main() {
 	// indistinguishable from a pool that is simply too small. Nothing set it
 	// except the e2e, which used it to force a reconciler into a namespace that
 	// declared no pool -- and paid for that with a controller restart per spec.
-	warmPoolNS := watchNS
-	// One namespace, derived from the watched one.
-	if warmPoolNS != "" {
-		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-			return runWarmPool(ctx, mgr, ds, warmPoolNS, warmPoolGPUUtil, warmPoolSleepMinSize,
-				warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget)
-		})); err != nil {
-			setupLog.Error(err, "unable to add the warm pool to manager")
-			os.Exit(1)
+	// One reconciler per readable watched namespace.
+	if watchNS != "" {
+		for _, warmPoolNS := range readableWatched {
+			if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+				return runWarmPool(ctx, mgr, ds, warmPoolNS, warmPoolGPUUtil, warmPoolSleepMinSize,
+					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget)
+			})); err != nil {
+				setupLog.Error(err, "unable to add the warm pool to manager", "namespace", warmPoolNS)
+				os.Exit(1)
+			}
 		}
 	} else if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		// EVERY namespace that declares a pool, discovered as they appear.
@@ -1229,7 +1250,22 @@ func main() {
 	// outcome now so a fallback forced by a Forbidden Namespace read is alertable.
 	metrics.SetPolicyNamespaceUnverified(cfg.PolicySource() == config.PolicySourceLocalUnverified)
 
+	metrics.SetWatchNamespacesUnreadable(unreadableWatched)
+	if watchNS != "" && len(cfg.WatchNamespaces()) > 1 {
+		if err := mgr.Add(&watchns.Prober{Reader: policyProbe, Watched: cfg.WatchNamespaces(),
+			Active: readableWatched, Report: metrics.SetWatchNamespacesUnreadable}); err != nil {
+			setupLog.Error(err, "unable to add the watched-namespace prober to the manager")
+			os.Exit(1)
+		}
+	}
+
 	if err := mgr.Start(signalCtx); err != nil {
+		if errors.Is(err, watchns.ErrSetChanged) {
+			// Not a failure: the container restarts and the cache is rebuilt
+			// from the namespaces that are readable now.
+			setupLog.Info("Exiting to rebuild the cache for the watched namespaces that are readable now")
+			os.Exit(1)
+		}
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
@@ -1406,6 +1442,23 @@ func nodeReadProbe(ctx context.Context, c client.Reader) error {
 			"keeping the previous verdict. No action unless it persists", "err", err.Error())
 	}
 	return nodeReadProbeErr
+}
+
+// cacheNamespaces is the namespace set a namespace-scoped manager caches: the
+// namespaces it manages (--watch-namespace, one or a comma-separated list) and
+// its own. Its own is where its scaling policy lives, and a policy edit there
+// must reach the ConfigMap reconciler without a restart; the controller holds
+// the manager Role in its own namespace as in each managed one. The policy
+// namespace, when separate, is deliberately not added (see the caller).
+func cacheNamespaces(watched []string, controllerNS string) map[string]cache.Config {
+	out := make(map[string]cache.Config, len(watched)+1)
+	for _, ns := range watched {
+		out[ns] = cache.Config{}
+	}
+	if controllerNS != "" {
+		out[controllerNS] = cache.Config{}
+	}
+	return out
 }
 
 // runWarmPool reconciles the warm pools of ONE namespace until ctx ends.

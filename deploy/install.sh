@@ -40,6 +40,10 @@ fi
 # from the make targets, which is where this resolution used to live. It was in
 # only 12 of them, so `NAMESPACE=x make undeploy-wva-on-k8s` uninstalled from the
 # DEFAULT namespace while the install had gone to x.
+# CONTROLLER_NAMESPACE is the same setting under the name the utilization-share
+# commands take: either one names where the controller runs, and WVA_NS wins
+# when both are set, so one exported variable reaches every step.
+WVA_NS=${WVA_NS:-${CONTROLLER_NAMESPACE:-}}
 WVA_NS_EXPLICIT=${WVA_NS:-}
 NAMESPACE_EXPLICIT=${NAMESPACE:-}
 export WVA_NS_EXPLICIT NAMESPACE_EXPLICIT

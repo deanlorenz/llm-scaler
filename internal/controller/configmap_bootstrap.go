@@ -65,9 +65,13 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 	var namespacesToScan []string
 
 	if watchNamespace != "" {
-		// Single-namespace mode: only watch the specified namespace
-		if watchNamespace != systemNamespace {
-			namespacesToScan = []string{watchNamespace}
+		// Namespace-scoped: only the watched namespaces, one or a listed few
+		for _, ns := range r.Config.WatchNamespaces() {
+			if ns != systemNamespace {
+				namespacesToScan = append(namespacesToScan, ns)
+			}
+		}
+		if len(namespacesToScan) > 0 {
 			logger.Info("Initial ConfigMap bootstrap", "watchNamespace", watchNamespace)
 		}
 	} else {
@@ -117,6 +121,12 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 
 	// Bootstrap all target ConfigMaps
 	for _, target := range targets {
+		if r.Config.Unreadable(target.namespace) {
+			// Left unmanaged while it cannot be read; reported where it was found.
+			logger.Info("Skipping the ConfigMap bootstrap of a watched namespace this controller may not read",
+				"namespace", target.namespace)
+			continue
+		}
 		if err := r.bootstrapConfigMap(ctx, target.name, target.namespace, target.isGlobal); err != nil {
 			r.Config.MarkConfigMapsBootstrapFailed(err)
 			return err

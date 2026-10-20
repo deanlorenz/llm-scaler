@@ -106,6 +106,26 @@ wva_missing_prereqs() {
             *)  echo "$kind/$name (in $WVA_NS)" ;;
         esac
     done <<< "$expected"
+
+    # The manager Role and RoleBinding the prereqs phase writes in each managed
+    # namespace, when the controller runs outside them (wva_apply_watch_namespace_rbac).
+    [ -n "${WVA_WATCH_NS:-}" ] || return 0
+    local role binding ns
+    read -r role binding <<< "$(wva_watch_rbac_names)"
+    for ns in $(wva_watch_words); do
+        [ "$ns" != "$WVA_NS" ] || continue
+        for kind in Role RoleBinding; do
+            name="$role"; [ "$kind" = Role ] || name="$binding"
+            rc=0
+            out=$(kubectl get "$kind" "$name" -n "$ns" 2>&1) || rc=$?
+            [ $rc -eq 0 ] && continue
+            if printf '%s' "$out" | grep -qi 'forbidden'; then
+                echo "UNVERIFIABLE $kind/$name in $ns"
+            else
+                echo "$kind/$name (in $ns)"
+            fi
+        done
+    done
 }
 
 # wva_resolve_install_phase decides which half of the install is left to do,
@@ -375,6 +395,9 @@ main() {
     wva_resolve_namespace
     # Says once, up front, when the selected scenario is not the supported one.
     wva_warn_unsupported_scope
+    # WVA_WATCH_NS=auto or a list, settled once for every path below. Not on
+    # the undeploy: it reads what the live Deployment manages.
+    [ "$UNDEPLOY" = "true" ] || wva_resolve_watch_namespaces
 
     # NOTE on wva_require_namespace, which refuses to guess the managed namespace:
     # it is called in the CHECK and INSTALL paths below, NOT here, and NOT on the
@@ -429,11 +452,12 @@ main() {
         # Gated on SKIP_CHECKS so the escape hatch these messages advertise is real
         # here too: they say "install without the checks: SKIP_CHECKS=true", and a
         # preflight that refused anyway would be telling the reader something false.
-        if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
+        if { [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; } || wva_watch_is_multi; then
             # A cluster-scoped controller manages every namespace, so the same
             # checks run once per namespace it would manage, found rather than
             # named. Run against WVA_NS they checked the controller's own
             # namespace, which holds no model servers, and passed on nothing.
+            # A controller managing a listed few checks each of those.
             if ! wva_check_managed_namespaces && [ "$SKIP_CHECKS" != "true" ]; then
                 log_error "Refusing to continue — fix the namespaces above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
             fi
@@ -547,7 +571,7 @@ main() {
             # Missing monitors are added by the prereqs phase below, when this
             # run includes it (wva_apply_llmd_monitors).
             wva_set_monitors_planned
-            if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
+            if { [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; } || wva_watch_is_multi; then
                 # Every namespace the controller would manage, as the preflight
                 # does: the controller's own namespace holds no model servers.
                 wva_check_managed_namespaces \
@@ -652,7 +676,9 @@ main() {
         # not the controller's, which is where the overlay would have put it and
         # where it would have selected nothing.
         if [ "${WVA_FMA_LAUNCHER_METRICS:-false}" = "true" ]; then
-            deploy_fma_launcher_podmonitor "${WVA_WATCH_NS:-$WVA_NS}"
+            for ns in $(wva_watch_words); do
+                deploy_fma_launcher_podmonitor "$ns"
+            done
         fi
     fi
 

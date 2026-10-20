@@ -492,6 +492,28 @@ var _ = Describe("ConfigMapReconciler", func() {
 		})
 	})
 
+	Context("Several watched namespaces", func() {
+		AfterEach(func() {
+			_ = os.Unsetenv("WATCH_NAMESPACE")
+		})
+
+		It("watches ConfigMaps in each listed namespace and in no other", func() {
+			for _, name := range []string{"watched-a", "watched-b", "not-watched"} {
+				ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+				Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, ns))).NotTo(HaveOccurred())
+			}
+			Expect(os.Setenv("WATCH_NAMESPACE", "watched-a,watched-b")).To(Succeed())
+			var err error
+			cfg, err = newTestConfigWithPrometheus("https://prometheus.monitoring:9090")
+			Expect(err).NotTo(HaveOccurred())
+			reconciler.Config = cfg
+
+			Expect(reconciler.shouldWatchNamespaceLocalConfigMap(ctx, "watched-a")).To(BeTrue())
+			Expect(reconciler.shouldWatchNamespaceLocalConfigMap(ctx, "watched-b")).To(BeTrue())
+			Expect(reconciler.shouldWatchNamespaceLocalConfigMap(ctx, "not-watched")).To(BeFalse())
+		})
+	})
+
 	Context("Single-Namespace Mode", func() {
 		var watchedNamespace string
 

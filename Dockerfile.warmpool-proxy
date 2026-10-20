@@ -7,7 +7,7 @@
 #
 # Digests are pinned for the same reason the manager's are: a floating tag turned
 # an already-cached local build green while CI could not build main at all.
-FROM quay.io/projectquay/golang:1.26@sha256:506a668eb4c763a964ffc4d4ad0125d45d75aac899392be7e5d39380f8452564 AS builder
+FROM quay.io/projectquay/golang:1.26@sha256:d5acf07940fb5e6e2d07542abd853cece623d95ffd364769ec825aab5471d3b8 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

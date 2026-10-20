@@ -68,7 +68,38 @@ wva_undeploy_watch_namespace_rbac() {
     esac
     [ "$watched" != "$WVA_NS" ] || return 0
 
+    # The rest of the uninstall (the monitors, the pod-write grants) acts on
+    # what this controller managed, so it learns it here, from the Deployment,
+    # when the caller did not repeat it.
+    case "${WVA_WATCH_NS:-}" in
+        ''|auto) WVA_WATCH_NS="$watched"; export WVA_WATCH_NS ;;
+    esac
+
     read -r role binding <<< "$(wva_watch_rbac_names)"
+    local one all granted=""
+    # Every namespace this install ever set up, found by its label, and every
+    # namespace the Deployment lists now: a namespace dropped from the list by
+    # an earlier install, and not pruned, is not left holding the grant.
+    if declare -F wva_granted_namespaces >/dev/null; then
+        granted="$(wva_granted_namespaces 2>/dev/null || true)"
+    fi
+    all="$(printf '%s\n%s\n' "$(printf '%s' "$watched" | tr ',' '\n')" "$granted" | grep -v '^$' | sort -u)"
+    case "$watched" in
+        *,*) ;;
+        *) [ "$(printf '%s\n' "$all" | grep -c .)" -gt 1 ] || all="" ;;
+    esac
+    if [ -n "$all" ]; then
+        for one in $all; do
+            [ "$one" != "$WVA_NS" ] || continue
+            kubectl delete rolebinding "$binding" -n "$one" --ignore-not-found > /dev/null 2>&1 || true
+            kubectl delete role "$role" -n "$one" --ignore-not-found > /dev/null 2>&1 || true
+            if declare -F wva_revoke_namespace >/dev/null; then wva_revoke_namespace "$one"; fi
+            log_info "Removed the controller's permissions in $one (Role/$role, RoleBinding/$binding)"
+        done
+        WVA_WATCH_NS="$(printf '%s\n' "$all" | grep -vxF -- "$WVA_NS" | paste -sd, -)"
+        export WVA_WATCH_NS
+        return 0
+    fi
     kubectl delete rolebinding "$binding" -n "$watched" --ignore-not-found > /dev/null 2>&1 || true
     kubectl delete role "$role" -n "$watched" --ignore-not-found > /dev/null 2>&1 || true
     log_info "Removed the controller's permissions in $watched (Role/$role, RoleBinding/$binding)"
@@ -77,6 +108,9 @@ wva_undeploy_watch_namespace_rbac() {
 undeploy_wva_controller() {
     log_info "Uninstalling Workload-Variant-Autoscaler..."
     wva_undeploy_watch_namespace_rbac
+    if declare -F wva_revoke_pod_list_grant >/dev/null && [ "$(wva_install_scope)" = namespace ]; then
+        wva_revoke_pod_list_grant
+    fi
 
     local kustomize_overlay
     kustomize_overlay="$(wva_overlay_dir)"
@@ -176,7 +210,8 @@ EOF
     elif ! kc_not_found "$KC_ERR"; then
         log_warning "Could not tell whether the controller Deployment in $WVA_NS is gone ($KC_ERR), so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once it is."
     elif [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
+        # shellcheck disable=SC2046 # one word per managed namespace
+        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" $(printf '%s' "${WVA_WATCH_NS:-}" | tr ',' ' ')
     else
         wva_remove_pod_writers "$WVA_NS"
     fi

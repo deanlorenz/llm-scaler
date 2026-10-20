@@ -309,6 +309,15 @@ check_tenant_install() {
     local sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
     local policy_ns limiter node_read
 
+    # A controller that manages several namespaces runs in one of its own, so
+    # it reads its own ConfigMap (internal/controller/policy_namespace.go: not
+    # self-managed), which this install writes. No label on a managed
+    # namespace redirects it.
+    if wva_watch_is_multi; then
+        log_info "Policy: this controller manages $(wva_watch_words | sed 's/ /, /g') from $WVA_NS, so it reads its limiters from its own ConfigMap there (wva-scaling-policy-config), which this install writes."
+        return 0
+    fi
+
     policy_ns="$(wva_cluster_policy_ns)"
     if [ "$policy_ns" = "unknown" ]; then
         log_warning "Could not read the ${WVA_WATCH_NS:-$WVA_NS} namespace object, so which cluster policy governs this install is unknown — a namespace is cluster-scoped, and namespaced rights do not reach it."
@@ -405,6 +414,9 @@ wva_api_resource() {
 wva_autoselect_namespace() {
     [ "${WVA_NS_SOURCE:-}" = "default" ] || return 0
     [ "$(wva_install_scope)" = "namespace" ] || return 0
+    # The managed namespaces are named (WVA_WATCH_NS), and the controller
+    # runs in WVA_NS, outside them: nothing to pick.
+    [ -z "${WVA_WATCH_NS:-}" ] || return 0
 
     # Searching means listing workloads cluster-wide, which a NAMESPACE ADMIN may
     # not do. Say that, rather than falling back to the default namespace as
@@ -475,7 +487,13 @@ wva_report_namespace() {
         return 0
     fi
 
-    if [ "$managed" != "$ns" ]; then
+    if wva_watch_is_multi; then
+        # Each managed namespace is checked, and reported, by
+        # wva_check_managed_namespaces.
+        log_info "  It runs in $ns and manages $(wva_watch_words | sed 's/ /, /g') (WVA_WATCH_NS$([ "${WVA_WATCH_NS_SOURCE:-}" = discovered ] && echo '=auto: every namespace with llm-d'))."
+        log_info "  Only those: it gets a Role in each, and no cluster-wide read of workloads."
+        return 0
+    elif [ "$managed" != "$ns" ]; then
         log_info "  It runs in $ns and manages $managed (WVA_WATCH_NS)."
     else
         log_info "  It runs in $ns and manages that same namespace — nothing outside it."
@@ -887,7 +905,13 @@ wva_kueue_source_configured() {
 # names what could not be read.
 wva_check_kueue_namespace_read() {
     [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
-    local source sa managed target answer
+    local source sa managed target answer one
+    if wva_watch_is_multi; then
+        for one in $(wva_watch_words); do
+            (WVA_WATCH_NS="$one"; wva_check_kueue_namespace_read) || exit 1
+        done
+        return 0
+    fi
     source="$(wva_kueue_source_configured)"
     [ -n "$source" ] || return 0
     sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
@@ -1073,6 +1097,19 @@ check_permissions() {
             denied+=("create namespace $ns (it does not exist yet)")
             cluster_denied=1
         fi
+    fi
+
+    # The Role and RoleBinding the prereqs phase writes in each managed
+    # namespace when the controller runs outside it.
+    if [ "${INSTALL_PHASE:-all}" != "wva" ] && [ -n "${WVA_WATCH_NS:-}" ]; then
+        local watched
+        for watched in $(wva_watch_words); do
+            [ "$watched" != "$ns" ] || continue
+            kubectl auth can-i create roles -n "$watched" >/dev/null 2>&1 \
+                || denied+=("create roles in $watched (the controller's permissions there)")
+            kubectl auth can-i create rolebindings -n "$watched" >/dev/null 2>&1 \
+                || denied+=("create rolebindings in $watched (the controller's permissions there)")
+        done
     fi
 
     # The external scaler certificates and KEDA's side of them (WVA_SCALER_TLS).
@@ -1299,7 +1336,13 @@ physical limiter: drop gpu-inventory from WVA_LIMITER."
 # mid-flow state between `deploy-wva` and `scaledobjects-apply`, or a forgotten
 # registration step -- and NOTHING IN CLUSTER STATE DISTINGUISHES THEM.
 wva_report_scaledobjects() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where sc=""
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where sc="" one
+    if declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        for one in $(wva_watch_words); do
+            (WVA_WATCH_NS="$one"; wva_report_scaledobjects) || true
+        done
+        return 0
+    fi
     # A cluster-scoped controller registers workloads in every namespace, never
     # in its own. Counting its own namespace reported "none yet" beside a
     # cluster full of registrations, and the commands it printed, without

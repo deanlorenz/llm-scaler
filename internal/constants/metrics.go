@@ -366,6 +366,13 @@ const (
 	// namespaces hold on shared nodes read as free.
 	WVAPodAccessDenied = "wva_pod_access_denied"
 
+	// WVAWatchNamespaceUnreadable is 1, per namespace and reason, for a
+	// namespace a namespace-scoped controller is told to watch and may not read
+	// (reason forbidden: its RoleBinding is gone; namespace-not-found). The
+	// controller runs on the others and leaves this one unmanaged until it can
+	// read it again. Absent for a namespace it reads.
+	WVAWatchNamespaceUnreadable = "wva_watch_namespace_unreadable"
+
 	// WVAConfigRejectedEntries is the number of entries of one scaling-policy
 	// ConfigMap that were rejected at its last load (labels: namespace,
 	// configmap). A rejected entry keeps the previous entry under its key in

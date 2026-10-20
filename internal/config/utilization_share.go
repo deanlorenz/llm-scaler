@@ -533,16 +533,19 @@ func (c *Config) UtilizationShare() (settings UtilizationShare, selected bool, e
 	if err != nil {
 		return UtilizationShare{}, false, err
 	}
-	if ns := c.infrastructure.watchNamespace; settings.PhysicalGroups && ns != "" {
-		// A namespace-scoped controller never plans a physical group. Where a
-		// quota bounds its namespace the setting has no effect anyway (the
-		// quota group plans it), so a leftover physicalGroups in a shared
-		// policy changes nothing. Where nothing but the inventory bounds it,
-		// the setting would take effect, so it is ignored -- not the whole
-		// block -- and the note says so.
+	if raw := c.infrastructure.watchNamespace; settings.PhysicalGroups && raw != "" {
+		// A namespace-scoped controller never plans a physical group, whether
+		// it manages one namespace or a listed few. Where a quota bounds every
+		// one of them the setting has no effect anyway (the quota group plans
+		// it), so a leftover physicalGroups in a shared policy changes nothing.
+		// Where nothing but the inventory bounds one, the setting would take
+		// effect, so it is ignored -- not the whole block -- and the note says so.
 		settings.PhysicalGroups = false
-		if !c.quotaBoundsNamespaceLocked(ns) {
-			settings.Note = PhysicalGroupsIgnoredMessage(ns)
+		for _, ns := range ParseWatchNamespaces(raw) {
+			if !c.quotaBoundsNamespaceLocked(ns) {
+				settings.Note = PhysicalGroupsIgnoredMessage(raw)
+				break
+			}
 		}
 	}
 	return settings, true, nil

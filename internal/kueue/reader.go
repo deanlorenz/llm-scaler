@@ -70,8 +70,9 @@ type Options struct {
 	// call reads.
 	RefreshInterval time.Duration
 
-	// Namespace, when set, restricts the LocalQueue listing to that namespace.
-	// A namespace-scoped controller can list LocalQueues nowhere else, and a
+	// Namespace, when set, restricts the LocalQueue listing to that namespace,
+	// or to each of a comma-separated list of them (a controller that watches
+	// several). A namespace-scoped controller can list LocalQueues nowhere else, and a
 	// cluster-wide list from it would be Forbidden — an error, not an empty
 	// result (Forbidden is not absent). ClusterQueues and ResourceFlavors are
 	// cluster-scoped and are always listed cluster-wide. Cohort borrowing
@@ -232,11 +233,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		cluster = addCaps(cluster, caps)
 	}
 
-	var listOpts []client.ListOption
-	if r.opts.Namespace != "" {
-		listOpts = append(listOpts, client.InNamespace(r.opts.Namespace))
-	}
-	localQueues, err := r.list(ctx, KindLocalQueue, listOpts...)
+	localQueues, err := r.listLocalQueues(ctx)
 	if err != nil {
 		return config.ExternalQuotas{}, err
 	}
@@ -1181,6 +1178,36 @@ func addTyped(caps map[string]int, accType string, n int) map[string]int {
 	}
 	caps[key] = addCapped(caps[key], n)
 	return caps
+}
+
+// listLocalQueues lists LocalQueues cluster-wide when Options.Namespace is
+// empty, else in each namespace it names (one, or a comma-separated list), in
+// that order. A namespace-scoped controller may list them nowhere else.
+//
+// With several namespaces, one that is Forbidden (its RoleBinding deleted, or
+// the namespace gone) is skipped and logged, not failed: the others keep their
+// Kueue bound, and the skipped one has no LocalQueue here, so its grant reads
+// as none -- bounded at nothing, the safe direction. With one namespace a
+// Forbidden list stays the error it is.
+func (r *Reader) listLocalQueues(ctx context.Context) ([]unstructured.Unstructured, error) {
+	namespaces := config.ParseWatchNamespaces(r.opts.Namespace)
+	if len(namespaces) == 0 {
+		return r.list(ctx, KindLocalQueue)
+	}
+	var out []unstructured.Unstructured
+	for _, ns := range namespaces {
+		items, err := r.list(ctx, KindLocalQueue, client.InNamespace(ns))
+		if err != nil {
+			if len(namespaces) > 1 && apierrors.IsForbidden(err) {
+				kueueLogger(ctx).Info("Cannot list Kueue LocalQueues in one watched namespace; it is skipped and gets no Kueue grant until the read is allowed again",
+					"namespace", ns, "error", err.Error())
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
 }
 
 // list fetches every object of a Kueue kind at whatever version the cluster
