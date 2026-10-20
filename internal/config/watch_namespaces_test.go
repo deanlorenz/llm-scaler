@@ -110,3 +110,18 @@ limiters:
 		})
 	}
 }
+
+// A value that names no namespace is cluster scope, decided once at load: not
+// a namespace-scoped controller with an empty list.
+func TestBlankWatchNamespaceIsClusterScope(t *testing.T) {
+	for _, raw := range []string{" , ", ",", "   "} {
+		c := NewTestConfig()
+		SetWatchNamespaceForTest(c, raw)
+		if c.WatchNamespace() != "" || c.WatchNamespaces() != nil {
+			t.Errorf("WATCH_NAMESPACE=%q: WatchNamespace()=%q WatchNamespaces()=%q, want cluster scope", raw, c.WatchNamespace(), c.WatchNamespaces())
+		}
+	}
+	if got := NormalizeWatchNamespace(" team-b , team-a,team-b "); got != "team-b,team-a" {
+		t.Errorf("NormalizeWatchNamespace = %q, want team-b,team-a", got)
+	}
+}

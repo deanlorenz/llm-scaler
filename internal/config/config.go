@@ -73,6 +73,8 @@ type infrastructureConfig struct {
 	restTimeout          time.Duration
 	secureMetrics        bool
 	watchNamespace       string
+	// unreadableNamespaces are watched namespaces found unreadable at startup.
+	unreadableNamespaces []string
 	loggerVerbosity      int
 	optimizationInterval time.Duration
 	// How long the saturation analyzer keeps what it has learned. Three
@@ -247,6 +249,30 @@ func (c *Config) WatchNamespaces() []string {
 // manages them all by other rules. Thread-safe.
 func (c *Config) Watches(namespace string) bool {
 	return namespace != "" && slices.Contains(c.WatchNamespaces(), namespace)
+}
+
+// NormalizeWatchNamespace is the parsed list of raw joined by commas: "" for
+// a value that names no namespace (blank, spaces, only commas).
+func NormalizeWatchNamespace(raw string) string {
+	return strings.Join(ParseWatchNamespaces(raw), ",")
+}
+
+// SetUnreadableNamespaces records the watched namespaces this controller may
+// not read, found at startup: they stay in WatchNamespaces (the controller is
+// still namespace-scoped, and still bound to them), and Unreadable reports
+// them so a read that would fail is not made. Thread-safe.
+func (c *Config) SetUnreadableNamespaces(namespaces []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infrastructure.unreadableNamespaces = slices.Clone(namespaces)
+}
+
+// Unreadable reports whether namespace is a watched namespace found
+// unreadable at startup. Thread-safe.
+func (c *Config) Unreadable(namespace string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return slices.Contains(c.infrastructure.unreadableNamespaces, namespace)
 }
 
 // ParseWatchNamespaces splits a --watch-namespace value on commas, trimming
@@ -637,7 +663,7 @@ func (c *Config) setPrometheusBaseURLForTesting(baseURL string) {
 func SetWatchNamespaceForTest(c *Config, ns string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.infrastructure.watchNamespace = ns
+	c.infrastructure.watchNamespace = NormalizeWatchNamespace(ns)
 }
 
 // SetOptimizationIntervalForTest overrides the optimization interval on a test

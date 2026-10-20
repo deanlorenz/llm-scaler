@@ -142,7 +142,9 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		}
 	}
 
-	// Read resolved values into Config
+	// Read resolved values into Config. WATCH_NAMESPACE is normalised once, here
+	// (blanks, spaces and repeats dropped), so " , " is cluster scope everywhere
+	// rather than namespace-scoped with no namespace.
 	cfg.infrastructure = infrastructureConfig{
 		metricsAddr:          v.GetString("METRICS_BIND_ADDRESS"),
 		probeAddr:            v.GetString("HEALTH_PROBE_BIND_ADDRESS"),
@@ -153,7 +155,7 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		retryPeriod:          v.GetDuration("LEADER_ELECTION_RETRY_PERIOD"),
 		restTimeout:          v.GetDuration("REST_CLIENT_TIMEOUT"),
 		secureMetrics:        v.GetBool("METRICS_SECURE"),
-		watchNamespace:       v.GetString("WATCH_NAMESPACE"),
+		watchNamespace:       NormalizeWatchNamespace(v.GetString("WATCH_NAMESPACE")),
 		loggerVerbosity:      v.GetInt("V"),
 		optimizationInterval: sanitizeOptimizationInterval(
 			v.GetDuration("GLOBAL_OPT_INTERVAL"), v.GetString("GLOBAL_OPT_INTERVAL")),

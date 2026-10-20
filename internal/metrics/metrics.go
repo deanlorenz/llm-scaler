@@ -77,6 +77,7 @@ var (
 	configUnknownKeys                   *prometheus.GaugeVec
 	configIgnoredFields                 *prometheus.GaugeVec
 	podAccessDenied                     *prometheus.GaugeVec
+	watchNamespaceUnreadable            *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
 	configInfoGauge                     *prometheus.GaugeVec
@@ -621,6 +622,14 @@ func InitMetrics(registry prometheus.Registerer) error {
 		podAccessDeniedLabels,
 	)
 
+	watchNamespaceUnreadable = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAWatchNamespaceUnreadable,
+			Help: "1 for a watched namespace this namespace-scoped controller may not read; it is left unmanaged while the others run",
+		},
+		append(append([]string{}, podAccessDeniedLabels...), constants.LabelNamespace, constants.LabelReason),
+	)
+
 	configRejectedEntriesLabels := []string{constants.LabelNamespace, "configmap"}
 	if controllerInstance != "" {
 		configRejectedEntriesLabels = append(configRejectedEntriesLabels, constants.LabelControllerInstance)
@@ -886,6 +895,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(podAccessDenied); err != nil {
 		return fmt.Errorf("failed to register podAccessDenied metric: %w", err)
+	}
+	if err := registry.Register(watchNamespaceUnreadable); err != nil {
+		return fmt.Errorf("failed to register watchNamespaceUnreadable metric: %w", err)
 	}
 	if err := registry.Register(configRejectedEntries); err != nil {
 		return fmt.Errorf("failed to register configRejectedEntries metric: %w", err)
@@ -1524,6 +1536,22 @@ func SetPodAccessDenied(denied bool) {
 		value = 1.0
 	}
 	podAccessDenied.With(labels).Set(value)
+}
+
+// SetWatchNamespacesUnreadable replaces the set of watched namespaces this
+// controller may not read: one series per namespace, labelled with why.
+func SetWatchNamespacesUnreadable(blocked map[string]string) {
+	if watchNamespaceUnreadable == nil {
+		return
+	}
+	watchNamespaceUnreadable.Reset()
+	for ns, reason := range blocked {
+		labels := prometheus.Labels{constants.LabelNamespace: ns, constants.LabelReason: reason}
+		if controllerInstance != "" {
+			labels[constants.LabelControllerInstance] = controllerInstance
+		}
+		watchNamespaceUnreadable.With(labels).Set(1)
+	}
 }
 
 // SetConfigRejectedEntries records how many entries of the scaling-policy

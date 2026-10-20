@@ -121,6 +121,12 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 
 	// Bootstrap all target ConfigMaps
 	for _, target := range targets {
+		if r.Config.Unreadable(target.namespace) {
+			// Left unmanaged while it cannot be read; reported where it was found.
+			logger.Info("Skipping the ConfigMap bootstrap of a watched namespace this controller may not read",
+				"namespace", target.namespace)
+			continue
+		}
 		if err := r.bootstrapConfigMap(ctx, target.name, target.namespace, target.isGlobal); err != nil {
 			r.Config.MarkConfigMapsBootstrapFailed(err)
 			return err

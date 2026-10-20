@@ -78,6 +78,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool"
 	warmpoolpolicy "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/policy"
 	warmpoolpool "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/pool"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/watchns"
 	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
@@ -531,9 +532,29 @@ func main() {
 	mgrOptions := managerOptions(cfg, metricsServerOptions, webhookServer)
 
 	watchNS := cfg.WatchNamespace()
+	// The watched namespaces this controller may read now. One it may not --
+	// its RoleBinding deleted, or the namespace gone -- would hold every
+	// informer, and so the whole controller, short of Ready. It is left out of
+	// the cache, reported (wva_watch_namespace_unreadable, the log), and asked
+	// again by watchns.Prober, which restarts the manager when the set
+	// changes.
+	var unreadableWatched map[string]string
+	// One watched namespace is cached as before, readable or not: there are no
+	// others to keep running.
+	readableWatched := cfg.WatchNamespaces()
+	if len(readableWatched) > 1 {
+		readableWatched, unreadableWatched = watchns.Split(signalCtx, policyProbe, cfg.WatchNamespaces())
+		blocked := make([]string, 0, len(unreadableWatched))
+		for ns, why := range unreadableWatched {
+			blocked = append(blocked, ns)
+			setupLog.Error(nil, "A watched namespace cannot be read; it is left unmanaged and the others run. Restore the controller's Role and RoleBinding there (make setup-prereqs), or take it out of WVA_WATCH_NS",
+				"namespace", ns, "reason", why)
+		}
+		cfg.SetUnreadableNamespaces(blocked)
+	}
 	if watchNS != "" {
-		namespaces := cacheNamespaces(cfg.WatchNamespaces(), config.SystemNamespace())
-		setupLog.Info("Watching namespaces", "namespaces", cfg.WatchNamespaces(),
+		namespaces := cacheNamespaces(readableWatched, config.SystemNamespace())
+		setupLog.Info("Watching namespaces", "namespaces", readableWatched, "unreadable", unreadableWatched,
 			"controllerNamespace", config.SystemNamespace())
 		// The policy namespace is deliberately NOT added to the cache.
 		//
@@ -1079,9 +1100,9 @@ func main() {
 	// indistinguishable from a pool that is simply too small. Nothing set it
 	// except the e2e, which used it to force a reconciler into a namespace that
 	// declared no pool -- and paid for that with a controller restart per spec.
-	// One reconciler per watched namespace, derived from the watched ones.
-	if watched := cfg.WatchNamespaces(); len(watched) > 0 {
-		for _, warmPoolNS := range watched {
+	// One reconciler per readable watched namespace.
+	if watchNS != "" {
+		for _, warmPoolNS := range readableWatched {
 			if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 				return runWarmPool(ctx, mgr, ds, warmPoolNS, warmPoolGPUUtil, warmPoolSleepMinSize,
 					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget)
@@ -1229,7 +1250,22 @@ func main() {
 	// outcome now so a fallback forced by a Forbidden Namespace read is alertable.
 	metrics.SetPolicyNamespaceUnverified(cfg.PolicySource() == config.PolicySourceLocalUnverified)
 
+	metrics.SetWatchNamespacesUnreadable(unreadableWatched)
+	if watchNS != "" && len(cfg.WatchNamespaces()) > 1 {
+		if err := mgr.Add(&watchns.Prober{Reader: policyProbe, Watched: cfg.WatchNamespaces(),
+			Active: readableWatched, Report: metrics.SetWatchNamespacesUnreadable}); err != nil {
+			setupLog.Error(err, "unable to add the watched-namespace prober to the manager")
+			os.Exit(1)
+		}
+	}
+
 	if err := mgr.Start(signalCtx); err != nil {
+		if errors.Is(err, watchns.ErrSetChanged) {
+			// Not a failure: the container restarts and the cache is rebuilt
+			// from the namespaces that are readable now.
+			setupLog.Info("Exiting to rebuild the cache for the watched namespaces that are readable now")
+			os.Exit(1)
+		}
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

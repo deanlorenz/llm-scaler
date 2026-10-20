@@ -120,6 +120,30 @@ func TestLoad_EnvPrecedence(t *testing.T) {
 	}
 }
 
+// A WATCH_NAMESPACE that names no namespace is normalised at load into cluster
+// scope, so nothing downstream sees a namespace-scoped controller with an empty
+// list.
+func TestLoad_BlankWatchNamespaceIsClusterScope(t *testing.T) {
+	_ = os.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
+	defer func() { _ = os.Unsetenv("PROMETHEUS_BASE_URL") }()
+	for _, raw := range []string{" , ", ",", "  "} {
+		cfg, err := Load(nil, writeTestConfigFile(t, `WATCH_NAMESPACE: "`+raw+`"`))
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+		if cfg.WatchNamespace() != "" {
+			t.Errorf("WATCH_NAMESPACE=%q loaded as %q, want \"\" (cluster scope)", raw, cfg.WatchNamespace())
+		}
+	}
+	cfg, err := Load(nil, writeTestConfigFile(t, `WATCH_NAMESPACE: " team-b , team-a,team-b "`))
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.WatchNamespace() != "team-b,team-a" {
+		t.Errorf("WatchNamespace() = %q, want team-b,team-a", cfg.WatchNamespace())
+	}
+}
+
 func TestLoad_FilePrecedence(t *testing.T) {
 	_ = os.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
 	defer func() { _ = os.Unsetenv("PROMETHEUS_BASE_URL") }()
