@@ -426,7 +426,7 @@ You should see the namespaces it manages, the quota, the GPU product, and no
   policy: workload-variant-autoscaler-system/wva-scaling-policy-config
 [OK]   limiter: quota; the optimizer shares each quota group
   ...
-  accelerators the controller resolves:  NVIDIA-A100-PCIE-80GB
+  accelerators the controller resolves: NVIDIA-A100-PCIE-80GB
 [OK]   no AcceleratorNotResolved events
   optimizer block: none (today's optimizer). Next: shadow
 ```
@@ -501,7 +501,7 @@ You should see `active`:
 
 ```text
   the controller in workload-variant-autoscaler-system manages team-a, team-b
-  ...
+  policy namespace: workload-variant-autoscaler-system (from workload-variant-autoscaler-system/wva-controller-status)
 [OK]   the controller in workload-variant-autoscaler-system can already patch pods in team-a
   wrote the optimizer block (active) into workload-variant-autoscaler-system/wva-scaling-policy-config
 [OK]   the controller applied version 4564: utilization share is active
