@@ -41,7 +41,7 @@ FAIL=0
 PASS=0
 # Every case reports ok or FAIL exactly once; a run that stops early must not
 # pass having checked less. Change this deliberately with the cases.
-EXPECT_CASES=25
+EXPECT_CASES=27
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -101,6 +101,11 @@ kubectl() {
                 items="${items:+$items,}{\"metadata\":{\"namespace\":\"${pair%%=*}\"},\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"manager\",\"env\":[{\"name\":\"WVA_WATCH_NAMESPACE\",\"value\":\"${pair#*=}\"}]}]}}}}"
             done
             echo "{\"items\":[${items}]}"; return 0 ;;
+        "get clusterrolebindings -o jsonpath="*)
+            # CRB_ROLES: the roleRef names of the cluster's bindings.
+            local r; for r in ${CRB_ROLES:-}; do echo "$r"; done; return 0 ;;
+        "get clusterroles -l llm-d.ai/applied-by=wva-setup-prereqs -o name")
+            echo "clusterrole.rbac.authorization.k8s.io/wva-epp-metrics-scraper"; return 0 ;;
         "get rolebindings -A -l llm-d.ai/watch-grant-for="*)
             # GRANTED_NS: the namespaces holding this install's labelled grant.
             local ns
@@ -366,6 +371,26 @@ if [ "$verbs" = "pods:list" ] && [ "$subj" = "llm-scaling/wva-controller-manager
     ok "gpu-inventory beside a quota gets list on Pods cluster-wide and nothing more; a quota alone gets none"
 else
     fail "the Pod list grant must be pods:list for llm-scaling, and absent with a quota alone (verbs=$verbs subj=$subj)" "$out"
+fi
+
+# 26. The uninstall removes the shared EPP scrape ClusterRole with its last
+#     binding, and keeps it while another binding still uses it.
+run 'CRB_ROLES="other-role"; WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b"; wva_remove_llmd_monitors'
+last_gone=$(grep -c '^kubectl delete clusterrole wva-epp-metrics-scraper ' "$CALLS")
+run 'CRB_ROLES="wva-epp-metrics-scraper"; WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b"; wva_remove_llmd_monitors'
+still_bound=$(grep -c '^kubectl delete clusterrole wva-epp-metrics-scraper ' "$CALLS")
+if [ "$last_gone" -ge 1 ] && [ "$still_bound" -eq 0 ]; then
+    ok "the EPP scrape ClusterRole goes with its last binding, and stays while one is left"
+else
+    fail "the EPP scrape ClusterRole must go only with its last binding (unbound deletes=$last_gone, bound deletes=$still_bound)" "$out"
+fi
+
+# 27. A list shrunk to one namespace needs no NAMESPACE: WVA_WATCH_NS names it.
+run 'WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS=team-a NAMESPACE_EXPLICIT=""; wva_require_namespace && echo NAMED'
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx NAMED; then
+    ok "a single WVA_WATCH_NS outside WVA_NS is the managed namespace: NAMESPACE is not also required"
+else
+    fail "wva_require_namespace must accept WVA_WATCH_NS=team-a with WVA_NS=llm-scaling (rc=$rc)" "$out"
 fi
 
 total=$((PASS + FAIL))

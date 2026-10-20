@@ -509,6 +509,12 @@ You should see the namespaces it manages, the quota, the GPU product, and no
   optimizer block: none (today's optimizer). Next: shadow
 ```
 
+With option B, the limiter line reads:
+
+```text
+[OK]   limiters: gpu-inventory and quota, both in force; the share's cluster budget is the cluster-scope quota, and the GPUs that exist bound it too
+```
+
 If not:
 
 - **`the controller has logged no accelerator yet`.** Wait another minute and

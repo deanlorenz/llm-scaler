@@ -1101,6 +1101,12 @@ wva_require_namespace() {
     if declare -F wva_watch_is_listed >/dev/null && wva_watch_is_listed; then
         return 0
     fi
+    # WVA_WATCH_NS naming one namespace outside WVA_NS names it too: the managed
+    # namespace was given, so there is nothing to guess. A list shrunk to one
+    # namespace on a re-install lands here.
+    if [ -n "${WVA_WATCH_NS:-}" ] && [ "$WVA_WATCH_NS" != "$WVA_NS" ]; then
+        return 0
+    fi
     # kind-emulator provisions llm-d, the EPP and WVA in one sequence and owns its own
     # namespaces: `make deploy-e2e-infra` calls install.sh with no NAMESPACE on
     # purpose, using the controller-namespace defaults. Requiring it there would break

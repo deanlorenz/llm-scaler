@@ -1677,6 +1677,18 @@ wva_remove_llmd_monitors() {
         ns="${WVA_WATCH_NS:-$WVA_NS}"
         where=(-n "$ns")
         kubectl delete clusterrolebinding "${WVA_EPP_SCRAPE_ROLE}-${ns}" --ignore-not-found >/dev/null 2>&1 || true
+        # The shared ClusterRole goes with its last binding: one still bound
+        # (another namespace's EPP monitor) keeps it. A list that cannot be read
+        # keeps it too.
+        local bound
+        if bound="$(kubectl get clusterrolebindings -o jsonpath='{range .items[*]}{.roleRef.name}{"\n"}{end}' 2>/dev/null)" \
+            && ! printf '%s\n' "$bound" | grep -qxF -- "$WVA_EPP_SCRAPE_ROLE"; then
+            # Only our own: the ClusterRole setup labelled, never one of that name it did not write.
+            if kubectl get clusterroles -l "$WVA_LLMD_MONITOR_MARK" -o name 2>/dev/null \
+                | grep -qxF -- "clusterrole.rbac.authorization.k8s.io/$WVA_EPP_SCRAPE_ROLE"; then
+                kubectl delete clusterrole "$WVA_EPP_SCRAPE_ROLE" --ignore-not-found >/dev/null 2>&1 || true
+            fi
+        fi
     else
         kubectl delete clusterrolebindings,clusterroles -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
     fi
