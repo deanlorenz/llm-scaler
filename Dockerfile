@@ -1,9 +1,10 @@
 # Build the manager binary
-# Digest re-pinned 2026-08-14: the previous one (sha256:94758a60...) had been
-# removed from quay.io and resolved to "not found", so every build without that
-# layer already cached failed -- CI could not build main at all, while local
-# builds kept succeeding from cache and hid it.
-FROM quay.io/projectquay/golang:1.26@sha256:506a668eb4c763a964ffc4d4ad0125d45d75aac899392be7e5d39380f8452564 AS builder
+# Digest re-pinned 2026-10-20, and before that 2026-08-14: each time quay.io
+# re-pushed the 1.26 tag and removed the old digest (sha256:506a668e..., before
+# it sha256:94758a60...), which then resolved to "not found". Every build
+# without that layer cached failed -- CI could not build main at all, while
+# local builds kept succeeding from cache and hid it.
+FROM quay.io/projectquay/golang:1.26@sha256:d5acf07940fb5e6e2d07542abd853cece623d95ffd364769ec825aab5471d3b8 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
