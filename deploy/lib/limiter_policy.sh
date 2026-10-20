@@ -455,18 +455,21 @@ $2"
 }
 
 # policy_counts_borrowing reads a policy's default entry on stdin and echoes yes
-# when it counts Kueue cohort borrowing -- some quota entry has kueue.enabled
-# and a countBorrowable that is not false (the controller default is true) --
-# and no when it does not. Fails, printing nothing, when the entry does not
-# parse: a policy nobody could read is not one that counts nothing. Pure, so
-# the hack checks execute it offline.
+# when it counts Kueue cohort borrowing -- some quota entry of scope namespace
+# (the default) has kueue.enabled and a countBorrowable that is not false (the
+# controller default is true) -- and no when it does not. A scope: cluster
+# entry never counts borrowing (countsBorrowing in
+# internal/engines/allocation/limiter_factory.go), whatever countBorrowable
+# says. Fails, printing nothing, when the entry does not parse: a policy nobody
+# could read is not one that counts nothing. Pure, so the hack checks execute
+# it offline.
 #
 # It decides whether a controller gets the cluster-wide Workload and LocalQueue
 # read (pl_grant_kueue_borrow_read): that read reaches every tenant's Workloads,
 # so it is granted only to a controller whose policy needs it.
 policy_counts_borrowing() {
     local n
-    n="$(yq '[.limiters[]? | select(.type == "quota" and .kueue.enabled == true and .kueue.countBorrowable != false)] | length' 2>/dev/null)" || return 1
+    n="$(yq '[.limiters[]? | select(.type == "quota" and .scope != "cluster" and .kueue.enabled == true and .kueue.countBorrowable != false)] | length' 2>/dev/null)" || return 1
     case "$n" in
         0) echo no ;;
         ''|null|*[!0-9]*) return 1 ;;

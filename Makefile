@@ -2909,6 +2909,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-cluster-namespace-checks.sh
 	@bash -n hack/check-watch-namespace-list.sh
+	@bash -n hack/check-kueue-queues.sh
 	@bash -n hack/check-cluster-controller-namespace.sh
 	@bash -n hack/check-llmd-monitors.sh
 	@bash -n hack/check-e2e-images.sh
@@ -3079,6 +3080,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# controller-only upgrade, bounds the namespace at nothing. The
 	@# preflight must refuse that phase; executed against a stub kubectl.
 	@bash hack/check-kueue-namespace-grant.sh
+	@# With a Kueue budget, a namespace with no LocalQueue on a GPU
+	@# ClusterQueue, or a model server with no queue label, installs
+	@# cleanly and is charged to no queue. The preflight must refuse it.
+	@bash hack/check-kueue-queues.sh
 	@echo "Checking the installer's decisions against a stubbed cluster..."
 	@# KEDA preflight and install order, image pinning, chart pinning, TLS
 	@# verification, uninstall grants and summaries: each parses and is wrong.

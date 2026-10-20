@@ -468,11 +468,15 @@ main() {
             # silent, and missing the queue also disables the detector that would have
             # reported the rest.
             wva_require_epp_metrics
+            # With a Kueue budget: a LocalQueue here, on a GPU ClusterQueue,
+            # and every model server on it.
+            wva_require_kueue_queues
         else
             # Still SAY what is missing -- skipping the gate should not mean skipping
             # the finding, or SKIP_CHECKS becomes a way to be uninformed.
             wva_report_modelserver_metrics || true
             wva_report_epp_flowcontrol || true
+            wva_report_kueue_queues || true
         fi
         # Informational only. No ScaledObject yet is the EXPECTED state here, because
         # registration is the step AFTER this one -- objects to scale are WVA's
@@ -579,6 +583,7 @@ main() {
             else
                 wva_require_modelserver_metrics
                 wva_require_epp_metrics
+                wva_require_kueue_queues
             fi
         fi
     fi

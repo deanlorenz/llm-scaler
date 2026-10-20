@@ -1278,6 +1278,251 @@ wva_require_epp_metrics() {
     log_error "Refusing to continue — fix the EPP above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
 }
 
+# --- Kueue as the budget ------------------------------------------------------
+#
+# With WVA_QUOTA_KUEUE=true the quota's figure comes from Kueue's ClusterQueues,
+# and Kueue charges a model server's GPUs only when its pods go through a
+# LocalQueue. Three things make that true in a namespace, and each one missing
+# is silent: the install succeeds, the controller logs a budget, and the
+# namespace's GPUs are charged to no queue.
+#
+#   1. a LocalQueue in the namespace, pointing at a ClusterQueue that exists,
+#      declares a GPU resource, and whose namespaceSelector admits the
+#      namespace (internal/kueue/reader.go counts nothing else);
+#   2. every model server naming that LocalQueue in kueue.x-k8s.io/queue-name,
+#      on the object or its pod template -- or the namespace selected by a
+#      LocalQueue named `default`, which Kueue fills in on objects created
+#      after it;
+#   3. the running model-server pods carrying the label, which is what Kueue
+#      actually charges. A Deployment created before its `default` LocalQueue
+#      keeps unlabelled pods, and Kueue refuses to add the label to it later
+#      (the label is immutable on the Deployment), so the fix is the pod
+#      template.
+
+WVA_KUEUE_GPU_RESOURCES='["nvidia.com/gpu","amd.com/gpu","habana.ai/gaudi","gpu.intel.com/i915","gpu.intel.com/xe"]'
+WVA_KUEUE_QUEUE_LABEL="kueue.x-k8s.io/queue-name"
+
+# wva_kueue_budget_wanted reports whether this run declares a quota bounded by
+# Kueue: WVA_LIMITER naming quota, with WVA_QUOTA_KUEUE=true.
+wva_kueue_budget_wanted() {
+    local set
+    [ "${WVA_QUOTA_KUEUE:-false}" = true ] || return 1
+    # A WVA_LIMITER limiter_types_of refuses is the install's refusal to make,
+    # not this check's: read as no Kueue budget here.
+    set="$(limiter_types_of "${WVA_LIMITER:-none}" 2>/dev/null)" || return 1
+    limiter_set_has "$set" quota
+}
+
+# wva_kueue_gpu_queues echoes, one per line, "<ClusterQueue> <GPUs>" for every
+# ClusterQueue in the JSON list $1 that declares a GPU resource, GPUs being its
+# nominal GPU quota summed over its flavors.
+wva_kueue_gpu_queues() {
+    printf '%s' "$1" | jq -r --argjson gpu "$WVA_KUEUE_GPU_RESOURCES" '
+        .items[]?
+        | [ .spec.resourceGroups[]?.flavors[]?.resources[]?
+            | select(.name as $n | $gpu | index($n))
+            | (.nominalQuota | tostring | tonumber? // 0) ] as $q
+        | select(($q | length) > 0)
+        | "\(.metadata.name) \($q | add)"'
+}
+
+# wva_report_kueue_queues is the per-namespace Kueue check: the three
+# conditions above, for the namespace WVA_WATCH_NS (else WVA_NS). Returns 1
+# when one is missing, naming the fix; a read it may not make is "cannot tell
+# whether", never a pass. Silent unless the run wants a Kueue budget.
+wva_report_kueue_queues() {
+    wva_kueue_budget_wanted || return 0
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" version cqs lqs labels rows gpu_cqs one_cq
+    local usable="" usable_cqs="" bad=0 row lq cq verdict n workloads pods
+
+    if ! kc_capture get crd localqueues.kueue.x-k8s.io -o jsonpath='{.spec.versions[?(@.storage==true)].name}'; then
+        if kc_not_found "$KC_ERR"; then
+            log_warning "  Kueue budget: this cluster has no Kueue (no LocalQueue CRD), and WVA_QUOTA_KUEUE=true reads the budget from it. Install Kueue, or pick a budget without it (drop WVA_QUOTA_KUEUE)."
+            return 1
+        fi
+        log_warning "  Kueue budget: cannot tell whether Kueue is installed: ${KC_ERR}"
+        return 0
+    fi
+    version="${KC_OUT:-v1beta2}"
+    if ! kc_capture get clusterqueues.kueue.x-k8s.io -o json; then
+        log_warning "  Kueue budget: cannot tell whether a ClusterQueue holds a GPU quota: ${KC_ERR}"
+        return 0
+    fi
+    cqs="$KC_OUT"
+    gpu_cqs="$(wva_kueue_gpu_queues "$cqs")"
+    one_cq="<a ClusterQueue with a GPU quota>"
+    [ "$(printf '%s\n' "$gpu_cqs" | grep -c .)" = 1 ] && one_cq="${gpu_cqs%% *}"
+    if ! kc_capture get localqueues.kueue.x-k8s.io -n "$ns" -o json; then
+        log_warning "  Kueue budget: cannot tell whether $ns has a LocalQueue: ${KC_ERR}"
+        return 0
+    fi
+    lqs="$KC_OUT"
+    if [ "$(printf '%s' "$lqs" | jq '.items | length')" = 0 ]; then
+        log_warning "  Kueue budget: no LocalQueue in $ns, so Kueue grants it nothing and its model servers run outside Kueue."
+        if [ -z "$gpu_cqs" ]; then
+            log_warning "    No ClusterQueue declares a GPU quota either. Create one with nominalQuota on nvidia.com/gpu, then a LocalQueue here that points at it."
+        else
+            log_warning "    ClusterQueues with a GPU quota: $(printf '%s\n' "$gpu_cqs" | awk '{printf "%s%s (%s GPUs)", (NR>1?", ":""), $1, $2}')."
+        fi
+        log_warning "    Create one:  kubectl create -n $ns -f - <<< '{\"apiVersion\":\"kueue.x-k8s.io/${version}\",\"kind\":\"LocalQueue\",\"metadata\":{\"name\":\"serving\"},\"spec\":{\"clusterQueue\":\"${one_cq}\"}}'"
+        return 1
+    fi
+    # The namespace labels, for a ClusterQueue namespaceSelector; null when
+    # they cannot be read, which leaves the selector unevaluated.
+    labels=null
+    if kc_capture get namespace "$ns" -o json; then
+        labels="$(printf '%s' "$KC_OUT" | jq -c '.metadata.labels // {}')" || labels=null
+    fi
+    # One row per LocalQueue: name, ClusterQueue, verdict, GPUs.
+    rows="$(printf '%s' "$lqs" | jq -r --argjson cqs "$cqs" --argjson labels "$labels" --argjson gpu "$WVA_KUEUE_GPU_RESOURCES" '
+        def gpus: [ .spec.resourceGroups[]?.flavors[]?.resources[]?
+                    | select(.name as $n | $gpu | index($n))
+                    | (.nominalQuota | tostring | tonumber? // 0) ];
+        def expr($l): . as $x | ($l[$x.key]) as $v
+            | if $x.operator == "In" then $v != null and (($x.values // []) | index($v)) != null
+              elif $x.operator == "NotIn" then $v == null or (($x.values // []) | index($v)) == null
+              elif $x.operator == "Exists" then $l | has($x.key)
+              elif $x.operator == "DoesNotExist" then ($l | has($x.key)) | not
+              else false end;
+        def admits($l): .spec.namespaceSelector as $s
+            | if $s == null then false
+              else ((($s.matchLabels // {}) | to_entries | all(.key as $k | .value == $l[$k]))
+                    and (($s.matchExpressions // []) | all(expr($l)))) end;
+        ($cqs.items // [] | map({key: .metadata.name, value: .}) | from_entries) as $by
+        | .items[]
+        | (.spec.clusterQueue // "") as $cq | $by[$cq] as $q
+        | [ .metadata.name, $cq,
+            ( if $q == null then "missing"
+              elif ($q | gpus | length) == 0 then "nogpu"
+              elif $labels == null and ($q.spec.namespaceSelector // {}) != {} then "unknown"
+              elif ($q | admits($labels // {})) | not then "notadmitted"
+              else "ok" end ),
+            ( if $q == null then 0 else ($q | gpus | add // 0) end ) ]
+        | @tsv')" || { log_warning "  Kueue budget: cannot tell whether $ns has a usable LocalQueue: the LocalQueues did not parse."; return 0; }
+    while IFS=$'\t' read -r lq cq verdict n; do
+        [ -n "$lq" ] || continue
+        case "$verdict" in
+            ok)
+                usable="${usable:+$usable }$lq"
+                case " $usable_cqs " in *" $cq "*) ;; *) usable_cqs="${usable_cqs:+$usable_cqs }$cq" ;; esac
+                log_success "  Kueue budget: LocalQueue $lq -> ClusterQueue $cq ($n GPUs)." ;;
+            missing) log_warning "  Kueue budget: LocalQueue $lq points at ClusterQueue '${cq}', which does not exist. Point it at ${one_cq}." ;;
+            nogpu) log_warning "  Kueue budget: LocalQueue $lq points at ClusterQueue $cq, which declares no GPU resource, so it says nothing about GPUs. Point it at ${one_cq}." ;;
+            notadmitted) log_warning "  Kueue budget: LocalQueue $lq points at ClusterQueue $cq, whose namespaceSelector does not admit $ns, so Kueue admits nothing through it. Label $ns to match the selector, or widen it." ;;
+            unknown) log_warning "  Kueue budget: cannot tell whether ClusterQueue $cq admits $ns: its namespaceSelector needs the namespace labels, which may not be read here." ;;
+        esac
+    done <<< "$rows"
+    if [ -z "$usable" ]; then
+        printf '%s\n' "$rows" | grep -q "	unknown	" && return 0
+        log_warning "  Kueue budget: no usable LocalQueue in $ns (one on a ClusterQueue with a GPU quota that admits $ns). Fix one of those above."
+        return 1
+    fi
+    case "$usable_cqs" in
+        *" "*) log_warning "  Kueue budget: $ns has LocalQueues on several GPU ClusterQueues ($usable_cqs). A namespace gets one queue's figure, not their sum (multi-queue-namespace). Keep one LocalQueue for the model servers." ;;
+    esac
+
+    # Each model server names a usable LocalQueue, or the namespace is
+    # selected by a usable LocalQueue named default.
+    workloads="$(for kind in deployments leaderworkersets; do
+        kubectl get "$kind" -n "$ns" -o json 2>/dev/null || true
+    done | jq -rs --argjson markers "$(so_serving_markers_json)" --arg q "$WVA_KUEUE_QUEUE_LABEL" '
+        [ .[].items[]? ] | .[]
+        | ((.spec.template.metadata.labels // .spec.leaderWorkerTemplate.leaderTemplate.metadata.labels
+            // .spec.leaderWorkerTemplate.workerTemplate.metadata.labels) // {}) as $t
+        | select($t | to_entries | any((.key + "=" + (.value | tostring)) as $kv | ($markers | index($kv)) != null))
+        | [ ((.kind // "Deployment") | ascii_downcase) + "/" + .metadata.name,
+            ((.metadata.labels // {})[$q] // $t[$q] // "") ]
+        | @tsv' 2>/dev/null || true)"
+    local w queue fixq="${usable%% *}"
+    while IFS=$'\t' read -r w queue; do
+        [ -n "$w" ] || continue
+        if [ -z "$queue" ]; then
+            case " $usable " in
+                *" default "*) continue ;;
+            esac
+            log_warning "  Kueue budget: $w carries no ${WVA_KUEUE_QUEUE_LABEL} label, so Kueue charges its GPUs to no queue."
+            log_warning "    Add it to the pod template (this restarts its pods; or set it in your llm-d values):  kubectl patch -n $ns $w --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"${WVA_KUEUE_QUEUE_LABEL}\":\"${fixq}\"}}}}}'"
+            bad=1
+        elif ! printf '%s\n' $usable | grep -qxF -- "$queue"; then
+            log_warning "  Kueue budget: $w names LocalQueue '$queue', which is not a usable LocalQueue in $ns (usable: ${usable// /, }). Set ${WVA_KUEUE_QUEUE_LABEL}=${fixq} on its pod template."
+            bad=1
+        fi
+    done <<< "$workloads"
+
+    # The running model-server pods: what Kueue actually charges. A pod Kueue
+    # manages carries kueue.x-k8s.io/managed=true; one without it holds GPUs no
+    # queue is charged for.
+    pods="$(kubectl get pods -n "$ns" -o json 2>/dev/null | jq -r --argjson markers "$(so_serving_markers_json)" --arg q "$WVA_KUEUE_QUEUE_LABEL" '
+        .items[]?
+        | select(.status.phase == "Running" or .status.phase == "Pending")
+        | (.metadata.labels // {}) as $l
+        | select($l | to_entries | any((.key + "=" + (.value | tostring)) as $kv | ($markers | index($kv)) != null))
+        | select(($l["kueue.x-k8s.io/managed"] // "") != "true")
+        | [ .metadata.name, (if ($l[$q] // "") == "" then "unlabelled" else "uncovered" end) ]
+        | @tsv' 2>/dev/null || true)"
+    if [ -n "$pods" ]; then
+        log_warning "  Kueue budget: $(printf '%s\n' "$pods" | grep -c .) model-server pod(s) in $ns run outside Kueue (no kueue.x-k8s.io/managed label): $(printf '%s\n' "$pods" | cut -f1 | head -3 | paste -sd, -)."
+        if printf '%s\n' "$pods" | grep -q "	unlabelled$"; then
+            log_warning "    They started before their model server was on a queue. Label the pod template as above; the rollout replaces them."
+        fi
+        if printf '%s\n' "$pods" | grep -q "	uncovered$"; then
+            log_warning "    They carry ${WVA_KUEUE_QUEUE_LABEL}, so Kueue does not manage pods in $ns: its webhooks or managedJobsNamespaceSelector leave $ns out, or the pod and deployment integrations are off (integrations.frameworks in kueue-manager-config). Cover $ns, then restart the model servers."
+        fi
+        bad=1
+    fi
+    [ "$bad" = 0 ] || return 1
+    log_success "  Kueue budget: the model servers in $ns are on LocalQueue ${usable// /, }."
+    return 0
+}
+
+# wva_require_kueue_queues turns that report into a stop, like the two above.
+wva_require_kueue_queues() {
+    wva_report_kueue_queues && return 0
+    log_error "Refusing to continue — fix the Kueue queues above, or SKIP_CHECKS=true (see docs/reference/operations.md#first-line-troubleshooting)."
+}
+
+# wva_report_kueue_cluster_budget says, once per run, what a scope: cluster
+# Kueue budget adds up to, for the namespaces given as arguments. The cluster
+# figure is the GPU quota of EVERY ClusterQueue (internal/kueue/reader.go), not
+# only the ones these namespaces use, so a queue for other work (training,
+# batch) widens the budget past what the models can be admitted to. Warns,
+# naming the finite cap that keeps the budget to the models' queues.
+wva_report_kueue_cluster_budget() {
+    wva_kueue_budget_wanted || return 0
+    [ "${WVA_QUOTA_SCOPE:-namespace}" = cluster ] || return 0
+    local gpu_cqs used="" ns cq name n total=0 mine=0 others=""
+    kc_capture get clusterqueues.kueue.x-k8s.io -o json || return 0
+    gpu_cqs="$(wva_kueue_gpu_queues "$KC_OUT")"
+    [ -n "$gpu_cqs" ] || return 0
+    for ns in "$@"; do
+        for cq in $(kubectl get localqueues.kueue.x-k8s.io -n "$ns" -o jsonpath='{.items[*].spec.clusterQueue}' 2>/dev/null || true); do
+            case " $used " in *" $cq "*) ;; *) used="${used:+$used }$cq" ;; esac
+        done
+    done
+    while read -r name n; do
+        [ -n "$name" ] || continue
+        total=$((total + n))
+        case " $used " in
+            *" $name "*) mine=$((mine + n)) ;;
+            *) others="${others:+$others, }$name ($n)" ;;
+        esac
+    done <<< "$gpu_cqs"
+    if [ -z "$others" ]; then
+        log_success "Kueue budget: $total GPUs, the GPU quota of ClusterQueue(s) ${used// /, }, shared by every managed namespace; WVA_QUOTAS can only lower it."
+        return 0
+    fi
+    # A finite WVA_QUOTAS cap keeps the budget to it whatever Kueue sums.
+    case " $(printf '%s' "${WVA_QUOTAS:-}" | tr ',' ' ') " in
+        *"=-1 "*) ;;
+        *)
+            log_info "Kueue budget: the GPU quota of every ClusterQueue, $total GPUs, capped by WVA_QUOTAS (${WVA_QUOTAS:-}). The managed namespaces use ClusterQueue(s) ${used// /, } ($mine GPUs)."
+            return 0 ;;
+    esac
+    log_warning "Kueue budget: the shared budget is the GPU quota of EVERY ClusterQueue, $total GPUs, and ClusterQueue(s) $others serve none of the managed namespaces."
+    log_warning "  To keep the budget to the models' queues, cap it at their $mine GPUs: WVA_QUOTAS='<accelerator>=${mine}' instead of -1."
+    return 0
+}
+
 # wva_inferencepool_namespaces echoes every namespace that has an InferencePool,
 # in either API group (the same two wva_epp_services reads).
 wva_inferencepool_namespaces() {
@@ -1295,6 +1540,9 @@ wva_ns_check_reasons() {
     case "$out" in *"Monitoring not enabled for your llm-d servers"*) reasons+=("model servers not scraped") ;; esac
     case "$out" in *"Router monitoring not enabled"*) reasons+=("EPP not scraped") ;; esac
     case "$out" in *"could not read"*"plugins config"*) reasons+=("EPP config unreadable") ;; esac
+    case "$out" in *"Kueue budget: no LocalQueue in"*|*"Kueue budget: no usable LocalQueue"*) reasons+=("no usable Kueue LocalQueue") ;; esac
+    case "$out" in *"Kueue charges its GPUs to no queue"*|*"which is not a usable LocalQueue"*|*"run outside Kueue"*) reasons+=("model servers not on a Kueue queue") ;; esac
+    case "$out" in *"this cluster has no Kueue"*) reasons+=("no Kueue") ;; esac
     local IFS=,
     printf '%s' "${reasons[*]}" | sed 's/,/, /g'
 }
@@ -1307,6 +1555,7 @@ wva_ns_check_notes() {
     case "$out" in *"Setup adds PodMonitor"*) notes+=("setup adds the model-server PodMonitor") ;; esac
     case "$out" in *"Setup adds ServiceMonitor"*) notes+=("setup adds the EPP ServiceMonitor") ;; esac
     case "$out" in *"EPP flow control: off"*) notes+=("EPP flow control off: no scale from zero") ;; esac
+    case "$out" in *"Kueue budget: the model servers in"*) notes+=("on Kueue LocalQueue $(printf '%s\n' "$out" | sed -n 's/.*Kueue budget: the model servers in .* are on LocalQueue \(.*\)\.$/\1/p' | head -1)") ;; esac
     local IFS=,
     printf '%s' "${notes[*]}" | sed 's/,/, /g'
 }
@@ -1381,6 +1630,8 @@ wva_check_managed_namespaces() {
         out="$( (WVA_WATCH_NS="$ns"; wva_report_modelserver_metrics) 2>&1 )" || rc=1
         out="${out}
 $( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
+        out="${out}
+$( (WVA_WATCH_NS="$ns"; wva_report_kueue_queues) 2>&1 )" || rc=1
         printf '%s\n' "$out" | grep -v '^$' >&2 || true
         if [ "$rc" -ne 0 ]; then
             reasons="$(wva_ns_check_reasons "$out")"
@@ -1410,6 +1661,8 @@ $( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
             *)      log_warning "  $name: ${status}${why:+ ($why)}" ;;
         esac
     done
+    # shellcheck disable=SC2086 # one word per namespace
+    wva_report_kueue_cluster_budget $namespaces
     if [ "$failed" -gt 0 ]; then
         log_warning "Namespaces: $passed passed, $failed failed, $unchecked could not be checked."
         return 1
