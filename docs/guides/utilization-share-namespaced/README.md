@@ -374,12 +374,11 @@ make deploy-wva INSTALL_PHASE=wva \
 ```
 <!-- guide:steps.installphysical end -->
 
-You should see the node read and the Pod list confirmed, both limiters, and
-`Deployment on kubernetes complete!`:
+You should see each namespace pass, both limiters, and `Deployment on
+kubernetes complete!`:
 
 ```text
-[SUCCESS] The controller can list nodes, which the gpu-inventory limiter requires
-[SUCCESS] The controller can list Pods in every namespace, which the gpu-inventory limiter needs to see other namespaces' GPUs
+[SUCCESS] Namespaces: all 2 passed.
 ...
 [WARNING] Scaling is now bounded by every limiter in 'gpu-inventory quota' (declared in workload-variant-autoscaler-system/wva-scaling-policy-config):
     - type: gpu-inventory
@@ -399,8 +398,10 @@ If not:
   `WVA_WATCH_NS`. Run step 9 again in this shell.
 - **It warns that the quota key matches no node.** Use the exact product from
   step 5.
-- **Option B: it says the controller cannot list Pods in every namespace.**
-  Step 9 ran as option A. Run step 9 for option B.
+- **Option B: the Pod list is missing.** Step 9 ran as option A. Check it
+  with `kubectl auth can-i list pods -A --as=system:serviceaccount:${CONTROLLER_NAMESPACE}:wva-controller-manager`;
+  it answers `yes` after step 9 for option B. If it answers `no`, run step 9
+  for option B.
 - **`gpu-inventory alone is refused`.** Keep the quota beside it, as above.
 
 ## Register the models
