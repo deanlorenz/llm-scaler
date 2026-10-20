@@ -241,7 +241,10 @@ verify_deployment() {
     # Not at cluster scope: there the controller's namespace holds no EPP, and
     # the preflight checked every managed namespace (wva_check_managed_namespaces).
     if [ "$(wva_install_scope)" != "cluster" ] || [ -n "${WVA_WATCH_NS:-}" ]; then
-        wva_report_epp_flowcontrol || true
+        local epp_ns
+        for epp_ns in $(wva_watch_words); do
+            (WVA_WATCH_NS="$epp_ns"; wva_report_epp_flowcontrol) || true
+        done
     fi
 
     # --- Monitoring
@@ -315,7 +318,7 @@ verify_deployment() {
             # ("Register the workloads") has created anything. It becomes a real
             # confirmation on a later, standalone `make verify-deployment`.
             local keda_ns=""
-            [ "$(wva_install_scope)" = "namespace" ] && keda_ns="${WVA_WATCH_NS:-$WVA_NS}"
+            [ "$(wva_install_scope)" = "namespace" ] && keda_ns="$(wva_watch_list | head -1)"
             if [ -n "$keda_ns" ] && kubectl get scaledobject -n "$keda_ns" \
                     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
                     | grep -qx 'True'; then
@@ -621,6 +624,8 @@ print_summary() {
     echo "  Scope:        $(wva_install_scope)-scoped"
     if [ "$(wva_install_scope)" = "cluster" ]; then
         echo "  Manages:      every namespace"
+    elif wva_watch_is_multi; then
+        echo "  Manages:      $(wva_watch_words | sed 's/ /, /g') (it runs in $WVA_NS; its cache holds those and its own)"
     elif [ -n "${WVA_WATCH_NS:-}" ] && [ "$WVA_WATCH_NS" != "$WVA_NS" ]; then
         # The admin-owned install: the controller RUNS in one namespace and
         # WATCHES another, which is the whole point of that configuration and the

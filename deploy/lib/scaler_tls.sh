@@ -1173,7 +1173,15 @@ wva_scaler_keda_marker_state() {
 wva_scaler_plaintext_scaledobjects() {
     local want="${1:-tls}" out rc=0 err
     err="$(mktemp)"
-    if [ "$(wva_install_scope)" = "namespace" ]; then
+    if [ "$(wva_install_scope)" = "namespace" ] && declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        # Each managed namespace, merged into one list.
+        local one part
+        out='{"items":[]}'
+        for one in $(wva_watch_words); do
+            part="$(kubectl get scaledobjects.keda.sh -n "$one" -o json 2>"$err")" || { rc=$?; break; }
+            out="$(jq -c --argjson p "$part" '.items += ($p.items // [])' <<<"$out")" || { rc=1; break; }
+        done
+    elif [ "$(wva_install_scope)" = "namespace" ]; then
         out="$(kubectl get scaledobjects.keda.sh -n "${WVA_WATCH_NS:-$WVA_NS}" -o json 2>"$err")" || rc=$?
     else
         out="$(kubectl get scaledobjects.keda.sh -A -o json 2>"$err")" || rc=$?

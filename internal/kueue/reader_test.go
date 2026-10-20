@@ -381,6 +381,22 @@ var _ = Describe("Reader", func() {
 		Expect(snap.Cluster).To(Equal(config.ExternalCaps{Untyped: 6, HasUntyped: true}))
 	})
 
+	It("lists LocalQueues in each of several watched namespaces, and nowhere else", func() {
+		c := newFakeClient(v,
+			flavor(v, "h100", nil),
+			clusterQueue(v, "cq", flavorQuotas("h100", quota("nvidia.com/gpu", "6"))),
+			localQueue(v, "team-a", "lq", "cq"),
+			localQueue(v, "team-b", "lq", "cq"),
+			localQueue(v, "team-c", "lq", "cq"),
+		)
+		snap, err := NewReader(c, Options{Namespace: "team-a,team-b"}).Quotas(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snap.Namespace).To(HaveLen(2))
+		Expect(snap.Namespace).To(HaveKey("team-a"))
+		Expect(snap.Namespace).To(HaveKey("team-b"))
+		Expect(snap.Cluster).To(Equal(config.ExternalCaps{Untyped: 6, HasUntyped: true}))
+	})
+
 	It("clamps a huge nominalQuota and accepts numeric quantities", func() {
 		c := newFakeClient(v,
 			flavor(v, "h100", map[string]interface{}{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"}),

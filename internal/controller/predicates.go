@@ -57,11 +57,8 @@ func ConfigMapPredicate(ds datastore.Datastore, cfg *config.Config) predicate.Pr
 
 		// Single-namespace mode: watch all ConfigMaps in the watched namespace
 		// Explicit CLI flag overrides tracking-based filtering
-		if cfg != nil {
-			watchNamespace := cfg.WatchNamespace()
-			if watchNamespace != "" && namespace == watchNamespace {
-				return true
-			}
+		if cfg != nil && cfg.Watches(namespace) {
+			return true
 		}
 
 		// Multi-namespace mode: only allow in tracked namespaces (namespaces with VAs)

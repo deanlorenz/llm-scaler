@@ -1332,22 +1332,33 @@ wva_llmd_namespaces() {
 # "could not check" does not fail, the same rule the checks themselves apply to a
 # signal they could not confirm.
 wva_check_managed_namespaces() {
-    local namespaces ns out rc reasons notes count
+    local namespaces ns out rc reasons notes count listed=false
     local passed=0 failed=0 unchecked=0 summary=()
 
-    if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
-        log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
-        log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
-        return 0
-    fi
+    # A namespace-scoped controller that manages a listed few: those, as named
+    # (WVA_WATCH_NS, already settled from `auto` by wva_resolve_watch_namespaces).
+    # A listed namespace with no llm-d in it fails: the controller would manage
+    # nothing there, which the single-namespace check refuses too.
+    if [ "$(wva_install_scope)" = namespace ] && declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        listed=true
+        namespaces="$(wva_watch_list)"
+        count="$(printf '%s\n' "$namespaces" | grep -c .)"
+        log_info "Checking the $count namespace(s) this controller manages (WVA_WATCH_NS):"
+    else
+        if ! kubectl auth can-i list deployments -A >/dev/null 2>&1; then
+            log_warning "Namespaces: could not check any. Listing workloads cluster-wide is not permitted for you, so the namespaces with llm-d cannot be found."
+            log_warning "  This is not a pass. Check each one yourself:  make check-prereqs NAMESPACE=<namespace>"
+            return 0
+        fi
 
-    namespaces="$(wva_llmd_namespaces)"
-    if [ -z "$namespaces" ]; then
-        log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
-        return 0
+        namespaces="$(wva_llmd_namespaces)"
+        if [ -z "$namespaces" ]; then
+            log_warning "Namespaces: no llm-d model servers and no InferencePool on this cluster, so there is nothing to scale yet."
+            return 0
+        fi
+        count="$(printf '%s\n' "$namespaces" | grep -c .)"
+        log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
     fi
-    count="$(printf '%s\n' "$namespaces" | grep -c .)"
-    log_info "Checking the $count namespace(s) with llm-d model servers or an InferencePool:"
 
     for ns in $namespaces; do
         echo "" >&2
@@ -1357,6 +1368,13 @@ wva_check_managed_namespaces() {
             log_warning "  Could not check $ns: reading its Pods or ConfigMaps is not permitted for you."
             unchecked=$((unchecked + 1))
             summary+=("could not check|$ns|reading it is not permitted for you")
+            continue
+        fi
+        if [ "$listed" = true ] && [ "$(wva_serving_workload_count "$ns")" = 0 ] \
+            && [ -z "$(wva_epp_services "$ns" 2>/dev/null)" ]; then
+            log_warning "  No llm-d found in $ns: no model servers and no InferencePool. Install llm-d there, or leave it out of WVA_WATCH_NS."
+            failed=$((failed + 1))
+            summary+=("failed|$ns|no llm-d model servers")
             continue
         fi
         rc=0
@@ -1449,6 +1467,8 @@ wva_llmd_monitors_wanted() {
 wva_monitor_namespaces() {
     if [ "$(wva_install_scope)" = "cluster" ] && [ -z "${WVA_WATCH_NS:-}" ]; then
         wva_llmd_namespaces
+    elif declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        wva_watch_list
     else
         echo "${WVA_WATCH_NS:-$WVA_NS}"
     fi
@@ -1639,6 +1659,13 @@ wva_apply_llmd_monitors() {
 # shared ClusterRole goes only with a cluster-scoped install, the last user.
 wva_remove_llmd_monitors() {
     local where=(-A) ns
+    if declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
+        # One controller, several managed namespaces: the same removal in each.
+        for ns in $(wva_watch_words); do
+            (WVA_WATCH_NS="$ns"; wva_remove_llmd_monitors) || true
+        done
+        return 0
+    fi
     if [ "$(wva_install_scope)" != "cluster" ] || [ -n "${WVA_WATCH_NS:-}" ]; then
         ns="${WVA_WATCH_NS:-$WVA_NS}"
         where=(-n "$ns")
@@ -1648,5 +1675,9 @@ wva_remove_llmd_monitors() {
     fi
     kubectl delete podmonitors.monitoring.coreos.com,servicemonitors.monitoring.coreos.com,secrets,serviceaccounts \
         "${where[@]}" -l "$WVA_LLMD_MONITOR_MARK" --ignore-not-found >/dev/null 2>&1 || true
-    log_info "Removed the monitors setup added in the llm-d namespaces (label $WVA_LLMD_MONITOR_MARK)."
+    if [ -n "${ns:-}" ]; then
+        log_info "Removed the monitors setup added in $ns (label $WVA_LLMD_MONITOR_MARK)."
+    else
+        log_info "Removed the monitors setup added in the llm-d namespaces (label $WVA_LLMD_MONITOR_MARK)."
+    fi
 }

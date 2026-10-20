@@ -256,7 +256,12 @@ $types" in
             else
                 install_scope="${WVA_SCOPE:-namespace}"
             fi
-            if [ "$install_scope" = "namespace" ]; then
+            if [ "$install_scope" = "namespace" ] && [ "${WVA_WATCH_NS:-}" != "${WVA_WATCH_NS#*,}" ]; then
+                # Several managed namespaces: each gets its own budget, through
+                # the reserved per-unlisted-namespace key. One budget for all of
+                # them is WVA_QUOTA_SCOPE=cluster.
+                key="default"
+            elif [ "$install_scope" = "namespace" ]; then
                 key="${WVA_WATCH_NS:-${WVA_NS:-}}"
             else
                 key="default"

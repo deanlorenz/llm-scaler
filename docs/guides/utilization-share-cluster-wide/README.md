@@ -6,7 +6,9 @@ namespace is not using. It gives them back when its load drops.
 **Experimental.**
 
 For one namespace, see [Turn on the utilization-share optimizer,
-safely](../utilization-share/). To learn what this costs first, see [the
+safely](../utilization-share/). For a scaling manager with no cluster-wide
+rights on workloads, see [Share GPUs between namespaces with a
+namespace-scoped install](../utilization-share-namespaced/). To learn what this costs first, see [the
 well-lit path](../../well-lit-paths/utilization-share/).
 
 ## Before you begin

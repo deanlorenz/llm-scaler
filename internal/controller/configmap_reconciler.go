@@ -183,16 +183,13 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 }
 
 // shouldWatchNamespaceLocalConfigMap returns true if a namespace-local ConfigMap should be watched.
-// In single-namespace mode (--watch-namespace set), it watches all ConfigMaps in the watched namespace.
+// Namespace-scoped (--watch-namespace set), it watches all ConfigMaps in each watched namespace.
 // In multi-namespace mode, it checks exclusion first (highest priority), then VA-based tracking (automatic), then opt-in label (explicit).
 func (r *ConfigMapReconciler) shouldWatchNamespaceLocalConfigMap(ctx context.Context, namespace string) bool {
-	// In single-namespace mode, watch all ConfigMaps in the watched namespace
+	// Namespace-scoped, watch all ConfigMaps in each watched namespace
 	// Explicit CLI flag overrides annotation/label-based filtering
-	if r.Config != nil {
-		watchNamespace := r.Config.WatchNamespace()
-		if watchNamespace != "" && namespace == watchNamespace {
-			return true
-		}
+	if r.Config != nil && r.Config.Watches(namespace) {
+		return true
 	}
 
 	// Multi-namespace mode: Check exclusion first (highest priority - overrides everything)

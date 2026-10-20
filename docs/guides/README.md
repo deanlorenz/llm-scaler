@@ -36,6 +36,7 @@ source docs/guides/env.sh
 | [Let models borrow from a Kueue cohort](kueue-borrowing/) | a Kueue-bounded quota that grows into GPUs its cohort leaves idle: prerequisites, pilot, reasons, turning it off (experimental) |
 | [Turn on the utilization-share optimizer, safely](utilization-share/) | share one quota between models by weight: shadow first, then active, and how to back out (experimental) |
 | [Share GPUs between models in different namespaces](utilization-share-cluster-wide/) | llm-d already serves in several namespaces: one cluster-wide install, one budget, GPUs moving between namespaces (experimental) |
+| [Share GPUs between namespaces with a namespace-scoped install](utilization-share-namespaced/) | the same, with no cluster-wide rights on workloads: the scaling manager manages only the llm-d namespaces, a Role in each, one quota (experimental) |
 
 ## Reference
 

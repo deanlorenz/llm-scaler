@@ -45,7 +45,9 @@ Environment Variables:
                                              namespace's owner then installs the controller, and
                                              every later upgrade, with no cluster rights.
   WVA_WATCH_NS                 Namespace a namespace-scoped controller MANAGES, when that differs from
-                               the one it runs in (default: its own)
+                               the one it runs in (default: its own). A comma-separated list
+                               (team-a,team-b) or auto (every namespace with llm-d) manages
+                               several from WVA_NS, with a Role in each and nothing cluster-wide
   WVA_REPLICAS                 Controller replicas. >1 is leader-election failover, NOT more throughput (default: 1)
   DEPLOY_WVA                   Deploy WVA controller (default: true)
   SKIP_CHECKS                  Skip the prerequisite and permission checks (default: false)

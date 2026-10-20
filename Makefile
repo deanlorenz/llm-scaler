@@ -525,9 +525,11 @@ disable-physical-limiter: disable-limiter ## CLUSTER ADMIN: the older name of di
 # requires the reload.
 # CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given.
 us_controller_ns_given = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
-us_args = -n "$(NAMESPACE)" $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
+us_args = $(if $(prepull_namespace_given),-n "$(NAMESPACE)",) $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
 	$(if $(POLICY_NAMESPACE),--policy-namespace "$(POLICY_NAMESPACE)",) $(if $(filter 1 true,$(RESTART)),--restart,)
-us_namespace_check = @test -n "$(prepull_namespace_given)" || { echo "$@: set NAMESPACE=<the models' namespace> (the Makefile default is not taken here)" >&2; exit 1; }
+# A controller that manages a list of namespaces is found by CONTROLLER_NAMESPACE
+# alone; the script then covers every namespace it manages.
+us_namespace_check = @test -n "$(prepull_namespace_given)$(us_controller_ns_given)" || { echo "$@: set NAMESPACE=<the models' namespace> (the Makefile default is not taken here), or CONTROLLER_NAMESPACE=<ns> for a controller that manages several" >&2; exit 1; }
 
 .PHONY: utilization-share-check
 utilization-share-check: ## Utilization share: is there a budget to share, and do the accelerators resolve. NAMESPACE=<ns> [POLICY_NAMESPACE=] [CONTROLLER_NAMESPACE=]
@@ -2881,6 +2883,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/file_capture.sh
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-cluster-namespace-checks.sh
+	@bash -n hack/check-watch-namespace-list.sh
 	@bash -n hack/check-llmd-monitors.sh
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
@@ -3057,6 +3060,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking the cluster-scoped preflight checks every llm-d namespace..."
 	@# It used to check only the controller's namespace, and passed on nothing.
 	@bash hack/check-cluster-namespace-checks.sh
+	@echo "Checking one namespace-scoped controller managing a list of namespaces..."
+	@# WVA_WATCH_NS=team-a,team-b or auto: a Role in each, checks per namespace.
+	@bash hack/check-watch-namespace-list.sh
 	@echo "Checking setup adds the monitors a fresh llm-d lacks, and flow control off is a warning..."
 	@# A fresh llm-d install has neither, and the preflight used to refuse it.
 	@bash hack/check-llmd-monitors.sh

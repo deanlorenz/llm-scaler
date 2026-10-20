@@ -49,8 +49,16 @@ wva_watch_rbac_names() {
 # The Role is a copy of the rendered one rather than a second definition, so it
 # cannot drift from the permissions the controller actually needs.
 wva_apply_watch_namespace_rbac() {
-    local tmp_overlay="$1" role binding rendered
+    local tmp_overlay="$1" role binding rendered ns
     [ -n "${WVA_WATCH_NS:-}" ] || return 0
+    if wva_watch_is_multi; then
+        # The same Role and RoleBinding in each managed namespace, and nowhere
+        # else: least privilege is the list, not the cluster.
+        for ns in $(wva_watch_words); do
+            (WVA_WATCH_NS="$ns"; wva_apply_watch_namespace_rbac "$tmp_overlay") || exit 1
+        done
+        return 0
+    fi
     [ "$WVA_WATCH_NS" != "$WVA_NS" ] || return 0
 
     read -r role binding <<< "$(wva_watch_rbac_names)"
@@ -1759,9 +1767,16 @@ EOF
     # lingers, and `undeploy` removes both.
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
     if [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+        # Every managed namespace by name: one, or each of a list. The Kueue and
+        # Namespace reads stay narrowed to exactly those (and the policy names).
+        local managed_words managed_labels="" m
+        managed_words="$(wva_watch_words)"
+        for m in $managed_words; do managed_labels="$managed_labels $(wva_managed_policy_label "$m")"; done
+        # shellcheck disable=SC2086 # one word per Namespace name
+        wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "$managed_words"
+        # shellcheck disable=SC2086 # one word per Namespace name
         wva_append_policy_namespace_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" \
-            "${WVA_WATCH_NS:-$WVA_NS}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$WVA_NS}")"
+            $managed_words "${WVA_POLICY_NS:-}" $managed_labels
         if wva_kueue_reader_unneeded; then
             log_info "WVA_LIMITER=none and no policy this controller reads uses Kueue: the Kueue reader (ClusterRole wva-kueue-reader-role-$(wva_ns_suffix "$WVA_NS")) is not created"
             wva_append_kueue_reader_delete "$tmp_overlay/kustomization.yaml" "$WVA_NS"
@@ -1857,10 +1872,15 @@ EOF
         if [ "$(wva_install_scope)" != "namespace" ]; then
             log_error "WVA_WATCH_NS only applies to a namespace-scoped install (WVA_SCOPE=namespace). A cluster-scoped controller manages every namespace."
         fi
-        if ! kubectl get namespace "$WVA_WATCH_NS" >/dev/null 2>&1; then
-            log_error "WVA_WATCH_NS=$WVA_WATCH_NS does not exist. Create the tenant namespace before installing."
-        fi
-        if [ "$WVA_WATCH_NS" = "$WVA_NS" ]; then
+        local watched
+        for watched in $(wva_watch_words); do
+            if ! kubectl get namespace "$watched" >/dev/null 2>&1; then
+                log_error "WVA_WATCH_NS: namespace $watched does not exist. Create the tenant namespace before installing."
+            fi
+        done
+        if wva_watch_is_multi; then
+            log_info "Controller runs in $WVA_NS and manages $(wva_watch_words | sed 's/ /, /g')"
+        elif [ "$WVA_WATCH_NS" = "$WVA_NS" ]; then
             log_warning "WVA_WATCH_NS equals WVA_NS: the controller runs in the namespace it manages. If that namespace belongs to a tenant, they own this Deployment and can lift any limit set on them."
         else
             log_info "Controller runs in $WVA_NS and manages $WVA_WATCH_NS"

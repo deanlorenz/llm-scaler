@@ -36,7 +36,10 @@ own-install quota, the cluster admin for a policy in `wva-policy` or `wva-<ns>`.
 Models in several namespaces, one budget for all of them? Use [Share GPUs
 between models in different namespaces](../../guides/utilization-share-cluster-wide/)
 instead: one cluster-wide install, from llm-d already serving to GPUs moving
-between namespaces.
+between namespaces. If the scaling manager may not read every namespace, use
+[Share GPUs between namespaces with a namespace-scoped
+install](../../guides/utilization-share-namespaced/): it manages only the
+llm-d namespaces, with a Role in each, under one quota.
 
 To undo, see [Cleanup](../../guides/utilization-share/README.md#cleanup). The
 guide's two-model trial holds GPUs until you tear it down. If the controller

@@ -65,9 +65,13 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 	var namespacesToScan []string
 
 	if watchNamespace != "" {
-		// Single-namespace mode: only watch the specified namespace
-		if watchNamespace != systemNamespace {
-			namespacesToScan = []string{watchNamespace}
+		// Namespace-scoped: only the watched namespaces, one or a listed few
+		for _, ns := range r.Config.WatchNamespaces() {
+			if ns != systemNamespace {
+				namespacesToScan = append(namespacesToScan, ns)
+			}
+		}
+		if len(namespacesToScan) > 0 {
 			logger.Info("Initial ConfigMap bootstrap", "watchNamespace", watchNamespace)
 		}
 	} else {

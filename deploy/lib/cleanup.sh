@@ -68,7 +68,26 @@ wva_undeploy_watch_namespace_rbac() {
     esac
     [ "$watched" != "$WVA_NS" ] || return 0
 
+    # The rest of the uninstall (the monitors, the pod-write grants) acts on
+    # what this controller managed, so it learns it here, from the Deployment,
+    # when the caller did not repeat it.
+    case "${WVA_WATCH_NS:-}" in
+        ''|auto) WVA_WATCH_NS="$watched"; export WVA_WATCH_NS ;;
+    esac
+
     read -r role binding <<< "$(wva_watch_rbac_names)"
+    local one
+    case "$watched" in
+        *,*)
+            # Several managed namespaces: the same Role and RoleBinding in each.
+            for one in $(printf '%s' "$watched" | tr ',' ' '); do
+                [ "$one" != "$WVA_NS" ] || continue
+                kubectl delete rolebinding "$binding" -n "$one" --ignore-not-found > /dev/null 2>&1 || true
+                kubectl delete role "$role" -n "$one" --ignore-not-found > /dev/null 2>&1 || true
+                log_info "Removed the controller's permissions in $one (Role/$role, RoleBinding/$binding)"
+            done
+            return 0 ;;
+    esac
     kubectl delete rolebinding "$binding" -n "$watched" --ignore-not-found > /dev/null 2>&1 || true
     kubectl delete role "$role" -n "$watched" --ignore-not-found > /dev/null 2>&1 || true
     log_info "Removed the controller's permissions in $watched (Role/$role, RoleBinding/$binding)"
@@ -176,7 +195,8 @@ EOF
     elif ! kc_not_found "$KC_ERR"; then
         log_warning "Could not tell whether the controller Deployment in $WVA_NS is gone ($KC_ERR), so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once it is."
     elif [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
+        # shellcheck disable=SC2046 # one word per managed namespace
+        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" $(printf '%s' "${WVA_WATCH_NS:-}" | tr ',' ' ')
     else
         wva_remove_pod_writers "$WVA_NS"
     fi

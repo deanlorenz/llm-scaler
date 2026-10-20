@@ -14,7 +14,10 @@
 #   utilization-share.sh off      -n NS   back through shadow, wait for the marks to clear, remove the block
 #
 # Options:
-#   -n, --namespace NS          the models' namespace (required)
+#   -n, --namespace NS          the models' namespace (required, unless the
+#                               controller manages a list of namespaces: then
+#                               --controller-namespace alone, and every one of
+#                               them is covered)
 #   --controller-namespace NS   where the controller runs (default: NS)
 #   --policy-namespace NS       where its scaling policy lives. Default: the one
 #                               the controller logged at start (a policy
@@ -547,10 +550,19 @@ set_mode() {
 # MARKED -- pods carrying a transfer mark.
 MARKED=""
 read_marks() {
-    local pods
-    kread pods get pods -n "$NS" -o json || die "could not list pods in $NS, so the transfer marks were not checked: $pods"
-    MARKED="$(printf '%s' "$pods" | jq -r --arg m "$MARK" '.items[] | select(.metadata.annotations[$m] != null) | .metadata.name')" \
-        || die "could not parse the pod list in $NS, so the transfer marks were not checked"
+    local pods managed one part all=""
+    # Every namespace a controller managing a list manages; else NS.
+    managed="$(controller_managed_ns)"
+    case "$managed" in *,*) ;; *) managed="$NS" ;; esac
+    for one in $(printf '%s' "$managed" | tr ',' ' '); do
+        kread pods get pods -n "$one" -o json || die "could not list pods in $one, so the transfer marks were not checked: $pods"
+        part="$(printf '%s' "$pods" | jq -r --arg m "$MARK" --arg ns "$one" --arg own "$NS" \
+            '.items[] | select(.metadata.annotations[$m] != null) | (if $ns == $own then "" else $ns + "/" end) + .metadata.name')" \
+            || die "could not parse the pod list in $one, so the transfer marks were not checked"
+        [ -z "$part" ] || all="${all:+$all
+}$part"
+    done
+    MARKED="$all"
 }
 
 # ---------------------------------------------------------------------------
@@ -606,13 +618,27 @@ verb_check() {
     # as one here: that model gets no budget and the group plans around it.
     # Read every namespace for it; NS alone passed a cluster where only the
     # other namespace was broken.
-    local where="-n $NS" in_where="in $NS"
-    if [ "$(controller_managed_ns)" = "*" ]; then
+    local where="-n $NS" in_where="in $NS" managed one part
+    managed="$(controller_managed_ns)"
+    if [ "$managed" = "*" ]; then
         where="-A" in_where="in the namespaces this cluster-scoped controller manages"
     fi
-    # shellcheck disable=SC2086 # $where is one or two words by construction
-    kread events get events $where --field-selector reason=AcceleratorNotResolved -o name \
-        || die "could not read events $in_where: $events"
+    case "$managed" in
+        *,*)
+            # A namespace-scoped controller managing a list: each of them.
+            in_where="in $(printf '%s' "$managed" | sed 's/,/, /g')"
+            events=""
+            for one in $(printf '%s' "$managed" | tr ',' ' '); do
+                kread part get events -n "$one" --field-selector reason=AcceleratorNotResolved -o name \
+                    || die "could not read events in $one: $part"
+                [ -z "$part" ] || events="${events:+$events
+}$part"
+            done ;;
+        *)
+            # shellcheck disable=SC2086 # $where is one or two words by construction
+            kread events get events $where --field-selector reason=AcceleratorNotResolved -o name \
+                || die "could not read events $in_where: $events" ;;
+    esac
     if [ -n "$events" ]; then
         fail "$(printf '%s\n' "$events" | grep -c .) AcceleratorNotResolved event(s) $in_where: those variants get no budget. List them: kubectl get events $where --field-selector reason=AcceleratorNotResolved"; rc=1
     else
@@ -674,6 +700,17 @@ verb_shadow() {
 # clusterNamespaces, when the block lists some, narrows either. A cluster budget is split per accelerator, which this script
 # cannot see, so the warning says "if". A list it cannot read is said, not
 # taken for none.
+# us_managed_list -- the namespaces a namespace-scoped controller managing a
+# list manages, one per line. Fails for any other controller. Its ScaledObjects
+# can only be in those, so this is the set that shares its budget, read
+# without a cluster-wide list.
+us_managed_list() {
+    local managed
+    managed="$(controller_managed_ns)"
+    case "$managed" in *,*) ;; *) return 1 ;; esac
+    printf '%s\n' "$managed" | tr ',' '\n' | grep -v '^$'
+}
+
 warn_ungranted_namespaces() {
     local list ns only excluded odd
     case "$(printf '%s\n' "$POLICY" | us_budget_scope)" in
@@ -686,7 +723,9 @@ warn_ungranted_namespaces() {
     esac
     only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
-    if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
+    if list="$(us_managed_list)"; then
+        : # a controller managing a list: exactly those namespaces
+    elif ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
         [ "$GRANT_SHARED" -eq 0 ] \
             || die "could not list ScaledObjects cluster-wide, so --grant-shared cannot tell which namespaces share this budget (${list:0:300}). Run activate in each of them instead"
         warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
@@ -730,7 +769,7 @@ us_shared_namespaces() {
     esac
     only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || return 1
     excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || return 1
-    list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>/dev/null)" || return 1
+    list="$(us_managed_list)" || list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>/dev/null)" || return 1
     for ns in $list; do
         [ "$ns" != "$NS" ] || continue
         if [ -n "$only" ] && ! grep -qxF -- "$ns" <<<"$only"; then continue; fi
@@ -870,6 +909,16 @@ main() {
             *) fail "unknown argument: $1"; usage ;;
         esac
     done
+    if [ -z "$NS" ] && [ -n "$CONTROLLER_NS" ]; then
+        # A controller that manages a list of namespaces names them itself.
+        local managed
+        managed="$(controller_managed_ns)"
+        case "$managed" in
+            *,*) NS="${managed%%,*}"
+                 info "the controller in $CONTROLLER_NS manages $(printf '%s' "$managed" | sed 's/,/, /g')" ;;
+            *) die "the controller in $CONTROLLER_NS manages $managed, not a list: set the models' namespace with -n" ;;
+        esac
+    fi
     [ -n "$NS" ] || { fail "set the models' namespace with -n"; usage; }
     CONTROLLER_NS="${CONTROLLER_NS:-$NS}"
     [ "$GRANT_SHARED" -eq 0 ] || [ "$verb" = activate ] || die "--grant-shared is an activate option"
