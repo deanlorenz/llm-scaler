@@ -40,6 +40,20 @@ K8S_VERSION ?= v1.32.0
 # POD_NAMESPACE, so ClusterRoleBinding subjects and the system-namespace lookups
 # follow.
 WVA_NS              ?= workload-variant-autoscaler-system
+# One variable for where the controller runs. WVA_NS or CONTROLLER_NAMESPACE,
+# whichever is given, reaches every install, check, register, verify,
+# dashboard, utilization-share and uninstall target; given both, WVA_NS wins
+# (a recursive e2e make passes WVA_NS explicitly beside an inherited
+# CONTROLLER_NAMESPACE). Neither given: the WVA_NS default above.
+# CONTROLLER_NAMESPACE keeps its e2e default further down, which counts only
+# when it is given.
+wva_ns_given  = $(filter command line environment,$(origin WVA_NS))
+ctl_ns_given  = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
+# wva_ns_arg is the WVA_NS=<ns> the scripts get: the one given, else nothing
+# (the scripts default it).
+wva_ns_arg    = $(if $(wva_ns_given),WVA_NS=$(WVA_NS),$(if $(ctl_ns_given),WVA_NS=$(CONTROLLER_NAMESPACE),))
+# wva_ctl_ns is the controller namespace given by either name, else empty.
+wva_ctl_ns    = $(if $(wva_ns_given),$(WVA_NS),$(if $(ctl_ns_given),$(CONTROLLER_NAMESPACE),))
 # Where llm-d runs. NAMESPACE is llm-d's OWN variable — its well-lit path guides
 # say `export NAMESPACE=…` and pass `-n ${NAMESPACE}` to every command — so a
 # reader arriving from one already has it set, and this repo no longer invents a
@@ -523,9 +537,10 @@ disable-physical-limiter: disable-limiter ## CLUSTER ADMIN: the older name of di
 # bounded only by the physical inventory (a gpu-inventory limiter, no quota).
 # RESTART=1 restarts the controller when it logs no reload of a write, and then
 # requires the reload.
-# CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given.
-us_controller_ns_given = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
-us_args = $(if $(prepull_namespace_given),-n "$(NAMESPACE)",) $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
+# CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given;
+# WVA_NS, the install's name for it, counts too (wva_ctl_ns).
+us_controller_ns_given = $(wva_ctl_ns)
+us_args = $(if $(prepull_namespace_given),-n "$(NAMESPACE)",) $(if $(us_controller_ns_given),--controller-namespace "$(wva_ctl_ns)",) \
 	$(if $(POLICY_NAMESPACE),--policy-namespace "$(POLICY_NAMESPACE)",) $(if $(filter 1 true,$(RESTART)),--restart,)
 # A controller that manages a list of namespaces is found by CONTROLLER_NAMESPACE
 # alone; the script then covers every namespace it manages.
@@ -594,12 +609,12 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 define wva_phase
 	@echo "Phase '$(if $(1),$(1),auto)', $(SCOPE)-scoped$(if $(2), on $(2),)"
 	$(if $(filter prereqs,$(1)),,@echo "Image: $(IMG)")
-	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
+	$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
 endef
 
 # wva_check: $(1)=ENVIRONMENT
 define wva_check
-	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(1),ENVIRONMENT=$(1),) ./deploy/install.sh --check
+	$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(1),ENVIRONMENT=$(1),) ./deploy/install.sh --check
 endef
 
 ##@ Install and remove
@@ -642,7 +657,7 @@ deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cl
 
 .PHONY: undeploy-wva
 undeploy-wva: ## Remove WVA. Pass the same ENVIRONMENT, SCOPE and namespace you installed with.
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) $(wva_ns_arg) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 .PHONY: deploy-wva-on-k8s
 deploy-wva-on-k8s: ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
@@ -658,12 +673,12 @@ deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, I
 .PHONY: undeploy-wva-on-k8s
 undeploy-wva-on-k8s: ## Remove WVA from Kubernetes. Pass the same SCOPE and NAMESPACE/WVA_NS you installed with.
 	@echo ">>> Undeploying workload-variant-autoscaler from Kubernetes"
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes $(wva_ns_arg) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 .PHONY: undeploy-wva-on-openshift
 undeploy-wva-on-openshift: ## Remove WVA from OpenShift. Pass the same SCOPE and NAMESPACE/WVA_NS you installed with.
 	@echo ">>> Undeploying workload-variant-autoscaler from OpenShift"
-	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
+	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift $(wva_ns_arg) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 ## Check that everything a deploy needs is present, without deploying anything.
 ## Runs the SAME check the install runs (deploy/lib/prereqs.sh), so a pass here
@@ -685,7 +700,7 @@ check-prereqs: ## Phase 1, read-only: tools, permissions, the namespace and the 
 ## decides the CA KEDA must trust.
 .PHONY: verify-deployment
 verify-deployment: ## Is the controller running, and are metrics flowing? Read-only. WVA_NS=<ns>, NAMESPACE=<ns>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			export DEPLOY_PROMETHEUS=$${DEPLOY_PROMETHEUS:-true}; export DEPLOY_OPERATIONAL_DASHBOARD=$${DEPLOY_OPERATIONAL_DASHBOARD:-true}; export SCALER_BACKEND=$${SCALER_BACKEND:-keda}; export MONITORING_NAMESPACE=$${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}; \
 			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
@@ -698,7 +713,7 @@ verify-deployment: ## Is the controller running, and are metrics flowing? Read-o
 ## "scaling". The plan documents its own fields in the comments it is written with.
 .PHONY: scaledobjects-plan
 scaledobjects-plan: ## List llm-d model servers and write an editable ScaledObject plan. WVA_DEFAULT_SO_NS=<ns>|wva|all, WVA_DEFAULT_SO_PLAN=<file>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=plan $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; install_default_scaledobjects'
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=plan $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; install_default_scaledobjects'
 
 ## Report the pod-spec settings that decide whether autoscaling a workload is
 ## safe, as a patch you can apply where the pod spec is owned.
@@ -720,7 +735,7 @@ model-cache: ## Create the weights PVC. NAMESPACE=<ns> WVA_MODEL_PVC_SIZE=<size>
 	@# These comments sit BEFORE the recipe, not inside it: a \ line placed after
 	@# a backslash continuation is not a recipe line at all, it is part of the
 	@# command, and the shell tried to run it -- "@#: command not found".
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
 		$(if $(WVA_MODEL_PVC_NAME),WVA_MODEL_PVC_NAME=$(WVA_MODEL_PVC_NAME),) \
 		$(if $(WVA_MODEL_PVC_SIZE),WVA_MODEL_PVC_SIZE=$(WVA_MODEL_PVC_SIZE),) \
 		$(if $(WVA_MODEL_PVC_CLASS),WVA_MODEL_PVC_CLASS=$(WVA_MODEL_PVC_CLASS),) \
@@ -917,7 +932,7 @@ workload-patch: ## Write a patch for model servers that do not drain on scale-do
 	@# so_target_namespaces reads WVA_DEFAULT_SO_NS, else the install scope, and
 	@# never NAMESPACE. With APPLY=true that is a rolling restart of every model
 	@# server on the cluster, from a command that reads as scoped to one.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
 			$(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),$(if $(filter command line environment,$(origin NAMESPACE)),WVA_DEFAULT_SO_NS=$(NAMESPACE),)) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; wva_workload_patch'
 
@@ -928,7 +943,7 @@ workload-patch: ## Write a patch for model servers that do not drain on scale-do
 ## its old connection, and only this step, the first to dial, can see it.
 .PHONY: scaledobjects-apply
 scaledobjects-apply: ## Apply a ScaledObject plan (this is what makes WVA scale anything). Per entry: apply: yes|no|adopt. WVA_DEFAULT_SO_PLAN=<edited file>, WVA_DEFAULT_SO_TEMPLATE=<file>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=true $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/scaledobject.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=true $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/scaledobject.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
 			wva_bootstrap_env; install_default_scaledobjects; rc=$$?; wva_verify_scaler_wiring || true; exit $$rc'
 
@@ -936,7 +951,7 @@ scaledobjects-apply: ## Apply a ScaledObject plan (this is what makes WVA scale 
 ## use scaledobjects-plan + scaledobjects-apply where there is none.
 .PHONY: scaledobjects-edit
 scaledobjects-edit: ## Review the discovered model servers in $$EDITOR and apply what you confirm.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=edit $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; install_default_scaledobjects'
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=edit $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; install_default_scaledobjects'
 
 ## Repair ScaledObjects that ask for WVA by name but name a namespace where no
 ## scaler is running -- what the samples do when you install anywhere other than
@@ -949,7 +964,7 @@ scaledobjects-edit: ## Review the discovered model servers in $$EDITOR and apply
 ## to narrow the scan.
 .PHONY: scaledobjects-repoint
 scaledobjects-repoint: ## Repoint ScaledObjects naming a missing WVA at the install that is running. Usually needs no arguments.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
 		$(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; so_repoint_stale'
 
@@ -959,7 +974,7 @@ scaledobjects-repoint: ## Repoint ScaledObjects naming a missing WVA at the inst
 ## workload, forever, with the HPA reading a healthy ratio the whole time.
 .PHONY: verify-scaledobjects
 verify-scaledobjects: ## Rescan model servers and check every ScaledObject's modelID for drift. Read-only.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
 		$(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; so_verify_scaledobjects'
 
@@ -970,14 +985,14 @@ verify-scaledobjects: ## Rescan model servers and check every ScaledObject's mod
 ## already runs while building a ScaledObject plan.
 .PHONY: verify-fma
 verify-fma: ## Check every FMA launcher pod has a scrape target. Read-only. WVA_NS=<ns>, NAMESPACE=<ns>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
 		$(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/scaledobject.sh; wva_bootstrap_env; so_verify_fma'
 
 # The environment the so-* targets share. Same shape the scaledobjects-* targets
 # pass inline: WVA_NS and NAMESPACE only when the CALLER set them, so an unset
 # variable stays unset and the resolution in wva_bootstrap_env still runs.
-WVA_SO_ENV = $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),)
+WVA_SO_ENV = $(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),)
 
 ## Parking a WVA-managed workload, and putting it back.
 ##

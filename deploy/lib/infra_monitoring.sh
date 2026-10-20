@@ -1448,6 +1448,10 @@ $( (WVA_WATCH_NS="$ns"; wva_report_epp_flowcontrol) 2>&1 )" || rc=1
 WVA_LLMD_MONITOR_MARK_KEY="llm-d.ai/applied-by"
 WVA_LLMD_MONITOR_MARK_VAL="wva-setup-prereqs"
 WVA_LLMD_MONITOR_MARK="${WVA_LLMD_MONITOR_MARK_KEY}=${WVA_LLMD_MONITOR_MARK_VAL}"
+# Which install added a monitor: the controller's namespace. Set beside the
+# mark, so a controller that stops managing a namespace removes only its own
+# (wva_prune_unlisted_namespaces) and never another install's.
+WVA_LLMD_MONITOR_OWNER_KEY="llm-d.ai/applied-for"
 # The EPP ServiceMonitor, and the identity Prometheus scrapes it as. The EPP
 # authenticates /metrics (a TokenReview, then a SubjectAccessReview for GET
 # /metrics), so the scrape carries a ServiceAccount token, as the router chart's
@@ -1494,9 +1498,11 @@ wva_apply_modelserver_podmonitor() {
     labels="$(wva_prometheus_selector_labels podMonitorSelector)"
     [ -n "$labels" ] || labels='{}'
     NS="$ns" LABELS="$labels" MK="$WVA_LLMD_MONITOR_MARK_KEY" MV="$WVA_LLMD_MONITOR_MARK_VAL" \
+        OK="$WVA_LLMD_MONITOR_OWNER_KEY" OV="$WVA_NS" \
         yq '.metadata.namespace = strenv(NS)
             | .metadata.labels += (strenv(LABELS) | from_yaml)
-            | .metadata.labels[strenv(MK)] = strenv(MV)' \
+            | .metadata.labels[strenv(MK)] = strenv(MV)
+            | .metadata.labels[strenv(OK)] = strenv(OV)' \
             "$WVA_PROJECT/config/modelserver-metrics/modelserver-podmonitor.yaml" \
         | kubectl apply -f - >/dev/null
 }
@@ -1522,7 +1528,8 @@ wva_epp_scrape_docs() {
     labels="$(wva_prometheus_selector_labels serviceMonitorSelector)"
     [ -n "$labels" ] || labels='{}'
     labels="$(jq -c --arg k "$WVA_LLMD_MONITOR_MARK_KEY" --arg v "$WVA_LLMD_MONITOR_MARK_VAL" \
-        '. + {"app.kubernetes.io/name": "workload-variant-autoscaler", "app.kubernetes.io/component": "epp-metrics"} + {($k): $v}' <<< "$labels")"
+        --arg ok "$WVA_LLMD_MONITOR_OWNER_KEY" --arg ov "$WVA_NS" \
+        '. + {"app.kubernetes.io/name": "workload-variant-autoscaler", "app.kubernetes.io/component": "epp-metrics"} + {($k): $v, ($ok): $ov}' <<< "$labels")"
     cat <<EOF
 apiVersion: v1
 kind: ServiceAccount

@@ -124,10 +124,14 @@ verify_deployment() {
     if [ "${sat_missing:-0}" -gt 0 ]; then
         log_warning "WVA is running but has NO model-server metrics to size from — it logged \"No saturation metrics available for model\" ${sat_missing}x in its last 40 lines."
         log_warning "  It will hold every workload at minReplicas. On the HPA that looks identical to a correct decision ('1/1 (avg)'), which is why this is checked here."
-        log_warning "  Usually nothing is scraping the model servers. Check:  kubectl get podmonitor,servicemonitor -n ${WVA_WATCH_NS:-$WVA_NS}"
-        log_warning "  That is llm-d's step 3, \"(Optional) Enable monitoring\" — optional for llm-d, required for WVA:"
-        log_warning "      kubectl apply -n ${WVA_WATCH_NS:-$WVA_NS} -k \$REPO_ROOT/guides/recipes/modelserver/components/monitoring"
-        log_warning "  or, with no llm-d checkout:  kubectl apply -n ${WVA_WATCH_NS:-$WVA_NS} -k config/modelserver-metrics"
+        local hint_ns
+        # One hint per managed namespace: a comma list is not a namespace -n takes.
+        for hint_ns in $(wva_watch_words); do
+            log_warning "  Usually nothing is scraping the model servers. Check:  kubectl get podmonitor,servicemonitor -n ${hint_ns}"
+            log_warning "  That is llm-d's step 3, \"(Optional) Enable monitoring\" — optional for llm-d, required for WVA:"
+            log_warning "      kubectl apply -n ${hint_ns} -k \$REPO_ROOT/guides/recipes/modelserver/components/monitoring"
+            log_warning "  or, with no llm-d checkout:  kubectl apply -n ${hint_ns} -k config/modelserver-metrics"
+        done
         log_warning "  A model server with 0 replicas also produces no series; that case resolves itself when one starts."
     elif grep -q "scaling-decision" <<< "$wva_logs40"; then
         log_success "WVA is reading model-server metrics and emitting scaling decisions"
@@ -317,14 +321,22 @@ verify_deployment() {
             # verify_deployment runs, as part of an install, before step 3
             # ("Register the workloads") has created anything. It becomes a real
             # confirmation on a later, standalone `make verify-deployment`.
-            local keda_ns=""
-            [ "$(wva_install_scope)" = "namespace" ] && keda_ns="$(wva_watch_list | head -1)"
-            if [ -n "$keda_ns" ] && kubectl get scaledobject -n "$keda_ns" \
-                    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
-                    | grep -qx 'True'; then
-                log_success "KEDA is running — confirmed by a READY ScaledObject in $keda_ns (its operator pod just carries no label this check recognizes; a platform-managed KEDA often does not)."
+            # Every managed namespace, not the first: a controller managing a
+            # list is confirmed by a READY ScaledObject in any of them.
+            local keda_ns="" keda_one keda_ready=""
+            [ "$(wva_install_scope)" = "namespace" ] && keda_ns="$(wva_watch_words)"
+            for keda_one in $keda_ns; do
+                if kubectl get scaledobject -n "$keda_one" \
+                        -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+                        | grep -qx 'True'; then
+                    keda_ready="$keda_one"
+                    break
+                fi
+            done
+            if [ -n "$keda_ready" ]; then
+                log_success "KEDA is running — confirmed by a READY ScaledObject in $keda_ready (its operator pod just carries no label this check recognizes; a platform-managed KEDA often does not)."
             elif [ -n "$keda_ns" ]; then
-                log_info "No KEDA operator matched $KEDA_OPERATOR_LABEL_SELECTOR anywhere on the cluster, and no READY ScaledObject in $keda_ns confirms it that way either. A platform-managed KEDA may not carry that label — confirm with: kubectl get scaledobject -n $keda_ns"
+                log_info "No KEDA operator matched $KEDA_OPERATOR_LABEL_SELECTOR anywhere on the cluster, and no READY ScaledObject in ${keda_ns// /, } confirms it that way either. A platform-managed KEDA may not carry that label — confirm with: kubectl get scaledobject -n ${keda_ns%% *}"
             else
                 log_info "No KEDA operator matched $KEDA_OPERATOR_LABEL_SELECTOR anywhere on the cluster. A platform-managed KEDA may not carry that label — confirm with: kubectl get scaledobject -A"
             fi

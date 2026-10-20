@@ -21,6 +21,16 @@
 #   - the uninstall removes the Role and RoleBinding in each namespace the live
 #     Deployment names.
 #   - a single WVA_WATCH_NS behaves as before.
+#   - `auto` skips a namespace annotated wva.llmd.ai/exclude=true and one
+#     another controller manages, warning about each.
+#   - a shrunk list revokes this install's labelled grant and monitors in the
+#     dropped namespace only, and its Kueue reader names follow the new list;
+#     the uninstall finds every namespace it ever set up by that label.
+#   - enable-physical-limiter splits a managed list (the Kueue read, and a
+#     policy in the controller's own namespace needs no restart).
+#   - a non-default controller namespace is the one every grant names.
+#   - gpu-inventory alone is refused for a list controller; beside a quota it
+#     is taken, and the setup phase grants list on Pods cluster-wide for it.
 
 set -u
 
@@ -31,11 +41,11 @@ FAIL=0
 PASS=0
 # Every case reports ok or FAIL exactly once; a run that stops early must not
 # pass having checked less. Change this deliberately with the cases.
-EXPECT_CASES=16
+EXPECT_CASES=25
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh scaledobject.sh infra_monitoring.sh infra_wva.sh limiter_policy.sh cleanup.sh install_core.sh; do
+for lib in common.sh scaledobject.sh infra_monitoring.sh infra_wva.sh limiter_policy.sh cleanup.sh install_core.sh physical_limiter.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 
@@ -78,6 +88,30 @@ kubectl() {
         "get inferencepools.inference.networking.x-k8s.io -A -o jsonpath="*)
             echo 'error: the server does not have a resource type' >&2; return 1 ;;
         "get namespace "*) return 0 ;;
+        "get namespaces -o json")
+            local ns items=""
+            for ns in ${EXCLUDED_NS:-}; do
+                items="${items:+$items,}{\"metadata\":{\"name\":\"$ns\",\"annotations\":{\"wva.llmd.ai/exclude\":\"true\"}}}"
+            done
+            echo "{\"items\":[${items}]}"; return 0 ;;
+        "get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler -o json")
+            # OTHER_WVA: "<controller ns>=<its WVA_WATCH_NAMESPACE>" words.
+            local pair items=""
+            for pair in ${OTHER_WVA:-}; do
+                items="${items:+$items,}{\"metadata\":{\"namespace\":\"${pair%%=*}\"},\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"manager\",\"env\":[{\"name\":\"WVA_WATCH_NAMESPACE\",\"value\":\"${pair#*=}\"}]}]}}}}"
+            done
+            echo "{\"items\":[${items}]}"; return 0 ;;
+        "get rolebindings -A -l llm-d.ai/watch-grant-for="*)
+            # GRANTED_NS: the namespaces holding this install's labelled grant.
+            local ns
+            for ns in ${GRANTED_NS:-}; do echo "$ns"; done; return 0 ;;
+        "get clusterrole wva-kueue-reader-role-"*" -o yaml")
+            if [ -n "${KUEUE_ROLE_NAMES:-}" ]; then
+                printf '%s\n' 'rules:' '- resources: [clusterqueues]' '- resources: [namespaces]' '  resourceNames:'
+                local n; for n in $KUEUE_ROLE_NAMES; do echo "  - $n"; done
+                return 0
+            fi
+            echo 'Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "x" not found' >&2; return 1 ;;
         "kustomize "*)
             printf '%s\n' 'apiVersion: rbac.authorization.k8s.io/v1' 'kind: Role' 'metadata:' \
                 '  name: wva-manager-role' '  namespace: wva-ctl' 'rules: []'
@@ -237,6 +271,101 @@ if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -qx MULTI && printf '%s\n' "$o
     ok "a single WVA_WATCH_NS is not a list, and its quota is keyed on it as before"
 else
     fail "a single WVA_WATCH_NS must behave as before (rc=$rc)" "$out"
+fi
+
+# 17. auto skips a namespace that opted out, and one another controller manages.
+run 'MS_NS="team-a team-b team-c" POOL_NS=""; EXCLUDED_NS="team-b"; OTHER_WVA="wva-other=team-c"
+WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl WVA_SCOPE=namespace WVA_WATCH_NS=auto; wva_resolve_watch_namespaces; echo "WATCH=$WVA_WATCH_NS"'
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx 'WATCH=team-a' \
+    && printf '%s' "$out" | grep -q 'skipping team-b, annotated wva.llmd.ai/exclude=true' \
+    && printf '%s' "$out" | grep -q 'skipping team-c, already managed by the controller in wva-other'; then
+    ok "auto skips an excluded namespace and one another controller manages, and warns about each"
+else
+    fail "auto must resolve to team-a alone, warning about team-b and team-c (rc=$rc)" "$out"
+fi
+
+# 18. A shrunk list revokes this install's grant and monitors in the dropped namespace only.
+run 'GRANTED_NS="team-a team-b team-c"; WVA_NS=wva-ctl WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b"; wva_apply_watch_namespace_rbac "$WORK"'
+revoked="$(grep -E '^kubectl delete (rolebindings,roles|podmonitors)' "$CALLS" | awk '{for (i = 1; i <= NF; i++) if ($i == "-n") print $(i + 1)}' | sort -u | paste -sd, -)"
+if [ "$rc" -eq 0 ] && [ "$revoked" = "team-c" ] \
+    && grep -q "^kubectl delete rolebindings,roles -n team-c -l llm-d.ai/watch-grant-for=" "$CALLS" \
+    && grep -q "^kubectl delete podmonitors.*-n team-c -l llm-d.ai/applied-by=wva-setup-prereqs,llm-d.ai/applied-for=wva-ctl" "$CALLS" \
+    && printf '%s' "$out" | grep -q 'in team-c, which WVA_WATCH_NS no longer lists'; then
+    ok "shrinking the list removes, by this install's labels, the grant and monitors in the dropped namespace only"
+else
+    fail "a re-install with team-c dropped must revoke in team-c and nowhere else (rc=$rc, revoked=$revoked)" "$out
+$(cat "$CALLS")"
+fi
+
+# 19. The Kueue reader names follow the new list: a dropped namespace loses its name, a hand-added one stays.
+run 'KUEUE_ROLE_NAMES="team-a team-b team-c wva-extra"; WVA_KUEUE_READER_PREVIOUS="team-a team-b team-c"
+WVA_NS=wva-ctl; wva_kueue_reader_names wva-ctl "team-a,team-b"; echo "NAMES=$WVA_KUEUE_READER_NAMES"'
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx 'NAMES=team-a team-b wva-extra'; then
+    ok "the Kueue reader names are recomputed from the new list, keeping a name the install never managed"
+else
+    fail "the Kueue reader must name team-a team-b wva-extra (rc=$rc)" "$out"
+fi
+
+# 20. The uninstall removes every namespace this install ever set up, found by label.
+run 'LIVE_WATCH="team-a,team-b"; GRANTED_NS="team-a team-c"; WVA_NS=wva-ctl WVA_SCOPE=namespace; wva_undeploy_watch_namespace_rbac; echo "WATCH=$WVA_WATCH_NS"'
+dels="$(grep -E '^kubectl delete (role|rolebinding) ' "$CALLS" | awk '{print $3" "$6}' | sort -u | paste -sd, -)"
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx 'WATCH=team-a,team-b,team-c' \
+    && [ "$dels" = "role team-a,role team-b,role team-c,rolebinding team-a,rolebinding team-b,rolebinding team-c" ]; then
+    ok "the uninstall finds a namespace an earlier list set up by its label, and removes it too"
+else
+    fail "the uninstall must cover team-a, team-b and the labelled team-c (rc=$rc, deletes=$dels)" "$out"
+fi
+
+# 21. make enable-physical-limiter splits a managed list before naming the Kueue read.
+run '. "$WORK/physical_limiter.sh"; WVA_NS=wva-ctl; pl_grant_kueue_read wva-ctl wva-controller-manager "team-a,team-b"'
+names="$(yq -r 'select(.kind == "ClusterRole") | .rules[1].resourceNames | join(",")' "$WORK/applied.yaml" 2>/dev/null | grep -v '^$' | head -1)"
+if [ "$rc" -eq 0 ] && [ "$names" = "team-a,team-b" ]; then
+    ok "enable-physical-limiter names each managed namespace in the Kueue read, not the controller's"
+else
+    fail "the Kueue read must name team-a,team-b (rc=$rc, names=$names)" "$out"
+fi
+
+# 22. A policy in the controller's own namespace is live for a list controller: no restart.
+run '. "$WORK/physical_limiter.sh"; pl_policy_is_live "team-a,team-b" wva-ctl wva-ctl && echo LIVE-OWN; pl_policy_is_live "team-a,team-b" wva-policy wva-ctl || echo RESTART-OTHER; pl_policy_is_live team-a wva-ctl wva-ctl || echo RESTART-SINGLE'
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx LIVE-OWN && printf '%s' "$out" | grep -qx RESTART-OTHER \
+    && printf '%s' "$out" | grep -qx RESTART-SINGLE; then
+    ok "a list controller reloads a policy in its own namespace live; elsewhere, and a single one, still restart"
+else
+    fail "pl_policy_is_live must be live for the list controller's own namespace only (rc=$rc)" "$out"
+fi
+
+# 23. A non-default controller namespace reaches every grant: the RoleBinding subject,
+#     the grant label and the monitor owner label name it, never the default.
+run 'WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b"; wva_apply_watch_namespace_rbac "$WORK"'
+subj="$(yq -r 'select(.kind == "RoleBinding") | .subjects[0].namespace' "$WORK/applied.yaml" 2>/dev/null | grep -v '^---$' | sort -u | paste -sd, -)"
+if [ "$rc" -eq 0 ] && [ "$subj" = "llm-scaling" ] && ! grep -q 'workload-variant-autoscaler-system' "$WORK/applied.yaml" "$CALLS" \
+    && grep -q "llm-d.ai/watch-grant-for=$(printf '%s' llm-scaling | sha256sum | cut -c1-8)" "$CALLS"; then
+    ok "a controller in llm-scaling is bound and labelled as llm-scaling in each managed namespace"
+else
+    fail "the grants must name llm-scaling, never the default namespace (rc=$rc, subjects=$subj)" "$out"
+fi
+
+# 24. gpu-inventory alone is refused for a list controller; beside a quota it is taken.
+run 'WVA_NS=wva-ctl WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b" WVA_LIMITER=gpu-inventory; wva_resolve_watch_namespaces'
+alone_rc=$rc alone_out="$out"
+run 'WVA_NS=wva-ctl WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b" WVA_LIMITER=gpu-inventory,quota; wva_resolve_watch_namespaces; echo "WATCH=$WVA_WATCH_NS"'
+if [ "$alone_rc" -ne 0 ] && printf '%s' "$alone_out" | grep -q 'would plan the same free GPUs' \
+    && [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qx 'WATCH=team-a,team-b'; then
+    ok "gpu-inventory alone is refused for a list controller, and gpu-inventory,quota is taken"
+else
+    fail "gpu-inventory alone must be refused and gpu-inventory,quota taken (alone rc=$alone_rc, both rc=$rc)" "$alone_out
+$out"
+fi
+
+# 25. Option B: the setup phase grants the cluster-wide Pod list, read-only, to this controller only.
+run 'WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b" WVA_LIMITER=gpu-inventory,quota; wva_apply_pod_list_grant'
+verbs="$(yq -r 'select(.kind == "ClusterRole") | .rules[] | (.resources | join(",")) + ":" + (.verbs | join(","))' "$WORK/applied.yaml" 2>/dev/null | grep -v '^---$' | paste -sd' ' -)"
+subj="$(yq -r 'select(.kind == "ClusterRoleBinding") | .subjects[0].namespace + "/" + .subjects[0].name' "$WORK/applied.yaml" 2>/dev/null | grep -v '^---$' | paste -sd' ' -)"
+run 'WVA_NS=llm-scaling WVA_SCOPE=namespace WVA_WATCH_NS="team-a,team-b" WVA_LIMITER=quota; wva_apply_pod_list_grant; echo "APPLIED=$(grep -c . "$WORK/applied.yaml")"'
+if [ "$verbs" = "pods:list" ] && [ "$subj" = "llm-scaling/wva-controller-manager" ] && printf '%s' "$out" | grep -qx 'APPLIED=0'; then
+    ok "gpu-inventory beside a quota gets list on Pods cluster-wide and nothing more; a quota alone gets none"
+else
+    fail "the Pod list grant must be pods:list for llm-scaling, and absent with a quota alone (verbs=$verbs subj=$subj)" "$out"
 fi
 
 total=$((PASS + FAIL))
