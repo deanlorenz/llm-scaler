@@ -33,8 +33,8 @@ on and seeing the first move takes about 10 minutes more.
 
 **What this changes in your cluster.**
 
-- A new namespace, `workload-variant-autoscaler-system`, with the scaling
-  manager, and its cluster roles.
+- A new namespace for the scaling manager, `workload-variant-autoscaler-system`
+  unless step 6 names another, and its cluster roles.
 - KEDA, in `keda-system`, if the cluster has none. A Prometheus, if the
   cluster has none.
 - In each model namespace: a PodMonitor and a ServiceMonitor where nothing
@@ -136,8 +136,21 @@ needs it.
 
 ### Step 6: Run the preflight
 
-This command only reads. It finds every namespace that runs llm-d and checks
-each one.
+First say where the scaling manager runs. The default is
+`workload-variant-autoscaler-system`; to use another, set it here instead,
+for example `export CONTROLLER_NAMESPACE=llm-scaling`. Every later step reads
+it, from the install to the uninstall. (`WVA_NS` is the same setting; set one
+of them.)
+
+<!-- guide:steps.controllerns start -->
+```bash
+# Where the scaling manager runs. Every later step reads it.
+export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
+```
+<!-- guide:steps.controllerns end -->
+
+Then run the preflight. It only reads. It finds every namespace that runs
+llm-d and checks each one.
 
 <!-- guide:steps.check start -->
 ```bash
@@ -402,13 +415,13 @@ everything else on the cluster that uses KEDA, so it is your call; with
 
 ### Step 13: Name a model namespace
 
-The commands from here on take one model namespace. Any of them will do.
+The commands from here on take one model namespace. Any of them will do. They
+read `CONTROLLER_NAMESPACE` from step 6 too.
 
 <!-- guide:steps.names start -->
 ```bash
-# One model namespace, for the commands that follow, and the controller's.
+# One model namespace, for the commands that follow.
 export NAMESPACE=<one model namespace>
-export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
 ```
 <!-- guide:steps.names end -->
 

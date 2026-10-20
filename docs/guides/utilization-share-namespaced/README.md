@@ -13,9 +13,9 @@ namespaces is not using. It gives them back when its load drops.
   the llm-d namespaces. It gets a Role in each of them, and nothing
   cluster-wide on workloads.
 - **[One install for the whole cluster](../utilization-share-cluster-wide/)**:
-  the scaling manager may read every namespace. Pick that one if you also want
-  the cluster's free GPUs as the budget (option B there). This guide has a
-  quota budget only.
+  the scaling manager may read every namespace. Pick that one if you want the
+  cluster's free GPUs, with no quota, as the budget (option B there). Here the
+  budget is always a quota; option B adds the cluster's GPUs for placement.
 - **One namespace only**: see [Turn on the utilization-share optimizer,
   safely](../utilization-share/).
 
@@ -26,7 +26,7 @@ path](../../well-lit-paths/utilization-share/).
 
 You need:
 
-- A Kubernetes cluster, and cluster-admin rights on it for step 8.
+- A Kubernetes cluster, and cluster-admin rights on it for step 9.
 - llm-d serving in two or more namespaces. Each namespace has its model
   servers, an EPP and an InferencePool. A fresh llm-d install is enough: the
   installer adds the monitoring llm-d leaves out.
@@ -35,7 +35,7 @@ You need:
   `nodeSelector` or `nodeAffinity` (`nvidia.com/gpu.product`).
 - `kubectl`, `helm`, `git`, `jq`, `yq`, `make` and `openssl`.
 - A checkout of this repository. Run every command from its top directory, in
-  one shell: steps 6 and 9 set variables that the later steps read.
+  one shell: steps 6 and 8 set variables that the later steps read.
 
 KEDA and Prometheus are optional. If the cluster has none, the installer adds
 them.
@@ -46,14 +46,22 @@ on and seeing the first move takes about 10 minutes more.
 
 **What this changes in your cluster.**
 
-- A new namespace, `workload-variant-autoscaler-system`, with the scaling
-  manager.
+- A new namespace for the scaling manager, `workload-variant-autoscaler-system`
+  unless step 6 names another.
 - In each llm-d namespace: a Role and RoleBinding for the scaling manager, a
   PodMonitor and a ServiceMonitor where nothing scrapes the model servers or
   the EPP yet, and one ScaledObject for each model server.
-- A few cluster roles that no Role can express: node read (to resolve the GPU
-  product), Namespace read limited by name to the llm-d namespaces, and the
-  metrics authentication. None of them reads or changes workloads.
+- A few cluster roles that no Role can express. None of them changes
+  workloads:
+  - node read, to resolve the GPU product;
+  - Namespace read, limited by name to the llm-d namespaces;
+  - list on Kueue ClusterQueues, Cohorts and ResourceFlavors, which cannot be
+    limited by name;
+  - the metrics authentication;
+  - on OpenShift, `cluster-monitoring-view`, so the scaling manager can query
+    the platform's Thanos;
+  - option B only: list on Pods in every namespace, so the GPU count sees the
+    GPUs other namespaces hold on the same nodes.
 - KEDA, in `keda-system`, if the cluster has none. A Prometheus, if the
   cluster has none.
 - No model server restarts. KEDA now sets each model's replica count.
@@ -84,7 +92,7 @@ kubectl auth can-i '*' '*' --all-namespaces
 <!-- guide:steps.admin end -->
 
 You should see `yes`. If you see `no`, ask a cluster admin to run steps 6 to
-8, then go on from step 9.
+9, then go on from step 10.
 
 ### Step 3: Check llm-d serves in each namespace
 
@@ -144,7 +152,7 @@ nsm-kind-control-plane   Ready    control-plane   14m   v1.31.2
 nsm-kind-worker          Ready    <none>          14m   v1.31.2   NVIDIA-A100-PCIE-80GB
 ```
 
-Write down the product of the nodes the models run on. Step 9 needs it.
+Write down the product of the nodes the models run on. Step 8 needs it.
 
 ## Install
 
@@ -152,11 +160,18 @@ Write down the product of the nodes the models run on. Step 9 needs it.
 
 `WVA_WATCH_NS=auto` means every namespace that runs llm-d model servers or an
 InferencePool. The installer finds them once, here, and writes the list into
-the scaling manager. `CONTROLLER_NAMESPACE` is where the scaling manager runs.
+the scaling manager. It skips a namespace annotated
+`wva.llmd.ai/exclude: "true"`, and one another scaling manager already
+manages, and warns about each.
+
+`CONTROLLER_NAMESPACE` is where the scaling manager runs. The default is
+`workload-variant-autoscaler-system`; to use another, set it here, for example
+`export CONTROLLER_NAMESPACE=llm-scaling`. Every later step reads it, from the
+install to the uninstall. (`WVA_NS` is the same setting; set one of them.)
 
 <!-- guide:steps.names start -->
 ```bash
-# Manage every namespace that runs llm-d, from the scaling manager's own namespace.
+# Manage every namespace that runs llm-d, from the scaling manager's own namespace. Every later step reads both.
 export WVA_WATCH_NS=auto
 export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
 ```
@@ -214,16 +229,48 @@ If not:
 - **A namespace `failed` for another reason.** The lines under it say what is
   missing. Fix it, then run step 7 again.
 
-### Step 8: Install the prerequisites
+### Step 8: Choose the budget
+
+The budget is a GPU count you set: how many GPUs of one product the models in
+all the managed namespaces may hold together. Pick one option. Steps 9 and 10
+then have a part for each; every other step is the same.
+
+- **Option A: quota.** The GPU count alone. A replica that fits the count is
+  allowed, wherever the scheduler then puts it.
+- **Option B: quota plus the cluster's GPUs.** The same count, and the
+  scaling manager also reads the nodes (`gpu-inventory`), so it adds a
+  replica only where a node has a free GPU of that product. Pick it when other
+  work holds GPUs on the same nodes. It needs two more read-only grants:
+  node read and list on Pods in every namespace.
+
+The cluster's GPUs alone, with no quota, is not offered here: every
+namespace-scoped scaling manager would plan the same free GPUs. For that one,
+use [the cluster-wide install](../utilization-share-cluster-wide/).
+
+Set the GPU product from step 5, and the GPU count:
+
+<!-- guide:steps.vars start -->
+```bash
+# The GPU product from step 5, and how many of its GPUs the models may hold together.
+export ACCELERATOR=<gpu product>
+export GPUS=<gpus>
+```
+<!-- guide:steps.vars end -->
+
+This prints nothing.
+
+### Step 9: Install the prerequisites
 
 This is the cluster-admin step. It takes about 3 minutes. It creates the
 scaling manager's namespace, a Role in each managed namespace, the few cluster
 roles listed above, the monitors the preflight said were missing, and KEDA if
 the cluster has none.
 
+**Option A: quota.**
+
 <!-- guide:steps.setup start -->
 ```bash
-# Cluster admin, once. A Role in each managed namespace, the monitors, and KEDA only if the cluster has none.
+# Option A: quota. Cluster admin, once. A Role in each managed namespace, the monitors, and KEDA only if the cluster has none.
 make setup-prereqs KEDA_HELM_INSTALL=true
 ```
 <!-- guide:steps.setup end -->
@@ -249,6 +296,25 @@ You should see the monitors and the Role in each namespace, and KEDA:
     Monitors added in team-b: PodMonitor wva-modelserver-metrics, ServiceMonitor wva-epp-metrics for optimized-baseline-epp
 ```
 
+**Option B: quota plus the cluster's GPUs.**
+
+<!-- guide:steps.setupphysical start -->
+```bash
+# Option B: quota plus the cluster's GPUs. As option A, and the read-only Pod list and node read the GPU count needs.
+make setup-prereqs KEDA_HELM_INSTALL=true \
+  WVA_LIMITER=gpu-inventory,quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
+```
+<!-- guide:steps.setupphysical end -->
+
+You should see what option A shows, and the Pod list:
+
+```text
+[SUCCESS]   Role/wva-manager-role-1d8cfc15 and RoleBinding/wva-manager-rolebinding-1d8cfc15 in team-b
+[SUCCESS]   ClusterRole/wva-pod-list-role-1d8cfc15: list Pods in every namespace, so gpu-inventory sees the GPUs other namespaces hold on the same nodes
+...
+ Prerequisites ready for workload-variant-autoscaler-system
+```
+
 With KEDA already on the cluster, the line reads `KEDA: already on the
 cluster`. Where something already scrapes a namespace, no monitor is added
 there.
@@ -261,36 +327,16 @@ If not:
   Prometheus does not use the Prometheus Operator. Scrape the model servers
   and the EPP your own way, then run step 7 again.
 
-### Step 9: Set the budget
-
-The budget is a GPU count you set: how many GPUs of one product the models in
-all the managed namespaces may hold together.
-
-Only a quota works here. The other budget, the cluster's free GPUs
-(`gpu-inventory`), needs a scaling manager that sees every pod on the GPU
-nodes, which this install does not. For that one, use [the cluster-wide
-install](../utilization-share-cluster-wide/).
-
-Set the GPU product from step 5, and the GPU count:
-
-<!-- guide:steps.vars start -->
-```bash
-# The GPU product from step 5, and how many of its GPUs the models may hold together.
-export ACCELERATOR=<gpu product>
-export GPUS=<gpus>
-```
-<!-- guide:steps.vars end -->
-
-This prints nothing.
-
 ### Step 10: Install the scaling manager
 
 It takes about 2 minutes. `WVA_QUOTA_SCOPE=cluster` makes the namespaces
 share one budget.
 
+**Option A: quota.**
+
 <!-- guide:steps.install start -->
 ```bash
-# The scaling manager, with one GPU budget for every namespace it manages.
+# Option A: quota. The scaling manager, with one GPU budget for every namespace it manages.
 make deploy-wva INSTALL_PHASE=wva \
   WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
 ```
@@ -318,13 +364,44 @@ You should see each namespace pass, the namespaces it manages, the quota, and
 [SUCCESS] Deployment on kubernetes complete!
 ```
 
+**Option B: quota plus the cluster's GPUs.**
+
+<!-- guide:steps.installphysical start -->
+```bash
+# Option B: quota plus the cluster's GPUs. The same budget, and a replica goes only where a node has a free GPU.
+make deploy-wva INSTALL_PHASE=wva \
+  WVA_LIMITER=gpu-inventory,quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
+```
+<!-- guide:steps.installphysical end -->
+
+You should see the node read and the Pod list confirmed, both limiters, and
+`Deployment on kubernetes complete!`:
+
+```text
+[SUCCESS] The controller can list nodes, which the gpu-inventory limiter requires
+[SUCCESS] The controller can list Pods in every namespace, which the gpu-inventory limiter needs to see other namespaces' GPUs
+...
+[WARNING] Scaling is now bounded by every limiter in 'gpu-inventory quota' (declared in workload-variant-autoscaler-system/wva-scaling-policy-config):
+    - type: gpu-inventory
+    - name: install-quota
+      type: quota
+      scope: cluster
+      quotas:
+        NVIDIA-A100-PCIE-80GB: 4
+...
+[SUCCESS] Deployment on kubernetes complete!
+```
+
 If not:
 
-- **It says the prerequisites are missing.** Run step 8 first.
-- **A Role is missing in one namespace.** Step 8 ran with a different
-  `WVA_WATCH_NS`. Run step 8 again in this shell.
+- **It says the prerequisites are missing.** Run step 9 first.
+- **A Role is missing in one namespace.** Step 9 ran with a different
+  `WVA_WATCH_NS`. Run step 9 again in this shell.
 - **It warns that the quota key matches no node.** Use the exact product from
   step 5.
+- **Option B: it says the controller cannot list Pods in every namespace.**
+  Step 9 ran as option A. Run step 9 for option B.
+- **`gpu-inventory alone is refused`.** Keep the quota beside it, as above.
 
 ## Register the models
 
@@ -440,7 +517,7 @@ If not:
   `nodeSelector`. The event stays for an hour after the fix; delete it with
   `kubectl delete events -n <namespace> --field-selector reason=AcceleratorNotResolved`
   and run step 14 again.
-- **The quota has no key for a product.** Run steps 9 and 10 again with that
+- **The quota has no key for a product.** Run steps 8 and 10 again with that
   exact name.
 
 ### Step 15: Turn on shadow
@@ -508,7 +585,7 @@ You should see `active`:
   for two to three minutes nothing in the group scales (quiet-period); the same follows every controller restart
 ```
 
-The Role from step 8 already lets the scaling manager mark pods in each
+The Role from step 9 already lets the scaling manager mark pods in each
 managed namespace, so nothing new is granted, and a namespace that needs
 nothing prints nothing. A namespace it may not mark pods in is named with a
 warning. Nothing scales for two to three
@@ -585,12 +662,13 @@ You should see `utilization share is off`.
 ### Step 20: Remove the scaling manager
 
 The uninstall reads the namespaces it managed from the scaling manager
-itself, so it needs no settings.
+itself, and finds every namespace an earlier list set up by its label, so it
+needs only the scaling manager's namespace from step 6.
 
 <!-- guide:steps.uninstall start -->
 ```bash
 # Remove the scaling manager. The models keep serving; KEDA and Prometheus stay.
-make undeploy-wva
+make undeploy-wva CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE}
 ```
 <!-- guide:steps.uninstall end -->
 
@@ -620,28 +698,40 @@ before step 13. KEDA and Prometheus stay. To remove them too, add
 
 - **What the scaling manager may do.** In each managed namespace: what its
   Role grants, the same as a single-namespace install. Outside them: list
-  nodes, get the managed Namespaces by name, and authenticate metrics. It
-  cannot list or change workloads anywhere else. Check it with
-  `kubectl auth can-i list deployments -A --as=system:serviceaccount:workload-variant-autoscaler-system:wva-controller-manager`,
+  nodes, get the managed Namespaces by name, list Kueue queues, and
+  authenticate metrics; with option B, list Pods too. It cannot change
+  workloads anywhere else, or list them outside the managed namespaces. Check
+  it with
+  `kubectl auth can-i list deployments -A --as=system:serviceaccount:${CONTROLLER_NAMESPACE}:wva-controller-manager`,
   which answers `no`.
+- **A namespace it may no longer read.** If its RoleBinding is deleted, or the
+  namespace is, the scaling manager keeps managing the others. It logs the
+  namespace, reports it as `wva_watch_namespace_unreadable{namespace,reason}`,
+  and asks again every minute; once it may read it again, it restarts to
+  manage it. Run step 9 again to restore the RoleBinding.
+- **Taking a namespace out of the list.** Run steps 9 and 10 again with the
+  shorter `WVA_WATCH_NS`. They remove the Role, RoleBinding and monitors this
+  install added in the namespace you left out, found by their labels, and
+  nothing else there.
 - **`WVA_WATCH_NS=auto` is read once.** A namespace that starts running llm-d
-  later is not managed until you run steps 8 and 10 again. The scaling manager
+  later is not managed until you run steps 9 and 10 again. The scaling manager
   never widens its own rights.
 - **The budget is a quota, `scope: cluster`.** It is charged only what this
   scaling manager's models hold. Back it with a Kubernetes `ResourceQuota`
   where other work must be bounded too. Without `WVA_QUOTA_SCOPE=cluster`,
   each namespace gets its own budget of `GPUS` and nothing is shared.
-- **Why not the cluster's free GPUs.** That budget is every free GPU on the
-  nodes. A scaling manager that cannot list every pod cannot tell which GPUs
-  are free, so it ignores `physicalGroups`. Use [the cluster-wide
-  install](../utilization-share-cluster-wide/) for it.
+- **Why not the cluster's free GPUs alone.** Every namespace-scoped scaling
+  manager would plan the same free GPUs, so `gpu-inventory` without a quota
+  is refused here and `physicalGroups` is ignored. Option B keeps the quota
+  as the budget and uses the nodes only for placement. Use [the cluster-wide
+  install](../utilization-share-cluster-wide/) for the free GPUs alone.
 - **Where the policy lives.** In `wva-scaling-policy-config` in the scaling
-  manager's own namespace, which only the cluster admin who ran step 8 can
+  manager's own namespace, which only the cluster admin who ran step 9 can
   edit. The teams in the managed namespaces cannot change the budget.
 - **What the preflight checks in each namespace.** That llm-d runs there, that
   something scrapes the model servers and the EPP, and whether the EPP has
   flow control on.
-- **The monitors step 8 adds.** A PodMonitor for the model servers, and a
+- **The monitors step 9 adds.** A PodMonitor for the model servers, and a
   ServiceMonitor for the EPP. Only where nothing scrapes them yet. Each is
   labelled `llm-d.ai/applied-by=wva-setup-prereqs`; step 20 removes exactly
   those.

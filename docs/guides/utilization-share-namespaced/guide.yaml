@@ -23,7 +23,7 @@ steps:
     run: |
       kubectl get nodes -L nvidia.com/gpu.product
   names:
-    note: Manage every namespace that runs llm-d, from the scaling manager's own namespace.
+    note: Manage every namespace that runs llm-d, from the scaling manager's own namespace. Every later step reads both.
     run: |
       export WVA_WATCH_NS=auto
       export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
@@ -31,20 +31,30 @@ steps:
     note: Read-only. Checks the tools, your rights, KEDA, Prometheus, and each namespace it will manage.
     run: |
       make check-prereqs KEDA_HELM_INSTALL=true
-  setup:
-    note: Cluster admin, once. A Role in each managed namespace, the monitors, and KEDA only if the cluster has none.
-    run: |
-      make setup-prereqs KEDA_HELM_INSTALL=true
   vars:
     note: The GPU product from step 5, and how many of its GPUs the models may hold together.
     run: |
       export ACCELERATOR=<gpu product>
       export GPUS=<gpus>
+  setup:
+    note: "Option A: quota. Cluster admin, once. A Role in each managed namespace, the monitors, and KEDA only if the cluster has none."
+    run: |
+      make setup-prereqs KEDA_HELM_INSTALL=true
+  setupphysical:
+    note: "Option B: quota plus the cluster's GPUs. As option A, and the read-only Pod list and node read the GPU count needs."
+    run: |
+      make setup-prereqs KEDA_HELM_INSTALL=true \
+        WVA_LIMITER=gpu-inventory,quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
   install:
-    note: The scaling manager, with one GPU budget for every namespace it manages.
+    note: "Option A: quota. The scaling manager, with one GPU budget for every namespace it manages."
     run: |
       make deploy-wva INSTALL_PHASE=wva \
         WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
+  installphysical:
+    note: "Option B: quota plus the cluster's GPUs. The same budget, and a replica goes only where a node has a free GPU."
+    run: |
+      make deploy-wva INSTALL_PHASE=wva \
+        WVA_LIMITER=gpu-inventory,quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=${GPUS}"
   plan:
     note: Read-only. Lists the model servers in the managed namespaces and writes a plan. Applies nothing.
     run: |
@@ -89,4 +99,4 @@ steps:
   uninstall:
     note: Remove the scaling manager. The models keep serving; KEDA and Prometheus stay.
     run: |
-      make undeploy-wva
+      make undeploy-wva CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE}
