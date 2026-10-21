@@ -33,6 +33,8 @@ You need:
 - GPU nodes. The models that share must run on one GPU product. Every model
   server must ask for its GPUs (`nvidia.com/gpu`) and name the product in its
   `nodeSelector` or `nodeAffinity` (`nvidia.com/gpu.product`).
+- For option C only: Kueue, with a ClusterQueue that holds a GPU quota, and
+  a LocalQueue on it in each model namespace. Step 8 checks them.
 - `kubectl`, `helm`, `git`, `jq`, `yq`, `make` and `openssl`.
 - A checkout of this repository. Run every command from its top directory, in
   one shell: steps 6 and 8 set variables that the later steps read.
@@ -231,9 +233,10 @@ If not:
 
 ### Step 8: Choose the budget
 
-The budget is a GPU count you set: how many GPUs of one product the models in
-all the managed namespaces may hold together. Pick one option. Steps 9 and 10
-then have a part for each; every other step is the same.
+The budget is a GPU count: how many GPUs of one product the models in all the
+managed namespaces may hold together. Pick one option. Steps 9 and 10 then
+have a part for each, and option C adds a check here; every other step is
+the same.
 
 - **Option A: quota.** The GPU count alone. A replica that fits the count is
   allowed, wherever the scheduler then puts it.
@@ -242,12 +245,20 @@ then have a part for each; every other step is the same.
   replica only where a node has a free GPU of that product. Pick it when other
   work holds GPUs on the same nodes. It needs two more read-only grants:
   node read and list on Pods in every namespace.
+- **Option C: Kueue.** The count is the GPU quota of Kueue's ClusterQueues.
+  Pick it when the cluster already uses Kueue to share GPUs. It needs a
+  ClusterQueue with a GPU quota (`nominalQuota` on `nvidia.com/gpu`), a
+  LocalQueue on it in each managed namespace, and each model server on that
+  LocalQueue: the label `kueue.x-k8s.io/queue-name: <LocalQueue>` on its pod
+  template. It needs no more grants than option A: the Kueue reads are
+  already there, limited to the managed namespaces. Change the quota in
+  Kueue, and the budget follows within a minute.
 
 The cluster's GPUs alone, with no quota, is not offered here: every
 namespace-scoped scaling manager would plan the same free GPUs. For that one,
 use [the cluster-wide install](../utilization-share-cluster-wide/).
 
-Set the GPU product from step 5, and the GPU count:
+For options A and B, set the GPU product from step 5, and the GPU count:
 
 <!-- guide:steps.vars start -->
 ```bash
@@ -258,6 +269,56 @@ export GPUS=<gpus>
 <!-- guide:steps.vars end -->
 
 This prints nothing.
+
+For option C, set the GPU product from step 5. Kueue gives the number:
+
+<!-- guide:steps.varskueue start -->
+```bash
+# Option C: Kueue. The GPU product from step 5. Kueue's ClusterQueues give the number.
+export ACCELERATOR=<gpu product>
+```
+<!-- guide:steps.varskueue end -->
+
+This prints nothing. Then check the queues. This only reads:
+
+<!-- guide:steps.checkkueue start -->
+```bash
+# Option C: Kueue. Read-only. Checks each managed namespace has a LocalQueue on a GPU ClusterQueue, with its model servers on it.
+make check-prereqs KEDA_HELM_INSTALL=true \
+  WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=-1" WVA_QUOTA_KUEUE=true
+```
+<!-- guide:steps.checkkueue end -->
+
+You should see each namespace on its LocalQueue, the budget Kueue gives, and
+`Preflight passed`:
+
+```text
+[INFO] Checking the 2 namespace(s) this controller manages (WVA_WATCH_NS):
+
+[INFO] Namespace team-a
+[SUCCESS]   Kueue budget: LocalQueue serving -> ClusterQueue inference (4 GPUs).
+[SUCCESS]   Kueue budget: the model servers in team-a are on LocalQueue serving.
+[SUCCESS]   team-a: passed (setup adds the model-server PodMonitor, setup adds the EPP ServiceMonitor, EPP flow control off: no scale from zero, on Kueue LocalQueue serving).
+...
+[SUCCESS] Kueue budget: 4 GPUs, the GPU quota of ClusterQueue(s) inference, shared by every managed namespace; WVA_QUOTAS can only lower it.
+[SUCCESS] Namespaces: all 2 passed.
+[SUCCESS] Preflight passed for ENVIRONMENT=kubernetes, WVA_SCOPE=namespace, WVA_LIMITER=quota
+```
+
+If not:
+
+- **`no LocalQueue in team-a`.** Create one on the GPU ClusterQueue. The line
+  under it prints the `kubectl create` command.
+- **`carries no kueue.x-k8s.io/queue-name label`.** Add the label to the model
+  server's pod template, with the `kubectl patch` it prints, or in your llm-d
+  values. Its pods restart.
+- **`run outside Kueue`.** The pods started before the label. The patch above
+  replaces them.
+- **`which declares no GPU resource`** or **`does not admit team-a`.** Point
+  the LocalQueue at a ClusterQueue with a GPU quota whose `namespaceSelector`
+  selects the namespace.
+- **`cannot tell whether team-a has a LocalQueue`.** You may not list
+  LocalQueues there. Run it as a cluster admin.
 
 ### Step 9: Install the prerequisites
 
@@ -314,6 +375,33 @@ You should see what option A shows, and the Pod list:
 ...
  Prerequisites ready for workload-variant-autoscaler-system
 ```
+
+**Option C: Kueue.**
+
+<!-- guide:steps.setupkueue start -->
+```bash
+# Option C: Kueue. As option A, and the Kueue reads, granted for the managed namespaces only.
+make setup-prereqs KEDA_HELM_INSTALL=true \
+  WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=-1" WVA_QUOTA_KUEUE=true
+```
+<!-- guide:steps.setupkueue end -->
+
+You should see what option A shows, and the Kueue reads:
+
+```text
+[SUCCESS] Kueue budget: 4 GPUs, the GPU quota of ClusterQueue(s) inference, shared by every managed namespace; WVA_QUOTAS can only lower it.
+...
+[SUCCESS]   Role/wva-manager-role-1d8cfc15 and RoleBinding/wva-manager-rolebinding-1d8cfc15 in team-b
+...
+ Prerequisites ready for workload-variant-autoscaler-system
+  ...
+    ClusterRole/wva-kueue-reader-role-1d8cfc15
+  ...
+    ClusterRoleBinding/wva-kueue-reader-rolebinding-1d8cfc15
+```
+
+No ClusterRole to read Workloads in every namespace is created: one budget
+for every namespace counts no cohort borrowing.
 
 With KEDA already on the cluster, the line reads `KEDA: already on the
 cluster`. Where something already scrapes a namespace, no monitor is added
@@ -391,6 +479,43 @@ kubernetes complete!`:
 [SUCCESS] Deployment on kubernetes complete!
 ```
 
+**Option C: Kueue.** `-1` lets Kueue set the number. A finite number there
+caps the budget below Kueue's.
+
+<!-- guide:steps.installkueue start -->
+```bash
+# Option C: Kueue. The scaling manager, with the GPU quota of Kueue's ClusterQueues as one budget for every namespace it manages.
+make deploy-wva INSTALL_PHASE=wva \
+  WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=-1" WVA_QUOTA_KUEUE=true
+```
+<!-- guide:steps.installkueue end -->
+
+You should see each namespace on its LocalQueue, the quota read from Kueue,
+and `Deployment on kubernetes complete!`:
+
+```text
+[SUCCESS] The controller can get namespaces/team-a, which the Kueue quota source (WVA_QUOTA_KUEUE=true) needs
+[SUCCESS] The controller can get namespaces/team-b, which the Kueue quota source (WVA_QUOTA_KUEUE=true) needs
+...
+[SUCCESS]   team-a: passed (EPP flow control off: no scale from zero, on Kueue LocalQueue serving)
+[SUCCESS]   team-b: passed (EPP flow control off: no scale from zero, on Kueue LocalQueue serving)
+[SUCCESS] Kueue budget: 4 GPUs, the GPU quota of ClusterQueue(s) inference, shared by every managed namespace; WVA_QUOTAS can only lower it.
+[SUCCESS] Namespaces: all 2 passed.
+...
+[INFO] Controller runs in workload-variant-autoscaler-system and manages team-a, team-b
+...
+[WARNING] Scaling is now bounded by every limiter in 'quota' (declared in workload-variant-autoscaler-system/wva-scaling-policy-config):
+    - name: install-quota
+      type: quota
+      scope: cluster
+      kueue:
+        enabled: true
+      quotas:
+        NVIDIA-A100-PCIE-80GB: -1
+...
+[SUCCESS] Deployment on kubernetes complete!
+```
+
 If not:
 
 - **It says the prerequisites are missing.** Run step 9 first.
@@ -403,6 +528,11 @@ If not:
   it answers `yes` after step 9 for option B. If it answers `no`, run step 9
   for option B.
 - **`gpu-inventory alone is refused`.** Keep the quota beside it, as above.
+- **Option C: a namespace `failed` with a Kueue reason.** Fix what the
+  `Kueue budget:` lines under it say, as in step 8.
+- **Option C: `the shared budget is the GPU quota of EVERY ClusterQueue`.**
+  A ClusterQueue for other work counts too. Set `WVA_QUOTAS` to the number it
+  prints instead of `-1`.
 
 ## Register the models
 
@@ -496,7 +626,7 @@ make utilization-share-check CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE}
 <!-- guide:steps.budget end -->
 
 You should see the namespaces it manages, the quota, the GPU product, and no
-`[FAIL]`:
+`[FAIL]`. Option C reads the same as option A:
 
 ```text
   the controller in workload-variant-autoscaler-system manages team-a, team-b
@@ -727,6 +857,27 @@ before step 13. KEDA and Prometheus stay. To remove them too, add
   scaling manager's models hold. Back it with a Kubernetes `ResourceQuota`
   where other work must be bounded too. Without `WVA_QUOTA_SCOPE=cluster`,
   each namespace gets its own budget of `GPUS` and nothing is shared.
+- **Kueue as the budget (option C).** The budget is the GPU `nominalQuota` of
+  every ClusterQueue, read every 30 seconds, and the smaller of that and
+  `WVA_QUOTAS`. Kueue still admits each pod; the scaling manager only stops
+  asking for replicas Kueue would hold. The Kueue reads are cluster-scoped
+  lists of ClusterQueues, Cohorts and ResourceFlavors, and get on the managed
+  Namespaces by name; LocalQueues are read through each namespace's Role. See
+  [Kueue as a quota
+  source](../../reference/quota-limiter.md#kueue-as-a-quota-source).
+- **Option C limit: every ClusterQueue counts.** A ClusterQueue for other
+  work adds to the budget. Cap it with a finite `WVA_QUOTAS`; step 10 prints
+  the number.
+- **Option C limit: one budget per ClusterQueue, not per namespace.**
+  Namespaces on one queue share it, and two that grow in the same minute can
+  ask for more than it admits; Kueue holds the extra pods
+  ([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213)).
+- **Option C limit: GPUs Kueue granted are never taken back by the
+  optimizer.** Kueue preempts what it must
+  ([the scaling policy](../../reference/scaling-policy.md#optimizer-cluster-default-only-live)).
+- **Option C limit: no cohort borrowing.** One budget for every namespace
+  counts only nominal quota. For borrowing, use [Let models borrow from a
+  Kueue cohort](../kueue-borrowing/).
 - **Why not the cluster's free GPUs alone.** Every namespace-scoped scaling
   manager would plan the same free GPUs, so `gpu-inventory` without a quota
   is refused here and `physicalGroups` is ignored. Option B keeps the quota

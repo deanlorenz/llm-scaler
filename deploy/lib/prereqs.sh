@@ -767,6 +767,9 @@ wva_kueue_borrow_wanted() {
                 || [ "${WVA_QUOTA_KUEUE:-false}" != "true" ]; then
                 continue
             fi
+            # A scope: cluster entry counts no borrowing, so it needs no
+            # cluster-wide Workload read (policy_counts_borrowing).
+            [ "${WVA_QUOTA_SCOPE:-namespace}" != cluster ] || continue
             case "${WVA_QUOTA_KUEUE_BORROW:-}" in
                 false) continue ;;
                 true) ans=yes; continue ;;
