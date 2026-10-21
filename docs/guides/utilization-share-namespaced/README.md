@@ -93,8 +93,9 @@ kubectl auth can-i '*' '*' --all-namespaces
 ```
 <!-- guide:steps.admin end -->
 
-You should see `yes`. If you see `no`, ask a cluster admin to run steps 6 to
-9, then go on from step 10.
+You should see `yes`. If you see `no`, you can still run every read-only
+step. For step 9, render it for a cluster admin instead: step 9 says how.
+Then go on from step 10 once they have run it.
 
 ### Step 3: Check llm-d serves in each namespace
 
@@ -402,6 +403,37 @@ You should see what option A shows, and the Kueue reads:
 
 No ClusterRole to read Workloads in every namespace is created: one budget
 for every namespace counts no cohort borrowing.
+
+**If you are not a cluster admin, render this step for one.** This only
+reads, so read rights are enough. It writes the step to `admin-setup/` and
+applies nothing. For option B or C, add the same settings as that option's
+command above:
+
+<!-- guide:steps.render start -->
+<!-- guide:steps.render end -->
+
+It ends with what it wrote and the command for the admin:
+
+```text
+[SUCCESS] Rendered the cluster-admin phase for workload-variant-autoscaler-system into /home/you/admin-setup. Nothing was applied.
+[INFO]   admin.yaml: 35 objects
+...
+[INFO] Give both files to a cluster admin, who reviews them and runs:
+[INFO]     bash /home/you/admin-setup/admin.sh
+```
+
+`admin.yaml` holds every object this step creates, the Role in each managed
+namespace among them. `admin.sh` holds the Helm installs and anything else
+that is not a plain object, each with a comment saying why, then applies
+`admin.yaml`. Send both files to the admin. They need `kubectl` and `helm`,
+not this repository:
+
+<!-- guide:steps.adminrun start -->
+<!-- guide:steps.adminrun end -->
+
+`admin.yaml` holds private keys (the scaler's certificates), so send it
+privately. Render again after anything on the cluster changes: the render
+describes the cluster as it was when you ran it.
 
 With KEDA already on the cluster, the line reads `KEDA: already on the
 cluster`. Where something already scrapes a namespace, no monitor is added

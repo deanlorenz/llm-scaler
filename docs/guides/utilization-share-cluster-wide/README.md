@@ -69,8 +69,9 @@ kubectl auth can-i '*' '*' --all-namespaces
 ```
 <!-- guide:steps.admin end -->
 
-You should see `yes`. If you see `no`, ask a cluster admin to run steps 6 and
-7, then go on from step 8.
+You should see `yes`. If you see `no`, you can still run every read-only
+step. For step 7, render it for a cluster admin instead: step 7 says how.
+Then go on from step 8 once they have run it.
 
 ### Step 3: Check llm-d serves in each namespace
 
@@ -231,6 +232,35 @@ there.
 It also warns that no Prometheus is granted the controller's own metrics.
 Scaling does not need them; they feed the dashboards. To grant them, run step
 7 again with `PROMETHEUS_SA=<namespace>/<serviceaccount>` of your Prometheus.
+
+**If you are not a cluster admin, render this step for one.** This only
+reads, so read rights are enough. It writes the step to `admin-setup/` and
+applies nothing:
+
+<!-- guide:steps.render start -->
+<!-- guide:steps.render end -->
+
+It ends with what it wrote and the command for the admin:
+
+```text
+[SUCCESS] Rendered the cluster-admin phase for workload-variant-autoscaler-system into /home/you/admin-setup. Nothing was applied.
+[INFO]   admin.yaml: 33 objects
+...
+[INFO] Give both files to a cluster admin, who reviews them and runs:
+[INFO]     bash /home/you/admin-setup/admin.sh
+```
+
+`admin.yaml` holds every object step 7 creates. `admin.sh` holds the Helm
+installs and anything else that is not a plain object, each with a comment
+saying why, then applies `admin.yaml`. Send both files to the admin. They
+need `kubectl` and `helm`, not this repository:
+
+<!-- guide:steps.adminrun start -->
+<!-- guide:steps.adminrun end -->
+
+`admin.yaml` holds private keys (the scaler's certificates), so send it
+privately. Render again after anything on the cluster changes: the render
+describes the cluster as it was when you ran it.
 
 If not:
 

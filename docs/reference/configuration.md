@@ -24,6 +24,7 @@ Every option `deploy/install.sh` reads. Each entry is read by something, and eve
 | `KUEUE_NAMESPACE` | Where Kueue runs. The prereqs phase puts the Role that reads the Kueue controller's Deployment and leader Lease there; the uninstall finds it by label wherever it is. Unset, the `kueue.controllerNamespace` the policy keeps is used, so a re-run need not repeat it: `KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<ns> make setup-prereqs` | the entry's `kueue.controllerNamespace`, else `kueue-system` |
 | `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when it differs from the one it runs in. The workloads' owner then does not administer the controller, which is where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold). A comma-separated list (`team-a,team-b`), or `auto` for every namespace with llm-d, manages several from `WVA_NS`: a Role in each, nothing cluster-wide on workloads. See [Share GPUs between namespaces with a namespace-scoped install](../guides/utilization-share-namespaced/) | the controller's own namespace |
 | `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: the install picks the half left to do, `wva` when the caller cannot create cluster-scoped objects or the admin half is already in place. `make setup-prereqs` is the `prereqs` phase; see [deploy/](../../deploy/) | auto |
+| `RENDER` | A directory. `make setup-prereqs RENDER=<dir>` runs the cluster-admin phase with every read and check as usual and **applies nothing**. It writes `admin.yaml`, every object the phase creates or updates, and `admin.sh`, the Helm installs and deletes that are not plain objects, each with its reason, then `kubectl apply -f admin.yaml`. A cluster admin reviews both and runs `bash admin.sh`, with no checkout. Needs read rights only; see [Rendering the admin phase](#rendering-the-admin-phase) | unset |
 | `WVA_PROJECT` | Repository root the script installs from | `$PWD` |
 
 ## Image
@@ -515,6 +516,43 @@ None of the `LEARNED_STATE_*` variables is set by the installer: they are read f
 the controller's own environment, so set them on its Deployment
 (`kubectl set env deployment/<controller> -n <controller-namespace> LEARNED_STATE_SNAPSHOT=true`),
 which restarts it.
+
+### Rendering the admin phase
+
+When the person installing is not a cluster admin, they render the admin
+phase and hand it over:
+
+```bash
+make setup-prereqs <the same settings> RENDER=admin-setup   # you: read rights only
+bash admin-setup/admin.sh                                    # the cluster admin
+```
+
+Then the namespace owner runs `make deploy-wva INSTALL_PHASE=wva` as usual.
+
+The render runs every read and check a live run makes, with your rights, and
+writes nothing to the cluster. What it would have written goes to the two
+files:
+
+- `admin.yaml`: every object, without server fields, namespaces and RBAC
+  first. It holds the private keys the scaler certificates need, so it is
+  mode 600; send it privately.
+- `admin.sh`: the Helm installs (exact chart, version and values), CRDs
+  applied from a URL, deletes of objects already on the cluster (an
+  immutable `roleRef`, an obsolete token), each with a comment saying why,
+  then `kubectl apply -f admin.yaml`. Waits and rollout checks are left to
+  the admin's run.
+
+Questions about what you may write are answered for the admin, so a render
+needs read rights only. The built-in `view` role is not quite enough. A
+render also reads CustomResourceDefinitions, ClusterRoles,
+ClusterRoleBindings, Roles, RoleBindings and InferencePools (`get` and
+`list`). A read the cluster refuses is listed at the end of the render, since
+the admin's run would have seen that object and might decide differently.
+
+A render describes the cluster when it ran. Render again after the cluster
+changes. With cert-manager on the cluster, render with
+`WVA_SCALER_TLS_PROVIDER=openssl`: a render cannot wait for cert-manager to
+issue certificates, and stays on plaintext without it.
 
 ### External scaler mutual TLS
 
