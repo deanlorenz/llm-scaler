@@ -1471,22 +1471,45 @@ EOF
 }
 
 # wva_render_real_kubectl runs the real kubectl, on the pinned context if any.
+# A read the cluster refuses is noted (wva_render_note_forbidden): the live
+# run, made by an admin, would have seen the object, so the render may differ.
 wva_render_real_kubectl() {
+    local errf rc=0
+    errf="$(mktemp)" || return 125
     if [ -n "${WVA_KUBE_CONTEXT:-}" ]; then
-        "$WVA_RENDER_KUBECTL" --context "$WVA_KUBE_CONTEXT" "$@"
+        "$WVA_RENDER_KUBECTL" --context "$WVA_KUBE_CONTEXT" "$@" 2>"$errf" || rc=$?
     else
-        "$WVA_RENDER_KUBECTL" "$@"
+        "$WVA_RENDER_KUBECTL" "$@" 2>"$errf" || rc=$?
     fi
+    [ "$rc" -eq 0 ] || wva_render_note_forbidden "$errf"
+    cat "$errf" >&2
+    rm -f "$errf"
+    return "$rc"
 }
 
 # wva_render_real_helm runs the real helm, on the pinned context if any.
 wva_render_real_helm() {
+    local errf rc=0
     [ -n "$WVA_RENDER_HELM" ] || { echo "helm: not on PATH" >&2; return 127; }
+    errf="$(mktemp)" || return 125
     if [ -n "${WVA_KUBE_CONTEXT:-}" ]; then
-        "$WVA_RENDER_HELM" --kube-context "$WVA_KUBE_CONTEXT" "$@"
+        "$WVA_RENDER_HELM" --kube-context "$WVA_KUBE_CONTEXT" "$@" 2>"$errf" || rc=$?
     else
-        "$WVA_RENDER_HELM" "$@"
+        "$WVA_RENDER_HELM" "$@" 2>"$errf" || rc=$?
     fi
+    [ "$rc" -eq 0 ] || wva_render_note_forbidden "$errf"
+    cat "$errf" >&2
+    rm -f "$errf"
+    return "$rc"
+}
+
+# wva_render_note_forbidden records, from kubectl or helm stderr in file $1,
+# the resource a Forbidden read named, for the warning wva_render_finish gives.
+wva_render_note_forbidden() {
+    local res
+    grep -qi 'forbidden' "$1" 2>/dev/null || return 0
+    res="$(grep -oiE 'cannot (get|list|watch) resource "[^"]+"( in API group "[^"]*")?' "$1" | head -1)"
+    printf '%s\n' "${res:-$(grep -i -m1 forbidden "$1" | cut -c1-200)}" >> "$WVA_RENDER_WORK/forbidden"
 }
 
 # wva_render_local_kubectl runs the real kubectl for a purely local operation
@@ -2135,21 +2158,30 @@ wva_render_delete() {
 # be answered as such. A question about a write is about the cluster admin who
 # runs admin.sh, and is answered yes.
 wva_render_can_i() {
-    local a verb=""
+    local a verb="" ns="" skip=0
     for a in "$@"; do
         case "$a" in
             --as|--as=*) wva_render_real_kubectl auth "$@"; return ;;
         esac
     done
     for a in "$@"; do
+        if [ "$skip" = 1 ]; then skip=0; ns="$a"; continue; fi
         case "$a" in
-            auth|can-i|-*) continue ;;
+            -n|--namespace) skip=1; continue ;;
+            --namespace=*) ns="${a#*=}"; continue ;;
+            can-i|-*) continue ;;
         esac
-        verb="$a"
-        break
+        [ -n "$verb" ] || verb="$a"
     done
     case "$verb" in
-        get|list|watch) wva_render_real_kubectl auth "$@" ;;
+        get|list|watch)
+            # In a namespace the cluster does not have yet, every read is
+            # answered by this render's own objects.
+            if [ -n "$ns" ] && [ "$(wva_render_ns_state "$ns")" = no ]; then
+                echo yes
+                return 0
+            fi
+            wva_render_real_kubectl auth "$@" ;;
         *) echo yes ;;
     esac
 }
@@ -2392,6 +2424,8 @@ wva_render_finish() {
         echo 'echo "Done. The namespace owner can now install the controller: make deploy-wva INSTALL_PHASE=wva"'
     } > "$out/admin.sh"
     chmod +x "$out/admin.sh"
+    local forbidden=""
+    [ ! -s "$w/forbidden" ] || forbidden="$(sort -u "$w/forbidden")"
     rm -rf "$w"
 
     echo "" >&2
@@ -2406,6 +2440,13 @@ wva_render_finish() {
     done
     if [ "$secrets" -gt 0 ]; then
         log_warning "  admin.yaml holds $secrets Secret(s), private keys among them (it is mode 600). Hand it over privately, and delete it once it is applied."
+    fi
+    if [ -n "$forbidden" ]; then
+        # Forbidden is not absent: the live run, as an admin, would have seen
+        # these, and decided on what it saw.
+        log_warning "  Some reads were refused for you, so this render may differ from what a cluster admin's run would do:"
+        printf '%s\n' "$forbidden" | head -12 | while IFS= read -r line; do log_warning "      $line"; done
+        log_warning "  Get read access to them (docs/reference/configuration.md, RENDER) and render again, or have the admin check admin.sh closely."
     fi
     log_info "Give both files to a cluster admin, who reviews them and runs:"
     log_info "    bash $out/admin.sh"
