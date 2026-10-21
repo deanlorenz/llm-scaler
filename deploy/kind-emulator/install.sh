@@ -27,7 +27,8 @@ NAMESPACE_SUFFIX="sim"
 # Namespaces
 NAMESPACE="llm-d-$NAMESPACE_SUFFIX"
 MONITORING_NAMESPACE="workload-variant-autoscaler-monitoring"
-WVA_NS=${WVA_NS:-"workload-variant-autoscaler-system"}
+# CONTROLLER_NAMESPACE is the same setting, as in deploy/install.sh.
+WVA_NS=${WVA_NS:-${CONTROLLER_NAMESPACE:-"workload-variant-autoscaler-system"}}
 
 # Simulator image — must match defaultModelServiceSimulatorImage in test/e2e/fixtures/model_service_conventions.go
 SIM_IMAGE=${SIM_IMAGE:-"ghcr.io/llm-d/llm-d-inference-sim:v0.9.0"}

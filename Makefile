@@ -1161,7 +1161,10 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		WVA_PROJECT=$(CURDIR) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		./deploy/install-epp.sh
-	@NS=$${WVA_NS:-workload-variant-autoscaler-system}; \
+	@# The overrides go where the install above put the controller: it was given
+	@# WVA_NS=$(CONTROLLER_NAMESPACE), so reading WVA_NS (or its default) here
+	@# patched a ConfigMap in a namespace this install never wrote.
+	@NS=$(CONTROLLER_NAMESPACE); \
 	if [ -n "$(SCALE_UP_THRESHOLD)$(SCALE_DOWN_BOUNDARY)" ]; then \
 		echo "Applying optional WVA scaling-band overrides (SCALE_UP_THRESHOLD / SCALE_DOWN_BOUNDARY)..."; \
 		cur=$$($(KUBECTL) get configmap wva-scaling-policy-config -n "$$NS" -o jsonpath="{.data.default}" 2>/dev/null); \
@@ -2906,6 +2909,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-cluster-namespace-checks.sh
 	@bash -n hack/check-watch-namespace-list.sh
+	@bash -n hack/check-cluster-controller-namespace.sh
 	@bash -n hack/check-llmd-monitors.sh
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
@@ -3085,6 +3089,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking one namespace-scoped controller managing a list of namespaces..."
 	@# WVA_WATCH_NS=team-a,team-b or auto: a Role in each, checks per namespace.
 	@bash hack/check-watch-namespace-list.sh
+	@echo "Checking a cluster-scoped install into a non-default controller namespace..."
+	@# CONTROLLER_NAMESPACE must reach every step of the cluster-wide guide.
+	@bash hack/check-cluster-controller-namespace.sh
 	@echo "Checking setup adds the monitors a fresh llm-d lacks, and flow control off is a warning..."
 	@# A fresh llm-d install has neither, and the preflight used to refuse it.
 	@bash hack/check-llmd-monitors.sh

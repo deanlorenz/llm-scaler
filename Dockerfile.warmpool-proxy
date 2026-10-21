@@ -5,9 +5,10 @@
 # the pool's, next to the GPU-holding supervisor -- and has no reason to carry
 # the controller binary.
 #
-# Digests are pinned for the same reason the manager's are: a floating tag turned
-# an already-cached local build green while CI could not build main at all.
-FROM quay.io/projectquay/golang:1.26@sha256:d5acf07940fb5e6e2d07542abd853cece623d95ffd364769ec825aab5471d3b8 AS builder
+# The builder is pinned by tag, as in the manager's Dockerfile: quay.io deletes
+# superseded golang digests, so a digest pin breaks every uncached build. The
+# runtime stage stays digest-pinned.
+FROM quay.io/projectquay/golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

@@ -144,7 +144,7 @@ of them.)
 
 <!-- guide:steps.controllerns start -->
 ```bash
-# Where the scaling manager runs. Every later step reads it.
+# Where the scaling manager runs: default workload-variant-autoscaler-system; to use another, set CONTROLLER_NAMESPACE=<namespace>. Every later step reads it.
 export CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
 ```
 <!-- guide:steps.controllerns end -->

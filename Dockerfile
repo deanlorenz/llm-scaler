@@ -1,10 +1,9 @@
 # Build the manager binary
-# Digest re-pinned 2026-10-20, and before that 2026-08-14: each time quay.io
-# re-pushed the 1.26 tag and removed the old digest (sha256:506a668e..., before
-# it sha256:94758a60...), which then resolved to "not found". Every build
-# without that layer cached failed -- CI could not build main at all, while
-# local builds kept succeeding from cache and hid it.
-FROM quay.io/projectquay/golang:1.26@sha256:d5acf07940fb5e6e2d07542abd853cece623d95ffd364769ec825aab5471d3b8 AS builder
+# Pinned by tag, not digest: quay.io deletes each superseded 1.26 digest, which
+# broke every uncached build twice (2026-08-14, 2026-10-20). The tag fixes the
+# Go minor; Dependabot's docker updater (.github/dependabot.yml) proposes the
+# next one. The runtime stage below stays digest-pinned: gcr.io keeps old ones.
+FROM quay.io/projectquay/golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
