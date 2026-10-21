@@ -1989,10 +1989,19 @@ EOF
         if [ "$(wva_install_scope)" != "namespace" ]; then
             log_error "WVA_WATCH_NS only applies to a namespace-scoped install (WVA_SCOPE=namespace). A cluster-scoped controller manages every namespace."
         fi
-        local watched
+        local watched ns_rc
         for watched in $(wva_watch_words); do
-            if ! kubectl get namespace "$watched" >/dev/null 2>&1; then
-                log_error "WVA_WATCH_NS: namespace $watched does not exist. Create the tenant namespace before installing."
+            # Forbidden is not absent: a namespace owner may not read the
+            # Namespace object of a namespace it does not own, and the admin
+            # phase that granted the controller its Role there already found
+            # it. Only NotFound refuses.
+            ns_rc=0
+            kc_capture get namespace "$watched" -o name || ns_rc=$?
+            if [ "$ns_rc" -ne 0 ]; then
+                if kc_not_found "$KC_ERR"; then
+                    log_error "WVA_WATCH_NS: namespace $watched does not exist. Create the tenant namespace before installing."
+                fi
+                log_info "WVA_WATCH_NS: cannot read namespace $watched (${KC_ERR:-kubectl exited $ns_rc}); the controller's Role there is the admin phase's, checked with the other prerequisites."
             fi
         done
         if wva_watch_is_multi; then
