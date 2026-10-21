@@ -372,6 +372,11 @@ $(pl_kueue_borrowers_besides "$WVA_NS")"
 main() {
     parse_args "$@"
 
+    # RENDER=<dir>: the cluster-admin phase, written to <dir> for an admin to
+    # run instead of applied (deploy/lib/common.sh, "Render mode"). First, so
+    # every kubectl and helm call below goes through it.
+    wva_render_init "${RENDER:-}"
+
     # Before ANY check that exempts kind-emulator -- the preflight and the install
     # both have one. A caller relying on CLUSTER_TYPE=kind auto-detection rather
     # than passing ENVIRONMENT=kind-emulator must resolve to it first, or the
@@ -688,7 +693,12 @@ main() {
     fi
 
     if [ "$phase" = "prereqs" ]; then
-        print_prereqs_summary
+        if wva_render_active; then
+            # Nothing was created, so the "ready" summary would be false.
+            wva_render_finish
+        else
+            print_prereqs_summary
+        fi
         exit 0
     fi
 

@@ -53,6 +53,10 @@ Environment Variables:
   SKIP_CHECKS                  Skip the prerequisite and permission checks (default: false)
   WVA_KUBE_CONTEXT             Pin every kubectl/helm call to this context, without
                                changing your global current-context (default: unset)
+  RENDER                       A directory. The cluster-admin phase (--phase prereqs) reads the
+                               cluster as usual and applies NOTHING: it writes admin.yaml (every
+                               object) and admin.sh (Helm installs, deletes, then the apply) there
+                               for a cluster admin to review and run. Needs read rights only.
 
  Scaling behaviour
   WVA_LIMITER                  (unset) | none | gpu-inventory | quota | gpu-inventory,quota. A list
