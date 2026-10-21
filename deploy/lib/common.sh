@@ -1508,6 +1508,9 @@ wva_render_real_helm() {
 wva_render_note_forbidden() {
     local res
     grep -qi 'forbidden' "$1" 2>/dev/null || return 0
+    # Impersonation is not a read: a question --as another identity that is
+    # refused is answered "unknown", and the run already says so.
+    grep -qi 'cannot impersonate' "$1" && return 0
     res="$(grep -oiE 'cannot (get|list|watch) resource "[^"]+"( in API group "[^"]*")?' "$1" | head -1)"
     printf '%s\n' "${res:-$(grep -i -m1 forbidden "$1" | cut -c1-200)}" >> "$WVA_RENDER_WORK/forbidden"
 }
