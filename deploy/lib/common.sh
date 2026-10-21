@@ -2292,13 +2292,6 @@ wva_render_virtual_object() {
     [ "$kind" != CustomResourceDefinition ] || echo "$name" >> "$WVA_RENDER_WORK/virt-crds"
 }
 
-# wva_render_virtual_chart_recorded reports whether this render records an
-# install of chart $1 (a substring of the chart reference).
-wva_render_virtual_chart_recorded() {
-    wva_render_active || return 1
-    wva_render_commands pre | grep -E "^helm (upgrade|install) .*$1" >/dev/null
-}
-
 # wva_render_helm is `helm` in render mode: installs, upgrades, uninstalls and
 # repository changes are recorded; reads go to the cluster.
 wva_render_helm() {
