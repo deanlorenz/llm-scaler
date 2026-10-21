@@ -231,8 +231,8 @@ is in its notes on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases):
 
 ```bash
-git checkout v0.10.0-rc1
-export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0-rc1
+git checkout v0.10.0-rc2
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0-rc2
 # or the exact build
 export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:a2e10bd07c490a53cf3d6ba9d55642f96d5280f22ab925e78868b806d36f9e5a
 ```
