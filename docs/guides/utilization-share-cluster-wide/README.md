@@ -238,13 +238,17 @@ reads, so read rights are enough. It writes the step to `admin-setup/` and
 applies nothing:
 
 <!-- guide:steps.render start -->
+```bash
+# Not a cluster admin? Read-only. Writes the same step to admin-setup/ for an admin to run, and applies nothing.
+make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true RENDER=admin-setup
+```
 <!-- guide:steps.render end -->
 
 It ends with what it wrote and the command for the admin:
 
 ```text
 [SUCCESS] Rendered the cluster-admin phase for workload-variant-autoscaler-system into /home/you/admin-setup. Nothing was applied.
-[INFO]   admin.yaml: 33 objects
+[INFO]   admin.yaml: 44 objects
 ...
 [INFO] Give both files to a cluster admin, who reviews them and runs:
 [INFO]     bash /home/you/admin-setup/admin.sh
@@ -256,6 +260,10 @@ saying why, then applies `admin.yaml`. Send both files to the admin. They
 need `kubectl` and `helm`, not this repository:
 
 <!-- guide:steps.adminrun start -->
+```bash
+# The cluster admin, in the directory you gave them. No checkout needed.
+bash admin-setup/admin.sh
+```
 <!-- guide:steps.adminrun end -->
 
 `admin.yaml` holds private keys (the scaler's certificates), so send it
