@@ -299,13 +299,14 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		_, err := analyzer.Analyze(ctx, makeAnalyzerInput(full, states))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.decodeSaturatedAt).To(HaveLen(1))
-		// EvictStaleHistory reads the wall clock, as the history does; an
-		// entry written under the test clock (2026-09-18) is older than an
-		// hour of wall time and younger than a century of it.
-		horizonsForTest(analyzer, 100*365*24*time.Hour)
+		// The entry is stamped on the analyzer's clock and swept on it: an
+		// hour on that clock, whatever the wall clock reads. Swept on the wall
+		// clock, the fixture's date (2026-09-18) made it weeks old at once.
+		horizonsForTest(analyzer, time.Hour)
+		clock = clock.Add(time.Hour - time.Minute)
 		analyzer.EvictStaleHistory()
 		Expect(analyzer.decodeSaturatedAt).To(HaveLen(1), "a fresh entry survives")
-		horizonsForTest(analyzer, time.Hour)
+		clock = clock.Add(2 * time.Minute)
 		analyzer.EvictStaleHistory()
 		Expect(analyzer.decodeSaturatedAt).To(BeEmpty(), "a stale one is swept")
 	})

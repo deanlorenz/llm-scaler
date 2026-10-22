@@ -309,7 +309,15 @@ func (r *RollingAverage) Median() float64 {
 // 2 read in the analyzer's replica_capacity.go for what that cost when they
 // did not.
 func (r *RollingAverage) Stale(timeout time.Duration) bool {
-	return time.Since(r.lastUsed) > timeout
+	return r.StaleAt(time.Now(), timeout)
+}
+
+// StaleAt is Stale as of now rather than the wall clock. A caller that keeps
+// its own clock sweeps on it: TouchAt stamps a window with that clock, and
+// measuring the stamp against time.Now instead mixes two clocks, which only
+// agree when the caller's clock IS the wall clock.
+func (r *RollingAverage) StaleAt(now time.Time, timeout time.Duration) bool {
+	return now.Sub(r.lastUsed) > timeout
 }
 
 // WriteGapExceeds reports whether more than the given gap has passed since a

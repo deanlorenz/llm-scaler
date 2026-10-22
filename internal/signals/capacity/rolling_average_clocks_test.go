@@ -30,6 +30,15 @@ var _ = Describe("RollingAverage's two clocks", func() {
 		Expect(ra.WriteGapExceeds(short)).To(BeFalse())
 	})
 
+	It("ages on the clock it is given, not the wall clock", func() {
+		ra := NewRollingAverage(10)
+		at := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+		ra.TouchAt(at)
+		Expect(ra.StaleAt(at.Add(gap), gap)).To(BeFalse(), "exactly the timeout is not past it")
+		Expect(ra.StaleAt(at.Add(gap+time.Second), gap)).To(BeTrue())
+		Expect(ra.Stale(gap)).To(BeTrue(), "Stale is StaleAt on the wall clock")
+	})
+
 	It("fails safe on a zero value, which the constructor is the only way to avoid", func() {
 		// Nothing constructs one this way today (NewRollingAverage is the only
 		// construction site). If something ever does, both predicates must
