@@ -158,7 +158,7 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		Expect(measuredPrefillKeys()).To(BeZero(), "prefill's own window is still not written under decode's metering")
 		k := boundKey()
 		Expect(k).NotTo(BeEmpty())
-		Expect(analyzer.saturatedThroughput[k].Max()).To(BeNumerically("~", boundRate, 1e-9))
+		Expect(analyzer.saturatedThroughput[k].Max()).To(BeNumerically("~", boundRate*promptTokens, 1e-9), "held in computed tokens/s")
 		Expect(analyzer.saturatedThroughput[k].Len()).To(Equal(floor.MinThroughputSamplesToOrder))
 	})
 
@@ -167,7 +167,7 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 			clock = clock.Add(ThroughputSampleSpacing)
 			run(append(decodeFull(), prefill("prefill-0", 30, 357_800, computed)), states(1, 0), runLambda)
 		}
-		Expect(analyzer.saturatedThroughput[boundKey()].Max()).To(BeNumerically("~", 24_000/promptTokens, 1e-9))
+		Expect(analyzer.saturatedThroughput[boundKey()].Max()).To(BeNumerically("~", 24_000.0, 1e-9))
 	})
 
 	It("learns nothing from a prefill that is not queued, not Ready, or has no token rate", func() {
@@ -344,5 +344,70 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		k := boundKey()
 		Expect(s.Throughput).To(HaveKey(k))
 		Expect(s.Throughput[k].Values).To(HaveLen(floor.MinThroughputSamplesToOrder))
+	})
+})
+
+// One input bucket spans a factor of two, and the top one ("huge", 6000 tokens
+// and up) has no upper end. A bound held in requests/s kept the shortest
+// prompt's figure, since the max never yields: learned at 6000-token prompts,
+// it priced 12,000-token prompts at twice what the replica does for them. The
+// window holds computed tokens/s and converts at the prompt being served.
+var _ = Describe("a prefill lower bound across prompt lengths in one input bucket", func() {
+	It("prices the prompt length being served, not the shortest one it was learned at", func() {
+		analyzer := NewSaturationAnalyzer(capacity.NewStore())
+		clock := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+		analyzer.now = func() time.Time { return clock }
+		const prefillVariant = "prefill-v"
+		states := []domain.VariantReplicaState{
+			{VariantName: decodeVariant, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+			{VariantName: prefillVariant, Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+		}
+		rows := func(prompt float64, decodeFull bool, queue int, tokens int64, computed float64) []domain.ReplicaMetrics {
+			var out []domain.ReplicaMetrics
+			for i, kv := range []int64{970_475, 1_039_474} {
+				q := 40
+				if !decodeFull {
+					kv, q = 300_000, 0
+				}
+				rm := makeReplicaMetrics(fmt.Sprintf("decode-%d", i), decodeVariant, kv, runKvCapacity, q, prompt, 1000)
+				rm.RequestRate = 4.73
+				rm.GenerationTokenRate = rm.RequestRate * rm.AvgOutputTokens
+				out = append(out, rm)
+			}
+			p := makeReplicaMetrics("prefill-0", prefillVariant, tokens, 1_149_312, queue, prompt, 1)
+			p.RequestRate = computed / prompt
+			p.PrefillComputedTokenRate = computed
+			return append(out, p)
+		}
+		run := func(r []domain.ReplicaMetrics, lambda float64) *domain.AnalyzerResult {
+			in := makeAnalyzerInput(r, states)
+			in.ArrivalRate = lambda
+			in.Config.(*config.ScalingPolicy).EnablePrefillThroughputBound = true
+			res, err := analyzer.Analyze(context.Background(), in)
+			Expect(err).NotTo(HaveOccurred())
+			return res
+		}
+		// Behind a full decode at 6000-token prompts, then hours later at
+		// 12,000: the replica computes 24,000 tokens/s both times, 4 req/s
+		// and then 2.
+		for _, prompt := range []float64{6000, 12000} {
+			clock = clock.Add(3 * time.Hour)
+			for i := 0; i < 2; i++ {
+				clock = clock.Add(ThroughputSampleSpacing)
+				run(rows(prompt, true, 30, 357_800, 24_000*(1-0.01*float64(i))), runLambda)
+			}
+		}
+		clock = clock.Add(DecodeSaturationMemory + time.Second)
+		res := run(rows(12000, false, 0, 20_000, 24_000), 2*runLambda)
+		var priced *domain.ServiceRateSignal
+		for _, vc := range res.VariantCapacities {
+			if vc.VariantName == prefillVariant {
+				priced = vc.ServiceRate
+			}
+		}
+		Expect(priced).NotTo(BeNil())
+		Expect(priced.RateSource).To(Equal(domain.ServiceRateSourceLowerBound))
+		Expect(priced.Rate).To(BeNumerically("~", 2.0, 1e-9),
+			"24,000 tokens/s at 12,000-token prompts, not the 4 req/s of the 6000-token episode")
 	})
 })

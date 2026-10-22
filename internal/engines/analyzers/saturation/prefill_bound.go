@@ -33,6 +33,15 @@ import (
 // where the measured window reads a median, and a lower reading never
 // displaces a higher one (notePrefillBound).
 //
+// The window holds computed TOKENS per second, not requests per second, and
+// is converted at the prompt length being served when it is read. Its key's
+// input bucket spans a factor of two, and the top one ("huge", 6000 tokens
+// and up) has no upper end, so readings in one window come from different
+// prompt lengths. In requests per second, the max that never yields kept the
+// shortest prompt's figure, and priced a 12,000-token prompt at what the
+// replica did for 6000-token ones: twice its rate, half the prefill. A
+// replica's token rate moves far less with prompt length.
+//
 // The error goes one way. The floor divides by mu, so a bound under-reading
 // the true rate by a factor f over-orders prefill by f. What bounds it:
 //
@@ -97,9 +106,10 @@ type prefillBoundReading struct {
 // measured window also takes are recorded here too; it costs nothing, since
 // the measured window wins wherever it exists.
 //
-// ileff is the effective prompt length the throughput key was built with, so
-// the bound is in the same requests/s, at the same shape, as the measured
-// window it stands in for.
+// The window holds computed tokens/s (see the file header); ileff, the
+// effective prompt length the throughput key was built with this cycle,
+// converts it on the way out, so the bound returned is in the same requests/s,
+// at the shape being served, as the measured window it stands in for.
 func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *config.ScalingPolicy,
 	role, throughputKey, args string, ileff float64, adm admission, logger logr.Logger) prefillBoundReading {
 	if !cfg.EnablePrefillThroughputBound || domain.CanonicalRole(role) != domain.RolePrefill {
@@ -114,14 +124,14 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	a.mu.Unlock()
 	saturated := rm.BusiestRankQueue() >= int(cfg.QueueLengthThreshold) && rm.BusiestRankTokens() > 0
 	if saturated && adm.serving() && rm.PrefillComputedTokenRate > 0 && ileff > 0 {
-		rate := rm.PrefillComputedTokenRate / ileff
+		tokens := rm.PrefillComputedTokenRate
 		a.mu.Lock()
 		var prior float64
 		if ra, ok := a.saturatedThroughput[key]; ok {
 			prior = ra.Max()
 		}
 		a.mu.Unlock()
-		a.recordSaturatedThroughput(key, rate)
+		a.recordSaturatedThroughput(key, tokens)
 		a.mu.Lock()
 		if ra, ok := a.saturatedThroughput[key]; ok {
 			if args != "" {
@@ -143,13 +153,13 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 		logger.V(logging.DEFAULT).Info("prefill-throughput-bound-reading",
 			"variant", rm.VariantName, "pod", rm.PodName, "key", key,
 			"computedTokenRate", rm.PrefillComputedTokenRate, "effectiveInputTokens", ileff,
-			"reading", rate, "queueLength", rm.BusiestRankQueue(),
+			"reading", tokens/ileff, "queueLength", rm.BusiestRankQueue(),
 			"queueThreshold", cfg.QueueLengthThreshold)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ra, ok := a.saturatedThroughput[key]
-	if !ok || ra.Len() == 0 {
+	if !ok || ra.Len() == 0 || !(ileff > 0) {
 		return prefillBoundReading{}
 	}
 	// Read counts as use, as it does for the measured window: a bound the
@@ -157,5 +167,5 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	// saturation, which is the one thing a fleet the bound is working for
 	// stops producing.
 	ra.Touch()
-	return prefillBoundReading{rate: ra.Max(), samples: ra.Len()}
+	return prefillBoundReading{rate: ra.Max() / ileff, samples: ra.Len()}
 }
