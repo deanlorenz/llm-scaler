@@ -180,13 +180,16 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 // but per-model, representing requests queued upstream before reaching the engine.
 // Returns nil (not an error) when flow control metrics are unavailable.
 //
-// The two queries take no parameters at all: the flow-control metrics have no
-// namespace label to scope them by (#2309) and are no longer filtered by model
-// either, so a single cluster-wide execution of each covers every model the
-// controller manages and this picks its own out of the result.
+// The two queries take no parameters: one cluster-wide execution of each
+// covers every model the controller manages, and this picks its own series out
+// of the result by model AND namespace (eppSeriesInNamespace). The namespace is
+// the one Prometheus stamps on the EPP's series at scrape time, the same label
+// the arrival-rate query matches on. Before it was kept, two namespaces serving
+// the same model name read the SUM of both routers' queues: a lightly loaded
+// model was charged its saturated twin's queue as its own demand.
 func (c *ReplicaMetricsCollector) CollectSchedulerQueueMetrics(
 	ctx context.Context,
-	modelID string,
+	modelID, namespace string,
 ) *domain.SchedulerQueueMetrics {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -198,43 +201,49 @@ func (c *ReplicaMetricsCollector) CollectSchedulerQueueMetrics(
 	results, err := c.refreshShared(ctx, queries, nil)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("Scheduler queue metrics unavailable",
-			"modelID", modelID, "error", err)
+			"modelID", modelID, "namespace", namespace, "error", err)
 		return nil
 	}
 
 	var queueSize, queueBytes int64
 	hasData := false
+	// Series of this model that belong to another namespace's router. Counted
+	// only to say so: an EPP deployed outside its model's namespace lands here.
+	elsewhere := 0
 
-	if result := results[registration.QuerySchedulerQueueSize]; result != nil && !result.HasError() {
+	sum := func(name string, into *int64) {
+		result := results[name]
+		if result == nil || result.HasError() {
+			return
+		}
 		for _, value := range result.Values {
 			if eppSeriesModel(value.Labels) != modelID {
 				continue
 			}
-			if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
-				queueSize += int64(value.Value)
-				hasData = true
-			}
-		}
-	}
-
-	if result := results[registration.QuerySchedulerQueueBytes]; result != nil && !result.HasError() {
-		for _, value := range result.Values {
-			if eppSeriesModel(value.Labels) != modelID {
+			if !eppSeriesInNamespace(value.Labels, namespace) {
+				elsewhere++
 				continue
 			}
 			if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
-				queueBytes += int64(value.Value)
+				*into += int64(value.Value)
 				hasData = true
 			}
 		}
 	}
+	sum(registration.QuerySchedulerQueueSize, &queueSize)
+	sum(registration.QuerySchedulerQueueBytes, &queueBytes)
 
 	if !hasData {
+		if elsewhere > 0 {
+			logger.V(logging.DEBUG).Info("Scheduler queue series for this model exist only in other namespaces; reading none",
+				"modelID", modelID, "namespace", namespace, "otherNamespaceSeries", elsewhere)
+		}
 		return nil
 	}
 
 	logger.V(logging.DEBUG).Info("Collected scheduler queue metrics",
 		"modelID", modelID,
+		"namespace", namespace,
 		"queueSize", queueSize,
 		"queueBytes", queueBytes)
 

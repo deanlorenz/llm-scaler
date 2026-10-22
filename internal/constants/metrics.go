@@ -183,9 +183,11 @@ const (
 // These metrics come from the Gateway API Inference Extension EPP (Endpoint Picker)
 // flow control layer, not from vLLM pods. They are model-scoped (not per-pod).
 //
-// TODO(#2309): These metrics currently lack a namespace label upstream.
-// If the same model and inference pool names exist in different namespaces,
-// the metrics will collide. See gateway-api-inference-extension issue #2309.
+// The EPP does not export a namespace label on these (gateway-api-inference-
+// extension issue #2309). The namespace label they carry in Prometheus is added
+// at scrape time from the EPP pod's namespace, and the controller's readers of
+// them group by or match on it: grouped by model name alone, two namespaces
+// serving the same model name would read the sum of both routers' queues.
 const (
 	// EPPFlowControlQueueSize is the number of requests queued in the inference
 	// scheduler's flow control layer. This is the current name for the family
@@ -193,7 +195,7 @@ const (
 	// "[Deprecated: Use llm_d_epp_flow_control_queue_size]". Prefer this one and
 	// keep the deprecated name only as a fallback.
 	// Labels: fairness_id, priority, inference_pool, model_name, target_model_name
-	// Note: no namespace label — see TODO(#2309) above.
+	// Note: namespace is added at scrape time (the EPP pod's), not exported — see above.
 	EPPFlowControlQueueSize = "llm_d_epp_flow_control_queue_size"
 
 	// SchedulerFlowControlQueueSize is the deprecated alias of
@@ -201,13 +203,13 @@ const (
 	// emits only this name (and without the inference_pool/model_name/
 	// target_model_name labels llm-d's EPP adds), so it remains the fallback.
 	// Labels: fairness_id, priority, inference_pool, model_name, target_model_name
-	// Note: no namespace label — see TODO(#2309) above.
+	// Note: namespace is added at scrape time (the EPP pod's), not exported — see above.
 	SchedulerFlowControlQueueSize = "inference_extension_flow_control_queue_size"
 
 	// SchedulerFlowControlQueueBytes is the total bytes of request bodies queued
 	// in the inference scheduler's flow control layer.
 	// Labels: fairness_id, priority, inference_pool, model_name, target_model_name
-	// Note: no namespace label — see TODO(#2309) above.
+	// Note: namespace is added at scrape time (the EPP pod's), not exported — see above.
 	SchedulerFlowControlQueueBytes = "inference_extension_flow_control_queue_bytes"
 )
 

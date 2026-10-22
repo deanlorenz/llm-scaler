@@ -368,6 +368,18 @@ label matchers that change a query's result.
 
 
 
+### The router's namespace label
+
+The router (EPP) does not put a namespace on its own metrics. The controller
+reads the `namespace` label Prometheus adds when it scrapes the router, and
+uses it to tell apart two namespaces that serve the same model name. That
+applies to the router's queue (`llm_d_epp_flow_control_queue_size` and
+`_bytes`) and its arrival rate.
+
+ServiceMonitors and PodMonitors add the label. If a custom scrape job drops it,
+the arrival rate reads zero, and every namespace reads the router's queue as
+its own. Keep the label on router series.
+
 ## llm-scaling-manager metrics
 
 The metrics below describe the scaling manager's decisions and its own health.

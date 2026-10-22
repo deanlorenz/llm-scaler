@@ -50,6 +50,9 @@ func queued(depth float64, modelID string, age time.Duration) source.MetricValue
 
 const testPool = "llm-d-sim/optimized-baseline"
 
+// testNamespace is testPool's namespace.
+const testNamespace = "llm-d-sim"
+
 var errScrape = errors.New("epp scrape failed: 401 Unauthorized")
 
 // The whole point: the EPP scrape is down, the queue is in Prometheus, and the
@@ -60,13 +63,13 @@ func TestFallbackReportsDemandWhenTheScrapeIsDown(t *testing.T) {
 
 	// Below the threshold it must NOT answer — one failed scrape is ordinary.
 	for i := 1; i < f.Threshold; i++ {
-		if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape); engaged {
+		if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape); engaged {
 			t.Fatalf("engaged after %d failures; the threshold is %d, and switching on a "+
 				"single blip trades a live signal for a stale one for nothing", i, f.Threshold)
 		}
 	}
 
-	pending, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+	pending, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	if !engaged {
 		t.Fatal("the fallback must engage once the scrape has failed Threshold times")
 	}
@@ -86,7 +89,7 @@ func TestFallbackIgnoresAStaleSample(t *testing.T) {
 	f := NewQueueFallback(src)
 	f.Threshold = 1
 
-	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	if !engaged {
 		t.Fatal("the fallback engaged, it just found nothing fresh")
 	}
@@ -103,7 +106,7 @@ func TestFallbackThrottlesPrometheus(t *testing.T) {
 	f.Threshold = 1
 
 	for i := 0; i < 50; i++ {
-		f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+		f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	}
 	if src.refreshes != 1 {
 		t.Errorf("queried Prometheus %d times for 50 ticks; the loop runs at 10Hz and the "+
@@ -111,7 +114,7 @@ func TestFallbackThrottlesPrometheus(t *testing.T) {
 	}
 
 	f.MinInterval = 0 // as if the interval had elapsed
-	f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+	f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	if src.refreshes != 2 {
 		t.Errorf("refreshes = %d, want a fresh query once the interval elapsed", src.refreshes)
 	}
@@ -125,7 +128,7 @@ func TestFallbackDoesNotClaimNoDemandWhenPrometheusAlsoFails(t *testing.T) {
 	f := NewQueueFallback(src)
 	f.Threshold = 1
 
-	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	if engaged {
 		t.Error("with both transports down the caller must surface the scrape error, " +
 			"not be handed an answer nobody could observe")
@@ -142,11 +145,11 @@ func TestScrapeRecoveryResetsTheFailureCount(t *testing.T) {
 	f := NewQueueFallback(src)
 
 	for i := 0; i < f.Threshold; i++ {
-		f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+		f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	}
 	f.ScrapeSucceeded(context.Background(), testPool)
 
-	if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape); engaged {
+	if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape); engaged {
 		t.Error("one failure after a recovery must not re-engage; the count restarts")
 	}
 }
@@ -157,12 +160,46 @@ func TestFallbackMatchesTheModel(t *testing.T) {
 	f := NewQueueFallback(src)
 	f.Threshold = 1
 
-	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape)
+	_, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
 	if !engaged {
 		t.Fatal("the fallback engaged")
 	}
 	if hasPending {
 		t.Error("a queue for other-model must not wake llama")
+	}
+}
+
+// Another namespace's router is not this pool's demand, even for a model of the
+// same name: grouped by model name alone, a parked model was woken by a
+// same-named model's queue in another namespace.
+func TestFallbackMatchesTheNamespace(t *testing.T) {
+	inNamespace := func(depth float64, ns string) source.MetricValue {
+		v := queued(depth, "llama", time.Second)
+		v.Labels["namespace"] = ns
+		return v
+	}
+	cases := []struct {
+		name    string
+		values  []source.MetricValue
+		pending float64 // 0: no demand
+	}{
+		{"only another namespace queues", []source.MetricValue{inNamespace(52, "other-ns"), inNamespace(0, testNamespace)}, 0},
+		{"each namespace reads its own", []source.MetricValue{inNamespace(52, "other-ns"), inNamespace(3, testNamespace)}, 3},
+		// No namespace label: unattributable, read as before the label was read.
+		{"a series without the label is kept", []source.MetricValue{queued(5, "llama", time.Second)}, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewQueueFallback(newFakeQueueSource(tc.values, nil))
+			f.Threshold = 1
+			pending, hasPending, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape)
+			if !engaged {
+				t.Fatal("the fallback engaged")
+			}
+			if hasPending != (tc.pending > 0) || (hasPending && pending.Value != tc.pending) {
+				t.Errorf("pending = %v (hasPending %v), want %v", pending.Value, hasPending, tc.pending)
+			}
+		})
 	}
 }
 
@@ -178,7 +215,7 @@ func TestFallbackFallsBackToModelNameLabel(t *testing.T) {
 	f := NewQueueFallback(src)
 	f.Threshold = 1
 
-	if _, hasPending, _ := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape); !hasPending {
+	if _, hasPending, _ := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape); !hasPending {
 		t.Error("a series carrying only model_name still identifies the model")
 	}
 }
@@ -187,7 +224,7 @@ func TestFallbackFallsBackToModelNameLabel(t *testing.T) {
 // It must behave exactly as the engine did before the fallback existed.
 func TestNilFallbackIsAWorkingNoOp(t *testing.T) {
 	var f *QueueFallback
-	if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, "llama", errScrape); engaged {
+	if _, _, engaged := f.PendingAfterScrapeFailure(context.Background(), testPool, testNamespace, "llama", errScrape); engaged {
 		t.Error("a nil fallback must never engage")
 	}
 	f.ScrapeSucceeded(context.Background(), testPool) // must not panic
