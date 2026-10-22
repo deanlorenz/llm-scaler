@@ -97,8 +97,9 @@ func TestShareLongBursts(t *testing.T) {
 // spans two 8-GPU pods, so only a set funds it -- takes no donor below its own
 // recent peak, its peak over its scale-down window. A peak older than that
 // window, still inside the swing window, does not hold it -- unless D reached
-// it in two separate bursts: a peak that comes back holds its donor for the
-// window. Control: with D's peak no higher than what it keeps, the set starts.
+// it in two bursts further apart than its scale-down window: a peak that
+// comes back holds its donor for the window. Control: with D's peak no higher
+// than what it keeps, the set starts.
 func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
 	run := func(recentPeak, oldPeak float64, recurring bool) (started bool, withheld int) {
 		t0 := time.Unix(1_000_000, 0)
@@ -108,7 +109,7 @@ func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
 		v8 := ShareVariant{Name: "d", GPUs: 8, PodGPUs: []int{8}}
 		l := NewShareLedger()
 		// A known history: D at oldPeak from 70 to 40 minutes ago, inside
-		// the swing window -- recurring, from 52 to 44 and from 36 to 28
+		// the swing window -- recurring, from 56 to 48 and from 34 to 26
 		// minutes ago instead -- and at recentPeak over the last 6 minutes,
 		// inside its scale-down window.
 		ago := func(at time.Time, from, to time.Duration) bool {
@@ -117,7 +118,7 @@ func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
 		for at := t0.Add(-70 * time.Minute); at.Before(t0.Add(-30 * time.Second)); at = at.Add(30 * time.Second) {
 			d := 8.0
 			switch {
-			case recurring && (ago(at, 52*time.Minute, 44*time.Minute) || ago(at, 36*time.Minute, 28*time.Minute)):
+			case recurring && (ago(at, 56*time.Minute, 48*time.Minute) || ago(at, 34*time.Minute, 26*time.Minute)):
 				d = oldPeak
 			case !recurring && at.Before(t0.Add(-40*time.Minute)):
 				d = oldPeak
@@ -145,7 +146,7 @@ func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
 				}
 			}
 		}
-		if b := l.needBursts("D"); recurring != (b.completed >= 2) {
+		if b := l.needBurstsJoined("D", tm.Window); recurring != (b.completed >= 2) {
 			panic(fmt.Sprintf("setup: D burst %d times within the window, recurring %v", b.completed, recurring))
 		}
 		return started, withheld

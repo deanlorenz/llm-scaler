@@ -200,6 +200,47 @@ func TestShareSwapBackIsNotHeldOnTheDonorsOldPeak(t *testing.T) {
 	}
 }
 
+// A dip inside the donor's one busy stretch does not make its peak a
+// recurring one. The swap back of TestShareSwapBackIsNotHeldOnTheDonorsOldPeak,
+// with the busy model's need falling to the other's for a minute, twice, in
+// its busy hour: counted as three bursts, the donor kept its peak over the
+// swing window, and the swap back waited over an hour for it to age out.
+// Both orders.
+func TestShareSwapBackIsNotHeldOnADipInTheDonorsBurst(t *testing.T) {
+	const m = time.Minute
+	busy, dip := stallNeeds(1.5, 0.5), stallNeeds(0.5, 1.5)
+	plain := []stallPhase{{60 * m, stallNeeds(1, 1)}, {60 * m, busy}, {120 * m, dip}}
+	dipped := []stallPhase{{60 * m, stallNeeds(1, 1)}, {20 * m, busy}, {m, dip}, {19 * m, busy}, {m, dip}, {19 * m, busy}, {120 * m, dip}}
+	for _, order := range []struct {
+		name          string
+		plain, dipped []stallPhase
+		final         [2]int
+	}{
+		{"A then B", plain, dipped, [2]int{1, 3}},
+		{"B then A", stallSwap(plain), stallSwap(dipped), [2]int{3, 1}},
+	} {
+		heldAfter := func(cycles []stallCycle) int {
+			held := 0
+			for _, c := range cycles {
+				if c.at >= 120*m {
+					held += c.donorPeak
+				}
+			}
+			return held
+		}
+		want := heldAfter(stallLoop(simTimings(), map[string]int{"A": 1, "B": 1}, false, order.plain))
+		cycles := stallLoop(simTimings(), map[string]int{"A": 1, "B": 1}, false, order.dipped)
+		if held := heldAfter(cycles); held > want {
+			t.Errorf("%s: donor-peak held the swap back %d cycles with dips in the donor's busy hour, %d without", order.name, held, want)
+		}
+		after, ok := stallReached(cycles, 120*m, order.final[0], order.final[1])
+		if !ok || after > 45*m {
+			t.Errorf("%s: the swap back reached %d:%d after %v (reached %v), want within 45m: the donor was held on its old peak",
+				order.name, order.final[0], order.final[1], after, ok)
+		}
+	}
+}
+
 // A load that moves for good is not planned on its mean. Two models swap
 // 1:3 for 3:1 and back within a swing window: the first move back is each
 // role's second change of direction, and the swing rule plans both on their

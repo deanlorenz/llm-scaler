@@ -1360,8 +1360,8 @@ Work down the list in order.
    - `donor-peak`: while the quota holds every model's peak, a model already at
      its need takes no headroom that would leave its donor below the donor's
      own recent peak (its peak over its scale-down window, or over the swing
-     window once it has peaked twice within it), by a single move or a donor
-     set.
+     window once it has peaked twice within it, more than a scale-down window
+     apart), by a single move or a donor set.
    - `awaiting-return`: a short model is credited with returns still releasing
      whose pods hold its pods, in whole replicas; only the rest is funded by
      draining other models. The model shows blocked reason `awaiting-release`.

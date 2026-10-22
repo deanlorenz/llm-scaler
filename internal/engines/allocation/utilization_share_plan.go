@@ -655,9 +655,13 @@ func (p *sharePlanRun) donorView(r ShareRole) ShareRole {
 // back. A donor that has burst at least twice within the window has a peak
 // that comes back, and keeps it (peakClaims): judged on its last scale-down
 // window, a donor peaking every 15 to 90 minutes gave its spare away between
-// peaks and waited a release at each one.
+// peaks and waited a release at each one. A dip shorter than the scale-down
+// window does not split a burst in two (needBurstsJoined): judged on its
+// recent peak, the donor never left that peak during it, and counting it
+// held a donor whose one busy hour had a one-minute dip at its old peak for
+// most of a swing window, as before the rule.
 func (p *sharePlanRun) donorPeak(dn string) int {
-	if p.l.needBursts(dn).completed >= 2 {
+	if p.l.needBurstsJoined(dn, p.tm.Window).completed >= 2 {
 		return p.peaks[dn]
 	}
 	r := p.byKey[dn]

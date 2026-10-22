@@ -46,6 +46,28 @@ func TestShareBurstsAreNotEndedByOneDip(t *testing.T) {
 	}
 }
 
+// A dip shorter than join does not split a burst for needBurstsJoined: R
+// was busy for 22 minutes with a 2-minute dip in the middle, one burst. A
+// gap of 20 minutes between two bursts still counts two.
+func TestShareBurstsJoinedAcrossAShortDip(t *testing.T) {
+	nines := func(n int) []float64 { return slices.Repeat([]float64{9}, n) }
+	ones := func(n int) []float64 { return slices.Repeat([]float64{1}, n) }
+	l := burstLedger(nil, "R", slices.Concat(ones(2), nines(10), ones(2), nines(10), ones(2))...)
+	if got := l.needBursts("R").completed; got != 2 {
+		t.Fatalf("setup: the dip of two readings split the burst into %d, want 2", got)
+	}
+	if got := l.needBurstsJoined("R", 5*time.Minute).completed; got != 1 {
+		t.Errorf("a 2-minute dip split the burst: %d completed with join 5m, want 1", got)
+	}
+	if got, want := l.needBurstsJoined("R", 0), l.needBursts("R"); got != want {
+		t.Errorf("join 0 read %+v, needBursts %+v", got, want)
+	}
+	l = burstLedger(nil, "R", slices.Concat(ones(2), nines(5), ones(20), nines(5), ones(2))...)
+	if got := l.needBurstsJoined("R", 5*time.Minute).completed; got != 2 {
+		t.Errorf("bursts 20 minutes apart joined: %d completed with join 5m, want 2", got)
+	}
+}
+
 // A run under way when the history starts is not a completed burst: its
 // start is not known, and taken as the history's -- a long burst whose first
 // minutes aged out of the window -- it was counted short, predicting an early

@@ -1163,6 +1163,15 @@ func (b shareBursts) sofar() time.Duration {
 // lower bound, so it still counts toward the longest: a burster whose one
 // long burst straddles the window's start is still a long burster.
 func (l *ShareLedger) needBursts(role string) shareBursts {
+	return l.needBurstsJoined(role, 0)
+}
+
+// needBurstsJoined is needBursts with two runs counted as one burst when the
+// dip between them -- from the first reading of one at or below the midpoint
+// to the first of the next above it -- is shorter than join. A dip of a
+// minute or two inside one busy stretch, from noise in the need, would
+// otherwise count the stretch as two bursts.
+func (l *ShareLedger) needBurstsJoined(role string, join time.Duration) shareBursts {
 	s := l.needs[role]
 	if len(s) < 3 {
 		return shareBursts{}
@@ -1178,22 +1187,39 @@ func (l *ShareLedger) needBursts(role string) shareBursts {
 	}
 	mid := (hi + lo) / 2
 	out := shareBursts{spread: (hi - lo) / math.Max(hi, 1)}
-	var start time.Time
-	in, cut := false, false
+	// A run that ended is counted once the next one starts after a dip of
+	// at least join, or once the history ends without one: until then the
+	// next run may continue it.
+	var start, end time.Time
+	in, cut, ended := false, false, false
+	count := func() {
+		d := end.Sub(start)
+		out.longest = max(out.longest, d)
+		if !cut {
+			out.completed++
+			out.last = d
+		}
+	}
 	for i := 1; i < len(s); i++ {
 		a, b := s[i-1].need, s[i].need
 		switch {
 		case !in && a > mid && b > mid:
-			in, cut, start = true, i == 1, s[i-1].at
-		case in && a <= mid && b <= mid:
-			in = false
-			d := s[i-1].at.Sub(start)
-			out.longest = max(out.longest, d)
-			if !cut {
-				out.completed++
-				out.last = d
+			in = true
+			if ended && s[i-1].at.Sub(end) < join {
+				ended = false
+				continue
 			}
+			if ended {
+				count()
+				ended = false
+			}
+			cut, start = i == 1, s[i-1].at
+		case in && a <= mid && b <= mid:
+			in, ended, end = false, true, s[i-1].at
 		}
+	}
+	if ended {
+		count()
 	}
 	if in {
 		out.ongoing = s[len(s)-1].at.Sub(start)
