@@ -534,8 +534,16 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	defer a.mu.Unlock()
 	variantTimeout, bucketRetention := a.horizons.VariantTimeout, a.horizons.BucketRetention
 	var evicted Evicted
+	// One clock for the whole sweep, the windows included. In the controller
+	// a.now is time.Now, so this changes nothing there. Under a spec's fake
+	// clock it does: a spec stamps a window with TouchAt(fake), and Stale
+	// measured that stamp against the wall clock, so the two disagreed by
+	// the distance from the fixture's date to today. Once that passed a
+	// retention, the sweep took a window touched a moment earlier and the
+	// spec failed on the date rather than on the code.
+	now := a.now()
 	for key, ra := range a.computeCapacityHistory {
-		if ra.Stale(bucketRetention) {
+		if ra.StaleAt(now, bucketRetention) {
 			delete(a.computeCapacityHistory, key)
 			evicted.K2History++
 		}
@@ -592,7 +600,6 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// start time measured before a redeploy onto different hardware would size
 	// every later fit and projection for that key. Only the liveness test
 	// changed, from "its window is empty" to "nothing has reported it".
-	now := a.now()
 	// The tracker sweeps windows and baselines in separate passes, and the
 	// start estimates below have their own loop, not one pass over the
 	// windows: noteReplicaStart runs for every role while noteITL runs for
@@ -663,7 +670,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		}
 	}
 	for key, ra := range a.saturatedThroughput {
-		if ra.Stale(bucketRetention) {
+		if ra.StaleAt(now, bucketRetention) {
 			delete(a.saturatedThroughput, key)
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
@@ -677,13 +684,13 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// A window put aside under arguments the variant no longer runs ages as
 	// it did in use: a bucket retention after it was last read.
 	for key, ra := range a.k2Stash {
-		if ra.Stale(bucketRetention) {
+		if ra.StaleAt(now, bucketRetention) {
 			delete(a.k2Stash, key)
 			evicted.StashedWindows++
 		}
 	}
 	for key, st := range a.throughputStash {
-		if st.window.Stale(bucketRetention) {
+		if st.window.StaleAt(now, bucketRetention) {
 			delete(a.throughputStash, key)
 			evicted.StashedWindows++
 		}
