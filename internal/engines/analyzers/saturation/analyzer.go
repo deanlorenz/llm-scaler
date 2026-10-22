@@ -534,13 +534,19 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	defer a.mu.Unlock()
 	variantTimeout, bucketRetention := a.horizons.VariantTimeout, a.horizons.BucketRetention
 	var evicted Evicted
-	// One clock for the whole sweep, the windows included. In the controller
-	// a.now is time.Now, so this changes nothing there. Under a spec's fake
-	// clock it does: a spec stamps a window with TouchAt(fake), and Stale
-	// measured that stamp against the wall clock, so the two disagreed by
-	// the distance from the fixture's date to today. Once that passed a
-	// retention, the sweep took a window touched a moment earlier and the
-	// spec failed on the date rather than on the code.
+	// The analyzer's clock for the sweep, the windows included. In the
+	// controller a.now is time.Now, so this changes nothing there. Under a
+	// spec's fake clock it does: a spec stamps a window with TouchAt(fake),
+	// and Stale measured that stamp against the wall clock, so the two
+	// disagreed by the distance from the fixture's date to today. Once that
+	// passed a retention, the sweep took a window touched a moment earlier
+	// and the spec failed on the date rather than on the code.
+	//
+	// Two entries still age on the wall clock, because that is the clock
+	// they are stamped on: the accelerator memo (stableAccelerator and
+	// NoteVariantsPresent write time.Now) and a pending restore's windows
+	// (their LastUsed came from a window's own stamp). A stamp and its sweep
+	// must read one clock; which one is the stamp's choice.
 	now := a.now()
 	for key, ra := range a.computeCapacityHistory {
 		if ra.StaleAt(now, bucketRetention) {
@@ -585,9 +591,9 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// by variant (namespace|variant|model|accel|gpus|role|bucket|qN): a bucket
 	// the variant has stopped serving must still expire while the variant
 	// lives, which a per-variant stamp cannot express. Their reads call Touch
-	// so that "last use" is what it says. The accelerator memo, the
-	// decode-saturation memory and the fleet shape are per model, not per
-	// variant, and age on wall-clock time.Since.
+	// so that "last use" is what it says. The decode-saturation memory and the
+	// fleet shape are per model, not per variant, and age on their own stamps,
+	// written on a.now; the accelerator memo ages on its own wall-clock stamp.
 	//
 	// The window is still pruned every sweep,
 	// because stale observations must not reach a fit, but an empty window is
@@ -770,8 +776,9 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		}
 		p.pruneWindows(time.Now(), a.horizons)
 	}
+	// On a.now, the clock rememberDecodeSaturation stamps it with.
 	for key, at := range a.decodeSaturatedAt {
-		if time.Since(at) > variantTimeout {
+		if now.Sub(at) > variantTimeout {
 			delete(a.decodeSaturatedAt, key)
 			evicted.DecodeSaturation++
 		}
