@@ -132,3 +132,37 @@ tests:
         alertname: WVAModelHasNoWakeSignal
         exp_alerts:
           - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m-idle, reason: no-wake-signal, pod: wva-a}
+
+  # 5. Two namespaces serve the same model name, each through its own router.
+  #    The router series carry the router's namespace as plain namespace (the
+  #    router exports none of its own, so nothing is renamed); the controller's
+  #    series carry the model's as exported_namespace. team-b is serving and its
+  #    router refuses some requests (overload). team-a is parked with no wake
+  #    signal and nothing refused: joined on model_name alone it paged critical
+  #    for team-b's refusals and its own warning stayed quiet. team-c is parked
+  #    and its own router refuses: that pages, and only for team-c.
+  - interval: 1m
+    input_series:
+      - series: 'wva_model_replicas{namespace="wva",exported_namespace="team-a",model_name="m-twin",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_model_replicas{namespace="wva",exported_namespace="team-b",model_name="m-twin",pod="wva-a"}'
+        values: '2x20'
+      - series: 'wva_model_replicas{namespace="wva",exported_namespace="team-c",model_name="m-twin",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_model_scaling_blocked{namespace="wva",exported_namespace="team-a",model_name="m-twin",reason="no-wake-signal",pod="wva-a"}'
+        values: '1x20'
+      - series: 'llm_d_epp_request_error_total{namespace="team-a",pod="team-a-epp-0",model_name="m-twin",error_code="ServiceUnavailable"}'
+        values: '0x20'
+      - series: 'llm_d_epp_request_error_total{namespace="team-b",pod="team-b-epp-0",model_name="m-twin",error_code="ServiceUnavailable"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_error_total{namespace="team-c",pod="team-c-epp-0",model_name="m-twin",error_code="ServiceUnavailable"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: WVAModelParkedWhileRequestsRefused
+        exp_alerts:
+          - exp_labels: {severity: critical, exported_namespace: team-c, model_name: m-twin}
+      - eval_time: 11m
+        alertname: WVAModelHasNoWakeSignal
+        exp_alerts:
+          - exp_labels: {severity: warning, namespace: wva, exported_namespace: team-a, model_name: m-twin, reason: no-wake-signal, pod: wva-a}

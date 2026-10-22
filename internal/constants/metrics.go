@@ -640,7 +640,9 @@ const (
 	// wva_current_replicas and EPP's llm_d_epp_request_error_total — and they
 	// cannot be joined. wva_current_replicas is per VARIANT and carries
 	// variant_name/namespace/accelerator_type with no model_name; EPP's counter
-	// carries model_name and target_model_name with no namespace. PromQL can
+	// carries model_name and target_model_name, and only the namespace
+	// Prometheus adds at scrape time (the router's, which the alert matches to
+	// this series' exported_namespace). PromQL can
 	// rewrite a label, not derive a model from a variant name, and nothing in
 	// Prometheus knows that mapping. WVA is the one component that does.
 	//

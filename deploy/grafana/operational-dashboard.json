@@ -1707,7 +1707,7 @@
       "id": 63,
       "type": "timeseries",
       "title": "Models at zero replicas",
-      "description": "Total replicas serving each model, summed across its variants. Zero is normal for an idle model that scaled to zero, and a fault only when demand exists - which is what the WVAModelParkedWhileRequestsRefused alert joins against, using this series as the key. EPP's request metrics carry model_name and no namespace, and the per-variant wva_current_replicas carries no model_name, so this is the only series the two sides can be joined on. A line sitting flat at zero while traffic arrives is a stranded model.",
+      "description": "Total replicas serving each model, summed across its variants. Zero is normal for an idle model that scaled to zero, and a fault only when demand exists - which is what the WVAModelParkedWhileRequestsRefused alert joins against, using this series as the key. EPP's request metrics carry model_name and the router's namespace (added at scrape time), and the per-variant wva_current_replicas carries no model_name, so this is the only series the two sides can be joined on. A line sitting flat at zero while traffic arrives is a stranded model.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource_uid}"
