@@ -221,6 +221,11 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 			set.Outcome, set.Started.Sub(floorDropped).Round(time.Second), set.Raised.Sub(floorDropped).Round(time.Second),
 			set.Ended.Sub(floorDropped).Round(time.Second)))
 		wnMeasure("taken: queued pod seen bound to node 2", squatterBound)
+		// Without it G lands on a node nothing took, and "done" says nothing
+		// about the class. The pod binds as the first GPU frees and stays
+		// bound until G is raised, at least a planning cycle and a KEDA poll
+		// later: far longer than one poll.
+		Expect(squatterBound).To(BeTrue(), "the queued pod never took a released GPU on node 2: nothing was preempted")
 		Expect(set.Outcome).To(Equal("done"), describeShare(lines, 40))
 		for _, l := range lines {
 			Expect(l.Reason).NotTo(Equal("release-taken"), "release-taken logged:\n%s", describeShare(lines, 40))
@@ -235,6 +240,13 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 				g.Expect(p.Spec.NodeName).NotTo(Equal(packed), "the queued pod still holds a GPU on node 2")
 			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("The scheduler preempted the queued pod")
+		evs, err := k8sClient.CoreV1().Events(e.fillerNS).List(ctx, metav1.ListOptions{
+			FieldSelector: "involvedObject.name=" + squatter + ",reason=Preempted"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(evs.Items).NotTo(BeEmpty(), "no Preempted event on the queued pod")
+		wnMeasure("taken: preempted", evs.Items[0].Message)
 
 		By("G, at a PriorityClass, is not named by the whole-node priority warning")
 		Expect(controllerLogsSince(setUp)).NotTo(MatchRegexp(`set no priorityClassName.*`+e.ns+"/"+msG),
