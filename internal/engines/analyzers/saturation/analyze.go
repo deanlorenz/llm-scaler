@@ -333,8 +333,9 @@ func (c *cycle) observeFleetShape() {
 func (c *cycle) resolvePricing() {
 	c.muDivisor = c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	c.muInput, c.muShortWindow = c.fleetInput, false
+	// On a.now: noteFleetShape stamps lastChangedAt with it.
 	if c.a.shapeChangedWithin(c.input.Namespace, c.input.ModelID,
-		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), time.Now()) {
+		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), c.a.now()) {
 		if recent := fleetOutputLengthRecent(c.input.ReplicaMetrics, c.rolesByVariant); recent > 0 {
 			c.muDivisor = recent
 			if recentIn := servedPromptLengthRecent(c.input.ReplicaMetrics); recentIn > 0 {
