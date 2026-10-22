@@ -59,6 +59,14 @@ steps:
     run: |
       make setup-prereqs KEDA_HELM_INSTALL=true \
         WVA_LIMITER=quota WVA_QUOTA_SCOPE=cluster WVA_QUOTAS="${ACCELERATOR}=-1" WVA_QUOTA_KUEUE=true
+  render:
+    note: "Not a cluster admin? Option A, read-only. Writes the step to admin-setup/ for an admin to run, and applies nothing. For option B or C, add that option's settings."
+    run: |
+      make setup-prereqs KEDA_HELM_INSTALL=true RENDER=admin-setup
+  adminrun:
+    note: The cluster admin, in the directory you gave them. No checkout needed.
+    run: |
+      bash admin-setup/admin.sh
   install:
     note: "Option A: quota. The scaling manager, with one GPU budget for every namespace it manages."
     run: |

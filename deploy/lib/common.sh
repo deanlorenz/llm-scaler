@@ -1359,3 +1359,1091 @@ wva_rendered_prereq_objects() {
         | yq "$(wva_prereq_kind_filter select) | .kind + \" \" + .metadata.name" 2>/dev/null \
         | grep -Ev '^(---|null)' || true
 }
+
+# --- Render mode (make setup-prereqs RENDER=<dir>) ----------------------------
+#
+# The cluster-admin phase, rendered for an admin instead of applied. Every read
+# and detection runs against the cluster exactly as in a live run, with the
+# caller's own (read-only) rights; nothing is written. What the live run would
+# write goes to <dir>:
+#
+#   admin.yaml   every object it would create or apply, cleaned of server
+#                fields, in apply order (namespaces and RBAC first)
+#   admin.sh     what is not a plain object -- Helm installs, deletes, patches
+#                of objects already on the cluster -- each with the reason, and
+#                `kubectl apply -f admin.yaml`
+#
+# How: wva_render_init replaces `kubectl` and `helm` with the shell functions
+# below, the same mechanism WVA_KUBE_CONTEXT uses, so every call in the admin
+# phase goes through one place and no call site knows about rendering. Reads
+# go to the cluster. Writes are captured: an apply or create becomes an object
+# in a local store, a patch or label of a stored object is applied to the
+# stored copy, and anything else is recorded as a command. Later reads of a
+# stored object are answered from the store, so the phase sees its own writes
+# as it would on the cluster. A Helm install it records also answers the reads
+# that only the installed chart could (its CRDs, KEDA's API), so the decisions
+# after it are the live run's.
+#
+# Permission questions about the caller (`kubectl auth can-i` without --as) are
+# answered yes: they ask what the person who runs admin.sh may do, and that is
+# a cluster admin. A render therefore needs read rights only. Waits and rollout
+# checks on objects that were only rendered are skipped and say so.
+#
+# A PATH shim catches any child process that calls kubectl or helm directly and
+# refuses its writes, so a render can never write to the cluster.
+
+# wva_render_active reports whether this run renders instead of applying.
+wva_render_active() {
+    [ -n "${WVA_RENDER_DIR:-}" ]
+}
+
+# wva_render_init starts render mode for directory $1. Refuses anything but the
+# cluster-admin phase. Clears the outputs of an earlier render first, so a
+# render that fails leaves no admin.sh that looks current.
+wva_render_init() {
+    local dir="$1"
+    [ -n "$dir" ] || return 0
+    if [ "${CHECK_ONLY:-false}" = "true" ] || [ "${UNDEPLOY:-false}" = "true" ]; then
+        log_error "RENDER renders the cluster-admin phase only (make setup-prereqs RENDER=<dir>); it does not combine with --check or --undeploy."
+    fi
+    if [ -z "${INSTALL_PHASE_EXPLICIT:-}" ]; then
+        INSTALL_PHASE=prereqs
+        INSTALL_PHASE_EXPLICIT=prereqs
+        export INSTALL_PHASE INSTALL_PHASE_EXPLICIT
+    fi
+    if [ "${INSTALL_PHASE:-}" != "prereqs" ]; then
+        log_error "RENDER renders the cluster-admin phase only: make setup-prereqs RENDER=<dir>. The controller phase (INSTALL_PHASE=${INSTALL_PHASE}) is run by the namespace owner, after the admin has run admin.sh."
+    fi
+    if [ "${ENVIRONMENT:-}" = "kind-emulator" ]; then
+        log_error "RENDER does not apply to ENVIRONMENT=kind-emulator, which creates its own cluster."
+    fi
+    mkdir -p "$dir" || log_error "RENDER=$dir: cannot create the directory."
+    WVA_RENDER_DIR="$(cd "$dir" && pwd)" || log_error "RENDER=$dir: cannot enter the directory."
+    WVA_RENDER_WORK="$WVA_RENDER_DIR/.render-work"
+    rm -rf "$WVA_RENDER_WORK"
+    rm -f "$WVA_RENDER_DIR/admin.yaml" "$WVA_RENDER_DIR/admin.sh"
+    mkdir -p "$WVA_RENDER_WORK/obj" "$WVA_RENDER_WORK/virt" "$WVA_RENDER_WORK/ns" "$WVA_RENDER_WORK/bin" \
+        "$WVA_RENDER_WORK/pre.d" "$WVA_RENDER_WORK/post.d" \
+        || log_error "RENDER=$dir: cannot write there."
+    : > "$WVA_RENDER_WORK/order"
+    : > "$WVA_RENDER_WORK/gone"
+    : > "$WVA_RENDER_WORK/virt-crds"
+    WVA_RENDER_KUBECTL="$(type -P kubectl || true)"
+    WVA_RENDER_HELM="$(type -P helm || true)"
+    [ -n "$WVA_RENDER_KUBECTL" ] || log_error "RENDER: kubectl is not on PATH."
+    export WVA_RENDER_DIR WVA_RENDER_WORK WVA_RENDER_KUBECTL WVA_RENDER_HELM
+    wva_render_write_path_shim
+    PATH="$WVA_RENDER_WORK/bin:$PATH"
+    export PATH
+    kubectl() { wva_render_kubectl "$@"; }
+    helm()    { wva_render_helm "$@"; }
+    log_info "RENDER=$WVA_RENDER_DIR: this run reads the cluster with your rights and applies NOTHING; it needs read rights only."
+    log_info "  Permission checks are answered for the cluster admin who runs admin.sh. Where the output below says created, applied or removed, it means written to admin.yaml or admin.sh."
+}
+
+# wva_render_write_path_shim writes kubectl and helm executables that refuse
+# writes, for any child process that bypasses the shell functions.
+wva_render_write_path_shim() {
+    local tool real
+    for tool in kubectl helm; do
+        real="$WVA_RENDER_KUBECTL"
+        [ "$tool" = kubectl ] || real="$WVA_RENDER_HELM"
+        [ -n "$real" ] || continue
+        cat > "$WVA_RENDER_WORK/bin/$tool" <<EOF
+#!/usr/bin/env bash
+# Render mode: reads pass through, writes are refused (deploy/lib/common.sh).
+case " \$* " in
+    *" --dry-run"*|*" --local"*|*" kustomize "*) exec "$real" "\$@" ;;
+esac
+for a in "\$@"; do
+    case "\$a" in
+        -*) continue ;;
+        apply|create|patch|label|annotate|delete|replace|scale|set|edit|rollout|taint|cordon|uncordon|drain|run|expose|autoscale|exec|cp|install|upgrade|uninstall|rollback|repo|certificate)
+            echo "RENDER: refusing '$tool \$*' from a child process; a render writes nothing to the cluster." >&2
+            exit 1 ;;
+        *) break ;;
+    esac
+done
+exec "$real" "\$@"
+EOF
+        chmod +x "$WVA_RENDER_WORK/bin/$tool"
+    done
+}
+
+# wva_render_real_kubectl runs the real kubectl, on the pinned context if any.
+# A read the cluster refuses is noted (wva_render_note_forbidden): the live
+# run, made by an admin, would have seen the object, so the render may differ.
+wva_render_real_kubectl() {
+    local errf rc=0
+    errf="$(mktemp)" || return 125
+    if [ -n "${WVA_KUBE_CONTEXT:-}" ]; then
+        "$WVA_RENDER_KUBECTL" --context "$WVA_KUBE_CONTEXT" "$@" 2>"$errf" || rc=$?
+    else
+        "$WVA_RENDER_KUBECTL" "$@" 2>"$errf" || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || wva_render_note_forbidden "$errf"
+    cat "$errf" >&2
+    rm -f "$errf"
+    return "$rc"
+}
+
+# wva_render_real_helm runs the real helm, on the pinned context if any.
+wva_render_real_helm() {
+    local errf rc=0
+    [ -n "$WVA_RENDER_HELM" ] || { echo "helm: not on PATH" >&2; return 127; }
+    errf="$(mktemp)" || return 125
+    if [ -n "${WVA_KUBE_CONTEXT:-}" ]; then
+        "$WVA_RENDER_HELM" --kube-context "$WVA_KUBE_CONTEXT" "$@" 2>"$errf" || rc=$?
+    else
+        "$WVA_RENDER_HELM" "$@" 2>"$errf" || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || wva_render_note_forbidden "$errf"
+    cat "$errf" >&2
+    rm -f "$errf"
+    return "$rc"
+}
+
+# wva_render_note_forbidden records, from kubectl or helm stderr in file $1,
+# the resource a Forbidden read named, for the warning wva_render_finish gives.
+wva_render_note_forbidden() {
+    local res
+    grep -qi 'forbidden' "$1" 2>/dev/null || return 0
+    # Impersonation is not a read: a question --as another identity that is
+    # refused is answered "unknown", and the run already says so.
+    grep -qi 'cannot impersonate' "$1" && return 0
+    res="$(grep -oiE 'cannot (get|list|watch) resource "[^"]+"( in API group "[^"]*")?' "$1" | head -1)"
+    printf '%s\n' "${res:-$(grep -i -m1 forbidden "$1" | cut -c1-200)}" >> "$WVA_RENDER_WORK/forbidden"
+}
+
+# wva_render_local_kubectl runs the real kubectl for a purely local operation
+# (--local, kustomize, --dry-run=client), never on a context.
+wva_render_local_kubectl() {
+    "$WVA_RENDER_KUBECTL" "$@"
+}
+
+# wva_render_quote echoes its arguments as one shell-quoted command line.
+wva_render_quote() {
+    local a out=""
+    for a in "$@"; do
+        if [[ "$a" =~ ^[A-Za-z0-9_./:=@,+%-]+$ ]]; then
+            out="$out $a"
+        else
+            out="$out '${a//\'/\'\\\'\'}'"
+        fi
+    done
+    printf '%s\n' "${out# }"
+}
+
+# wva_render_lower echoes $1 in lower case.
+wva_render_lower() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# wva_render_key echoes the store key for kind $1, namespace $2, name $3.
+wva_render_key() {
+    printf '%s__%s__%s' "$(wva_render_lower "$1")" "${2:-_}" "$3" | sed 's/[^A-Za-z0-9._-]/_/g'
+}
+
+# wva_render_kinds echoes the lower-case kind resource $1 names: kubectl takes
+# plurals, short names and resource.group (prometheuses.monitoring.coreos.com
+# is kind prometheus).
+wva_render_kinds() {
+    local r
+    r="$(wva_render_lower "${1%%.*}")"
+    case "$r" in
+        ns) r=namespace ;; cm) r=configmap ;; sa) r=serviceaccount ;; deploy) r=deployment ;;
+        svc) r=service ;; crd|crds) r=customresourcedefinition ;; netpol) r=networkpolicy ;;
+        sts) r=statefulset ;; ds) r=daemonset ;; rs) r=replicaset ;; ep|endpoints) r=endpoints ;;
+        prometheus|*status|*ingress) ;;
+        *ies) r="${r%ies}y" ;;
+        *uses) r="${r%es}" ;;
+        *sses) r="${r%es}" ;;
+        *ss) ;;
+        *s) r="${r%s}" ;;
+    esac
+    printf '%s\n' "$r"
+}
+
+# wva_render_cluster_scoped reports whether lower-case kind $1 is cluster-scoped.
+wva_render_cluster_scoped() {
+    case "$1" in
+        namespace|node|clusterrole|clusterrolebinding|customresourcedefinition|apiservice|\
+        persistentvolume|storageclass|priorityclass|clustertriggerauthentication|clusterissuer|\
+        clusterqueue|resourceflavor|cohort|validatingwebhookconfiguration|mutatingwebhookconfiguration|\
+        validatingadmissionpolicy|validatingadmissionpolicybinding|runtimeclass|ingressclass) return 0 ;;
+    esac
+    return 1
+}
+
+# wva_render_find echoes the stored (or chart-provided) file for resource $1
+# named $2 in namespace $3, or fails. A name deleted by this render and not
+# written again answers "gone" (status 2).
+wva_render_find() {
+    local res="$1" name="$2" ns="$3" kind n key
+    for kind in $(wva_render_kinds "$res"); do
+        for n in "$ns" ""; do
+            key="$(wva_render_key "$kind" "$n" "$name")"
+            if [ -f "$WVA_RENDER_WORK/obj/$key.yaml" ]; then
+                printf '%s\n' "$WVA_RENDER_WORK/obj/$key.yaml"
+                return 0
+            fi
+            if grep -qxF "$key" "$WVA_RENDER_WORK/gone" 2>/dev/null; then
+                return 2
+            fi
+            if [ -f "$WVA_RENDER_WORK/virt/$key.yaml" ]; then
+                printf '%s\n' "$WVA_RENDER_WORK/virt/$key.yaml"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# wva_render_virtual_crd reports whether resource $1 is served only by a chart
+# this render records (so the cluster does not know its type yet).
+wva_render_virtual_crd() {
+    local r
+    r="$(wva_render_lower "$1")"
+    case "$r" in
+        *.*) grep -qxF "$r" "$WVA_RENDER_WORK/virt-crds" ;;
+        *)   grep -qE "^(${r}|${r}s|${r}es)\." "$WVA_RENDER_WORK/virt-crds" ;;
+    esac
+}
+
+# wva_render_ns_state echoes yes, no or unknown: whether namespace $1 exists on
+# the cluster (not in the render). Cached for the run.
+wva_render_ns_state() {
+    local ns="$1" f out rc=0
+    f="$WVA_RENDER_WORK/ns/$(printf '%s' "$ns" | sed 's/[^A-Za-z0-9._-]/_/g')"
+    if [ -f "$f" ]; then cat "$f"; return 0; fi
+    out="$(wva_render_real_kubectl get namespace "$ns" -o name 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo yes > "$f"
+    elif printf '%s' "$out" | grep -qF '(NotFound)'; then
+        echo no > "$f"
+    else
+        echo unknown > "$f"
+    fi
+    cat "$f"
+}
+
+# wva_render_print prints stored object file $1 in kubectl output format $2.
+wva_render_print() {
+    local file="$1" fmt="$2" kind name
+    case "$fmt" in
+        json) yq -o=json '.' "$file" ;;
+        yaml) cat "$file" ;;
+        name)
+            kind="$(yq '.kind' "$file")"; name="$(yq '.metadata.name' "$file")"
+            printf '%s/%s\n' "$(wva_render_lower "$kind")" "$name" ;;
+        "")
+            name="$(yq '.metadata.name' "$file")"
+            printf 'NAME\n%s\n' "$name" ;;
+        *) wva_render_local_kubectl annotate --local -f "$file" wva.llmd.ai/render-noop- -o "$fmt" ;;
+    esac
+}
+
+# wva_render_empty_list prints an empty list in kubectl output format $1.
+wva_render_empty_list() {
+    case "$1" in
+        json) printf '{"apiVersion":"v1","items":[],"kind":"List","metadata":{}}\n' ;;
+        yaml) printf 'apiVersion: v1\nitems: []\nkind: List\nmetadata: {}\n' ;;
+        "") echo "No resources found" >&2 ;;
+    esac
+    return 0
+}
+
+# wva_render_get answers `kubectl get`: a stored object from the store, a read
+# in a namespace that does not exist yet as empty, everything else from the
+# cluster.
+wva_render_get() {
+    local a res="" name="" ns="" fmt="" list=false ignore=false raw="" pos=0 file rc=0 out kind
+    local args=("$@")
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            -n|--namespace) ns="$1"; shift ;;
+            --namespace=*) ns="${a#*=}" ;;
+            -o|--output) fmt="$1"; shift ;;
+            -o*) fmt="${a#-o}"; fmt="${fmt#=}" ;;
+            --output=*) fmt="${a#*=}" ;;
+            -A|--all-namespaces|--all-namespaces=true) list=true ;;
+            -l|--selector|--field-selector) list=true; shift ;;
+            -l*|--selector=*|--field-selector=*) list=true ;;
+            --ignore-not-found|--ignore-not-found=true) ignore=true ;;
+            --raw) raw="$1"; shift ;;
+            --raw=*) raw="${a#*=}" ;;
+            -*) ;;
+            *)
+                pos=$((pos + 1))
+                if [ "$pos" -eq 1 ]; then res="$a"; else name="$a"; fi ;;
+        esac
+    done
+    if [ -n "$raw" ]; then
+        file="$WVA_RENDER_WORK/virt/raw$(printf '%s' "$raw" | sed 's/[^A-Za-z0-9._-]/_/g').json"
+        if [ -f "$file" ]; then cat "$file"; return 0; fi
+        wva_render_real_kubectl get "${args[@]}"
+        return
+    fi
+    case "$res" in */*) name="${res#*/}"; res="${res%%/*}" ;; esac
+    case "$res" in *,*) list=true ;; esac
+    if [ -n "$name" ] && [ "$list" = false ]; then
+        rc=0
+        file="$(wva_render_find "$res" "$name" "$ns")" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            wva_render_print "$file" "$fmt"
+            return
+        fi
+        if [ "$rc" -eq 2 ] || { [ -n "$ns" ] && ! wva_render_cluster_scoped "$(wva_render_kinds "$res" | head -1)" \
+                && [ "$(wva_render_ns_state "$ns")" = no ]; } || wva_render_virtual_crd "$res"; then
+            # Deleted by this render, in a namespace the cluster does not have
+            # yet, or of a type only a chart this render installs serves.
+            [ "$ignore" = true ] && return 0
+            echo "Error from server (NotFound): $res \"$name\" not found" >&2
+            return 1
+        fi
+        wva_render_real_kubectl get "${args[@]}"
+        return
+    fi
+    if [ -n "$res" ] && [ "${res#*,}" = "$res" ]; then
+        wva_render_list "$res" "$ns" "$fmt" "${args[@]}"
+        return
+    fi
+    wva_render_real_kubectl get "${args[@]}"
+}
+
+# wva_render_local_items echoes the store and chart files of resource $1 in
+# namespace $2 ("" for every namespace), stored objects first.
+wva_render_local_items() {
+    local res="$1" ns="$2" kind f key k rest seen=" "
+    for kind in $(wva_render_kinds "$res" | sort -u); do
+        for f in "$WVA_RENDER_WORK"/obj/"${kind}"__*.yaml "$WVA_RENDER_WORK"/virt/"${kind}"__*.yaml; do
+            [ -f "$f" ] || continue
+            key="$(basename "$f" .yaml)"
+            case "$seen" in *" $key "*) continue ;; esac
+            seen="$seen$key "
+            grep -qxF "$key" "$WVA_RENDER_WORK/gone" && continue
+            k="${key%%__*}"; rest="${key#*__}"
+            [ "$k" = "$kind" ] || continue
+            if [ -n "$ns" ] && ! wva_render_cluster_scoped "$kind"; then
+                [ "${rest%%__*}" = "$(printf '%s' "$ns" | sed 's/[^A-Za-z0-9._-]/_/g')" ] || continue
+            fi
+            printf '%s\n' "$f"
+        done
+    done
+}
+
+# wva_render_selector_jq echoes a jq condition for kubectl label selector $1:
+# key=value, key==value, key!=value and bare key, comma-separated.
+wva_render_selector_jq() {
+    local sel="$1" term cond="true" k v
+    local IFS=,
+    for term in $sel; do
+        case "$term" in
+            *!=*) k="${term%%!=*}"; v="${term#*!=}"; cond="$cond and ((.metadata.labels // {})[\"$k\"] != \"$v\")" ;;
+            *==*) k="${term%%==*}"; v="${term#*==}"; cond="$cond and ((.metadata.labels // {})[\"$k\"] == \"$v\")" ;;
+            *=*)  k="${term%%=*}";  v="${term#*=}";  cond="$cond and ((.metadata.labels // {})[\"$k\"] == \"$v\")" ;;
+            *)    cond="$cond and ((.metadata.labels // {}) | has(\"$term\"))" ;;
+        esac
+    done
+    printf '%s' "$cond"
+}
+
+# wva_render_list answers a list read of resource $1 in namespace $2 (output
+# format $3; the original arguments follow): the cluster's items, with what this
+# render stored -- or a chart it records creates -- merged in, and what it
+# deleted taken out. A read of a type only such a chart serves, or in a
+# namespace the cluster does not have yet, has no cluster part.
+wva_render_list() {
+    local res="$1" ns="$2" fmt="$3" a sel="" all=false tmp files f cluster="" rc=0 tpl inner out
+    shift 3
+    local args=("$@")
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            -l|--selector) sel="$1"; shift ;;
+            -l=*|--selector=*) sel="${a#*=}" ;;
+            -l*) sel="${a#-l}" ;;
+            -A|--all-namespaces|--all-namespaces=true) all=true ;;
+        esac
+    done
+    [ "$all" = false ] || ns=""
+    files="$(wva_render_local_items "$res" "$ns")"
+    if [ -z "$files" ] && ! wva_render_virtual_crd "$res"; then
+        if [ -n "$ns" ] && ! wva_render_cluster_scoped "$(wva_render_kinds "$res" | head -1)" \
+            && [ "$(wva_render_ns_state "$ns")" = no ]; then
+            wva_render_empty_list "$fmt"
+            return 0
+        fi
+        wva_render_real_kubectl get "${args[@]}"
+        return
+    fi
+    tmp="$(mktemp -d)" || return 1
+    if ! wva_render_virtual_crd "$res" \
+        && { [ -z "$ns" ] || wva_render_cluster_scoped "$(wva_render_kinds "$res" | head -1)" \
+             || [ "$(wva_render_ns_state "$ns")" != no ]; }; then
+        if [ -n "$ns" ]; then
+            cluster="$(wva_render_real_kubectl get "$res" -n "$ns" ${sel:+-l "$sel"} -o json 2>"$tmp/err")" || rc=$?
+        else
+            cluster="$(wva_render_real_kubectl get "$res" -A ${sel:+-l "$sel"} -o json 2>"$tmp/err")" || rc=$?
+        fi
+        if [ "$rc" -ne 0 ]; then
+            # Forbidden is not absent: the list fails as it would have.
+            cat "$tmp/err" >&2
+            rm -rf "$tmp"
+            return "$rc"
+        fi
+    fi
+    printf '%s' "${cluster:-}" | jq -c '.items[]?' > "$tmp/items" 2>/dev/null || : > "$tmp/items"
+    : > "$tmp/local"
+    while read -r f; do
+        [ -n "$f" ] || continue
+        yq -o=json -I=0 '.' "$f" >> "$tmp/local"
+    done <<< "$files"
+    # The store key (wva_render_key) of each item: an object this render wrote
+    # replaces the cluster's, and one it deleted is left out.
+    jq -c -n --slurpfile loc "$tmp/local" --slurpfile cl "$tmp/items" \
+        --argjson gone "$(jq -R -s -c 'split("\n") | map(select(. != ""))' "$WVA_RENDER_WORK/gone")" '
+        def key: [((.kind // "") | ascii_downcase), ((.metadata.namespace // "") | if . == "" then "_" else . end), (.metadata.name // "")]
+                 | join("__") | gsub("[^A-Za-z0-9._-]"; "_");
+        ($loc | map(key)) as $lk
+        | {apiVersion: "v1", kind: "List", metadata: {},
+           items: (($cl | map(select(key as $k | ($lk | index($k)) == null and ($gone | index($k)) == null))) + $loc)}' > "$tmp/list.json" \
+        || { rm -rf "$tmp"; echo "RENDER: could not merge the list of $res" >&2; return 1; }
+    if [ -n "$sel" ]; then
+        jq -c "{apiVersion, kind, metadata, items: [.items[] | select($(wva_render_selector_jq "$sel"))]}" "$tmp/list.json" > "$tmp/l2" \
+            && mv "$tmp/l2" "$tmp/list.json"
+    fi
+    case "$fmt" in
+        json) cat "$tmp/list.json"; echo ;;
+        yaml) yq -p=json -o=yaml -P '.' "$tmp/list.json" ;;
+        name) jq -r '.items[] | ((.kind | ascii_downcase) + "/" + .metadata.name)' "$tmp/list.json" ;;
+        "")
+            if [ "$(jq '.items | length' "$tmp/list.json")" = 0 ]; then
+                echo "No resources found" >&2
+            else
+                echo "NAME"; jq -r '.items[].metadata.name' "$tmp/list.json"
+            fi ;;
+        jsonpath=*|go-template=*)
+            tpl="${fmt#*=}"; inner=""
+            case "$fmt" in
+                jsonpath=*)
+                    case "$tpl" in
+                        "{range .items[*]}"*"{end}") inner="${tpl#"{range .items[*]}"}"; inner="${inner%"{end}"}" ;;
+                    esac ;;
+                go-template=*)
+                    case "$tpl" in
+                        "{{range .items}}"*"{{end}}") inner="${tpl#"{{range .items}}"}"; inner="${inner%"{{end}}"}" ;;
+                    esac ;;
+            esac
+            if [ -n "$inner" ]; then
+                jq -c '.items[]' "$tmp/list.json" | while IFS= read -r out; do
+                    printf '%s\n' "$out" > "$tmp/one.json"
+                    wva_render_local_kubectl annotate --local -f "$tmp/one.json" wva.llmd.ai/render-noop- -o "${fmt%%=*}=$inner"
+                done
+            elif [ "${tpl#*".items[*]"}" != "$tpl" ]; then
+                # {.items[*].x}: x of every item, space-separated, as kubectl prints it.
+                tpl="${tpl//".items[*]"/}"
+                jq -c '.items[]' "$tmp/list.json" | while IFS= read -r out; do
+                    printf '%s\n' "$out" > "$tmp/one.json"
+                    wva_render_local_kubectl annotate --local -f "$tmp/one.json" wva.llmd.ai/render-noop- -o "jsonpath=$tpl"
+                done | paste -sd' ' -
+            else
+                # {.items[0].x}: the first item of the merged list.
+                tpl="${tpl//".items[0]"/}"
+                jq '.items[0] // empty' "$tmp/list.json" > "$tmp/one.json"
+                if [ -s "$tmp/one.json" ]; then
+                    wva_render_local_kubectl annotate --local -f "$tmp/one.json" wva.llmd.ai/render-noop- -o "${fmt%%=*}=$tpl"
+                fi
+            fi ;;
+        *) wva_render_real_kubectl get "${args[@]}" ;;
+    esac
+    rm -rf "$tmp"
+    return 0
+}
+
+# wva_render_why echoes why the current command is needed, from the function
+# that issued it, for the comment above its line in admin.sh.
+wva_render_why() {
+    local f
+    for f in "${FUNCNAME[@]:1}"; do
+        case "$f" in
+            wva_render_*|kubectl|helm|kc_capture) continue ;;
+            deploy_keda) echo "KEDA is not on the cluster; the scaling manager needs it to scale anything (KEDA_HELM_INSTALL=true)." ;;
+            deploy_prometheus_kube_stack) echo "No Prometheus on the cluster; the scaling manager reads its metrics from this one." ;;
+            deploy_wva_prerequisites_kube_like|deploy_wva_prerequisites) echo "A dependency of the scaling manager that the cluster does not have." ;;
+            _install_crd_group|install_inference_crds) echo "CRDs the scaling manager watches and the cluster does not have." ;;
+            wva_repair_immutable_rolerefs) echo "roleRef is immutable: this binding must point at a new role, so it is deleted and admin.yaml recreates it." ;;
+            wva_delete_legacy_crbs) echo "An obsolete binding from an older install; it grants access nothing uses." ;;
+            wva_delete_legacy_controller_token) echo "An obsolete non-expiring token for the controller's ServiceAccount." ;;
+            wva_revoke_namespace|wva_prune_unlisted_namespaces) echo "This namespace is no longer in WVA_WATCH_NS; the controller's grant there is removed." ;;
+            wva_append_scaler_networkpolicy_patch) echo "WVA_SCALER_NETWORKPOLICY=false: the external scaler NetworkPolicy is removed." ;;
+            create_namespaces_shared_loop) echo "The namespace is stuck terminating and must finish before it is created again." ;;
+            pl_revoke_kueue_borrow_read|pl_sync_kueue_borrow_read) echo "No policy of this install counts Kueue borrowing, so its cluster-wide Workload read is revoked." ;;
+            pl_revoke_kueue_controller_read) echo "The Kueue controller read is no longer needed." ;;
+            wva_scaler_keda_*|wva_scaler_tls_*) echo "KEDA keeps the scaler's client certificate until its operator restarts." ;;
+            wva_revoke_pod_list_grant) echo "gpu-inventory is no longer declared; the cluster-wide Pod list is revoked." ;;
+            *) echo "From ${f} (deploy/lib)." ;;
+        esac
+        return 0
+    done
+    echo "From the setup-prereqs phase."
+}
+
+# wva_render_record appends command "$@" to section $1 (pre: before admin.yaml
+# is applied, post: after), with its reason, and says so.
+wva_render_record() {
+    local section="$1" why line n
+    shift
+    why="$(wva_render_why)"
+    line="$(wva_render_quote "$@")"
+    # One file per command: a quoted argument may span lines.
+    n="$(find "$WVA_RENDER_WORK/$section.d" -type f | wc -l | tr -d ' ')"
+    printf '# %s\n%s\n' "$why" "$line" > "$WVA_RENDER_WORK/$section.d/$(printf '%05d' "$((n + 1))")"
+    log_info "RENDER: recorded in admin.sh: $(printf '%s' "$line" | head -1 | cut -c1-200)"
+}
+
+# wva_render_capture reads manifests from file $1 (YAML or JSON, one or many
+# documents, Lists expanded) into the store, defaulting a namespaced object's
+# namespace to $2, and prints what it captured as kubectl does.
+wva_render_capture() {
+    local in="$1" defns="$2" tmp f kind ns name key lkind
+    tmp="$(mktemp -d)" || return 1
+    {
+        yq 'select((.kind // "") | test("List$")) | .items[] | split_doc' "$in" 2>/dev/null || true
+        echo "---"
+        yq 'select(((.kind // "") | test("List$")) | not)' "$in" 2>/dev/null || true
+    } > "$tmp/all.yaml"
+    yq 'select(. != null and .kind != null)
+        | del(.status) | del(.metadata.resourceVersion) | del(.metadata.uid)
+        | del(.metadata.creationTimestamp) | del(.metadata.managedFields)
+        | del(.metadata.generation) | del(.metadata.selfLink)
+        | del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])
+        | del(.metadata.annotations | select(length == 0))
+        | del(.metadata.labels | select(length == 0))' "$tmp/all.yaml" > "$tmp/clean.yaml" \
+        || { rm -rf "$tmp"; echo "RENDER: could not parse the manifests to capture" >&2; return 1; }
+    mkdir -p "$tmp/docs"
+    # -P: JSON input (jq-built Secrets) comes out as block YAML, for review.
+    D="$tmp/docs" yq -P -s 'strenv(D) + "/" + ($index | tostring)' 'select(. != null)' "$tmp/clean.yaml" 2>/dev/null || true
+    local i=0
+    while [ -f "$tmp/docs/$i.yml" ]; do
+        f="$tmp/docs/$i.yml"
+        i=$((i + 1))
+        [ -s "$f" ] || continue
+        kind="$(yq '.kind // ""' "$f")"; name="$(yq '.metadata.name // ""' "$f")"; ns="$(yq '.metadata.namespace // ""' "$f")"
+        [ -n "$kind" ] && [ -n "$name" ] || continue
+        lkind="$(wva_render_lower "$kind")"
+        if [ -z "$ns" ] && [ -n "$defns" ] && ! wva_render_cluster_scoped "$lkind"; then
+            ns="$defns"
+            NS="$ns" yq -i '.metadata.namespace = strenv(NS)' "$f"
+        fi
+        key="$(wva_render_key "$kind" "$ns" "$name")"
+        # One document per file, without its separators: admin.yaml adds them.
+        grep -vxE -- '---|\.\.\.' "$f" > "$WVA_RENDER_WORK/obj/$key.yaml" || true
+        grep -qxF "$key" "$WVA_RENDER_WORK/order" || echo "$key" >> "$WVA_RENDER_WORK/order"
+        if grep -qxF "$key" "$WVA_RENDER_WORK/gone"; then
+            grep -vxF "$key" "$WVA_RENDER_WORK/gone" > "$tmp/gone" || true
+            cat "$tmp/gone" > "$WVA_RENDER_WORK/gone"
+        fi
+        printf '%s/%s rendered\n' "$lkind" "$name"
+    done
+    rm -rf "$tmp"
+}
+
+# wva_render_apply captures `kubectl apply|create -f/-k`. A remote file or
+# kustomization is recorded as a command instead.
+wva_render_apply() {
+    local a ns="" dry="" srcs=() kdirs=() src tmp rc=0
+    local args=("$@")
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            --context|--kubeconfig) shift ;;
+            -f|--filename) srcs+=("$1"); shift ;;
+            -f=*|--filename=*) srcs+=("${a#*=}") ;;
+            -k|--kustomize) kdirs+=("$1"); shift ;;
+            -k=*|--kustomize=*) kdirs+=("${a#*=}") ;;
+            -n|--namespace) ns="$1"; shift ;;
+            --namespace=*) ns="${a#*=}" ;;
+            --dry-run=*) dry="${a#*=}" ;;
+            --dry-run) dry=client ;;
+            --field-manager|-o|--output|--selector|-l) shift ;;
+        esac
+    done
+    case "$dry" in
+        server)
+            # Validation the admin's own apply repeats. The cluster cannot
+            # validate objects whose namespace or type only this render makes.
+            for src in ${srcs[@]+"${srcs[@]}"}; do [ "$src" != - ] || cat > /dev/null; done
+            return 0 ;;
+        client) wva_render_real_kubectl apply "${args[@]}"; return ;;
+    esac
+    tmp="$(mktemp)" || return 1
+    # Every source ends with a newline before the separator: a document that
+    # does not end in one would otherwise swallow the `---`.
+    for src in ${srcs[@]+"${srcs[@]}"}; do
+        case "$src" in
+            -) cat >> "$tmp"; printf '\n---\n' >> "$tmp" ;;
+            http://*|https://*) wva_render_record pre kubectl apply -f "$src" ;;
+            *)
+                if [ -d "$src" ]; then
+                    cat "$src"/*.yaml "$src"/*.yml "$src"/*.json 2>/dev/null >> "$tmp" || true
+                else
+                    cat "$src" >> "$tmp" || { rm -f "$tmp"; return 1; }
+                fi
+                printf '\n---\n' >> "$tmp" ;;
+        esac
+    done
+    for src in ${kdirs[@]+"${kdirs[@]}"}; do
+        if [ -d "$src" ]; then
+            wva_render_local_kubectl kustomize "$src" >> "$tmp" || { rm -f "$tmp"; return 1; }
+            printf '\n---\n' >> "$tmp"
+        else
+            wva_render_record pre kubectl apply -k "$src"
+        fi
+    done
+    wva_render_capture "$tmp" "$ns" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# wva_render_create captures `kubectl create <type> ...` through its own
+# client-side dry run.
+wva_render_create() {
+    local a out rc=0 tmp
+    for a in "$@"; do
+        case "$a" in
+            --dry-run|--dry-run=*) wva_render_real_kubectl create "$@"; return ;;
+            -f|--filename|-f=*|--filename=*|-k|--kustomize) wva_render_apply "$@"; return ;;
+        esac
+    done
+    tmp="$(mktemp)" || return 1
+    wva_render_real_kubectl create "$@" --dry-run=client -o yaml > "$tmp" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        wva_render_capture "$tmp" "" || rc=$?
+    fi
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# wva_render_target parses `<verb> <resource> <name> -n <ns>` style arguments
+# into RT_RES, RT_NAME, RT_NS (RT_SELECTOR when a label selector is given).
+wva_render_target() {
+    local a pos=0
+    RT_RES="" RT_NAME="" RT_NS="" RT_SELECTOR="" RT_ALL=false RT_SLASH=false
+    while [ $# -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            -n|--namespace) RT_NS="$1"; shift ;;
+            --namespace=*) RT_NS="${a#*=}" ;;
+            -l|--selector) RT_SELECTOR="$1"; shift ;;
+            -l=*|--selector=*) RT_SELECTOR="${a#*=}" ;;
+            -A|--all-namespaces) RT_ALL=true ;;
+            -p|--patch|--type|--patch-file|-o|--output|--timeout|--field-manager|--grace-period|--context|--kubeconfig) shift ;;
+            -*) ;;
+            *)
+                pos=$((pos + 1))
+                if [ "$pos" -eq 1 ]; then RT_RES="$a"; elif [ "$pos" -eq 2 ] && [ "$RT_SLASH" = false ]; then RT_NAME="$a"; fi
+                case "$pos:$a" in 1:*/*) RT_SLASH=true; RT_NAME="${a#*/}"; RT_RES="${a%%/*}" ;; esac ;;
+        esac
+    done
+}
+
+# wva_render_edit handles patch/label/annotate (verb $1): on a stored object it
+# is applied to the stored copy; on an object already on the cluster it is
+# recorded for admin.sh.
+wva_render_edit() {
+    local verb="$1" file rc=0 tmp
+    shift
+    wva_render_target "$@"
+    if [ -n "$RT_NAME" ] && [ -z "$RT_SELECTOR" ] && file="$(wva_render_find "$RT_RES" "$RT_NAME" "$RT_NS")" \
+        && [ "${file#"$WVA_RENDER_WORK/obj/"}" != "$file" ]; then
+        local rest=() a skip=0 pos=0
+        for a in "$@"; do
+            if [ "$skip" = 1 ]; then skip=0; continue; fi
+            case "$a" in
+                -n|--namespace|-o|--output) skip=1; continue ;;
+                --namespace=*|-o*|--output=*) continue ;;
+                -*) rest+=("$a"); continue ;;
+            esac
+            pos=$((pos + 1))
+            # The resource and name are replaced by -f; any other positional
+            # (a label, an annotation) stays.
+            if [ "$RT_SLASH" = true ] && [ "$pos" -le 1 ]; then continue; fi
+            if [ "$RT_SLASH" = false ] && [ "$pos" -le 2 ]; then continue; fi
+            rest+=("$a")
+        done
+        tmp="$(mktemp)" || return 1
+        if wva_render_local_kubectl "$verb" --local -f "$file" ${rest[@]+"${rest[@]}"} -o yaml > "$tmp"; then
+            wva_render_capture "$tmp" "" >/dev/null || rc=$?
+            printf '%s/%s %s (rendered)\n' "$(wva_render_lower "$RT_RES")" "$RT_NAME" "$verb"
+        else
+            rc=1
+        fi
+        rm -f "$tmp"
+        return "$rc"
+    fi
+    wva_render_record pre kubectl "$verb" "$@"
+}
+
+# wva_render_delete records a delete for admin.sh when there is something to
+# delete, drops a stored object of that name, and remembers the name as gone.
+wva_render_delete() {
+    local args=("$@") a has_ignore=false out rc=0 file key kind res
+    for a in "$@"; do
+        case "$a" in --ignore-not-found|--ignore-not-found=true) has_ignore=true ;; esac
+    done
+    wva_render_target "$@"
+    if [ -n "$RT_NAME" ] && [ -z "$RT_SELECTOR" ]; then
+        for res in ${RT_RES//,/ }; do
+            rc=0
+            file="$(wva_render_find "$res" "$RT_NAME" "$RT_NS")" || rc=$?
+            if [ "$rc" -eq 0 ] && [ "${file#"$WVA_RENDER_WORK/obj/"}" != "$file" ]; then
+                key="$(basename "$file" .yaml)"
+                rm -f "$file"
+                grep -vxF "$key" "$WVA_RENDER_WORK/order" > "$WVA_RENDER_WORK/order.tmp" || true
+                mv "$WVA_RENDER_WORK/order.tmp" "$WVA_RENDER_WORK/order"
+            fi
+            for kind in $(wva_render_kinds "$res" | head -1); do
+                key="$(wva_render_key "$kind" "$(wva_render_cluster_scoped "$kind" || printf '%s' "$RT_NS")" "$RT_NAME")"
+                grep -qxF "$key" "$WVA_RENDER_WORK/gone" || echo "$key" >> "$WVA_RENDER_WORK/gone"
+            done
+        done
+    fi
+    # Only what would delete something: a delete of nothing is noise in a
+    # script an admin has to review. An unreadable answer is kept.
+    rc=0
+    if [ -n "$RT_NAME" ]; then
+        if [ -n "$RT_NS" ] && [ "$(wva_render_ns_state "$RT_NS")" = no ]; then
+            out=""
+        else
+            # A NotFound for one of several resources is not an error about
+            # the others; anything else is kept, and the delete recorded.
+            out="$(wva_render_real_kubectl get "$RT_RES" "$RT_NAME" ${RT_NS:+-n "$RT_NS"} -o name 2>&1)" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                out="$(printf '%s\n' "$out" | grep -vE '\(NotFound\)|the server doesn.t have a resource type' || true)"
+                rc=0
+            fi
+        fi
+    elif [ -n "$RT_SELECTOR" ]; then
+        if [ "$RT_ALL" = true ]; then
+            out="$(wva_render_real_kubectl get "$RT_RES" -A -l "$RT_SELECTOR" -o name 2>&1)" || rc=$?
+        elif [ -n "$RT_NS" ] && [ "$(wva_render_ns_state "$RT_NS")" = no ]; then
+            out=""
+        else
+            out="$(wva_render_real_kubectl get "$RT_RES" ${RT_NS:+-n "$RT_NS"} -l "$RT_SELECTOR" -o name 2>&1)" || rc=$?
+        fi
+        if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qE 'the server doesn.t have a resource type'; then
+            out=""; rc=0
+        fi
+    else
+        out=unknown; rc=1
+    fi
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf '%s "%s" not found, nothing to delete (rendered)\n' "$RT_RES" "${RT_NAME:-$RT_SELECTOR}" >&2
+        return 0
+    fi
+    # The live run makes some deletes after its apply, once nothing references
+    # what they remove; admin.sh keeps that order.
+    local section=pre
+    case " ${FUNCNAME[*]} " in *" wva_delete_legacy_controller_token "*) section=post ;; esac
+    if [ "$has_ignore" = true ]; then
+        wva_render_record "$section" kubectl delete "${args[@]}"
+    else
+        wva_render_record "$section" kubectl delete "${args[@]}" --ignore-not-found
+    fi
+    printf '%s "%s" deleted (rendered)\n' "$RT_RES" "${RT_NAME:-$RT_SELECTOR}"
+}
+
+# wva_render_can_i answers `kubectl auth can-i <args>` in render mode. A
+# question about another identity (--as), or about a read, goes to the cluster:
+# this run reads with the caller's own rights, and a read it may not make must
+# be answered as such. A question about a write is about the cluster admin who
+# runs admin.sh, and is answered yes.
+wva_render_can_i() {
+    local a verb="" ns="" skip=0
+    for a in "$@"; do
+        case "$a" in
+            --as|--as=*) wva_render_real_kubectl auth "$@"; return ;;
+        esac
+    done
+    for a in "$@"; do
+        if [ "$skip" = 1 ]; then skip=0; ns="$a"; continue; fi
+        case "$a" in
+            -n|--namespace) skip=1; continue ;;
+            --namespace=*) ns="${a#*=}"; continue ;;
+            can-i|-*) continue ;;
+        esac
+        [ -n "$verb" ] || verb="$a"
+    done
+    case "$verb" in
+        get|list|watch)
+            # In a namespace the cluster does not have yet, every read is
+            # answered by this render's own objects.
+            if [ -n "$ns" ] && [ "$(wva_render_ns_state "$ns")" = no ]; then
+                echo yes
+                return 0
+            fi
+            wva_render_real_kubectl auth "$@" ;;
+        *) echo yes ;;
+    esac
+}
+
+# wva_render_kubectl is `kubectl` in render mode.
+wva_render_kubectl() {
+    local verb="" a i=0 takes=false pre=() rest=()
+    for a in "$@"; do
+        i=$((i + 1))
+        if [ "$takes" = true ]; then takes=false; continue; fi
+        case "$a" in
+            -n|--namespace|--context|--kubeconfig|--request-timeout|-s|--server|--cluster|--user) takes=true; continue ;;
+            -*) continue ;;
+        esac
+        verb="$a"
+        break
+    done
+    case " $* " in
+        *" --local "*|*" --local=true "*) wva_render_local_kubectl "$@"; return ;;
+    esac
+    if [ -n "$verb" ]; then
+        pre=("${@:1:i-1}")
+        rest=("${@:i+1}")
+    fi
+    set -- ${pre[@]+"${pre[@]}"} ${rest[@]+"${rest[@]}"}
+    case "$verb" in
+        get) wva_render_get "$@" ;;
+        apply) wva_render_apply "$@" ;;
+        create) wva_render_create "$@" ;;
+        patch|label|annotate) wva_render_edit "$verb" "$@" ;;
+        delete) wva_render_delete "$@" ;;
+        kustomize) wva_render_local_kubectl kustomize "$@" ;;
+        auth)
+            case " $* " in
+                *" can-i "*) wva_render_can_i "$@" ;;
+                *" reconcile "*) wva_render_record pre kubectl auth "$@" ;;
+                *) wva_render_real_kubectl auth "$@" ;;
+            esac ;;
+        wait)
+            log_info "RENDER: skipped 'kubectl wait $*': it waits on objects that are only rendered."
+            return 0 ;;
+        rollout)
+            case " $* " in
+                *" status "*|*" history "*)
+                    log_info "RENDER: skipped 'kubectl rollout $*': it checks objects that are only rendered."
+                    return 0 ;;
+                *) wva_render_record post kubectl rollout "$@" ;;
+            esac ;;
+        replace|scale|set|edit|taint|cordon|uncordon|drain|certificate|run|expose|autoscale|exec|cp|attach|debug)
+            log_warning "RENDER: 'kubectl $verb' is not rendered as an object; recorded as a command for the admin to review."
+            wva_render_record pre kubectl "$verb" "$@" ;;
+        "") wva_render_real_kubectl "$@" ;;
+        *) wva_render_real_kubectl "$verb" "$@" ;;
+    esac
+}
+
+# wva_render_chart records what a Helm chart install makes exist, for the reads
+# after it: its CRDs and, for KEDA, the API the scaler TLS asks for.
+wva_render_chart() {
+    local chart="$1" ns="$2" crd
+    case "$chart" in
+        *kedacore/keda|*/keda)
+            for crd in scaledobjects.keda.sh scaledjobs.keda.sh triggerauthentications.keda.sh clustertriggerauthentications.keda.sh; do
+                wva_render_virtual_object CustomResourceDefinition "" "$crd"
+            done
+            printf '{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"keda.sh/v1alpha1","resources":[{"name":"scaledobjects","namespaced":true,"kind":"ScaledObject"},{"name":"scaledjobs","namespaced":true,"kind":"ScaledJob"},{"name":"triggerauthentications","namespaced":true,"kind":"TriggerAuthentication"},{"name":"clustertriggerauthentications","namespaced":false,"kind":"ClusterTriggerAuthentication"}]}\n' \
+                > "$WVA_RENDER_WORK/virt/raw_apis_keda.sh_v1alpha1.json"
+            wva_render_virtual_object APIService "" v1beta1.external.metrics.k8s.io \
+                ".spec.service.namespace = \"$ns\" | .spec.service.name = \"keda-operator-metrics-apiserver\""
+            wva_render_virtual_object Deployment "$ns" keda-operator
+            ;;
+        *kube-prometheus-stack)
+            for crd in prometheuses podmonitors servicemonitors prometheusrules alertmanagers alertmanagerconfigs probes thanosrulers scrapeconfigs prometheusagents; do
+                wva_render_virtual_object CustomResourceDefinition "" "$crd.monitoring.coreos.com"
+            done
+            # The Prometheus the chart creates, as deploy_prometheus_kube_stack
+            # configures it: served over TLS from PROMETHEUS_SECRET_NAME, behind
+            # its own Service. Read later to pick its URL and copy its CA.
+            wva_render_virtual_object Prometheus "$ns" kube-prometheus-stack-prometheus \
+                ".apiVersion = \"monitoring.coreos.com/v1\"
+                 | .spec.web.tlsConfig.cert.secret.name = \"${PROMETHEUS_SECRET_NAME:-prometheus-web-tls}\"
+                 | .spec.web.tlsConfig.cert.secret.key = \"tls.crt\""
+            wva_render_virtual_object Service "$ns" kube-prometheus-stack-prometheus \
+                ".spec.selector[\"operator.prometheus.io/name\"] = \"kube-prometheus-stack-prometheus\"
+                 | .spec.ports = [{\"name\": \"http-web\", \"port\": ${PROMETHEUS_PORT:-9090}}]"
+            ;;
+        *lws)
+            wva_render_virtual_object CustomResourceDefinition "" leaderworkersets.leaderworkerset.x-k8s.io ;;
+    esac
+}
+
+# wva_render_virtual_object stores object kind $1 / namespace $2 / name $3,
+# with yq edit $4, as one a recorded chart creates. Never written to admin.yaml.
+wva_render_virtual_object() {
+    local kind="$1" ns="$2" name="$3" edit="${4:-.}" key api=v1
+    key="$(wva_render_key "$kind" "$ns" "$name")"
+    case "$kind" in
+        CustomResourceDefinition) api=apiextensions.k8s.io/v1 ;;
+        APIService) api=apiregistration.k8s.io/v1 ;;
+        Deployment) api=apps/v1 ;;
+    esac
+    A="$api" K="$kind" N="$name" NS="$ns" yq -n '.apiVersion = strenv(A) | .kind = strenv(K) | .metadata.name = strenv(N)
+        | .metadata.namespace = strenv(NS) | del(.metadata | select(.namespace == "") | .namespace)' \
+        | yq "$edit" > "$WVA_RENDER_WORK/virt/$key.yaml"
+    [ "$kind" != CustomResourceDefinition ] || echo "$name" >> "$WVA_RENDER_WORK/virt-crds"
+}
+
+# wva_render_helm is `helm` in render mode: installs, upgrades, uninstalls and
+# repository changes are recorded; reads go to the cluster.
+wva_render_helm() {
+    local verb="" a ns="" chart="" pos=0 skip=0
+    for a in "$@"; do
+        if [ "$skip" = 1 ]; then skip=0; ns="$a"; continue; fi
+        case "$a" in
+            -n|--namespace) skip=1; continue ;;
+            --namespace=*) ns="${a#*=}"; continue ;;
+            -*) continue ;;
+        esac
+        pos=$((pos + 1))
+        [ "$pos" -eq 1 ] && verb="$a"
+        [ "$pos" -eq 3 ] && chart="$a"
+    done
+    case "$verb" in
+        upgrade|install)
+            wva_render_record pre helm "$@"
+            wva_render_chart "$chart" "$ns"
+            echo "Release rendered: helm $verb (recorded in admin.sh)" ;;
+        uninstall|delete|rollback)
+            wva_render_record pre helm "$@" ;;
+        repo)
+            case " $* " in
+                *" add "*) wva_render_record pre helm "$@" --force-update ;;
+                *" update"*) wva_render_record pre helm "$@" ;;
+                *) wva_render_real_helm "$@" ;;
+            esac ;;
+        list|ls|status|get|history)
+            # A release cannot be in a namespace that does not exist yet.
+            if [ -n "$ns" ] && [ "$(wva_render_ns_state "$ns")" = no ]; then
+                case "$verb" in
+                    list|ls) case " $* " in *" json "*|*"-o=json"*|*"--output=json"*) echo "[]" ;; esac; return 0 ;;
+                    *) echo "Error: release: not found" >&2; return 1 ;;
+                esac
+            fi
+            wva_render_real_helm "$@" ;;
+        *) wva_render_real_helm "$@" ;;
+    esac
+}
+
+# wva_render_kind_rank echoes the apply-order rank of lower-case kind $1:
+# namespaces, then CRDs and RBAC, then what monitors and bindings reference.
+wva_render_kind_rank() {
+    case "$1" in
+        namespace) echo 0 ;; customresourcedefinition) echo 1 ;; clusterrole) echo 2 ;;
+        clusterrolebinding) echo 3 ;; role) echo 4 ;; rolebinding) echo 5 ;;
+        serviceaccount) echo 6 ;; secret) echo 7 ;; configmap) echo 8 ;; *) echo 9 ;;
+    esac
+}
+
+
+# wva_render_commands prints the recorded commands of section $1 (pre or post),
+# in the order they were recorded, each under its reason.
+wva_render_commands() {
+    local f
+    for f in "$WVA_RENDER_WORK/$1.d"/*; do
+        [ -f "$f" ] || continue
+        cat "$f"
+    done
+}
+
+# wva_render_finish writes admin.yaml and admin.sh from the store and the
+# recorded commands, and prints what was rendered and what the admin runs.
+wva_render_finish() {
+    wva_render_active || return 0
+    local out="$WVA_RENDER_DIR" w="$WVA_RENDER_WORK" key n=0 ctx server has_helm=false secrets=0 line first=true
+    : > "$w/sorted"
+    while read -r key; do
+        [ -n "$key" ] && [ -f "$w/obj/$key.yaml" ] || continue
+        n=$((n + 1))
+        printf '%s %06d %s\n' "$(wva_render_kind_rank "${key%%__*}")" "$n" "$key" >> "$w/sorted"
+    done < "$w/order"
+    ctx="${WVA_KUBE_CONTEXT:-$(wva_render_real_kubectl config current-context 2>/dev/null || true)}"
+    server="$(wva_render_real_kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+    {
+        echo "# Rendered by make setup-prereqs RENDER=<dir>, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "# Cluster read: ${ctx:-unknown} ${server}"
+        echo "# Controller namespace: ${WVA_NS}, scope: $(wva_install_scope)${WVA_WATCH_NS:+, manages: $WVA_WATCH_NS}"
+        echo "# Every object the cluster-admin phase creates or updates, in apply order."
+        echo "# admin.sh applies it."
+        while read -r _ _ key; do
+            if [ "$first" = true ]; then first=false; else echo "---"; fi
+            cat "$w/obj/$key.yaml"
+            case "$key" in secret__*) secrets=$((secrets + 1)) ;; esac
+        done < <(sort "$w/sorted")
+    } > "$out/admin.yaml"
+    [ "$secrets" -eq 0 ] || chmod 600 "$out/admin.yaml"
+    # Not `| grep -q`: under pipefail its early exit fails the producer.
+    case "$(wva_render_commands pre)" in
+        "helm upgrade "*|"helm install "*|*$'\n'"helm upgrade "*|*$'\n'"helm install "*) has_helm=true ;;
+    esac
+    {
+        echo "#!/usr/bin/env bash"
+        echo "# Rendered by make setup-prereqs RENDER=<dir>, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "# For cluster: ${ctx:-unknown} ${server}"
+        echo "# Controller namespace: ${WVA_NS}, scope: $(wva_install_scope)${WVA_WATCH_NS:+, manages: $WVA_WATCH_NS}"
+        echo "#"
+        echo "# The cluster-admin half of the scaling manager install. Review it, then"
+        echo "# run it as a cluster admin, against the cluster above:  bash admin.sh"
+        echo "# It needs kubectl$( [ "$has_helm" = true ] && echo " and helm") and admin.yaml beside it; no repository checkout."
+        echo "set -euo pipefail"
+        echo 'cd "$(dirname "$0")"'
+        echo 'echo "Applying the scaling manager prerequisites to: $(kubectl config current-context)"'
+        echo ""
+        if [ -n "$(ls -A "$w/pre.d")" ]; then
+            echo "# --- Before the objects ----------------------------------------------------"
+            if [ "$has_helm" = true ]; then
+                echo "# First pass: the namespaces, RBAC and Secrets the charts below need (the"
+                echo "# Prometheus TLS Secret, KEDA's namespace). Objects of kinds only those charts"
+                echo "# define cannot apply yet; they fail here and the second pass applies them."
+                echo "kubectl apply -f admin.yaml || true"
+            fi
+            wva_render_commands pre
+            echo ""
+        fi
+        echo "# --- The objects -----------------------------------------------------------"
+        echo "# Every object the cluster-admin phase creates or updates (admin.yaml)."
+        echo "kubectl apply -f admin.yaml"
+        if [ -n "$(ls -A "$w/post.d")" ]; then
+            echo ""
+            echo "# --- After the objects -----------------------------------------------------"
+            wva_render_commands post
+        fi
+        echo ""
+        echo 'echo "Done. The namespace owner can now install the controller: make deploy-wva INSTALL_PHASE=wva"'
+    } > "$out/admin.sh"
+    chmod +x "$out/admin.sh"
+    local forbidden=""
+    [ ! -s "$w/forbidden" ] || forbidden="$(sort -u "$w/forbidden")"
+    rm -rf "$w"
+
+    echo "" >&2
+    log_success "Rendered the cluster-admin phase for $WVA_NS into $out. Nothing was applied."
+    log_info "  admin.yaml: $(grep -c '^kind: ' "$out/admin.yaml" | tr -d ' ') objects"
+    grep -E '^kind: ' "$out/admin.yaml" | sort | uniq -c | sed 's/kind: //' | while read -r n line; do
+        log_info "      $n $line"
+    done
+    log_info "  admin.sh:   $(grep -cE '^(kubectl|helm) ' "$out/admin.sh" | tr -d ' ') commands"
+    grep -E '^(kubectl|helm) ' "$out/admin.sh" | while IFS= read -r line; do
+        log_info "      $(printf '%s' "$line" | cut -c1-150)"
+    done
+    if [ "$secrets" -gt 0 ]; then
+        log_warning "  admin.yaml holds $secrets Secret(s), private keys among them (it is mode 600). Hand it over privately, and delete it once it is applied."
+    fi
+    if [ -n "$forbidden" ]; then
+        # Forbidden is not absent: the live run, as an admin, would have seen
+        # these, and decided on what it saw.
+        log_warning "  Some reads were refused for you, so this render may differ from what a cluster admin's run would do:"
+        printf '%s\n' "$forbidden" | head -12 | while IFS= read -r line; do log_warning "      $line"; done
+        log_warning "  Get read access to them (docs/reference/configuration.md, RENDER) and render again, or have the admin check admin.sh closely."
+    fi
+    log_info "Give both files to a cluster admin, who reviews them and runs:"
+    log_info "    bash $out/admin.sh"
+}

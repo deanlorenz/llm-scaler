@@ -609,7 +609,7 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 define wva_phase
 	@echo "Phase '$(if $(1),$(1),auto)', $(SCOPE)-scoped$(if $(2), on $(2),)"
 	$(if $(filter prereqs,$(1)),,@echo "Image: $(IMG)")
-	$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
+	$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) $(if $(RENDER),RENDER=$(RENDER),) ./deploy/install.sh
 endef
 
 # wva_check: $(1)=ENVIRONMENT
@@ -648,7 +648,7 @@ ENVIRONMENT_INSTALL = $(if $(filter command line environment,$(origin ENVIRONMEN
 # downloaded kustomize was never used (the install runs `kubectl kustomize`).
 # Regenerating is a development step: `make manifests`.
 .PHONY: setup-prereqs
-setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
+setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster. RENDER=<dir> writes it for an admin (admin.yaml, admin.sh) and applies nothing; needs read rights only.
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
@@ -2912,6 +2912,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-kueue-queues.sh
 	@bash -n hack/check-cluster-controller-namespace.sh
 	@bash -n hack/check-llmd-monitors.sh
+	@bash -n hack/check-setup-prereqs-render.sh
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
@@ -3100,6 +3101,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking setup adds the monitors a fresh llm-d lacks, and flow control off is a warning..."
 	@# A fresh llm-d install has neither, and the preflight used to refuse it.
 	@bash hack/check-llmd-monitors.sh
+	@echo "Checking setup-prereqs RENDER writes admin.yaml and admin.sh and applies nothing..."
+	@# Runs install.sh against stub kubectl and helm. A render that makes one
+	@# write to the cluster parses perfectly and breaks the promise it exists for.
+	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-setup-prereqs-render.sh
 	@echo "Checking every image the e2e Go code names has a registry host..."
 	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
 	@bash hack/check-e2e-images.sh

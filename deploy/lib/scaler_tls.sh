@@ -526,6 +526,13 @@ EOF
 wva_scaler_tls_provision_cert_manager() {
     local d out rc=0 cert certs="wva-external-scaler-ca wva-external-scaler-client" secret
     [ "${ENVIRONMENT:-}" = openshift ] || certs="$certs wva-external-scaler"
+    # A render applies nothing, so cert-manager issues nothing, and KEDA's side
+    # needs the issued client Secret. openssl mints them in the render itself.
+    if declare -F wva_render_active >/dev/null && wva_render_active; then
+        wva_scaler_tls_give_up "RENDER cannot render certificates cert-manager would issue (KEDA's side copies the issued Secret). Re-run the render with WVA_SCALER_TLS_PROVIDER=openssl." \
+            "a render cannot wait for cert-manager to issue the certificates; re-run the render with WVA_SCALER_TLS_PROVIDER=openssl to keep TLS"
+        return 0
+    fi
     for cert in wva-external-scaler-selfsigned wva-external-scaler-ca; do
         wva_scaler_require_writable issuers.cert-manager.io "$cert"
     done

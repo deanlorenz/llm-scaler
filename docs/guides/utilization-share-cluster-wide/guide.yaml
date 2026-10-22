@@ -34,6 +34,14 @@ steps:
     note: Cluster admin, once. Installs KEDA only if the cluster has none.
     run: |
       make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true
+  render:
+    note: Not a cluster admin? Read-only. Writes the same step to admin-setup/ for an admin to run, and applies nothing.
+    run: |
+      make setup-prereqs SCOPE=cluster KEDA_HELM_INSTALL=true RENDER=admin-setup
+  adminrun:
+    note: The cluster admin, in the directory you gave them. No checkout needed.
+    run: |
+      bash admin-setup/admin.sh
   vars:
     note: "Option A: quota. The GPU product from step 5, and how many of its GPUs the models may hold together."
     run: |
