@@ -64,6 +64,26 @@ func TestRecordAnalyzerMetrics_GathersBorrowsAcrossAnalyzers(t *testing.T) {
 		"an analyzer that borrows nothing unpublished another's borrow")
 }
 
+// A variant one analyzer stops reporting while saturation still prices it has
+// not left, so its borrow stays published.
+func TestEvictStaleAnalyzerSeries_KeepsABorrowAnotherAnalyzerStillReports(t *testing.T) {
+	e, registry := engineConfigEngine(t)
+	k2 := map[string][]domain.LearnedStateBorrow{
+		"canary": {{Quantity: domain.BorrowedK2, Donor: "main"}},
+	}
+	e.recordAnalyzerMetrics("ns", "m", []allocation.NamedAnalyzerResult{
+		withBorrows(namedResult("saturation", nil, 5, "main", "canary"), k2),
+		namedResult("throughput", nil, 5, "main", "canary"),
+	})
+	e.recordAnalyzerMetrics("ns", "m", []allocation.NamedAnalyzerResult{
+		withBorrows(namedResult("saturation", nil, 5, "main", "canary"), k2),
+		namedResult("throughput", nil, 5, "main"),
+	})
+	assert.ElementsMatch(t, []string{"canary"},
+		seriesLabels(t, registry, constants.WVALearnedStateBorrowed, constants.LabelVariantName),
+		"one analyzer dropping the variant unpublished a borrow saturation still reports")
+}
+
 func TestEvictStaleAnalyzerSeries_DeletesTheBorrowOfADepartedVariant(t *testing.T) {
 	e, registry := engineConfigEngine(t)
 	k2 := map[string][]domain.LearnedStateBorrow{

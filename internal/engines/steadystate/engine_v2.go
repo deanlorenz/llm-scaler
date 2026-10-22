@@ -231,6 +231,20 @@ type analyzerSeries struct {
 	// analyzer: only the saturation analyzer prices a service rate.
 	serviceRate map[string]struct{}
 	pricingK    bool
+	// engineConfig holds the variants whose wva_engine_config series the
+	// model keeps this cycle: the ones published this cycle, and any an
+	// analyzer still reports. Per variant, never per (analyzer, variant): one
+	// analyzer dropping a variant that the model still runs must not take the
+	// configuration with it.
+	engineConfig map[string]struct{}
+}
+
+// engineConfigPublished is the set of variants publishEngineConfig recorded
+// for one model since the model's last recordAnalyzerMetrics.
+type engineConfigPublished struct {
+	namespace string
+	modelID   string
+	variants  map[string]struct{}
 }
 
 // recordAnalyzerMetrics publishes the wva_analyzer_demand / wva_analyzer_target
@@ -247,12 +261,20 @@ type analyzerSeries struct {
 // could tell it apart from a live reading.
 func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allocation.NamedAnalyzerResult) {
 	current := analyzerSeries{
-		namespace:   namespace,
-		modelID:     modelID,
-		demand:      make(map[analyzerDemandSeries]struct{}),
-		target:      make(map[analyzerTargetSeries]struct{}),
-		serviceRate: make(map[string]struct{}),
+		namespace:    namespace,
+		modelID:      modelID,
+		demand:       make(map[analyzerDemandSeries]struct{}),
+		target:       make(map[analyzerTargetSeries]struct{}),
+		serviceRate:  make(map[string]struct{}),
+		engineConfig: make(map[string]struct{}),
 	}
+	// The configuration published at the start of this cycle is kept whatever
+	// the analyzers report: a variant the cycle enumerated has not left.
+	modelKey := utils.GetNamespacedKey(namespace, modelID)
+	for variant := range e.publishedEngineConfig[modelKey].variants {
+		current.engineConfig[variant] = struct{}{}
+	}
+	delete(e.publishedEngineConfig, modelKey)
 	borrows := map[string][]domain.LearnedStateBorrow{}
 	// k2s holds, per variant, the entry that carries a k2 source, if any
 	// analyzer reported one; otherwise any entry, so the variant is still
@@ -276,6 +298,7 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerTarget(nr.Name, namespace, modelID, vc.VariantName, vc.PerReplicaCapacity)
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
+			current.engineConfig[vc.VariantName] = struct{}{}
 			borrows[vc.VariantName] = append(borrows[vc.VariantName], vc.Borrowed...)
 			if _, seen := k2s[vc.VariantName]; !seen || vc.K2Source != "" {
 				k2s[vc.VariantName] = vc
@@ -296,10 +319,10 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	// Per variant, not per analyzer: gathered across every analyzer that
 	// reported the variant this cycle, so one that borrows nothing does not
 	// unpublish another's borrow. Every reported variant is written,
-	// borrowing or not, which is what removes a borrow that ended. (A variant
-	// that one analyzer stops reporting while another still does has its
-	// borrow deleted by the eviction below and republished next cycle, as
-	// wva_engine_config is; only the saturation analyzer borrows today.)
+	// borrowing or not, which is what removes a borrow that ended. A variant
+	// that one analyzer stops reporting while another still does keeps its
+	// borrow: the eviction below deletes it only for a variant no analyzer
+	// reports.
 	for variant, b := range borrows {
 		e.metricsEmitter.RecordLearnedStateBorrows(namespace, modelID, variant, b)
 	}
@@ -331,6 +354,20 @@ func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerato
 		capacity.FingerprintVersion,
 		rec.EngineParams.FingerprintValues(),
 	)
+	if e.publishedEngineConfig == nil {
+		e.publishedEngineConfig = make(map[string]engineConfigPublished)
+	}
+	modelKey := utils.GetNamespacedKey(namespace, modelID)
+	published, ok := e.publishedEngineConfig[modelKey]
+	if !ok {
+		published = engineConfigPublished{
+			namespace: namespace,
+			modelID:   modelID,
+			variants:  make(map[string]struct{}),
+		}
+		e.publishedEngineConfig[modelKey] = published
+	}
+	published.variants[variantName] = struct{}{}
 }
 
 // acceleratorStabiliser is the part of the saturation analyzer the engine-config
@@ -668,14 +705,28 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			e.metricsEmitter.DeleteAnalyzerDemand(prev.analyzer, namespace, modelID, prev.role)
 		}
 	}
+	reported := make(map[string]struct{}, len(current.target))
+	for series := range current.target {
+		reported[series.variant] = struct{}{}
+	}
 	for prev := range e.lastAnalyzerSeries[modelKey].target {
 		if _, still := current.target[prev]; !still {
 			e.metricsEmitter.DeleteAnalyzerTarget(prev.analyzer, namespace, modelID, prev.variant)
 			e.metricsEmitter.DeleteAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant)
-			// The config series is per variant, not per analyzer, so this is
-			// idempotent when several analyzers report the same variant.
-			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
-			e.metricsEmitter.DeleteLearnedStateBorrows(namespace, modelID, prev.variant)
+			// The borrow series is per variant, not per analyzer: it goes
+			// only when no analyzer reports the variant any more.
+			if _, still := reported[prev.variant]; !still {
+				e.metricsEmitter.DeleteLearnedStateBorrows(namespace, modelID, prev.variant)
+			}
+		}
+	}
+	// So is the config series, and it goes only when the variant has left:
+	// not published this cycle and reported by no analyzer. Evicting it per
+	// (analyzer, variant) made it vanish for a cycle whenever any one
+	// analyzer stopped reporting a variant the model still runs.
+	for prev := range e.lastAnalyzerSeries[modelKey].engineConfig {
+		if _, still := current.engineConfig[prev]; !still {
+			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev)
 		}
 	}
 	for prev := range e.lastAnalyzerSeries[modelKey].serviceRate {
@@ -702,8 +753,16 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 // transient collection blip should not make the series flap in and out, and
 // staleness there is reported separately through the analyzer liveness signal.
 func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
-	if len(activeKeys) == 0 || e.lastAnalyzerSeries == nil {
+	if len(activeKeys) == 0 {
 		return
+	}
+	// A configuration published by a cycle that never reached
+	// recordAnalyzerMetrics is tracked only here.
+	for modelKey, published := range e.publishedEngineConfig {
+		if !activeKeys[modelKey] {
+			e.metricsEmitter.DeleteEngineConfigForModel(published.namespace, published.modelID)
+			delete(e.publishedEngineConfig, modelKey)
+		}
 	}
 	for modelKey, series := range e.lastAnalyzerSeries {
 		if !activeKeys[modelKey] {
@@ -724,6 +783,10 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 // Safe to call repeatedly — it empties its own bookkeeping, so subsequent idle
 // cycles are no-ops.
 func (e *Engine) evictAllAnalyzerSeries() {
+	for modelKey, published := range e.publishedEngineConfig {
+		e.metricsEmitter.DeleteEngineConfigForModel(published.namespace, published.modelID)
+		delete(e.publishedEngineConfig, modelKey)
+	}
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)

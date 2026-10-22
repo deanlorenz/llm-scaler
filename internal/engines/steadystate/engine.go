@@ -219,6 +219,13 @@ type Engine struct {
 	// sequentially in one goroutine and models are processed serially.
 	lastAnalyzerSeries map[string]analyzerSeries
 
+	// publishedEngineConfig records, per model (keyed identically), the
+	// variants whose wva_engine_config series was published since the model's
+	// last recordAnalyzerMetrics. That call folds them into the cycle's kept
+	// set and clears the entry. Unguarded for the same reason as
+	// lastAnalyzerSeries.
+	publishedEngineConfig map[string]engineConfigPublished
+
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky
