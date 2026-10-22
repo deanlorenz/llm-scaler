@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -28,12 +29,15 @@ import (
 // GPUs as its largest node has -- and whose pod template sets no
 // priorityClassName. A LeaderWorkerSet is listed when its leader or worker
 // template sets none. Nil without a node picture: the optimizer then frees no
-// node.
+// node. A node is the group's by accelerator.SameName, as node-aware planning
+// matches it: the group takes the budget's spelling ("H200"), the node its
+// label's ("NVIDIA-H200"). A cordoned node counts, so cordoning one for
+// maintenance does not change the list.
 func shareWholeNodeUnprioritized(g allocation.ShareGroup, nodes map[string]decision.NodeGPU,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor) []string {
 	largest := 0
 	for _, n := range nodes {
-		if n.Accelerator == g.AcceleratorType {
+		if accelerator.SameName(n.Accelerator, g.AcceleratorType) {
 			largest = max(largest, n.Capacity)
 		}
 	}

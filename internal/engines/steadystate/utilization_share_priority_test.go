@@ -76,6 +76,15 @@ func TestShareWholeNodeUnprioritized(t *testing.T) {
 	if want := []string{"ns/g-decode", "ns/l-decode"}; !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
+	// The nodes spell the accelerator as their label does, the group as its
+	// budget does: they are still the group's nodes.
+	labelled := map[string]decision.NodeGPU{
+		"n1": {Accelerator: "NVIDIA-H100", Capacity: 8},
+		"a1": {Accelerator: "NVIDIA-A100", Capacity: 16},
+	}
+	if got := shareWholeNodeUnprioritized(g, labelled, accessor); !slices.Equal(got, []string{"ns/g-decode", "ns/l-decode"}) {
+		t.Fatalf("nodes labelled NVIDIA-H100: got %v", got)
+	}
 	// Nodes of the group's accelerator are larger than any pod: no pod needs
 	// a whole node.
 	nodes["n1"] = decision.NodeGPU{Accelerator: "H100", Capacity: 16}
@@ -145,5 +154,38 @@ func TestUtilizationShareWarnsOfAWholeNodeReceiverWithNoPriorityClass(t *testing
 				t.Fatalf("warned naming ns/B-v = %v, want %v; lines %v", got, tc.want, warned)
 			}
 		})
+	}
+}
+
+// A node picture that lapses and returns does not log the warning again: the
+// set did not change, only whether it could be read.
+func TestUtilizationShareWholeNodeWarningSurvivesALapsedNodePicture(t *testing.T) {
+	nf := newNodeFleet(t)
+	ctx, logs := observe(t)
+	nf.se.ctx = ctx
+	cycle := func(publish bool) {
+		nf.se.clock = nf.se.clock.Add(3 * time.Minute)
+		if publish {
+			nf.se.e.utilizationShare.nodes.Publish(nf.nodes, nf.se.clock)
+		}
+		out := nf.f.requests()
+		for i := range out {
+			st := &out[i].VariantStates[0]
+			st.PodGPUs = []int{1}
+			if out[i].ModelID == "B" {
+				st.GPUsPerReplica, st.PodGPUs = 2, []int{2}
+			}
+		}
+		targets := nf.f.scaleTargets()
+		targets["ns/B-v"] = gpuDeployment("B-decode", 2, "")
+		quota := []*allocation.ResourceConstraints{{Pools: map[string]allocation.ResourcePool{
+			"A100": {Limit: 16, Used: 16}}}}
+		nf.se.e.evaluateUtilizationShare(nf.se.ctx, out, quota, targets)
+	}
+	cycle(true)
+	cycle(false) // the snapshot is now older than NodeGPUsMaxAge
+	cycle(true)
+	if n := len(logs.FilterMessageSnippet("set no priorityClassName").All()); n != 1 {
+		t.Fatalf("want the warning once across a lapsed node picture, got %d", n)
 	}
 }
