@@ -194,8 +194,10 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 	soG, soS1, soS2 := msG+"-so", msS1+"-so", msS2+"-so"
 	var e *wholeNodeEnv
 	var packed string
+	var setUp time.Time
 
 	BeforeAll(func() {
+		setUp = time.Now()
 		e = setUpWholeNode("uwf-", 3)
 		restore, err := fixtures.SetNamespaceQuota(ctx, k8sClient, cfg.WVANamespace, scalingPolicyConfigMapName(),
 			e.ns, e.product, quotaGPUs, fixtures.WithOptimizer(map[string]any{"type": "utilizationShare"}))
@@ -286,6 +288,10 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 				wnMeasure("long start: effective "+p+" (s)", v)
 			}
 		}
+
+		By("G, a whole-node model at no PriorityClass, is named by the controller's warning (issue #234)")
+		Expect(controllerLogsSince(setUp)).To(MatchRegexp(`set no priorityClassName.*`+e.ns+"/"+msG),
+			"no whole-node priority warning names G")
 	})
 })
 
