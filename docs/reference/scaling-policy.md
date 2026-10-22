@@ -1335,12 +1335,15 @@ them, and these limits apply:
 - One cycle adds at most as many replicas as are ready, so the fleet at most
   doubles per replica start.
 - It does not add prefill while decode is still full.
+- It only rises. A lower reading, taken behind a full decode after prefill
+  grew, does not lower it.
 - Prefill's own measurement replaces it.
 
 Because the bound is low, prefill can end up larger than its load needs. In
 the worst case, the extra is the ratio between what prefill can really do and
-what it was seen doing behind a full decode. Turn the bound off when that costs
-you.
+the highest rate it was seen doing behind a full decode. A prefill that large
+rarely queues on its own, so the extra can last until you reset the variant's
+learned state. Turn the bound off when that costs you.
 
 ```yaml
 llama-8b-prod:

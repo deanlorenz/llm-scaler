@@ -166,7 +166,7 @@ no reading of its own. The router's arrival rate then grows prefill before its
 queue forms.
 
 A lower bound can only make the floor ask for too much prefill, never too
-little. Four limits keep that small:
+little. These limits keep that small:
 
 - It needs two readings a minute apart before it may grow prefill. With one,
   it only holds.
@@ -174,6 +174,8 @@ little. Four limits keep that small:
   for the new replicas to become ready.
 - While decode is still saturated, prefill is held as before, so the bound
   does not add prefill for decode's shortfall.
+- The bound only rises. A later reading behind a full decode is lower once
+  prefill has grown, and does not replace a higher one.
 - Prefill's own reading replaces the bound as soon as prefill saturates while
   decode is fine.
 

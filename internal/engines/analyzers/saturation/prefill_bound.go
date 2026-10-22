@@ -30,7 +30,8 @@ import (
 // -- its own compute, or decode's admission -- so the computed-token rate it
 // shows then is AT MOST what it can sustain. That is a lower bound on mu, and
 // the max of lower bounds is the tightest one; so this window reads its MAX,
-// where the measured window reads a median.
+// where the measured window reads a median, and a lower reading never
+// displaces a higher one (notePrefillBound).
 //
 // The error goes one way. The floor divides by mu, so a bound under-reading
 // the true rate by a factor f over-orders prefill by f. What bounds it:
@@ -113,10 +114,29 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	saturated := rm.BusiestRankQueue() >= int(cfg.QueueLengthThreshold) && rm.BusiestRankTokens() > 0
 	if saturated && adm.serving() && rm.PrefillComputedTokenRate > 0 && ileff > 0 {
 		rate := rm.PrefillComputedTokenRate / ileff
+		a.mu.Lock()
+		var prior float64
+		if ra, ok := a.saturatedThroughput[key]; ok {
+			prior = ra.Max()
+		}
+		a.mu.Unlock()
 		a.recordSaturatedThroughput(key, rate)
 		a.mu.Lock()
-		if _, ok := a.saturatedThroughput[key]; ok && args != "" {
-			a.throughputWindowArgs[key] = args
+		if ra, ok := a.saturatedThroughput[key]; ok {
+			if args != "" {
+				a.throughputWindowArgs[key] = args
+			}
+			// The bound only rises. A reading behind a full decode is
+			// decode's admission shared over the prefill fleet, so one taken
+			// after the bound grew that fleet is lower by the growth, and
+			// letting it evict the higher reading (the ring holds ten, and a
+			// write after EpisodeGap starts a new window) re-priced prefill
+			// on the smaller figure: every decode episode at the same load
+			// grew prefill again, by at least 1/scaleUp. Each reading is a
+			// lower bound on the same rate, so the highest one stays true.
+			if ra.Max() < prior {
+				ra.RaiseLast(prior)
+			}
 		}
 		a.mu.Unlock()
 		logger.V(logging.DEFAULT).Info("prefill-throughput-bound-reading",

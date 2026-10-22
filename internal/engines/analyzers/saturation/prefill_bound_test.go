@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -219,6 +220,46 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		for _, o := range orders {
 			Expect(o).To(BeNumerically("<=", 2), "no cycle more than doubles the ready fleet")
 		}
+	})
+
+	// Decode saturates again and again at one load, serving all of it. Each
+	// episode's readings are decode's admission shared over the prefill fleet
+	// the bound had grown, so they read lower than the last episode's; ten of
+	// them fill the ring. Were the lowest reading to price prefill, every
+	// episode would grow the fleet by 1/scaleUp at least: 5, 6, 8, 10 on this
+	// fixture. The bound keeps its highest reading, so the fleet stays put.
+	It("does not grow prefill again on each decode episode at the same load", func() {
+		lambda := 2 * runLambda
+		n := 4
+		var fleets []int
+		for episode := 0; episode < 4; episode++ {
+			for i := 0; i < 10; i++ {
+				clock = clock.Add(ThroughputSampleSpacing)
+				rows := decodeFull()
+				for j := 0; j < n; j++ {
+					rows = append(rows, prefill(fmt.Sprintf("prefill-%d", j), 30, 357_800,
+						lambda*promptTokens/float64(n)*(1-0.001*float64(i))))
+				}
+				run(rows, states(n, 0), lambda)
+			}
+			recover()
+			ready, pending := n, 0
+			for cycle := 0; cycle < 10; cycle++ {
+				clock = clock.Add(15 * time.Second)
+				rows := decodeCoping()
+				for j := 0; j < ready; j++ {
+					rows = append(rows, prefill(fmt.Sprintf("prefill-%d", j), 0, 20_000,
+						lambda*promptTokens/float64(ready)))
+				}
+				order := prefillOrder(run(rows, states(ready, pending), lambda), ready, pending)
+				ready += pending
+				pending = order
+			}
+			n = ready + pending
+			fleets = append(fleets, n)
+		}
+		// 12 / 3 / 0.85 = 4.7: five, on the first episode's bound of 3 req/s.
+		Expect(fleets).To(Equal([]int{5, 5, 5, 5}))
 	})
 
 	It("orders nothing on a bound while decode is still saturated: the prefill hold stands", func() {
