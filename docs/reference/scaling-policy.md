@@ -830,10 +830,12 @@ arrival rate. Otherwise it is priced against its KV memory, and memory is not
 what limits prefill: compute throughput is. A prefill finishes fast and hands
 its KV to decode, so few tokens are resident at any instant, and the need reads
 small even for long prompts. A queue that builds while decode is saturated too
-is not learned from, because prefill then waits on decode. And what is learned
-does not last: it is kept in the controller's memory only, per band of prompt
-length, so a restart, a leader change or a shift in prompt length puts prefill
-back on KV-memory pricing until it queues on its own again. In the one P/D
+is not taken as prefill's capacity, because prefill then waits on decode. It
+is kept as a lower bound instead, which lets the router's arrival rate grow
+prefill (see [`disablePrefillThroughputBound`](#disableprefillthroughputbound)).
+What is learned is kept per band of prompt length, so a shift in prompt length
+puts prefill back on KV-memory pricing until it queues again, and a restart
+keeps it only with `LEARNED_STATE_SNAPSHOT` set. In the one P/D
 benchmark attempt prefill never queued on its own and never left one replica
 under 15 000-token prompts
 ([why](../well-lit-paths/utilization-share/measured.md#an-earlier-attempt-on-one-model)).
@@ -1313,6 +1315,51 @@ llama-8b-prod:
   `default:` entry turned it off.
 - To discard what one variant has learned, rather than stop it borrowing, see
   [Reset one variant's learned state](troubleshooting.md#reset-one-variants-learned-state).
+
+### `disablePrefillThroughputBound`
+
+Stops the throughput floor from sizing prefill on a **lower bound**. This
+matters for P/D models only.
+
+The bound is the prompt-token rate a prefill replica showed while its queue was
+full and its own rate could not be recorded, usually because decode was full
+too. Prefill can do at least that much. With the bound, the router's arrival
+rate grows prefill before its queue builds. Without it, prefill has no floor
+until it saturates while decode is fine, and grows only once its queue builds.
+
+**The bound is on by default.** It can only add prefill replicas, never remove
+them, and these limits apply:
+
+- It needs two readings a minute apart before it adds any replica. With one,
+  it only holds the fleet.
+- One cycle adds at most as many replicas as are ready, so the fleet at most
+  doubles per replica start.
+- It does not add prefill while decode is still full.
+- Prefill's own measurement replaces it.
+
+Because the bound is low, prefill can end up larger than its load needs. In
+the worst case, the extra is the ratio between what prefill can really do and
+what it was seen doing behind a full decode. Turn the bound off when that costs
+you.
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  disablePrefillThroughputBound: true
+```
+
+- It takes effect on the next cycle. The `Effective scaling policy` log line
+  shows what the model resolved `disablePrefillThroughputBound` to.
+- The bound is kept with the rest of the learned state, so it survives a
+  restart when `LEARNED_STATE_SNAPSHOT` is set. It is dropped when the
+  variant's engine arguments change.
+- One direction only, like `disableK2Borrow`: a per-model entry can turn the
+  bound off where the default leaves it on, but not back on where the
+  `default:` entry turned it off.
+- To see when the bound is in use, read `lowerBound` on the
+  [`throughput-demand-floor`](cycle-log.md#throughput-demand-floor) line, or
+  `wva_service_rate_per_replica{source="lower-bound"}`.
 ### `slo` (observe only)
 
 Latency targets, and the analyzer that judges a model against them. **On this
