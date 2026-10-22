@@ -705,17 +705,21 @@ one planning cycle to see the release, the KEDA poll and HPA sync that raise the
 receiver, scheduling, and the receiver's model load -- often 3 to 10 minutes for
 a large model.
 
-**Whole-node models: the freed node is not reserved.** Between the donor's pod
-going and the receiver's pod being created -- a planning cycle, a KEDA poll and
-an HPA sync, typically 30 to 75 seconds -- the freed node is free to anyone.
-Today's optimizer does not scale models into GPUs promised to a receiver, but a
-pod from outside the controller's view (another tenant, a training job) can take
-it, and one 1-GPU pod is enough to spoil an 8-GPU hole. The transfer then ends
-`fill-timeout` with `release-taken`. Give share-group receivers a
-`PriorityClass` above the cluster's other GPU workloads, so the scheduler places
-their Pending pod first, and see
-[proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)
-for raising the receiver earlier. An idle model is not
+**Whole-node models: give them a `PriorityClass`.** A node freed for a
+whole-node model opens one GPU at a time as the donors' pods go, and the
+model's pod fits only once all of them are free. The scheduler holds nothing
+for a Pending pod of the same priority, so any Pending pod that needs fewer
+GPUs (another tenant, a training job, one 1-GPU pod is enough) takes the
+first GPU. The transfer then ends `fill-timeout` with `release-taken`, and the
+donors have shrunk for nothing. Set `priorityClassName` on the whole-node
+model's pod template, naming a `PriorityClass` above the cluster's other GPU
+pods, with the default `preemptionPolicy` (`PreemptLowerPriority`; `Never` does
+not help). The model's Pending pod then evicts the pod that took the GPU, and
+the scheduler keeps the node for it. The cost: a Pending pod of that model
+evicts lower-priority pods whenever it waits, for any reason, including pods
+the scaling manager does not manage. That is the cluster owner's call. The
+controller logs `whole-node models set no priorityClassName` and names them
+while node-aware planning is on. An idle model is not
 shrunk to its floor: it stays at its headroom target, its weighted share of
 the spare GPUs. While the quota is contended, that share is at most its need
 rounded up to whole replicas plus `maxHeadroomReplicas` (one by default) times

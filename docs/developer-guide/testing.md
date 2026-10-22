@@ -391,9 +391,13 @@ The specs:
   once it first does, while the small models return their spare. Then,
   with the optimizer off and room in the quota, today's optimizer orders a G
   replica that stays Pending.
-- **A released node taken.** Same layout as "funded", plus a pause pod
-  waiting for one GPU on the small models' node. The transfer must end
-  `fill-timeout` with `release-taken`, and G's raise is undone.
+- **A released node taken** (issue #234). Same layout as "funded", plus a
+  pause pod waiting for one GPU on the small models' node, and G at a
+  `PriorityClass` the spec creates. The pause pod takes the first GPU freed;
+  G's raised pod preempts it, the transfer ends `done`, and G runs two
+  replicas. Without the class it ends `fill-timeout` with `release-taken`.
+  "Funded" checks the controller's warning naming G, which has no class;
+  this spec checks it does not name G.
 - **A two-node LeaderWorkerSet** (`utilization_share_wholenode_lws_test.go`).
   G has two groups of two 8-GPU pods. It lends its highest group to S1, then
   gets a group back.

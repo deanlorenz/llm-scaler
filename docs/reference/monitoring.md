@@ -333,6 +333,8 @@ Notes on these alerts:
     enough for the model's largest pod. Expires one release timeout later.
   - `release-taken`: a transfer's GPUs came free, and a pod the scaling
     manager did not place took them first. Expires one release timeout later.
+    For a whole-node model, a `PriorityClass` on its pods prevents it (see
+    [whole-node models](scaling-policy.md)).
 
   `donors-at-floor` and `quota-short` are not on the list: they mean no model
   has GPUs to give, not that a node cannot hold the replica. See

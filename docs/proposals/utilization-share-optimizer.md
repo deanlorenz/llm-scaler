@@ -3179,14 +3179,24 @@ Decided, not built here:
   after giving. Not fixed; a demand signal that discounts a draining backlog
   is the fix. Until then, an owner who cannot accept starting a burst short
   keeps a floor (`minReplicaCount`) sized for the burst.
-- **Raise the receiver when its donor pod starts terminating.** Today the
-  receiver is raised when the donor's pod is gone, so for 30 to 75 seconds a
-  freed whole node has no receiver pod queued for it, and any Pending GPU pod
-  in the cluster can take it (the transfer ends `release-taken`). Raising at
-  the donor pod's `deletionTimestamp` queues the receiver's pod through the
-  drain; it needs the ResourceQuota admission of a pod created while its
-  donor still terminates checked first, since a refused create would only move
-  the race. Until then, receivers should run at a higher `PriorityClass`.
+- **A freed whole node is held only by priority (issue #234).** The receiver
+  is raised when the donors' pods are gone, and any Pending GPU pod in the
+  cluster can take a GPU of the freed node first (the transfer ends
+  `release-taken`). Raising the receiver earlier, at the donor pod's
+  `deletionTimestamp`, would not fix this, as an earlier draft of this item
+  claimed. The node opens one GPU at a time, the receiver's pod fits only
+  once all are free, and the scheduler holds nothing for a Pending pod of
+  equal priority: a waiting pod that needs one GPU takes the first, however
+  long the receiver's pod has been queued. Placeholder pods lose the same
+  race, or are rejected by the kubelet when bound before the GPU is free, and
+  would need a create grant on pods. Only priority closes it: a receiver at a
+  higher `PriorityClass` (default `preemptionPolicy`) preempts the pod that
+  took the GPU and is nominated to the node, which the scheduler then keeps
+  from lower-priority pods. The class is the owner's to set, since such a pod
+  evicts lower-priority pods whenever it waits; the controller logs the
+  whole-node models that have none (`whole-node models set no
+  priorityClassName`). The whole-node kind e2e "a released node taken" runs G
+  at a class and expects the transfer to end `done`.
 - **Resource-aware holes.** The node picture (`decision.NodeGPU`) and
   `ShareCovers` read GPUs only. A receiver needing more CPU, memory, hugepages
   or RDMA devices than its donor freed is planned into a hole it cannot use,

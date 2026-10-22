@@ -799,7 +799,12 @@ install again here later, step 12 tells you to restart it then.
   Without it, each namespace gets its own budget of `GPUS`.
 - **The cluster's GPUs as the budget.** A GPU the models give up can be taken
   by any other pod. The receiver then shows the blocked reason
-  `release-taken`. Events still say "quota group".
+  `release-taken`. Events still say "quota group". For a whole-node model,
+  set `priorityClassName` on its pod template, naming a `PriorityClass` above
+  the cluster's other GPU pods: its Pending pod then evicts the pod that took
+  the GPU. It also evicts lower-priority pods whenever it waits, including
+  pods the scaling manager does not manage, so it is the cluster owner's
+  call. See [whole-node models](../../reference/scaling-policy.md).
 - **The budget caps only what this controller places.** It does not stop
   other pods. Back it with a Kubernetes `ResourceQuota` where that matters.
 - **Kueue as the budget (option C).** The budget is the GPU `nominalQuota` of
