@@ -20,10 +20,11 @@ import (
 // case must still go. Without the second half a Touch that never expired
 // anything would pass the first, and the leak would be back.
 //
-// Note on the clock: RollingAverage.Stale reads wall-clock time.Since, which
-// no test can inject. So "a cycle later" is staged by aging the window with
-// TouchAt and then asserting against a one-second timeout -- the window was
-// either refreshed by the read just now or it was not.
+// Note on the clock: RollingAverage.Stale reads wall-clock time.Since (the
+// sweep reads StaleAt on the analyzer's clock instead). So "a cycle later" is
+// staged by aging the window with TouchAt and then asserting Stale against a
+// one-second timeout -- the window was either refreshed by the read just now
+// or it was not.
 var _ = Describe("learned state ages on last use, not last write", func() {
 	const (
 		ns      = "ns"
