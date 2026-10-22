@@ -249,7 +249,7 @@ func TestChangeReporter_TheEffectivePolicyChangesWithThePrefillBoundSwitch(t *te
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	first := r.seen["effective|ns|m"]
 
-	cfg.DisablePrefillThroughputBound = true
+	cfg.EnablePrefillThroughputBound = true
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
-	assert.NotEqual(t, first, r.seen["effective|ns|m"], "turning the prefill bound off must be reported")
+	assert.NotEqual(t, first, r.seen["effective|ns|m"], "turning the prefill bound on must be reported")
 }

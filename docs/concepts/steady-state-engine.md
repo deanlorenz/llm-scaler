@@ -159,7 +159,8 @@ reading taken then measures decode, so it is not kept as prefill's mu. Without
 a mu the floor has nothing for prefill, and prefill grows only once its own
 queue builds.
 
-The engine keeps that reading as a **lower bound** instead. A prefill replica
+With `enablePrefillThroughputBound` on, the engine keeps that reading as a
+**lower bound** instead. A prefill replica
 that is queued computes prompt tokens as fast as something lets it, so its
 rate is at least that. The floor prices prefill on the bound when prefill has
 no reading of its own. The router's arrival rate then grows prefill before its
@@ -179,8 +180,10 @@ little. These limits keep that small:
 - Prefill's own reading replaces the bound as soon as prefill saturates while
   decode is fine.
 
-It is on by default. Turn it off per model with
-[`disablePrefillThroughputBound`](../reference/scaling-policy.md#disableprefillthroughputbound).
+It is off by default. Turn it on for every model or for one with
+[`enablePrefillThroughputBound`](../reference/scaling-policy.md#enableprefillthroughputbound).
+Its extra prefill lasts until the variant's learned state is reset, because a
+prefill held that large rarely queues on its own.
 
 ### 3. The scaling signal
 

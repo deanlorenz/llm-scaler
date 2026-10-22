@@ -46,7 +46,8 @@ import (
 //     saturated the prefill hold (holdPrefillDemand) still clamps prefill, so
 //     the bound cannot order prefill for decode's shortfall -- the 33
 //     GPU-minutes computeK2's comment records came of exactly that;
-//   - disablePrefillThroughputBound turns it off for a model.
+//   - it is off unless enablePrefillThroughputBound turns it on; off,
+//     nothing is recorded or read.
 //
 // Without a bound on record nothing changes: no window, no term, the floor
 // prices prefill as it did.
@@ -86,7 +87,7 @@ type prefillBoundReading struct {
 // notePrefillBound records a prefill replica's lower bound when its queue is
 // saturated, and returns the bound on record for its key. Called for every
 // prefill replica the analyzer prices; a no-op returning nothing when the
-// model turned the bound off, the role is not prefill, or the key has no
+// model has not turned the bound on, the role is not prefill, or the key has no
 // bound shape.
 //
 // Recorded only from a SERVING row -- Ready, the variant's own, not mid-
@@ -101,7 +102,7 @@ type prefillBoundReading struct {
 // window it stands in for.
 func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *config.ScalingPolicy,
 	role, throughputKey, args string, ileff float64, adm admission, logger logr.Logger) prefillBoundReading {
-	if cfg.DisablePrefillThroughputBound || domain.CanonicalRole(role) != domain.RolePrefill {
+	if !cfg.EnablePrefillThroughputBound || domain.CanonicalRole(role) != domain.RolePrefill {
 		return prefillBoundReading{}
 	}
 	key := prefillBoundKey(throughputKey)

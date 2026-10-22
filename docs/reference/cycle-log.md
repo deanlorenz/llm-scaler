@@ -146,7 +146,7 @@ cycles of a fleet that is coping have none.
 | `heldAtFleet` | `true` when the floor was capped at what the current fleet supplies at the scale-up threshold: it may hold the fleet up, but not order more replicas |
 | `heldWhy` | why it was capped; see below. Empty when `heldAtFleet` is `false` |
 | `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |
-| `lowerBound`, `growthCapped` | `lowerBound` is `true` when prefill's rate is a lower bound, learned while prefill queued behind a full decode (see [`disablePrefillThroughputBound`](scaling-policy.md#disableprefillthroughputbound)). `growthCapped` is `true` when the floor on that bound was cut to twice the ready prefill fleet |
+| `lowerBound`, `growthCapped` | `lowerBound` is `true` when prefill's rate is a lower bound, learned while prefill queued behind a full decode (only with [`enablePrefillThroughputBound`](scaling-policy.md#enableprefillthroughputbound) on). `growthCapped` is `true` when the floor on that bound was cut to twice the ready prefill fleet |
 | `orderedBehindQueue`, `queueJustifiedReplicas` | whether a held floor still ordered behind a standing queue, and how many replicas the queue was worth when it did |
 
 On a disaggregated fleet the per-role lines do not add up to the model's

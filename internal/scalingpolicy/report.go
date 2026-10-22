@@ -162,7 +162,7 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 		// Reported for the opposite reason: it is the switch an operator
 		// reaches for in an incident, and needs to see take effect.
 		"disableK2Borrow", cfg.DisableK2Borrow,
-		"disablePrefillThroughputBound", cfg.DisablePrefillThroughputBound,
+		"enablePrefillThroughputBound", cfg.EnablePrefillThroughputBound,
 		// The SLO targets and whether the analyzer that reads them is listed:
 		// both halves resolve through the overlay separately, and this is the
 		// one place that shows the model ended up with both.
@@ -192,7 +192,7 @@ func formatBand(cfg config.ScalingPolicy) string {
 	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%t|%t|%s",
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
 		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse, cfg.DisableK2Borrow,
-		cfg.DisablePrefillThroughputBound, cfg.SLOSummary())
+		cfg.EnablePrefillThroughputBound, cfg.SLOSummary())
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

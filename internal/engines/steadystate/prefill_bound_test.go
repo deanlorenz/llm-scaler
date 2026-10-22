@@ -66,9 +66,10 @@ func pbStore() *capacity.Store {
 	return store
 }
 
-// pbCycle runs one analyzer cycle and the engine's capacity build, and returns
-// the prefill role's required capacity in replicas.
-func pbCycle(t *testing.T, a *saturation.SaturationAnalyzer, lambda float64,
+// pbCycle runs one analyzer cycle and the engine's capacity build, with the
+// prefill bound on or off, and returns the prefill role's required capacity
+// in replicas.
+func pbCycle(t *testing.T, a *saturation.SaturationAnalyzer, on bool, lambda float64,
 	rows ...domain.ReplicaMetrics) float64 {
 	t.Helper()
 	count := map[string]int{}
@@ -87,7 +88,8 @@ func pbCycle(t *testing.T, a *saturation.SaturationAnalyzer, lambda float64,
 	in := domain.AnalyzerInput{ModelID: "test-model", Namespace: "test-ns", ReplicaMetrics: rows,
 		VariantStates: states, ArrivalRate: lambda,
 		Config: &config.ScalingPolicy{KvCacheThreshold: 0.8, QueueLengthThreshold: 5, AnalyzerName: "saturation",
-			ScaleUpThreshold: pbScaleUp, ScaleDownBoundary: pbScaleDown}}
+			ScaleUpThreshold: pbScaleUp, ScaleDownBoundary: pbScaleDown,
+			EnablePrefillThroughputBound: on}}
 	ctx := logr.NewContext(context.Background(), logr.Discard())
 	res, err := a.Analyze(ctx, in)
 	require.NoError(t, err)
@@ -110,10 +112,10 @@ func pbCycle(t *testing.T, a *saturation.SaturationAnalyzer, lambda float64,
 // second time, a little lower, to stand for the second rate window a minute
 // later -- the analyzer's own clock is not reachable from this package, and
 // the floor needs two spaced readings before it may order.
-func pbLearnAndRestart(t *testing.T) *saturation.SaturationAnalyzer {
+func pbLearnAndRestart(t *testing.T, on bool) *saturation.SaturationAnalyzer {
 	t.Helper()
 	first := saturation.NewSaturationAnalyzer(pbStore())
-	pbCycle(t, first, 6,
+	pbCycle(t, first, on, 6,
 		pbDecode("d-0", 970_475, 36), pbDecode("d-1", 1_039_474, 81),
 		pbPrefill("p-0", 357_800, 30, 4*pbPrompt))
 	s := first.ExportLearnedState()
@@ -138,8 +140,8 @@ func pbLearnAndRestart(t *testing.T) *saturation.SaturationAnalyzer {
 }
 
 func TestPrefillBoundOrdersPrefillBeforeItsQueueForms(t *testing.T) {
-	a := pbLearnAndRestart(t)
-	required := pbCycle(t, a, 12,
+	a := pbLearnAndRestart(t, true)
+	required := pbCycle(t, a, true, 12,
 		pbDecode("d-0", 300_000, 0), pbDecode("d-1", 280_000, 0),
 		pbPrefill("p-0", 20_000, 0, 12*pbPrompt))
 	// D = 0.85 x 2 x P (the growth cap), RC = D / 0.85 - 1 = 1.
@@ -149,8 +151,8 @@ func TestPrefillBoundOrdersPrefillBeforeItsQueueForms(t *testing.T) {
 func TestPrefillBoundOrdersNothingAtTheLoadItWasLearnedAt(t *testing.T) {
 	// 6 req/s on two prefill replicas against a bound of 4: 1.5 replicas'
 	// worth, 1.76 of supply -- inside the two the fleet has.
-	a := pbLearnAndRestart(t)
-	required := pbCycle(t, a, 6,
+	a := pbLearnAndRestart(t, true)
+	required := pbCycle(t, a, true, 6,
 		pbDecode("d-0", 300_000, 0), pbDecode("d-1", 280_000, 0),
 		pbPrefill("p-0", 20_000, 0, 3*pbPrompt), pbPrefill("p-1", 20_000, 0, 3*pbPrompt))
 	assert.Zero(t, required)
@@ -161,7 +163,20 @@ func TestPrefillBoundWithoutABoundOrdersNothing(t *testing.T) {
 	// the floor has no prefill term, and an empty queue orders nothing. This
 	// is the behaviour without router-priced prefill, and with the bound off.
 	a := saturation.NewSaturationAnalyzer(pbStore())
-	required := pbCycle(t, a, 12,
+	required := pbCycle(t, a, true, 12,
+		pbDecode("d-0", 300_000, 0), pbDecode("d-1", 280_000, 0),
+		pbPrefill("p-0", 20_000, 0, 12*pbPrompt))
+	assert.Zero(t, required)
+}
+
+// TestPrefillBoundOffIsTheDefaultAndOrdersNothing: the same back-pressure
+// episode, restart and surge with the bound off -- its default -- order no
+// prefill on the empty queue, which is the behaviour before the bound
+// existed. TestPrefillBoundOrdersPrefillBeforeItsQueueForms is the same run on.
+func TestPrefillBoundOffIsTheDefaultAndOrdersNothing(t *testing.T) {
+	require.False(t, config.ScalingPolicy{}.EnablePrefillThroughputBound, "the bound is opt-in")
+	a := pbLearnAndRestart(t, false)
+	required := pbCycle(t, a, false, 12,
 		pbDecode("d-0", 300_000, 0), pbDecode("d-1", 280_000, 0),
 		pbPrefill("p-0", 20_000, 0, 12*pbPrompt))
 	assert.Zero(t, required)

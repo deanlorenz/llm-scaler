@@ -85,20 +85,27 @@ func TestMergeCarriesDisableK2Borrow(t *testing.T) {
 	})
 }
 
-// TestMergeCarriesDisablePrefillThroughputBound: the prefill bound's switch is
-// per model, like the borrow's, and the bound is on by default.
-func TestMergeCarriesDisablePrefillThroughputBound(t *testing.T) {
-	t.Run("a per-model override turns the bound off", func(t *testing.T) {
-		base := ScalingPolicy{}
-		base.Merge(ScalingPolicy{DisablePrefillThroughputBound: true})
-		if !base.DisablePrefillThroughputBound {
-			t.Error("an override that disables the prefill bound must survive Merge")
+// TestMergeCarriesEnablePrefillThroughputBound: the prefill bound is off by
+// default, and either a `default:` entry or a model's own entry turns it on.
+func TestMergeCarriesEnablePrefillThroughputBound(t *testing.T) {
+	t.Run("the zero value leaves the bound off", func(t *testing.T) {
+		var p ScalingPolicy
+		if p.EnablePrefillThroughputBound {
+			t.Error("the prefill bound is opt-in")
 		}
 	})
-	t.Run("the zero value leaves the bound on", func(t *testing.T) {
-		var p ScalingPolicy
-		if p.DisablePrefillThroughputBound {
-			t.Error("the prefill bound can only order more prefill, and is on by default")
+	t.Run("a per-model override turns the bound on", func(t *testing.T) {
+		base := ScalingPolicy{}
+		base.Merge(ScalingPolicy{EnablePrefillThroughputBound: true})
+		if !base.EnablePrefillThroughputBound {
+			t.Error("an override that enables the prefill bound must survive Merge")
+		}
+	})
+	t.Run("a default entry that turns it on reaches a model that says nothing", func(t *testing.T) {
+		base := ScalingPolicy{EnablePrefillThroughputBound: true}
+		base.Merge(ScalingPolicy{ScaleUpThreshold: 0.9})
+		if !base.EnablePrefillThroughputBound {
+			t.Error("an override silent on the bound must not turn it off")
 		}
 	})
 }

@@ -40,6 +40,8 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		analyzer *SaturationAnalyzer
 		ctx      context.Context
 		clock    time.Time
+		// rateSources is every prefill service-rate source closedLoop saw.
+		rateSources []string
 	)
 	const (
 		prefillVariant = "prefill-v"
@@ -53,6 +55,7 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		clock = time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
 		analyzer.now = func() time.Time { return clock }
 		ctx = context.Background()
+		rateSources = nil
 	})
 	decode := func(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, promptTokens, 1000)
@@ -85,6 +88,9 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		tweak ...func(*config.ScalingPolicy)) *domain.AnalyzerResult {
 		in := makeAnalyzerInput(rows, st)
 		in.ArrivalRate = lambda
+		// On for these specs; off is the default, and the specs that test it
+		// say so with the off tweak.
+		in.Config.(*config.ScalingPolicy).EnablePrefillThroughputBound = true
 		for _, t := range tweak {
 			t(in.Config.(*config.ScalingPolicy))
 		}
@@ -176,25 +182,20 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 		Expect(boundKey()).To(BeEmpty())
 	})
 
-	It("learns and prices nothing when the model turns it off", func() {
-		off := func(c *config.ScalingPolicy) { c.DisablePrefillThroughputBound = true }
-		for i := 0; i < 2; i++ {
-			clock = clock.Add(ThroughputSampleSpacing)
-			run(append(decodeFull(), prefill("prefill-0", 30, 357_800, 24_000)), states(1, 0), runLambda, off)
-		}
-		Expect(boundKey()).To(BeEmpty())
-	})
-
 	// The closed loop. Phase B: decode has recovered, prefill's queue is
 	// empty, and the router's arrival rate doubles to 12 req/s. lambda over
 	// the bound is 3 replicas' worth, 3 / 0.85 = 3.53 of supply, against a
 	// fleet of one. The engine's order is replayed each cycle: a replica
 	// ordered is pending for one cycle and Ready the next, and every prefill
-	// row reads an empty queue -- the queue never forms.
-	It("orders prefill on rising router arrivals before its queue forms, and stops at what the bound implies", func() {
-		learn(floor.MinThroughputSamplesToOrder)
+	// row reads an empty queue -- the queue never forms. Returns each cycle's
+	// order and the fleet it ends on.
+	closedLoop := func(tweak ...func(*config.ScalingPolicy)) ([]int, int) {
+		for i := 0; i < floor.MinThroughputSamplesToOrder; i++ {
+			clock = clock.Add(ThroughputSampleSpacing)
+			computed := boundRate * promptTokens * (1 - 0.01*float64(i))
+			run(append(decodeFull(), prefill("prefill-0", 30, 357_800, computed)), states(1, 0), runLambda, tweak...)
+		}
 		recover()
-
 		lambda := 2 * runLambda
 		ready, pending := 1, 0
 		var orders []int
@@ -206,16 +207,40 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 				rows = append(rows, prefill("prefill-"+string(rune('0'+i)), 0, 20_000,
 					lambda*promptTokens/float64(ready)))
 			}
-			res := run(rows, states(ready, pending), lambda)
+			res := run(rows, states(ready, pending), lambda, tweak...)
+			for _, vc := range res.VariantCapacities {
+				if vc.VariantName == prefillVariant && vc.ServiceRate != nil {
+					rateSources = append(rateSources, vc.ServiceRate.RateSource)
+				}
+			}
 			order := prefillOrder(res, ready, pending)
 			orders = append(orders, order)
 			ready += pending
 			pending = order
 		}
+		return orders, ready + pending
+	}
+
+	// Off is the default, and off is the behaviour before the bound existed:
+	// nothing is learned from the back-pressure episode, prefill has no rate,
+	// and the empty queue orders nothing. The same run with the bound on
+	// orders prefill on the first cycle of the surge.
+	It("is off by default: learns nothing and orders no prefill before its queue forms", func() {
+		off := func(c *config.ScalingPolicy) { c.EnablePrefillThroughputBound = false }
+		orders, fleet := closedLoop(off)
+		Expect(boundKey()).To(BeEmpty(), "nothing recorded with the bound off")
+		Expect(rateSources).NotTo(ContainElement(domain.ServiceRateSourceLowerBound), "nothing read with the bound off")
+		Expect(orders).To(HaveEach(0), "no prefill ordered on an empty queue")
+		Expect(fleet).To(Equal(1))
+	})
+
+	It("orders prefill on rising router arrivals before its queue forms, and stops at what the bound implies", func() {
+		orders, fleet := closedLoop()
+		Expect(rateSources).To(ContainElement(domain.ServiceRateSourceLowerBound))
 		Expect(orders[0]).To(Equal(1),
 			"the first cycle of the surge orders prefill with its queue at zero, capped at twice the ready fleet")
 		// 12 / 4 / 0.85 = 3.53: the fleet settles on four, never more.
-		Expect(ready+pending).To(Equal(4), "converges on lambda / (bound x scaleUp), no ratchet")
+		Expect(fleet).To(Equal(4), "converges on lambda / (bound x scaleUp), no ratchet")
 		Expect(orders[len(orders)-1]).To(BeZero())
 		for _, o := range orders {
 			Expect(o).To(BeNumerically("<=", 2), "no cycle more than doubles the ready fleet")
