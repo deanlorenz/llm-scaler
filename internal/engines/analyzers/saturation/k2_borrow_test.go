@@ -230,6 +230,35 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Expect(ok).To(BeFalse(), "a spent borrow re-armed at full strength with no new evidence")
 		})
 
+		It("ages the donor's window on the analyzer's clock, not the wall clock", func() {
+			// The spec above touches the window on the fixture's clock, a fixed
+			// date, and the sweep used to measure that stamp against the wall
+			// clock: it passed until the wall clock was a retention past the
+			// fixture's date, then swept the window and panicked on the next
+			// touch. Both dates here are far from any wall clock, either way.
+			retention := a.horizons.BucketRetention
+
+			clock = time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+			a.computeCapacityHistory[donor].TouchAt(clock)
+			a.EvictStaleHistory()
+			Expect(a.computeCapacityHistory).To(HaveKey(donor),
+				"a window touched this instant was swept: its age was read off the wall clock")
+
+			clock = clock.Add(retention + time.Minute)
+			a.EvictStaleHistory()
+			Expect(a.computeCapacityHistory).NotTo(HaveKey(donor),
+				"a window unread for a retention on the analyzer's clock was kept")
+
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(4000)
+			a.computeCapacityHistory[donor] = ra
+			clock = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+			ra.TouchAt(clock.Add(-retention - time.Minute))
+			a.EvictStaleHistory()
+			Expect(a.computeCapacityHistory).NotTo(HaveKey(donor),
+				"a window a retention old on the analyzer's clock was kept, because the wall clock is behind it")
+		})
+
 		It("re-arms when the donor has measured something materially different", func() {
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())

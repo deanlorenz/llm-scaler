@@ -821,6 +821,28 @@ func TestDerivedMuPricesOneShapeNotTwo(t *testing.T) {
 			"the fleet's own lagging reading is still reported, for noteLineMismatch")
 	})
 
+	// The change is stamped on the analyzer's clock, so the window it opens is
+	// read on that clock too. Read against the wall clock, a change declared
+	// under a fixed date was decades old and the swap priced on [5m].
+	t.Run("the short window opens on the analyzer's clock, not the wall clock", func(t *testing.T) {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		clock := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+		a.now = func() time.Time { return clock }
+
+		ctx1, _ := observedCtx(t)
+		_, err := a.Analyze(ctx1, makeAnalyzerInput(serving(6000, 1000, 6000, 1000), states))
+		require.NoError(t, err)
+
+		clock = clock.Add(15 * time.Second)
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, makeAnalyzerInput(serving(5429, 1800, 1000, 4000), states))
+		require.NoError(t, err)
+
+		got := requireLogged(t, logs2, "derived-mu")
+		assert.Equal(t, true, got["muShortWindow"], "the change was read as outside its window")
+		assert.Equal(t, float64(4000), got["muDivisor"])
+	})
+
 	// The pairing is conditional on the short-window prompt existing. An engine
 	// that publishes one counter and not the other keeps the divisor on the
 	// short window and the shape on [5m]: that IS the mismatch above, but the
