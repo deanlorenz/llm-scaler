@@ -933,11 +933,16 @@ const ShareStepSpread = 0.25
 
 // steppedAway reports whether role's need has stayed more than
 // ShareStepSpread above its mean over the swing window, or as far below it,
-// for at least d up to its latest reading. A swing crosses its mean every
-// half period; a step stays on one side until the mean catches up. Planned
-// on the mean after a step, a model whose load moved for good was held
-// halfway for most of a swing window: two models swapping 3:1 for 1:3 sat at
-// 2:2 for 85 minutes, the busy one past its threshold.
+// for at least d up to its latest reading, and for longer than any earlier
+// run on either side within the window. A swing crosses its mean every half
+// period; a step stays on one side until the mean catches up. Planned on the
+// mean after a step, a model whose load moved for good was held halfway for
+// most of a swing window: two models swapping 3:1 for 1:3 sat at 2:2 for 85
+// minutes, the busy one past its threshold. A run no longer than the swing's
+// own earlier ones is the swing, not a step: a load swapping every 16 to 45
+// minutes -- longer than a move, shorter than its window -- counted as a
+// step at the end of every half period, and chasing it started three times
+// the transfers and left more demand unserved than planning on its mean.
 func (l *ShareLedger) steppedAway(role string, d time.Duration) bool {
 	s := l.needs[role]
 	if len(s) < 2 || d <= 0 {
@@ -953,16 +958,27 @@ func (l *ShareLedger) steppedAway(role string, d time.Duration) bool {
 		}
 		return 0
 	}
-	last := s[len(s)-1]
-	cur := side(last.need)
-	if cur == 0 {
-		return false
+	// Runs of readings on one side of the mean, the last one under way. The
+	// first may have begun before the window: its length is a lower bound,
+	// and still counts toward the longest.
+	var earlier, cur time.Duration
+	run, start := side(s[0].need), s[0].at
+	for i := 1; i <= len(s); i++ {
+		if i < len(s) && side(s[i].need) == run {
+			continue
+		}
+		if run != 0 {
+			if i == len(s) {
+				cur = s[i-1].at.Sub(start)
+			} else {
+				earlier = max(earlier, s[i-1].at.Sub(start))
+			}
+		}
+		if i < len(s) {
+			run, start = side(s[i].need), s[i].at
+		}
 	}
-	since := last.at
-	for i := len(s) - 2; i >= 0 && side(s[i].need) == cur; i-- {
-		since = s[i].at
-	}
-	return last.at.Sub(since) >= d
+	return cur >= d && cur > earlier
 }
 
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.

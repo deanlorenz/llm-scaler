@@ -206,7 +206,8 @@ func TestShareSwapBackIsNotHeldOnTheDonorsOldPeak(t *testing.T) {
 // mean need. On their means the split is 2:2, and the busy model sat there
 // past its threshold -- a need of 3 on 2 GPUs -- for 85 minutes. Its need
 // has stayed well above its mean, and the other's well below, for longer than
-// a move takes: a step, so each is planned on its current need again. Both
+// a move takes and longer than either half of the swap before it (30
+// minutes): a step, so each is planned on its current need again. Both
 // orders.
 func TestShareStepAfterASwapIsNotPlannedOnTheMean(t *testing.T) {
 	const m = time.Minute
@@ -231,8 +232,8 @@ func TestShareStepAfterASwapIsNotPlannedOnTheMean(t *testing.T) {
 			t.Fatalf("%s, setup: the swap back never started the swing rule; the scenario no longer reaches it", order.name)
 		}
 		after, ok := stallReached(cycles, 300*m, order.final[0], order.final[1])
-		if !ok || after > 30*m {
-			t.Errorf("%s: the step reached %d:%d after %v (reached %v), want within 30m: it was planned on its mean",
+		if !ok || after > 45*m {
+			t.Errorf("%s: the step reached %d:%d after %v (reached %v), want within 45m: it was planned on its mean",
 				order.name, order.final[0], order.final[1], after, ok)
 			continue
 		}
@@ -281,4 +282,100 @@ func TestShareFastSwapsStayPlannedOnTheMean(t *testing.T) {
 		t.Fatalf("control: the swing rule started %d transfers, without it %d; want fewer with it", started, startedOff)
 	}
 	t.Logf("swinging %d of %d cycles; %d transfers started, %d without the rule", swinging, cycles, started, startedOff)
+}
+
+// stallEvery is one phase per cycle over total, the needs f gives at each.
+func stallEvery(total time.Duration, f func(t time.Duration) (a, b float64)) []stallPhase {
+	var out []stallPhase
+	for t := time.Duration(0); t < total; t += simCycle {
+		a, b := f(t)
+		out = append(out, stallPhase{simCycle, stallNeeds(a, b)})
+	}
+	return out
+}
+
+// A load that swings slower than a move lands is still planned on its mean.
+// The two models swap every 18 minutes, longer than a move takes (about 13):
+// each half stays on one side of its mean for longer than a move, but no
+// longer than the halves before it, so it is the swing, not a step. Counted
+// as a step at the end of every half, it was chased: a move decided 13
+// minutes into a half landed in the next one, and the loop started nearly
+// three times the transfers. Control: with the swing window at zero -- the
+// rule off -- the same load starts more transfers.
+func TestShareSwingSlowerThanAMoveStaysPlannedOnTheMean(t *testing.T) {
+	const m = time.Minute
+	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle}, nil)
+	const half = 18 * m
+	if tm.MoveLatency >= half {
+		t.Fatalf("setup: a move takes %v, not less than the %v half period", tm.MoveLatency, half)
+	}
+	warm := 240 * m
+	phases := stallEvery(warm+8*time.Hour, func(at time.Duration) (float64, float64) {
+		switch {
+		case at < warm:
+			return 2, 2
+		case int((at-warm)/half)%2 == 0:
+			return 1, 3
+		}
+		return 3, 1
+	})
+	run := func(tm ShareTimings) (swinging, cycles, started int) {
+		for _, c := range stallLoop(tm, map[string]int{"A": 2, "B": 2}, true, phases) {
+			if c.at < warm {
+				continue
+			}
+			cycles++
+			if len(c.swinging) > 0 {
+				swinging++
+			}
+			started += c.started
+		}
+		return swinging, cycles, started
+	}
+	swinging, cycles, started := run(tm)
+	off := tm
+	off.SwingWindow = 0
+	_, _, startedOff := run(off)
+	if swinging*2 < cycles {
+		t.Errorf("swaps every 18 minutes were planned on the mean in %d of %d cycles, want at least half", swinging, cycles)
+	}
+	if started*2 > startedOff {
+		t.Errorf("the swing rule started %d transfers, without it %d; want at most half: the swing was chased as a step", started, startedOff)
+	}
+	t.Logf("swinging %d of %d cycles; %d transfers started, %d without the rule", swinging, cycles, started, startedOff)
+}
+
+// A donor whose peak comes back keeps it. B peaks for 10 minutes every 30
+// and A sits at its need: the peaks fit the quota, so the spare is spread,
+// and A, at its need, takes no replica that leaves B below its peak
+// (donor-peak). Judged on its peak over its scale-down window alone, B gave
+// its spare to A between peaks and waited a release at every one.
+func TestShareRecurringDonorPeakIsKept(t *testing.T) {
+	const m = time.Minute
+	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle}, nil)
+	warm := 240 * m
+	phases := stallEvery(warm+8*time.Hour, func(at time.Duration) (float64, float64) {
+		if at%(30*m) < 10*m {
+			return 1, 2.6
+		}
+		return 1, 0.9
+	})
+	held, started, short := 0, 0, 0
+	for i, c := range stallLoop(tm, map[string]int{"A": 2, "B": 2}, true, phases) {
+		if c.at < warm {
+			continue
+		}
+		held += c.donorPeak
+		started += c.started
+		if float64(c.held["B"]) < math.Ceil(phases[i].need["B"]) {
+			short++
+		}
+	}
+	if held == 0 {
+		t.Fatal("setup: donor-peak never held B; the scenario no longer reaches the rule")
+	}
+	if started != 0 || short != 0 {
+		t.Errorf("B, peaking every 30 minutes, gave its spare away: %d transfers started, B short in %d cycles", started, short)
+	}
+	t.Logf("donor-peak held %d cycles", held)
 }

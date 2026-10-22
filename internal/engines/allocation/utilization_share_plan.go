@@ -648,11 +648,18 @@ func (p *sharePlanRun) donorView(r ShareRole) ShareRole {
 
 // donorPeak is what donor dn keeps under the donor-peak rule: its claim at
 // its peak need over its scale-down window, in whole replicas, as donorView
-// judges a donor. Not its peak over the swing window (peakClaims): a donor
-// whose load fell would keep that peak for the whole window, about two hours
-// by default, and a model at its need beside it waited that long for its
-// headroom replica, as if the load had swung back.
+// judges a donor. Not its peak over the swing window (peakClaims) for a
+// donor that burst once: one whose load fell would keep that peak for the
+// whole window, about two hours by default, and a model at its need beside
+// it waited that long for its headroom replica, as if the load had swung
+// back. A donor that has burst at least twice within the window has a peak
+// that comes back, and keeps it (peakClaims): judged on its last scale-down
+// window, a donor peaking every 15 to 90 minutes gave its spare away between
+// peaks and waited a release at each one.
 func (p *sharePlanRun) donorPeak(dn string) int {
+	if p.l.needBursts(dn).completed >= 2 {
+		return p.peaks[dn]
+	}
 	r := p.byKey[dn]
 	g := max(r.ReplicaGPUs, 1)
 	r.Need = r.gpusFor(p.l.RecentPeak(dn, p.now, p.tm.Window))
