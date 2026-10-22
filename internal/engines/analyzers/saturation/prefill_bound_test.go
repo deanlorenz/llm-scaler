@@ -363,7 +363,7 @@ var _ = Describe("a prefill lower bound across prompt lengths in one input bucke
 			{VariantName: prefillVariant, Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
 		}
 		rows := func(prompt float64, decodeFull bool, queue int, tokens int64, computed float64) []domain.ReplicaMetrics {
-			var out []domain.ReplicaMetrics
+			out := make([]domain.ReplicaMetrics, 0, 3)
 			for i, kv := range []int64{970_475, 1_039_474} {
 				q := 40
 				if !decodeFull {
