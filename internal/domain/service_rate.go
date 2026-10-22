@@ -28,6 +28,12 @@ const (
 	// not a source of its own: it is measured, and the floor's heldWhy says
 	// single-sample.
 	ServiceRateSourceNeighbour = "neighbour"
+	// ServiceRateSourceLowerBound is a prefill rate the variant was seen to
+	// sustain with its queue saturated while its own window could not record
+	// it, usually because decode was saturated and metering it. The true
+	// rate is at least this. The throughput floor may grow prefill on it, up
+	// to a growth cap, and an own measured window replaces it.
+	ServiceRateSourceLowerBound = "lower-bound"
 )
 
 // ServiceRateSignal is what the saturation analyzer priced one variant's

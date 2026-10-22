@@ -152,6 +152,22 @@ type ScalingPolicy struct {
 	// on where a `default:` entry turned it off.
 	DisableK2Borrow bool `yaml:"disableK2Borrow,omitempty"`
 
+	// DisablePrefillThroughputBound stops the throughput floor pricing
+	// prefill on a lower bound: the computed-token rate a prefill replica
+	// showed with its queue saturated while its own window could not record
+	// it, usually because decode was saturated. Without the bound a P/D
+	// fleet's prefill has no floor term until it saturates on its own, and
+	// scales only once its queue builds.
+	//
+	// ON BY DEFAULT, because the bound can only order more prefill, never
+	// less, and is capped at twice the ready prefill fleet per replica
+	// start. This is the switch for its cost: a prefill fleet held larger
+	// than its load needs on a bound learned while decode metered it.
+	//
+	// A DISABLE for the reason DisableK2Borrow gives: Merge is one-way for a
+	// plain bool, so a per-model true turns it off for that model.
+	DisablePrefillThroughputBound bool `yaml:"disablePrefillThroughputBound,omitempty"`
+
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
 	// Zero takes the default.
@@ -640,6 +656,10 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// One-way like the rest: a true turns the borrow off for the model.
 	if override.DisableK2Borrow {
 		c.DisableK2Borrow = true
+	}
+	// One-way like the rest: a true turns the prefill bound off for the model.
+	if override.DisablePrefillThroughputBound {
+		c.DisablePrefillThroughputBound = true
 	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a

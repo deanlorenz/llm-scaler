@@ -35,6 +35,21 @@ const (
 	// readings, not one, before a reading may order" in
 	// docs/developer-guide/analyzer-evidence.md.
 	MinThroughputSamplesToOrder = 2
+
+	// LowerBoundMaxGrowth caps a floor priced on a prefill lower bound at
+	// this multiple of the role's READY supply, so one replica start can at
+	// most double the ready prefill fleet and the next step waits for the
+	// ordered replicas to become Ready.
+	//
+	// A lower bound under-reads mu, and the floor divides by mu, so its error
+	// is an over-order of (true mu / bound). The bound is learned while
+	// decode meters prefill, which leaves the ratio unknown in general: on
+	// the one measured episode it was about 1.1 (5.57 req/s against 6
+	// offered), but nothing bounds it from the reading alone. The cap does.
+	// Against ready supply, not anticipated, for the reason the queue
+	// release in Estimate gives: against anticipated supply a cap is a
+	// per-cycle increment, and repeats every cycle while the replicas start.
+	LowerBoundMaxGrowth = 2.0
 )
 
 // Floor is the demand the offered load implies per role once each
@@ -65,7 +80,8 @@ type Term struct {
 	Replicas float64
 	// Held reports that the floor was capped at the fleet's anticipated size
 	// because its mu is not one the floor may order on -- HeldWhy says
-	// which: "borrowed" (a neighbouring bucket's reading) or "single-sample".
+	// which: "borrowed" (a neighbouring bucket's reading), "single-sample",
+	// or "lower-bound" (a prefill lower bound with too few readings).
 	Held    bool
 	HeldWhy string
 	// OrderedBehindQueue reports that a window too thin to order on was
@@ -109,6 +125,12 @@ type Term struct {
 	// replica's borrowed flag.
 	MayOrder     bool
 	BorrowedOnly bool
+	// LowerBound reports that Mu is a prefill lower bound
+	// (capacity.ReplicaCapacity.SaturatedThroughputLowerBound): no replica of
+	// the role had a reading of its own, and the bound priced it instead.
+	// GrowthCapped reports that LowerBoundMaxGrowth cut the floor this cycle.
+	LowerBound   bool
+	GrowthCapped bool
 }
 
 // Estimate computes the per-role floor from lambda, the
@@ -151,6 +173,14 @@ type Term struct {
 //
 // A third kind of held reading arrives with this package's borrowed-LINE
 // routing; see borrowedReading below.
+//
+// A prefill LOWER BOUND (capacity.ReplicaCapacity.SaturatedThroughputLowerBound)
+// is the fourth kind, and the only one that may grow a role without being a
+// measurement: it ranks below any own reading and above a neighbour's, orders
+// only with MinThroughputSamplesToOrder readings and a steady shape, never
+// through the standing-queue release, and is capped at LowerBoundMaxGrowth
+// times the role's ready supply. It is what gives prefill a floor on a fleet
+// whose prefill only ever queues behind a full decode (issue #144).
 
 // borrowedReading reports whether a replica's service rate is evidence about
 // something other than this variant's own current load, and so may hold a fleet
@@ -259,6 +289,13 @@ func Estimate(
 	borrowedMus := make(map[string][]float64)
 	mayOrder := make(map[string]bool)
 	borrowedOnly := make(map[string]bool)
+	// A prefill lower bound is kept apart from both: it is not a neighbour's
+	// figure, so it may grow the role, and it is not a measurement, so any
+	// replica's own reading outvotes it.
+	boundCosts := make(map[string][]float64)
+	boundMus := make(map[string][]float64)
+	boundOrders := make(map[string]bool)
+	lowerBound := make(map[string]bool)
 	for _, rc := range replicas {
 		if rc.FromWarmPool || !priceable(rc.SaturatedThroughput) {
 			continue
@@ -289,6 +326,17 @@ func Estimate(
 		// that disjunction re-admitted exactly what the derived half had just
 		// excluded. Gating a decision in one of two disjuncts gates nothing;
 		// the reading has to be routed, not annotated.
+		if rc.SaturatedThroughputLowerBound {
+			boundCosts[role] = append(boundCosts[role], p/rc.SaturatedThroughput)
+			boundMus[role] = append(boundMus[role], rc.SaturatedThroughput)
+			if cur, seen := smallestP[role]; !seen || p < cur {
+				smallestP[role] = p
+			}
+			if rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape {
+				boundOrders[role] = true
+			}
+			continue
+		}
 		if borrowedReading(rc) {
 			borrowedCosts[role] = append(borrowedCosts[role], p/rc.SaturatedThroughput)
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
@@ -319,6 +367,19 @@ func Estimate(
 		if rc.SaturatedThroughputDerived ||
 			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
 			mayOrder[role] = true
+		}
+	}
+	// Own readings first, then the bound, then a neighbour's figure. A
+	// neighbour's figure is a measurement of another shape and may only hold;
+	// the bound is a reading of this shape that is low by an unknown factor,
+	// and may grow the role within LowerBoundMaxGrowth.
+	for role, c := range boundCosts {
+		if len(costs[role]) == 0 {
+			costs[role] = c
+			mus[role] = boundMus[role]
+			lowerBound[role] = true
+			borrowedOnly[role] = false
+			mayOrder[role] = boundOrders[role]
 		}
 	}
 	for role, c := range borrowedCosts {
@@ -391,7 +452,10 @@ func Estimate(
 		// ten seconds of arrivals and would release the hold, which is jitter,
 		// not a standing queue. mu is the other natural scale and needs no
 		// constant.
-		thinOwnWindow := !staleShape && !borrowedOnly[role]
+		//
+		// Not a lower bound either: the release trusts a thin window to be
+		// roughly right, and a bound is low by a factor nothing here knows.
+		thinOwnWindow := !staleShape && !borrowedOnly[role] && !lowerBound[role]
 		if !mayOrder[role] && thinOwnWindow && schedulerQueued > max(lambda, mu) && scaleUpThreshold > 0 {
 			// Bounded at ONE replica beyond the fleet already anticipated.
 			// Releasing the hold outright would also skip the cap below, and
@@ -452,6 +516,17 @@ func Estimate(
 		// were evaluated whether or not the cap went on to bind.
 		term.MayOrder = mayOrder[role]
 		term.BorrowedOnly = borrowedOnly[role]
+		term.LowerBound = lowerBound[role]
+		// A lower bound that may order is still capped at LowerBoundMaxGrowth
+		// times the role's ready supply: it over-orders by an unknown factor,
+		// and this bounds what one replica start can cost.
+		if lowerBound[role] && mayOrder[role] && scaleUpThreshold > 0 {
+			if growth := scaleUpThreshold * LowerBoundMaxGrowth *
+				nonNegativeSupply(anticipated[role].TotalSupply); floor > growth {
+				floor = growth
+				term.GrowthCapped = true
+			}
+		}
 		if !mayOrder[role] && scaleUpThreshold > 0 {
 			// A hold, not an order, on either. Letting a single reading
 			// order one replica was tried twice and dropped: against the
@@ -486,6 +561,9 @@ func Estimate(
 				floor = hold
 				term.Held = true
 				term.HeldWhy = "single-sample"
+				if lowerBound[role] {
+					term.HeldWhy = "lower-bound"
+				}
 				if borrowedOnly[role] {
 					term.HeldWhy = "borrowed"
 					if lineBorrowed[role] {
@@ -502,7 +580,7 @@ func Estimate(
 					// own. The composed value keeps the borrow visible; the
 					// single-sample case still reads as "shape-change" alone,
 					// because a stale shape is the reason that bounds it.
-					if borrowedOnly[role] {
+					if borrowedOnly[role] || lowerBound[role] {
 						term.HeldWhy += "+shape-change"
 					} else {
 						term.HeldWhy = "shape-change"

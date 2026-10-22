@@ -478,9 +478,11 @@ func fleetHasMeasuredItself(replicas []capacity.ReplicaCapacity) bool {
 		// sibling's line, which also cleared staleShape in the same cycle and
 		// so removed the only other thing standing between a borrowed line and
 		// an order.
+		// Nor is a prefill lower bound: it is the reading the fleet could
+		// NOT take as its own, recorded for its direction alone.
 		own := (rc.SaturatedThroughputDerived && !rc.SaturatedThroughputLineBorrowed) ||
 			(rc.SaturatedThroughput > 0 && !rc.SaturatedThroughputBorrowed &&
-				!rc.SaturatedThroughputLineBorrowed &&
+				!rc.SaturatedThroughputLineBorrowed && !rc.SaturatedThroughputLowerBound &&
 				rc.SaturatedThroughputSamples >= floor.MinThroughputSamplesToOrder)
 		measured[rc.VariantName] = measured[rc.VariantName] || own
 	}

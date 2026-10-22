@@ -89,4 +89,16 @@ type ReplicaCapacity struct {
 	// not GROW one on it, which is the same rule it already applies to a
 	// reading borrowed from a neighbouring shape bucket.
 	SaturatedThroughputLineBorrowed bool
+	// SaturatedThroughputLowerBound is set when SaturatedThroughput is a
+	// prefill replica's LOWER BOUND on its service rate rather than a
+	// reading of it: the computed prompt tokens per second it was seen to
+	// sustain with its queue saturated while its own window could not
+	// record -- in practice, while decode was saturated and metering it.
+	//
+	// The true rate is at least this, so the error goes one way: a fleet
+	// priced on it is over-ordered, never under-ordered. The floor may grow
+	// prefill on it, within a growth cap, and only with
+	// MinThroughputSamplesToOrder readings; an own window always wins.
+	// SaturatedThroughputSamples counts the bound's readings when this is set.
+	SaturatedThroughputLowerBound bool
 }

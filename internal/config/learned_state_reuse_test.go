@@ -84,3 +84,21 @@ func TestMergeCarriesDisableK2Borrow(t *testing.T) {
 		}
 	})
 }
+
+// TestMergeCarriesDisablePrefillThroughputBound: the prefill bound's switch is
+// per model, like the borrow's, and the bound is on by default.
+func TestMergeCarriesDisablePrefillThroughputBound(t *testing.T) {
+	t.Run("a per-model override turns the bound off", func(t *testing.T) {
+		base := ScalingPolicy{}
+		base.Merge(ScalingPolicy{DisablePrefillThroughputBound: true})
+		if !base.DisablePrefillThroughputBound {
+			t.Error("an override that disables the prefill bound must survive Merge")
+		}
+	})
+	t.Run("the zero value leaves the bound on", func(t *testing.T) {
+		var p ScalingPolicy
+		if p.DisablePrefillThroughputBound {
+			t.Error("the prefill bound can only order more prefill, and is on by default")
+		}
+	})
+}
