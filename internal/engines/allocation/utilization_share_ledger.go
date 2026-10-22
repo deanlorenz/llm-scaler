@@ -270,7 +270,10 @@ type ShareLedger struct {
 	noPair     map[sharePair]time.Time
 	moves      map[string][]shareMove
 	swingUntil map[string]time.Time
-	needs      map[string][]shareNeedSample
+	// stepped marks the roles whose need has stayed on one side of its mean
+	// for longer than a move takes (RecordNeeds): a step, not a swing.
+	stepped map[string]bool
+	needs   map[string][]shareNeedSample
 	// needsSince is when each role's need was first recorded: until a swing
 	// window has passed since, its peak over the window is not known
 	// (PeakKnown).
@@ -321,6 +324,7 @@ func NewShareLedger() *ShareLedger {
 		noPair:      map[sharePair]time.Time{},
 		moves:       map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
+		stepped:     map[string]bool{},
 		needs:       map[string][]shareNeedSample{},
 		needsSince:  map[string]time.Time{},
 		confirm:     map[string]int{},
@@ -915,9 +919,50 @@ func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 	}
 }
 
-// Swinging reports whether role is planned on its mean need now.
+// Swinging reports whether role is planned on its mean need now: its moves
+// changed direction twice within the swing window, and its need has not since
+// settled away from its mean for longer than a move takes (stepped).
 func (l *ShareLedger) Swinging(role string, now time.Time) bool {
-	return now.Before(l.swingUntil[role])
+	return now.Before(l.swingUntil[role]) && !l.stepped[role]
+}
+
+// ShareStepSpread is how far from its mean, as a fraction of it, a swinging
+// role's need must stay for a move's latency before it counts as a step and
+// the role is planned on its current need again (ShareLedger.Swinging).
+const ShareStepSpread = 0.25
+
+// steppedAway reports whether role's need has stayed more than
+// ShareStepSpread above its mean over the swing window, or as far below it,
+// for at least d up to its latest reading. A swing crosses its mean every
+// half period; a step stays on one side until the mean catches up. Planned
+// on the mean after a step, a model whose load moved for good was held
+// halfway for most of a swing window: two models swapping 3:1 for 1:3 sat at
+// 2:2 for 85 minutes, the busy one past its threshold.
+func (l *ShareLedger) steppedAway(role string, d time.Duration) bool {
+	s := l.needs[role]
+	if len(s) < 2 || d <= 0 {
+		return false
+	}
+	mean := l.MeanNeed(role, 0)
+	side := func(n float64) int {
+		switch {
+		case n > mean*(1+ShareStepSpread):
+			return 1
+		case n < mean*(1-ShareStepSpread):
+			return -1
+		}
+		return 0
+	}
+	last := s[len(s)-1]
+	cur := side(last.need)
+	if cur == 0 {
+		return false
+	}
+	since := last.at
+	for i := len(s) - 2; i >= 0 && side(s[i].need) == cur; i-- {
+		since = s[i].at
+	}
+	return last.at.Sub(since) >= d
 }
 
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.
@@ -936,6 +981,7 @@ func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm Sh
 			l.needsSince[role] = now
 		}
 		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})
+		l.stepped[role] = l.steppedAway(role, tm.moveLatency())
 	}
 }
 
@@ -1518,6 +1564,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.lastGot, r)
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
+		delete(l.stepped, r)
 		delete(l.needs, r)
 		delete(l.needsSince, r)
 		delete(l.hard, r)
