@@ -430,7 +430,7 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 
 ### `wva_engine_config`
 - **Type**: Gauge
-- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant.
+- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant. The series stays while the variant exists, also through a cycle in which an analyzer does not report it, and goes on the next cycle that analyzes the model after the variant is removed, or when the model itself goes.
 - **Labels**:
   - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant
   - `accelerator`, `gpus`: the hardware its learned state is filed under. On a fleet whose pods sit on two GPU products this is the last product that resolved, not this cycle's reading, so it can differ from what discovery reports for the same variant
