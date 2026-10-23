@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"cmp"
+	"maps"
 	"math"
 	"slices"
 	"testing"
@@ -22,6 +23,9 @@ type stallCycle struct {
 	swinging  []string
 	donorPeak int
 	started   int
+	// swingNeeds is the plan's SwingNeeds: what each swinging role was
+	// planned on, and what it read.
+	swingNeeds map[string]ShareSwingNeed
 }
 
 // stallLoop runs two roles of 1-GPU replicas in a quota of 4 through phases,
@@ -31,6 +35,13 @@ type stallCycle struct {
 // plan (fillIdleShare). With lag, each role's need is read as the mean of the
 // samples from 2·simLag to simLag ago, as runShareSim reads it.
 func stallLoop(tm ShareTimings, initial map[string]int, lag bool, phases []stallPhase) []stallCycle {
+	return stallLoopServed(tm, initial, lag, phases, nil)
+}
+
+// stallLoopServed is stallLoop with each role's need read through served,
+// given the need its phase states and the GPUs the role holds: what a role
+// whose demand is measured from what it serves reads while it is short.
+func stallLoopServed(tm ShareTimings, initial map[string]int, lag bool, phases []stallPhase, served func(need float64, held int) float64) []stallCycle {
 	const budget = 4
 	keys := []string{"A", "B"}
 	l := NewShareLedger()
@@ -70,6 +81,9 @@ func stallLoop(tm ShareTimings, initial map[string]int, lag bool, phases []stall
 			Headroom: ShareHeadroom{Capped: true, Replicas: 1, ReturnLoad: 0.6}}
 		for _, k := range keys {
 			need := phases[pi].need[k]
+			if served != nil {
+				need = served(need, held[k])
+			}
 			samples[k] = append(samples[k], need)
 			if lag {
 				s, n := samples[k], int(simLag/simCycle)
@@ -117,7 +131,8 @@ func stallLoop(tm ShareTimings, initial map[string]int, lag bool, phases []stall
 		l.SetFillShort(slices.DeleteFunc(slices.Clone(receivers), func(rc string) bool { return committed[rc] >= integer[rc] }))
 
 		out = append(out, stallCycle{at: t, held: map[string]int{"A": held["A"], "B": held["B"]},
-			swinging: plan.Swinging, donorPeak: plan.Withheld[ShareWithheldDonorPeak], started: len(plan.Started)})
+			swinging: plan.Swinging, donorPeak: plan.Withheld[ShareWithheldDonorPeak], started: len(plan.Started),
+			swingNeeds: maps.Clone(plan.SwingNeeds)})
 	}
 	return out
 }
@@ -419,4 +434,83 @@ func TestShareRecurringDonorPeakIsKept(t *testing.T) {
 		t.Errorf("B, peaking every 30 minutes, gave its spare away: %d transfers started, B short in %d cycles", started, short)
 	}
 	t.Logf("donor-peak held %d cycles", held)
+}
+
+// The second swap back of issue #269 is held at 2:2 by the swing rule, and
+// the plan says what it held each role on. Two models of 1-GPU replicas in a
+// quota of 4 swap a load of 2.9 GPUs for 0.17 after 25 minutes, then 0.7 for
+// 2.9 for 20, then swap back for good, as the real-GPU run did; a short model
+// reads at most 1.5 GPUs per replica it holds, its demand measured from what
+// it serves. The swap back is each model's second change of direction within
+// the flapping window, so both are planned on their mean need: the first
+// replica moves (1:3 to 2:2) and the second waits until the busy model's
+// mean has caught up, or its need has outlasted the earlier halves -- the
+// run's 2:2 sat eleven minutes and its second transfer started 18 minutes in.
+// That is the documented rule (a load that keeps swinging, however slowly,
+// stays on its mean), not a stall, so the test pins it: the hold happens, the
+// busy role's SwingNeeds show it planned below its reading (what the log line
+// prints), the split still reaches 3:1 within 35 minutes, and with the rule
+// off (control) it reaches 3:1 within 12.
+func TestShareSecondSwapBackIsHeldOnTheMeanAndSaysSo(t *testing.T) {
+	const m = time.Minute
+	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle, ReplicaStart: 240 * time.Second}, nil)
+	phases := []stallPhase{{5 * m, stallNeeds(0.1, 0.1)}, {25 * m, stallNeeds(2.9, 0.17)},
+		{20 * m, stallNeeds(0.7, 2.9)}, {60 * m, stallNeeds(2.9, 0.65)}}
+	served := func(need float64, held int) float64 { return math.Min(need, 1.5*float64(held)) }
+	const back = 50 * m
+	for _, order := range []struct {
+		name   string
+		phases []stallPhase
+		busy   string
+		split  func(busy, idle int) (int, int)
+	}{
+		{"A then B", phases, "A", func(b, i int) (int, int) { return b, i }},
+		{"B then A", stallSwap(phases), "B", func(b, i int) (int, int) { return i, b }},
+	} {
+		cycles := stallLoopServed(tm, map[string]int{"A": 1, "B": 1}, true, order.phases, served)
+		a1, b1 := order.split(1, 3)
+		if x, y := stallHeldAt(cycles, back); x != a1 || y != b1 {
+			t.Fatalf("%s, setup: the first swap left %d:%d, want %d:%d", order.name, x, y, a1, b1)
+		}
+		a2, b2 := order.split(2, 2)
+		halfway, ok := stallReached(cycles, back, a2, b2)
+		if !ok || halfway > 10*m {
+			t.Fatalf("%s, setup: the swap back reached 2:2 after %v (reached %v), want within 10m", order.name, halfway, ok)
+		}
+		a3, b3 := order.split(3, 1)
+		done, ok := stallReached(cycles, back, a3, b3)
+		if !ok || done > 35*m {
+			t.Errorf("%s: the swap back reached 3:1 after %v (reached %v), want within 35m", order.name, done, ok)
+			continue
+		}
+		held := 0
+		for _, c := range cycles {
+			if c.at < back+halfway || c.at >= back+done || c.held[order.busy] != 2 {
+				continue
+			}
+			n, swinging := c.swingNeeds[order.busy]
+			if !swinging || !slices.Contains(c.swinging, order.busy) {
+				t.Errorf("%s: at %v the busy role sat at 2 GPUs, short of 2.9, without the swing rule holding it", order.name, c.at)
+				break
+			}
+			// Until its lagged reading has caught up with the replica it
+			// gained, the busy role reads no more than its mean; after, the
+			// mean holds it below the reading.
+			if n.Mean < n.Current {
+				held++
+			}
+		}
+		if held == 0 {
+			t.Fatalf("%s, setup: the swing rule never held the busy role at 2:2; the scenario no longer reaches it", order.name)
+		}
+		off := tm
+		off.SwingWindow = 0
+		free, ok := stallReached(stallLoopServed(off, map[string]int{"A": 1, "B": 1}, true, order.phases, served), back, a3, b3)
+		if !ok || free > 12*m {
+			t.Errorf("%s, control: with the swing rule off the swap back reached 3:1 after %v (reached %v), want within 12m",
+				order.name, free, ok)
+		}
+		t.Logf("%s: 2:2 after %v, 3:1 after %v, held on the mean %d cycles; rule off: 3:1 after %v",
+			order.name, halfway, done, held, free)
+	}
 }
