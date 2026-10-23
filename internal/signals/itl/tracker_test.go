@@ -234,6 +234,7 @@ var _ = Describe("Tracker", func() {
 		// The dips' own slopes through the 6 ms floor are 0.085 to 0.105.
 		Expect(r.Model.A).To(BeNumerically("~", 0.100, 0.005))
 		Expect(r.SteadyHeld).To(Equal(1), "only the first reading, of a replica present from the start")
+		Expect(r.SteadySpread).To(BeZero())
 	})
 
 	It("forgets intercepts and keeps the readings", func() {

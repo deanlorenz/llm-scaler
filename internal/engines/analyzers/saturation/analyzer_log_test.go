@@ -83,9 +83,9 @@ var logContract = map[string][]string{
 	"itl-window": {
 		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
-		"notReady", "noITL", "noK", "aboveBand", // and why the rest were not
+		"notReady", "noITL", "noK", "belowBand", "aboveBand", // and why the rest were not
 		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
-		"ready", "minSamples", // and whether that is enough to fit on
+		"steadySpread", "minKSpread", "ready", "minSamples", // and whether that is enough to fit on
 	},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker
 	// answer and the report has to be able to tell the two apart.
@@ -249,6 +249,37 @@ func TestLogContract_DerivedMuReportsItsTerms(t *testing.T) {
 		assert.Contains(t, fields, key,
 			"derived-mu must carry %q: the contract names it and the report reads it by key", key)
 	}
+}
+
+// itl-window counts every row under one reason. A light replica's reading is
+// below the band, and before belowBand was logged a single replica at 0.5 to 3
+// requests/s logged `offered: 0` and every other count 0 for 24 minutes.
+func TestLogContract_ITLWindowCountsEveryRow(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	analyzer := NewSaturationAnalyzer(capacity.NewStore())
+
+	light := makeReplicaMetrics("pod-1", "variant-d", 5000, 100000, 0, 1000, 500)
+	light.KvUsageInstant, light.AvgITL = 0.05, 0.0145 // that run, at 0.5 requests/s
+	input := makeAnalyzerInput(
+		[]domain.ReplicaMetrics{light},
+		[]domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		},
+	)
+
+	_, err := analyzer.Analyze(ctx, input)
+	require.NoError(t, err)
+
+	fields := requireLogged(t, logs, "itl-window")
+	assert.EqualValues(t, 1, fields["belowBand"])
+	var sum int64
+	for _, key := range []string{"offered", "notReady", "noITL", "noK", "belowBand", "aboveBand"} {
+		n, ok := fields[key].(int64)
+		require.True(t, ok, "%q must be an integer, got %T", key, fields[key])
+		sum += n
+	}
+	assert.EqualValues(t, fields["replicas"], sum, "every row is counted under exactly one reason")
 }
 
 // The divisor is the [5m] mean on a steady shape, and the short window only

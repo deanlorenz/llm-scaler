@@ -208,6 +208,10 @@ least squares' `A` from 0.101 to 0.170, and the derived mu read 3.1 to 4.2
 requests/s against the 6.1 to 6.2 each replica served, for a whole
 twenty-minute phase. The median sets them aside.
 
+`itl-window` counts every row under one reason (`offered`, `notReady`,
+`noITL`, `noK`, `belowBand`, `aboveBand`), so they add up to `replicas`, and
+reports `steadySpread` beside `minKSpread`, the other half of `ready`.
+
 The steady readings are kept apart from the main window, and outlive its oldest
 reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced
 fleet its spread, and it fills the 20-reading main window with unsteady

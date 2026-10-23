@@ -78,6 +78,9 @@ type Reading struct {
 	// outlives the main window by up to DefaultSteadyCarry.
 	SteadyHeld int
 	Ready      bool
+	// SteadySpread is max k - min k over the steady readings: the other half
+	// of Ready, and how far it is from DefaultMinKSpread.
+	SteadySpread float64
 }
 
 // Observe offers one cycle's replica rows of a variant to the key's window and
@@ -206,7 +209,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	sw.dropBefore(cutoff)
 	steadyObs := sw.Observations()
-	r.Held, r.Ready, r.SteadyHeld = len(obs), sw.Ready(), len(steadyObs)
+	r.Held, r.Ready, r.SteadyHeld, r.SteadySpread = len(obs), sw.Ready(), len(steadyObs), sw.KSpread()
 	baseline, stored := t.baselines[key]
 	t.mu.Unlock()
 

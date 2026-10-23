@@ -346,16 +346,24 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	//
 	// Counted per reason, because "the window is empty" has four different
 	// causes with four different fixes, and a run that cannot tell them apart
-	// costs a rebuild to find out which one it was. Below
-	// DefaultMinObservableK the window drops the reading itself, so `offered`
-	// counts what was offered and `held` what was kept.
+	// costs a rebuild to find out which one it was. Every row is counted
+	// under exactly one of them, so they add up to `replicas`. belowBand was
+	// the one missing: a single replica at 0.5 to 3 requests/s sat below k
+	// 0.15 on nearly every cycle for 24 minutes and logged `offered: 0` with
+	// every other count 0, which reads as the window being broken rather than
+	// the load being light.
 	logger.V(logging.DEFAULT).Info("itl-window",
 		"variant", variantName, "key", key,
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
-		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK,
+		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
+		// Ready needs minSamples steady readings AND this much spread among
+		// them; without it a window that never becomes Ready does not say
+		// which of the two it lacked.
+		"steadySpread", r.SteadySpread, "minKSpread", itl.DefaultMinKSpread,
 		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
 	switch {
 	case r.Tier == itl.TierOLS:
