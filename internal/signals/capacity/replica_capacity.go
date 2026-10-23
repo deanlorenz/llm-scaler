@@ -53,6 +53,14 @@ type ReplicaCapacity struct {
 	// leaves the same share of QueueLength out of its backlog. Zero on a role
 	// with no settled-idle replica, so its queues count in full.
 	QueueRoutedFraction float64
+	// ServiceRate is the replica's own completion rate this cycle (req/s; for
+	// prefill, the prompt tokens it computed over the prompt length), 0 when
+	// it has none; ServiceRateOnRecord is the rate its bucket has on record
+	// (measured saturated throughput, else the derived one), 0 when none.
+	// The saturation analyzer reads the two to tell a prefill replica that is
+	// idle from one that is busy at a KV its work does not fill.
+	ServiceRate         float64
+	ServiceRateOnRecord float64
 
 	// FromWarmPool marks a BRIDGE: a warm pool Pod lent to this variant rather
 	// than one of its own replicas. Carried through from the collector so

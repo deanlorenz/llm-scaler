@@ -148,7 +148,9 @@ const imbCycle = 15 * time.Second
 
 // imbSettle runs in every imbCycle until a replica that reads idle on every
 // row has done so for IdleSettledFor, and returns the last result: the
-// steady state of a fleet that stays as in describes.
+// steady state of a fleet that stays as in describes. Two cycles over, since
+// a prefill replica's idleness needs a rate on record, which the first
+// saturated cycle may not yet have written.
 func imbSettle(t *testing.T, a *SaturationAnalyzer, clock *time.Time, in domain.AnalyzerInput) *domain.AnalyzerResult {
 	t.Helper()
 	start := *clock
@@ -157,7 +159,7 @@ func imbSettle(t *testing.T, a *SaturationAnalyzer, clock *time.Time, in domain.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if clock.Sub(start) >= IdleSettledFor {
+		if clock.Sub(start) >= IdleSettledFor+2*imbCycle {
 			return r
 		}
 		*clock = clock.Add(imbCycle)
@@ -269,7 +271,14 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 			imbRow("decode-1", "decode-v", 0.25, 0, prompt, 1000, 0.5),
 		)
 		for i := range fracs {
-			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, 1.0))
+			// An empty replica completes nothing: prefill's KV is not its
+			// load, and a replica completing at its siblings' rate is busy
+			// however little it holds (pricedIdle).
+			rate := 1.0
+			if fracs[i] == 0 && queues[i] == 0 {
+				rate = 0
+			}
+			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, rate))
 		}
 		r := imbSettle(t, a, clock, makeAnalyzerInput(rows, states))
 		return r.RoleDemand[domain.RolePrefill], imbVariant(t, r, "prefill-v").PerReplicaCapacity

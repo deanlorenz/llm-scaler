@@ -101,3 +101,99 @@ func TestIdleRoomBridgeIsNoRoom(t *testing.T) {
 		t.Errorf("an idle warm-pool bridge took the queue out of demand: %.0f -> %.0f", alone, withBridge)
 	}
 }
+
+// Idle is measured against the replica's own capacity, min(k1, k2), not
+// against its cache. A compute-bound fleet whose k2 is 25 % of the cache has
+// replicas at their limit under the cache's 30 % line; one with nothing
+// waiting for a minute is busy, not room, and one request more or less on it
+// must not move the whole role's demand.
+func TestIdleRoomIsMeasuredAgainstTheReplicasCapacity(t *testing.T) {
+	const cache = int64(1_000_000)
+	states := []domain.VariantReplicaState{{VariantName: "both-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1}}
+	row := func(pod string, tok int64, q int) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics(pod, "both-v", tok, cache, q, 6000, 1000)
+		rm.RequestRate = 2
+		rm.GenerationTokenRate = 2000
+		rm.KvUsageInstant = float64(tok) / float64(cache)
+		return rm
+	}
+	// demand seeds k2 = 250 000 on four queued replicas, then holds r3 at
+	// r3Tokens with r3Queue waiting: for one cycle, or until it has read idle
+	// for long enough to count.
+	demand := func(r3Tokens int64, r3Queue int, settle bool) float64 {
+		t.Helper()
+		a, clock := imbAnalyzer()
+		for range 3 {
+			in := makeAnalyzerInput([]domain.ReplicaMetrics{
+				row("r0", 250_000, 20), row("r1", 250_000, 20), row("r2", 250_000, 20), row("r3", 250_000, 20),
+			}, states)
+			if _, err := a.Analyze(context.Background(), in); err != nil {
+				t.Fatal(err)
+			}
+			*clock = clock.Add(2 * imbCycle)
+		}
+		in := makeAnalyzerInput([]domain.ReplicaMetrics{
+			row("r0", 250_000, 20), row("r1", 250_000, 20), row("r2", 250_000, 20), row("r3", r3Tokens, r3Queue),
+		}, states)
+		if settle {
+			return imbSettle(t, a, clock, in).TotalDemand
+		}
+		r, err := a.Analyze(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.TotalDemand
+	}
+	const oneRequest = 7000
+	for _, c := range []struct {
+		name   string
+		tokens int64
+		settle bool
+	}{
+		{"r3 at 29 % of its cache, over its k2, one cycle", 290_000, false},
+		{"r3 at 29 % of its cache, over its k2, settled", 290_000, true},
+		{"r3 at 80 % of its k2 (20 % of its cache), settled", 200_000, true},
+	} {
+		busy, quiet := demand(c.tokens, 1, c.settle), demand(c.tokens, 0, c.settle)
+		t.Logf("%s: demand with one request waiting on r3 %.0f, with none %.0f", c.name, busy, quiet)
+		if busy-quiet > oneRequest {
+			t.Errorf("%s: one request fewer on r3 dropped demand by %.0f tokens, more than the request's own %d: its siblings' queues went with it",
+				c.name, busy-quiet, oneRequest)
+		}
+	}
+}
+
+// A P/D prefill replica holds KV only until decode pulls it, so a busy one
+// reads low KV with nothing waiting. Completing at the rate its siblings do,
+// it is not room for their queues, however long it reads that way.
+func TestIdleRoomPrefillIsJudgedByItsRate(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	const prompt = 6000.0
+	run := func(lowRate float64) float64 {
+		t.Helper()
+		a, clock := imbAnalyzer()
+		rows := []domain.ReplicaMetrics{
+			imbRow("decode-0", "decode-v", 0.25, 0, prompt, 1000, 0.5),
+			imbRow("decode-1", "decode-v", 0.25, 0, prompt, 1000, 0.5),
+			imbRow("prefill-0", "prefill-v", 0.20, 30, prompt, 1, 1.0),
+			imbRow("prefill-1", "prefill-v", 0.20, 30, prompt, 1, 1.0),
+			imbRow("prefill-2", "prefill-v", 0.20, 30, prompt, 1, 1.0),
+			imbRow("prefill-3", "prefill-v", 0.05, 0, prompt, 1, lowRate),
+		}
+		return imbSettle(t, a, clock, makeAnalyzerInput(rows, states)).RoleDemand[domain.RolePrefill]
+	}
+	busy, idle := run(1.0), run(0)
+	tokens := func(f float64) float64 { return float64(int64(f * float64(imbKv))) }
+	full := 3*tokens(0.20) + tokens(0.05) + 3*30*prompt
+	t.Logf("prefill demand: the low-KV replica completing at its siblings' rate %.0f, completing nothing %.0f; every queue charged %.0f",
+		busy, idle, full)
+	if busy != full {
+		t.Errorf("a prefill replica at 5 %% KV completing 1 req/s took its siblings' queues out of demand: %.0f, want %.0f", busy, full)
+	}
+	if !(idle < full) {
+		t.Errorf("a prefill replica at 5 %% KV completing nothing for minutes is room, yet demand stayed %.0f", idle)
+	}
+}

@@ -426,6 +426,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
+		ServiceRate:                 serviceRate,
+		ServiceRateOnRecord:         ref,
 		SaturatedThroughput:         saturatedThroughput,
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,

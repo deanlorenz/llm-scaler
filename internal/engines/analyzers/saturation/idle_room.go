@@ -22,9 +22,10 @@ import (
 // really is idle and could take it, and only as much of it as that sibling has
 // room for:
 //
-//   - The sibling has read idle (replicaIdle) on every cycle for
-//     IdleSettledFor, no two readings more than IdleMaxGap apart. One idle
-//     row is not an idle minute: the row is a one-minute peak, and a replica
+//   - The sibling has read idle against what it can do (pricedIdle) on
+//     every cycle for IdleSettledFor, no two readings more than IdleMaxGap
+//     apart. One idle row is not an idle minute: the row is a one-minute
+//     peak, and a replica
 //     that turned Ready seconds ago has a peak over those seconds alone. A
 //     fleet scaling up lands replicas one at a time, so on a single-row test
 //     there is nearly always a fresh "idle" pod, and the backlog that orders
@@ -81,7 +82,7 @@ func (a *SaturationAnalyzer) routeQueuesToIdleRoom(
 	logger logr.Logger,
 ) map[string]idleRoom {
 	now := a.now()
-	settled := a.noteIdleRuns(namespace, modelID, caps, rows, now)
+	settled := a.noteIdleRuns(namespace, modelID, caps, rows, rolesByVariant, now)
 
 	room := map[string]idleRoom{}
 	for i := range caps {
@@ -135,12 +136,40 @@ func takesRoutedQueue(rc capacity.ReplicaCapacity, rm domain.ReplicaMetrics) boo
 	return !rc.FromWarmPool && rm.TotalKvCapacityTokens > 0 && rc.LocalQueueDemand > 0
 }
 
+// pricedIdle reports whether a replica reads idle against what it can do, not
+// only against its cache: replicaIdle, and its busiest rank holding under
+// idleKvUsage of its effective capacity, min(k1, k2), and -- for prefill --
+// completing under idleKvUsage of the rate on record.
+//
+// The cache alone says idle about replicas that are not. A compute-bound
+// replica's limit can sit below 30 % of its cache (prefill-heavy traffic
+// queues at 16 % KV): one at its k2 with no queue for a minute read idle, and
+// in review the whole role's demand flapped 1 467 000 <-> 1 040 000 as one
+// request came and went on it. A P/D prefill replica holds KV only until
+// decode pulls it, so its KV is not its load at all: it is idle only when its
+// own completion rate says so, and with no rate on record it is never taken
+// as idle. A row priced without a cache size has no k1 to measure against
+// and is not idle either.
+func pricedIdle(rm domain.ReplicaMetrics, rc capacity.ReplicaCapacity, role string) bool {
+	if rm.TotalKvCapacityTokens <= 0 || rc.EffectiveCapacity <= 0 || !replicaIdle(rm) {
+		return false
+	}
+	if float64(rm.BusiestRankTokens()) >= idleKvUsage*float64(rc.EffectiveCapacity) {
+		return false
+	}
+	if domain.CanonicalRole(role) == domain.RolePrefill {
+		return rc.ServiceRateOnRecord > 0 && rc.ServiceRate < idleKvUsage*rc.ServiceRateOnRecord
+	}
+	return true
+}
+
 // noteIdleRuns records this cycle's idle readings in the model's replica memo
 // and reports, per row, whether that replica has been idle for IdleSettledFor.
 func (a *SaturationAnalyzer) noteIdleRuns(
 	namespace, modelID string,
 	caps []capacity.ReplicaCapacity,
 	rows []domain.ReplicaMetrics,
+	rolesByVariant map[string]string,
 	now time.Time,
 ) []bool {
 	settled := make([]bool, len(caps))
@@ -159,7 +188,7 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	for i := range caps {
 		rm := rows[i]
 		key := rm.VariantName + "/" + rm.PodName
-		if rm.FromWarmPool || rm.TotalKvCapacityTokens <= 0 || !replicaIdle(rm) {
+		if rm.FromWarmPool || !pricedIdle(rm, caps[i], rolesByVariant[rm.VariantName]) {
 			delete(memo.idle, key)
 			continue
 		}
