@@ -143,6 +143,13 @@ cache, 0.68 on the defaults), not at saturation, so the floor does not apply
 the `scaleUpThreshold` headroom to it again: a replica at the target fill,
 serving exactly that rate, is "full" to the floor and to occupancy alike.
 
+Only the variant's own line can grow a fleet this way. A line borrowed from
+another variant (a new namespace, a renamed variant) can hold the fleet but
+not grow it. With no line at all there is no floor: occupancy alone sizes the
+role, and it under-orders at a load step until the variant has fitted its own
+line. Under EPP flow control, where replicas rarely queue, that is the normal
+state of a new variant for its first minutes.
+
 Three rules keep it honest. Each was learned from a measured mistake; the runs
 are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 

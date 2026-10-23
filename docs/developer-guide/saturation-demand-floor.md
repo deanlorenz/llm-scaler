@@ -363,8 +363,25 @@ flow control on) no replica queued again after its first minute. A measured
 **derived** `mu` of the ITL line wherever it is the lower figure: an own
 measured window more than 2x above it outranks it only while the bucket has
 read saturated in agreement with it in the last five minutes, and a stale one
-under it keeps pricing (`measuredYieldsToDerived`). With no line fitted yet there is no derived `mu`
-either, the role has no floor, and occupancy alone sizes it. k2 is the same: it
+under it keeps pricing (`measuredYieldsToDerived`). That holds for the
+variant's **own** line only:
+
+- **A borrowed line holds the fleet but does not grow it.** A derived `mu`
+  from a line borrowed from another variant (a fresh namespace, a rename) is a
+  `borrowedReading` in `floor.Estimate` and never sets `mayOrder`: it prices
+  the replicas but caps the floor at the role's anticipated supply. In review,
+  three replicas at KV 0.8 under flow control with a borrowed line read the
+  same demand as with no line at all (1 082 760).
+- **No line is no floor.** With no line fitted yet there is no derived `mu`
+  either, and occupancy alone sizes the role until the variant fits its own
+  line (about 28 cycles of readings across the k spread). Occupancy
+  under-orders at a step: a step to twice the fleet's capacity (lambda 24 on
+  a fleet good for 12) read 3.53 replicas at a router queue of 0 and 5.63 at
+  360, against the 7.1 and 8.8 the load needs, closing only as the router's
+  queue builds. This is the cost of refusing the join-time readings, which on
+  E1 over-ordered 12-20x.
+
+k2 is the same: it
 is learned in those minutes or not at all, and otherwise comes from the
 history window or the engine arguments (`P2-hist`, `P3-k2`).
 
