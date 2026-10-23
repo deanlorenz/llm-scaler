@@ -233,7 +233,11 @@ var _ = Describe("Tracker", func() {
 		Expect(r.Tier).To(Equal(TierPinnedB))
 		// The dips' own slopes through the 6 ms floor are 0.085 to 0.105.
 		Expect(r.Model.A).To(BeNumerically("~", 0.100, 0.005))
-		Expect(r.SteadyHeld).To(Equal(1), "only the first reading, of a replica present from the start")
+		// The first reading is the warm-up one, of a replica the load came
+		// back to after five idle cycles: it starts over as a joiner, as the
+		// two that did join, and its k swings by more than DefaultMaxKDrift
+		// after that.
+		Expect(r.SteadyHeld).To(BeZero(), "the load coming back is not a steady reading")
 		Expect(r.SteadySpread).To(BeZero())
 	})
 

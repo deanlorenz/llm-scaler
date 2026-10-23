@@ -230,7 +230,12 @@ the same fill twice as slowly (two replicas: 9 cycles to the new `A`, against
 5). A level the fleet only passed through
 never settles, so it never reaches the steady readings and teaches nothing.
 A reading with no `k` (the collector's zero value) is not traced, so one
-missed scrape does not make its replica unsteady.
+missed scrape does not make its replica unsteady. A replica the load comes back
+to after two or more rows without an ITL starts over as a joiner and waits out
+`DefaultSteadyFor`. An idle replica leaves nothing in its trace, so its first
+reading, which carries the warm-up ITL, was otherwise steady: on a load step
+that brought an idle replica back, the full fit stored `B` = 77 ms against a
+true 12 ms. One such row between two readings is a missed scrape.
 
 From the line, two closed forms:
 

@@ -289,6 +289,68 @@ var _ = Describe("Tracker steady readings", func() {
 		Expect(r.SteadyHeld).To(Equal(13))
 	})
 
+	// The round-2 statistics review's probe. p1 serves at k 0.35; p2 is Ready
+	// but idle from the key's first Observe (k 0 and no ITL: nothing running).
+	// The load rises: p1 steps to 0.70, and p2's first reading is k 0.55 at
+	// 0.45 s, the warm-up reading a two-namespace run logged at 435 to 496 ms.
+	// Then both sit on the true line at 0.70. With nothing in p2's trace to
+	// judge it by, the warm-up reading was steady, and the full fit through it
+	// stored B = 77 ms against a true 12 ms: 31 of 40 cycles were priced more
+	// than 10% off at ITL(0.85), the worst +236%.
+	It("holds a replica the load comes back to out until it has served DefaultSteadyFor", func() {
+		for range 16 {
+			observe(row("p1", 0.35, trueLine.ITLAt(0.35)), row("p2", 0, 0))
+		}
+		r := observe(row("p1", 0.70, trueLine.ITLAt(0.70)), row("p2", 0.55, 0.45))
+		Expect(r.Unsteady).To(Equal(2), "p1 stepped, and p2 just started serving")
+		full := 0
+		for c := range 40 {
+			r = observe(row("p1", 0.70, trueLine.ITLAt(0.70)), row("p2", 0.70, trueLine.ITLAt(0.70)))
+			if r.Tier == TierOLS {
+				full++
+				Expect(r.Model.B).To(BeNumerically("~", trueLine.B, 1e-6), "cycle %d: the full fit's B", c)
+			}
+			// Before the first full fit the pinned fit holds B at the 6 ms
+			// default, and through the old level that reads +9% here.
+			Expect(r.Model.ITLAt(0.85)).To(BeNumerically("~", trueLine.ITLAt(0.85), 0.10*trueLine.ITLAt(0.85)),
+				"cycle %d: %s A=%.4f B=%.4f", c, r.Tier, r.Model.A, r.Model.B)
+		}
+		Expect(full).To(BeNumerically(">", 0), "the step gives the fleet its spread")
+		b, ok := t.Baseline("key")
+		Expect(ok).To(BeTrue())
+		Expect(b).To(BeNumerically("~", trueLine.B, 1e-6), "remembered B")
+	})
+
+	It("holds a lone replica out after it idled, and learns B from the levels it settled at", func() {
+		for range 4 {
+			observe(row("p", 0, 0))
+		}
+		Expect(observe(row("p", 0.30, 0.27)).Unsteady).To(Equal(1), "the warm-up reading")
+		for range 12 {
+			observe(row("p", 0.35, trueLine.ITLAt(0.35)))
+		}
+		for range 16 {
+			observe(row("p", 0.70, trueLine.ITLAt(0.70)))
+		}
+		b, ok := t.Baseline("key")
+		Expect(ok).To(BeTrue())
+		Expect(b).To(BeNumerically("~", trueLine.B, 1e-6), "against 0.23 through the warm-up reading")
+	})
+
+	It("does not take one scrape that read nothing on a serving replica as idling", func() {
+		for range 12 {
+			observe(row("p", 0.60, 0.05))
+		}
+		r := observe(row("p", 0, 0))
+		Expect(r.NoITL).To(Equal(1))
+		Expect(observe(row("p", 0.60, 0.05)).Unsteady).To(BeZero(), "one gap is a missed scrape")
+
+		By("two in a row are the replica idling")
+		observe(row("p", 0, 0))
+		observe(row("p", 0, 0))
+		Expect(observe(row("p", 0.60, 0.05)).Unsteady).To(Equal(1))
+	})
+
 	It("forgets a stale key's steady readings and traces with its window", func() {
 		observe(row("p", 0.5, 0.06))
 		t.Sweep(now, func(string) bool { return true })

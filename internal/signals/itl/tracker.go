@@ -154,6 +154,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
 				traces.replicas[rm.PodName] = trace
 			}
+			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), now)
 			if traceable(rm.KvUsageInstant) {
 				steady = trace.steady(rm.KvUsageInstant, now)
 			} else {

@@ -62,6 +62,38 @@ type replicaTrace struct {
 	// it is new, not merely new to this process.
 	joined  bool
 	samples []kSample
+	// idle counts the replica's latest rows in a row that carried no ITL: no
+	// tokens in the rate window, so nothing was served.
+	idle int
+}
+
+// idleRows is how many rows without an ITL in a row make a replica idle
+// rather than one that missed a scrape.
+//
+// An idle replica leaves nothing in its trace -- vLLM reports a KV fill of 0
+// with nothing running, and a k of 0 is not traced -- so when the load comes
+// back, its first reading had nothing to be judged against and was steady.
+// That reading carries the warm-up ITL: on a two-namespace run, about 0.46 of
+// k at 435 to 496 ms against a line near 0.09. It reached the full fit, and on
+// a load step that gives an idle replica its first reading the full fit
+// learned B = 77 ms against a true 12 ms and pinned it into every fit after.
+// Two rows, so that one scrape that read nothing on a replica serving either
+// side of it does not hold that replica out for DefaultSteadyFor.
+const idleRows = 2
+
+// serving notes whether this row of the replica carried an ITL. A replica
+// that comes back with one after idleRows or more rows without starts its
+// trace over as a joiner: it waits out DefaultSteadyFor, and its trace
+// begins at now.
+func (rt *replicaTrace) serving(hasITL bool, now time.Time) {
+	if !hasITL {
+		rt.idle++
+		return
+	}
+	if rt.idle >= idleRows {
+		rt.since, rt.joined, rt.samples = now, true, rt.samples[:0]
+	}
+	rt.idle = 0
 }
 
 // keyTraces is every replica a key is tracing, and when it began.
@@ -79,7 +111,8 @@ type keyTraces struct {
 // of history from every replica would delay the first full fit after every
 // controller restart. One that joined later is new -- a pod just started, or
 // back from a rollout -- and its ITL covers its own warm-up, so it waits out
-// DefaultSteadyFor.
+// DefaultSteadyFor. So does one the load came back to after it idled: see
+// idleRows.
 func (rt *replicaTrace) steady(k float64, now time.Time) bool {
 	if rt.joined && now.Sub(rt.since) < DefaultSteadyFor {
 		return false
@@ -126,7 +159,8 @@ func (w *Window) dropBefore(cutoff time.Time) {
 // missed scrape put a k of 0 into the trace and held the replica out of the
 // steady readings for DefaultSteadyFor against it. A row without a k neither
 // judges the replica nor restarts its trace; one that is not Ready, is lent by
-// the warm pool, or is missing from the cycle restarts it.
+// the warm pool, or is missing from the cycle restarts it, and so does load
+// coming back after idleRows rows without an ITL.
 func traceable(k float64) bool {
 	return k > 0 && !math.IsInf(k, 0)
 }
