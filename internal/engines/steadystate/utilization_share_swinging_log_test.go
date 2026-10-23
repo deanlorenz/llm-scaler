@@ -18,7 +18,7 @@ func TestUtilizationShareReportsSwingingRoles(t *testing.T) {
 	var lines []string
 	logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
 	st := &utilizationShareState{}
-	tm := allocation.ShareTimings{SwingWindow: 90 * time.Minute}
+	tm := allocation.ShareTimings{SwingWindow: 90*time.Minute + 245*time.Millisecond, SwingReversals: 4}
 	const busy, idle = "ns-a/m/decode", "ns-b/m/decode"
 	both := allocation.SharePlan{Swinging: []string{busy, idle}, SwingNeeds: map[string]allocation.ShareSwingNeed{
 		busy: {Mean: 1.43, Current: 2.73}, idle: {Mean: 0.72, Current: 0.66}}}
@@ -37,8 +37,13 @@ func TestUtilizationShareReportsSwingingRoles(t *testing.T) {
 	if got := count("planned on its mean need"); got != 2 {
 		t.Fatalf("entering the swing rule logged %d lines naming it, want 2: %q", got, lines)
 	}
-	if count(`"flappingWindow"="1h30m0s"`) != 2 {
-		t.Errorf("the swing lines lack the flapping window: %q", lines)
+	if count(`"flappingWindow"="1h30m0s"`) != 2 || count(`"swingReversals"=4`) != 2 {
+		t.Errorf("the swing lines lack the flapping window or the count in force: %q", lines)
+	}
+	// The message states the count and the window; on a cluster it once read
+	// "changed direction swingReversals times within the flappingWindow".
+	if count("changed direction 4 times within 1h30m0s") != 2 || count("swingReversals times") != 0 {
+		t.Errorf("the swing message does not state the count and the window in force: %q", lines)
 	}
 	for _, want := range []string{`"role"="ns-a/m/decode"`, `"meanNeedGPUs"="1.43"`, `"currentNeedGPUs"="2.73"`} {
 		if count(want) != 1 {

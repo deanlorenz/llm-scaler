@@ -1145,11 +1145,15 @@ func (st *utilizationShareState) reportSwinging(logger logr.Logger, key string, 
 			continue
 		}
 		n := plan.SwingNeeds[role]
-		logger.Info("Utilization share: planned on its mean need -- its transfers, landed or called off, changed direction swingReversals times "+
-			"within the flappingWindow -- until its need stays more than a quarter from that mean for longer than a move "+
-			"takes and than any earlier swing, or the window passes",
+		// The count and the window go in the message itself: written as the
+		// knobs' names, the line read "changed direction swingReversals times
+		// within the flappingWindow" on a cluster.
+		logger.Info(fmt.Sprintf("Utilization share: planned on its mean need -- its transfers, landed or called off, changed "+
+			"direction %d times within %s (swingReversals, flappingWindow) -- until its need stays more than a quarter from "+
+			"that mean for longer than a move takes and than any earlier swing, or the window passes",
+			tm.Reversals(), tm.SwingWindow.Round(time.Second)),
 			"role", role, "meanNeedGPUs", fmt.Sprintf("%.2f", n.Mean), "currentNeedGPUs", fmt.Sprintf("%.2f", n.Current),
-			"flappingWindow", tm.SwingWindow.String(), "swingReversals", tm.Reversals())
+			"flappingWindow", tm.SwingWindow.Round(time.Second).String(), "swingReversals", tm.Reversals())
 	}
 	for _, role := range slices.Sorted(maps.Keys(was)) {
 		if !now[role] {
