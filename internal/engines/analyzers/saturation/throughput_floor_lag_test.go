@@ -13,9 +13,10 @@ import (
 
 // floorOneReplica applies the throughput floor to one decode replica holding
 // resident tokens with queued requests charged queueCharge as residency, at
-// arrival rate lambda, with a saturated throughput of mu from samples readings
-// of its own window, and returns the model's demand after the floor.
-func floorOneReplica(lambda, mu float64, samples int, resident, queueCharge float64, queued int) float64 {
+// arrival rate lambda, with a saturated throughput of 6 req/s from samples
+// readings of its own window, and returns the model's demand after the floor.
+func floorOneReplica(lambda float64, samples int, resident, queueCharge float64, queued int) float64 {
+	const mu = 6.0
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	in := makeAnalyzerInput(nil, nil)
 	in.ArrivalRate = lambda
@@ -35,7 +36,7 @@ func floorOneReplica(lambda, mu float64, samples int, resident, queueCharge floa
 // 312 936 -> 47 265 in one cycle.
 func TestThroughputFloor_DoesNotLowerDemandOnALaggingArrivalRate(t *testing.T) {
 	const resident, charge = 260_123.0, 239_323.0
-	got := floorOneReplica(0.8, 6.0, 2, resident, charge, 160)
+	got := floorOneReplica(0.8, 2, resident, charge, 160)
 	assert.InDelta(t, resident+charge, got, 1, "the occupancy and queue demand stands")
 }
 
@@ -43,7 +44,7 @@ func TestThroughputFloor_DoesNotLowerDemandOnALaggingArrivalRate(t *testing.T) {
 // reading (mayOrder=false) took 356 392 to 274 556.
 func TestThroughputFloor_DoesNotLowerDemandOnAHeldTerm(t *testing.T) {
 	const resident, charge = 274_556.0, 81_836.0
-	got := floorOneReplica(2.5, 6.0, 1, resident, charge, 59)
+	got := floorOneReplica(2.5, 1, resident, charge, 59)
 	assert.InDelta(t, resident+charge, got, 1)
 }
 
@@ -53,7 +54,7 @@ func TestThroughputFloor_DoesNotLowerDemandOnAHeldTerm(t *testing.T) {
 // its residency charge comes to.
 func TestThroughputFloor_PricesABacklogAsDrainWhenLambdaHolds(t *testing.T) {
 	const resident, charge = 260_123.0, 239_323.0
-	got := floorOneReplica(6.0, 6.0, 2, resident, charge, 160)
+	got := floorOneReplica(6.0, 2, resident, charge, 160)
 	want := (6.0 + 160.0/60) / 6.0 * 260_622
 	assert.InDelta(t, want, got, 1)
 	assert.Less(t, got, resident+charge)
@@ -65,13 +66,13 @@ func TestThroughputFloor_PricesABacklogAsDrainWhenLambdaHolds(t *testing.T) {
 // took this replica from 499 446 to 260 123 between 2.95 and 3.0 req/s.
 func TestThroughputFloor_TheSwapIsContinuousInLambda(t *testing.T) {
 	const resident, charge = 260_123.0, 239_323.0
-	below := floorOneReplica(2.95, 6.0, 2, resident, charge, 160)
-	above := floorOneReplica(3.0, 6.0, 2, resident, charge, 160)
+	below := floorOneReplica(2.95, 2, resident, charge, 160)
+	above := floorOneReplica(3.0, 2, resident, charge, 160)
 	t.Logf("demand at 2.95 req/s %.0f, at 3.0 req/s %.0f", below, above)
 	assert.InDelta(t, below, above, 0.02*below, "a 2 %% rise in lambda moves demand by at most 2 %%")
 	prev := resident + charge
 	for _, lambda := range []float64{2.8, 3.2, 3.6, 4.0, 4.4, 4.8, 5.2, 6.0, 8.0} {
-		got := floorOneReplica(lambda, 6.0, 2, resident, charge, 160)
+		got := floorOneReplica(lambda, 2, resident, charge, 160)
 		t.Logf("lambda %.1f: demand %.0f", lambda, got)
 		assert.LessOrEqual(t, prev-got, 0.15*(resident+charge),
 			"at %.1f req/s demand fell by more than 15 %% of the measured demand in one step", lambda)

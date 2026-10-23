@@ -506,10 +506,11 @@ func TestImbalanceAQueuedReplicaKeepsItsPeak(t *testing.T) {
 	prefill := func(instants []float64) float64 {
 		t.Helper()
 		a, _ := imbAnalyzer()
-		rows := []domain.ReplicaMetrics{
+		rows := make([]domain.ReplicaMetrics, 0, 2+len(instants))
+		rows = append(rows,
 			imbRow("d0", "decode-v", 0.25, 0, 6000, 1000, 0.5),
 			imbRow("d1", "decode-v", 0.25, 0, 6000, 1000, 0.5),
-		}
+		)
 		for i, k := range instants {
 			rm := imbRow("p"+string(rune('0'+i)), "prefill-v", 0.6, 30, 6000, 1, 1.0)
 			rm.KvUsageInstant = k

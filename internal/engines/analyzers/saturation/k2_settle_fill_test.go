@@ -105,7 +105,7 @@ func TestK2Settle_ASlowFillIsLearnedFilled(t *testing.T) {
 				}))
 			require.NoError(t, err)
 			ds := logs.FilterMessage("k2-decision").All()
-			if len(ds) == 0 || stringField(t, ds[0].ContextMap(), "priority") != "P1-obs" {
+			if len(ds) == 0 || stringField(t, ds[0].ContextMap(), "priority") != capacity.K2SrcObserved.String() {
 				continue
 			}
 			for _, e := range logs.FilterMessage("replica-capacity-decision").All() {
