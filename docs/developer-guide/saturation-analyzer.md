@@ -424,6 +424,9 @@ An admitted k2 reading is not always a service rate. `throughputRefusal`
 (`throughput_admission.go`) also refuses, logging
 `saturated-throughput-refused`, a reading from a replica that completed no
 request over the window (`RequestRate` 0: every sequence is still growing),
+one whose generated tokens run more than `MaxTokensOverCompletions` (1.15x)
+ahead of what its completions account for (`tokensOutrunCompletions`, the
+same fill a minute on; not judged for prefill),
 one under half of what a Ready replica of the variant served this cycle
 (`servedBounds`, logged as `servedBound`: a served rate is a lower bound on
 `mu`, so this is one slow replica), and one under `MinMeasuredOfDerived`
@@ -444,6 +447,18 @@ a minute) is a real low rate, the line the wrong figure, and its readings are
 recorded from then on (`saturated-throughput-low-confirmed`,
 `TestMuChoice_ALowRateThatRepeatsIsRecorded`). The runs live in
 `muChoice.low`. A reading the served rate contradicts is never confirmed.
+
+A filling replica can read high as well. On the E1 rerun two replicas that
+had joined a minute before, still queued, read 6.70 and 6.99 req/s from
+their token rate while they completed 5.08 and 4.86. Their batches were
+still growing, so tokens went to sequences that had not completed yet. The
+two readings became the window's median, and sg1 was priced at 6.70 against
+the 6.0-6.1 its saturated replicas completed. That is 11 % high, which
+under-orders. Full replicas past their fill read 0.90-1.07x tokens over
+completions across 24 scrape intervals of the same run. The filling
+readings read 1.32x and 1.44x, so a reading over 1.15x is refused. Such a
+replica is also left out of `servedBounds`
+(`TestE1_AFillingReplicaDoesNotRaiseMu`, which read 6.70 before).
 
 ## Demand
 
@@ -698,6 +713,7 @@ unchanged, so stored windows are still found.
 | `IdleMaxGap` | 1m | `saturation` |
 | `JoinedReplicaWindow` | 1m | `saturation` |
 | `MinMeasuredOfDerived` | 0.5 | `saturation` |
+| `MaxTokensOverCompletions` | 1.15 | `saturation` |
 | `MeasuredLowConfirmFor` | 2m | `saturation` |
 | `MeasuredDerivedMaxRatio` | 2.0 | `saturation` |
 | `MeasuredDerivedReturnRatio` | 1.6 | `saturation` |

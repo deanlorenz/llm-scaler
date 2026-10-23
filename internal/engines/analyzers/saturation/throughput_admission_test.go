@@ -308,3 +308,55 @@ func TestE1_AStaleMeasuredMuYieldsToADisagreeingDerivedFigure(t *testing.T) {
 		})
 	}
 }
+
+// The E1 rerun (2026-10-23, image c0ac4bfd9): sg1's mu sat at 6.70 req/s
+// from phase C on, against the 6.0-6.1 its saturated replicas completed
+// (request_success_total). The samples behind it came from replicas a minute
+// after they joined, still queued: 6.70 at 5.08 completed (rc5bc, 17:12:02)
+// and 6.99 at 4.86 (zv8bk, 16:51:28). Their batches were still filling, so
+// they generated tokens for sequences not yet completed, and the token rate
+// over the output length ran 1.32x and 1.44x ahead of what they served.
+// Replayed here: p0 is measured at 6.0 and stays full, unqueued, at 6.0; p1
+// reads the two filling minutes, then settles at 6.0. Two filling samples
+// beside one honest one were the window's median.
+func TestE1_AFillingReplicaDoesNotRaiseMu(t *testing.T) {
+	a := newE1Analyzer(t, false)
+	const out = 498
+	full, light := int64(340_000), int64(60_000)
+	cycles := []e1Cycle{
+		{"17:10:01", []e1Row{{"p0", 10, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
+		{"17:10:16", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
+		{"17:10:31", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
+		{"17:10:46", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
+		{"17:11:02", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 51, 354_644, 5.076, 6.703 * out}}},
+		{"17:11:17", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 51, 354_644, 5.1, 6.70 * out}}},
+		{"17:12:03", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 5, 367_000, 4.858, 6.998 * out}}},
+		{"17:12:18", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 5, 367_000, 4.86, 6.99 * out}}},
+	}
+	for i := range 8 {
+		at := time.Date(0, 1, 1, 17, 13, 4+15*i, 0, time.UTC).Format("15:04:05")
+		cycles = append(cycles, e1Cycle{at, []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, full, 6.0, 6.0 * out}}})
+	}
+	decisions, _ := replayE1(t, a, cycles)
+	for _, d := range decisions {
+		if d.mu > 0 {
+			assert.LessOrEqual(t, d.mu, 6.0*1.05, "%s %s: mu %.2f from %s, above the 6.0 the replicas complete", d.at, d.pod, d.mu, d.bucket)
+		}
+	}
+}
+
+// A replica whose tokens and completions agree at steady state is not
+// filling, whatever the shape; one whose tokens run ahead is, and prefill,
+// which generates about one token a request, is never judged.
+func TestTokensOutrunCompletions(t *testing.T) {
+	rm := func(rr, gps, avgOut float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{RequestRate: rr, GenerationTokenRate: gps, AvgOutputTokens: avgOut}
+	}
+	assert.False(t, tokensOutrunCompletions(rm(6.0, 6.0*500, 500), domain.RoleDecode, 500), "steady at 1.0x")
+	assert.False(t, tokensOutrunCompletions(rm(6.0, 1.07*6.0*500, 500), domain.RoleDecode, 500), "1.07x, the most a full replica read on E1")
+	assert.True(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RoleDecode, 500), "1.32x, a replica filling")
+	assert.True(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 0), domain.RoleDecode, 500), "the fleet's output length where the replica has none")
+	assert.False(t, tokensOutrunCompletions(rm(6.0, 6.0*2000, 2000), domain.RoleDecode, 500), "its own output length, not the fleet's")
+	assert.False(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RolePrefill, 500), "prefill is not judged")
+	assert.False(t, tokensOutrunCompletions(rm(0, 6.703*500, 500), domain.RoleDecode, 500), "no completion is refused on its own")
+}

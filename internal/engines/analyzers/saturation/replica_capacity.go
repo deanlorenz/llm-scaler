@@ -271,12 +271,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// another is the fault the key exists to prevent.
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
 			// Not every admitted k2 reading is a service rate: a replica that
-			// has completed nothing, or completes a fraction of what its ITL
-			// line prices, is filling (throughput_admission.go).
+			// has completed nothing, generates more tokens than its
+			// completions account for, or completes a fraction of what its
+			// ITL line prices, is filling (throughput_admission.go).
 			// Nor is one under half of what a Ready replica of the variant
 			// served this cycle (served): a served rate is a lower bound on
 			// what one replica sustains.
-			why := throughputRefusal(rm.RequestRate, mu, derived, served.max)
+			why := throughputRefusal(rm.RequestRate, mu, derived, served.max,
+				tokensOutrunCompletions(rm, role, fleetOutput))
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),

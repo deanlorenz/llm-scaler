@@ -45,6 +45,18 @@ import (
 //   - completed requests over the window (RequestRate > 0). A replica that
 //     has completed nothing has every sequence still growing: its token rate
 //     is the rate of a batch being admitted, not of one being served.
+//   - generated no more than MaxTokensOverCompletions times the tokens its
+//     completions account for (tokensOutrunCompletions; not judged for
+//     prefill, which holds nothing long). The same fill, a minute later: the
+//     batch is still growing, so tokens are generated for sequences that have
+//     not completed yet, and the token rate over the output length -- the
+//     mu recorded -- reads above what the replica completes. On the E1 rerun
+//     (2026-10-23) two replicas that had joined a minute before, still
+//     queued, read 6.70 and 6.99 req/s at 5.08 and 4.86 completed, 1.32x and
+//     1.44x; they became the window's median, and sg1 was priced at 6.70
+//     against the 6.0-6.1 its saturated replicas served -- 11 % high, the
+//     under-ordering side. Full replicas past their fill read 0.90-1.07x
+//     over 24 scrape intervals of the same run.
 //   - is not under half of what a Ready replica of the variant served this
 //     cycle (servedBounds; by more than MeasuredDerivedMaxRatio). A replica
 //     that served a rate can sustain it, so the highest served rate is a
@@ -199,15 +211,52 @@ const (
 	refusedNoCompletion = "no request completed over the rate window: every sequence is still growing, so the token rate is a batch being admitted, not served"
 	refusedUnderDerived = "under half the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
 	refusedUnderServed  = "under half what a Ready replica of the variant served this cycle: a served rate is a lower bound on mu, so this is one slow replica, not the variant's service rate"
+	refusedFilling      = "generated more tokens than its completions account for: sequences are still growing, so the token rate is a batch filling, not one being served"
 )
+
+// MaxTokensOverCompletions is the most a replica's generated-token rate may
+// be over the tokens its completions account for (its request rate times
+// its output length) for its rate to be a service rate
+// (tokensOutrunCompletions). A full replica past its fill reads 0.90-1.07x
+// (E1, 24 scrape intervals); a replica still filling read 1.32x and 1.44x.
+const MaxTokensOverCompletions = 1.15
+
+// tokensOutrunCompletions reports whether rm generated more than
+// MaxTokensOverCompletions times the tokens its completions account for over
+// the rate window: GenerationTokenRate against RequestRate times its own
+// output length (fleetOutput where it has none). At steady state the two
+// agree whatever the shape; while a batch fills, tokens go to sequences not
+// yet completed, and the token rate runs ahead. A drain burst runs the other
+// way and is not caught here. Prefill is not judged: it generates about one
+// token per request, and its rate is not read from generated tokens
+// (saturatedCompletionRate). Nor is a replica with no completions, which
+// throughputRefusal refuses on its own.
+func tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, fleetOutput float64) bool {
+	if domain.CanonicalRole(role) == domain.RolePrefill || !(rm.RequestRate > 0) || !(rm.GenerationTokenRate > 0) {
+		return false
+	}
+	out := rm.AvgOutputTokens
+	if !(out > 0) {
+		out = fleetOutput
+	}
+	if !(out > 0) {
+		return false
+	}
+	return rm.GenerationTokenRate > MaxTokensOverCompletions*rm.RequestRate*out
+}
 
 // throughputRefusal says why a saturated replica's completion rate mu is not
 // a sample of what one replica sustains, or "" when it may be recorded. The
 // replica has already passed the k2 admission, the joined test included.
-// served is the variant's highest served rate this cycle (servedBounds).
-func throughputRefusal(requestRate, mu float64, derived derivedMu, served float64) string {
+// served is the variant's highest served rate this cycle (servedBounds), and
+// filling whether the replica's tokens outran its completions
+// (tokensOutrunCompletions).
+func throughputRefusal(requestRate, mu float64, derived derivedMu, served float64, filling bool) string {
 	if !(requestRate > 0) {
 		return refusedNoCompletion
+	}
+	if filling {
+		return refusedFilling
 	}
 	if served > MeasuredDerivedMaxRatio*mu {
 		return refusedUnderServed
@@ -251,7 +300,8 @@ type servedRates struct {
 // the variant's mu; and one whose cache is full serves about its limit, so
 // the median of those that are not queued is a reading of it. Warm-pool bridges run the pool's
 // engine and are left out, as a Pod that is not Ready is, whose rate is not
-// a capacity (admissionOf).
+// a capacity (admissionOf), and so is a replica still filling, whose token
+// rate runs ahead of what it serves (tokensOutrunCompletions).
 func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold,
 	fleetOutput, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) map[string]servedRates {
 	out := make(map[string]servedRates)
@@ -263,7 +313,7 @@ func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string
 		role := rolesByVariant[rm.VariantName]
 		rate, ok := saturatedCompletionRate(rm, role, fleetOutput,
 			throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate))
-		if !ok || !(rate > 0) || math.IsInf(rate, 1) {
+		if !ok || !(rate > 0) || math.IsInf(rate, 1) || tokensOutrunCompletions(rm, role, fleetOutput) {
 			continue
 		}
 		s := out[rm.VariantName]
