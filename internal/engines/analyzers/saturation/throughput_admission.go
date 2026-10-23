@@ -34,6 +34,9 @@ import (
 //     as fresh as a new one. In review such a pod, absent for 75 s, kept its
 //     old first-seen time, and its filling reading (174 327 tokens, 1.0
 //     req/s, against 340 000 and 6.3 served) was written as k2 and mu.
+//     Today the collector reports no Ready time to this package, so the
+//     restart case is not yet covered: a follow-up after #283 merges
+//     switches replicaReadySince on (TODO(#283)).
 //     Where the time is unknown the analyzer's own first sight stands in. A
 //     replica already Ready on the analyzer's first cycle for the model then
 //     has an age the analyzer cannot know and is taken as established:
@@ -145,11 +148,13 @@ const k2UnsettledJoined = "the replica joined under a rate window ago: its batch
 
 // replicaReadySince is when rm's Pod last became Ready, zero when unknown.
 //
-// TODO(#283): return rm.ReadySince once PR #283 lands it on
+// TODO(#283): return rm.ReadySince. PR #283 adds it to
 // domain.ReplicaMetrics (the Pod Ready condition's LastTransitionTime, set
-// by the collector only for a Ready Pod; zero is unknown). Until then the
-// collector reports no Ready time and this is always unknown, so noteReady
-// falls back to the analyzer's first sight of the replica.
+// by the collector only for a Ready Pod; zero is unknown), but merging it
+// does not switch this: a follow-up commit after #283 merges does. Until
+// then this is always unknown, noteReady falls back to the analyzer's first
+// sight of the replica, and a pod back from a restart under the same name
+// keeps its old first-seen time.
 func replicaReadySince(domain.ReplicaMetrics) time.Time {
 	return time.Time{}
 }

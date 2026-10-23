@@ -164,8 +164,12 @@ so tests stand in for the collector). A pod back from an engine or LWS group
 restart under the same name has a new Ready time: in review one absent for
 75 s kept its old first-seen time and its filling reading (174,327 tokens,
 1.0 req/s) became k2 and mu (`TestReadySince_ARejoiningPodIsAsFreshAsANewOne`).
-Today `replicaReadySince` returns zero (unknown): `ReplicaMetrics.ReadySince`
-arrives with PR #283, and the accessor reads it then (TODO(#283)).
+Today `replicaReadySince` returns zero (unknown), so the restart case is not
+yet covered: PR #283 adds `ReplicaMetrics.ReadySince` and the collector that
+sets it, but merging it changes nothing here by itself. A follow-up commit
+after #283 merges switches the accessor to `rm.ReadySince` (TODO(#283)); that
+is what makes `TestReadySince_ARejoiningPodIsAsFreshAsANewOne`'s case hold in
+production.
 Where the time is unknown, `readySince` in the settle memo is when the analyzer
 first saw the replica Ready. A replica already Ready on the memo's first cycle
 then has an age the analyzer cannot know and is taken as established, so a
