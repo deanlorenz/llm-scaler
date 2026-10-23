@@ -705,17 +705,58 @@ one planning cycle to see the release, the KEDA poll and HPA sync that raise the
 receiver, scheduling, and the receiver's model load -- often 3 to 10 minutes for
 a large model.
 
-**Whole-node models: the freed node is not reserved.** Between the donor's pod
-going and the receiver's pod being created -- a planning cycle, a KEDA poll and
-an HPA sync, typically 30 to 75 seconds -- the freed node is free to anyone.
-Today's optimizer does not scale models into GPUs promised to a receiver, but a
-pod from outside the controller's view (another tenant, a training job) can take
-it, and one 1-GPU pod is enough to spoil an 8-GPU hole. The transfer then ends
-`fill-timeout` with `release-taken`. Give share-group receivers a
-`PriorityClass` above the cluster's other GPU workloads, so the scheduler places
-their Pending pod first, and see
-[proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)
-for raising the receiver earlier. An idle model is not
+**Whole-node models: give them a `PriorityClass`.** A node freed for a
+whole-node model opens one GPU at a time as the donors' pods go, and the
+model's pod fits only once all of them are free. The scheduler holds nothing
+for a Pending pod of the same priority, so any Pending pod that needs fewer
+GPUs (another tenant, a training job, one 1-GPU pod is enough) takes the
+first GPU. The transfer then ends `fill-timeout` with `release-taken`, and the
+donors have shrunk for nothing. Set `priorityClassName` on the whole-node
+model's pod template, naming a `PriorityClass` above the cluster's other GPU
+pods, with the default `preemptionPolicy` (`PreemptLowerPriority`; `Never` does
+not help). For a LeaderWorkerSet, set it on the leader and the worker
+template. The model's Pending pod then preempts lower-priority pods, is
+nominated to the node it preempted on, and the scheduler keeps that node from
+lower-priority pods until it lands.
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: whole-node-inference
+value: 100000          # above every other GPU workload's class
+preemptionPolicy: PreemptLowerPriority
+description: Whole-node models in a utilization-share group
+---
+# In the model's Deployment (or both LeaderWorkerSet templates):
+spec:
+  template:
+    spec:
+      priorityClassName: whole-node-inference
+```
+
+The cost, which is the cluster owner's call:
+
+- A Pending pod of that model preempts whenever it waits, for any reason: a
+  rollout's surge pod, a pod moved off a failed node, a replica raised by
+  today's optimizer. Each can evict a node's worth of lower-priority pods,
+  including pods the scaling manager does not manage. A whole-node Deployment
+  with `maxSurge: 0` rolls out without that surge.
+- The scheduler picks the victims, not the controller. It prefers the node
+  where it breaks the fewest PodDisruptionBudgets, then whose victims have the
+  lowest priority, then the fewest victims. That is usually the freed node,
+  where one pod took one GPU, but it can be another node, and the victims can
+  be other share-group models' pods. If one is a pod of a donor that is still
+  releasing, a node-planned transfer ends `wrong-pod` and its GPUs go back to
+  the budget: the move is lost, nothing else.
+- Preempted pods get their termination grace period, so the receiver waits
+  for it.
+
+The controller logs `whole-node models set no priorityClassName` and names
+them, once per change, while it has the node picture. It checks only that the
+name is set, not that the class is above the others.
+
+An idle model is not
 shrunk to its floor: it stays at its headroom target, its weighted share of
 the spare GPUs. While the quota is contended, that share is at most its need
 rounded up to whole replicas plus `maxHeadroomReplicas` (one by default) times

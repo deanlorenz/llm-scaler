@@ -39,6 +39,9 @@ type utilizationShareState struct {
 	// lastUnshared are the models the last cycle planned in no group because
 	// no budget bounds them, comma-joined: reported once per change.
 	lastUnshared string
+	// lastUnprioritized are the whole-node variants the last cycle found
+	// with no priorityClassName, comma-joined: reported once per change.
+	lastUnprioritized string
 	// noBoundSince is when the cycles began to see no constraints at all;
 	// zero while they see some. goneSince is when each ledger's group began
 	// to be missing from cycles that saw constraints. See shareAbsenceGrace.
@@ -256,6 +259,19 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	st.lastWeightErrs = weightErrs
 	st.reportUnshared(logger, unshared)
 	st.planned = allocation.PlannedModels(groups)
+	// Without a node picture whole-node models cannot be told apart: the
+	// last list stands, so a node read that lapses and comes back does not
+	// log the same warning again.
+	if nodes := e.shareNodes(now); nodes != nil {
+		var unprioritized []string
+		for _, g := range groups {
+			unprioritized = append(unprioritized, shareWholeNodeUnprioritized(g, nodes,
+				func(role, variant string) scaletarget.ScaleTargetAccessor {
+					return scaleTargets[utils.GetNamespacedKey(g.Origins[role].Namespace, variant)]
+				})...)
+		}
+		st.reportWholeNodeUnprioritized(logger, unprioritized)
+	}
 	published := make([]metrics.UtilizationShareGroup, 0, len(groups))
 	for _, g := range groups {
 		// Every target gives a role at most its headroom of the spare

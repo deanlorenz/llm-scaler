@@ -1645,7 +1645,7 @@ wva_model_scaling_blocked{reason=~"floor-pinned|floors-exceed-quota|donors-at-fl
 | `floors-exceed-quota` | the floors of the group's models add up to more than its budget; every model of the group shows it | lower a floor or raise the quota |
 | `donors-at-floor` | the role is short, and no other role holds more than its floor to give | lower another model's `minReplicaCount`, or raise the quota |
 | `release-timeout` | the role, as a donor, did not scale down within the release timeout; the release was aborted and it backs off before it is asked again | check the donor's ScaledObject scale-down window, its pods' termination grace, and that KEDA acts on it |
-| `release-taken` | the role's last fill timed out: the GPUs its donors released were taken by a pod the scaling manager did not place. Cleared after one release timeout | look for other workloads scheduling onto that accelerator; a `ResourceQuota` or a dedicated node pool keeps them off |
+| `release-taken` | the role's last fill timed out: the GPUs its donors released were taken by a pod the scaling manager did not place. Cleared after one release timeout | look for other workloads scheduling onto that accelerator; a `ResourceQuota` or a dedicated node pool keeps them off. For a whole-node model, a `priorityClassName` above the other GPU pods lets its Pending pod evict the one that took the GPU, at the cost of evicting lower-priority pods whenever it waits (see [whole-node models](scaling-policy.md)) |
 | `release-shape-mismatch` | the role's last fill timed out: enough GPUs were free in total, but on no node enough for its largest pod. Cleared after one release timeout | the GPUs are fragmented; free a whole node, or use smaller replicas |
 
 The reasons and their timing are in

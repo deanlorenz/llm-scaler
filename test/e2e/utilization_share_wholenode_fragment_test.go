@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -134,16 +133,18 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 	})
 })
 
-// A node released for the large model is taken by a pod outside WVA before
-// the large model's replica lands.
+// A node released for the large model, with a pod outside WVA waiting for a
+// GPU on it, and the large model at a higher PriorityClass (issue #234).
 //
 //   - The packed layout: G on node 1; four replicas each of S1 and S2 on node
-//     2, their fifth on node 3. Quota 18, spent.
+//     2, their fifth on node 3. Quota 18, spent. G runs at a PriorityClass
+//     above the pod outside WVA, which runs at none.
 //   - A pause pod outside WVA waits for one GPU on node 2.
 //   - G is loaded and the small models' floors drop: their pods on node 2
-//     go, the waiting pod takes a GPU there, and G's raised replica cannot be
-//     placed. The transfer must end fill-timeout, name release-taken, and
-//     undo G's raise.
+//     go, and the waiting pod takes the first GPU that frees. G's raised
+//     replica preempts it and lands on node 2: the transfer completes, and G
+//     is funded. Without the class the waiting pod keeps the GPU, the
+//     transfer ends fill-timeout with release-taken, and G's raise is undone.
 var _ = Describe("Utilization share with a whole-node model: a released node taken", Label("utilization-share-wholenode"), Ordered, func() {
 	const (
 		quotaGPUs = 18
@@ -154,28 +155,33 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 		modelS1   = "uwt-model-s1"
 		modelS2   = "uwt-model-s2"
 		loadG     = "uwt-g-load"
+		priorityG = "uwt-share-receiver"
 	)
 	depG, depS1, depS2 := msG+"-decode", msS1+"-decode", msS2+"-decode"
 	soG, soS1, soS2 := msG+"-so", msS1+"-so", msS2+"-so"
 	var e *wholeNodeEnv
 	var packed string
+	var setUp time.Time
 
 	BeforeAll(func() {
+		setUp = time.Now()
 		e = setUpWholeNode("uwt-", 3)
 		restore, err := fixtures.SetNamespaceQuota(ctx, k8sClient, cfg.WVANamespace, scalingPolicyConfigMapName(),
 			e.ns, e.product, quotaGPUs, fixtures.WithOptimizer(map[string]any{"type": "utilizationShare"}))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = restore(ctx) })
-		packed = layOutPacked(e, msG, modelG, msS1, modelS1, msS2, modelS2)
+		removePC, err := fixtures.CreatePriorityClass(ctx, k8sClient, priorityG, 1000)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = removePC(ctx) })
+		packed = layOutPacked(e, msG, modelG, msS1, modelS1, msS2, modelS2, fixtures.WithPriorityClass(priorityG))
 		e.register(soG, depG, modelG, 1, 2, "")
 		e.register(soS1, depS1, modelS1, 5, 5, "")
 		e.register(soS2, depS2, modelS2, 5, 5, "")
 		e.load(loadG, msG, modelG, 16)
 	})
 
-	It("ends the transfer fill-timeout, names release-taken and undoes G's raise", func() {
+	It("preempts the pod that took the released GPU, completes the transfer and funds G", func() {
 		start := time.Now()
-		pc := wholeNodeProm()
 		Eventually(func(g Gomega) {
 			short, read := e.shortOf(modelG, start.Add(-5*time.Minute))
 			g.Expect(short).To(BeTrue(), read)
@@ -195,10 +201,14 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 		e.lowerFloor(soS2, depS2, modelS2, 5, "")
 		floorDropped := time.Now()
 
-		By("Waiting for the transfer to G to end")
+		By("Watching the queued pod take a released GPU, then waiting for the transfer to G to end")
+		var squatterBound bool
 		var lines []shareLine
 		var set transferSet
 		Eventually(func(g Gomega) {
+			if p, err := k8sClient.CoreV1().Pods(e.fillerNS).Get(ctx, squatter, metav1.GetOptions{}); err == nil && p.Spec.NodeName == packed {
+				squatterBound = true
+			}
 			lines = shareLines(controllerLogsSince(start), e.ns)
 			for _, s := range setsTo(lines, modelG) {
 				if s.Outcome != "" {
@@ -206,33 +216,40 @@ var _ = Describe("Utilization share with a whole-node model: a released node tak
 				}
 			}
 			g.Expect(set.Outcome).NotTo(BeEmpty(), "no transfer to G has ended:\n%s", describeShare(lines, 40))
-		}, 20*time.Minute, 5*time.Second).Should(Succeed())
+		}, 20*time.Minute, 2*time.Second).Should(Succeed())
 		wnMeasure("taken: set", fmt.Sprintf("%s, %d members, outcome %s, started +%s, raised +%s, ended +%s", set.ID, len(set.Members),
 			set.Outcome, set.Started.Sub(floorDropped).Round(time.Second), set.Raised.Sub(floorDropped).Round(time.Second),
 			set.Ended.Sub(floorDropped).Round(time.Second)))
-		p, err := k8sClient.CoreV1().Pods(e.fillerNS).Get(ctx, squatter, metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Spec.NodeName).To(Equal(packed), "the queued pod did not take the released GPU")
-		Expect(set.Outcome).To(Equal("fill-timeout"), describeShare(lines, 40))
-		var cause, undone bool
+		wnMeasure("taken: queued pod seen bound to node 2", squatterBound)
+		// Without it G lands on a node nothing took, and "done" says nothing
+		// about the class. The pod binds as the first GPU frees and stays
+		// bound until G is raised, at least a planning cycle and a KEDA poll
+		// later: far longer than one poll.
+		Expect(squatterBound).To(BeTrue(), "the queued pod never took a released GPU on node 2: nothing was preempted")
+		Expect(set.Outcome).To(Equal("done"), describeShare(lines, 40))
 		for _, l := range lines {
-			if l.ID != set.ID {
-				continue
-			}
-			cause = cause || (strings.HasPrefix(l.Msg, "the receiver's pods stayed Pending") && l.Reason == "release-taken")
-			undone = undone || strings.HasPrefix(l.Msg, "the receiver's replica could not be placed")
+			Expect(l.Reason).NotTo(Equal("release-taken"), "release-taken logged:\n%s", describeShare(lines, 40))
 		}
-		Expect(cause).To(BeTrue(), "no release-taken cause logged:\n%s", describeShare(lines, 40))
-		Expect(undone).To(BeTrue(), "G's raise was not undone:\n%s", describeShare(lines, 40))
 
-		By("G is back at one replica, with no pod waiting, and reports release-taken")
+		By("G runs two replicas, its new one on node 2, and the queued pod no longer holds a GPU there")
 		Eventually(func(g Gomega) {
-			g.Expect(e.specReplicas(g, depG)).To(Equal(int32(1)))
-			g.Expect(e.podsByNode(depG)).NotTo(HaveKey(""))
-			reasons, err := blockedReasons(pc, e.ns, modelG)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(reasons).To(ContainElement("release-taken"), "G's reasons: %v", reasons)
-			wnMeasure("taken: G blocked reasons", reasons)
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+			g.Expect(e.readyReplicas(g, depG)).To(Equal(int32(2)), unreadyPods(e.ns))
+			g.Expect(e.podsByNode(depG)).To(HaveKeyWithValue(packed, 1))
+			p, err := k8sClient.CoreV1().Pods(e.fillerNS).Get(ctx, squatter, metav1.GetOptions{})
+			if err == nil {
+				g.Expect(p.Spec.NodeName).NotTo(Equal(packed), "the queued pod still holds a GPU on node 2")
+			}
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("The scheduler preempted the queued pod")
+		evs, err := k8sClient.CoreV1().Events(e.fillerNS).List(ctx, metav1.ListOptions{
+			FieldSelector: "involvedObject.name=" + squatter + ",reason=Preempted"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(evs.Items).NotTo(BeEmpty(), "no Preempted event on the queued pod")
+		wnMeasure("taken: preempted", evs.Items[0].Message)
+
+		By("G, at a PriorityClass, is not named by the whole-node priority warning")
+		Expect(controllerLogsSince(setUp)).NotTo(MatchRegexp(`set no priorityClassName.*`+e.ns+"/"+msG),
+			"the controller warned about G, which runs at a PriorityClass")
 	})
 })

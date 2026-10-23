@@ -166,7 +166,12 @@ cluster. Three things differ:
   ConfigMap, so write the block there.
 - **Spare GPUs are shared with everything on the cluster.** A GPU a donor
   releases can be taken by a pod the scaling manager did not place. That
-  transfer ends `release-taken`.
+  transfer ends `release-taken`. For a whole-node model, set
+  `priorityClassName` on its pod template, naming a `PriorityClass` above the
+  cluster's other GPU pods. Its Pending pod then evicts the pod that took the
+  GPU. The cost: it evicts lower-priority pods whenever it waits, including
+  pods the scaling manager does not manage. That is the cluster owner's
+  call. See [whole-node models](../../reference/scaling-policy.md).
 
 Only the quota benchmarks have been measured. The physical limiter has been
 run with the optimizer only on kind with emulated GPUs, where transfers
