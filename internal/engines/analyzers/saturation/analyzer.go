@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
@@ -241,6 +242,10 @@ type SaturationAnalyzer struct {
 	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
+	// readySince is when a replica's Pod last became Ready, as the
+	// collector reports it, zero when unknown (replicaReadySince); tests
+	// set it to stand in for the collector.
+	readySince func(domain.ReplicaMetrics) time.Time
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -374,6 +379,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startOutliers:          make(map[string]int),
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    time.Now,
+		readySince:             replicaReadySince,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }

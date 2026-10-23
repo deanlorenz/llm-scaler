@@ -152,8 +152,10 @@ type k2SettleInput struct {
 	perRequest float64
 	threshold  float64
 	// ready is the row's Pod Ready (domain.ReplicaMetrics.Ready), for the
-	// joined test.
-	ready bool
+	// joined test, and readyAt when its Pod last became Ready, zero when
+	// unknown (replicaReadySince).
+	ready   bool
+	readyAt time.Time
 	// rate is the replica's own service rate this cycle (saturatedCompletionRate)
 	// and rateOK whether it has one; ref is the rate on record for the bucket,
 	// zero when there is none; k2Ref is the mean of the bucket's k2 window,
@@ -178,7 +180,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 		memo = newSettleMemo()
 		a.k2Settle[model] = memo
 	}
-	joined := memo.noteReady(pod, in.ready, now)
+	joined := memo.noteReady(pod, in.ready, in.readyAt, now)
 	trace := memo.pods[pod]
 	settled := settledOverWindow(trace, now, in.tokens, in.threshold)
 	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})

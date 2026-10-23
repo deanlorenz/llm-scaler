@@ -196,7 +196,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
 		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
 		perRequest: k2SettlePerRequest(rm, role, shapeKeyInput, fleetOutput), threshold: config.QueueLengthThreshold,
-		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready,
+		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready, readyAt: a.readySince(rm),
 	})
 	d := a.computeK2(
 		historyKey,

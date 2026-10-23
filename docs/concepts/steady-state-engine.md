@@ -219,6 +219,9 @@ that is wrong stays wrong:
   its resident KV has stayed flat for a whole minute with the queue standing,
   or when the replica both completes at the rate on record and holds most of
   the compute ceiling on record.
+- **A replica that just became Ready is not measured.** For its first minute
+  its one-minute readings still describe the minute before the router sent it
+  work, and its batch is still filling.
 - **Decode back-pressure still protects prefill's learning.** If any decode
   replica is full and queued, prefill's readings are decode's back-pressure and
   are not learned, whatever the other decode replicas are doing. A decode

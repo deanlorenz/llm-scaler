@@ -141,7 +141,7 @@ suspect when the busiest rank's queue, at the request's footprint, is larger
 than everything the rank holds:
 
 ```
-joined   = first seen Ready under JoinedReplicaWindow (1m) ago
+joined   = Pod Ready (else first seen Ready) under JoinedReplicaWindow (1m) ago
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -158,10 +158,19 @@ its queue: its one-minute gauges still hold the minute before it was routed
 to. On the E1 run (2026-10-23) one just joined read 84 waiting on 174,327
 resident, the queue no deeper than its batch, and was recorded on sight; the
 window settled at 264,265 while every replica then held 331-351k with no queue.
-`readySince` in the settle memo is when the analyzer first saw the replica
-Ready. A replica already Ready on the memo's first cycle has an age the
-analyzer cannot know and is taken as established, so a restart does not hold
-every reading back; one unseen for over `K2SettleMaxGap` has rejoined.
+The age is read from when the Pod last became Ready, where the collector
+reports it (`replicaReadySince`, read through `SaturationAnalyzer.readySince`
+so tests stand in for the collector). A pod back from an engine or LWS group
+restart under the same name has a new Ready time: in review one absent for
+75 s kept its old first-seen time and its filling reading (174,327 tokens,
+1.0 req/s) became k2 and mu (`TestReadySince_ARejoiningPodIsAsFreshAsANewOne`).
+Today `replicaReadySince` returns zero (unknown): `ReplicaMetrics.ReadySince`
+arrives with PR #283, and the accessor reads it then (TODO(#283)).
+Where the time is unknown, `readySince` in the settle memo is when the analyzer
+first saw the replica Ready. A replica already Ready on the memo's first cycle
+then has an age the analyzer cannot know and is taken as established, so a
+restart does not hold every reading back; one unseen for over `K2SettleMaxGap`
+has rejoined.
 
 `I` and `O` are the replica's own lengths, or the fleet's where it has none. A
 replica that has completed nothing reports no lengths (the per-pod mean is
