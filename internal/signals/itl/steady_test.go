@@ -327,8 +327,10 @@ var _ = Describe("Tracker steady readings", func() {
 			fleet := func(extra func(i int, k float64) (float64, float64)) []domain.ReplicaMetrics {
 				k := 0.6 + 0.15*float64(cycle%2)
 				cycle++
-				rows := []domain.ReplicaMetrics{row("a", k, line.ITLAt(k)), row("b", k, line.ITLAt(k)),
-					row("c", k, line.ITLAt(k))}
+				rows := make([]domain.ReplicaMetrics, 0, 3+joiners)
+				for _, pod := range []string{"a", "b", "c"} {
+					rows = append(rows, row(pod, k, line.ITLAt(k)))
+				}
 				for i := range joiners {
 					kj, itl := extra(i, k)
 					rows = append(rows, row(fmt.Sprintf("j%d", i), kj, itl))
