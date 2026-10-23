@@ -40,8 +40,16 @@ import (
 //
 //   - its service rate has reached the rate on record for the bucket -- its
 //     own measured saturated throughput, or the derived one -- by
-//     K2SettleRateFraction. A replica just handed a step is still completing
-//     at the rate of the minute before it; or
+//     K2SettleRateFraction, AND it holds K2SettleRateFraction of the k2 on
+//     record. A replica just handed a step from idle is still completing at
+//     the rate of the minute before it. One handed the hot queue while it was
+//     already busy is not: it completes at most of the rate on record and
+//     still reads a queue deeper than its batch while it fills -- in review,
+//     a replica serving 1.5 req/s against 2.0 on record took 25 waiting on
+//     160 000 resident and pulled the k2 mean 250 000 -> 232 000, and every
+//     such move pulls it further. A rate shows the replica is busy, not that
+//     it is at its limit; residency near the k2 on record does. With no k2 on
+//     record there is nothing to be near, and only the next test admits; or
 //   - it has been queued for a whole window and its resident KV has settled:
 //     within K2SettleMaxRise, up or down, of its reading K2SettleLookback
 //     earlier, with the queue standing on every cycle between and no gap
@@ -129,10 +137,12 @@ type k2SettleInput struct {
 	threshold  float64
 	// rate is the replica's own service rate this cycle (saturatedCompletionRate)
 	// and rateOK whether it has one; ref is the rate on record for the bucket,
-	// zero when there is none.
+	// zero when there is none; k2Ref is the mean of the bucket's k2 window,
+	// zero when it has none.
 	rate   float64
 	rateOK bool
 	ref    float64
+	k2Ref  float64
 }
 
 // k2Unsettled returns why a saturated reading is not a replica at its limit,
@@ -172,7 +182,8 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if !(float64(in.queue)*in.perRequest > perRank) {
 		return "" // the queue is the overflow of a batch at least as large
 	}
-	if in.ref > 0 && in.rateOK && in.rate >= K2SettleRateFraction*in.ref {
+	if in.ref > 0 && in.rateOK && in.rate >= K2SettleRateFraction*in.ref &&
+		in.k2Ref > 0 && float64(in.tokens) >= K2SettleRateFraction*in.k2Ref {
 		return ""
 	}
 	// Settled is FLAT over a window: within K2SettleMaxRise of the reading a
@@ -186,7 +197,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if settled {
 		return ""
 	}
-	return "queue deeper than the replica's whole resident batch, its service rate below the rate on record, and its resident KV not yet settled: a load step, not a limit; not recorded"
+	return "queue deeper than the replica's whole resident batch, its service rate or its residency short of what is on record, and its resident KV not settled over a window: a load step, not a limit; not recorded"
 }
 
 // k2SettlePerRequest is a waiting request's footprint on role: the prompt for
@@ -241,4 +252,14 @@ func settledOverWindow(trace []settleReading, now time.Time, tokens int64, thres
 	}
 	base := float64(trace[ref].tokens)
 	return float64(tokens) <= base*(1+K2SettleMaxRise) && float64(tokens) >= base*(1-K2SettleMaxRise)
+}
+
+// k2OnRecordLocked is the mean of the bucket's k2 window, read without
+// touching it: the settle test is not a use of it. Zero when there is none.
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) k2OnRecordLocked(historyKey string) float64 {
+	if ra, ok := a.computeCapacityHistory[historyKey]; ok && ra.Len() > 0 {
+		return ra.Average()
+	}
+	return 0
 }

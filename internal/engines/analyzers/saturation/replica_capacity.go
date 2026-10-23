@@ -182,6 +182,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	a.mu.Lock()
 	a.throughputWindowUnderLocked(throughputKey, args)
 	ref := a.serviceRateOnRecordLocked(throughputKey)
+	k2Ref := a.k2OnRecordLocked(historyKey)
 	a.mu.Unlock()
 	if ref <= 0 && derived.ok {
 		ref = derived.rate
@@ -194,7 +195,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
 		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
 		perRequest: k2SettlePerRequest(rm, role), threshold: config.QueueLengthThreshold,
-		rate: serviceRate, rateOK: serviceRateOK, ref: ref,
+		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref,
 	})
 	d := a.computeK2(
 		historyKey,

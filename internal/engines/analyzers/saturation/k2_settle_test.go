@@ -153,15 +153,69 @@ func TestK2Settle_AFullReplicaIsRecordedOnSight(t *testing.T) {
 	assert.Equal(t, []string{"P1-obs"}, prios, "160 x 1500 = 240 000 waiting behind 260 000 resident")
 }
 
-// A suspect reading whose service rate has reached the rate on record is
-// admitted at once: the replica is completing at its limit.
+// A suspect reading whose service rate has reached the rate on record, and
+// whose residency has reached most of the k2 on record, is admitted at once:
+// the replica is completing at its limit, holding what a full one holds.
 func TestK2Settle_ARateAtTheRecordIsALimit(t *testing.T) {
 	prios, _ := runSettleCycles(t, []settleCycle{
 		{0, 270_000, 30, 3000},
 		{65 * time.Second, 12_000, 0, 1.2},
-		{80 * time.Second, 60_000, 160, 2900},
+		{80 * time.Second, 200_000, 160, 2900}, // 240 000 waiting behind 200 000, 0.74 of k2
 	})
 	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs"}, prios)
+}
+
+// A rate alone shows a replica is busy, not that it is at its limit. One
+// completing at the rate on record but holding a fifth of the k2 on record
+// under a queue deeper than its batch is filling, and waits for the window.
+func TestK2Settle_ARateWithoutTheResidencyIsNotALimit(t *testing.T) {
+	prios, k2s := runSettleCycles(t, []settleCycle{
+		{0, 270_000, 30, 3000},
+		{65 * time.Second, 12_000, 0, 1.2},
+		{80 * time.Second, 60_000, 160, 2900},
+	})
+	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs-unsettled"}, prios)
+	assert.Equal(t, int64(270_000), k2s[2], "the filling reading is not folded in")
+}
+
+// The router moves the hot queue onto a sibling that was already busy: it
+// completes at 75 % of the rate on record, above the 70 % the rate test asks,
+// and reads 25 waiting (175 000 of footprint) on 160 000 resident while it
+// fills. The k2 on record is 250 000, and the reading must not pull it down.
+func TestK2Settle_ABusySiblingHandedTheQueueIsNotALimit(t *testing.T) {
+	const cache = int64(1_000_000)
+	const key = "test-ns|both-v|test-model|H200|1|both|long|q5"
+	states := []domain.VariantReplicaState{{VariantName: "both-v", AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1}}
+	row := func(pod string, tok int64, q int, gtr float64) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics(pod, "both-v", tok, cache, q, 6000, 1000)
+		rm.RequestRate = gtr / 1000
+		rm.GenerationTokenRate = gtr
+		rm.KvUsageInstant, rm.KvUsageInstantKnown = float64(tok)/float64(cache), true
+		return rm
+	}
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	clock := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	// r0 at its limit (250 000, queued, 2.0 req/s); r1 busy at 60 % of that,
+	// serving 1.5 req/s, nothing waiting.
+	for range 4 {
+		_, err := a.Analyze(t.Context(), makeAnalyzerInput([]domain.ReplicaMetrics{
+			row("r0", 250_000, 20, 2000), row("r1", 150_000, 0, 1500)}, states))
+		require.NoError(t, err)
+		clock = clock.Add(ThroughputSampleSpacing)
+	}
+	a.mu.Lock()
+	before := a.computeCapacityHistory[key].Average()
+	a.mu.Unlock()
+	_, err := a.Analyze(t.Context(), makeAnalyzerInput([]domain.ReplicaMetrics{
+		row("r0", 250_000, 0, 2000), row("r1", 160_000, 25, 1500)}, states))
+	require.NoError(t, err)
+	a.mu.Lock()
+	after := a.computeCapacityHistory[key].Average()
+	a.mu.Unlock()
+	t.Logf("k2 mean %.0f -> %.0f", before, after)
+	assert.InDelta(t, 250_000, before, 1, "the seed is r0's limit")
+	assert.InDelta(t, before, after, 1, "a busy sibling filling under the moved queue is not its limit")
 }
 
 // Settled is flat, either way. A compute bound at low occupancy may drift
