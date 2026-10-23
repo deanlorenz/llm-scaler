@@ -42,18 +42,33 @@ import (
 //     own measured saturated throughput, or the derived one -- by
 //     K2SettleRateFraction. A replica just handed a step is still completing
 //     at the rate of the minute before it; or
-//   - it was queued on its previous cycle too (within K2SettleMaxGap) and its
-//     resident KV has settled: within K2SettleMaxRise of that cycle's, up or
-//     down -- a fall is traffic moved off the replica, not a limit. A
-//     compute bound reached at low occupancy -- long prompts behind a
-//     prefill-bound engine -- persists with flat residency and is admitted the
-//     cycle after it first shows, so a bucket that has no rate on record yet
-//     still learns its k2.
+//   - it has been queued for a whole window and its resident KV has settled:
+//     within K2SettleMaxRise, up or down, of its reading K2SettleLookback
+//     earlier, with the queue standing on every cycle between and no gap
+//     longer than the window. A fall is traffic moved off the replica, not
+//     a limit. A compute bound reached at low occupancy -- long prompts
+//     behind a prefill-bound engine -- persists with flat residency and is
+//     admitted a window after it first shows, so a bucket that has no rate
+//     on record yet still learns its k2.
+//
+// A window back, not a cycle back. The readings are one-minute peaks taken
+// every 15 s, so two consecutive ones share 45 s, and a band of 25 % per
+// cycle lets residency grow 2.4x a minute and still read "settled". A
+// replica whose batch is capped by max_num_seqs fills for minutes after a
+// step -- its batch is admitted at once and then grows by a token per
+// sequence per step toward prompt plus half the output -- and on long
+// outputs the cycle-to-cycle test admitted it mid-fill: in review, a
+// simulated 1000/6000 replica's first k2 was 0.47-0.49 of its steady
+// figure, 1000/4000 0.63-0.66, and k2 is never raised. Against the reading a
+// window back the same fills are first admitted near their steady figure
+// (k2_settle_test.go replays them).
 //
 // A rejected reading writes nothing: not the k2 window and not the saturated
 // throughput (written only for P1-obs), so the idle minute's rate does not
 // become mu either. The cost is that the first reading of a genuinely
-// saturated replica at low occupancy waits one cycle.
+// saturated replica at low occupancy waits a window, and that a noisy gauge
+// at a true limit is refused more often (k2_settle_test.go measures it). A
+// refusal only delays: it never writes a lower figure.
 const (
 	// K2SettleRateFraction is how close to the rate on record a suspect
 	// reading's own service rate must be for the reading to count. Below one
@@ -61,10 +76,16 @@ const (
 	// full; far above the rate of the minute before a load step.
 	K2SettleRateFraction = 0.7
 	// K2SettleMaxRise is how much a suspect reading's resident KV may have
-	// grown, or fallen, since the previous cycle and still count as settled.
+	// grown, or fallen, since its reading K2SettleLookback earlier and still
+	// count as settled.
 	K2SettleMaxRise = 0.25
-	// K2SettleMaxGap is how old the previous cycle's reading may be. Past it,
-	// the two readings are not consecutive cycles of one episode.
+	// K2SettleLookback is how far back the settled test compares: one
+	// collector window (max_over_time[1m]), so the two readings share none
+	// of it.
+	K2SettleLookback = time.Minute
+	// K2SettleMaxGap is how long a replica's readings are kept: the lookback
+	// and a minute of slack for a late cycle. A replica unseen for longer is
+	// dropped from the memo.
 	K2SettleMaxGap = 2 * time.Minute
 )
 
@@ -73,7 +94,7 @@ const (
 // header above). Not a capacity.K2Source: the chain falls through.
 const k2ReasonObsUnsettled = "P1-obs-unsettled"
 
-// settleReading is what one replica showed on one cycle, for the next cycle's
+// settleReading is what one replica showed on one cycle, for later cycles'
 // settle test.
 type settleReading struct {
 	at     time.Time
@@ -84,7 +105,9 @@ type settleReading struct {
 // settleMemo is one model's last readings per replica (SaturationAnalyzer.
 // k2Settle).
 type settleMemo struct {
-	pods map[string]settleReading
+	// pods is each replica's readings over the last K2SettleMaxGap, oldest
+	// first.
+	pods map[string][]settleReading
 	// idle is each replica's current run of idle readings, for the queue
 	// routing's settled-idle test (routeQueuesToIdleRoom). Here because it is
 	// the same per-model, per-replica memory and is swept with it.
@@ -123,16 +146,23 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	a.mu.Lock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = &settleMemo{pods: make(map[string]settleReading)}
+		memo = &settleMemo{pods: make(map[string][]settleReading)}
 		a.k2Settle[model] = memo
 	}
-	prev, hadPrev := memo.pods[pod]
-	memo.pods[pod] = settleReading{at: now, queue: in.queue, tokens: in.tokens}
+	trace := memo.pods[pod]
+	settled := settledOverWindow(trace, now, in.tokens, in.threshold)
+	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})
+	for len(trace) > 0 && now.Sub(trace[0].at) > K2SettleMaxGap {
+		trace = trace[1:]
+	}
+	memo.pods[pod] = trace
 	memo.seen = now
-	// A replica gone for longer than the gap is a replica the next cycle
+	// A replica gone for longer than the gap is a replica a later cycle
 	// cannot pair with anything; dropping it keeps the memo the size of the
 	// model's live fleet.
-	maps.DeleteFunc(memo.pods, func(_ string, r settleReading) bool { return now.Sub(r.at) > K2SettleMaxGap })
+	maps.DeleteFunc(memo.pods, func(_ string, rs []settleReading) bool {
+		return len(rs) == 0 || now.Sub(rs[len(rs)-1].at) > K2SettleMaxGap
+	})
 	a.mu.Unlock()
 
 	if in.queue < int(in.threshold) || in.tokens <= 0 {
@@ -145,16 +175,15 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if in.ref > 0 && in.rateOK && in.rate >= K2SettleRateFraction*in.ref {
 		return ""
 	}
-	// Settled is FLAT: within K2SettleMaxRise of the previous cycle either way.
-	// A fall is not settling. A replica that was full and queued and next reads
-	// a fraction of that with a deep queue has had its traffic moved off and
-	// handed back -- an argmax picker does this -- and is filling again, not at
-	// a limit: measured in the imbalance audit, 270 539 resident and queued,
-	// then 31 713 with 160 queued, admitted on the rise test alone, took the
-	// variant's window 270 539 -> 222 774 and re-priced every replica there.
-	if hadPrev && now.Sub(prev.at) <= K2SettleMaxGap && prev.queue >= int(in.threshold) &&
-		prev.tokens > 0 && float64(in.tokens) <= float64(prev.tokens)*(1+K2SettleMaxRise) &&
-		float64(in.tokens) >= float64(prev.tokens)*(1-K2SettleMaxRise) {
+	// Settled is FLAT over a window: within K2SettleMaxRise of the reading a
+	// window back, either way. A fall is not settling. A replica that was
+	// full and queued and next reads a fraction of that with a deep queue has
+	// had its traffic moved off and handed back -- an argmax picker does this
+	// -- and is filling again, not at a limit: measured in the imbalance
+	// audit, 270 539 resident and queued, then 31 713 with 160 queued,
+	// admitted on the rise test alone, took the variant's window 270 539 ->
+	// 222 774 and re-priced every replica there.
+	if settled {
 		return ""
 	}
 	return "queue deeper than the replica's whole resident batch, its service rate below the rate on record, and its resident KV not yet settled: a load step, not a limit; not recorded"
@@ -181,4 +210,35 @@ func (a *SaturationAnalyzer) serviceRateOnRecordLocked(throughputKey string) flo
 		return ra.Median()
 	}
 	return 0
+}
+
+// settledOverWindow reports whether a reading of tokens at now has settled
+// against trace, the replica's earlier readings oldest first: the newest of
+// them at least K2SettleLookback old is within K2SettleMaxRise of tokens
+// either way, and it and every reading after it stood queued (queue at or
+// over threshold, tokens in use) with no two of them, nor the last and now,
+// more than K2SettleLookback apart.
+func settledOverWindow(trace []settleReading, now time.Time, tokens int64, threshold float64) bool {
+	ref := -1
+	for i := len(trace) - 1; i >= 0; i-- {
+		if now.Sub(trace[i].at) >= K2SettleLookback {
+			ref = i
+			break
+		}
+	}
+	if ref < 0 {
+		return false
+	}
+	last := trace[ref].at
+	for _, r := range trace[ref:] {
+		if r.queue < int(threshold) || r.tokens <= 0 || r.at.Sub(last) > K2SettleLookback {
+			return false
+		}
+		last = r.at
+	}
+	if now.Sub(last) > K2SettleLookback {
+		return false
+	}
+	base := float64(trace[ref].tokens)
+	return float64(tokens) <= base*(1+K2SettleMaxRise) && float64(tokens) >= base*(1-K2SettleMaxRise)
 }

@@ -178,7 +178,7 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	defer a.mu.Unlock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = &settleMemo{pods: make(map[string]settleReading)}
+		memo = &settleMemo{pods: make(map[string][]settleReading)}
 		a.k2Settle[model] = memo
 	}
 	if memo.idle == nil {

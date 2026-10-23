@@ -198,9 +198,10 @@ const imbCycle = 15 * time.Second
 
 // imbSettle runs in every imbCycle until a replica that reads idle on every
 // row has done so for IdleSettledFor, and returns the last result: the
-// steady state of a fleet that stays as in describes. Two cycles over, since
-// a prefill replica's idleness needs a rate on record, which the first
-// saturated cycle may not yet have written.
+// steady state of a fleet that stays as in describes. A window and two
+// cycles over, since a prefill replica's idleness needs a rate on record,
+// which is written only once a saturated reading has settled
+// (K2SettleLookback).
 func imbSettle(t *testing.T, a *SaturationAnalyzer, clock *time.Time, in domain.AnalyzerInput) *domain.AnalyzerResult {
 	t.Helper()
 	start := *clock
@@ -209,7 +210,7 @@ func imbSettle(t *testing.T, a *SaturationAnalyzer, clock *time.Time, in domain.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if clock.Sub(start) >= IdleSettledFor+2*imbCycle {
+		if clock.Sub(start) >= IdleSettledFor+K2SettleLookback+2*imbCycle {
 			return r
 		}
 		*clock = clock.Add(imbCycle)
