@@ -183,10 +183,6 @@ type cycle struct {
 	// see noteLineMismatch -- and a second map holding the same fact could
 	// drift from the first.
 	itlBorrowedFrom map[string]string
-	// itlCalibration is, per decode variant with a line, the factor the
-	// line's token rate is scaled by so that it matches the rate the
-	// variant's settled replicas report (calibrateLine). Absent means 1.
-	itlCalibration map[string]float64
 	// itlSamples is how many readings each decode variant's OWN ITL window
 	// holds after this cycle's, whatever line it ends up priced on. Carried
 	// for the service-rate signal (attachServiceRates), where it is the
@@ -356,7 +352,6 @@ func (c *cycle) resolvePricing() {
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
 	c.itlBorrowedFrom = make(map[string]string, len(c.gpusByVariant))
-	c.itlCalibration = make(map[string]float64, len(c.gpusByVariant))
 	c.itlSamples = make(map[string]int, len(c.gpusByVariant))
 	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
@@ -444,7 +439,6 @@ func (c *cycle) fitLines() {
 			// so a sibling with nothing of its own can start from it.
 			c.a.publishLine(physicsKey, variantKey, own, c.a.now())
 			c.itlModels[variant] = own
-			c.itlCalibration[variant] = c.calibrateLine(variantKey, variant, own, rows, params, itlLogger)
 			continue
 		}
 
@@ -464,9 +458,6 @@ func (c *cycle) fitLines() {
 		itlLogger.V(logging.DEFAULT).Info("itl-line-borrowed",
 			"variant", variant, "from", from, "physicsKey", physicsKey,
 			"a", borrowed.A, "b", borrowed.B)
-		// Calibrated from this variant's own replicas, against the line
-		// that prices them: the lender's factor describes the lender's.
-		c.itlCalibration[variant] = c.calibrateLine(variantKey, variant, borrowed, rows, params, itlLogger)
 	}
 }
 
@@ -485,10 +476,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		role := c.rolesByVariant[rm.VariantName]
 		downstreamSaturated := c.decodeSaturated && domain.CanonicalRole(role) == domain.RolePrefill
 		// Priced, then reported on. noteLineMismatch says when the observed
-		// generation-token rate disagrees with the calibrated line, and does
-		// not act on it: see its comment for the run that decided that. What
-		// does act on the observed rate is calibrateLine, and only from
-		// replicas whose load has settled.
+		// generation-token rate disagrees with the line, and does not act on
+		// it: see its comment for the run that decided that.
 		itlModel := c.itlModels[rm.VariantName]
 		engineParams := engineParamsFor(c.a, c.input.Namespace, c.input.ModelID, rm.VariantName)
 		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate)
@@ -516,7 +505,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
 			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
-				muShape, kPrice, c.muDivisor).calibrated(c.lineCalibration(rm.VariantName))
+				muShape, kPrice, c.muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
 			// whether the fault is the output length, the sequence count, the
@@ -532,8 +521,6 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"ok", derived.ok,
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
-				// rate and tokenSec include it; 1 is the line as fitted.
-				"gpsCalibration", derived.calibration,
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
 				// Whose line it is. Without this the record reports a rate
 				// built on a sibling's physics identically to one built on the
@@ -554,8 +541,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// Per engine rank; the replica admits engineRanks times it.
 				"maxNumSeqs", maxSeqs, "engineRanks", rm.Ranks())
 		}
-		c.a.noteLineMismatch(itlModel, c.lineCalibration(rm.VariantName), engineParams, rm, role,
-			fleetShape.KVreq, c.itlBorrowedFrom[rm.VariantName], c.logger)
+		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
+			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName], c.logger)

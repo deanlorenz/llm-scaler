@@ -37,19 +37,15 @@ type Tracker struct {
 	// remembered B -- is taken from. See DefaultSteadyFor.
 	steady map[string]*Window
 	traces map[string]*keyTraces
-	// calibration is, per key, the factor the line's token rate is scaled by
-	// to match the rate its replicas report (calibration.go).
-	calibration map[string]float64
 }
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
 	return &Tracker{
-		windows:     map[string]*Window{},
-		baselines:   map[string]float64{},
-		steady:      map[string]*Window{},
-		traces:      map[string]*keyTraces{},
-		calibration: map[string]float64{},
+		windows:   map[string]*Window{},
+		baselines: map[string]float64{},
+		steady:    map[string]*Window{},
+		traces:    map[string]*keyTraces{},
 	}
 }
 
@@ -263,14 +259,6 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	for key := range t.traces {
 		if stale(key) {
 			delete(t.traces, key)
-		}
-	}
-	// The calibration is measured against the window's readings and goes
-	// with them: a key swept for new engine arguments must not price its new
-	// line with the old engine's factor.
-	for key := range t.calibration {
-		if stale(key) {
-			delete(t.calibration, key)
 		}
 	}
 	// Apart from the windows: a key can hold an intercept with no window, one

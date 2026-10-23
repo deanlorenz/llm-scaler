@@ -34,7 +34,6 @@ var derivedMuFields = []string{
 	"avgInputTokens",
 	"avgOutputTokens",
 	"engineRanks",
-	"gpsCalibration",
 	"itlA",
 	"itlAtKPrice",
 	"itlB",
