@@ -40,7 +40,11 @@ var _ = Describe("Tracker steady readings", func() {
 	// whatever it reads on the last cycle the spread lasts is remembered and
 	// pinned into every fit after: 0.024 here against a true 0.012, the same
 	// walk the run logged from 0.047 down to the 0.0045 it kept.
-	It("learns no intercept from a transient", func() {
+	//
+	// The first replica did settle at 0.65 before the split, and both settle
+	// at 0.33 after it, so the steady readings span two real levels: a full
+	// fit through them alone is the true line.
+	It("learns the intercept from the levels either side of a transient, not from the transient", func() {
 		for range 8 {
 			observe(row("p1", 0.65, trueLine.ITLAt(0.65)))
 		}
@@ -49,14 +53,18 @@ var _ = Describe("Tracker steady readings", func() {
 			lagging := trueLine.ITLAt(0.65)*(1-f) + trueLine.ITLAt(0.33)*f
 			r := observe(row("p1", 0.33, lagging), row("p2", 0.33, 0.06))
 			Expect(r.Unsteady).To(Equal(2), "both replicas' load has just moved")
+			Expect(r.Tier).NotTo(Equal(TierOLS))
 		}
-		for range 12 {
+		for j := range 12 {
 			r := observe(row("p1", 0.33, trueLine.ITLAt(0.33)), row("p2", 0.33, trueLine.ITLAt(0.33)))
-			Expect(r.Tier).NotTo(Equal(TierOLS),
-				"a full fit through pairs whose halves describe different moments")
+			if r.Tier == TierOLS {
+				Expect(r.Model.B).To(BeNumerically("~", trueLine.B, 1e-9),
+					"cycle %d: a full fit through pairs whose halves describe different moments", j)
+			}
 		}
 		b, ok := t.Baseline("key")
-		Expect(ok).To(BeFalse(), "remembered B = %v, learned from the transient", b)
+		Expect(ok).To(BeTrue())
+		Expect(b).To(BeNumerically("~", trueLine.B, 1e-9), "remembered B, against the transient's 0.024")
 	})
 
 	It("learns the true intercept from two levels the replica settled at", func() {
@@ -77,6 +85,69 @@ var _ = Describe("Tracker steady readings", func() {
 		b, ok := t.Baseline("key")
 		Expect(ok).To(BeTrue())
 		Expect(b).To(BeNumerically("~", trueLine.B, 1e-9))
+	})
+
+	// A balanced fleet through one load step: k 0.35 for ten minutes, then
+	// 0.70 for ten, with the one-minute ITL a minute behind k. The main window
+	// holds 20 readings, so from two replicas on the step's unsteady readings
+	// fill it before the new level is steady; the old level's steady readings
+	// have to outlive it until then, or the fleet never learns B (stats review
+	// probe: 0 full fits for 2-8 replicas, against B = 12 ms learned before the
+	// steady gate).
+	DescribeTable("learns B from a load step, whatever the fleet's size",
+		func(replicas int) {
+			line := Model{A: 0.020, B: 0.012}
+			fleet := func(k, itl float64) []domain.ReplicaMetrics {
+				rows := make([]domain.ReplicaMetrics, replicas)
+				for i := range rows {
+					rows[i] = row(string(rune('a'+i)), k, itl)
+				}
+				return rows
+			}
+			full := 0
+			for c := range 80 {
+				k, itl := 0.35, line.ITLAt(0.35)
+				if c >= 40 {
+					f := min(float64(c-40+1)/4, 1)
+					k, itl = 0.70, line.ITLAt(0.35)*(1-f)+line.ITLAt(0.70)*f
+				}
+				if observe(fleet(k, itl)...).Tier == TierOLS {
+					full++
+				}
+			}
+			b, ok := t.Baseline("key")
+			Expect(ok).To(BeTrue(), "%d replicas: no full fit in %d cycles", replicas, 80)
+			Expect(b).To(BeNumerically("~", line.B, 1e-6))
+			GinkgoWriter.Printf("replicas=%d fullFits=%d B=%.6f\n", replicas, full, b)
+		},
+		Entry("1 replica", 1), Entry("2 replicas", 2), Entry("3 replicas", 3),
+		Entry("4 replicas", 4), Entry("5 replicas", 5), Entry("6 replicas", 6),
+		Entry("7 replicas", 7), Entry("8 replicas", 8), Entry("16 replicas", 16),
+	)
+
+	// The spread is there only while the load moves: a two-replica fleet at
+	// k 0.33 takes a one-minute burst to 0.65 and comes back, its ITL a
+	// minute behind k both ways. Before the steady gate the full fit ran
+	// across the burst and kept its intercept.
+	It("learns no intercept from a burst it never settled at", func() {
+		lagging := func(from, to float64, j int) float64 {
+			f := min(float64(j+1)/4, 1)
+			return trueLine.ITLAt(from)*(1-f) + trueLine.ITLAt(to)*f
+		}
+		for range 20 {
+			observe(row("p1", 0.33, trueLine.ITLAt(0.33)), row("p2", 0.33, trueLine.ITLAt(0.33)))
+		}
+		for j := range 4 {
+			itl := lagging(0.33, 0.65, j)
+			observe(row("p1", 0.65, itl), row("p2", 0.65, itl))
+		}
+		for j := range 20 {
+			itl := lagging(0.65, 0.33, j)
+			r := observe(row("p1", 0.33, itl), row("p2", 0.33, itl))
+			Expect(r.Tier).NotTo(Equal(TierOLS), "cycle %d after the burst", j)
+		}
+		b, ok := t.Baseline("key")
+		Expect(ok).To(BeFalse(), "remembered B = %v, learned from the burst", b)
 	})
 
 	It("takes the replicas it first sees as steady, so a restart does not delay the first full fit", func() {

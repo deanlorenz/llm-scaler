@@ -95,7 +95,10 @@ instance and its own keys.
   steady when its replica's `k` stayed within 0.10 over the last two minutes
   (`DefaultSteadyFor`, `DefaultMaxKDrift`) and, if the replica joined after the
   key was first observed, it has served that long: across a step in load the
-  instantaneous `k` and the `rate[1m]` ITL describe different moments. Otherwise, with 10 readings,
+  instantaneous `k` and the `rate[1m]` ITL describe different moments. The
+  steady readings outlive the window's oldest by up to five minutes
+  (`DefaultSteadyCarry`), so a step's old level is still there when the new
+  one settles. Otherwise, with 10 readings,
   `FitPinnedB` with `B` held at the remembered intercept or, before there is
   one, `DefaultBaselineSec` (6 ms). A balanced fleet spans little of `k`, so the
   pinned fit is the normal case. A pinned fit that refuses the readings is

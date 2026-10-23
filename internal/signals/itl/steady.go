@@ -24,6 +24,30 @@ const DefaultSteadyFor = 2 * time.Minute
 // replicas each settled at.
 const DefaultMaxKDrift = 0.10
 
+// DefaultSteadyCarry is how long a steady reading may outlive the oldest
+// reading of the key's main window.
+//
+// The main window holds the latest DefaultWindowMaxSize readings, steady or
+// not, and a load step fills it with unsteady ones: every replica is held out
+// for DefaultSteadyFor, so N replicas add 8N unsteady rows at 15s cycles, the
+// whole window once N >= 3. Trimmed to that window, the steady window lost the
+// old level's readings before any reading of the new level was steady, the two
+// levels were never in it together, and no fleet of two or more replicas ever
+// had the spread a full fit needs: B stayed DefaultBaselineSec on every
+// multi-replica cycle of the issue #270 rerun (0 of 294 Ready), while one
+// replica learned it from the same step.
+//
+// Five minutes is DefaultSteadyFor for the new level to settle, up to two more
+// for the load to get there, and a cycle or two of margin. The old level is
+// kept that long and no longer, so a fit never rests on a level the fleet left
+// more than a few minutes before the main window's oldest reading.
+const DefaultSteadyCarry = 5 * time.Minute
+
+// DefaultSteadyWindowMaxSize is how many steady readings a key keeps: twice
+// the main window, so the old level's readings are not all displaced by the
+// new level's first steady cycle on a fleet of up to about 30 replicas.
+const DefaultSteadyWindowMaxSize = 2 * DefaultWindowMaxSize
+
 // kSample is one replica's k at one Observe.
 type kSample struct {
 	at time.Time

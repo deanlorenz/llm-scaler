@@ -72,9 +72,10 @@ type Reading struct {
 	Unsteady int
 	// Held is the window's size after pruning.
 	Held int
-	// SteadyHeld is how many of the readings the full fit may use, and Ready
+	// SteadyHeld is how many steady readings the full fit may use, and Ready
 	// is the confidence gate judged on those alone: a spread made of a
-	// transient is not a spread.
+	// transient is not a spread. It can exceed Held: a steady reading
+	// outlives the main window by up to DefaultSteadyCarry.
 	SteadyHeld int
 	Ready      bool
 }
@@ -113,7 +114,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	sw, ok := t.steady[key]
 	if !ok {
-		sw = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
+		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
 			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
 		t.steady[key] = sw
 	}
@@ -183,15 +184,17 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	w.Prune(now)
 	obs := w.Observations()
-	// The steady readings are a subset of the window, never older than it: a
-	// steady window that outlived the readings beside it would keep fitting a
-	// line the fleet has since moved off, and A moves with the workload.
+	// A steady reading outlives the main window's oldest by at most
+	// DefaultSteadyCarry: long enough for the old level to still be there
+	// when a step's new level settles, and no longer, because A moves with
+	// the workload and a steady window kept for its own sake would keep
+	// fitting a line the fleet has since moved off.
 	sw.Prune(now)
-	if len(obs) > 0 {
-		sw.dropBefore(obs[0].Timestamp)
-	} else {
-		sw.Clear()
+	cutoff := now.Add(-DefaultSteadyCarry)
+	if len(obs) > 0 && obs[0].Timestamp.Before(cutoff) {
+		cutoff = obs[0].Timestamp
 	}
+	sw.dropBefore(cutoff)
 	steadyObs := sw.Observations()
 	r.Held, r.Ready, r.SteadyHeld = len(obs), sw.Ready(), len(steadyObs)
 	baseline, stored := t.baselines[key]

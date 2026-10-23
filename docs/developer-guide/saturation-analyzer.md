@@ -178,6 +178,8 @@ evidence:
 | `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear |
 | `DefaultSteadyFor` | 2m | a replica's `k` must have held still this long |
 | `DefaultMaxKDrift` | 0.10 | how far it may have moved and still count as still |
+| `DefaultSteadyCarry` | 5m | how long a steady reading may outlive the main window's oldest |
+| `DefaultSteadyWindowMaxSize` | 40 | steady readings kept per key |
 
 The full fit, and so the remembered `B`, uses **steady** readings only: a
 replica whose `k` stayed within `DefaultMaxKDrift` over the last
@@ -187,9 +189,23 @@ so across a step in load the two describe different moments; in a balanced
 fleet that step is the only spread a window ever holds. Before this gate, two
 identical models in two namespaces remembered `B` = 4.5 ms and 14.8 ms from
 whichever transient each window caught, and priced the same replica at 5.3 and
-7.7 requests/s (issue #270). Unsteady readings still feed the pinned fit, and
-the steady readings are never older than the window's oldest. `itl-window`
-reports `unsteady` and `steadyHeld`.
+7.7 requests/s (issue #270). Unsteady readings still feed the pinned fit.
+`itl-window` reports `unsteady` and `steadyHeld`.
+
+The steady readings are kept apart from the main window, and outlive its oldest
+reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced
+fleet its spread, and it fills the 20-reading main window with unsteady
+readings: every replica is held out for `DefaultSteadyFor`, so N replicas add
+8N of them at 15 s cycles. When the steady readings were trimmed to the main
+window, the old level's were gone before the new level's were steady, and no
+fleet of two or more replicas ever had the spread for a full fit: on the issue
+#270 rerun, `itl-window` was `ready` on 0 of 294 multi-replica cycles, and `B`
+stayed at the 6 ms default. Carried, the old level is still there when the new
+one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
+1 to 16 replicas learns the true `B`. A level the fleet only passed through
+never settles, so it never reaches the steady readings and teaches nothing.
+A reading with no `k` (the collector's zero value) is not traced, so one
+missed scrape does not make its replica unsteady.
 
 From the line, two closed forms:
 
