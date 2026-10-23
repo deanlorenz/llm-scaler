@@ -192,7 +192,8 @@ func TestMuChoice_OneSlowReplicaIsNotTheFleetsMu(t *testing.T) {
 	start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 	var trace strings.Builder
 	for i := range 40 { // ten minutes at 15 s
-		rows := []e1Row{{"p0", 30, 330_000, 0.3, 150 + float64(i%3)}}
+		rows := make([]e1Row, 0, 4)
+		rows = append(rows, e1Row{"p0", 30, 330_000, 0.3, 150 + float64(i%3)})
 		for _, p := range []string{"p1", "p2", "p3"} {
 			rows = append(rows, e1Row{p, 0, 200_000, 3.6, 1800 + float64(i%3)})
 		}
