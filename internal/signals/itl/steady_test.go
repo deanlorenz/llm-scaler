@@ -132,6 +132,18 @@ var _ = Describe("Tracker steady readings", func() {
 		Expect(observe(row("p1", 0.5, 0.06)).Unsteady).To(Equal(1))
 	})
 
+	It("does not take a k the collector did not read as a step", func() {
+		for range 12 {
+			observe(row("p", 0.60, 0.05))
+		}
+		// One scrape without a k: the zero value, which Observe counts as NoK.
+		r := observe(row("p", 0, 0.05))
+		Expect(r.NoK).To(Equal(1))
+		r = observe(row("p", 0.60, 0.05))
+		Expect(r.Unsteady).To(BeZero(), "the replica's load never moved")
+		Expect(r.SteadyHeld).To(Equal(13))
+	})
+
 	It("forgets a stale key's steady readings and traces with its window", func() {
 		observe(row("p", 0.5, 0.06))
 		t.Sweep(now, func(string) bool { return true })

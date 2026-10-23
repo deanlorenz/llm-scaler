@@ -94,9 +94,15 @@ func (w *Window) dropBefore(cutoff time.Time) {
 	w.observations = w.observations[i:]
 }
 
-// traceable is whether a row's k says anything about the replica's load. A
-// replica that is not Ready, or is lent by the warm pool, or reports no finite
-// k, restarts its trace.
-func traceable(ready, fromWarmPool bool, k float64) bool {
-	return ready && !fromWarmPool && k >= 0 && !math.IsNaN(k) && !math.IsInf(k, 0)
+// traceable is whether a row's k says anything about the replica's load: a
+// finite k above zero.
+//
+// Zero is what the collector leaves in KvUsageInstant when it read no k for
+// the replica, and Observe already counts it as NoK. Traced as a reading, one
+// missed scrape put a k of 0 into the trace and held the replica out of the
+// steady readings for DefaultSteadyFor against it. A row without a k neither
+// judges the replica nor restarts its trace; one that is not Ready, is lent by
+// the warm pool, or is missing from the cycle restarts it.
+func traceable(k float64) bool {
+	return k > 0 && !math.IsInf(k, 0)
 }

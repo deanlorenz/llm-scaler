@@ -133,14 +133,19 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 		// replica's load is.
 		steady := false
 		var trace *replicaTrace
-		if traceable(rm.Ready, rm.FromWarmPool, rm.KvUsageInstant) {
+		if rm.Ready && !rm.FromWarmPool {
 			seen[rm.PodName] = true
 			trace = traces.replicas[rm.PodName]
 			if trace == nil {
 				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
 				traces.replicas[rm.PodName] = trace
 			}
-			steady = trace.steady(rm.KvUsageInstant, now)
+			if traceable(rm.KvUsageInstant) {
+				steady = trace.steady(rm.KvUsageInstant, now)
+			} else {
+				// Present, so its trace is kept; no k, so nothing is noted.
+				trace = nil
+			}
 		}
 		switch {
 		case !rm.Ready || rm.FromWarmPool:
