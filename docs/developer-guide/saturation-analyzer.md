@@ -348,6 +348,14 @@ reporting none, so a cold fleet does not price its queue at zero — `mu` divide
 by `avgOutput`, and a fleet that has completed nothing would otherwise divide by
 zero and emit no floor at all, in the one window the projection exists for.
 
+With no replica reporting a shape at all (parked at zero, or Ready without
+engine series), `estimateSchedulerQueueDemandAt` falls back for each half on
+its own: `avgInput` to the fleet's tracked prompt length (`stableInput`; the
+bytes still win when larger) and `avgOutput` to the same expected output
+length, unless prefill is the only active role. Before, 100 queued requests
+were worth 0, 100 000 or 51 200 tokens depending on whether there were zero
+replicas or one without series and whether the queue reported bytes.
+
 ## Aggregation
 
 `internal/engines/aggregation`, over `[]domain.VariantCapacity`:
