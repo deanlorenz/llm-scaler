@@ -425,6 +425,15 @@ shape cannot price another:
 Prefill is keyed `prefillOutputBucket = "noout"` instead: it emits about one
 token per request, so its output length is not a property of its work.
 
+The k2 history is keyed the same way (`k2KeyOutput` in `keys.go`): by the
+fleet's **tracked** output length, which moves only when the shape changes by
+more than `DefaultChangeTolerance`, not by the replica's own average. A
+workload at `max_tokens=500` reads per-replica averages of 482-582 and, keyed
+on those, alternated between the `medium` and `long` windows cycle by cycle,
+each holding a different k2 (260 622 and 187 458 on the run that showed it).
+Prefill keeps its own average, which is always `short`. The key strings are
+unchanged, so stored windows are still found.
+
 ## Constants
 
 | constant | value | package |

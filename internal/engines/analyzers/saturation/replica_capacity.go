@@ -88,7 +88,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		engineParams = rec.EngineParams
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		rm.AvgOutputTokens, config.QueueLengthThreshold)
+		k2KeyOutput(role, shapeKeyOutput, rm.AvgOutputTokens), config.QueueLengthThreshold)
 	// The rows whose saturated reading may become the variant's k2 are the
 	// rows whose saturated throughput may become its mu, below: Ready, and
 	// the variant's own. A warm-pool bridge is filed under the variant it is
@@ -193,8 +193,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (floor.Estimate), and the write side has to match it.
 	//
 	// Recorded and read under the FLEET's output-length bucket, not this
-	// replica's. The k2 key above is the replica's own, and rightly: its
-	// occupancy is its own. Its throughput is priced per role, as the median
+	// replica's, as the k2 key above is (k2KeyOutput). Its throughput is
+	// priced per role, as the median
 	// over the role's replicas (floor.Estimate), and a median over
 	// readings from different buckets is a reading of nothing. A replica's
 	// own average output length is a few minutes of its own completions,
