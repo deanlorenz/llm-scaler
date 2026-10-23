@@ -11,7 +11,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // What one replica can hold: the memory bound k1, the compute bound k2, and
@@ -57,6 +56,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// no saturated cycle and no bucket. It is preferred over the measured
 	// window when present (mu_from_itl.go).
 	derived derivedMu,
+	// served is the highest rate a Ready replica of the variant served this
+	// cycle (servedBounds), in the same requests/s mu is measured in: a
+	// lower bound on what one replica sustains.
+	served float64,
 	downstreamSaturated bool,
 	// revisionsMixed is the variant's replicas reporting more than one pod
 	// template revision this cycle (revisionsMixed): mid-rollout, whatever
@@ -171,10 +174,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// always used -- its capacity is about resident KV, which the shape's
 	// KVreq already discounts on its own path. Why the throughput key is the
 	// fleet's shape at all is said where it is written, below.
-	keyInput := shapeKeyInput
-	if domain.CanonicalRole(role) == domain.RolePrefill {
-		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
-	}
+	keyInput := throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate)
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
 	// A window written under engine arguments the variant no longer runs is
@@ -272,9 +272,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Not every admitted k2 reading is a service rate: a replica that
 			// has completed nothing, or completes a fraction of what its ITL
 			// line prices, is filling (throughput_admission.go).
-			why := throughputRefusal(rm.RequestRate, mu, derived)
+			// Nor is one under half of what a Ready replica of the variant
+			// served this cycle (served): a served rate is a lower bound on
+			// what one replica sustains.
+			why := throughputRefusal(rm.RequestRate, mu, derived, served)
 			// A low reading that repeats on every saturated cycle for
-			// MeasuredLowConfirmFor is a real low rate, not a fill.
+			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
+			// a sibling's served rate contradicts it (refusedUnderServed),
+			// which no repetition confirms.
 			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, a.now()) {
 				logger.V(logging.DEFAULT).Info("saturated-throughput-low-confirmed",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
@@ -287,7 +292,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
-					"derivedOK", derived.ok, "derivedRate", derived.rate, "reason", why)
+					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served, "reason", why)
 			} else {
 				a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
 				if args != "" {
@@ -343,7 +348,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// stale pair that disagrees prices the lower figure, latched so the
 	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, a.now()) {
+	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served, a.now()) {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure

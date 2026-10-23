@@ -383,7 +383,8 @@ flow control on) no replica queued again after its first minute. A measured
 **derived** `mu` of the ITL line wherever it is the lower figure: an own
 measured window more than 2x above it outranks it only while the bucket has
 read saturated in agreement with it in the last five minutes, and a stale one
-under it keeps pricing (`measuredYieldsToDerived`). That holds for the
+under it keeps pricing for up to 30 minutes (`MeasuredLowHoldFor`), or until a
+Ready replica serves more than twice it (`measuredYieldsToDerived`). That holds for the
 variant's **own** line only:
 
 - **A borrowed line holds the fleet but does not grow it.** A derived `mu`

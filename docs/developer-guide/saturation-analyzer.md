@@ -280,6 +280,22 @@ above the derived figure (`measuredYieldsToDerived`, `muChoice`):
   3.6 (`TestMuChoice_ContinuousSaturationKeepsItsMeasurement`).
 - **Stale and disagreeing** prices the **lower** figure, which over-orders: a
   measurement far under derived keeps pricing, one far over it yields.
+- **For at most `MeasuredLowHoldFor` (30m).** A measurement more than 2x
+  under derived yields once its bucket has not read saturated in agreement
+  for that long. A too-high derived figure corrects itself (the fleet
+  saturates and re-freshens the measurement); a too-low measurement does not,
+  because an over-ordered fleet never saturates. In review 1.2 req/s held for
+  20 unsaturated minutes against a derived 3.585, three times the replicas
+  the line priced, with no end date
+  (`TestMuChoice_AStaleLowMeasurementHoldsForAtMostMeasuredLowHoldFor`). If
+  the measurement was right, the fleet saturates and takes it back: at worst
+  one saturated episode per 30 minutes.
+- **A served rate contradicts it.** A measurement under derived yields at
+  once, fresh or not, while a Ready replica of the variant serves more than
+  2x it this cycle (latched down to 1.6x): that replica sustains what it
+  serves (`servedBounds`,
+  `TestMuChoice_ALowMeasurementAServedRateContradictsYields`). With no line
+  there is nothing to yield to, and the measurement stands.
 - **Latched.** Once a measurement has yielded it stays yielded until it comes
   back within `MeasuredDerivedReturnRatio` (1.6x) of derived, or the bucket
   reads saturated in agreement again. Derived mu is recomputed every cycle
@@ -387,8 +403,17 @@ at sixteen. Per replica it stays at the one-replica +5.4-5.5 % at any size
 An admitted k2 reading is not always a service rate. `throughputRefusal`
 (`throughput_admission.go`) also refuses, logging
 `saturated-throughput-refused`, a reading from a replica that completed no
-request over the window (`RequestRate` 0: every sequence is still growing) and
-one under `MinMeasuredOfDerived` (0.5) of the derived mu for the same line. On
+request over the window (`RequestRate` 0: every sequence is still growing),
+one under half of what a Ready replica of the variant served this cycle
+(`servedBounds`, logged as `servedBound`: a served rate is a lower bound on
+`mu`, so this is one slow replica), and one under `MinMeasuredOfDerived`
+(0.5) of the derived mu for the same line. Only queued replicas are read, so
+one slow replica -- a degraded GPU, a CPU-starved pod -- is often the only
+reading: in review one queued at 0.3 req/s beside three serving 3.6 unqueued
+was confirmed (below) and priced the fleet at 45 replicas for a load four
+serve, and 55.5 for 30 minutes after it recovered; it now reads 3.8 and 4.0
+(`TestMuChoice_OneSlowReplicaIsNotTheFleetsMu`). The bound is 2x, not 1x:
+equally saturated replicas read a few percent apart. On
 E1 a replica just joined, 84 waiting and no completion, generated 49 tokens/s:
 0.0995 req/s became the bucket's mu against a derived 3.1-5.7 and ~6.2 served,
 and priced 2 req/s as 12-20 replicas for the rest of the run
@@ -398,7 +423,7 @@ derived mu on every saturated cycle for `MeasuredLowConfirmFor` (2m, no gap over
 a minute) is a real low rate, the line the wrong figure, and its readings are
 recorded from then on (`saturated-throughput-low-confirmed`,
 `TestMuChoice_ALowRateThatRepeatsIsRecorded`). The runs live in
-`muChoice.low`.
+`muChoice.low`. A reading the served rate contradicts is never confirmed.
 
 ## Demand
 
@@ -657,6 +682,7 @@ unchanged, so stored windows are still found.
 | `MeasuredDerivedMaxRatio` | 2.0 | `saturation` |
 | `MeasuredDerivedReturnRatio` | 1.6 | `saturation` |
 | `MeasuredMuFreshFor` | 5m | `saturation` |
+| `MeasuredLowHoldFor` | 30m | `saturation` |
 | `FloorLagFraction` | 0.5 | `saturation` |
 | `FloorTrustFraction` | 0.8 | `saturation` |
 | `BacklogGrowthLookback` | 1m | `saturation` |

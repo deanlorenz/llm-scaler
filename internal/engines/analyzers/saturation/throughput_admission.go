@@ -1,9 +1,11 @@
 package saturation
 
 import (
+	"math"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // Which saturated readings may become a measured service rate (mu), and how
@@ -40,6 +42,19 @@ import (
 //   - completed requests over the window (RequestRate > 0). A replica that
 //     has completed nothing has every sequence still growing: its token rate
 //     is the rate of a batch being admitted, not of one being served.
+//   - is not under half of what a Ready replica of the variant served this
+//     cycle (servedBounds; by more than MeasuredDerivedMaxRatio). A replica
+//     that served a rate can sustain it, so the highest served rate is a
+//     lower bound on mu, and a reading under half of it is one slow replica
+//     -- a degraded GPU, a CPU-starved pod, an engine thrashing on
+//     preemption -- not the variant's service rate. Only queued replicas
+//     are admitted, so such a replica is often the only one read: in review
+//     one queued at 0.3 req/s beside three serving 3.6 unqueued was
+//     confirmed below and priced the fleet at 45 replicas for a load four
+//     serve, 55.5 for thirty minutes after it recovered. No repetition
+//     confirms a reading the served rate contradicts. Within the ratio, not
+//     at it: equally saturated replicas read a few percent apart, and a
+//     strict bound would refuse every one but the fastest.
 //   - is not implausibly far under the derived figure for the same line:
 //     under MinMeasuredOfDerived of it. A saturated replica at its limit
 //     completes about what its ITL line prices; one completing a fiftieth of
@@ -67,6 +82,26 @@ import (
 // priced from a derived 3.6. Within the ratio the measurement keeps winning
 // however old it is -- run R's own 1.27 against a derived 0.67 is the case the
 // measured-first rule exists for, and it is inside 2x.
+//
+// The lower figure holds for MeasuredLowHoldFor, not for ever. The two
+// directions do not correct alike. A derived figure that is too high
+// under-orders, the replicas saturate, and their readings re-freshen the
+// measurement within a cycle. A measurement that is too low over-orders, and
+// an over-ordered fleet never saturates, so nothing refreshes or replaces it:
+// in review 1.2 req/s held for 20 unsaturated minutes against a derived 3.585,
+// three times the replicas the line priced, with no end date. Past the hold a
+// measurement still MeasuredDerivedMaxRatio under derived gives way (latched
+// at MeasuredDerivedReturnRatio as above); if it was right, the fleet
+// saturates and takes it back -- one saturated episode per hold at worst.
+//
+// And a measurement under the derived figure gives way at once, fresh or
+// not, while a Ready replica of the variant serves more than
+// MeasuredDerivedMaxRatio times it (latched while it serves more than
+// MeasuredDerivedReturnRatio times it): that replica sustains what it serves,
+// so the measurement is not what one replica does. That is what a confirmed
+// low reading cannot survive once the replica recovers, or a sibling shows
+// it was one replica's. With no line there is no derived figure to give way
+// to, and the measurement stands.
 //
 // The yield is latched: once a stale measurement has given way it stays given
 // way until the two figures come back within MeasuredDerivedReturnRatio, or
@@ -98,6 +133,10 @@ const (
 	// agreement with it a measured mu outranks a derived one it disagrees
 	// with by more than MeasuredDerivedMaxRatio.
 	MeasuredMuFreshFor = 5 * time.Minute
+	// MeasuredLowHoldFor is how long after its bucket last read saturated in
+	// agreement with it a measured mu more than MeasuredDerivedMaxRatio under
+	// the derived one keeps pricing.
+	MeasuredLowHoldFor = 30 * time.Minute
 )
 
 // k2UnsettledJoined is the settle test's reason for a saturated reading from a
@@ -146,19 +185,59 @@ func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) b
 const (
 	refusedNoCompletion = "no request completed over the rate window: every sequence is still growing, so the token rate is a batch being admitted, not served"
 	refusedUnderDerived = "under half the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
+	refusedUnderServed  = "under half what a Ready replica of the variant served this cycle: a served rate is a lower bound on mu, so this is one slow replica, not the variant's service rate"
 )
 
 // throughputRefusal says why a saturated replica's completion rate mu is not
 // a sample of what one replica sustains, or "" when it may be recorded. The
 // replica has already passed the k2 admission, the joined test included.
-func throughputRefusal(requestRate, mu float64, derived derivedMu) string {
+// served is the variant's highest served rate this cycle (servedBounds).
+func throughputRefusal(requestRate, mu float64, derived derivedMu, served float64) string {
 	if !(requestRate > 0) {
 		return refusedNoCompletion
+	}
+	if served > MeasuredDerivedMaxRatio*mu {
+		return refusedUnderServed
 	}
 	if derived.ok && mu < MinMeasuredOfDerived*derived.rate {
 		return refusedUnderDerived
 	}
 	return ""
+}
+
+// throughputKeyInput is the prompt length a role's throughput key is built
+// with and its rate converted at: the tracked prompt length, and for prefill
+// the part of it the prefix cache does not hold, at the role's hit rate
+// (computeReplicaCapacity says why).
+func throughputKeyInput(role string, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) float64 {
+	if domain.CanonicalRole(role) == domain.RolePrefill {
+		return shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
+	}
+	return shapeKeyInput
+}
+
+// servedBounds is, per variant, the highest rate one of its Ready own
+// replicas served this cycle, queued or not, in the requests/s its saturated
+// throughput is measured in (saturatedCompletionRate at the fleet's shape). A
+// replica that served a rate sustains it, so this is a lower bound on the
+// variant's mu (throughputRefusal, measuredYieldsToDerived). Warm-pool
+// bridges run the pool's engine and are left out, as a Pod that is not Ready
+// is, whose rate is not a capacity (admissionOf).
+func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
+	fleetOutput, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) map[string]float64 {
+	out := make(map[string]float64)
+	for _, rm := range rows {
+		if rm.FromWarmPool || !rm.Ready {
+			continue
+		}
+		role := rolesByVariant[rm.VariantName]
+		rate, ok := saturatedCompletionRate(rm, role, fleetOutput,
+			throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate))
+		if ok && rate > out[rm.VariantName] && !math.IsInf(rate, 1) {
+			out[rm.VariantName] = rate
+		}
+	}
+	return out
 }
 
 // muChoice is one throughput key's memory for choosing between its measured
@@ -227,18 +306,35 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 
 // measuredYieldsToDerived reports whether the measured mu of the throughput
 // key, which useDerived would keep, gives way to the derived one this cycle:
-// the measurement is stale (its bucket has not read saturated in agreement
-// with it, nor taken a sample, for MeasuredMuFreshFor), and it sits more than
-// MeasuredDerivedMaxRatio above the derived figure -- or, once it has given
-// way, still MeasuredDerivedReturnRatio above it. A measurement under the
-// derived figure never gives way: the lower of the two prices.
-func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, now time.Time) bool {
+//
+//   - a measurement under the derived figure gives way, fresh or not, while
+//     served -- the variant's highest served rate this cycle (servedBounds) --
+//     is more than MeasuredDerivedMaxRatio times it, or, once it has given
+//     way, still MeasuredDerivedReturnRatio times it;
+//   - otherwise only a stale one: its bucket has not read saturated in
+//     agreement with it, nor taken a sample, for MeasuredMuFreshFor. It gives
+//     way when it sits more than MeasuredDerivedMaxRatio above the derived
+//     figure, or, once it has given way, still MeasuredDerivedReturnRatio
+//     above it; and when it sits as far under it, but only once it has been
+//     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
+func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, now time.Time) bool {
 	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
+	latched := c != nil && c.yielded
+	ratio := reading.rate / derived.rate
+	if ratio < 1 && (served > MeasuredDerivedMaxRatio*reading.rate ||
+		(latched && served > MeasuredDerivedReturnRatio*reading.rate)) {
+		if c == nil {
+			c = &muChoice{}
+			a.throughputMuChoice[key] = c
+		}
+		c.yielded = true
+		return true
+	}
 	// The last reading that agreed with the measurement; the newest sample
 	// only where none is on record (a window restored, or its first
 	// sample). A sample is not freshness by itself: a confirmed low rate
@@ -253,8 +349,14 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 		}
 		return false
 	}
-	ratio := reading.rate / derived.rate
-	yielded := ratio > MeasuredDerivedMaxRatio || (c != nil && c.yielded && ratio > MeasuredDerivedReturnRatio)
+	var yielded bool
+	if ratio >= 1 {
+		yielded = ratio > MeasuredDerivedMaxRatio || (latched && ratio > MeasuredDerivedReturnRatio)
+	} else {
+		// An unknown age is as stale as can be, as it is above.
+		heldOut := fresh.IsZero() || now.Sub(fresh) >= MeasuredLowHoldFor
+		yielded = heldOut && (ratio < 1/MeasuredDerivedMaxRatio || (latched && ratio < 1/MeasuredDerivedReturnRatio))
+	}
 	if c == nil {
 		if !yielded {
 			return false

@@ -472,6 +472,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
 	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	served := servedBounds(c.input.ReplicaMetrics, c.rolesByVariant, c.fleetOutput,
+		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for _, rm := range c.input.ReplicaMetrics {
 		select {
 		case <-ctx.Done():
@@ -551,7 +553,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName],
+			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: kvFromInstant(rm, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.logger)
