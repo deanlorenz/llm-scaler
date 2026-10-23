@@ -1,7 +1,11 @@
 package saturation
 
 import (
+	"fmt"
+	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -123,5 +127,42 @@ func TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand(t *testing.T) {
 		}
 		assert.GreaterOrEqual(t, got, pre, "t=%ds: demand fell under its pre-step %.0f while the queue grew", ts, pre)
 		assert.GreaterOrEqual(t, got, occupancy-1, "t=%ds: demand under the occupancy holding a growing queue", ts)
+	}
+}
+
+// Review probe (round 3, a one-request jitter flipped the swap). A standing
+// queue reading 160, 161, 160, 161 on 15 s cycles, with lambda steady: each
+// +1 cycle read as "grew", skipped the swap and priced the occupancy figure,
+// and the next swapped back -- 326 185 <-> 500 942 at 4.75 req/s, 376 454 <->
+// 500 941 at 6. Growth is counted past a tolerance (BacklogGrowthMinRequests,
+// BacklogGrowthFraction) against the queue BacklogGrowthLookback ago.
+func TestThroughputFloor_AQueueJitterDoesNotFlipTheSwap(t *testing.T) {
+	const mu, resident, perReq = 6.0, 260_123.0, 239_323.0 / 160
+	for _, lambda := range []float64{4.75, 6.0} {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		clock := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+		a.now = func() time.Time { return clock }
+		lo, hi := math.Inf(1), math.Inf(-1)
+		var trace strings.Builder
+		for i := range 12 {
+			in := makeAnalyzerInput(nil, nil)
+			in.ArrivalRate = lambda
+			q := 160 + i%2
+			charge := perReq * float64(q)
+			rcs := []capacity.ReplicaCapacity{{
+				VariantName: "v", PodName: "p", QueueLength: q, LocalQueueDemand: int64(charge),
+				SaturatedThroughput: mu, SaturatedThroughputSamples: 2,
+			}}
+			vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 260_622}}
+			got := a.applyThroughputFloor(in, in.Config.(*config.ScalingPolicy), rcs, vcs,
+				resident+float64(int64(charge)), nil, nil, 0, false, logr.Discard())
+			fmt.Fprintf(&trace, " %d:%.0f", q, got)
+			if i > 0 {
+				lo, hi = min(lo, got), max(hi, got)
+			}
+			clock = clock.Add(15 * time.Second)
+		}
+		t.Logf("lambda %.2f, queue:demand%s (max/min %.4f)", lambda, trace.String(), hi/lo)
+		assert.Less(t, hi/lo, 1.02, "lambda %.2f: a queue standing at 160 +-1 moved demand %.0f..%.0f", lambda, lo, hi)
 	}
 }

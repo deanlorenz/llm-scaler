@@ -279,14 +279,16 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			clock = clock.Add(ThroughputSampleSpacing + time.Second)
 		}
 	}
-	// standing analyzes in on two cycles 15 s apart and returns the second: a
-	// queue the floor may price as drain is one that has stood a cycle, not
-	// one that grew since the last (applyThroughputFloor, backlogGrew).
+	// standing analyzes in on 15 s cycles for BacklogGrowthLookback and returns
+	// the last: a queue the floor may price as drain is one that has stood
+	// that long, not one that grew over it (applyThroughputFloor, backlogGrew).
 	standing := func(in domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
-		if _, err := analyzer.Analyze(ctx, in); err != nil {
-			return nil, err
+		for range int(BacklogGrowthLookback / (15 * time.Second)) {
+			if _, err := analyzer.Analyze(ctx, in); err != nil {
+				return nil, err
+			}
+			clock = clock.Add(15 * time.Second)
 		}
-		clock = clock.Add(15 * time.Second)
 		return analyzer.Analyze(ctx, in)
 	}
 

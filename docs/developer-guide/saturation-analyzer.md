@@ -659,6 +659,9 @@ unchanged, so stored windows are still found.
 | `MeasuredMuFreshFor` | 5m | `saturation` |
 | `FloorLagFraction` | 0.5 | `saturation` |
 | `FloorTrustFraction` | 0.8 | `saturation` |
+| `BacklogGrowthLookback` | 1m | `saturation` |
+| `BacklogGrowthMinRequests` | 2 | `saturation` |
+| `BacklogGrowthFraction` | 0.05 | `saturation` |
 | `ThroughputSampleSpacing` | 1m | `saturation` |
 | `DefaultExpectedOutputTokens` | 512 | `saturation` |
 | `BytesPerToken` | 4 | `saturation` |

@@ -75,8 +75,16 @@ so each must keep up with all of it), and on the total otherwise.
   queued cut 499 446 to the 260 123 resident, and the analyzer's `rc` fell
   312 936 -> 47 265 in one cycle.
 
-  Nor while the role's backlog has grown since the previous cycle
-  (`noteBacklogGrowth`, logged as `backlogGrew`). The lag test cannot see a
+  Nor while the role's backlog has grown over the last minute
+  (`noteBacklogGrowth`, logged as `backlogGrew`): past
+  `max(BacklogGrowthMinRequests, BacklogGrowthFraction x B then)` (2
+  requests, 5 %) above the backlog `BacklogGrowthLookback` (1m) ago, or the
+  oldest on record before there is one that old. Not against the previous
+  cycle: the engine queue is a one-minute max read every 15 s, and a fleet
+  draining steadily reads a request or two either way. Counted strictly, a
+  queue reading 160, 161, 160, 161 at 4.75 req/s moved demand
+  326 185 <-> 500 942 every cycle
+  (`TestThroughputFloor_AQueueJitterDoesNotFlipTheSwap`). The lag test cannot see a
   step above fleet capacity: on a saturated fleet the resident KV sits at
   about `P` per replica whatever the arrival rate, so the ratio reads
   `lambda / (n x mu)` and reaches full trust once a lagging rate reads 80 %

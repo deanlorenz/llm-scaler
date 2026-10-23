@@ -600,8 +600,8 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// fleet sits at about P per replica whatever the arrival rate, so it
 		// reads lambda / (n x mu): full trust once a lagging rate reads 80 %
 		// of the fleet's capacity, even with the true rate at 150 %. A queue
-		// that grew since the last cycle is arrivals above what the fleet
-		// drains, whatever lambda reads, and the swap would price it below
+		// that grew past a noise band over the last minute
+		// (noteBacklogGrowth) is arrivals above what the fleet drains, whatever lambda reads, and the swap would price it below
 		// the occupancy that holds it. In review, a step from 3 to 9 req/s on
 		// one replica of mu 6 read 319 763 before it and 280 704, 354 736
 		// under occupancy's 387 263 and 454 573, for the three cycles the
@@ -644,8 +644,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// and a run that shows only one cannot tell an empty queue from a
 			// queue the fleet is projected to outrun.
 			"projectedBacklog", term.ProjectedBacklog,
-			// The backlog grew since the previous cycle, so the swap was
-			// not made: arrivals exceed what the fleet drains.
+			// The backlog grew past the noise band over the last minute
+			// (noteBacklogGrowth), so the swap was not made: arrivals
+			// exceed what the fleet drains.
 			"backlogGrew", grew[role])
 		if roleDemand != nil {
 			roleDemand[role] = want
@@ -709,12 +710,51 @@ const FloorLagFraction = 0.5
 // backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
 const FloorTrustFraction = 0.8
 
+// A role's backlog has grown (noteBacklogGrowth) when it exceeds the backlog
+// BacklogGrowthLookback ago by more than max(BacklogGrowthMinRequests,
+// BacklogGrowthFraction of it).
+//
+// Not "larger than on the previous cycle". The engine queue is a one-minute
+// max read every 15 s, so successive readings overlap, and with the
+// scheduler's queue beside it a fleet draining steadily reads a request or two
+// either way from cycle to cycle. Counted strictly, each +1 cycle skipped the
+// swap and the next made it: in review a queue reading 160, 161, 160, 161 at
+// 4.75 req/s moved demand 326 185 <-> 500 942 every cycle -- the cycle-to-cycle
+// flip floorTrust exists to remove, brought back on a noisier input. A step
+// grows the queue by tens of requests a cycle and clears the band at once.
+const (
+	// BacklogGrowthLookback is how far back the backlog a cycle's is compared
+	// with was read: one rate window (ThroughputSampleSpacing), so the two
+	// one-minute maxima share no samples. Until a reading that old exists the
+	// oldest on record stands in.
+	BacklogGrowthLookback = ThroughputSampleSpacing
+	// BacklogGrowthMinRequests is the least growth, in requests, that counts.
+	BacklogGrowthMinRequests = 2.0
+	// BacklogGrowthFraction is the least growth, as a share of the backlog it
+	// is compared with, that counts.
+	BacklogGrowthFraction = 0.05
+)
+
+// maxBacklogReadings bounds the backlog readings a model's memo keeps, for a
+// clock that does not advance: BacklogGrowthLookback at 15 s cycles is 4.
+const maxBacklogReadings = 16
+
+// backlogReading is the throughput floor's backlog per role on one cycle.
+type backlogReading struct {
+	at     time.Time
+	byRole map[string]float64
+}
+
 // noteBacklogGrowth records this cycle's floor backlog per role in the
-// model's memo and reports the roles whose backlog is larger than on the
-// previous cycle. A role with no previous reading has not grown: there is
-// nothing to compare with.
+// model's memo and reports the roles whose backlog has grown past the band
+// above since BacklogGrowthLookback ago. A role with no earlier reading has
+// not grown: there is nothing to compare with.
 func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlog map[string]float64) map[string]bool {
 	model := namespace + "|" + modelID
+	var now time.Time
+	if a.now != nil {
+		now = a.now()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.k2Settle == nil {
@@ -725,15 +765,30 @@ func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlo
 		memo = newSettleMemo()
 		a.k2Settle[model] = memo
 	}
-	grew := make(map[string]bool, len(backlog))
-	for role, b := range backlog {
-		if prev, seen := memo.backlog[role]; seen && b > prev {
-			grew[role] = true
+	// The newest reading at least BacklogGrowthLookback old, else the oldest;
+	// everything older than it is no longer needed.
+	ref := 0
+	for i, r := range memo.backlogs {
+		if now.Sub(r.at) >= BacklogGrowthLookback {
+			ref = i
 		}
 	}
-	memo.backlog = maps.Clone(backlog)
+	memo.backlogs = memo.backlogs[ref:]
+	grew := make(map[string]bool, len(backlog))
+	if len(memo.backlogs) > 0 {
+		then := memo.backlogs[0].byRole
+		for role, b := range backlog {
+			if prev, seen := then[role]; seen && b > prev+max(BacklogGrowthMinRequests, BacklogGrowthFraction*prev) {
+				grew[role] = true
+			}
+		}
+	}
+	memo.backlogs = append(memo.backlogs, backlogReading{at: now, byRole: maps.Clone(backlog)})
+	if n := len(memo.backlogs); n > maxBacklogReadings {
+		memo.backlogs = memo.backlogs[n-maxBacklogReadings:]
+	}
 	if a.now != nil {
-		memo.seen = a.now()
+		memo.seen = now
 	}
 	return grew
 }
