@@ -276,11 +276,13 @@ func imbFleet(fracs []float64, queues []int, rates []float64) []domain.ReplicaMe
 }
 
 // A queue the router pinned on one replica, while its siblings idle, is the
-// role's backlog in full: the floor prices requests to drain at mu, and an
-// idle sibling's KV room drains none of them. Pinned beside idle siblings or
-// standing beside busy ones, the same queue at the same lambda implies the
-// same order; it over-orders a fleet whose router is to blame, and that is
-// reported, not compensated.
+// role's backlog: the floor prices requests to drain at mu, and an idle
+// sibling's KV room drains none of them. Pinned beside idle siblings or
+// standing beside busy ones, the same queue at the same lambda is the same
+// backlog -- up to what its replica drains in the drain time, mu x T = 60 at
+// mu ~1, since added replicas cannot take a request waiting inside that
+// engine (localQueueBacklog). Beside busy siblings the order may be higher
+// still, by their resident KV.
 func TestImbalanceFloorBacklogCountsAPinnedQueue(t *testing.T) {
 	light := []float64{0.10, 0.10, 0.10}
 	balanced := imbFloorFleet(t, imbFleet([]float64{0.3125, 0.3125, 0.3125, 0.3125}, []int{0, 0, 0, 0}, []float64{0.5, 0.5, 0.5, 0.5}))
@@ -291,9 +293,13 @@ func TestImbalanceFloorBacklogCountsAPinnedQueue(t *testing.T) {
 	t.Logf("implied replicas: balanced %.2f; queued 100 on one beside idle siblings %.2f, beside busy ones %.2f",
 		balanced, q100, hotAmongBusy)
 	t.Logf("implied replicas: every replica full, queue 0 / 100 each %.2f / %.2f", busyQ0, busyQ100)
-	if q100 < hotAmongBusy-0.01 {
-		t.Errorf("a queue of 100 pinned beside idle siblings implies %.2f replicas, under the %.2f it implies beside busy ones: the backlog was cut for where it stands",
-			q100, hotAmongBusy)
+	// lambda 2 plus the pinned replica's own queue drained in T: (2 + 60/60) / 1.
+	drained := (2.0 + 1) / 0.85
+	for name, got := range map[string]float64{"beside idle siblings": q100, "beside busy ones": hotAmongBusy} {
+		if got < drained-0.05 {
+			t.Errorf("a queue of 100 pinned %s implies %.2f replicas, under the %.2f lambda and the replica's own drain need: the backlog was cut for where it stands",
+				name, got, drained)
+		}
 	}
 	if !(q100 > balanced+0.5) {
 		t.Errorf("a queue of 100 implies %.2f replicas, no more than balanced with none, %.2f", q100, balanced)

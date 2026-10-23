@@ -147,7 +147,8 @@ cycles of a fleet that is coping have none.
 | `residentDemand` | `demandBeforeFloor` with the queues' residency charge removed: what the replicas hold now |
 | `perReplicaCapacity` | the per-replica capacity the floor converts replicas into demand with. For a `derived` rate it is the variant's capacity times `scaleUpThreshold`: that rate is already the rate at the target fill, so the engine's scale-up headroom is not applied to it a second time |
 | `arrivalRate`, `saturatedThroughput`, `replicasImplied` | the requests per second arriving, what one replica completes at saturation, and the replicas their ratio asks for |
-| `backlogRequests`, `projectedBacklog`, `drainSeconds` | the queue measured, the queue the floor priced over the next replica's start time, and how fast it is to be drained |
+| `backlogRequests`, `projectedBacklog`, `drainSeconds` | the queue measured, the queue the floor priced over the next replica's start time, and how fast it is to be drained. In `backlogRequests` each replica's own engine queue counts for at most what that replica drains in the drain time (its `saturatedThroughput` x `drainSeconds`, or x the start time where longer): added replicas cannot take a request waiting inside another engine. The router's queue counts in full |
+| `queuedRequests` | the queues `backlogRequests` is built from, with no engine queue capped |
 | `heldAtFleet` | `true` when the floor was capped at what the current fleet supplies at the scale-up threshold: it may hold the fleet up, but not order more replicas |
 | `heldWhy` | why it was capped; see below. Empty when `heldAtFleet` is `false` |
 | `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |

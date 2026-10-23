@@ -48,16 +48,28 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`. Every engine queue counts in full, whichever replica it stands
-  on, and so does the scheduler's. `B` is requests to drain at `mu`, and an
+  `lambda`. Every engine queue counts, whichever replica it stands on, and
+  the scheduler's counts in full. `B` is requests to drain at `mu`, and an
   idle sibling's KV room drains none of them: in this model its `mu` is
   already spent on its share of `lambda`. Leaving out the share such a
   sibling had room for read three full replicas queued 60 beside a fourth
   never routed to at 5.88 replicas against the 9.41 the fleet needs with
-  perfect routing (`TestUnevenRoutingShortFleetKeepsItsBacklog`). A queue the
-  router pinned on one replica over-orders here (100 requests on one of four
-  replicas at half the fleet's throughput implies 4.31 against 2.35
-  balanced); that is reported, not compensated.
+  perfect routing (`TestUnevenRoutingShortFleetKeepsItsBacklog`).
+
+  A request waiting in one engine's queue is served by that engine only, so
+  each replica's own queue counts for at most what the replica drains itself
+  in the drain horizon, `min(queue, mu x T)` (`localQueueBacklog`; `T` is
+  `floor.DrainHorizon`, the drain target or one replica's start time where
+  longer). A queued replica is then worth at most one replica, and the floor
+  asks for `lambda / mu` plus the queued replicas. Charged in full, a queue
+  of 1000 pinned on one of four replicas (`mu` 1, `lambda` 2) ordered 21.96
+  replicas where 3.53 can help, and three replicas each queued 600 at
+  `lambda` 5 ordered 41.2 against the 9.41 of use
+  (`TestUnevenRoutingAPinnedQueueIsPricedAtWhatItsReplicaDrains`). A queue
+  each replica drains inside `T` is unchanged, so the short fleet above
+  still reads 9.41. The scheduler's queue is not capped: the router can send
+  it to any replica, added ones included. Growth (below) is judged on the
+  uncapped queues, logged as `queuedRequests`.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
   were resident at once) comes out -- but only where the floor's figure can

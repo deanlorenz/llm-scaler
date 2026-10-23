@@ -239,6 +239,21 @@ func replicaCost(rc capacity.ReplicaCapacity, p, scaleUpThreshold float64) float
 	return cost
 }
 
+// DrainHorizon is the seconds a role's backlog is priced to clear in:
+// drainSeconds, or one replica's start time (startSeconds) where that is
+// longer. Nothing added can clear anything before it is Ready, so the window
+// is at least a start. drainSeconds is 60 s and the measured start 67-82 s,
+// and dividing arrivals-over-the-start by the drain alone priced the arrival
+// rate at 1 + start/drain -- 2.17x lambda at run T's figures, every cycle the
+// fleet was behind.
+// A NaN start is no start: the comparison, unlike the builtin max, ignores it.
+func DrainHorizon(drainSeconds, startSeconds float64) float64 {
+	if startSeconds > drainSeconds {
+		return startSeconds
+	}
+	return drainSeconds
+}
+
 func Estimate(
 	lambda float64,
 	replicas []capacity.ReplicaCapacity,
@@ -437,16 +452,7 @@ func Estimate(
 		var observed, b float64
 		if drainSeconds > 0 {
 			observed = max(backlog[role], 0)
-			// Nothing to clear before capacity arrives, so the window the
-			// backlog must clear in is at least as long as a replica takes to
-			// start. drainSeconds is 60 s and the measured start is 67-82 s, so
-			// dividing arrivals-over-T by drain alone priced the arrival rate at
-			// 1 + T/drain -- 2.17x lambda at run T's figures, every cycle the
-			// fleet was behind.
-			horizon := drainSeconds
-			if T := startSeconds[role]; T > horizon {
-				horizon = T
-			}
+			horizon := DrainHorizon(drainSeconds, startSeconds[role])
 			b = backlogAtLanding(observed, lambda, mu, startSeconds[role],
 				readyByRole[role], startingByRole[role])
 			rate += b / horizon

@@ -143,6 +143,50 @@ func TestUnevenRoutingShortFleetKeepsItsBacklog(t *testing.T) {
 	}
 }
 
+// Review probe (round 3, a queue inside one engine priced as drainable by
+// any replica). mu about 1, lambda 2: a queue pinned on r0 beside three light
+// siblings can only drain at r0's own mu, however many replicas are added, so
+// at most (2 + 1) / 1 / 0.85 = 3.53 replicas are of use. Charged in full to the
+// floor's backlog, queues of 300 and 1000 ordered 8.24 and 21.96. A replica's
+// own queue enters the backlog at most at what that replica drains in the
+// floor's drain time, mu x T.
+//
+// And it cannot under-order a fleet that is really short: three replicas each
+// queued 600 at lambda 5 need lambda / mu for the arrivals plus the three
+// queued replicas themselves, (5 + 3) / 0.85 = 9.41 (it ordered 41.2), and
+// three queued 60 -- a queue each drains inside T -- keep the 9.41
+// TestUnevenRoutingShortFleetKeepsItsBacklog asserts.
+func TestUnevenRoutingAPinnedQueueIsPricedAtWhatItsReplicaDrains(t *testing.T) {
+	light := [3]float64{0.3, 0, 0.33}
+	useful := (2.0 + 1) / 1 / 0.85
+	for _, q := range []float64{60, 300, 1000} {
+		a, clock := unevenSeed(t)
+		var got float64
+		for range 6 { // past BacklogGrowthLookback: a queue that has stood, not one still growing
+			got = unevenImplied(t, a, 2, [][3]float64{{0.95, q, 1}, light, light, light})
+			*clock = clock.Add(15 * time.Second)
+		}
+		t.Logf("queue %4.0f pinned on one of four replicas, lambda 2: implied %.2f (of use at most %.2f)", q, got, useful)
+		if got > useful+0.1 {
+			t.Errorf("a queue of %.0f pinned on one replica ordered %.2f replicas, where at most %.2f can help", q, got, useful)
+		}
+	}
+	for _, q := range []float64{60, 600} {
+		a, clock := unevenSeed(t)
+		full := [3]float64{0.95, q, 1}
+		var got float64
+		for range 6 {
+			got = unevenImplied(t, a, 5, [][3]float64{full, full, full})
+			*clock = clock.Add(15 * time.Second)
+		}
+		want := (5.0 + 3) / 0.85
+		t.Logf("three replicas each queued %.0f, lambda 5: implied %.2f (lambda / mu plus the three queued: %.2f)", q, got, want)
+		if got < want-0.1 || got > want+0.1 {
+			t.Errorf("three replicas each queued %.0f at lambda 5 implied %.2f replicas, want %.2f", q, got, want)
+		}
+	}
+}
+
 // Review probe (round 2, a load step onto a fleet idle for minutes). The
 // router reaches three of the four replicas first; the first cycle of the
 // step must not drop the backlog the three hold (it read 5.88 against 10.59

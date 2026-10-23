@@ -432,28 +432,53 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	for _, vc := range variants {
 		roleOf[vc.VariantName] = domain.CanonicalRole(vc.Role)
 	}
+	// The projection is handed start times ONLY when lambda is a true arrival
+	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
+	// EPP reports nothing, and its own doc says that understates lambda exactly
+	// when demand is highest -- so on that path arrived = lambda*T is computed at
+	// one rate while served = mu*(...) is computed at another, the two cancel,
+	// and the projection becomes a pure subtraction that under-orders. Better no
+	// projection than one built on two different rates. Read before the
+	// backlog, whose engine queues are capped over the same drain horizon.
+	var startSeconds map[string]float64
+	if input.ArrivalRate > 0 {
+		startSeconds = a.startSecondsByRole(input, roleOf)
+	}
 	// Per role: the requests waiting in the engines' own queues, and the
 	// residency charge on them. Own replicas only -- a bridge's queue is
 	// counted toward the variant's demand by aggregation, but it is not this
 	// variant's backlog to size for.
 	backlog := make(map[string]float64)
+	// queued is the same backlog uncapped: what noteBacklogGrowth compares.
+	queued := make(map[string]float64)
 	residency := make(map[string]float64)
 	for _, rc := range replicas {
 		if rc.FromWarmPool {
 			continue
 		}
 		role := roleOf[rc.VariantName]
-		// Every queue counts in full, whichever replica it stands on. The
-		// backlog is requests to drain at mu, and a sibling's KV room says
-		// nothing about whether the fleet has the throughput to drain them:
-		// in the floor's own model a replica's mu is already spent on its
-		// share of lambda. Leaving out the share an idle sibling had room
-		// for read three replicas queued 60 each beside a fourth never
-		// routed to at 5.88 replicas, against the 9.41 the fleet needed with
-		// perfect routing. A queue pinned on one replica by the router
-		// over-orders here; that is reported (load-balance diagnostic), not
-		// compensated.
-		backlog[role] += float64(rc.QueueLength)
+		// Every queue counts, whichever replica it stands on. The backlog is
+		// requests to drain at mu, and a sibling's KV room says nothing about
+		// whether the fleet has the throughput to drain them: in the floor's
+		// own model a replica's mu is already spent on its share of lambda.
+		// Leaving out the share an idle sibling had room for read three
+		// replicas queued 60 each beside a fourth never routed to at 5.88
+		// replicas, against the 9.41 the fleet needed with perfect routing.
+		//
+		// But a request waiting in one engine's queue can only be served by
+		// that engine: replicas added take new arrivals and nothing else. So a
+		// replica's own queue counts for at most what the replica itself
+		// drains in the floor's drain time, mu x T (localQueueBacklog), which
+		// is one replica's worth: the floor then asks for lambda / mu plus the
+		// replicas that are queued. Charged in full, in review, a queue of
+		// 1000 pinned on one of four replicas (mu 1, lambda 2) ordered 21.96
+		// replicas where at most 3.53 can help, and three replicas each queued
+		// 600 at lambda 5 ordered 41.2 against the 9.41 of use. A queue each
+		// replica drains inside T is untouched, so the short fleet above still
+		// reads 9.41. The router's queue (eppQueued, below) is not capped: the
+		// router can send it to any replica, new ones included.
+		backlog[role] += localQueueBacklog(rc, floor.DrainHorizon(floor.BacklogDrainSeconds, startSeconds[role]))
+		queued[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
 	// The residency charge is per role -- estimateSchedulerQueueDemand already
@@ -487,29 +512,20 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	for role, tokens := range eppByRole {
 		if queueOwner == "" || role == queueOwner {
 			backlog[role] += eppQueued
+			queued[role] += eppQueued
 		}
 		residency[role] += tokens
 	}
 	// Recorded every cycle, priced or not, so the next has this one to
-	// compare with.
-	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, backlog)
+	// compare with. Uncapped: a queue that grows past what its replica
+	// drains in T is still arrivals above what the fleet drains.
+	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, queued)
 
 	// The hold cap is measured against the threshold the ENGINE sizes RC
 	// with, which is the saturation analyzer's own (config.AnalyzerThresholds):
 	// a cap drawn at the policy-level figure while the engine divides by a
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	// The projection is handed start times ONLY when lambda is a true arrival
-	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
-	// EPP reports nothing, and its own doc says that understates lambda exactly
-	// when demand is highest -- so on that path arrived = lambda*T is computed at
-	// one rate while served = mu*(...) is computed at another, the two cancel,
-	// and the projection becomes a pure subtraction that under-orders. Better no
-	// projection than one built on two different rates.
-	var startSeconds map[string]float64
-	if input.ArrivalRate > 0 {
-		startSeconds = a.startSecondsByRole(input, roleOf)
-	}
 	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
 		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
 
@@ -621,6 +637,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"modelID", input.ModelID, "namespace", input.Namespace, "role", role,
 			"demandBeforeFloor", measured, "residentDemand", resident, "flooredTo", want,
 			"arrivalRate", tf.Lambda, "backlogRequests", term.Backlog, "drainSeconds", tf.DrainSeconds,
+			// backlogRequests with each engine queue capped at what its
+			// replica drains in the drain time; this is the queues uncapped.
+			"queuedRequests", queued[role],
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
 			"orderedBehindQueue", term.OrderedBehindQueue,
@@ -791,6 +810,19 @@ func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlo
 		memo.seen = now
 	}
 	return grew
+}
+
+// localQueueBacklog is what one replica's own engine queue adds to its role's
+// floor backlog: the queue, but no more than the replica drains itself in
+// horizon seconds at its saturated throughput (applyThroughputFloor). A
+// replica with no throughput that can price it adds its whole queue; its role
+// is priced by its siblings' mu, if at all.
+func localQueueBacklog(rc capacity.ReplicaCapacity, horizon float64) float64 {
+	q := float64(rc.QueueLength)
+	if mu := rc.SaturatedThroughput; mu > 0 && !math.IsInf(mu, 1) && horizon > 0 {
+		return min(q, mu*horizon)
+	}
+	return q
 }
 
 // floorTrust is how far the floor's drain price may replace the queues'
