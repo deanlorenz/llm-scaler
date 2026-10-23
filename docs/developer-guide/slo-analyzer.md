@@ -101,7 +101,9 @@ instance and its own keys.
   one settles. Otherwise, with 10 readings,
   `FitPinnedB` with `B` held at the remembered intercept or, before there is
   one, `DefaultBaselineSec` (6 ms), over the steady readings when there are 10
-  of them and over every reading only when there are not. A balanced fleet spans little of `k`, so the
+  of them and over every reading only when there are not. It fits by least
+  absolute deviations, so a replica's first readings after it starts serving,
+  far above the line, do not move `A`. A balanced fleet spans little of `k`, so the
   pinned fit is the normal case. A pinned fit that refuses the readings is
   `Declined`.
 - **Sweeping.** `Sweep(now, stale)` drops windows and intercepts whose key the

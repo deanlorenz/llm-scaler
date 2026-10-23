@@ -198,6 +198,16 @@ reading, it took each load step whole: on the issue #270 rerun `A` went from
 0.077 to 0.207 on the cycle the load stepped, and the derived mu fell from 6.4
 to 2.65 requests/s for two and a half minutes.
 
+`FitPinnedB` fits by least absolute deviations: `A` is the median of the
+readings' own slopes `(ITL_i - B) / k_i`, weighted by `k_i`. A saturated fleet
+has few steady readings, so the pinned fit takes every reading, and a
+replica's first reading after it starts serving (a pod that joined, or one the
+load came back to) sits many times above the line. On a two-namespace run,
+three such readings of sixteen, at about 0.46 of `k` and 435 to 496 ms, moved
+least squares' `A` from 0.101 to 0.170, and the derived mu read 3.1 to 4.2
+requests/s against the 6.1 to 6.2 each replica served, for a whole
+twenty-minute phase. The median sets them aside.
+
 The steady readings are kept apart from the main window, and outlive its oldest
 reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced
 fleet its spread, and it fills the 20-reading main window with unsteady
@@ -212,8 +222,8 @@ one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
 pinned fit reads the steady readings the main window spans, reaching into the
 carry only for the `DefaultMinSamples` it needs through a step. `A` moves with
 the workload, and fitted on the carried window it followed a heavier shape at
-the same fill twice as slowly (two replicas: 17 cycles to 95% of the new `A`,
-against 8). A level the fleet only passed through
+the same fill twice as slowly (two replicas: 9 cycles to the new `A`, against
+5). A level the fleet only passed through
 never settles, so it never reaches the steady readings and teaches nothing.
 A reading with no `k` (the collector's zero value) is not traced, so one
 missed scrape does not make its replica unsteady.

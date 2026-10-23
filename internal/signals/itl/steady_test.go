@@ -177,8 +177,11 @@ var _ = Describe("Tracker steady readings", func() {
 	// A heavier shape at the same fill: k holds at 0.6 while A steps from 0.08
 	// to 0.12, so every reading stays steady. The pinned fit prices every
 	// multi-replica fleet and should follow on the main window's 20 readings;
-	// fitted on the carried steady window (40 readings, 5 minutes) it took
-	// twice as long -- 17 cycles for two replicas, 8 for four, 4 for eight.
+	// fitted on the carried steady window (40 readings, 5 minutes) it takes
+	// twice as long -- 9 cycles for two replicas, 4 for four, 2 for eight.
+	// The median answers the new A whole once the new level holds half the
+	// window's weight, so these are the cycles to that flip; least squares
+	// took 17, 8, 4 and 2 here to come within 5%.
 	DescribeTable("follows a shape change at the same fill on the main window, not the carry",
 		func(replicas, cycles int) {
 			fleet := func(itl float64) []domain.ReplicaMetrics {
@@ -204,8 +207,8 @@ var _ = Describe("Tracker steady readings", func() {
 			}
 			Fail(fmt.Sprintf("%d replicas: A never reached 95%% of %.2f", replicas, after.A))
 		},
-		Entry("1 replica", 1, 17), Entry("2 replicas", 2, 8),
-		Entry("4 replicas", 4, 4), Entry("8 replicas", 8, 2),
+		Entry("1 replica", 1, 10), Entry("2 replicas", 2, 5),
+		Entry("4 replicas", 4, 2), Entry("8 replicas", 8, 1),
 	)
 
 	It("fits the pinned line on every reading while too few are steady", func() {
