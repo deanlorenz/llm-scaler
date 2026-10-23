@@ -12,9 +12,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
-// loadSeries is the value of the one wva_load_imbalanced series for model, and
+// loadSeries is the value of the one wva_load_imbalanced series for model m, and
 // how many load-distribution series exist in all.
-func loadSeries(t *testing.T, reg *promclient.Registry, model string) (imbalanced float64, present bool, total int) {
+func loadSeries(t *testing.T, reg *promclient.Registry) (imbalanced float64, present bool, total int) {
 	t.Helper()
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -30,7 +30,7 @@ func loadSeries(t *testing.T, reg *promclient.Registry, model string) (imbalance
 		}
 		for _, m := range mf.GetMetric() {
 			for _, l := range m.GetLabel() {
-				if l.GetName() == constants.LabelModelName && l.GetValue() == model {
+				if l.GetName() == constants.LabelModelName && l.GetValue() == "m" {
 					imbalanced, present = m.GetGauge().GetValue(), true
 				}
 			}
@@ -68,7 +68,7 @@ func TestRunAnalyzersReportsLoadImbalanceOnce(t *testing.T) {
 		if _, err := e.runAnalyzers(ctx, "m", "ns", rows, policy, states, nil, nil, nil, nil, 0); err != nil {
 			t.Fatal(err)
 		}
-		v, present, _ := loadSeries(t, reg, "m")
+		v, present, _ := loadSeries(t, reg)
 		want := 0.0
 		if cycle >= 2 {
 			want = 1
@@ -95,25 +95,25 @@ func TestRunAnalyzersReportsLoadImbalanceOnce(t *testing.T) {
 	}
 
 	e.onNothingObserved("ns", "m")
-	if _, present, total := loadSeries(t, reg, "m"); present || total != 0 {
+	if _, present, total := loadSeries(t, reg); present || total != 0 {
 		t.Errorf("a model with no rows kept %d load series", total)
 	}
 
 	if _, err := e.runAnalyzers(ctx, "m", "ns", rows, policy, states, nil, nil, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, _ := loadSeries(t, reg, "m"); v != 0 {
+	if v, _, _ := loadSeries(t, reg); v != 0 {
 		t.Error("a model back from no rows resumed its old streak")
 	}
 	e.pruneAnalyzerSeries(map[string]bool{"ns/other": true})
-	if _, _, total := loadSeries(t, reg, "m"); total != 0 {
+	if _, _, total := loadSeries(t, reg); total != 0 {
 		t.Errorf("a model no longer reconciled kept %d load series", total)
 	}
 	if _, err := e.runAnalyzers(ctx, "m", "ns", rows, policy, states, nil, nil, nil, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	e.evictAllAnalyzerSeries()
-	if _, _, total := loadSeries(t, reg, "m"); total != 0 {
+	if _, _, total := loadSeries(t, reg); total != 0 {
 		t.Errorf("evicting every series kept %d load series", total)
 	}
 }
