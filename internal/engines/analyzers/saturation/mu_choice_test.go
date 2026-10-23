@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -321,5 +322,93 @@ func TestMuChoice_AMeasurementNearItsFullSiblingsStands(t *testing.T) {
 		if i >= 8 {
 			assert.NotEqual(t, servedBucket, bucket, "%ds: a measurement %.2f at 0.92x its full siblings yielded to them", i*15, mu)
 		}
+	}
+}
+
+// Review probe (round 5, a mostly slow fleet priced at its one fast replica).
+// p0-p2 are full and queued at 2.0 req/s, p3 full with nothing queued at 3.6:
+// the router steers away from the queued pods, so the fast one is the one
+// unqueued. 16 req/s arrive against the 9.6 the four serve. Read from the
+// unqueued replicas alone the siblings' median was 3.6, every replica was
+// priced at it, and the order was 5.71 replicas, against the 16 / 2.4 / 0.85 =
+// 7.84 the arrivals need at the fleet's mean of 2.4. With the queues growing
+// by what the slow pods are sent over what they serve, as well as standing.
+func TestMuChoice_AMostlySlowFleetIsNotPricedAtItsFastReplica(t *testing.T) {
+	const lambda = 16.0
+	need := lambda / 2.4 / 0.85
+	for _, grow := range []bool{false, true} {
+		a := newE1Analyzer(t, false)
+		start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+		var trace strings.Builder
+		var implied, mu float64
+		var bucket string
+		for i := range 24 {
+			q := 30
+			if grow {
+				q = 30 + int(float64(i)*15*(lambda-3.6-6.0)/3)
+			}
+			rows := make([]e1Row, 0, 4)
+			for _, p := range []string{"p0", "p1", "p2"} {
+				rows = append(rows, e1Row{p, q, 330_000, 2.0, 2.0*498 + float64(i%3)})
+			}
+			rows = append(rows, e1Row{"p3", 0, 330_000, 3.6, 3.6*498 + float64(i%3)})
+			implied, mu, bucket = muChoiceFleet(t, a, start.Add(time.Duration(i)*15*time.Second), lambda, rows)
+			if i%4 == 0 || i == 23 {
+				fmt.Fprintf(&trace, " %ds(q%d):%.2f(%s %.2f)", i*15, q, implied, bucket, mu)
+			}
+		}
+		t.Logf("grow=%v, three at 2.0 queued beside one at 3.6 unqueued, lambda 16, implied replicas:%s", grow, trace.String())
+		assert.NotEqual(t, servedBucket, bucket, "grow=%v: a fleet three quarters at 2.0 yielded to its one fast replica (mu %.2f)", grow, mu)
+		assert.GreaterOrEqual(t, implied, need, "grow=%v: 16 req/s on a fleet serving 9.6 ordered %.2f replicas, under the %.2f its arrivals need at its mean mu 2.4",
+			grow, implied, need)
+	}
+}
+
+// Review probe (round 5, the remembered sibling outlived its evidence). For
+// three minutes p0 is queued at 2.0 beside p1-p3 full and unqueued at 3.6, and
+// the measurement yields to them (TestMuChoice_AModeratelySlowReplicaYieldsToItsFullSiblings).
+// Then all four slow to 2.0 and queue: the replicas it yielded to now read
+// what it does. Kept, the remembered 3.6 priced the fleet for as long as the
+// window lived. And a fleet whose fast half queues too, two at 2.7 beside two
+// at 3.6 that then read 2.7 queued, never yields: the median of all four full
+// replicas is 2.7 from the start (it priced at 3.6 to the end).
+func TestMuChoice_ASiblingYieldEndsWhenItsSiblingsReadTheMeasurement(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		slow, fast       float64
+		slowPods         []string
+		lambdaA, lambdaB float64
+	}{
+		{"one slow, then all", 2.0, 3.6, []string{"p0"}, 2.0 + 3*3.6, 9},
+		{"half slow, then all", 2.7, 3.6, []string{"p0", "p1"}, 2*2.7 + 2*3.6, 12},
+	} {
+		a := newE1Analyzer(t, false)
+		start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+		var trace strings.Builder
+		var implied, mu float64
+		var bucket string
+		for i := range 32 { // three minutes mixed, then five all slow and queued
+			lambda := c.lambdaA
+			rows := make([]e1Row, 0, 4)
+			for _, p := range []string{"p0", "p1", "p2", "p3"} {
+				switch {
+				case i >= 12:
+					lambda = c.lambdaB
+					rows = append(rows, e1Row{p, 30, 330_000, c.slow, c.slow*498 + float64(i%3)})
+				case slices.Contains(c.slowPods, p):
+					rows = append(rows, e1Row{p, 30, 330_000, c.slow, c.slow*498 + float64(i%3)})
+				default:
+					rows = append(rows, e1Row{p, 0, 330_000, c.fast, c.fast*498 + float64(i%3)})
+				}
+			}
+			implied, mu, bucket = muChoiceFleet(t, a, start.Add(time.Duration(i)*15*time.Second), lambda, rows)
+			if i%4 == 0 || i == 31 {
+				fmt.Fprintf(&trace, " %ds:%.2f(%s %.2f)", i*15, implied, bucket, mu)
+			}
+		}
+		t.Logf("%s, implied replicas:%s", c.name, trace.String())
+		assert.NotEqual(t, servedBucket, bucket, "%s: five minutes with every replica queued at %.1f, the fleet is priced at mu %.2f, implied %.2f replicas",
+			c.name, c.slow, mu, implied)
+		assert.LessOrEqual(t, mu, c.slow*1.1, "%s: priced at mu %.2f against the %.1f every replica serves", c.name, mu, c.slow)
 	}
 }

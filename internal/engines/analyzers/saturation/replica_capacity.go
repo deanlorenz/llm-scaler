@@ -357,7 +357,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// Not the stale measured count, which describes a different figure
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
-	} else if rate, ok := a.siblingYield(throughputKey, reading, served.saturated); ok {
+	} else if rate, ok := a.siblingYield(throughputKey, reading, served); ok {
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).
 		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",

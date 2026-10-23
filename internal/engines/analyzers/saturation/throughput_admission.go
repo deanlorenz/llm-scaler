@@ -119,9 +119,9 @@ import (
 // to, and the measurement stands.
 //
 // Nor does a measurement outrank what the variant's Ready replicas serve
-// with a full cache and no queue: under SiblingMuTolerance of their median it
-// yields to it, line or no line, and stays yielded once they stop filling
-// (siblingYield). A replica at 0.55x its siblings passes the served bound
+// with a full cache, at least one of them unqueued: under SiblingMuTolerance
+// of their median it yields to it, line or no line, and stays yielded once
+// they stop filling, until they read what it does (siblingYield). A replica at 0.55x its siblings passes the served bound
 // above, and as the only queued replica it is the window: in review it priced
 // the fleet at 1.8x the replicas for as long as it stayed slow, and neither
 // the bound nor MeasuredLowHoldFor released it.
@@ -285,20 +285,31 @@ type servedRates struct {
 	// bound on the variant's mu (throughputRefusal, measuredYieldsToDerived).
 	max float64
 	// saturated is the lower median of the rates served by those whose cache
-	// is full (kvFull) with no queue past the threshold, zero when none is:
-	// what a replica at its batch limit serves, read from the replicas the
-	// window does not sample -- only a queued replica writes one -- and the
-	// evidence a measured mu yields to (siblingYield). The queued ones are
-	// left out so that a slow replica, full and queued alone, is never its
-	// own sibling evidence.
+	// is full (kvFull), queued or not: what a replica at its batch limit
+	// serves, and the evidence a measured mu yields to (siblingYield). Zero
+	// unless at least one of them is unqueued or at least two are full, so
+	// that a slow replica, full and queued alone, is never its own sibling
+	// evidence.
+	//
+	// The queued ones count. The router steers away from a queued replica,
+	// so in a fleet of mixed speeds the fast replicas are the ones full with
+	// nothing queued: read from them alone, three replicas at 2.0 beside one
+	// at 3.6 priced every replica at 3.6, and a fleet serving 9.6 req/s
+	// against 16 arriving was ordered 5.71 replicas against the 7.84 its
+	// mean of 2.4 needs (review, round 5).
 	saturated float64
+	// unqueued is whether any of the full replicas has no queue past the
+	// threshold. Only then may saturated open a yield (siblingYield): a
+	// queued replica is measured, and the window already holds what it
+	// serves.
+	unqueued bool
 }
 
 // servedBounds is, per variant, what its Ready own replicas served this
 // cycle (servedRates), at the fleet's shape (saturatedCompletionRate). A
 // replica that served a rate sustains it, so the highest is a lower bound on
 // the variant's mu; and one whose cache is full serves about its limit, so
-// the median of those that are not queued is a reading of it. Warm-pool bridges run the pool's
+// the median of those is a reading of it. Warm-pool bridges run the pool's
 // engine and are left out, as a Pod that is not Ready is, whose rate is not
 // a capacity (admissionOf), and so is a replica still filling, whose token
 // rate runs ahead of what it serves (tokensOutrunCompletions).
@@ -319,16 +330,22 @@ func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string
 		s := out[rm.VariantName]
 		s.max = max(s.max, rate)
 		out[rm.VariantName] = s
-		if kvFull(rm, kvCacheThreshold) && rm.BusiestRankQueue() < int(queueThreshold) {
+		if kvFull(rm, kvCacheThreshold) {
 			if full[rm.VariantName] == nil {
 				full[rm.VariantName] = make(map[string]float64)
 			}
 			full[rm.VariantName][rm.PodName] = rate
+			if rm.BusiestRankQueue() < int(queueThreshold) {
+				s.unqueued = true
+				out[rm.VariantName] = s
+			}
 		}
 	}
 	for v, reads := range full {
 		s := out[v]
-		s.saturated = lowerMedian(reads)
+		if s.unqueued || len(reads) >= 2 {
+			s.saturated = lowerMedian(reads)
+		}
 		out[v] = s
 	}
 	return out
@@ -345,8 +362,16 @@ const SiblingMuTolerance = 0.8
 
 // siblingYield reports the rate a measured mu of the throughput key yields
 // to, and whether it does: the newest median its Ready, full siblings served
-// (sibling, servedRates.saturated; zero when none is full this cycle), while
-// the measurement sits under SiblingMuTolerance of it.
+// (served.saturated; zero when there is none this cycle), while the
+// measurement sits under SiblingMuTolerance of it.
+//
+// A yield opens only on a median that includes an unqueued replica
+// (served.unqueued). One read from queued replicas alone moves a yield
+// already open and drops it once the measurement is no longer under it: the
+// replicas the measurement yielded to are now measured themselves, at what
+// it reads. Kept on the figure they served before, two replicas queued at
+// 2.7 beside two at 3.6 that later queued at 2.7 too priced the fleet at 3.6
+// for as long as the window lived (review, round 5).
 //
 // Remembered, not read fresh each cycle. Only queued replicas are measured, so
 // one slow replica -- a throttled GPU, a CPU-starved pod -- can be the only
@@ -355,20 +380,25 @@ const SiblingMuTolerance = 0.8
 // fleet at 1.8x the replicas. A fleet ordered that large stops saturating, so
 // its siblings stop reading full, and evidence read only while it lasts would
 // give way to the slow figure again the cycle after. The yield holds until
-// newer sibling evidence moves it, the measurement comes within the
+// newer sibling evidence moves or drops it, the measurement comes within the
 // tolerance of it, or the window starts over (recordSaturatedThroughputFrom).
-func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, sibling float64) (float64, bool) {
+func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, served servedRates) (float64, bool) {
 	if !(reading.rate > 0) {
 		return 0, false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
-	if sibling > 0 {
+	if sibling := served.saturated; sibling > 0 {
+		open := c != nil && c.sibling > 0
+		switch {
+		case !open && (!served.unqueued || !(reading.rate < SiblingMuTolerance*sibling)):
+			return 0, false
+		case !served.unqueued && !(reading.rate < SiblingMuTolerance*sibling):
+			c.sibling = 0 // the evidence is gone: the siblings read what it does
+			return 0, false
+		}
 		if c == nil {
-			if !(reading.rate < SiblingMuTolerance*sibling) {
-				return 0, false
-			}
 			c = &muChoice{}
 			a.throughputMuChoice[key] = c
 		}
@@ -392,7 +422,8 @@ type muChoice struct {
 	yielded bool
 	// sibling is the newest rate the key's Ready, full replicas served
 	// (servedRates.saturated), which a measurement under SiblingMuTolerance
-	// of it yields to (siblingYield); zero when none was read.
+	// of it yields to (siblingYield); zero when none was read, or once
+	// queued siblings read what the measurement does.
 	sibling float64
 	// low is, per replica, its current run of saturated readings refused as
 	// under MinMeasuredOfDerived of the derived figure.
