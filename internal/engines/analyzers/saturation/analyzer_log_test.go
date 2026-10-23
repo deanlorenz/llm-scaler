@@ -84,6 +84,7 @@ var logContract = map[string][]string{
 		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
 		"notReady", "noITL", "noK", "aboveBand", // and why the rest were not
+		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
 		"ready", "minSamples", // and whether that is enough to fit on
 	},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker

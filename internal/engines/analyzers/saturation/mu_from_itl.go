@@ -353,6 +353,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"variant", variantName, "key", key,
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
 		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		// Kept, but not for the full fit: the replica's load had just moved,
+		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
+		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
 		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
 	switch {
 	case r.Tier == itl.TierOLS:

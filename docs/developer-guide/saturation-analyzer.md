@@ -176,6 +176,20 @@ evidence:
 | `DefaultObservationMaxAge` | 30m | |
 | `DefaultMinObservableK` | 0.15 | below this the engine is not batching |
 | `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear |
+| `DefaultSteadyFor` | 2m | a replica's `k` must have held still this long |
+| `DefaultMaxKDrift` | 0.10 | how far it may have moved and still count as still |
+
+The full fit, and so the remembered `B`, uses **steady** readings only: a
+replica whose `k` stayed within `DefaultMaxKDrift` over the last
+`DefaultSteadyFor`, and that has served at least that long if it joined after
+the key was first observed. `k` is instantaneous and ITL is a `rate[1m]` mean,
+so across a step in load the two describe different moments; in a balanced
+fleet that step is the only spread a window ever holds. Before this gate, two
+identical models in two namespaces remembered `B` = 4.5 ms and 14.8 ms from
+whichever transient each window caught, and priced the same replica at 5.3 and
+7.7 requests/s (issue #270). Unsteady readings still feed the pinned fit, and
+the steady readings are never older than the window's oldest. `itl-window`
+reports `unsteady` and `steadyHeld`.
 
 From the line, two closed forms:
 
@@ -439,6 +453,8 @@ token per request, so its output length is not a property of its work.
 | `DefaultMaxObservableK` | 0.80 | `internal/signals/itl` |
 | `DefaultMinSamples` | 10 | `internal/signals/itl` |
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
+| `DefaultSteadyFor` | 2m | `internal/signals/itl` |
+| `DefaultMaxKDrift` | 0.10 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |
 | `MinThroughputSamplesToOrder` | 2 | `internal/signals/floor` |
 | `ShapeChangeHoldMax` | 5m | `saturation` |
