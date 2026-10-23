@@ -323,7 +323,8 @@ func TestE1_AFillingReplicaDoesNotRaiseMu(t *testing.T) {
 	a := newE1Analyzer(t, false)
 	const out = 498
 	full, light := int64(340_000), int64(60_000)
-	cycles := []e1Cycle{
+	cycles := make([]e1Cycle, 0, 16)
+	cycles = append(cycles, []e1Cycle{
 		{"17:10:01", []e1Row{{"p0", 10, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
 		{"17:10:16", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
 		{"17:10:31", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, light, 0.5, 0.5 * out}}},
@@ -332,7 +333,7 @@ func TestE1_AFillingReplicaDoesNotRaiseMu(t *testing.T) {
 		{"17:11:17", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 51, 354_644, 5.1, 6.70 * out}}},
 		{"17:12:03", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 5, 367_000, 4.858, 6.998 * out}}},
 		{"17:12:18", []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 5, 367_000, 4.86, 6.99 * out}}},
-	}
+	}...)
 	for i := range 8 {
 		at := time.Date(0, 1, 1, 17, 13, 4+15*i, 0, time.UTC).Format("15:04:05")
 		cycles = append(cycles, e1Cycle{at, []e1Row{{"p0", 0, full, 6.0, 6.0 * out}, {"p1", 0, full, 6.0, 6.0 * out}}})

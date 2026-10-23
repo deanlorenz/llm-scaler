@@ -187,9 +187,9 @@ func TestUnevenRoutingAPinnedQueueIsPricedAtWhatItsReplicaDrains(t *testing.T) {
 	}
 }
 
-// unevenFull is n replicas, each full, queued q and serving rate.
-func unevenFull(n int, q, rate float64) [][3]float64 {
-	out := make([][3]float64, n)
+// unevenFour is four replicas, each full, queued q and serving rate.
+func unevenFour(q, rate float64) [][3]float64 {
+	out := make([][3]float64, 4)
 	for i := range out {
 		out[i] = [3]float64{0.95, q, rate}
 	}
@@ -210,7 +210,7 @@ func TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains(t *testing.T)
 		a, clock := unevenSeed(t)
 		var got float64
 		for range 8 {
-			got = unevenImplied(t, a, c.lambda, unevenFull(4, c.q, c.rate))
+			got = unevenImplied(t, a, c.lambda, unevenFour(c.q, c.rate))
 			*clock = clock.Add(15 * time.Second)
 		}
 		want := (c.lambda + 4) / 0.85
@@ -232,14 +232,14 @@ func TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains(t *testing.T)
 func TestUnevenRoutingAGrowingQueueIsNotCappedWhileLambdaLags(t *testing.T) {
 	a, clock := unevenSeed(t)
 	for range 6 {
-		unevenImplied(t, a, 4, unevenFull(4, 0, 1))
+		unevenImplied(t, a, 4, unevenFour(0, 1))
 		*clock = clock.Add(15 * time.Second)
 	}
 	need := 20 / 0.85
 	for i := 1; i <= 8; i++ {
 		el := float64(i) * 15
 		lambda := 4 + 16*min(1, el/60)
-		got := unevenImplied(t, a, lambda, unevenFull(4, 4*el, 1))
+		got := unevenImplied(t, a, lambda, unevenFour(4*el, 1))
 		t.Logf("t=%3.0fs lambda read %4.1f, each queued %3.0f: implied %.2f (the arrivals need %.2f)", el, lambda, 4*el, got, need)
 		if i >= 2 && got < need-0.01 {
 			t.Errorf("t=%.0fs: a step to 20 req/s implied %.2f replicas, under the %.2f the arrivals need", el, got, need)
@@ -259,7 +259,7 @@ func TestUnevenRoutingAGrowingQueueIsNotCappedWithNoRouterRate(t *testing.T) {
 	var got float64
 	for i := 1; i <= 8; i++ {
 		el := float64(i) * 15
-		got = unevenImplied(t, a, 0, unevenFull(4, 2*el, 1))
+		got = unevenImplied(t, a, 0, unevenFour(2*el, 1))
 		t.Logf("t=%3.0fs no router rate, each queued %3.0f: implied %.2f", el, 2*el, got)
 		*clock = clock.Add(15 * time.Second)
 	}

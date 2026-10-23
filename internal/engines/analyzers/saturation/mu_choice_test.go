@@ -286,7 +286,8 @@ func TestMuChoice_AModeratelySlowReplicaYieldsToItsFullSiblings(t *testing.T) {
 			if i >= 40 {
 				sibTokens = 200_000
 			}
-			rows := []e1Row{{"p0", 30, 330_000, 2.0, 2.0*498 + float64(i%3)}}
+			rows := make([]e1Row, 0, 4)
+			rows = append(rows, e1Row{"p0", 30, 330_000, 2.0, 2.0*498 + float64(i%3)})
 			for _, p := range []string{"p1", "p2", "p3"} {
 				rows = append(rows, e1Row{p, 0, sibTokens, 3.6, 3.6*498 + float64(i%3)})
 			}
@@ -311,7 +312,8 @@ func TestMuChoice_AMeasurementNearItsFullSiblingsStands(t *testing.T) {
 	a := newE1Analyzer(t, false)
 	start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 	for i := range 20 {
-		rows := []e1Row{{"p0", 30, 330_000, 3.3, 3.3*498 + float64(i%3)}}
+		rows := make([]e1Row, 0, 4)
+		rows = append(rows, e1Row{"p0", 30, 330_000, 3.3, 3.3*498 + float64(i%3)})
 		for _, p := range []string{"p1", "p2", "p3"} {
 			rows = append(rows, e1Row{p, 0, 330_000, 3.6, 3.6*498 + float64(i%3)})
 		}
