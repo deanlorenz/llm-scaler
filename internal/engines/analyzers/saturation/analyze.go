@@ -156,9 +156,9 @@ type cycle struct {
 	// KV, not its one-minute peak, while its role is in it.
 	busyNowRoles map[string]bool
 
-	// priceReplicas: per role, the room its settled-idle replicas offer
-	// (routeQueuesToIdleRoom), found once every row is priced.
-	idleRoom map[string]idleRoom
+	// priceReplicas: how many decode replicas have read idle for
+	// IdleSettledFor (settledIdleDecode), found once every row is priced.
+	settledIdleDecode int
 
 	// observeFleetShape: the one shape the fleet is serving, and the tracker's
 	// view of whether it just changed.
@@ -571,10 +571,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			pricedRows = append(pricedRows, rm)
 		}
 	}
-	// A replica's queue is charged in full above; how much of it a sibling's
-	// room may take needs every row priced (idle_room.go).
-	c.idleRoom = c.a.routeQueuesToIdleRoom(c.input.Namespace, c.input.ModelID,
-		replicaCapacities, pricedRows, c.rolesByVariant, c.logger)
+	// Whether a decode replica is idle against what it can do needs its
+	// effective capacity, so every row priced first (idle_room.go).
+	c.settledIdleDecode = c.a.settledIdleDecode(c.input.Namespace, c.input.ModelID,
+		replicaCapacities, pricedRows, c.rolesByVariant)
 	return replicaCapacities, nil
 }
 
@@ -762,11 +762,11 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	// RoleDemand and TotalDemand keep moving together.
 	//
 	// One thing relaxes the hold and nothing else: a decode replica that
-	// has been idle room for IdleSettledFor (routeQueuesToIdleRoom). Then
-	// decode has room the router is not using, and prefill's demand is its
-	// own to be ordered on; what prefill may LEARN stays gated on
-	// decodeSaturated alone (roleSaturated says why).
-	prefillHeld := c.decodeSaturated && c.idleRoom[domain.RoleDecode].replicas == 0
+	// has read idle for IdleSettledFor (settledIdleDecode). Then decode has
+	// room the router is not using, and prefill's demand is its own to be
+	// ordered on; what prefill may LEARN stays gated on decodeSaturated
+	// alone (roleSaturated says why). Relaxing a hold only raises an order.
+	prefillHeld := c.decodeSaturated && c.settledIdleDecode == 0
 	if prefillHeld && d.roleDemand != nil {
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		// The scheduler queue's share is exempt: those requests have been

@@ -338,7 +338,7 @@ it has never saturated under. See [Prefill, specifically](#prefill-specifically)
 
 ```
 replicaDemand  = residentCharge(TokensInUse)          // instant KV for an unqueued pod idle now beside one busy now
-               + waitingQueueDemand(role)            // less the share settled-idle siblings have room for
+               + waitingQueueDemand(role)            // in full, whatever the replica's siblings are doing
 inputTokensRaw = max(QueueBytes / BytesPerToken, QueueSize x avgInput)
 prefill charge = inputTokensRaw x (1 - prefillHitRate)
 decode charge  = QueueSize x avgOutput            // split fleet

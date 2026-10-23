@@ -94,7 +94,7 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 // with nothing waiting reads idle on one row: the load-imbalance diagnostic's
 // number (internal/signals/balance: IdleKvUsage = 0.30, busiest-rank KV under
 // it and nothing waiting). One row is not enough for the analyzer to act on;
-// routeQueuesToIdleRoom says what more it needs.
+// settledIdleDecode says what more it needs.
 const idleKvUsage = 0.30
 
 // replicaIdle reports whether rm reads idle on this cycle's row: Ready, its
@@ -102,7 +102,7 @@ const idleKvUsage = 0.30
 //
 // Both figures are one-minute peaks (the collector's max_over_time), but a
 // replica Ready for less than that minute has a peak over the seconds since it
-// came up, so one idle row is not an idle minute (routeQueuesToIdleRoom). The KV is the
+// came up, so one idle row is not an idle minute (settledIdleDecode). The KV is the
 // larger of the utilization the row reports and its busiest-rank tokens over
 // its cache: in production the two are the same number (TokensInUse is
 // KvCacheUsage times the cache), and where a row carries only one of them the
@@ -125,9 +125,8 @@ func replicaIdle(rm domain.ReplicaMetrics) bool {
 // replicaRouting is what the cycle's routing says about how one replica's
 // resident KV is charged. Built per row in priceReplicas from what newCycle
 // decided over every row, since a replica cannot tell from its own row
-// whether a sibling is busy. Its waiting queue is charged in full here and
-// moved to an idle sibling's room, if at all, once every row is priced
-// (routeQueuesToIdleRoom).
+// whether a sibling is busy. Its waiting queue is charged in full, whatever
+// its siblings are doing (idle_room.go says why).
 type replicaRouting struct {
 	// kvFromInstant is set when the replica's resident KV is charged at its
 	// instant reading rather than its one-minute peak (residentCharge):
@@ -208,8 +207,8 @@ func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
 // back-pressure that makes a prefill reading decode's is the full replica's:
 // KV prefilled for it waits on it, whatever its siblings are doing, and a
 // prefill k2 learned from that wait is never corrected (k2 is never raised).
-// The idle sibling's room relaxes only the hold on prefill's DEMAND
-// (applyFloorAndHolds), never what prefill may learn.
+// A decode sibling idle for IdleSettledFor relaxes only the hold on
+// prefill's DEMAND (applyFloorAndHolds), never what prefill may learn.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
 	for _, rm := range metrics {
 		if !rm.Ready || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != role {

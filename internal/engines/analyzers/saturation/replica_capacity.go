@@ -63,7 +63,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// its scale target's status says.
 	revisionsMixed bool,
 	// routing is what the cycle's routing says about this replica's demand
-	// (replicaRouting): whether its own queue is the router's to move.
+	// (replicaRouting): whether its resident KV is charged at its instant
+	// reading.
 	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
@@ -77,8 +78,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 
 	// Compute demand: tokens already resident in KV cache plus the role-aware
-	// footprint of requests still waiting in the local engine queue, in full;
-	// a sibling idle for long enough may take some of it (routeQueuesToIdleRoom).
+	// footprint of requests still waiting in the local engine queue, in full
+	// whatever the replica's siblings are doing (idle_room.go says why).
 	// The resident half is the one-minute peak, or the instant reading where
 	// that peak is load the router has since moved to a sibling
 	// (residentCharge).
@@ -440,8 +441,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
-		ServiceRate:                 serviceRate,
-		ServiceRateOnRecord:         ref,
 		SaturatedThroughput:         saturatedThroughput,
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,

@@ -379,7 +379,6 @@ Two sources, added.
 
 ```
 replicaDemand = residentCharge(rm, rm.TokensInUse, capacity, routing) + waitingQueueDemand(rm, role)
-              - (moved to settled-idle room, routeQueuesToIdleRoom)
 ```
 
 `residentCharge` is `rm.TokensInUse`, the collector's one-minute peak, except
@@ -399,30 +398,32 @@ rank reported one), and without it the peak stands. With no replica busy now
 every peak stands. Only demand reads this; `kvFull`, k2 and its admission keep
 the peak.
 
-The waiting queue is charged in full when the row is priced. Once every row
-is priced, `routeQueuesToIdleRoom` (`idle_room.go`) moves part of it to a
-sibling's room, on strong evidence only:
+This rule counts one load once in time; it is not a routing compensation and
+moves no demand between replicas. The role's charge never falls under the sum
+of what its replicas hold now: a replica busy now keeps its peak, one idle now
+is charged its instant reading, and no queue is discounted.
 
-- **Settled idle.** `pricedIdle`: `replicaIdle` (Ready, busiest-rank KV under
-  `idleKvUsage` = 0.30 of the cache, nothing waiting), AND busiest-rank tokens
-  under 0.30 x `EffectiveCapacity` (min(k1, k2)), AND for prefill a
-  `ServiceRate` under 0.30 x `ServiceRateOnRecord` (never idle with no rate on
-  record). Read on every cycle for `IdleSettledFor` (2m), no two readings over
-  `IdleMaxGap` (1m) apart; the runs live in `settleMemo.idle`. A replica just
-  Ready reads empty: three full replicas queued 60 and a fourth just Ready
-  implied 5.88 replicas instead of 9.41 on the single-row test.
-- **Own replicas.** A warm-pool bridge neither offers room nor gives up a
-  queue; nor does a row priced without a cache size.
-- **Bounded by room.** Per role, room = sum of max(EffectiveCapacity -
-  ReplicaDemand, 0) over the settled-idle replicas; each queued replica's
-  `LocalQueueDemand` (so `ReplicaDemand`) loses `min(room / queued, 1)` of
-  itself, recorded as `QueueRoutedFraction`. The throughput floor leaves the
-  same share of `QueueLength` out of its backlog.
+The waiting queue is charged in full, on whichever replica it stands. Demand
+and supply are both sums over the role's replicas, so a queue on the wrong
+replica is in the sum either way, and taking it out can only hide demand. An
+earlier revision moved the share a settled-idle sibling had room for out of
+`LocalQueueDemand` and out of the floor's backlog, and charged it nowhere: in
+review a two-replica variant at 0.93 of its supply read 0.50, three replicas
+queued 60 each beside a fourth never routed to implied 5.88 replicas against
+the 9.41 the fleet needed, and 439 prompts on one of four prefill pods priced
+2,169,104 tokens against the 2,866,448 resident plus queued
+(`idle_room_test.go`, `imbalance_test.go` pin the full charge). Uneven routing
+is reported by the load-balance diagnostic, not compensated here; where it
+moves demand it raises it.
 
-Measured in the imbalance audit, 439 requests on one of four prefill pods with
-three idle priced prefill at 2,866,448 tokens; with the three idle for two
-minutes it now reads 2,169,104 (232,448 resident plus the queue less three
-replicas' room of 232,448 each).
+`settledIdleDecode` (`idle_room.go`) still reads settled idleness, for one
+purpose: a decode replica idle for `IdleSettledFor` (2m) relaxes the hold on
+prefill's demand while decode is saturated (`applyFloorAndHolds`), which can
+only raise prefill's order. Idle is `pricedIdle`: `replicaIdle` (Ready,
+busiest-rank KV under `idleKvUsage` = 0.30 of the cache, nothing waiting) AND
+busiest-rank tokens under 0.30 x `EffectiveCapacity` (min(k1, k2)), on every
+cycle for `IdleSettledFor`, no two readings over `IdleMaxGap` (1m) apart, own
+replicas only. The runs live in `settleMemo.idle`.
 
 ### The scheduler queue
 

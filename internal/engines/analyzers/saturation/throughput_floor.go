@@ -438,17 +438,17 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			continue
 		}
 		role := roleOf[rc.VariantName]
-		// The share of a queue a settled-idle sibling has room for is the
-		// router's, not the role's (capacity.ReplicaCapacity.
-		// QueueRoutedFraction): replicas added cannot drain it, and pricing
-		// it as backlog ordered them -- measured in the imbalance audit, 100
-		// requests on one of four replicas at half the fleet's throughput
-		// implied 4.31 replicas against 2.35 balanced, 300 implied 8.24. Its
-		// residency charge already came out of LocalQueueDemand, so the queue
-		// is counted nowhere twice. The rest counts in full: with no sibling
-		// idle for long enough, or a queue deeper than its room, the fleet is
-		// short, and that is the order the backlog exists for.
-		backlog[role] += float64(rc.QueueLength) * (1 - rc.QueueRoutedFraction)
+		// Every queue counts in full, whichever replica it stands on. The
+		// backlog is requests to drain at mu, and a sibling's KV room says
+		// nothing about whether the fleet has the throughput to drain them:
+		// in the floor's own model a replica's mu is already spent on its
+		// share of lambda. Leaving out the share an idle sibling had room
+		// for read three replicas queued 60 each beside a fourth never
+		// routed to at 5.88 replicas, against the 9.41 the fleet needed with
+		// perfect routing. A queue pinned on one replica by the router
+		// over-orders here; that is reported (load-balance diagnostic), not
+		// compensated.
+		backlog[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
 	// The residency charge is per role -- estimateSchedulerQueueDemand already

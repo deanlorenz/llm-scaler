@@ -48,18 +48,16 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`. The share of an engine's own queue that a settled-idle sibling
-  has room for is left out (`capacity.ReplicaCapacity.QueueRoutedFraction`,
-  set by `routeQueuesToIdleRoom`; see saturation-analyzer.md, "A replica's own
-  demand"): only that engine drains it, so that share is the router's
-  imbalance, not a shortfall replicas fix. Measured in the imbalance audit,
-  100 requests on one of four replicas at half the fleet's throughput implied
-  4.31 replicas against 2.35 balanced, 300 implied 8.24; with the siblings
-  idle for two minutes both read 2.35. A replica just Ready is not settled
-  idle: three full replicas queued 60 beside one read 9.41 replicas, as
-  without it, where a single-row idle test read 5.88. A role with no settled
-  idle replica counts its queues in full, as before. The scheduler's queue
-  always counts: the router can still place those.
+  `lambda`. Every engine queue counts in full, whichever replica it stands
+  on, and so does the scheduler's. `B` is requests to drain at `mu`, and an
+  idle sibling's KV room drains none of them: in this model its `mu` is
+  already spent on its share of `lambda`. Leaving out the share such a
+  sibling had room for read three full replicas queued 60 beside a fourth
+  never routed to at 5.88 replicas against the 9.41 the fleet needs with
+  perfect routing (`TestUnevenRoutingShortFleetKeepsItsBacklog`). A queue the
+  router pinned on one replica over-orders here (100 requests on one of four
+  replicas at half the fleet's throughput implies 4.31 against 2.35
+  balanced); that is reported, not compensated.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
   were resident at once) comes out -- but only where the floor's figure can
@@ -282,9 +280,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   and a prefill k2 learned from it is never corrected (with decode-0 at 26 %
   and decode-1 full with 81 waiting, prefill would record 357 800 against a
   k1 of 919 449). Only the hold on prefill's DEMAND relaxes, and only once a
-  decode replica has been settled idle room for `IdleSettledFor` (two
-  minutes; `routeQueuesToIdleRoom`): then decode has room the router is not
-  using, and prefill may be ordered on its own demand.
+  decode replica has read idle for `IdleSettledFor` (two minutes;
+  `settledIdleDecode`): then decode has room the router is not using, and
+  prefill may be ordered on its own demand.
 
   The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's

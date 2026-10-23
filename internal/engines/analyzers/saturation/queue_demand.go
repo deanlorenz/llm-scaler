@@ -216,6 +216,15 @@ func waitingQueueDemand(rm domain.ReplicaMetrics, role string) int64 {
 // every replica, a light one and a load that has just stopped all price as
 // before. Only demand reads this; the saturation tests, k2 and its admission
 // keep the peak.
+//
+// This is not a routing compensation, and it does not serve one. It counts
+// one load once in TIME: the same tokens read at four different moments of
+// the minute are not four loads. It moves no demand between replicas and
+// hides none, because the role's charge never falls under the sum of what its
+// replicas hold now: a replica busy now keeps its peak, which is at least its
+// instant reading, and one idle now is charged its instant reading. A queue
+// is never discounted by it -- a replica with anything waiting keeps its
+// peak, and every queue is charged in full (idle_room.go).
 func residentCharge(rm domain.ReplicaMetrics, peakTokens, capacityTokens int64, routing replicaRouting) int64 {
 	if !routing.kvFromInstant || capacityTokens <= 0 {
 		return peakTokens

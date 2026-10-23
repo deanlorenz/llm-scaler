@@ -116,8 +116,8 @@ type settleMemo struct {
 	// pods is each replica's readings over the last K2SettleMaxGap, oldest
 	// first.
 	pods map[string][]settleReading
-	// idle is each replica's current run of idle readings, for the queue
-	// routing's settled-idle test (routeQueuesToIdleRoom). Here because it is
+	// idle is each decode replica's current run of idle readings, for the
+	// prefill hold's settled-idle test (settledIdleDecode). Here because it is
 	// the same per-model, per-replica memory and is swept with it.
 	idle map[string]idleRun
 	// readySince is when each replica was first seen Ready, for the joined

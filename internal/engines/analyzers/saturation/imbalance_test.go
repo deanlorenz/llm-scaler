@@ -12,9 +12,11 @@ import (
 )
 
 // Uneven routing: the router loads one replica of a role while a sibling of
-// the same role sits idle. What the analyzer learns, measures and prices must
-// not move with it -- and must not move either when the fleet really is short,
-// every replica of the role busy. Each test below checks both sides.
+// the same role sits idle. What the analyzer LEARNS must not move with it. What
+// it prices is a sum over the role's replicas and charges every queue in full
+// wherever it stands: uneven routing is reported, not compensated, and where
+// it moves the demand it raises it. A fleet that really is short, every
+// replica busy, is checked beside each case.
 //
 // The fixtures use the shipped test policy (makeAnalyzerInput: kvCacheThreshold
 // 0.8, queueLengthThreshold 5, scale-up 0.85) and a 1,162,240-token cache, the
@@ -67,7 +69,7 @@ func imbK2Windows(a *SaturationAnalyzer, role string) int {
 // One decode replica full and queued is decode saturated for what prefill
 // LEARNS, whatever its siblings do: KV prefilled for it waits on it, and a
 // prefill k2 learned from that wait is never corrected. Only prefill's DEMAND
-// hold relaxes, and only once a decode sibling has been idle room for
+// hold relaxes, and only once a decode sibling has read idle for
 // IdleSettledFor. Every decode replica full and queued, or one full among
 // busy siblings, holds as well; a balanced decode that is not full does
 // neither.
@@ -273,47 +275,47 @@ func imbFleet(fracs []float64, queues []int, rates []float64) []domain.ReplicaMe
 	return rows
 }
 
-// A queue the router pinned on one replica, while a sibling idles, is not a
-// backlog the role can be sized for: replicas added cannot drain another
-// engine's queue. With every replica busy it is, and counts as before.
-func TestImbalanceFloorBacklogLeavesAPinnedQueueOut(t *testing.T) {
+// A queue the router pinned on one replica, while its siblings idle, is the
+// role's backlog in full: the floor prices requests to drain at mu, and an
+// idle sibling's KV room drains none of them. Pinned beside idle siblings or
+// standing beside busy ones, the same queue at the same lambda implies the
+// same order; it over-orders a fleet whose router is to blame, and that is
+// reported, not compensated.
+func TestImbalanceFloorBacklogCountsAPinnedQueue(t *testing.T) {
 	light := []float64{0.10, 0.10, 0.10}
 	balanced := imbFloorFleet(t, imbFleet([]float64{0.3125, 0.3125, 0.3125, 0.3125}, []int{0, 0, 0, 0}, []float64{0.5, 0.5, 0.5, 0.5}))
 	q100 := imbFloorFleet(t, imbFleet(append([]float64{0.95}, light...), []int{100, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
-	q300 := imbFloorFleet(t, imbFleet(append([]float64{0.95}, light...), []int{300, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
 	busyQ0 := imbFloorFleet(t, imbFleet([]float64{0.95, 0.95, 0.95, 0.95}, []int{0, 0, 0, 0}, []float64{0.5, 0.5, 0.5, 0.5}))
 	busyQ100 := imbFloorFleet(t, imbFleet([]float64{0.95, 0.95, 0.95, 0.95}, []int{100, 100, 100, 100}, []float64{0.5, 0.5, 0.5, 0.5}))
 	hotAmongBusy := imbFloorFleet(t, imbFleet([]float64{0.95, 0.5, 0.5, 0.5}, []int{100, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
-	t.Logf("implied replicas: balanced %.2f; one replica queued 100 / 300 beside idle siblings %.2f / %.2f", balanced, q100, q300)
-	t.Logf("implied replicas: every replica full, queue 0 / 100 each %.2f / %.2f; queued 100 beside busy siblings %.2f",
-		busyQ0, busyQ100, hotAmongBusy)
-	for name, got := range map[string]float64{"queue 100": q100, "queue 300": q300} {
-		if got > balanced+0.5 {
-			t.Errorf("%s pinned on one replica beside idle siblings implies %.2f replicas, balanced %.2f", name, got, balanced)
-		}
+	t.Logf("implied replicas: balanced %.2f; queued 100 on one beside idle siblings %.2f, beside busy ones %.2f",
+		balanced, q100, hotAmongBusy)
+	t.Logf("implied replicas: every replica full, queue 0 / 100 each %.2f / %.2f", busyQ0, busyQ100)
+	if q100 < hotAmongBusy-0.01 {
+		t.Errorf("a queue of 100 pinned beside idle siblings implies %.2f replicas, under the %.2f it implies beside busy ones: the backlog was cut for where it stands",
+			q100, hotAmongBusy)
+	}
+	if !(q100 > balanced+0.5) {
+		t.Errorf("a queue of 100 implies %.2f replicas, no more than balanced with none, %.2f", q100, balanced)
 	}
 	if !(busyQ100 > busyQ0+1) {
 		t.Errorf("every replica full and queued 100 implies %.2f replicas, no more than queue 0's %.2f: the backlog of a short fleet was dropped",
 			busyQ100, busyQ0)
 	}
-	if !(hotAmongBusy > balanced+0.5) {
-		t.Errorf("a queue beside busy (not idle) siblings implies %.2f replicas, no more than balanced %.2f: only an idle sibling may drop it",
-			hotAmongBusy, balanced)
-	}
 }
 
 // A queue the router pinned on one prefill replica, while its siblings have
-// idled for long enough, is not charged as resident prompt as far as their
-// room goes: only that engine drains it. With every prefill replica busy it
-// is, in full.
-func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
+// idled for minutes, is charged as resident prompt in full, as it is beside
+// busy siblings. Review probe (round 2): with the three idle replicas' room
+// taken off it, the 439 waiting priced 9.3 replicas against the 12.3 the
+// resident KV and the queue need.
+func TestImbalanceResidencyChargesAPinnedQueue(t *testing.T) {
 	states := []domain.VariantReplicaState{
 		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
 		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
 	}
 	const prompt = 6000.0
-	// run returns prefill's demand and its per-replica capacity.
-	run := func(fracs []float64, queues []int) (float64, float64) {
+	run := func(fracs []float64, queues []int) float64 {
 		t.Helper()
 		a, clock := imbAnalyzer()
 		rows := make([]domain.ReplicaMetrics, 0, 2+len(fracs))
@@ -322,17 +324,13 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 			imbRow("decode-1", "decode-v", 0.25, 0, prompt, 1000, 0.5),
 		)
 		for i := range fracs {
-			// An empty replica completes nothing: prefill's KV is not its
-			// load, and a replica completing at its siblings' rate is busy
-			// however little it holds (pricedIdle).
 			rate := 1.0
 			if fracs[i] == 0 && queues[i] == 0 {
 				rate = 0
 			}
 			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, rate))
 		}
-		r := imbSettle(t, a, clock, makeAnalyzerInput(rows, states))
-		return r.RoleDemand[domain.RolePrefill], imbVariant(t, r, "prefill-v").PerReplicaCapacity
+		return imbSettle(t, a, clock, makeAnalyzerInput(rows, states)).RoleDemand[domain.RolePrefill]
 	}
 	resident := func(fracs []float64) float64 {
 		var s float64
@@ -342,27 +340,23 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 		return s
 	}
 	hot := []float64{0.20, 0, 0, 0}
-	pinned, p := run(hot, []int{439, 0, 0, 0})
-	none, _ := run(hot, []int{0, 0, 0, 0})
+	pinned := run(hot, []int{439, 0, 0, 0})
 	busy := []float64{0.35, 0.35, 0.35, 0.35}
-	busyQ, _ := run(busy, []int{100, 100, 100, 100})
-	busyQ0, _ := run(busy, []int{0, 0, 0, 0})
-	amongBusy, _ := run(busy, []int{439, 0, 0, 0})
-	t.Logf("prefill demand: 439 queued on one, three idle %.0f (per replica %.0f); no queue %.0f", pinned, p, none)
-	t.Logf("prefill demand: every replica 0.35 KV, queue 100 each %.0f, queue 0 %.0f; 439 on one beside busy siblings %.0f",
-		busyQ, busyQ0, amongBusy)
-	// The three idle siblings, idle for long enough, have room for three
-	// replicas' capacity between them; that much of the queue is the
-	// router's, and the rest is still charged.
-	if want := none + max(439*prompt-3*p, 0); math.Abs(pinned-want) > 2 {
-		t.Errorf("439 requests pinned on one prefill replica beside three idle ones priced prefill at %.0f, want %.0f: %.0f without them plus the queue less the idle room",
-			pinned, want, none)
-	}
-	if want := resident(busy) + 4*100*prompt; busyQ != want {
-		t.Errorf("every prefill replica busy and queued 100: demand %.0f, want the resident KV plus the whole queue, %.0f", busyQ, want)
-	}
-	if want := resident(busy) + 439*prompt; amongBusy != want {
-		t.Errorf("439 queued beside busy (not idle) siblings: demand %.0f, want %.0f -- only an idle sibling may drop it", amongBusy, want)
+	busyQ := run(busy, []int{100, 100, 100, 100})
+	amongBusy := run(busy, []int{439, 0, 0, 0})
+	t.Logf("prefill demand: 439 queued on one, three idle %.0f; every replica 0.35 KV queued 100 %.0f; 439 on one beside busy siblings %.0f",
+		pinned, busyQ, amongBusy)
+	for _, c := range []struct {
+		name      string
+		got, want float64
+	}{
+		{"439 queued on one beside three idle", pinned, resident(hot) + 439*prompt},
+		{"every replica busy and queued 100", busyQ, resident(busy) + 4*100*prompt},
+		{"439 queued on one beside busy siblings", amongBusy, resident(busy) + 439*prompt},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: prefill demand %.0f, want the resident KV plus the whole queue, %.0f", c.name, c.got, c.want)
+		}
 	}
 }
 
