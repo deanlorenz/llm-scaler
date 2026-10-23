@@ -127,9 +127,12 @@ on half the picture.
    Resolved for the queue-depth path: a reading whose queue is larger than the
    replica's whole resident batch is admitted only when its service rate has
    reached the rate on record, or when the queue stood the previous cycle and
-   the residency stopped rising (`k2_settle.go`, `P1-obs-unsettled`). Measured
-   cause: a load step's first reading, 31 713 tokens under a queue of 160,
-   pulled a 270 539 window to 151 126.
+   the residency stayed flat, within 25 % either way (`k2_settle.go`,
+   `P1-obs-unsettled`). Measured cause: a load step's first reading, 31 713
+   tokens under a queue of 160, pulled a 270 539 window to 151 126. The band
+   was first one-sided (no more than 25 % higher), which admitted the same
+   reading straight after a queued 270 539 -- traffic the router moved off a
+   pod and back -- and took the window to 222 774.
 3. **Relaxation policy.** How does a bucket minimum ever move up when a workload
    genuinely gets cheaper? Slow age-based relaxation is the proposal; the rate and
    its interaction with the SLO asymmetry need choosing deliberately.

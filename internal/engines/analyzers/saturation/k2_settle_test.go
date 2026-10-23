@@ -133,3 +133,18 @@ func TestK2Settle_ARateAtTheRecordIsALimit(t *testing.T) {
 	})
 	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs"}, prios)
 }
+
+// Settled is flat, either way. A compute bound at low occupancy may drift
+// down a little from one cycle to the next and is still admitted; a fall past
+// K2SettleMaxRise is traffic moved off the replica, not a limit, and is not.
+// No rate on record (no generated tokens), so the flat test alone decides.
+func TestK2Settle_AFallIsNotSettling(t *testing.T) {
+	prios, k2s := runSettleCycles(t, []settleCycle{
+		{0, 45_000, 40, 0},
+		{15 * time.Second, 46_000, 40, 0},
+		{30 * time.Second, 36_000, 40, 0}, // 22 % down: still flat
+		{45 * time.Second, 20_000, 40, 0}, // 44 % down: moved off
+	})
+	assert.Equal(t, []string{"P1-obs-unsettled", "P1-obs", "P1-obs", "P1-obs-unsettled"}, prios)
+	assert.Equal(t, int64((46_000+36_000)/2), k2s[3], "the fall is not folded in")
+}

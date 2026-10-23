@@ -311,3 +311,57 @@ func TestImbalanceDemandDoesNotSumAMovedPeak(t *testing.T) {
 		}
 	}
 }
+
+// A replica full and queued, whose traffic the router then moves off and
+// hands back, reads a fraction of its batch under a deep queue the next
+// cycle. That is a replica filling, not one at a limit, and must not lower
+// the variant's k2: every replica of it is priced there, and a k2 too low is
+// never corrected.
+func TestImbalanceK2RefusesAFallUnderAQueue(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	a, clock := imbAnalyzer()
+	var full []domain.ReplicaMetrics
+	for _, p := range []string{"r0", "r1", "r2", "r3"} {
+		full = append(full, imbRow(p, "agg-v", 270_539.0/float64(imbKv), 10, 1000, 1000, 6.0))
+	}
+	in := makeAnalyzerInput(full, states)
+	in.ArrivalRate = 24
+	if _, err := a.Analyze(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	before := imbK2Average(a)
+	*clock = clock.Add(ThroughputSampleSpacing + time.Second)
+	step := []domain.ReplicaMetrics{
+		imbRow("r0", "agg-v", 31_713.0/float64(imbKv), 160, 1000, 1000, 0.0019),
+		imbRow("r1", "agg-v", 0, 0, 1000, 1000, 0),
+		imbRow("r2", "agg-v", 0, 0, 1000, 1000, 0),
+		imbRow("r3", "agg-v", 0, 0, 1000, 1000, 0),
+	}
+	in = makeAnalyzerInput(step, states)
+	in.ArrivalRate = 0.8
+	r, err := a.Analyze(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := imbK2Average(a)
+	t.Logf("k2 window: %.0f before; %.0f after one replica read 31 713 under 160 queued; priced at %.0f",
+		before, after, imbVariant(t, r, "agg-v").PerReplicaCapacity)
+	if after != before {
+		t.Errorf("a fall under a deep queue moved the variant's k2 %.0f -> %.0f", before, after)
+	}
+}
+
+// imbK2Average is the mean of the one k2 window the analyzer holds.
+func imbK2Average(a *SaturationAnalyzer) float64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var avg float64
+	for _, ra := range a.computeCapacityHistory {
+		if ra.Len() > 0 {
+			avg = ra.Average()
+		}
+	}
+	return avg
+}

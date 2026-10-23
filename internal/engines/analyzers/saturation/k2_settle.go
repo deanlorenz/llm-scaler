@@ -43,7 +43,8 @@ import (
 //     K2SettleRateFraction. A replica just handed a step is still completing
 //     at the rate of the minute before it; or
 //   - it was queued on its previous cycle too (within K2SettleMaxGap) and its
-//     resident KV has stopped rising (by no more than K2SettleMaxRise). A
+//     resident KV has settled: within K2SettleMaxRise of that cycle's, up or
+//     down -- a fall is traffic moved off the replica, not a limit. A
 //     compute bound reached at low occupancy -- long prompts behind a
 //     prefill-bound engine -- persists with flat residency and is admitted the
 //     cycle after it first shows, so a bucket that has no rate on record yet
@@ -60,7 +61,7 @@ const (
 	// full; far above the rate of the minute before a load step.
 	K2SettleRateFraction = 0.7
 	// K2SettleMaxRise is how much a suspect reading's resident KV may have
-	// grown since the previous cycle and still count as settled.
+	// grown, or fallen, since the previous cycle and still count as settled.
 	K2SettleMaxRise = 0.25
 	// K2SettleMaxGap is how old the previous cycle's reading may be. Past it,
 	// the two readings are not consecutive cycles of one episode.
@@ -140,8 +141,16 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if in.ref > 0 && in.rateOK && in.rate >= K2SettleRateFraction*in.ref {
 		return ""
 	}
+	// Settled is FLAT: within K2SettleMaxRise of the previous cycle either way.
+	// A fall is not settling. A replica that was full and queued and next reads
+	// a fraction of that with a deep queue has had its traffic moved off and
+	// handed back -- an argmax picker does this -- and is filling again, not at
+	// a limit: measured in the imbalance audit, 270 539 resident and queued,
+	// then 31 713 with 160 queued, admitted on the rise test alone, took the
+	// variant's window 270 539 -> 222 774 and re-priced every replica there.
 	if hadPrev && now.Sub(prev.at) <= K2SettleMaxGap && prev.queue >= int(in.threshold) &&
-		prev.tokens > 0 && float64(in.tokens) <= float64(prev.tokens)*(1+K2SettleMaxRise) {
+		prev.tokens > 0 && float64(in.tokens) <= float64(prev.tokens)*(1+K2SettleMaxRise) &&
+		float64(in.tokens) >= float64(prev.tokens)*(1-K2SettleMaxRise) {
 		return ""
 	}
 	return "queue deeper than the replica's whole resident batch, its service rate below the rate on record, and its resident KV not yet settled: a load step, not a limit; not recorded"

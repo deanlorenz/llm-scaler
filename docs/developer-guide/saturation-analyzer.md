@@ -145,8 +145,14 @@ suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !suspect
         || rate >= K2SettleRateFraction x rateOnRecord              // 0.7
         || (queued last cycle, within K2SettleMaxGap = 2m,
-            and tokens <= (1 + K2SettleMaxRise) x tokens last cycle) // 0.25
+            and (1 - K2SettleMaxRise) x tokens last cycle
+                <= tokens <= (1 + K2SettleMaxRise) x tokens last cycle) // 0.25
 ```
+
+The band is two-sided. A fall is not settling: a replica full and queued at
+270,539 that next reads 31,713 under 160 queued has had its traffic moved off
+and handed back, and admitted on the rise test alone it took the window to
+222,774 (imbalance audit, 2026-10-23).
 
 `rate` is the replica's own `saturatedCompletionRate`; `rateOnRecord` is the
 bucket's measured saturated throughput, read without touching the window, or

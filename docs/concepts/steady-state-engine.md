@@ -223,6 +223,10 @@ a role that is busy everywhere is never treated as imbalanced.
   it visited shows a full peak. A pod that is idle now, while another pod of
   its role is busy now, is charged what it holds now. If no pod of the role is
   busy now, every peak counts.
+- **A replica the router emptied and refilled is not measured.** A full replica
+  whose traffic is moved off and handed back shows a deep queue on a nearly
+  empty cache. That reading is not kept as its compute ceiling: a ceiling
+  learned too low never corrects itself.
 
 ### 3. The scaling signal
 
