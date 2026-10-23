@@ -75,7 +75,7 @@ func TestImbalanceDecodeSaturationNeedsNoIdleSibling(t *testing.T) {
 	}
 	roles := map[string]string{"decode-v": domain.RoleDecode, "prefill-v": domain.RolePrefill}
 	decode := func(fracs []float64, queues []int) []domain.ReplicaMetrics {
-		var rows []domain.ReplicaMetrics
+		rows := make([]domain.ReplicaMetrics, 0, len(fracs))
 		for i, f := range fracs {
 			rows = append(rows, imbRow("decode-"+string(rune('0'+i)), "decode-v", f, queues[i], 6000, 1000, 0.3))
 		}
@@ -154,7 +154,7 @@ func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64)
 	}
 	a, clock := imbAnalyzer()
 	for i := 0; i < 4; i++ {
-		var seed []domain.ReplicaMetrics
+		seed := make([]domain.ReplicaMetrics, 0, 4)
 		for _, p := range []string{"r0", "r1", "r2", "r3"} {
 			// Distinct readings per cycle, so each counts as a sample.
 			seed = append(seed, imbRow(p, "agg-v", 0.95, 10, 1000, 1000, []float64{1.0, 1.02, 0.98, 1.01}[i]))
@@ -178,7 +178,7 @@ func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64)
 // imbFleet is four agg-v replicas r0..r3 at the given KV fractions, queues and
 // request rates.
 func imbFleet(fracs []float64, queues []int, rates []float64) []domain.ReplicaMetrics {
-	var rows []domain.ReplicaMetrics
+	rows := make([]domain.ReplicaMetrics, 0, len(fracs))
 	for i := range fracs {
 		rows = append(rows, imbRow("r"+string(rune('0'+i)), "agg-v", fracs[i], queues[i], 1000, 1000, rates[i]))
 	}
@@ -226,10 +226,11 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 	run := func(fracs []float64, queues []int) float64 {
 		t.Helper()
 		a, _ := imbAnalyzer()
-		rows := []domain.ReplicaMetrics{
+		rows := make([]domain.ReplicaMetrics, 0, 2+len(fracs))
+		rows = append(rows,
 			imbRow("decode-0", "decode-v", 0.25, 0, prompt, 1000, 0.5),
 			imbRow("decode-1", "decode-v", 0.25, 0, prompt, 1000, 0.5),
-		}
+		)
 		for i := range fracs {
 			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, 1.0))
 		}
@@ -281,7 +282,7 @@ func TestImbalanceDemandDoesNotSumAMovedPeak(t *testing.T) {
 	run := func(instants []float64) float64 {
 		t.Helper()
 		a, _ := imbAnalyzer()
-		var rows []domain.ReplicaMetrics
+		rows := make([]domain.ReplicaMetrics, 0, len(instants))
 		for i, k := range instants {
 			rm := imbRow("r"+string(rune('0'+i)), "agg-v", peak, 0, 1000, 1000, 0.5)
 			rm.KvUsageInstant = k
@@ -322,7 +323,7 @@ func TestImbalanceK2RefusesAFallUnderAQueue(t *testing.T) {
 		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
 	}
 	a, clock := imbAnalyzer()
-	var full []domain.ReplicaMetrics
+	full := make([]domain.ReplicaMetrics, 0, 4)
 	for _, p := range []string{"r0", "r1", "r2", "r3"} {
 		full = append(full, imbRow(p, "agg-v", 270_539.0/float64(imbKv), 10, 1000, 1000, 6.0))
 	}
