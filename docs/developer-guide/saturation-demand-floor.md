@@ -48,20 +48,28 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`. An engine's own queue is left out while its role has an idle
-  Ready replica (`capacity.ReplicaCapacity.QueueRoutable`, set from
-  `rolesWithIdleReplica`): only that engine drains it, so it is the router's
+  `lambda`. The share of an engine's own queue that a settled-idle sibling
+  has room for is left out (`capacity.ReplicaCapacity.QueueRoutedFraction`,
+  set by `routeQueuesToIdleRoom`; see saturation-analyzer.md, "A replica's own
+  demand"): only that engine drains it, so that share is the router's
   imbalance, not a shortfall replicas fix. Measured in the imbalance audit,
   100 requests on one of four replicas at half the fleet's throughput implied
-  4.31 replicas against 2.35 balanced, 300 implied 8.24; both read 2.35 now.
-  A role with no idle replica counts its queues in full, as before. The
-  scheduler's queue always counts: the router can still place those.
+  4.31 replicas against 2.35 balanced, 300 implied 8.24; with the siblings
+  idle for two minutes both read 2.35. A replica just Ready is not settled
+  idle: three full replicas queued 60 beside one read 9.41 replicas, as
+  without it, where a single-row idle test read 5.88. A role with no settled
+  idle replica counts its queues in full, as before. The scheduler's queue
+  always counts: the router can still place those.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
   were resident at once) comes out -- but only where the floor's figure can
-  carry the queue: the term may order (`mayOrder`), is not held, and its
-  arrival half `lambda x P / mu` accounts for at least `FloorLagFraction`
-  (0.5) of the resident KV. Elsewhere `demand = max(measured, floor)`. What is
+  carry the queue: the term may order (`mayOrder`) and is not held, and in
+  proportion to how much of the resident KV its arrival half `lambda x P / mu`
+  accounts for -- none at `FloorLagFraction` (0.5) or under, all of it at
+  `FloorTrustFraction` (0.8) or over, linear between (`floorTrust`), so
+  demand moves continuously with `lambda`; a hard switch took one replica
+  499 446 -> 260 123 between 2.95 and 3.0 req/s. Elsewhere
+  `demand = max(measured, floor)`. What is
   resident arrived within one residence time, so the resident KV implies an
   arrival rate of about `resident x mu / P`; a `lambda` well under it is a
   `[1m]` rate still reading the minute before a load step. Measured on the
@@ -269,13 +277,14 @@ Properties, each with a spec in `throughput_floor_test.go`:
   allocate the blocks a pull needs, which the transfer pipeline does not
   produce.
 
-  And no Ready decode replica idle (`replicaIdle` in `roles.go`: busiest-rank
-  KV under `idleKvUsage` = 0.30 and nothing waiting, the numbers of
-  `internal/signals/balance`). One decode pod full and queued while its
-  siblings idle is the router's choice, not a role out of room, and it used to
-  gate prefill's learning and hold prefill's demand for the whole model. Only
-  an idle sibling clears the test: a sibling busy but not full is not counted
-  as room, so a decode loaded everywhere and full somewhere gates as before.
+  Any one such replica gates prefill's learning, whatever its siblings do:
+  KV prefilled for it waits on it, so prefill's reading is its back-pressure,
+  and a prefill k2 learned from it is never corrected (with decode-0 at 26 %
+  and decode-1 full with 81 waiting, prefill would record 357 800 against a
+  k1 of 919 449). Only the hold on prefill's DEMAND relaxes, and only once a
+  decode replica has been settled idle room for `IdleSettledFor` (two
+  minutes; `routeQueuesToIdleRoom`): then decode has room the router is not
+  using, and prefill may be ordered on its own demand.
 
   The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's
