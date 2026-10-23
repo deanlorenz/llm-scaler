@@ -74,11 +74,14 @@ type Distribution struct {
 	MaxQueue    float64
 	MeanQueue   float64
 
-	// Saturated counts ready replicas at or over SaturatedKvUsage, or (prefill
-	// and aggregated roles only) with a busiest-rank queue at or over the
-	// policy's queueLengthThreshold. A decode replica's waiting count also
-	// holds requests waiting for their remote KV, so decode is judged on KV
-	// alone.
+	// Saturated counts ready replicas at or over SaturatedKvUsage, or with a
+	// busiest-rank queue at or over the policy's queueLengthThreshold. The
+	// queue test is left out on decode of a disaggregated model (one with a
+	// prefill variant): there the decode replica's waiting count also holds
+	// requests waiting for their remote KV, so it is judged on KV alone. A
+	// decode variant with no prefill beside it serves whole requests, and its
+	// queue is a backlog: measured, one such replica at max-num-seqs held 768
+	// waiting at KV 0.86-0.89, under SaturatedKvUsage, while three idled.
 	Saturated int
 	// Idle counts ready replicas under IdleKvUsage with nothing waiting that
 	// have been Ready for at least IdleAfterReady.
@@ -86,8 +89,8 @@ type Distribution struct {
 
 	// BusiestPod and IdlePods name the replicas behind the verdict, for the
 	// warning line. BusiestPod is ranked by the signal that judges the role
-	// saturated: a saturated replica before one that is not, then, on prefill
-	// and aggregated roles, the deepest busiest-rank queue, then the highest
+	// saturated: a saturated replica before one that is not, then, on a role
+	// judged on its queue, the deepest busiest-rank queue, then the highest
 	// KV. It is never an idle replica, and is empty when every replica is idle.
 	BusiestPod string
 	IdlePods   []string
@@ -148,7 +151,9 @@ func (k busiestKey) above(o busiestKey) bool {
 // Measure computes the distribution of every role that has a ready replica
 // among rows, as of now. rolesByVariant maps a variant to its role as
 // discovery recorded it; a variant it does not name is read as aggregated
-// (domain.RoleBoth), as domain.CanonicalRole reads an empty role.
+// (domain.RoleBoth), as domain.CanonicalRole reads an empty role. A model is
+// disaggregated when rolesByVariant names a prefill variant, whether or not
+// it has a ready replica, and only then is decode judged on KV alone.
 // queueThreshold is the policy's queueLengthThreshold; at or below zero no
 // replica is saturated on its queue.
 //
@@ -173,6 +178,7 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
 	busiest := map[string]busiestKey{}
+	disaggregated := hasPrefill(rolesByVariant)
 	for _, rm := range rows {
 		if !rm.Ready {
 			continue
@@ -192,7 +198,8 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 		s.kv += kv
 		s.queue += queue
 		sums[role] = s
-		isSaturated := saturated(rm, role, kv, queueThreshold)
+		byQueue := role != domain.RoleDecode || !disaggregated
+		isSaturated := saturated(rm, byQueue, kv, queueThreshold)
 		switch {
 		case isSaturated:
 			d.Saturated++
@@ -203,7 +210,7 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 			continue // an idle replica is never the busiest
 		}
 		k := busiestKey{saturated: isSaturated, kv: kv}
-		if role != domain.RoleDecode {
+		if byQueue {
 			k.queue = max(rm.BusiestRankQueue(), 0)
 		}
 		if d.BusiestPod == "" || k.above(busiest[role]) {
@@ -226,14 +233,29 @@ func readyLongEnough(since, now time.Time) bool {
 	return !since.IsZero() && now.Sub(since) >= IdleAfterReady
 }
 
-func saturated(rm domain.ReplicaMetrics, role string, kv, queueThreshold float64) bool {
+// saturated reports whether rm is saturated: its KV at or over
+// SaturatedKvUsage, or, when byQueue, its busiest rank's queue at or over
+// queueThreshold.
+func saturated(rm domain.ReplicaMetrics, byQueue bool, kv, queueThreshold float64) bool {
 	if kv >= SaturatedKvUsage {
 		return true
 	}
-	if role == domain.RoleDecode || !(queueThreshold > 0) {
+	if !byQueue || !(queueThreshold > 0) {
 		return false
 	}
 	return float64(rm.BusiestRankQueue()) >= queueThreshold
+}
+
+// hasPrefill reports whether rolesByVariant names a prefill variant: the
+// model is disaggregated, and its decode replicas' waiting counts hold
+// requests waiting for their remote KV.
+func hasPrefill(rolesByVariant map[string]string) bool {
+	for _, role := range rolesByVariant {
+		if domain.CanonicalRole(role) == domain.RolePrefill {
+			return true
+		}
+	}
+	return false
 }
 
 // fraction is v clamped to at most 1, and false when v is not a finite,
