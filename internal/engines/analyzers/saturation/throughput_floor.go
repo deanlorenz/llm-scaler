@@ -520,6 +520,27 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// compare with. Uncapped: a queue that grows past what its replica
 	// drains in T is still arrivals above what the fleet drains.
 	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, queued)
+	// The cap above is right for a STANDING queue only. Requests waiting in
+	// an engine can be served by that engine alone, but a queue that grows
+	// is arrivals above what the fleet serves, and those arrivals are still
+	// to come: replicas added can take them. Lambda may not count them yet
+	// -- the router's rate is a one-minute rate that reads a step late, and
+	// with no router rate lambda falls back to completions, which on a full
+	// fleet are n x mu whatever arrives -- so the growing queue is the only
+	// evidence of them, and capped it is lost. While the role's backlog grows
+	// (noteBacklogGrowth) the engine queues are charged in full, as the
+	// growth test reads them. In review (mu ~1, four full replicas, flow
+	// control off): a step from 4 to 20 req/s read 18.82 replicas at 30 s,
+	// under the 23.53 the arrivals alone need, and with no router rate a true
+	// 12 req/s read 9.41 for two minutes against 14.12. Charged in full they
+	// read 23.53 by 30 s and by 120 s. grew lingers for up to
+	// BacklogGrowthLookback after the growth stops, so the full charge
+	// outlives it by up to a minute: an over-order, the cheap direction.
+	for role, q := range queued {
+		if grew[role] {
+			backlog[role] = q
+		}
+	}
 
 	// The hold cap is measured against the threshold the ENGINE sizes RC
 	// with, which is the saturation analyzer's own (config.AnalyzerThresholds):

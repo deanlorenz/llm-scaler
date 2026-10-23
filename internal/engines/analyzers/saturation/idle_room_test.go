@@ -187,6 +187,87 @@ func TestUnevenRoutingAPinnedQueueIsPricedAtWhatItsReplicaDrains(t *testing.T) {
 	}
 }
 
+// unevenFull is n replicas, each full, queued q and serving rate.
+func unevenFull(n int, q, rate float64) [][3]float64 {
+	out := make([][3]float64, n)
+	for i := range out {
+		out[i] = [3]float64{0.95, q, rate}
+	}
+	return out
+}
+
+// Review probe (round 4, the cap on a queue that stands). mu about 1. Over a
+// drain time T a replica serves at most mu x T of its own queue, so a fleet
+// with each replica queued past that needs lambda / mu for the arrivals plus
+// one replica per queued replica: four queued 100 at lambda 2 need
+// (2 + 4) / 0.85 = 7.06 (charged in full, 10.20), and four queued 600 at
+// lambda 8 need (8 + 4) / 0.85 = 14.12 (charged in full, 56.47). Read after
+// the queues have stood a minute, past BacklogGrowthLookback.
+func TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains(t *testing.T) {
+	for _, c := range []struct {
+		lambda, q, rate float64
+	}{{2, 100, 0.5}, {8, 600, 1}} {
+		a, clock := unevenSeed(t)
+		var got float64
+		for range 8 {
+			got = unevenImplied(t, a, c.lambda, unevenFull(4, c.q, c.rate))
+			*clock = clock.Add(15 * time.Second)
+		}
+		want := (c.lambda + 4) / 0.85
+		t.Logf("four replicas each queued %.0f, standing, lambda %.0f: implied %.2f (want %.2f)", c.q, c.lambda, got, want)
+		if got < want-0.1 || got > want+0.1 {
+			t.Errorf("four replicas each queued %.0f at lambda %.0f implied %.2f replicas once the queues stood, want %.2f", c.q, c.lambda, got, want)
+		}
+	}
+}
+
+// Review probe (round 4, a load step the router's rate reads late). Four
+// full replicas at mu about 1, flow control off, so every request above what
+// they serve queues in an engine. The load steps from 4 to 20 req/s; the
+// router's one-minute rate reads it linearly over 60 s, and each queue grows
+// 4 per second. The queue past mu x T is arrivals lambda has not counted
+// yet, and new replicas can take them; capped, the order read 18.82 at 30 s,
+// under the 20 / 0.85 = 23.53 the arrivals alone need. A growing queue is
+// charged in full.
+func TestUnevenRoutingAGrowingQueueIsNotCappedWhileLambdaLags(t *testing.T) {
+	a, clock := unevenSeed(t)
+	for range 6 {
+		unevenImplied(t, a, 4, unevenFull(4, 0, 1))
+		*clock = clock.Add(15 * time.Second)
+	}
+	need := 20 / 0.85
+	for i := 1; i <= 8; i++ {
+		el := float64(i) * 15
+		lambda := 4 + 16*min(1, el/60)
+		got := unevenImplied(t, a, lambda, unevenFull(4, 4*el, 1))
+		t.Logf("t=%3.0fs lambda read %4.1f, each queued %3.0f: implied %.2f (the arrivals need %.2f)", el, lambda, 4*el, got, need)
+		if i >= 2 && got < need-0.01 {
+			t.Errorf("t=%.0fs: a step to 20 req/s implied %.2f replicas, under the %.2f the arrivals need", el, got, need)
+		}
+		*clock = clock.Add(15 * time.Second)
+	}
+}
+
+// Review probe (round 4, no router rate). With ArrivalRate 0 lambda falls
+// back to completions, which on four full replicas are 4 x mu whatever
+// arrives. The true rate is 12 req/s: each queue grows 2 per second, and is
+// the only evidence of the 8 req/s above what is served. Capped, the order
+// read 9.41 from 30 s to 120 s against the 12 / 0.85 = 14.12 the arrivals
+// need.
+func TestUnevenRoutingAGrowingQueueIsNotCappedWithNoRouterRate(t *testing.T) {
+	a, clock := unevenSeed(t)
+	var got float64
+	for i := 1; i <= 8; i++ {
+		el := float64(i) * 15
+		got = unevenImplied(t, a, 0, unevenFull(4, 2*el, 1))
+		t.Logf("t=%3.0fs no router rate, each queued %3.0f: implied %.2f", el, 2*el, got)
+		*clock = clock.Add(15 * time.Second)
+	}
+	if need := 12 / 0.85; got < need-0.01 {
+		t.Errorf("a true 12 req/s on four replicas implied %.2f replicas after two minutes, under the %.2f the arrivals need", got, need)
+	}
+}
+
 // Review probe (round 2, a load step onto a fleet idle for minutes). The
 // router reaches three of the four replicas first; the first cycle of the
 // step must not drop the backlog the three hold (it read 5.88 against 10.59

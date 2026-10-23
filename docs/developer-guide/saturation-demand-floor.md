@@ -70,6 +70,28 @@ so each must keep up with all of it), and on the total otherwise.
   still reads 9.41. The scheduler's queue is not capped: the router can send
   it to any replica, added ones included. Growth (below) is judged on the
   uncapped queues, logged as `queuedRequests`.
+
+  The cap holds only while the queue stands. A queue that grows is arrivals
+  above what the fleet serves, and added replicas can take those arrivals.
+  `lambda` may not count them yet: the router's rate is a one-minute rate
+  that reads a step late, and with no router rate `lambda` falls back to
+  completions, which on a full fleet are `n x mu` whatever arrives. So while
+  the role's backlog grows (`backlogGrew`) every engine queue is charged in
+  full. With the cap on growing queues too, four full replicas (`mu` 1) read
+  18.82 replicas 30 s into a step from 4 to 20 req/s, under the 23.53 the
+  arrivals need. With no router rate, a true 12 req/s read 9.41 for two
+  minutes against 14.12. Charged in full, both read 23.53
+  (`TestUnevenRoutingAGrowingQueueIsNotCappedWhileLambdaLags`,
+  `TestUnevenRoutingAGrowingQueueIsNotCappedWithNoRouterRate`). Once the
+  queues have stood a minute the cap is back: four replicas queued 100 at
+  `lambda` 2 read 7.06, and four queued 600 at `lambda` 8 read 14.12
+  (`TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains`).
+
+  `backlogGrew` compares with the backlog one minute ago, so it stays on
+  for up to a minute after the growth stops, and the queues are charged in
+  full that long. That over-orders for a minute. We accept it: over-ordering
+  is the cheap direction, and a shorter memory would let jitter flip the
+  charge from cycle to cycle.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
   were resident at once) comes out -- but only where the floor's figure can
