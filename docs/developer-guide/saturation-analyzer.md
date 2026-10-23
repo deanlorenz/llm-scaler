@@ -189,8 +189,14 @@ so across a step in load the two describe different moments; in a balanced
 fleet that step is the only spread a window ever holds. Before this gate, two
 identical models in two namespaces remembered `B` = 4.5 ms and 14.8 ms from
 whichever transient each window caught, and priced the same replica at 5.3 and
-7.7 requests/s (issue #270). Unsteady readings still feed the pinned fit.
-`itl-window` reports `unsteady` and `steadyHeld`.
+7.7 requests/s (issue #270). `itl-window` reports `unsteady` and `steadyHeld`.
+
+The pinned fit, which prices a balanced fleet, takes the steady readings too
+whenever there are at least `DefaultMinSamples` of them, and every reading only
+below that, so a fleet that has not settled still gets a line. Taking every
+reading, it took each load step whole: on the issue #270 rerun `A` went from
+0.077 to 0.207 on the cycle the load stepped, and the derived mu fell from 6.4
+to 2.65 requests/s for two and a half minutes.
 
 The steady readings are kept apart from the main window, and outlive its oldest
 reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced

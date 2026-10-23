@@ -150,6 +150,42 @@ var _ = Describe("Tracker steady readings", func() {
 		Expect(ok).To(BeFalse(), "remembered B = %v, learned from the burst", b)
 	})
 
+	// The adversarial review's probe: a balanced two-replica fleet steady at
+	// k 0.30, then the load steps to 0.55 while the one-minute ITL still
+	// averages the prefill burst of the step, twice the line. A balanced fleet
+	// is priced from the pinned fit, and taking those readings it walked A to
+	// 1.95x the true slope within six cycles (the rerun: A 0.077 -> 0.207, mu
+	// 6.4 -> 2.65 req/s for two and a half minutes).
+	It("keeps the pinned fit on the steady readings through a load step", func() {
+		line := Model{A: 0.08, B: DefaultBaselineSec}
+		var r Reading
+		for range 12 {
+			r = observe(row("p1", 0.30, line.ITLAt(0.30)), row("p2", 0.30, line.ITLAt(0.30)))
+		}
+		Expect(r.Tier).To(Equal(TierPinnedB))
+		Expect(r.Model.A).To(BeNumerically("~", line.A, 1e-9))
+		for j := range 6 {
+			r = observe(row("p1", 0.55, 2*line.ITLAt(0.55)), row("p2", 0.55, 2*line.ITLAt(0.55)))
+			Expect(r.Unsteady).To(Equal(2), "cycle %d: both replicas just moved", j)
+			Expect(r.Tier).To(Equal(TierPinnedB))
+			Expect(r.Model.A).To(BeNumerically("~", line.A, 0.02*line.A),
+				"cycle %d after the step: A from the transient", j)
+		}
+	})
+
+	It("fits the pinned line on every reading while too few are steady", func() {
+		observe(row("p0", 0.40, 0.04))
+		rows := make([]domain.ReplicaMetrics, 0, 11)
+		rows = append(rows, row("p0", 0.40, 0.04))
+		for i := range 10 {
+			rows = append(rows, row(string(rune('a'+i)), 0.40, 0.04))
+		}
+		r := observe(rows...)
+		Expect(r.SteadyHeld).To(Equal(2), "the newcomers wait out DefaultSteadyFor")
+		Expect(r.Held).To(Equal(12))
+		Expect(r.Tier).To(Equal(TierPinnedB), "a fleet that has not settled still gets a line")
+	})
+
 	It("takes the replicas it first sees as steady, so a restart does not delay the first full fit", func() {
 		rows := make([]domain.ReplicaMetrics, 10)
 		for i := range rows {

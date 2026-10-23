@@ -101,8 +101,17 @@ type Reading struct {
 // Its intercept was remembered and pinned into every fit after it: on one
 // run, two identical models in two namespaces kept B = 4.5 ms and 14.8 ms
 // from whichever transient each window happened to catch, and priced the
-// same replica at 5.3 and 7.7 requests/s (issue #270). The pinned fit still
-// takes every reading, so a fleet still gets a line while it moves.
+// same replica at 5.3 and 7.7 requests/s (issue #270). The steady readings
+// outlive the window by up to DefaultSteadyCarry, so a step's old level is
+// still there when the new one settles, and the two give the spread.
+//
+// The pinned fit takes the steady readings too while there are at least
+// DefaultMinSamples of them, and every reading only below that, so a fleet
+// that has not settled yet still gets a line. A load step is a transient the
+// pinned fit would otherwise take whole: on the issue #270 rerun A jumped from
+// 0.077 to 0.207 on the cycle the load stepped, with every new reading
+// unsteady and 10 steady ones held, and the derived mu fell from 6.4 to 2.65
+// requests/s for two and a half minutes.
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now time.Time) Reading {
 	var r Reading
 	t.mu.Lock()
@@ -224,10 +233,14 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	// The sample floor still applies when the spread is waived: the pinned
 	// fit answers from a single pair, and a line should not rest on one
 	// reading from one replica on one cycle.
-	if len(obs) < DefaultMinSamples {
+	pinned := obs
+	if len(steadyObs) >= DefaultMinSamples {
+		pinned = steadyObs
+	}
+	if len(pinned) < DefaultMinSamples {
 		return r
 	}
-	m, ok := FitPinnedB(obs, baseline)
+	m, ok := FitPinnedB(pinned, baseline)
 	if !ok {
 		r.Declined = true
 		return r
