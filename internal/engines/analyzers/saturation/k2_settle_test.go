@@ -27,8 +27,8 @@ func runSettleCycles(t *testing.T, cycles []settleCycle) ([]string, []int64) {
 	t.Helper()
 	analyzer := NewSaturationAnalyzer(capacity.NewStore())
 	start := time.Date(2026, 10, 23, 11, 18, 0, 0, time.UTC)
-	var prios []string
-	var k2s []int64
+	prios := make([]string, 0, len(cycles))
+	k2s := make([]int64, 0, len(cycles))
 	for _, c := range cycles {
 		at := start.Add(c.at)
 		analyzer.now = func() time.Time { return at }

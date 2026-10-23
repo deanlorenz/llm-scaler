@@ -18,8 +18,8 @@ func k2KeysOverCycles(t *testing.T, role string, tokens []int64, queues []int, o
 	require.Len(t, tokens, len(outputs))
 	require.Len(t, queues, len(outputs))
 	analyzer := NewSaturationAnalyzer(capacity.NewStore())
-	var keys []string
-	var prices []float64
+	keys := make([]string, 0, len(outputs))
+	prices := make([]float64, 0, len(outputs))
 	for i, out := range outputs {
 		ctx, logs := observedCtx(t)
 		rm := makeReplicaMetrics("pod-k", "variant-k", tokens[i], 376_480, queues[i], 1000, out)
