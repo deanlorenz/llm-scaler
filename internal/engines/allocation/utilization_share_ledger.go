@@ -270,7 +270,10 @@ type ShareLedger struct {
 	noPair     map[sharePair]time.Time
 	moves      map[string][]shareMove
 	swingUntil map[string]time.Time
-	needs      map[string][]shareNeedSample
+	// stepped marks the roles whose need has stayed on one side of its mean
+	// for longer than a move takes (RecordNeeds): a step, not a swing.
+	stepped map[string]bool
+	needs   map[string][]shareNeedSample
 	// needsSince is when each role's need was first recorded: until a swing
 	// window has passed since, its peak over the window is not known
 	// (PeakKnown).
@@ -321,6 +324,7 @@ func NewShareLedger() *ShareLedger {
 		noPair:      map[sharePair]time.Time{},
 		moves:       map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
+		stepped:     map[string]bool{},
 		needs:       map[string][]shareNeedSample{},
 		needsSince:  map[string]time.Time{},
 		confirm:     map[string]int{},
@@ -915,9 +919,66 @@ func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 	}
 }
 
-// Swinging reports whether role is planned on its mean need now.
+// Swinging reports whether role is planned on its mean need now: its moves
+// changed direction twice within the swing window, and its need has not since
+// settled away from its mean for longer than a move takes (stepped).
 func (l *ShareLedger) Swinging(role string, now time.Time) bool {
-	return now.Before(l.swingUntil[role])
+	return now.Before(l.swingUntil[role]) && !l.stepped[role]
+}
+
+// ShareStepSpread is how far from its mean, as a fraction of it, a swinging
+// role's need must stay for a move's latency before it counts as a step and
+// the role is planned on its current need again (ShareLedger.Swinging).
+const ShareStepSpread = 0.25
+
+// steppedAway reports whether role's need has stayed more than
+// ShareStepSpread above its mean over the swing window, or as far below it,
+// for at least d up to its latest reading, and for longer than any earlier
+// run on either side within the window. A swing crosses its mean every half
+// period; a step stays on one side until the mean catches up. Planned on the
+// mean after a step, a model whose load moved for good was held halfway for
+// most of a swing window: two models swapping 3:1 for 1:3 sat at 2:2 for 85
+// minutes, the busy one past its threshold. A run no longer than the swing's
+// own earlier ones is the swing, not a step: a load swapping every 16 to 45
+// minutes -- longer than a move, shorter than its window -- counted as a
+// step at the end of every half period, and chasing it started three times
+// the transfers and left more demand unserved than planning on its mean.
+func (l *ShareLedger) steppedAway(role string, d time.Duration) bool {
+	s := l.needs[role]
+	if len(s) < 2 || d <= 0 {
+		return false
+	}
+	mean := l.MeanNeed(role, 0)
+	side := func(n float64) int {
+		switch {
+		case n > mean*(1+ShareStepSpread):
+			return 1
+		case n < mean*(1-ShareStepSpread):
+			return -1
+		}
+		return 0
+	}
+	// Runs of readings on one side of the mean, the last one under way. The
+	// first may have begun before the window: its length is a lower bound,
+	// and still counts toward the longest.
+	var earlier, cur time.Duration
+	run, start := side(s[0].need), s[0].at
+	for i := 1; i <= len(s); i++ {
+		if i < len(s) && side(s[i].need) == run {
+			continue
+		}
+		if run != 0 {
+			if i == len(s) {
+				cur = s[i-1].at.Sub(start)
+			} else {
+				earlier = max(earlier, s[i-1].at.Sub(start))
+			}
+		}
+		if i < len(s) {
+			run, start = side(s[i].need), s[i].at
+		}
+	}
+	return cur >= d && cur > earlier
 }
 
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.
@@ -936,6 +997,7 @@ func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm Sh
 			l.needsSince[role] = now
 		}
 		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})
+		l.stepped[role] = l.steppedAway(role, tm.moveLatency())
 	}
 }
 
@@ -1101,6 +1163,15 @@ func (b shareBursts) sofar() time.Duration {
 // lower bound, so it still counts toward the longest: a burster whose one
 // long burst straddles the window's start is still a long burster.
 func (l *ShareLedger) needBursts(role string) shareBursts {
+	return l.needBurstsJoined(role, 0)
+}
+
+// needBurstsJoined is needBursts with two runs counted as one burst when the
+// dip between them -- from the first reading of one at or below the midpoint
+// to the first of the next above it -- is shorter than join. A dip of a
+// minute or two inside one busy stretch, from noise in the need, would
+// otherwise count the stretch as two bursts.
+func (l *ShareLedger) needBurstsJoined(role string, join time.Duration) shareBursts {
 	s := l.needs[role]
 	if len(s) < 3 {
 		return shareBursts{}
@@ -1116,22 +1187,39 @@ func (l *ShareLedger) needBursts(role string) shareBursts {
 	}
 	mid := (hi + lo) / 2
 	out := shareBursts{spread: (hi - lo) / math.Max(hi, 1)}
-	var start time.Time
-	in, cut := false, false
+	// A run that ended is counted once the next one starts after a dip of
+	// at least join, or once the history ends without one: until then the
+	// next run may continue it.
+	var start, end time.Time
+	in, cut, ended := false, false, false
+	count := func() {
+		d := end.Sub(start)
+		out.longest = max(out.longest, d)
+		if !cut {
+			out.completed++
+			out.last = d
+		}
+	}
 	for i := 1; i < len(s); i++ {
 		a, b := s[i-1].need, s[i].need
 		switch {
 		case !in && a > mid && b > mid:
-			in, cut, start = true, i == 1, s[i-1].at
-		case in && a <= mid && b <= mid:
-			in = false
-			d := s[i-1].at.Sub(start)
-			out.longest = max(out.longest, d)
-			if !cut {
-				out.completed++
-				out.last = d
+			in = true
+			if ended && s[i-1].at.Sub(end) < join {
+				ended = false
+				continue
 			}
+			if ended {
+				count()
+				ended = false
+			}
+			cut, start = i == 1, s[i-1].at
+		case in && a <= mid && b <= mid:
+			in, ended, end = false, true, s[i-1].at
 		}
+	}
+	if ended {
+		count()
 	}
 	if in {
 		out.ongoing = s[len(s)-1].at.Sub(start)
@@ -1518,6 +1606,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.lastGot, r)
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
+		delete(l.stepped, r)
 		delete(l.needs, r)
 		delete(l.needsSince, r)
 		delete(l.hard, r)

@@ -646,6 +646,30 @@ func (p *sharePlanRun) donorView(r ShareRole) ShareRole {
 	return r
 }
 
+// donorPeak is what donor dn keeps under the donor-peak rule: its claim at
+// its peak need over its scale-down window, in whole replicas, as donorView
+// judges a donor. Not its peak over the swing window (peakClaims) for a
+// donor that burst once: one whose load fell would keep that peak for the
+// whole window, about two hours by default, and a model at its need beside
+// it waited that long for its headroom replica, as if the load had swung
+// back. A donor that has burst at least twice within the window has a peak
+// that comes back, and keeps it (peakClaims): judged on its last scale-down
+// window, a donor peaking every 15 to 90 minutes gave its spare away between
+// peaks and waited a release at each one. A dip shorter than the scale-down
+// window does not split a burst in two (needBurstsJoined): judged on its
+// recent peak, the donor never left that peak during it, and counting it
+// held a donor whose one busy hour had a one-minute dip at its old peak for
+// most of a swing window, as before the rule.
+func (p *sharePlanRun) donorPeak(dn string) int {
+	if p.l.needBurstsJoined(dn, p.tm.Window).completed >= 2 {
+		return p.peaks[dn]
+	}
+	r := p.byKey[dn]
+	g := max(r.ReplicaGPUs, 1)
+	r.Need = r.gpusFor(p.l.RecentPeak(dn, p.now, p.tm.Window))
+	return g * int(math.Ceil(r.Claim()/float64(g)-1e-9))
+}
+
 // donorViewFor is donor r judged for receiver rc: on its recent peak
 // (donorView) unless rc's bursts outlast a move (ShareLedger.LongBursts).
 // Then a move lands inside the burst it was made for, and holding it back a
@@ -1178,7 +1202,9 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 		// leave its donor below the donor's own recent peak: the split covers
 		// both, and the move -- from a donor that may drain for minutes --
 		// lands after the receiver's burst and just before the donor's own.
-		if !p.plan.HeadroomCapped && float64(work[rc]) >= p.need(rc) && work[dn]-gd < p.peaks[dn] {
+		// The peak is the donor's recent one (donorPeak), not its peak over
+		// the swing window.
+		if !p.plan.HeadroomCapped && float64(work[rc]) >= p.need(rc) && work[dn]-gd < p.donorPeak(dn) {
 			p.plan.Withheld[ShareWithheldDonorPeak]++
 			return started, fundNext, candidate, misfit
 		}
@@ -1413,7 +1439,7 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 	peakHeld := false
 	if !p.plan.HeadroomCapped && float64(p.work[rc]) >= p.need(rc) {
 		rule.keepsPeak = func(dn string, left int) bool {
-			if left < p.peaks[dn] {
+			if left < p.donorPeak(dn) {
 				peakHeld = true
 				return true
 			}

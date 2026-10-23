@@ -179,18 +179,20 @@ func TestShareJoinerClaimsWhatItHolds(t *testing.T) {
 
 // donorPeakRun is L at its need of 3 on 3 GPUs and Q, calm on 7, in a quota
 // of 10 whose peaks are known and fit: the spare is spread, L's target is 6,
-// and Q, at 4, is a donor. qPeak is Q's peak over the swing window, read
-// twice in a row before its scale-down window.
-func donorPeakRun(qPeak float64) (moved int, withheld int) {
+// and Q, at 4, is a donor. qPeak is Q's peak, read twice in a row ending ago
+// before the first cycle; the scale-down window is 5 minutes.
+func donorPeakRun(qPeak float64, ago time.Duration) (moved int, withheld int) {
 	tm := spareTimings()
+	tm.Window = 5 * time.Minute
 	in := spareRun(3, 1, 7)
 	l := NewShareLedger()
-	knownFor(l, time.Unix(1000, 0), "L", "Q")
-	for _, at := range []int64{900, 915} {
-		l.RecordNeeds(map[string]float64{"Q": qPeak}, time.Unix(at, 0), tm)
+	t0 := time.Unix(10000, 0)
+	knownFor(l, t0, "L", "Q")
+	for _, at := range []time.Time{t0.Add(-ago - 15*time.Second), t0.Add(-ago)} {
+		l.RecordNeeds(map[string]float64{"Q": qPeak}, at, tm)
 	}
 	for i := range 3 {
-		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), tm)
+		p := PlanShareTransfers(l, in, t0.Add(time.Duration(15*i)*time.Second), tm)
 		if p.HeadroomCapped {
 			return -1, -1
 		}
@@ -201,19 +203,27 @@ func donorPeakRun(qPeak float64) (moved int, withheld int) {
 }
 
 // Spread, a receiver already at its need takes no headroom that would leave
-// its donor below the donor's own recent peak: the split covers both, and the
-// move -- from a donor that may drain for minutes -- lands after the
-// receiver's burst and just before the donor's own. Control: with Q's peak
-// low, the same move is made.
+// its donor below the donor's own recent peak -- its peak over its scale-down
+// window, as a scale-down judges it: the split covers both, and the move --
+// from a donor that may drain for minutes -- lands after the receiver's burst
+// and just before the donor's own. A peak older than that window does not hold
+// the donor: judged on its peak over the swing window, a donor whose load had
+// fallen kept its GPUs for about two hours, and two models swapping 3:1 for
+// 1:3 sat at 2:2 for all of it. Control: with Q's peak low, the same move is
+// made.
 func TestShareSpreadMoveKeepsTheDonorsPeak(t *testing.T) {
-	moved, withheld := donorPeakRun(6.5)
+	moved, withheld := donorPeakRun(6.5, 85*time.Second)
 	if moved < 0 {
 		t.Fatal("setup: the peaks (7 + 1 of 10) fit, and the cap is on")
 	}
 	if moved != 0 || withheld == 0 {
-		t.Fatalf("Q, peaking at 7, gave L %d replicas below its peak (withheld donor-peak %d)", moved, withheld)
+		t.Fatalf("Q, peaking at 7 a minute ago, gave L %d replicas below its peak (withheld donor-peak %d)", moved, withheld)
 	}
-	if moved, _ := donorPeakRun(2); moved == 0 {
+	if moved, withheld := donorPeakRun(6.5, 40*time.Minute); moved == 0 || withheld != 0 {
+		t.Fatalf("Q, whose peak of 7 was 40 minutes ago, gave L %d replicas (withheld donor-peak %d): held on a peak older than its scale-down window",
+			moved, withheld)
+	}
+	if moved, _ := donorPeakRun(2, 85*time.Second); moved == 0 {
 		t.Fatal("control: Q, peaking at 2, gave L nothing")
 	}
 }

@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -94,21 +95,35 @@ func TestShareLongBursts(t *testing.T) {
 // The donor-peak guard holds for a donor set as for a single move: while the
 // quota holds every peak, a receiver at its need -- here one whose replica
 // spans two 8-GPU pods, so only a set funds it -- takes no donor below its own
-// recent peak. Control: with D's peak no higher than what it keeps, the set
-// starts.
+// recent peak, its peak over its scale-down window. A peak older than that
+// window, still inside the swing window, does not hold it -- unless D reached
+// it in two bursts further apart than its scale-down window: a peak that
+// comes back holds its donor for the window. Control: with D's peak no higher
+// than what it keeps, the set starts.
 func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
-	run := func(dPeak float64) (started bool, withheld int) {
+	run := func(recentPeak, oldPeak float64, recurring bool) (started bool, withheld int) {
 		t0 := time.Unix(1_000_000, 0)
-		tm := ShareTimings{Window: time.Minute, ReleaseTimeout: 10 * time.Minute, FillTimeout: 3 * time.Minute,
+		tm := ShareTimings{Window: 10 * time.Minute, ReleaseTimeout: 10 * time.Minute, FillTimeout: 3 * time.Minute,
 			ReversalHold: 10 * time.Minute, SwingWindow: 60 * time.Minute}
 		lws := ShareVariant{Name: "r", GPUs: 16, PodGPUs: []int{8, 8}}
 		v8 := ShareVariant{Name: "d", GPUs: 8, PodGPUs: []int{8}}
 		l := NewShareLedger()
-		// A known history: D peaked at dPeak, sustained, inside the window.
-		for at := t0.Add(-70 * time.Minute); at.Before(t0.Add(-2 * time.Minute)); at = at.Add(30 * time.Second) {
+		// A known history: D at oldPeak from 70 to 40 minutes ago, inside
+		// the swing window -- recurring, from 56 to 48 and from 34 to 26
+		// minutes ago instead -- and at recentPeak over the last 6 minutes,
+		// inside its scale-down window.
+		ago := func(at time.Time, from, to time.Duration) bool {
+			return !at.Before(t0.Add(-from)) && at.Before(t0.Add(-to))
+		}
+		for at := t0.Add(-70 * time.Minute); at.Before(t0.Add(-30 * time.Second)); at = at.Add(30 * time.Second) {
 			d := 8.0
-			if at.Before(t0.Add(-40 * time.Minute)) {
-				d = dPeak
+			switch {
+			case recurring && (ago(at, 56*time.Minute, 48*time.Minute) || ago(at, 34*time.Minute, 26*time.Minute)):
+				d = oldPeak
+			case !recurring && at.Before(t0.Add(-40*time.Minute)):
+				d = oldPeak
+			case !at.Before(t0.Add(-6 * time.Minute)):
+				d = recentPeak
 			}
 			l.RecordNeeds(map[string]float64{"D": d, "R": 16}, at, tm)
 		}
@@ -131,12 +146,23 @@ func TestShareDonorSetKeepsTheDonorsPeak(t *testing.T) {
 				}
 			}
 		}
+		if b := l.needBurstsJoined("D", tm.Window); recurring != (b.completed >= 2) {
+			panic(fmt.Sprintf("setup: D burst %d times within the window, recurring %v", b.completed, recurring))
+		}
 		return started, withheld
 	}
-	if started, withheld := run(32); started || withheld == 0 {
-		t.Fatalf("a set took D below its peak of 32 for R, at its need (started %v, withheld %d)", started, withheld)
+	if started, withheld := run(32, 8, false); started || withheld == 0 {
+		t.Fatalf("a set took D below its recent peak of 32 for R, at its need (started %v, withheld %d)", started, withheld)
 	}
-	if started, _ := run(8); !started {
+	if started, withheld := run(8, 32, false); !started || withheld != 0 {
+		t.Fatalf("a peak of 32 40 minutes ago kept D from funding R (started %v, withheld %d): held on a peak older than its scale-down window",
+			started, withheld)
+	}
+	if started, withheld := run(8, 32, true); started || withheld == 0 {
+		t.Fatalf("D, peaking at 32 twice within the window, funded R below that peak (started %v, withheld %d): a peak that comes back was dropped",
+			started, withheld)
+	}
+	if started, _ := run(8, 8, false); !started {
 		t.Fatal("control: with D's peak no higher than it keeps, no set funded R")
 	}
 }
