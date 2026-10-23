@@ -1773,7 +1773,8 @@ namespace, scraped as `exported_namespace`), `model_name` and `role`
 (`prefill`, `decode` or `both`), plus `controller_instance` when
 `CONTROLLER_INSTANCE` is set. A role's series are deleted on the cycle it has
 no ready replica, and a model's when it is no longer reconciled or its metrics
-could not be collected that cycle.
+could not be collected on any cycle for 2 minutes. A shorter collection
+failure leaves the series at their last value.
 
 One replica is classified on its busiest engine rank (for a pod of one rank,
 the pod itself):
@@ -1781,7 +1782,7 @@ the pod itself):
 | class | test |
 | --- | --- |
 | saturated | KV cache at or over 0.90; or, on `prefill` and `both`, a waiting queue at or over `queueLengthThreshold`. Decode is judged on KV alone: its waiting count also holds requests waiting for their remote KV |
-| idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes. A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica |
+| idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes. A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica. The 2 minutes run from the later of the Pod's Ready time and the cycle the controller first saw it Ready, so a node clock behind the controller's does not shorten them. A warm-pool Pod lent to the variant counts from when it was lent, not from its Ready time in the pool |
 
 KV is the collector's one-minute peak, the same reading the saturation tests
 use. A replica whose KV figure is not a number is left out, like one that is

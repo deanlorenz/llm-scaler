@@ -27,7 +27,9 @@
 #      load-imbalance-alerts: a role kept imbalanced for 10 minutes pages
 #      once per model and role, from two controller pods too; one that
 #      clears or flips inside the window does not; a dip does not resolve a
-#      firing page, and a cleared one resolves after keep_firing_for.
+#      firing page, and a cleared one resolves after keep_firing_for; a
+#      collection failure shorter than 2 minutes does not delay the page,
+#      and one that persists takes the series, and the page, away.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.

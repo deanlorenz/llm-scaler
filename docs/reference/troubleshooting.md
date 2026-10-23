@@ -371,8 +371,10 @@ choosing one replica, that replica fills and queues while its siblings idle.
 A replica count is unlikely to fix this: the warning needs an idle replica
 that has been Ready for at least 2 minutes, so the role already has capacity
 the router is not using, and new replicas are routed to no more than the idle
-ones are. A scale-up in progress does not raise it: a replica Ready for less
-than 2 minutes is never counted idle. The usual cause is the role's scheduling profile, where
+ones are. A scale-up in progress does not raise it: a replica is not counted
+idle until 2 minutes after it became Ready and the controller first saw it
+Ready. A warm-pool Pod lent to the role counts from when it was lent. After a
+controller restart every replica waits those 2 minutes again. The usual cause is the role's scheduling profile, where
 the largest weight wins ties it should not. With `prefix-cache-scorer: 3`
 against `queue-scorer: 2`, the replica that saw a prefix gets the request
 however busy it is. One measured prefill fleet held 439 queued requests on one

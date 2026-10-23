@@ -30,8 +30,10 @@ func steppedLoadClock(e *Engine, start time.Time) {
 }
 
 // sustainCycles is the cycle on which an imbalance held from the first is
-// reported.
-var sustainCycles = int(balance.SustainFor/loadCycle) + 1
+// reported. The tracker first sees the replicas on the first cycle, so the
+// idle one is idle from IdleAfterReady on, however long its Pod has been
+// Ready, and the imbalance is reported SustainFor after that.
+var sustainCycles = int((balance.IdleAfterReady+balance.SustainFor)/loadCycle) + 1
 
 // failingSaturation is a saturation analyzer whose every analysis fails.
 type failingSaturation struct{}
@@ -196,5 +198,59 @@ func TestFailingAnalysisDoesNotFreezeTheLoadSeries(t *testing.T) {
 	}
 	if v, present, _ := loadSeries(t, reg); !present || v != 0 {
 		t.Errorf("wva_load_imbalanced = %v (present %v) after the load evened out under a failing analysis, want 0", v, present)
+	}
+}
+
+// Review r3 (N2): one failed collection deleted the series and forgot the
+// model, so the alert's for: restarted from a stale series and the gauge
+// came back at 0 for SustainFor: one failure moved the page from 10 to 21
+// minutes, and one every 8 minutes kept it from paging at all. One failure
+// leaves the series and the report as they stand; collection failing for
+// balance.StaleAfter still deletes them.
+func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
+	e := &Engine{saturationV2Analyzer: sat, started: true,
+		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	steppedLoadClock(e, start)
+	since := start.Add(-time.Hour)
+	states := []domain.VariantReplicaState{{VariantName: "dec", Role: domain.RoleDecode, CurrentReplicas: 2}}
+	uneven := []domain.ReplicaMetrics{
+		{PodName: "dec-0", VariantName: "dec", KvCacheUsage: 0.95, Ready: true, ReadySince: since},
+		{PodName: "dec-1", VariantName: "dec", KvCacheUsage: 0.05, Ready: true, ReadySince: since},
+	}
+	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
+	ctx := context.Background()
+	collect := func() {
+		t.Helper()
+		if _, err := e.runAnalyzers(ctx, "m", "ns", uneven, policy, states, nil, nil, nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range sustainCycles {
+		collect()
+	}
+	if v, _, _ := loadSeries(t, reg); v != 1 {
+		t.Fatalf("wva_load_imbalanced = %v after the imbalance held, want 1", v)
+	}
+
+	e.loadBalanceCollectionFailed("ns", "m")
+	if v, present, _ := loadSeries(t, reg); !present || v != 1 {
+		t.Errorf("one failed collection left wva_load_imbalanced = %v (present %v), want 1", v, present)
+	}
+	collect()
+	if v, present, _ := loadSeries(t, reg); !present || v != 1 {
+		t.Errorf("the cycle after one failed collection read wva_load_imbalanced = %v (present %v), want 1", v, present)
+	}
+
+	for range int(balance.StaleAfter/loadCycle) + 1 {
+		e.loadBalanceCollectionFailed("ns", "m")
+	}
+	if _, _, total := loadSeries(t, reg); total != 0 {
+		t.Errorf("collection failing for StaleAfter kept %d load series", total)
 	}
 }

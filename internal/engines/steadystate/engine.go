@@ -1527,9 +1527,10 @@ func (e *Engine) optimizeV2(
 		if err != nil {
 			msg := "Model data preparation failed"
 			logger.Error(err, msg, "modelID", modelID)
-			// Nothing measured the load this cycle: drop the series rather
-			// than leave the last value, a page included, standing for it.
-			e.forgetLoadBalance(namespace, modelID)
+			// Nothing measured the load this cycle: the series go once
+			// collection has failed for balance.StaleAfter, not on one
+			// failed cycle (loadBalanceCollectionFailed).
+			e.loadBalanceCollectionFailed(namespace, modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
 			reportSignalReason(namespace, modelID, nil)

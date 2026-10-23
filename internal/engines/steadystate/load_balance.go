@@ -36,21 +36,13 @@ const loadImbalancedWarning = "WARNING: load imbalanced across a role's replicas
 // count.
 func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID string,
 	rows []domain.ReplicaMetrics, states []domain.VariantReplicaState, queueThreshold float64) {
-	// Lazily, as the other per-model maps here: optimize cycles run one at a
-	// time, and an Engine built as a literal in a test has none.
-	if e.loadBalance == nil {
-		e.loadBalance = balance.NewTracker()
-	}
-	now := time.Now()
-	if e.loadBalanceNow != nil {
-		now = e.loadBalanceNow()
-	}
+	tracker, now := e.loadBalanceTracker(), e.loadBalanceClock()
 	roles := make(map[string]string, len(states))
 	for _, vs := range states {
 		roles[vs.VariantName] = vs.Role
 	}
-	readings := e.loadBalance.Observe(utils.GetNamespacedKey(namespace, modelID),
-		balance.Measure(rows, roles, queueThreshold, now), now)
+	key := utils.GetNamespacedKey(namespace, modelID)
+	readings := tracker.Observe(key, tracker.Measure(key, rows, roles, queueThreshold, now), now)
 	metrics.PublishLoadBalance(namespace, modelID, readings)
 	for _, r := range readings {
 		if !r.Changed {
@@ -67,6 +59,40 @@ func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID strin
 			continue
 		}
 		logger.Info("load balanced again across a role's replicas", fields...)
+	}
+}
+
+// loadBalanceTracker is the engine's load-balance tracker, set to the
+// configured optimize interval.
+func (e *Engine) loadBalanceTracker() *balance.Tracker {
+	// Lazily, as the other per-model maps here: optimize cycles run one at a
+	// time, and an Engine built as a literal in a test has none.
+	if e.loadBalance == nil {
+		e.loadBalance = balance.NewTracker()
+	}
+	e.loadBalance.SetInterval(e.sloMissedAfter())
+	return e.loadBalance
+}
+
+// loadBalanceClock is the instant the load-balance tracker reads.
+func (e *Engine) loadBalanceClock() time.Time {
+	if e.loadBalanceNow != nil {
+		return e.loadBalanceNow()
+	}
+	return time.Now()
+}
+
+// loadBalanceCollectionFailed is what a cycle that could not collect the
+// model's metrics does to its load-distribution series. One failed cycle
+// leaves them, and the tracker's streaks, as they stand: deleting them reset
+// the alert's for: timer and the tracker's sustain, so a single failure in a
+// persistent imbalance put the page back by 11 minutes, and one every 8
+// minutes kept it from ever paging. Once collection has failed on every cycle
+// for balance.StaleAfter the series are deleted, so a page does not stand on
+// figures nothing measures any more.
+func (e *Engine) loadBalanceCollectionFailed(namespace, modelID string) {
+	if e.loadBalanceTracker().Failed(utils.GetNamespacedKey(namespace, modelID), e.loadBalanceClock()) {
+		e.forgetLoadBalance(namespace, modelID)
 	}
 }
 

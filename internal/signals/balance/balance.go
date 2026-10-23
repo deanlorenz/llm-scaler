@@ -35,6 +35,13 @@ const (
 	// a saturated replica beside an idle one. The KV figure is a one-minute
 	// peak, so this covers that window and a minute for the router to fill
 	// the replica. A replica whose Ready time is unknown is not idle either.
+	//
+	// Tracker.Measure runs it from the later of the Pod's Ready time and the
+	// first cycle the tracker saw that Ready time on this variant's replica.
+	// A warm-pool Pod lent to the variant keeps the Ready time it had in the
+	// pool, long before the lend, and a node clock behind the controller's
+	// dates the Ready time into the controller's past; either alone would
+	// skip the grace.
 	IdleAfterReady = 2 * time.Minute
 	// SustainFor is how long a role must read imbalanced, on every cycle,
 	// before it is reported as imbalanced (Reading.Sustained). It exceeds the
@@ -149,7 +156,20 @@ func (k busiestKey) above(o busiestKey) bool {
 // says nothing about routing. So is one whose KV reading is not a finite,
 // non-negative number: an unknown load is neither saturated nor idle. A KV
 // reading over 1 is read as 1, and a negative queue as empty.
+//
+// Measure runs the IdleAfterReady grace from each row's ReadySince alone.
+// Tracker.Measure, which the engine calls, also runs it from the first cycle
+// it saw the replica Ready, which covers a lent warm-pool Pod and a node clock
+// behind the controller's.
 func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64, now time.Time) map[string]Distribution {
+	return measure(rows, rolesByVariant, queueThreshold, now,
+		func(rm domain.ReplicaMetrics) time.Time { return rm.ReadySince })
+}
+
+// measure is Measure with the instant each replica's IdleAfterReady grace runs
+// from given by graceFrom; a zero instant is never idle.
+func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64, now time.Time,
+	graceFrom func(domain.ReplicaMetrics) time.Time) map[string]Distribution {
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
 	busiest := map[string]busiestKey{}
@@ -176,7 +196,7 @@ func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 		switch {
 		case isSaturated:
 			d.Saturated++
-		case kv < IdleKvUsage && rm.QueueLength <= 0 && readyLongEnough(rm, now):
+		case kv < IdleKvUsage && rm.QueueLength <= 0 && readyLongEnough(graceFrom(rm), now):
 			d.Idle++
 			d.IdlePods = append(d.IdlePods, rm.PodName)
 			out[role] = d
@@ -200,10 +220,10 @@ func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 	return out
 }
 
-// readyLongEnough reports whether the replica has been Ready for at least
-// IdleAfterReady. An unknown Ready time is not long enough.
-func readyLongEnough(rm domain.ReplicaMetrics, now time.Time) bool {
-	return !rm.ReadySince.IsZero() && now.Sub(rm.ReadySince) >= IdleAfterReady
+// readyLongEnough reports whether IdleAfterReady has passed since since. An
+// unknown instant is not long enough.
+func readyLongEnough(since, now time.Time) bool {
+	return !since.IsZero() && now.Sub(since) >= IdleAfterReady
 }
 
 func saturated(rm domain.ReplicaMetrics, role string, kv, queueThreshold float64) bool {
