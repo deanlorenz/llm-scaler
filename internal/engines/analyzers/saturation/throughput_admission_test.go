@@ -92,8 +92,8 @@ func e1Metrics(r e1Row) domain.ReplicaMetrics {
 // cycle the lowest sample any throughput window holds (0 when none has one).
 func replayE1(t *testing.T, a *SaturationAnalyzer, cycles []e1Cycle) ([]e1Decision, []float64) {
 	t.Helper()
-	var out []e1Decision
-	var lows []float64
+	out := make([]e1Decision, 0, 3*len(cycles))
+	lows := make([]float64, 0, len(cycles))
 	for _, c := range cycles {
 		at, err := time.Parse("15:04:05", c.at)
 		require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestE1_AStaleMeasuredMuYieldsToADisagreeingDerivedFigure(t *testing.T) {
 			// No line while the replica saturates: nothing derived to refuse the
 			// reading on, so the window is the replica's own measurement.
 			a := newE1Analyzer(t, false)
-			var cycles []e1Cycle
+			cycles := make([]e1Cycle, 0, 4)
 			start, _ := time.Parse("15:04:05", "10:00:00")
 			at := func(d time.Duration) string { return start.Add(d).Format("15:04:05") }
 			for i := range 4 {
@@ -295,7 +295,7 @@ func TestE1_AStaleMeasuredMuYieldsToADisagreeingDerivedFigure(t *testing.T) {
 			_, _ = replayE1(t, a, cycles)
 			publishE1Line(a)
 			// Then the queue never builds again (flow control holds it upstream).
-			var quiet []e1Cycle
+			quiet := make([]e1Cycle, 0, 12)
 			for i := range 12 {
 				quiet = append(quiet, e1Cycle{at(4*time.Minute + time.Duration(i)*time.Minute),
 					[]e1Row{{"p0", 0, 330_000, tc.gps / 500, tc.gps}}})
