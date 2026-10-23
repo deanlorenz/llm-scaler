@@ -153,6 +153,41 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (BusiestRankTokens): the tokens one full rank holds plus seven idle
 	// ones' nothing is not what the pod holds when it is full. With one rank
 	// both are the pod's own queue and tokens, as before.
+	//
+	// Prefill's throughput is keyed on the prompt tokens it actually has to
+	// compute: a prefix the cache already holds is not work, so the discount
+	// that shape.New applies for KVreq applies to prefill's throughput too.
+	// Raw prompt length would put the same replica in different buckets
+	// purely because the hit rate moved. Decode keeps the raw figure it has
+	// always used -- its capacity is about resident KV, which the shape's
+	// KVreq already discounts on its own path. Why the throughput key is the
+	// fleet's shape at all is said where it is written, below.
+	keyInput := shapeKeyInput
+	if domain.CanonicalRole(role) == domain.RolePrefill {
+		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
+	}
+	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
+		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
+	// A window written under engine arguments the variant no longer runs is
+	// not its service rate (window_args.go).
+	args := windowArgs(engineParams)
+	a.mu.Lock()
+	a.throughputWindowUnderLocked(throughputKey, args)
+	ref := a.serviceRateOnRecordLocked(throughputKey)
+	a.mu.Unlock()
+	if ref <= 0 && derived.ok {
+		ref = derived.rate
+	}
+	// Whether a saturated reading is the replica at its limit or a load step
+	// it has just been handed (k2_settle.go). Judged on the busiest rank, as
+	// the reading is.
+	serviceRate, serviceRateOK := saturatedCompletionRate(rm, role, fleetOutput, keyInput)
+	adm.unsettled = a.k2Unsettled(k2SettleInput{
+		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
+		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
+		perRequest: k2SettlePerRequest(rm, role), threshold: config.QueueLengthThreshold,
+		rate: serviceRate, rateOK: serviceRateOK, ref: ref,
+	})
 	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -215,26 +250,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// pre-change window read back as an own, non-borrowed reading -- which
 	// useDerived then preferred over a derived figure that had priced the
 	// change correctly. k2 keeps historyKey unchanged; this is the throughput
-	// key alone, as the shape-shift proposal scopes it.
-	// Prefill is keyed on the prompt tokens it actually has to compute: a
-	// prefix the cache already holds is not work, so the discount that
-	// shape.New applies for KVreq applies to prefill's throughput too. Raw
-	// prompt length would put the same replica in different buckets purely
-	// because the hit rate moved. Decode keeps the raw figure it has always
-	// used -- its capacity is about resident KV, which the shape's KVreq
-	// already discounts on its own path.
-	keyInput := shapeKeyInput
-	if domain.CanonicalRole(role) == domain.RolePrefill {
-		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
-	}
-	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
-	// A window written under engine arguments the variant no longer runs is
-	// not its service rate (window_args.go).
-	args := windowArgs(engineParams)
-	a.mu.Lock()
-	a.throughputWindowUnderLocked(throughputKey, args)
-	a.mu.Unlock()
+	// key alone, as the shape-shift proposal scopes it. (throughputKey and
+	// keyInput are built above, before computeK2, whose settle test reads the
+	// rate on record under the key.)
 	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
@@ -779,6 +797,13 @@ func (a *SaturationAnalyzer) k2Chain(
 			"priority", k2ReasonObsRollout, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "the variant is mid-rollout and this pod may run the old engine; not recorded",
+			"tokensInUse", tokensInUse, "k1", k1)
+	case saturatedReading && adm.unsettled != "":
+		logger.V(logging.DEFAULT).Info("k2-decision",
+			"modelID", modelID, "namespace", namespace, "variant", variantName,
+			"priority", k2ReasonObsUnsettled, "historyKey", historyKey,
+			"queueLength", queueLen, "queueThreshold", queueThreshold,
+			"reason", adm.unsettled,
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading:
 		k2Observed := tokensInUse

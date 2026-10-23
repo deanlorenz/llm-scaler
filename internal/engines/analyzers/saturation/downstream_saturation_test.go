@@ -140,9 +140,15 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// through the scale-down window once decode recovers.
 		seedP := makeReplicaMetrics("prefill-0", prefillVariant, 80_000, prefillKv, 30, 6000, 1)
 		seedP.RequestRate, seedP.Ready = 30, true
-		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
-			decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), seedP}, states))
-		Expect(err).NotTo(HaveOccurred())
+		// Two cycles: 30 waiting prompts of 6000 tokens are more than the
+		// 80 000 the replica holds, which on its first cycle is what a load
+		// step looks like, so only a queue that stands while the residency
+		// stays flat is recorded (k2_settle.go).
+		for range 2 {
+			_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+				decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), seedP}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
 
 		By("capping the demand at the scale-up threshold of the anticipated supply")
 		result, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{

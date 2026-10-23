@@ -134,6 +134,27 @@ its ranks'. See
 k2's persistence is deliberate and load-bearing — see
 [analyzer-evidence.md](analyzer-evidence.md).
 
+Because a recorded k2 persists, the observed priority admits a reading only
+when it is a replica at its limit (`k2Unsettled` in `k2_settle.go`, the strict
+admission `docs/plans/analyzers/k2-capacity-model.md` calls for). A reading is
+suspect when the busiest rank's queue, at the request's footprint, is larger
+than everything the rank holds:
+
+```
+suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
+admitted = !suspect
+        || rate >= K2SettleRateFraction x rateOnRecord              // 0.7
+        || (queued last cycle, within K2SettleMaxGap = 2m,
+            and tokens <= (1 + K2SettleMaxRise) x tokens last cycle) // 0.25
+```
+
+`rate` is the replica's own `saturatedCompletionRate`; `rateOnRecord` is the
+bucket's measured saturated throughput, read without touching the window, or
+the derived mu. A refused reading logs `P1-obs-unsettled` and writes neither
+the k2 window nor the throughput window. The per-replica readings live in
+`k2Settle`, one memo per `namespace|model`, swept beside `hotRankHeld`. A
+refusal can only keep k2 where it was; nothing here raises a recorded k2.
+
 ### Which bound applies
 
 ```
