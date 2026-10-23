@@ -141,16 +141,32 @@ suspect when the busiest rank's queue, at the request's footprint, is larger
 than everything the rank holds:
 
 ```
+joined   = first seen Ready under JoinedReplicaWindow (1m) ago
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
-admitted = !suspect
+admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
             && tokens >= K2SettleRateFraction x k2OnRecord)         // k2OnRecord > 0
         || settledOverWindow: the newest earlier reading at least
              K2SettleLookback (1m) old, it and every reading since queued
              with no gap over 1m, and
              (1 - K2SettleMaxRise) x tokens then
-                 <= tokens <= (1 + K2SettleMaxRise) x tokens then    // 0.25
+                 <= tokens <= (1 + K2SettleMaxRise) x tokens then)   // 0.25
 ```
+
+A replica that joined the fleet under a rate window ago is filling, whatever
+its queue: its one-minute gauges still hold the minute before it was routed
+to. On the E1 run (2026-10-23) one just joined read 84 waiting on 174,327
+resident, the queue no deeper than its batch, and was recorded on sight; the
+window settled at 264,265 while every replica then held 331-351k with no queue.
+`readySince` in the settle memo is when the analyzer first saw the replica
+Ready. A replica already Ready on the memo's first cycle has an age the
+analyzer cannot know and is taken as established, so a restart does not hold
+every reading back; one unseen for over `K2SettleMaxGap` has rejoined.
+
+`I` and `O` are the replica's own lengths, or the fleet's where it has none. A
+replica that has completed nothing reports no lengths (the per-pod mean is
+0/0), and a footprint of zero made every queue on it the overflow of a batch
+"at least as large", so the test admitted exactly the replica it is for.
 
 The band is two-sided. A fall is not settling: a replica full and queued at
 270,539 that next reads 31,713 under 160 queued has had its traffic moved off
@@ -240,8 +256,15 @@ logs `itl-gps-mismatch` with `gates: false`.
 ## The service rate (mu)
 
 `mu` is requests completed per second by one saturated replica. There are two
-ways to get it, and the derived one is preferred because it can be priced for a
-shape the fleet has never run.
+ways to get it. The derived one can be priced for a shape the fleet has never
+run; the measured one wins where the fleet has measured this shape itself
+(`useDerived`: an own window with at least `MinThroughputSamplesToOrder`
+samples), unless the two disagree by more than `MeasuredDerivedMaxRatio` (2x)
+either way and the window's newest sample is `MeasuredMuFreshFor` (5m) old
+(`measuredYieldsToDerived`). Under EPP flow control the queue that writes a
+sample rarely builds again, and one stale reading must not pin the fleet in
+either direction. Within 2x the measurement keeps winning however old it is:
+run R's 1.27 req/s against a derived 0.67 is the case it is there for.
 
 ### The pricing point
 
@@ -334,6 +357,19 @@ N readings, and the window's median rose with the number of saturated replicas:
 with 6 % reading noise on a true 6.0 req/s, +5.4 % at one replica and +13.6 %
 at sixteen. Per replica it stays at the one-replica +5.4-5.5 % at any size
 (`TestMeasuredMu_DoesNotGrowWithTheSaturatedFleet`).
+
+An admitted k2 reading is not always a service rate. `throughputRefusal`
+(`throughput_admission.go`) also refuses, logging
+`saturated-throughput-refused`, a reading from a replica that completed no
+request over the window (`RequestRate` 0: every sequence is still growing) and
+one under `MinMeasuredOfDerived` (0.5) of the derived mu for the same line. On
+E1 a replica just joined, 84 waiting and no completion, generated 49 tokens/s:
+0.0995 req/s became the bucket's mu against a derived 3.1-5.7 and ~6.2 served,
+and priced 2 req/s as 12-20 replicas for the rest of the run
+(`TestE1Replay_AJoiningReplicaIsNotAThroughputSample` replays it). The cost of
+the derived-figure gate: where the line is the wrong figure by more than 2x and
+the true rate is low, the measurement is refused and the too-high derived mu
+prices until the line refits.
 
 ## Demand
 
