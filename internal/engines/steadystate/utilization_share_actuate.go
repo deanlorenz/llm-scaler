@@ -1128,10 +1128,10 @@ func (e *Engine) holdFillTimeout(tm allocation.ShareTimings) time.Duration {
 
 // reportSwinging logs each role of group key that starts, or stops, being
 // planned on its mean need (the swing rule, §6.7 rule 5). The rule holds a
-// short role below its reading for as long as it lasts -- two models that
-// swapped loads twice sat at 2:2 for eleven minutes after the second swap,
-// the busy one past its threshold -- and only a gauge and a blocked reason
-// said why. The line names the need each way, so the hold can be told from a
+// short role below its reading for as long as it lasts -- before a swing
+// took three changes of direction, two models sat at 2:2 for eleven minutes
+// after a single swap back, the busy one past its threshold (issue #269) --
+// and only a gauge and a blocked reason said why. The line names the need each way, so the hold can be told from a
 // stall.
 func (st *utilizationShareState) reportSwinging(logger logr.Logger, key string, plan allocation.SharePlan, tm allocation.ShareTimings) {
 	was := st.swinging[key]
@@ -1142,7 +1142,7 @@ func (st *utilizationShareState) reportSwinging(logger logr.Logger, key string, 
 			continue
 		}
 		n := plan.SwingNeeds[role]
-		logger.Info("Utilization share: planned on its mean need -- its transfers changed direction twice within "+
+		logger.Info("Utilization share: planned on its mean need -- its transfers changed direction three times within "+
 			"the flappingWindow -- until its need stays more than a quarter from that mean for longer than a move "+
 			"takes and than any earlier swing, or the window passes",
 			"role", role, "meanNeedGPUs", fmt.Sprintf("%.2f", n.Mean), "currentNeedGPUs", fmt.Sprintf("%.2f", n.Current),
