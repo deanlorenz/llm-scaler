@@ -495,7 +495,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		Expect(err).NotTo(HaveOccurred())
 		r := analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|long|q5"))
 		Expect(r.samples).To(Equal(1), "one moment, one sample")
-		Expect(r.rate).To(Equal(3.433333333333333), "at the lower median of the two: two replicas are two readings, not one re-read")
+		Expect(r.rate).To(BeNumerically("~", (3.433333333333333+3.6)/2, 1e-9), "at the mean of the two: two replicas are two readings, not one re-read")
 
 		idle := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 200_000, 0, runLambda/2), decode("decode-1", 200_000, 0, runLambda/2), prefill("prefill-0", 0)},

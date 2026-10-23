@@ -64,6 +64,44 @@ func TestMeasuredMu_DoesNotGrowWithTheSaturatedFleet(t *testing.T) {
 	assert.Less(t, sixteen, 0.08)
 }
 
+// A fleet serves the sum of its replicas' rates, so a sample is their mean.
+// Four replicas full and queued at 1, 1, 1 and 0.5 times 6.0 req/s serve
+// 0.875 of it each on average; the lower median read 1.0, 14 % high, and one
+// replica 30 % slow read 1.0 against 0.925. Each is a sample of every cycle,
+// a minute apart.
+func TestMeasuredMu_ASlowReplicaCountsInTheSample(t *testing.T) {
+	for _, c := range []struct {
+		rates []float64
+		want  float64
+	}{
+		{[]float64{6, 6, 6, 3}, 0.875 * 6},
+		{[]float64{6, 6, 6, 4.2}, 0.925 * 6},
+	} {
+		states := []domain.VariantReplicaState{{VariantName: "variant-m", AcceleratorName: "H200",
+			CurrentReplicas: len(c.rates), GPUsPerReplica: 1, Role: domain.RoleDecode}}
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+		for cycle := range 4 {
+			at := start.Add(time.Duration(cycle) * ThroughputSampleSpacing)
+			a.now = func() time.Time { return at }
+			rows := make([]domain.ReplicaMetrics, len(c.rates))
+			for i, r := range c.rates {
+				rows[i] = makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "variant-m", 600_000, 1_162_240, 30, 1000, 500)
+				rows[i].GenerationTokenRate = r * 500
+				rows[i].RequestRate = r
+			}
+			_, err := a.Analyze(logr.NewContext(t.Context(), logr.Discard()), makeAnalyzerInput(rows, states))
+			require.NoError(t, err)
+		}
+		a.mu.Lock()
+		require.Len(t, a.saturatedThroughput, 1)
+		for _, ra := range a.saturatedThroughput {
+			assert.InDelta(t, c.want, ra.Median(), 1e-9, "replicas at %v req/s: the sample is not their mean", c.rates)
+		}
+		a.mu.Unlock()
+	}
+}
+
 // learnedUnder runs three sample windows of a decode variant of four
 // replicas, the first `saturated` of them full and queued (600 000 tokens,
 // queue 30, 6.0 req/s at 500 out) and the rest at low load (50 000 tokens, no

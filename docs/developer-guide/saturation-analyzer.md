@@ -415,8 +415,12 @@ each computes part of the prefill and their rates add.
 The window (`recordSaturatedThroughputFrom`) takes one sample per
 `ThroughputSampleSpacing`. Readings inside the spacing fold into the last
 sample: by their **max** for re-reads of one replica (the same rate window read
-again) and by their **lower median** across replicas (independent readings,
-`throughputPodReads`). Only replicas that are themselves admitted saturated
+again) and by their **mean** across replicas (independent readings,
+`throughputPodReads`). The mean because a fleet serves the sum of its
+replicas' rates: a lower median ignored a slow replica once three read, and
+four at 1, 1, 1 and 0.5 priced 1.0 against the 0.875 they serve
+(`TestMeasuredMu_ASlowReplicaCountsInTheSample`). The readings that reach the
+fold have passed the settle, joined, filling and served-bound tests. Only replicas that are themselves admitted saturated
 readings (`P1-obs`, after the settle test) read into a sample at all, so on a
 fleet the router loads unevenly the idle replicas neither enter nor dilute it
 (`TestMeasuredMuAndK2_IgnoreTheIdleReplicasOfAnImbalancedFleet`: 1 of 4

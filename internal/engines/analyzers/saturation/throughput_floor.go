@@ -61,9 +61,9 @@ import (
 // an episode exactly when no next window would come, and on two replayed
 // passes left mu 10-12 % low for the rest of the pass, on one of them
 // ordering a fourth replica the run never needed. The fold is a max over
-// re-reads of one replica and the lower median across replicas
+// re-reads of one replica and the mean across replicas
 // (recordSaturatedThroughputFrom): two replicas saturating in one cycle read
-// as one moment at the lower median of their two readings.
+// as one moment at the mean of their two readings.
 //
 // What the max is worth is another matter. A saturated rate under-reads
 // while the replica is full (file header),
@@ -108,13 +108,21 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 // the variant reads into it each cycle. A reading inside the spacing is folded
 // into the last sample, and the fold is a max over re-reads of ONE replica's
 // rate window -- the same moment read again, whose highest reading is the
-// best one -- and the lower median ACROSS replicas, whose readings are
-// independent. Folded by a max across replicas too, a sample was the hottest
-// of N readings and the window's median an order statistic whose expectation
+// best one -- and the MEAN across replicas, whose readings are independent.
+// Folded by a max across replicas too, a sample was the hottest of N
+// readings and the window's median an order statistic whose expectation
 // rose with N: measured with 6 % reading noise on a true 6.0 req/s, +5.5 % at
 // one saturated replica and +13.6 % at sixteen. An over-stated mu orders too
 // few replicas. Per replica, the cross-replica part is gone and what is left
 // is the one-replica re-read max the window always kept.
+//
+// The mean, not the median: a fleet serves the sum of its replicas' rates,
+// so what one replica serves on average is their mean. A lower median
+// ignores a slow replica once three or more read: four at 1, 1, 1 and 0.5
+// read 1.0 against the 0.875 they serve, 14 % high, the side that orders too
+// few (review, round 5). The median was there against outliers; the
+// readings that reach this fold have passed the settle, joined, filling and
+// served-bound tests, so what is left is what a replica serves.
 //
 // The per-replica readings of the sample belong to the sample: they are kept
 // with its time (throughputPodReads) and start over with the next sample, and
@@ -159,7 +167,7 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 			}
 			reads.pods[pod] = max(reads.pods[pod], rate)
 			a.throughputPodReads[key] = reads
-			ra.SetLast(lowerMedian(reads.pods))
+			ra.SetLast(meanOf(reads.pods))
 			return
 		}
 		if read && rate == lastRead {
@@ -177,6 +185,18 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 type podReads struct {
 	at   time.Time
 	pods map[string]float64
+}
+
+// meanOf is the mean of the readings, zero when there are none.
+func meanOf(reads map[string]float64) float64 {
+	if len(reads) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range reads {
+		sum += v
+	}
+	return sum / float64(len(reads))
 }
 
 // lowerMedian is the lower median of the readings, the order statistic the
