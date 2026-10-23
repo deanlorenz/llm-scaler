@@ -132,7 +132,12 @@ the resident KV demand (occupancy with the queues' residency charge removed,
 since the queue is priced as a backlog instead) and what the arrival rate and
 the queue ask for at the throughput one replica sustains
 (`saturatedThroughput`). So the line also appears when that LOWERS demand: a
-queue priced as a backlog can be worth less than its residency charge. Most
+queue priced as a backlog can be worth less than its residency charge. It
+lowers demand only when `mayOrder` is `true`, `heldAtFleet` is `false`, and
+`arrivalRate` accounts for at least half of the resident KV
+(`arrivalRate / saturatedThroughput x perReplicaCapacity >= 0.5 x
+residentDemand`). Otherwise the arrival rate is still reading the minute
+before a load step, and `flooredTo` is never below `demandBeforeFloor`. Most
 cycles of a fleet that is coping have none.
 
 | Field | Description |

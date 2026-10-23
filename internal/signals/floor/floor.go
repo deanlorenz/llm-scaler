@@ -80,6 +80,11 @@ type Term struct {
 	Backlog float64
 	// Replicas is (lambda + Backlog / DrainSeconds) / Mu.
 	Replicas float64
+	// ArrivalDemand is the floor without its backlog: lambda x cost, the tokens
+	// the arrival rate alone asks for. The saturation analyzer compares it
+	// with the resident KV to tell a lagging lambda from a backlog the floor
+	// may price as drain (applyThroughputFloor).
+	ArrivalDemand float64
 	// Held reports that the floor was capped at the fleet's anticipated size
 	// because its mu is not one the floor may order on -- HeldWhy says
 	// which: "borrowed" (a neighbouring bucket's reading), "single-sample",
@@ -452,7 +457,7 @@ func Estimate(
 		// observed queue unrecoverable from the log -- and its meaning silently
 		// changed relative to every earlier run the commit messages reason from.
 		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: observed,
-			ProjectedBacklog: b, Replicas: rate / mu}
+			ProjectedBacklog: b, Replicas: rate / mu, ArrivalDemand: lambda * cost}
 		// A single reading may order while the SCHEDULER holds a real queue.
 		//
 		// Nothing here withholds the figure while a replica is starting, and

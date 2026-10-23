@@ -157,7 +157,10 @@ are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 - **A backlog is work to drain, not residency.** `B` queued requests are priced
   as `B / 60s` extra arrivals on top of `lambda`, not as `B` requests resident
   at once. Pricing them as resident sized fleets for queues that were gone
-  before the replicas arrived. Prefill's share of the scheduler queue is dropped:
+  before the replicas arrived. This can lower the demand, so it is done only
+  when the floor may order on its mu and the arrival rate accounts for what the
+  replicas already hold; in the first minute of a load step the arrival rate
+  still reads the minute before, and the queue keeps its full charge. Prefill's share of the scheduler queue is dropped:
   more prefill replicas do not fix a full decode.
 
 **Prefill's mu without a prefill saturation.** On a P/D model prefill rarely

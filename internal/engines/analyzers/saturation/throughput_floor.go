@@ -495,7 +495,32 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// the resident KV alone. The queued requests are in the floor as a
 		// backlog now, and must not be counted twice.
 		resident := max(measured-residency[role], 0)
-		want := max(resident, tokens)
+		// The swap -- the queue priced as work to drain instead of as KV
+		// resident at once -- may LOWER the role's demand, and so it is made
+		// only where the floor's figure can be trusted to carry the queue:
+		// a term that may order and is not held, whose arrival rate is not
+		// lagging (FloorLagFraction). Anywhere else the floor only raises:
+		// want = max(measured, floor).
+		//
+		// At a load step lambda lags -- a [1m] rate, or the completion
+		// fallback, still reading the minute before -- while the queue is
+		// already standing. The replicas say so themselves: what is resident
+		// arrived within one residence time, and at saturation a replica
+		// holding P tokens completes mu, so the resident KV implies an arrival
+		// rate of about resident / cost, and the floor's arrival half
+		// (lambda x cost, ArrivalDemand) about the resident KV. A lambda that
+		// accounts for less than FloorLagFraction of it is the minute before
+		// the step, and cannot price the queue behind it. Measured on the
+		// two-namespace rerun
+		// (11:20:09): lambda 0.8 req/s with 160 queued, demand 499 446 cut to
+		// the 260 123 resident, the analyzer's rc falling 312 936 -> 47 265 in
+		// one cycle; at 07:46:12 a term that could not order (mayOrder=false)
+		// took 356 392 to 274 556.
+		trusted := term.MayOrder && !term.Held && term.ArrivalDemand >= FloorLagFraction*resident
+		want := max(measured, tokens)
+		if trusted {
+			want = max(resident, tokens)
+		}
 		if want == measured {
 			continue
 		}
@@ -570,6 +595,16 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // not changed: it comes from aggregateRoleDemand as DemandByRole plus the
 // queue's per-role charge, while the post-floor `want` is an independent
 // (lambda + backlog / drain) x P / mu with no queue term at all.
+
+// FloorLagFraction is the least share of the resident KV the floor's arrival
+// half (floor.Term.ArrivalDemand) must account for before the floor may price
+// the queues as drain rather than residency, and so lower a role's demand
+// (applyThroughputFloor). Half, not one: the resident KV of a saturated
+// replica can stand above P -- k1 is kvCacheThreshold of the cache and a full
+// replica holds more -- and a fleet draining a backlog with lambda right reads
+// 0.8-0.9 of it. A load step whose lambda still reads the minute before reads
+// 0.13 (0.8 req/s against a replica holding 260 123 tokens at mu 6).
+const FloorLagFraction = 0.5
 
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler

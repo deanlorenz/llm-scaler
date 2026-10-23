@@ -662,12 +662,24 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			decode("a", 1_000_000, 2, 2.0), decode("b", 1_000_000, 2, 2.0), decode("c", 1_000_000, 2, 2.0),
 			prefill("p", 0),
 		}
+		// An arrival rate that accounts for what the replicas hold: 16 req/s
+		// at mu 5.4 is 2.96 replicas, about the 3M resident.
 		in := makeAnalyzerInput(rm, states(3, 1))
-		in.ArrivalRate = runLambda
+		in.ArrivalRate = 16
 		result, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 3_000_000, 1),
 			"the six queued requests come out of the residency charge and the resident 3M stays")
+
+		By("keeping the queue's charge where the arrival rate lags what is resident")
+		// At 6 req/s the arrival half is 1.11 replicas against 3M resident:
+		// lambda is reading a minute the replicas have moved past, so it
+		// cannot price the queue as drain, and the demand stays as measured.
+		in.ArrivalRate = runLambda
+		lagging, err := analyzer.Analyze(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lagging.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 3_000_000+6*7000, 1),
+			"the resident 3M and the six queued requests at 6000 in + 1000 out")
 	})
 
 	It("drops prefill's share of the scheduler queue while prefill has no mu, and prices it once it has", func() {
