@@ -301,18 +301,24 @@ above the derived figure (`measuredYieldsToDerived`, `muChoice`):
   `TestMuChoice_ALowMeasurementAServedRateContradictsYields`). With no line
   there is nothing to yield to, and the measurement stands.
 - **Its full siblings serve more.** A measurement under
-  `SiblingMuTolerance` (0.8) of the median rate served by the variant's
-  Ready replicas with a full cache and no queue yields to that median, line
-  or no line, logged as `saturated-throughput-yields-to-siblings` with the
+  `SiblingMuTolerance` (0.8) of the lower median rate served by the
+  variant's Ready replicas with a full cache, queued ones included, yields
+  to that median when at least one of them is unqueued, line or no line, logged as `saturated-throughput-yields-to-siblings` with the
   bucket `served-siblings` (`siblingYield`). A replica at 0.55x its siblings
   passes the 2x served bound and, as the only queued replica, is the window.
   In review it priced the fleet at 1.8x the replicas for as long as it
   stayed slow. Neither the bound nor the 30-minute hold released it
   (`TestMuChoice_AModeratelySlowReplicaYieldsToItsFullSiblings`). The
   yield is remembered after the larger fleet stops filling the siblings,
-  until newer sibling evidence moves it or the window starts over. Queued
-  replicas are left out of the median, so a slow replica is never its own
-  sibling. 0.8 because equally saturated replicas at one shape read within
+  until newer sibling evidence moves it or the window starts over. A median
+  read from queued replicas alone never opens a yield, so a slow replica
+  queued alone is never its own sibling; it moves one already open, and
+  ends it once the measurement is no longer under it. The queued replicas
+  count because the router steers away from them: read from the unqueued
+  alone, three replicas at 2.0 beside one at 3.6 priced every replica at
+  3.6 and ordered 5.71 replicas for a load needing 7.84
+  (`TestMuChoice_AMostlySlowFleetIsNotPricedAtItsFastReplica`,
+  `TestMuChoice_ASiblingYieldEndsWhenItsSiblingsReadTheMeasurement`). 0.8 because equally saturated replicas at one shape read within
   about 10 % of each other (0.90-1.07 on E1). It bounds what one slow
   replica can over-order to 1.25x
   (`TestMuChoice_AMeasurementNearItsFullSiblingsStands`).
@@ -724,7 +730,7 @@ unchanged, so stored windows are still found.
 | `FloorTrustFraction` | 0.8 | `saturation` |
 | `BacklogGrowthLookback` | 1m | `saturation` |
 | `BacklogGrowthMinRequests` | 2 | `saturation` |
-| `BacklogGrowthFraction` | 0.05 | `saturation` |
+| `BacklogGrowthFraction` | 0.10 | `saturation` |
 | `ThroughputSampleSpacing` | 1m | `saturation` |
 | `DefaultExpectedOutputTokens` | 512 | `saturation` |
 | `BytesPerToken` | 4 | `saturation` |

@@ -112,8 +112,12 @@ so each must keep up with all of it), and on the total otherwise.
   Nor while the role's backlog has grown over the last minute
   (`noteBacklogGrowth`, logged as `backlogGrew`): past
   `max(BacklogGrowthMinRequests, BacklogGrowthFraction x B then)` (2
-  requests, 5 %) above the backlog `BacklogGrowthLookback` (1m) ago, or the
-  oldest on record before there is one that old. Not against the previous
+  requests, 10 %) above the backlog `BacklogGrowthLookback` (1m) ago, or the
+  oldest on record before there is one that old. 10 % sits above a standing
+  queue's minute-to-minute jitter: at 5 %, four queues alternating 100 / 106
+  lifted the engine-queue cap every other minute and flipped the order
+  7.06 <-> 10.67 (`TestUnevenRoutingAJitteringStandingQueueStaysCapped`).
+  A queue growing slower than that is read as standing. Not against the previous
   cycle: the engine queue is a one-minute max read every 15 s, and a fleet
   draining steadily reads a request or two either way. Counted strictly, a
   queue reading 160, 161, 160, 161 at 4.75 req/s moved demand
