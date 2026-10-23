@@ -153,6 +153,38 @@ are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
   before the replicas arrived. Prefill's share of the scheduler queue is dropped:
   more prefill replicas do not fix a full decode.
 
+**Prefill's mu without a prefill saturation.** On a P/D model prefill rarely
+saturates on its own. Its queue usually builds because decode is full, and a
+reading taken then measures decode, so it is not kept as prefill's mu. Without
+a mu the floor has nothing for prefill, and prefill grows only once its own
+queue builds.
+
+With `enablePrefillThroughputBound` on, the engine keeps that reading as a
+**lower bound** instead. A prefill replica
+that is queued computes prompt tokens as fast as something lets it, so its
+rate is at least that. The floor prices prefill on the bound when prefill has
+no reading of its own. The router's arrival rate then grows prefill before its
+queue forms.
+
+A lower bound can only make the floor ask for too much prefill, never too
+little. These limits keep that small:
+
+- It needs two readings a minute apart before it may grow prefill. With one,
+  it only holds.
+- One cycle can at most double the ready prefill fleet. The next step waits
+  for the new replicas to become ready.
+- While decode is still saturated, prefill is held as before, so the bound
+  does not add prefill for decode's shortfall.
+- The bound only rises. A later reading behind a full decode is lower once
+  prefill has grown, and does not replace a higher one.
+- Prefill's own reading replaces the bound as soon as prefill saturates while
+  decode is fine.
+
+It is off by default. Turn it on for every model or for one with
+[`enablePrefillThroughputBound`](../reference/scaling-policy.md#enableprefillthroughputbound).
+Its extra prefill lasts until the variant's learned state is reset, because a
+prefill held that large rarely queues on its own.
+
 ### 3. The scaling signal
 
 The engine aggregates to model level:

@@ -296,6 +296,18 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
 	}
+	// Prefill with no window of its own under the arguments it runs is
+	// priced on its lower bound when it has one (prefill_bound.go). Only
+	// then: any own reading, however thin, and a previous figure from other
+	// arguments are both measurements, and a measurement outranks a bound.
+	prefillBound := a.notePrefillBound(rm, config, role, throughputKey, args, keyInput, adm, logger)
+	lowerBound := false
+	if reading.rate <= 0 && throughputBucket != derivedBucket && prefillBound.rate > 0 {
+		saturatedThroughput = prefillBound.rate
+		throughputBucket = lowerBoundBucket
+		throughputSamples = prefillBound.samples
+		lowerBound = true
+	}
 
 	effectiveCapacity := k1
 	bound := "k1-memory"
@@ -391,6 +403,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
 		SaturatedThroughputDerived:  throughputBucket == derivedBucket,
+		// Set only where the bound priced the replica, so a measured or
+		// derived figure is never read as one.
+		SaturatedThroughputLowerBound: lowerBound,
 	}
 }
 

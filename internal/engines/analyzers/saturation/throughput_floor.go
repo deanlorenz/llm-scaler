@@ -512,6 +512,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// states that a run testing the borrow path has to tell apart, and
 			// could not.
 			"mayOrder", term.MayOrder, "borrowedOnly", term.BorrowedOnly,
+			// mu was a prefill lower bound (prefill_bound.go), and whether
+			// the growth cap on it bound this cycle.
+			"lowerBound", term.LowerBound, "growthCapped", term.GrowthCapped,
 			// How many replicas the standing queue was worth when the release
 			// fired. Run T showed orderedBehindQueue=true on five consecutive
 			// cycles and no way to tell whether the cap granted one replica

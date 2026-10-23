@@ -48,7 +48,9 @@ against mu: the completion rate one replica sustained when last seen
 saturated, recorded per output-length bucket. Occupancy belongs to the fleet
 and falls as replicas are added. mu belongs to the hardware and the request
 shape, and does not move with the fleet. A fleet needs `lambda / mu` replicas
-to keep up. See
+to keep up. Prefill's mu is in prompt tokens: the tokens one replica computes
+per second, at the prompt length arriving. A prefill that has only ever queued
+behind a full decode has a lower bound on it instead. See
 [the throughput floor](steady-state-engine.md#the-throughput-floor).
 
 **Inter-token latency as a function of KV utilization.** A separate throughput
