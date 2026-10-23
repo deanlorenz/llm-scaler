@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -137,6 +138,114 @@ func TestEvictStaleAnalyzerSeries_DeletesTheConfigSeriesOfADepartedVariant(t *te
 	assert.ElementsMatch(t, []string{"v1"},
 		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelVariantName),
 		"a departed variant's config series must go with its analyzer series")
+}
+
+// sharedTargetCycle runs one cycle the way collectV2ModelRequest does: the
+// analysis path publishes each enumerated VA's configuration, then one record
+// covers every analyzer's result.
+func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allocation.NamedAnalyzerResult) {
+	t.Helper()
+	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
+	vas := map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{}
+	for _, name := range vaNames {
+		vas["ns/"+name] = &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+			Spec: llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{
+				ModelID:        "m",
+				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: "d"},
+			},
+		}
+	}
+	_, err := e.runV2AnalysisOnly(
+		context.Background(), "m", "ns", nil,
+		config.ScalingPolicy{
+			KvCacheThreshold:     0.8,
+			QueueLengthThreshold: 5,
+			AnalyzerName:         "saturation",
+			ScaleUpThreshold:     0.85,
+			ScaleDownBoundary:    0.70,
+		},
+		nil,
+		map[string]scaletarget.ScaleTargetAccessor{utils.GetNamespacedKey("ns", "d"): st},
+		vas, nil, 0,
+	)
+	require.NoError(t, err)
+	e.recordAnalyzerMetrics("ns", "m", results)
+}
+
+// Issue #172: the config series was evicted per (analyzer, variant), so a
+// second analyzer dropping v2 for one cycle unpublished v2's configuration
+// while saturation, and its VariantAutoscaling, still kept it.
+func TestEngineConfig_SurvivesOneAnalyzerDroppingAVariant(t *testing.T) {
+	e, registry := engineConfigEngine(t)
+	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+
+	second := [][]string{{"v1", "v2"}, {"v1"}, {"v1", "v2"}, {"v1", "v2"}}
+	got := make([][]string, 0, len(second))
+	for _, variants := range second {
+		sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
+			namedResult("saturation", nil, 5, "v1", "v2"),
+			namedResult("throughput", nil, 5, variants...),
+		})
+		published := seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelVariantName)
+		slices.Sort(published)
+		got = append(got, published)
+	}
+	assert.Equal(t, [][]string{{"v1", "v2"}, {"v1", "v2"}, {"v1", "v2"}, {"v1", "v2"}}, got,
+		"a variant the model still runs lost its configuration for a cycle")
+}
+
+func TestEngineConfig_SurvivesEveryAnalyzerDroppingAVariantItsVAKeeps(t *testing.T) {
+	// The VA is still enumerated and its configuration published: no
+	// analyzer reporting it does not mean it left.
+	e, registry := engineConfigEngine(t)
+	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+
+	sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
+		namedResult("saturation", nil, 5, "v1", "v2"),
+	})
+	sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
+		namedResult("saturation", nil, 5, "v1"),
+	})
+	assert.ElementsMatch(t, []string{"v1", "v2"},
+		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelVariantName))
+}
+
+func TestEngineConfig_GoesWhenTheVariantLeaves(t *testing.T) {
+	// v2's VA is gone and no analyzer reports it: its configuration goes in
+	// the same cycle, through the real publish path.
+	e, registry := engineConfigEngine(t)
+	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+
+	sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
+		namedResult("saturation", nil, 5, "v1", "v2"),
+		namedResult("throughput", nil, 5, "v1", "v2"),
+	})
+	sharedTargetCycle(t, e, []string{"v1"}, []allocation.NamedAnalyzerResult{
+		namedResult("saturation", nil, 5, "v1"),
+		namedResult("throughput", nil, 5, "v1"),
+	})
+	assert.ElementsMatch(t, []string{"v1"},
+		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelVariantName),
+		"a departed variant's configuration stayed published")
+}
+
+func TestPruneAnalyzerSeries_DeletesAConfigPublishedWithoutARecord(t *testing.T) {
+	// A cycle that published a configuration and then failed before
+	// recordAnalyzerMetrics leaves the series tracked only as published.
+	e, registry := engineConfigEngine(t)
+
+	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
+	for _, m := range []string{"m1", "m2"} {
+		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st)
+		e.publishEngineConfig("ns", m, "v", "NVIDIA-H200", 1)
+	}
+	e.pruneAnalyzerSeries(map[string]bool{"ns/m1": true})
+	assert.ElementsMatch(t, []string{"m1"},
+		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelModelName))
+
+	e.evictAllAnalyzerSeries()
+	assert.Empty(t, seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelModelName))
 }
 
 func TestPruneAnalyzerSeries_DeletesTheConfigSeriesOfADepartedModel(t *testing.T) {
