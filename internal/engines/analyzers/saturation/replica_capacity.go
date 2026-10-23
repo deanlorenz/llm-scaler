@@ -272,7 +272,18 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Not every admitted k2 reading is a service rate: a replica that
 			// has completed nothing, or completes a fraction of what its ITL
 			// line prices, is filling (throughput_admission.go).
-			if why := throughputRefusal(rm.RequestRate, mu, derived); why != "" {
+			why := throughputRefusal(rm.RequestRate, mu, derived)
+			// A low reading that repeats on every saturated cycle for
+			// MeasuredLowConfirmFor is a real low rate, not a fill.
+			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, a.now()) {
+				logger.V(logging.DEFAULT).Info("saturated-throughput-low-confirmed",
+					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
+					"pod", rm.PodName, "role", role, "rate", mu, "derivedRate", derived.rate,
+					"confirmedFor", MeasuredLowConfirmFor.String(),
+					"reason", "under half the derived mu on every saturated cycle for MeasuredLowConfirmFor: the line is the wrong figure, and the reading is recorded")
+				why = ""
+			}
+			if why != "" {
 				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
@@ -325,12 +336,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// "Measured this shape" is precise: an OWN reading (not borrowed from a
 	// neighbouring output bucket, which is exactly the stale figure the
 	// derivation exists to replace) with enough samples to order on. A borrowed
-	// or thin reading loses to derived, as before. So does one that disagrees
-	// with derived by more than 2x and has had no sample for a while: under
-	// flow control the queue that writes a sample rarely builds, and one
-	// stale reading must not pin the fleet either way (measuredYieldsToDerived).
+	// or thin reading loses to derived, as before. So does one more than 2x
+	// above derived whose bucket has not read saturated in agreement with it
+	// for a while: under flow control the queue that writes a sample rarely
+	// builds, and a stale high reading must not under-order the fleet. A
+	// stale pair that disagrees prices the lower figure, latched so the
+	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) || measuredYieldsToDerived(reading, derived, a.now()) {
+	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, a.now()) {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure

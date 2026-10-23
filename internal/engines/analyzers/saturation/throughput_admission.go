@@ -35,36 +35,60 @@ import (
 //   - is not implausibly far under the derived figure for the same line:
 //     under MinMeasuredOfDerived of it. A saturated replica at its limit
 //     completes about what its ITL line prices; one completing a fiftieth of
-//     it is still filling, or stalled.
+//     it is still filling, or stalled. A filling replica reads that way for
+//     a minute or so, though; one that reads it on every saturated cycle for
+//     MeasuredLowConfirmFor is a real low rate -- the line is the wrong
+//     figure -- and its readings are recorded from then on
+//     (noteSaturatedReading). Without that, a real low measurement could
+//     never be refreshed while the line stood, went stale by construction,
+//     and gave way to the too-high derived figure however many saturated
+//     readings re-confirmed it.
 //
-// Each refusal only withholds a sample; none lowers or raises a figure. The
-// cost of the last one is the case where the derived figure is the wrong one
-// by more than 2x and the real rate is low: that measurement is refused, and
-// the derived figure -- too high, so too few replicas -- prices until the
-// line is refitted. A too-low mu over-orders (money), a too-high one
-// under-orders (SLO); no gate here makes a mu higher than a measurement or a
-// derivation gave.
+// Each refusal only withholds or delays a sample; none lowers or raises a
+// figure. A too-low mu over-orders (money), a too-high one under-orders (SLO).
 //
-// And a measured mu that is never refreshed does not outrank, for ever, a
-// derived figure it disagrees with by more than MeasuredDerivedMaxRatio
-// either way (measuredYieldsToDerived): it wins only while its newest sample
-// is under MeasuredMuFreshFor old. Within the ratio it keeps winning however
-// old it is -- run R's own 1.27 against a derived 0.67 is the case the
+// And a measured mu does not outrank, for ever, a derived figure it
+// disagrees with by more than MeasuredDerivedMaxRatio (measuredYieldsToDerived).
+// It is fresh while its bucket keeps reading saturated at a rate that agrees
+// with it -- accepted as a sample or refused -- within MeasuredMuFreshFor, and
+// a fresh measurement wins either way. A stale one that disagrees by more than
+// the ratio gives way to the LOWER of the two figures, which over-orders: a
+// measurement far under derived keeps pricing, one far over it yields to
+// derived. In review the two gates together always picked the higher figure
+// under continuous saturation, a replica queued every minute at 1.2 req/s
+// priced from a derived 3.6. Within the ratio the measurement keeps winning
+// however old it is -- run R's own 1.27 against a derived 0.67 is the case the
 // measured-first rule exists for, and it is inside 2x.
+//
+// The yield is latched: once a stale measurement has given way it stays given
+// way until the two figures come back within MeasuredDerivedReturnRatio, or
+// the bucket reads saturated again. Derived mu is recomputed every cycle from
+// the fleet's output length and carries its noise; with a hard edge at 2x, in
+// review, a measurement near it flipped the priced mu between the two figures
+// 11 times in 20 cycles under 4 % noise on the output length.
 const (
 	// JoinedReplicaWindow is how long a replica must have been seen Ready
 	// before its saturated reading counts: the collector's rate window
 	// (ThroughputSampleSpacing, registration.RequestRateWindow).
 	JoinedReplicaWindow = ThroughputSampleSpacing
 	// MinMeasuredOfDerived is the smallest fraction of the derived mu a
-	// saturated reading may be and still be recorded.
+	// saturated reading may be and still be recorded at once.
 	MinMeasuredOfDerived = 0.5
-	// MeasuredDerivedMaxRatio is how far a measured mu may disagree with the
-	// derived one, either way, and still outrank it with no recent sample.
+	// MeasuredLowConfirmFor is how long one replica must read saturated under
+	// MinMeasuredOfDerived of the derived mu, on every saturated cycle with
+	// no gap over ThroughputSampleSpacing, before those readings are
+	// recorded: two rate windows, longer than a joining replica fills for.
+	MeasuredLowConfirmFor = 2 * ThroughputSampleSpacing
+	// MeasuredDerivedMaxRatio is how far a stale measured mu may sit above
+	// the derived one and still outrank it.
 	MeasuredDerivedMaxRatio = 2.0
-	// MeasuredMuFreshFor is how long after its newest sample a measured mu
-	// outranks a derived one it disagrees with by more than
-	// MeasuredDerivedMaxRatio.
+	// MeasuredDerivedReturnRatio is how close a stale measured mu that has
+	// given way to the derived one must come back before it outranks it
+	// again: the hysteresis band under MeasuredDerivedMaxRatio.
+	MeasuredDerivedReturnRatio = 1.6
+	// MeasuredMuFreshFor is how long after its bucket last read saturated in
+	// agreement with it a measured mu outranks a derived one it disagrees
+	// with by more than MeasuredDerivedMaxRatio.
 	MeasuredMuFreshFor = 5 * time.Minute
 )
 
@@ -93,30 +117,126 @@ func (m *settleMemo) noteReady(pod string, ready bool, now time.Time) bool {
 	return !since.IsZero() && now.Sub(since) < JoinedReplicaWindow
 }
 
+// The reasons throughputRefusal gives.
+const (
+	refusedNoCompletion = "no request completed over the rate window: every sequence is still growing, so the token rate is a batch being admitted, not served"
+	refusedUnderDerived = "under half the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
+)
+
 // throughputRefusal says why a saturated replica's completion rate mu is not
 // a sample of what one replica sustains, or "" when it may be recorded. The
 // replica has already passed the k2 admission, the joined test included.
 func throughputRefusal(requestRate, mu float64, derived derivedMu) string {
 	if !(requestRate > 0) {
-		return "no request completed over the rate window: every sequence is still growing, so the token rate is a batch being admitted, not served"
+		return refusedNoCompletion
 	}
 	if derived.ok && mu < MinMeasuredOfDerived*derived.rate {
-		return "under half the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
+		return refusedUnderDerived
 	}
 	return ""
 }
 
-// measuredYieldsToDerived reports whether a measured mu that useDerived would
-// keep gives way to the derived one: they disagree by more than
-// MeasuredDerivedMaxRatio either way, and the measurement's newest sample is
-// MeasuredMuFreshFor old or older (or of unknown age).
-func measuredYieldsToDerived(reading throughputReading, derived derivedMu, now time.Time) bool {
+// muChoice is one throughput key's memory for choosing between its measured
+// mu and the derived one (SaturationAnalyzer.throughputMuChoice).
+type muChoice struct {
+	// saturatedAt is when the bucket last read saturated at a rate within
+	// MeasuredDerivedMaxRatio of its window's median, the reading accepted
+	// or refused.
+	saturatedAt time.Time
+	// yielded is set while a stale measurement has given way to the derived
+	// figure, and latches it (measuredYieldsToDerived).
+	yielded bool
+	// low is, per replica, its current run of saturated readings refused as
+	// under MinMeasuredOfDerived of the derived figure.
+	low map[string]lowRun
+}
+
+// lowRun is one replica's run of saturated readings refused as low.
+type lowRun struct {
+	since, last time.Time
+}
+
+// noteSaturatedReading records one replica's saturated reading mu of the
+// throughput key, before it is recorded or refused, and reports whether a
+// reading refused as under the derived figure (refusedLow) has repeated for
+// MeasuredLowConfirmFor and is to be recorded after all.
+//
+// A reading that agrees with the window's median within
+// MeasuredDerivedMaxRatio keeps the measurement fresh, accepted or not: the
+// bucket is still reading what it measured. One that disagrees does not, and
+// a filling replica's reading -- a fraction of the rate on record -- is one.
+func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c, ok := a.throughputMuChoice[key]
+	if !ok {
+		c = &muChoice{}
+		a.throughputMuChoice[key] = c
+	}
+	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 {
+		if m := ra.Median(); m > 0 && mu <= m*MeasuredDerivedMaxRatio && mu >= m/MeasuredDerivedMaxRatio {
+			c.saturatedAt = now
+			c.yielded = false
+		}
+	}
+	for p, r := range c.low {
+		if now.Sub(r.last) > ThroughputSampleSpacing {
+			delete(c.low, p)
+		}
+	}
+	if !refusedLow {
+		delete(c.low, pod)
+		return false
+	}
+	if c.low == nil {
+		c.low = make(map[string]lowRun)
+	}
+	r, had := c.low[pod]
+	if !had {
+		r.since = now
+	}
+	r.last = now
+	c.low[pod] = r
+	return now.Sub(r.since) >= MeasuredLowConfirmFor
+}
+
+// measuredYieldsToDerived reports whether the measured mu of the throughput
+// key, which useDerived would keep, gives way to the derived one this cycle:
+// the measurement is stale (its bucket has not read saturated in agreement
+// with it, nor taken a sample, for MeasuredMuFreshFor), and it sits more than
+// MeasuredDerivedMaxRatio above the derived figure -- or, once it has given
+// way, still MeasuredDerivedReturnRatio above it. A measurement under the
+// derived figure never gives way: the lower of the two prices.
+func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, now time.Time) bool {
 	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
 		return false
 	}
-	ratio := reading.rate / derived.rate
-	if ratio <= MeasuredDerivedMaxRatio && ratio >= 1/MeasuredDerivedMaxRatio {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.throughputMuChoice[key]
+	// The last reading that agreed with the measurement; the newest sample
+	// only where none is on record (a window restored, or its first
+	// sample). A sample is not freshness by itself: a confirmed low rate
+	// is written under a median it contradicts.
+	fresh := reading.sampledAt
+	if c != nil && !c.saturatedAt.IsZero() {
+		fresh = c.saturatedAt
+	}
+	if !fresh.IsZero() && now.Sub(fresh) < MeasuredMuFreshFor {
+		if c != nil {
+			c.yielded = false
+		}
 		return false
 	}
-	return reading.sampledAt.IsZero() || now.Sub(reading.sampledAt) >= MeasuredMuFreshFor
+	ratio := reading.rate / derived.rate
+	yielded := ratio > MeasuredDerivedMaxRatio || (c != nil && c.yielded && ratio > MeasuredDerivedReturnRatio)
+	if c == nil {
+		if !yielded {
+			return false
+		}
+		c = &muChoice{}
+		a.throughputMuChoice[key] = c
+	}
+	c.yielded = yielded
+	return yielded
 }

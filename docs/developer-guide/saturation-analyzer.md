@@ -259,12 +259,29 @@ logs `itl-gps-mismatch` with `gates: false`.
 ways to get it. The derived one can be priced for a shape the fleet has never
 run; the measured one wins where the fleet has measured this shape itself
 (`useDerived`: an own window with at least `MinThroughputSamplesToOrder`
-samples), unless the two disagree by more than `MeasuredDerivedMaxRatio` (2x)
-either way and the window's newest sample is `MeasuredMuFreshFor` (5m) old
-(`measuredYieldsToDerived`). Under EPP flow control the queue that writes a
-sample rarely builds again, and one stale reading must not pin the fleet in
-either direction. Within 2x the measurement keeps winning however old it is:
-run R's 1.27 req/s against a derived 0.67 is the case it is there for.
+samples), until it is stale and sits more than `MeasuredDerivedMaxRatio` (2x)
+above the derived figure (`measuredYieldsToDerived`, `muChoice`):
+
+- **Fresh** is the bucket reading saturated, within `MeasuredMuFreshFor` (5m),
+  at a rate within 2x of the window's median, whether that reading was
+  recorded or refused (`noteSaturatedReading`; the newest sample stands in
+  only where no such reading is on record). A fresh measurement wins either
+  way. A replica queued every minute at 1.2 req/s used to have every reading
+  refused under a derived 3.6, went stale by construction, and was priced at
+  3.6 (`TestMuChoice_ContinuousSaturationKeepsItsMeasurement`).
+- **Stale and disagreeing** prices the **lower** figure, which over-orders: a
+  measurement far under derived keeps pricing, one far over it yields.
+- **Latched.** Once a measurement has yielded it stays yielded until it comes
+  back within `MeasuredDerivedReturnRatio` (1.6x) of derived, or the bucket
+  reads saturated in agreement again. Derived mu is recomputed every cycle
+  from the fleet's output length; with a hard edge at 2x a measurement near it
+  flipped the priced mu 8-11 times in 20 cycles under 4 % noise on the length
+  (`TestMuChoice_TheYieldDoesNotFlipNearTheRatio`).
+
+Under EPP flow control the queue that writes a sample rarely builds again,
+and a stale high reading must not under-order the fleet. Within 2x the
+measurement keeps winning however old it is: run R's 1.27 req/s against a
+derived 0.67 is the case it is there for.
 
 ### The pricing point
 
@@ -366,10 +383,13 @@ one under `MinMeasuredOfDerived` (0.5) of the derived mu for the same line. On
 E1 a replica just joined, 84 waiting and no completion, generated 49 tokens/s:
 0.0995 req/s became the bucket's mu against a derived 3.1-5.7 and ~6.2 served,
 and priced 2 req/s as 12-20 replicas for the rest of the run
-(`TestE1Replay_AJoiningReplicaIsNotAThroughputSample` replays it). The cost of
-the derived-figure gate: where the line is the wrong figure by more than 2x and
-the true rate is low, the measurement is refused and the too-high derived mu
-prices until the line refits.
+(`TestE1Replay_AJoiningReplicaIsNotAThroughputSample` replays it). A filling
+replica reads low for a minute or so; one replica that reads under half the
+derived mu on every saturated cycle for `MeasuredLowConfirmFor` (2m, no gap over
+a minute) is a real low rate, the line the wrong figure, and its readings are
+recorded from then on (`saturated-throughput-low-confirmed`,
+`TestMuChoice_ALowRateThatRepeatsIsRecorded`). The runs live in
+`muChoice.low`.
 
 ## Demand
 
@@ -622,6 +642,12 @@ unchanged, so stored windows are still found.
 | `idleKvUsage` | 0.30 | `saturation` |
 | `IdleSettledFor` | 2m | `saturation` |
 | `IdleMaxGap` | 1m | `saturation` |
+| `JoinedReplicaWindow` | 1m | `saturation` |
+| `MinMeasuredOfDerived` | 0.5 | `saturation` |
+| `MeasuredLowConfirmFor` | 2m | `saturation` |
+| `MeasuredDerivedMaxRatio` | 2.0 | `saturation` |
+| `MeasuredDerivedReturnRatio` | 1.6 | `saturation` |
+| `MeasuredMuFreshFor` | 5m | `saturation` |
 | `FloorLagFraction` | 0.5 | `saturation` |
 | `FloorTrustFraction` | 0.8 | `saturation` |
 | `ThroughputSampleSpacing` | 1m | `saturation` |

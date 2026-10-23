@@ -346,9 +346,10 @@ vLLM's own `num_requests_waiting` stays near zero and `P1-obs` (queue at or over
 lands -- which are the readings the admission refuses. On E1 (2026-10-23,
 flow control on) no replica queued again after its first minute. A measured
 `mu` then is rarely written or refreshed, and the floor prices from the
-**derived** `mu` of the ITL line: an own measured window outranks it only
-while it agrees within 2x or has a sample under five minutes old
-(`measuredYieldsToDerived`). With no line fitted yet there is no derived `mu`
+**derived** `mu` of the ITL line wherever it is the lower figure: an own
+measured window more than 2x above it outranks it only while the bucket has
+read saturated in agreement with it in the last five minutes, and a stale one
+under it keeps pricing (`measuredYieldsToDerived`). With no line fitted yet there is no derived `mu`
 either, the role has no floor, and occupancy alone sizes it. k2 is the same: it
 is learned in those minutes or not at all, and otherwise comes from the
 history window or the engine arguments (`P2-hist`, `P3-k2`).

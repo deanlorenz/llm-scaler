@@ -266,17 +266,18 @@ func TestE1_AReplicaWithNoCompletionsIsJudgedAtTheFleetShape(t *testing.T) {
 }
 
 // A measured mu that nothing refreshes does not hold forever over a derived
-// figure it disagrees with by more than MeasuredDerivedMaxRatio either way:
-// once its newest sample is MeasuredMuFreshFor old, derived prices the
-// replica. Within the ratio the measurement keeps winning, however old --
-// run R's 1.27 against a derived 0.67 is the case it must keep.
+// figure it sits more than MeasuredDerivedMaxRatio above: once its bucket
+// has not read saturated for MeasuredMuFreshFor, the lower figure prices the
+// replica. One far under derived is the lower figure and keeps pricing.
+// Within the ratio the measurement keeps winning, however old -- run R's 1.27
+// against a derived 0.67 is the case it must keep.
 func TestE1_AStaleMeasuredMuYieldsToADisagreeingDerivedFigure(t *testing.T) {
 	cases := []struct {
 		name      string
 		gps       float64 // per-replica tokens/s while saturated, at 500 out
 		wantFinal string
 	}{
-		{"measured far under derived", 600, derivedBucket}, // 1.2 req/s vs ~3.6
+		{"measured far under derived", 600, "medium"},      // 1.2 req/s vs ~3.6: the lower figure
 		{"measured far over derived", 4000, derivedBucket}, // 8.0 req/s vs ~3.6
 		{"measured within 2x of derived", 1250, "medium"},  // 2.5 req/s vs ~3.6
 	}

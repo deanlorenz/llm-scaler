@@ -117,6 +117,12 @@ type SaturationAnalyzer struct {
 	// readings per replica (recordSaturatedThroughputFrom); swept with the
 	// window.
 	throughputPodReads map[string]podReads
+	// throughputMuChoice is, per saturatedThroughput key, what the choice
+	// between its measured and its derived mu remembers: when the bucket
+	// last read saturated in agreement with its measurement, whether a
+	// stale measurement has given way, and each replica's run of readings
+	// refused as low (throughput_admission.go); swept with the window.
+	throughputMuChoice map[string]*muChoice
 	capacityStore      *capacity.Store
 
 	// decodeSaturatedAt is, per namespace|model, the last cycle a decode
@@ -352,6 +358,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
 		throughputPodReads:     make(map[string]podReads),
+		throughputMuChoice:     make(map[string]*muChoice),
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
 		hotRankHeld:            make(map[string]hotRankMemo),
@@ -693,9 +700,23 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
 			delete(a.throughputPodReads, key)
+			delete(a.throughputMuChoice, key)
 			evicted.MuWindows++
 		}
 	}
+	// A choice memo whose window never came to be -- every reading refused
+	// -- goes once none of its replicas has read low for a while.
+	maps.DeleteFunc(a.throughputMuChoice, func(key string, c *muChoice) bool {
+		if _, ok := a.saturatedThroughput[key]; ok {
+			return false
+		}
+		for _, r := range c.low {
+			if now.Sub(r.last) <= ThroughputSampleSpacing {
+				return false
+			}
+		}
+		return true
+	})
 	maps.DeleteFunc(a.throughputWindowArgs, func(key, _ string) bool {
 		_, ok := a.saturatedThroughput[key]
 		return !ok
