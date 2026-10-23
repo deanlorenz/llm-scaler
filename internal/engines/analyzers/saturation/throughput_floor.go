@@ -490,6 +490,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		}
 		residency[role] += tokens
 	}
+	// Recorded every cycle, priced or not, so the next has this one to
+	// compare with.
+	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, backlog)
 
 	// The hold cap is measured against the threshold the ENGINE sizes RC
 	// with, which is the saturation analyzer's own (config.AnalyzerThresholds):
@@ -591,8 +594,20 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// replica above went 499 446 -> 260 123 between 2.95 and 3.0 req/s,
 		// so a fleet sitting near the line flipped between the two demands
 		// cycle to cycle.
+		//
+		// And not while the role's backlog is growing (backlogGrew). The
+		// lag test reads lambda against the resident KV, which on a saturated
+		// fleet sits at about P per replica whatever the arrival rate, so it
+		// reads lambda / (n x mu): full trust once a lagging rate reads 80 %
+		// of the fleet's capacity, even with the true rate at 150 %. A queue
+		// that grew since the last cycle is arrivals above what the fleet
+		// drains, whatever lambda reads, and the swap would price it below
+		// the occupancy that holds it. In review, a step from 3 to 9 req/s on
+		// one replica of mu 6 read 319 763 before it and 280 704, 354 736
+		// under occupancy's 387 263 and 454 573, for the three cycles the
+		// queue tripled.
 		want := max(measured, tokens)
-		if term.MayOrder && !term.Held {
+		if term.MayOrder && !term.Held && !grew[role] {
 			trust := 1.0
 			if resident > 0 {
 				trust = floorTrust(term.ArrivalDemand / resident)
@@ -628,7 +643,10 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// what was measured; projectedBacklog is what the floor priced,
 			// and a run that shows only one cannot tell an empty queue from a
 			// queue the fleet is projected to outrun.
-			"projectedBacklog", term.ProjectedBacklog)
+			"projectedBacklog", term.ProjectedBacklog,
+			// The backlog grew since the previous cycle, so the swap was
+			// not made: arrivals exceed what the fleet drains.
+			"backlogGrew", grew[role])
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}
@@ -690,6 +708,35 @@ const FloorLagFraction = 0.5
 // proportion (floorTrust); 0.8 is the bottom of what a fleet draining a
 // backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
 const FloorTrustFraction = 0.8
+
+// noteBacklogGrowth records this cycle's floor backlog per role in the
+// model's memo and reports the roles whose backlog is larger than on the
+// previous cycle. A role with no previous reading has not grown: there is
+// nothing to compare with.
+func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlog map[string]float64) map[string]bool {
+	model := namespace + "|" + modelID
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.k2Settle == nil {
+		a.k2Settle = make(map[string]*settleMemo)
+	}
+	memo, ok := a.k2Settle[model]
+	if !ok {
+		memo = newSettleMemo()
+		a.k2Settle[model] = memo
+	}
+	grew := make(map[string]bool, len(backlog))
+	for role, b := range backlog {
+		if prev, seen := memo.backlog[role]; seen && b > prev {
+			grew[role] = true
+		}
+	}
+	memo.backlog = maps.Clone(backlog)
+	if a.now != nil {
+		memo.seen = a.now()
+	}
+	return grew
+}
 
 // floorTrust is how far the floor's drain price may replace the queues'
 // residency charge, from 0 at FloorLagFraction of the resident KV or less to

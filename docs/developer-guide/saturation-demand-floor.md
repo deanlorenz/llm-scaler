@@ -74,6 +74,20 @@ so each must keep up with all of it), and on the total otherwise.
   two-namespace rerun (2026-10-23, 11:20:09): `lambda` 0.8 req/s with 160
   queued cut 499 446 to the 260 123 resident, and the analyzer's `rc` fell
   312 936 -> 47 265 in one cycle.
+
+  Nor while the role's backlog has grown since the previous cycle
+  (`noteBacklogGrowth`, logged as `backlogGrew`). The lag test cannot see a
+  step above fleet capacity: on a saturated fleet the resident KV sits at
+  about `P` per replica whatever the arrival rate, so the ratio reads
+  `lambda / (n x mu)` and reaches full trust once a lagging rate reads 80 %
+  of capacity, even with the true rate at 150 %. A queue that grows is
+  arrivals above what the fleet drains. In review a step from 3 to 9 req/s on
+  one replica of `mu` 6 read 319 763 before it and 280 704 / 354 736 under
+  the occupancy (387 263 / 454 573) that held the queue for the cycles it
+  tripled; it now keeps the occupancy demand
+  (`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand`). The swap is
+  made on a queue that has stood a cycle, so its first cycle is priced at
+  `max(measured, floor)`, which only over-orders.
 - A role with no `mu` keeps the residency charge, except prefill's share of the
   scheduler queue, which is dropped. A prefill replica holds a prompt for its
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,

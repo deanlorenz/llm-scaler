@@ -90,3 +90,38 @@ func TestFloorTrust(t *testing.T) {
 	assert.InDelta(t, 1.0, floorTrust(FloorTrustFraction), 1e-12)
 	assert.InDelta(t, 1.0, floorTrust(1.4), 1e-12)
 }
+
+// Review probe (round 2, a step above fleet capacity). One replica of mu 6
+// holding P; the true arrival rate steps from 3 to 9 req/s, the [1m] rate
+// ramps to it over a minute, and the queue grows at 3/s from 40. The lag
+// test reads lambda against the resident KV, which a saturated replica holds
+// whatever the rate, so it trusted the ramping rate and priced the growing
+// queue as drain: 319 763 before the step, then 280 704 and 354 736 under the
+// occupancy that held it. A queue that grew since the last cycle keeps the
+// occupancy demand, and the order never dips under its pre-step value.
+func TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand(t *testing.T) {
+	const mu, resident, perReq = 6.0, 260_123.0, 239_323.0 / 160
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	pre := 0.0
+	for ts := 0; ts <= 60; ts += 15 {
+		in := makeAnalyzerInput(nil, nil)
+		in.ArrivalRate = 3 + 6*min(float64(ts)/60, 1)
+		q := 40 + 3*ts
+		charge := perReq * float64(q)
+		rcs := []capacity.ReplicaCapacity{{
+			VariantName: "v", PodName: "p", QueueLength: q, LocalQueueDemand: int64(charge),
+			SaturatedThroughput: mu, SaturatedThroughputSamples: 2,
+		}}
+		vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 260_622}}
+		occupancy := resident + float64(int64(charge))
+		got := a.applyThroughputFloor(in, in.Config.(*config.ScalingPolicy), rcs, vcs,
+			occupancy, nil, nil, 0, false, logr.Discard())
+		t.Logf("t=%2ds lambda read %.1f, queue %3d: demand %7.0f, occupancy %7.0f", ts, in.ArrivalRate, q, got, occupancy)
+		if ts == 0 {
+			pre = got
+			continue
+		}
+		assert.GreaterOrEqual(t, got, pre, "t=%ds: demand fell under its pre-step %.0f while the queue grew", ts, pre)
+		assert.GreaterOrEqual(t, got, occupancy-1, "t=%ds: demand under the occupancy holding a growing queue", ts)
+	}
+}

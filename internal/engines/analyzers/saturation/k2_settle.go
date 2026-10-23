@@ -128,7 +128,10 @@ type settleMemo struct {
 	// pastFirstCycle is set once the memo's first cycle has ended
 	// (noteIdleRuns, which runs once at the end of every cycle's pricing).
 	pastFirstCycle bool
-	seen           time.Time
+	// backlog is the throughput floor's backlog per role on the previous
+	// cycle (noteBacklogGrowth), nil before the first.
+	backlog map[string]float64
+	seen    time.Time
 }
 
 // newSettleMemo is an empty memo in its first cycle.

@@ -279,6 +279,16 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			clock = clock.Add(ThroughputSampleSpacing + time.Second)
 		}
 	}
+	// standing analyzes in on two cycles 15 s apart and returns the second: a
+	// queue the floor may price as drain is one that has stood a cycle, not
+	// one that grew since the last (applyThroughputFloor, backlogGrew).
+	standing := func(in domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+		if _, err := analyzer.Analyze(ctx, in); err != nil {
+			return nil, err
+		}
+		clock = clock.Add(15 * time.Second)
+		return analyzer.Analyze(ctx, in)
+	}
 
 	It("holds the decode role at lambda / mu once the fleet has caught up", func() {
 		saturate()
@@ -614,7 +624,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			states(1, 1))
 		in.ArrivalRate = runLambda
 		in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 200, QueueBytes: 200 * 6000 * 4}
-		result, err := analyzer.Analyze(ctx, in)
+		result, err := standing(in)
 		Expect(err).NotTo(HaveOccurred())
 		var decodeP float64
 		for _, vc := range result.VariantCapacities {
@@ -714,7 +724,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		in2.ArrivalRate = runLambda
 		_, err = analyzer.Analyze(ctx, in2)
 		Expect(err).NotTo(HaveOccurred())
-		result, err = analyzer.Analyze(ctx, in)
+		result, err = standing(in)
 		Expect(err).NotTo(HaveOccurred())
 		var prefillP float64
 		for _, vc := range result.VariantCapacities {
@@ -951,7 +961,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		in = makeAnalyzerInput([]domain.ReplicaMetrics{both("a", 1_158_912, 60, runMu)}, st)
 		in.ArrivalRate = runLambda
 		in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 40, QueueBytes: 40 * 6000 * 4}
-		result, err = analyzer.Analyze(ctx, in)
+		result, err = standing(in)
 		Expect(err).NotTo(HaveOccurred())
 		P := result.VariantCapacities[0].PerReplicaCapacity
 		Expect(result.TotalDemand).To(BeNumerically("~", (runLambda+100.0/floor.BacklogDrainSeconds)/runMu*P, 1))
