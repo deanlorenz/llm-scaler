@@ -2,6 +2,8 @@ package saturation
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +220,35 @@ func TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains(t *testing.T)
 		if got < want-0.1 || got > want+0.1 {
 			t.Errorf("four replicas each queued %.0f at lambda %.0f implied %.2f replicas once the queues stood, want %.2f", c.q, c.lambda, got, want)
 		}
+	}
+}
+
+// Review probe (round 5, a standing queue that jitters). The fixer case of
+// TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains, with each
+// queue alternating 100 / 106 from minute to minute: the role's 400 -> 424 is
+// 6 %, which cleared the 5 % growth band, so the cap came off every other
+// minute and the order flipped 7.06 <-> 10.67. Past the first two minutes,
+// the seed's queue of 30 becoming 400 -- real growth -- having lingered out.
+func TestUnevenRoutingAJitteringStandingQueueStaysCapped(t *testing.T) {
+	a, clock := unevenSeed(t)
+	want := (2.0 + 4) / 0.85
+	var trace strings.Builder
+	hi := 0.0
+	for i := range 24 {
+		q := 100.0
+		if (i/4)%2 == 1 {
+			q = 106
+		}
+		got := unevenImplied(t, a, 2, unevenFour(q, 0.5))
+		if i >= 8 {
+			hi = max(hi, got)
+		}
+		fmt.Fprintf(&trace, " %.0f:%.2f", q, got)
+		*clock = clock.Add(15 * time.Second)
+	}
+	t.Logf("four replicas queued 100 / 106 by the minute, lambda 2, implied replicas:%s", trace.String())
+	if hi > want*1.1 {
+		t.Errorf("a standing queue jittering 6 %% read up to %.2f replicas against the %.2f it needs", hi, want)
 	}
 }
 

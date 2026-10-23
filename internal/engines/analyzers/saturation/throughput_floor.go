@@ -771,8 +771,15 @@ const (
 	// BacklogGrowthMinRequests is the least growth, in requests, that counts.
 	BacklogGrowthMinRequests = 2.0
 	// BacklogGrowthFraction is the least growth, as a share of the backlog it
-	// is compared with, that counts.
-	BacklogGrowthFraction = 0.05
+	// is compared with, that counts. A standing queue's one-minute max moves
+	// by a few percent from minute to minute; at 5 %, in review, four queues
+	// alternating 100 / 106 cleared the band every other minute, lifted the
+	// engine-queue cap and flipped the order 7.06 <-> 10.67 (round 5). 10 %
+	// is above that jitter, and a queue really growing -- tens of requests a
+	// cycle -- clears it within a cycle or two. What it costs is a queue that
+	// grows slower than 10 % a minute: the cap stays on it and the floor
+	// reads it as standing.
+	BacklogGrowthFraction = 0.10
 )
 
 // maxBacklogReadings bounds the backlog readings a model's memo keeps, for a
