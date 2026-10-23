@@ -55,14 +55,15 @@ import (
 // share no samples.
 //
 // A reading inside the spacing belongs to the last sample's window, and is
-// folded into it: the sample becomes the max of what that window read
-// (RaiseLast) -- the max the window kept when every cycle was added, no
+// folded into it: the sample becomes the max of what that replica
+// read -- the max the window kept when every cycle was added, no
 // more. Dropping in-spacing readings instead lost the highest reading of
 // an episode exactly when no next window would come, and on two replayed
 // passes left mu 10-12 % low for the rest of the pass, on one of them
-// ordering a fourth replica the run never needed. Folding also makes two
-// replicas saturating in one cycle read as one moment at the higher of
-// the two, whichever row the collector's map yields first.
+// ordering a fourth replica the run never needed. The fold is a max over
+// re-reads of one replica and the lower median across replicas
+// (recordSaturatedThroughputFrom): two replicas saturating in one cycle read
+// as one moment at the lower median of their two readings.
 //
 // What the max is worth is another matter. A saturated rate under-reads
 // while the replica is full (file header),
@@ -97,6 +98,29 @@ import (
 // Same window size and staleness rule as k2 history, and pruned beside it in
 // EvictStaleHistory.
 func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64) {
+	a.recordSaturatedThroughputFrom(key, "", rate)
+}
+
+// recordSaturatedThroughputFrom is recordSaturatedThroughput for a reading
+// from one named replica (pod).
+//
+// The window is per bucket, not per replica, and every saturated replica of
+// the variant reads into it each cycle. A reading inside the spacing is folded
+// into the last sample, and the fold is a max over re-reads of ONE replica's
+// rate window -- the same moment read again, whose highest reading is the
+// best one -- and the lower median ACROSS replicas, whose readings are
+// independent. Folded by a max across replicas too, a sample was the hottest
+// of N readings and the window's median an order statistic whose expectation
+// rose with N: measured with 6 % reading noise on a true 6.0 req/s, +5.5 % at
+// one saturated replica and +13.6 % at sixteen. An over-stated mu orders too
+// few replicas. Per replica, the cross-replica part is gone and what is left
+// is the one-replica re-read max the window always kept.
+//
+// The per-replica readings of the sample belong to the sample: they are kept
+// with its time (throughputPodReads) and start over with the next sample, and
+// a sample with none on record -- restored, or put aside and brought back --
+// counts its own value as the reading of the replica that reads next.
+func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate float64) {
 	// `!(rate > 0)` rejects a NaN, which `rate <= 0` would admit. +Inf is
 	// excluded too, to match floor.priceable: it passes `rate > 0`, and left in
 	// it would take one of the window's ten slots from a real reading and be
@@ -117,12 +141,20 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
+		delete(a.throughputPodReads, key)
 	}
 	lastRead, read := a.throughputLastRead[key]
 	a.throughputLastRead[key] = rate
 	if last, sampled := a.throughputSampledAt[key]; sampled {
 		if now.Sub(last) < ThroughputSampleSpacing {
-			ra.RaiseLast(rate) // the last sample's window, still being read
+			// The last sample's window, still being read.
+			reads := a.throughputPodReads[key]
+			if reads.at != last || reads.pods == nil {
+				reads = podReads{at: last, pods: map[string]float64{pod: ra.Last()}}
+			}
+			reads.pods[pod] = max(reads.pods[pod], rate)
+			a.throughputPodReads[key] = reads
+			ra.SetLast(lowerMedian(reads.pods))
 			return
 		}
 		if read && rate == lastRead {
@@ -132,6 +164,24 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 	}
 	ra.Add(rate)
 	a.throughputSampledAt[key] = now
+	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
+}
+
+// podReads is one throughput sample's readings per replica, and the time of
+// the sample they belong to (recordSaturatedThroughputFrom).
+type podReads struct {
+	at   time.Time
+	pods map[string]float64
+}
+
+// lowerMedian is the lower median of the readings, the order statistic the
+// window itself reads (capacity.RollingAverage.Median).
+func lowerMedian(reads map[string]float64) float64 {
+	vs := slices.Sorted(maps.Values(reads))
+	if len(vs) == 0 {
+		return 0
+	}
+	return vs[(len(vs)-1)/2]
 }
 
 // saturatedThroughputFor returns the saturated completion rate on record for

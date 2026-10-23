@@ -259,7 +259,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// window is keyed by -- a rate divided by one shape and stored under
 		// another is the fault the key exists to prevent.
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
-			a.recordSaturatedThroughput(throughputKey, mu)
+			a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
 			if args != "" {
 				a.mu.Lock()
 				if _, ok := a.saturatedThroughput[throughputKey]; ok {

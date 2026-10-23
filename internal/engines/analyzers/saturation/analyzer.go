@@ -113,7 +113,11 @@ type SaturationAnalyzer struct {
 	// both swept with the window.
 	throughputSampledAt map[string]time.Time
 	throughputLastRead  map[string]float64
-	capacityStore       *capacity.Store
+	// throughputPodReads is, per saturatedThroughput key, the last sample
+	// readings per replica (recordSaturatedThroughputFrom); swept with the
+	// window.
+	throughputPodReads map[string]podReads
+	capacityStore      *capacity.Store
 
 	// decodeSaturatedAt is, per namespace|model, the last cycle a decode
 	// replica was seen full and queued (roleSaturated). Prefill's readings
@@ -347,6 +351,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
+		throughputPodReads:     make(map[string]podReads),
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
 		hotRankHeld:            make(map[string]hotRankMemo),
@@ -687,6 +692,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.saturatedThroughput, key)
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
+			delete(a.throughputPodReads, key)
 			evicted.MuWindows++
 		}
 	}

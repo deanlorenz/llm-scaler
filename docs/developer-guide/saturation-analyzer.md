@@ -293,6 +293,20 @@ mu_prefill = rm.PrefillComputedTokenRate / ILeff
 `PrefillComputedTokenRate` is **summed** across a pod's engines, not averaged:
 each computes part of the prefill and their rates add.
 
+The window (`recordSaturatedThroughputFrom`) takes one sample per
+`ThroughputSampleSpacing`. Readings inside the spacing fold into the last
+sample: by their **max** for re-reads of one replica (the same rate window read
+again) and by their **lower median** across replicas (independent readings,
+`throughputPodReads`). Only replicas that are themselves admitted saturated
+readings (`P1-obs`, after the settle test) read into a sample at all, so on a
+fleet the router loads unevenly the idle replicas neither enter nor dilute it
+(`TestMeasuredMuAndK2_IgnoreTheIdleReplicasOfAnImbalancedFleet`: 1 of 4
+saturated learns the balanced fleet's mu and k2). With a max across replicas the sample was the hottest of
+N readings, and the window's median rose with the number of saturated replicas:
+with 6 % reading noise on a true 6.0 req/s, +5.4 % at one replica and +13.6 %
+at sixteen. Per replica it stays at the one-replica +5.4-5.5 % at any size
+(`TestMeasuredMu_DoesNotGrowWithTheSaturatedFleet`).
+
 ## Demand
 
 Two sources, added.

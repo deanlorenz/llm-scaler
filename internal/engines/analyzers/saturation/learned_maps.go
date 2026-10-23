@@ -82,6 +82,7 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("saturatedThroughput", scopeK2Key, a.saturatedThroughput),
 		registered("throughputSampledAt", scopeK2Key, a.throughputSampledAt),
 		registered("throughputLastRead", scopeK2Key, a.throughputLastRead),
+		registered("throughputPodReads", scopeK2Key, a.throughputPodReads),
 		registered("k2WindowArgs", scopeK2Key, a.k2WindowArgs),
 		registered("throughputWindowArgs", scopeK2Key, a.throughputWindowArgs),
 		registered("k2Stash", scopeK2Key, a.k2Stash),
