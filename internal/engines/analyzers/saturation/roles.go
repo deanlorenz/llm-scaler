@@ -138,10 +138,11 @@ type replicaRouting struct {
 }
 
 // instantKv is rm's instantaneous KV utilization (KvUsageInstant) and whether
-// it is a usable fraction.
+// it is a usable fraction: read from a series (KvUsageInstantKnown), not the
+// zero a missing one leaves, and within [0, 1].
 func instantKv(rm domain.ReplicaMetrics) (float64, bool) {
 	k := rm.KvUsageInstant
-	return k, !math.IsNaN(k) && k >= 0 && k <= 1
+	return k, rm.KvUsageInstantKnown && !math.IsNaN(k) && k >= 0 && k <= 1
 }
 
 // rolesBusyNow is the set of roles (domain.CanonicalRole) with a Ready replica
@@ -168,11 +169,21 @@ func rolesBusyNow(metrics []domain.ReplicaMetrics, rolesByVariant map[string]str
 }
 
 // kvFromInstant reports whether rm's resident KV is charged at its instant
-// reading this cycle (replicaRouting.kvFromInstant): Ready, idle now, its
-// role busy now.
+// reading this cycle (replicaRouting.kvFromInstant): Ready, nothing waiting,
+// an instant reading on record and idle by it, its role busy now.
+//
+// Nothing waiting, because only a replica that has handed its load away has
+// a peak that is someone else's. One with requests queued has not: its
+// instant KV dips between prefill batches -- a P/D prefill replica's KV is
+// transient until decode pulls it -- and on preemption, and charged at the
+// dip a uniformly saturated, queued fleet ordered nothing (in review, every
+// pod at peak 0.95 queued 20 with instants 0.9/0.2/0.2/0.2 implied 4.00
+// replicas on four, against 5.84 with all four at 0.9; P/D prefill at
+// 0.4/0.1/0.1/0.1 read a scale-down). A missing series is not a reading of
+// zero: the peak stands.
 func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
 	k, ok := instantKv(rm)
-	return busyNow && rm.Ready && ok && k < idleKvUsage
+	return busyNow && rm.Ready && rm.QueueLength == 0 && ok && k < idleKvUsage
 }
 
 // roleSaturated reports whether any replica of the given role is full and

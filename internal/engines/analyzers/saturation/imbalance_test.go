@@ -33,7 +33,7 @@ func imbAnalyzer() (*SaturationAnalyzer, *time.Time) {
 // the test sets it apart, its instant reading) with queue waiting.
 func imbRow(pod, variant string, frac float64, queue int, in, out, reqRate float64) domain.ReplicaMetrics {
 	rm := makeReplicaMetrics(pod, variant, int64(frac*float64(imbKv)), imbKv, queue, in, out)
-	rm.KvUsageInstant = frac
+	rm.KvUsageInstant, rm.KvUsageInstantKnown = frac, true
 	rm.RequestRate = reqRate
 	rm.GenerationTokenRate = reqRate * out
 	rm.PrefillComputedTokenRate = reqRate * in
@@ -375,13 +375,15 @@ func TestImbalanceDemandDoesNotSumAMovedPeak(t *testing.T) {
 		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
 	}
 	const peak = 0.95
+	// run prices four pods peaking at peak with the given instant readings;
+	// a negative one is a pod whose instant series is missing.
 	run := func(instants []float64) float64 {
 		t.Helper()
 		a, _ := imbAnalyzer()
 		rows := make([]domain.ReplicaMetrics, 0, len(instants))
 		for i, k := range instants {
 			rm := imbRow("r"+string(rune('0'+i)), "agg-v", peak, 0, 1000, 1000, 0.5)
-			rm.KvUsageInstant = k
+			rm.KvUsageInstant, rm.KvUsageInstantKnown = max(k, 0), k >= 0
 			rows = append(rows, rm)
 		}
 		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
@@ -395,14 +397,18 @@ func TestImbalanceDemandDoesNotSumAMovedPeak(t *testing.T) {
 	moved := run([]float64{0.95, 0.02, 0.02, 0.02})
 	busy := run([]float64{0.90, 0.85, 0.92, 0.88})
 	stopped := run([]float64{0.02, 0.02, 0.02, 0.02})
-	missing := run([]float64{0, 0, 0, 0})
-	t.Logf("demand, four pods each peaking at %.2f: moved (one full now) %.0f; busy everywhere %.0f; stopped %.0f; no instant reading %.0f; sum of peaks %.0f",
-		peak, moved, busy, stopped, missing, allPeaks)
+	missing := run([]float64{-1, -1, -1, -1})
+	missingBesideBusy := run([]float64{0.95, -1, -1, -1})
+	t.Logf("demand, four pods each peaking at %.2f: moved (one full now) %.0f; busy everywhere %.0f; stopped %.0f; no instant reading %.0f; three missing beside one busy %.0f; sum of peaks %.0f",
+		peak, moved, busy, stopped, missing, missingBesideBusy, allPeaks)
 	if want := tokens(peak) + 3*math.Round(0.02*float64(imbKv)); moved != want {
 		t.Errorf("a load moved among four pods within the minute priced %.0f, want the busy pod's peak plus what the idle three hold now, %.0f",
 			moved, want)
 	}
-	for name, got := range map[string]float64{"busy everywhere": busy, "stopped": stopped, "no instant reading": missing} {
+	for name, got := range map[string]float64{
+		"busy everywhere": busy, "stopped": stopped, "no instant reading": missing,
+		"three instant series missing beside one busy pod": missingBesideBusy,
+	} {
 		if got != allPeaks {
 			t.Errorf("%s: demand %.0f, want every pod's peak, %.0f", name, got, allPeaks)
 		}
@@ -461,4 +467,63 @@ func imbK2Average(a *SaturationAnalyzer) float64 {
 		}
 	}
 	return avg
+}
+
+// A replica with requests waiting has not handed its load away, whatever its
+// instant KV reads: that dips between prefill batches -- a P/D prefill
+// replica's KV is transient until decode pulls it -- and on preemption. A
+// fleet saturated and queued everywhere is charged its peaks however its
+// instant readings scatter.
+func TestImbalanceAQueuedReplicaKeepsItsPeak(t *testing.T) {
+	agg := func(instants []float64) float64 {
+		t.Helper()
+		a, _ := imbAnalyzer()
+		rows := make([]domain.ReplicaMetrics, 0, len(instants))
+		for i, k := range instants {
+			rm := imbRow("pod-"+string(rune('a'+i)), "v", 0.95, 20, 2000, 500, 1.0)
+			rm.KvUsageInstant = k
+			rows = append(rows, rm)
+		}
+		states := []domain.VariantReplicaState{{VariantName: "v", AcceleratorName: "H200", CurrentReplicas: len(rows), GPUsPerReplica: 1}}
+		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.TotalDemand
+	}
+	even := agg([]float64{0.9, 0.9, 0.9, 0.9})
+	dipped := agg([]float64{0.9, 0.2, 0.2, 0.2})
+	t.Logf("four pods peaking at 0.95, 20 queued each: instants 0.9 everywhere %.0f; 0.9/0.2/0.2/0.2 %.0f", even, dipped)
+	if dipped != even {
+		t.Errorf("queued replicas whose instant KV dipped were charged at the dip: demand %.0f, %.0f with the instants even", dipped, even)
+	}
+
+	states := []domain.VariantReplicaState{
+		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	prefill := func(instants []float64) float64 {
+		t.Helper()
+		a, _ := imbAnalyzer()
+		rows := []domain.ReplicaMetrics{
+			imbRow("d0", "decode-v", 0.25, 0, 6000, 1000, 0.5),
+			imbRow("d1", "decode-v", 0.25, 0, 6000, 1000, 0.5),
+		}
+		for i, k := range instants {
+			rm := imbRow("p"+string(rune('0'+i)), "prefill-v", 0.6, 30, 6000, 1, 1.0)
+			rm.KvUsageInstant = k
+			rows = append(rows, rm)
+		}
+		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.RoleDemand[domain.RolePrefill]
+	}
+	pEven := prefill([]float64{0.4, 0.4, 0.4, 0.4})
+	pDipped := prefill([]float64{0.4, 0.1, 0.1, 0.1})
+	t.Logf("P/D prefill, four pods peaking at 0.6 with 30 queued: instants 0.4 everywhere %.0f; 0.4/0.1/0.1/0.1 %.0f", pEven, pDipped)
+	if pDipped != pEven {
+		t.Errorf("queued prefill replicas between batches were charged at their instant KV: demand %.0f, %.0f with the instants even", pDipped, pEven)
+	}
 }
