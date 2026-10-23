@@ -143,14 +143,41 @@ func TestImbalanceReplicaIdleMatchesBalance(t *testing.T) {
 	}
 }
 
-// imbFloorFleet is an aggregated variant of four replicas whose measured mu is
-// about 1 req/s, learned over four saturated cycles a minute apart, and the
-// analyzer handed back for one more cycle at lambda 2 -- half the fleet's
-// throughput.
+// imbCycle is the analyzer's cycle in these specs (GLOBAL_OPT_INTERVAL).
+const imbCycle = 15 * time.Second
+
+// imbSettle runs in every imbCycle until a replica that reads idle on every
+// row has done so for IdleSettledFor, and returns the last result: the
+// steady state of a fleet that stays as in describes.
+func imbSettle(t *testing.T, a *SaturationAnalyzer, clock *time.Time, in domain.AnalyzerInput) *domain.AnalyzerResult {
+	t.Helper()
+	start := *clock
+	for {
+		r, err := a.Analyze(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if clock.Sub(start) >= IdleSettledFor {
+			return r
+		}
+		*clock = clock.Add(imbCycle)
+	}
+}
+
+// imbFloorFleet is an aggregated variant of replicas whose measured mu is
+// about 1 req/s, learned on four replicas over four saturated cycles a minute
+// apart, and the analyzer handed rows at lambda: for one cycle, or, with
+// settle, until an idle replica among them has read idle for IdleSettledFor.
 func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64) {
 	t.Helper()
+	return imbFloorFleetAt(t, rows, 2.0, true)
+}
+
+// imbFloorFleetAt is imbFloorFleet at an arrival rate, settled or not.
+func imbFloorFleetAt(t *testing.T, rows []domain.ReplicaMetrics, lambda float64, settle bool) (implied float64) {
+	t.Helper()
 	states := []domain.VariantReplicaState{
-		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: len(rows), GPUsPerReplica: 1},
 	}
 	a, clock := imbAnalyzer()
 	for i := 0; i < 4; i++ {
@@ -159,7 +186,10 @@ func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64)
 			// Distinct readings per cycle, so each counts as a sample.
 			seed = append(seed, imbRow(p, "agg-v", 0.95, 10, 1000, 1000, []float64{1.0, 1.02, 0.98, 1.01}[i]))
 		}
-		in := makeAnalyzerInput(seed, states)
+		seedStates := []domain.VariantReplicaState{
+			{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+		}
+		in := makeAnalyzerInput(seed, seedStates)
 		in.ArrivalRate = 4.0
 		if _, err := a.Analyze(context.Background(), in); err != nil {
 			t.Fatal(err)
@@ -167,10 +197,15 @@ func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64)
 		*clock = clock.Add(ThroughputSampleSpacing + time.Second)
 	}
 	in := makeAnalyzerInput(rows, states)
-	in.ArrivalRate = 2.0
-	r, err := a.Analyze(context.Background(), in)
-	if err != nil {
-		t.Fatal(err)
+	in.ArrivalRate = lambda
+	var r *domain.AnalyzerResult
+	if settle {
+		r = imbSettle(t, a, clock, in)
+	} else {
+		var err error
+		if r, err = a.Analyze(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return r.TotalDemand / (0.85 * imbVariant(t, r, "agg-v").PerReplicaCapacity)
 }
@@ -214,18 +249,20 @@ func TestImbalanceFloorBacklogLeavesAPinnedQueueOut(t *testing.T) {
 	}
 }
 
-// A queue the router pinned on one prefill replica, while its siblings idle,
-// is not charged as resident prompt: only that engine drains it. With every
-// prefill replica busy it is, in full.
+// A queue the router pinned on one prefill replica, while its siblings have
+// idled for long enough, is not charged as resident prompt as far as their
+// room goes: only that engine drains it. With every prefill replica busy it
+// is, in full.
 func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 	states := []domain.VariantReplicaState{
 		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
 		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
 	}
 	const prompt = 6000.0
-	run := func(fracs []float64, queues []int) float64 {
+	// run returns prefill's demand and its per-replica capacity.
+	run := func(fracs []float64, queues []int) (float64, float64) {
 		t.Helper()
-		a, _ := imbAnalyzer()
+		a, clock := imbAnalyzer()
 		rows := make([]domain.ReplicaMetrics, 0, 2+len(fracs))
 		rows = append(rows,
 			imbRow("decode-0", "decode-v", 0.25, 0, prompt, 1000, 0.5),
@@ -234,11 +271,8 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 		for i := range fracs {
 			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, 1.0))
 		}
-		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return r.RoleDemand[domain.RolePrefill]
+		r := imbSettle(t, a, clock, makeAnalyzerInput(rows, states))
+		return r.RoleDemand[domain.RolePrefill], imbVariant(t, r, "prefill-v").PerReplicaCapacity
 	}
 	resident := func(fracs []float64) float64 {
 		var s float64
@@ -248,18 +282,21 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 		return s
 	}
 	hot := []float64{0.20, 0, 0, 0}
-	pinned := run(hot, []int{439, 0, 0, 0})
-	none := run(hot, []int{0, 0, 0, 0})
+	pinned, p := run(hot, []int{439, 0, 0, 0})
+	none, _ := run(hot, []int{0, 0, 0, 0})
 	busy := []float64{0.35, 0.35, 0.35, 0.35}
-	busyQ := run(busy, []int{100, 100, 100, 100})
-	busyQ0 := run(busy, []int{0, 0, 0, 0})
-	amongBusy := run(busy, []int{439, 0, 0, 0})
-	t.Logf("prefill demand: 439 queued on one, three idle %.0f; no queue %.0f", pinned, none)
+	busyQ, _ := run(busy, []int{100, 100, 100, 100})
+	busyQ0, _ := run(busy, []int{0, 0, 0, 0})
+	amongBusy, _ := run(busy, []int{439, 0, 0, 0})
+	t.Logf("prefill demand: 439 queued on one, three idle %.0f (per replica %.0f); no queue %.0f", pinned, p, none)
 	t.Logf("prefill demand: every replica 0.35 KV, queue 100 each %.0f, queue 0 %.0f; 439 on one beside busy siblings %.0f",
 		busyQ, busyQ0, amongBusy)
-	if pinned != none {
-		t.Errorf("439 requests pinned on one prefill replica beside three idle ones priced prefill at %.0f, %.0f without them",
-			pinned, none)
+	// The three idle siblings, idle for long enough, have room for three
+	// replicas' capacity between them; that much of the queue is the
+	// router's, and the rest is still charged.
+	if want := none + max(439*prompt-3*p, 0); math.Abs(pinned-want) > 2 {
+		t.Errorf("439 requests pinned on one prefill replica beside three idle ones priced prefill at %.0f, want %.0f: %.0f without them plus the queue less the idle room",
+			pinned, want, none)
 	}
 	if want := resident(busy) + 4*100*prompt; busyQ != want {
 		t.Errorf("every prefill replica busy and queued 100: demand %.0f, want the resident KV plus the whole queue, %.0f", busyQ, want)

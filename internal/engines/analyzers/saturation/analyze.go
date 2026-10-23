@@ -151,14 +151,14 @@ type cycle struct {
 	rolesByVariant  map[string]string
 	accelByVariant  map[string]string
 	decodeSaturated bool
-	// idleRoles is the roles with an idle Ready replica this cycle
-	// (rolesWithIdleReplica). A replica's own waiting queue is not the
-	// role's to size for while its role is in it.
-	idleRoles map[string]bool
 	// busyNowRoles is the roles with a Ready replica busy NOW by its
 	// instant KV (rolesBusyNow). A sibling idle now is charged its instant
 	// KV, not its one-minute peak, while its role is in it.
 	busyNowRoles map[string]bool
+
+	// priceReplicas: per role, the room its settled-idle replicas offer
+	// (routeQueuesToIdleRoom), found once every row is priced.
+	idleRoom map[string]idleRoom
 
 	// observeFleetShape: the one shape the fleet is serving, and the tracker's
 	// view of whether it just changed.
@@ -269,7 +269,6 @@ func (a *SaturationAnalyzer) newCycle(
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
 	// Decided over every row before any is priced, for the same reason.
-	c.idleRoles = rolesWithIdleReplica(input.ReplicaMetrics, c.rolesByVariant)
 	c.busyNowRoles = rolesBusyNow(input.ReplicaMetrics, c.rolesByVariant)
 
 	return c
@@ -471,6 +470,7 @@ func (c *cycle) fitLines() {
 // service rate the floor will divide the arrival rate by.
 func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, error) {
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
+	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, rm := range c.input.ReplicaMetrics {
 		select {
@@ -553,7 +553,6 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
-				queueRoutable: c.idleRoles[domain.CanonicalRole(role)],
 				kvFromInstant: kvFromInstant(rm, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.logger)
 		if rc != nil {
@@ -569,8 +568,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
 			replicaCapacities = append(replicaCapacities, *rc)
+			pricedRows = append(pricedRows, rm)
 		}
 	}
+	// A replica's queue is charged in full above; how much of it a sibling's
+	// room may take needs every row priced (idle_room.go).
+	c.idleRoom = c.a.routeQueuesToIdleRoom(c.input.Namespace, c.input.ModelID,
+		replicaCapacities, pricedRows, c.rolesByVariant, c.logger)
 	return replicaCapacities, nil
 }
 

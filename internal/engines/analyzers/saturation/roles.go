@@ -91,19 +91,18 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 }
 
 // idleKvUsage is the busiest-rank KV utilization below which a Ready replica
-// with nothing waiting is idle: the router has a replica of the role it could
-// hand work to, with room for it. The number and the rule in replicaIdle are
-// the load-imbalance diagnostic's (internal/signals/balance: IdleKvUsage =
-// 0.30, busiest-rank KV under it and nothing waiting). Keep the two identical:
-// a replica the analyzer calls idle is one that metric reports as idle, so
-// whatever the analyzer stops counting because of it, the metric shows.
+// with nothing waiting reads idle on one row: the load-imbalance diagnostic's
+// number (internal/signals/balance: IdleKvUsage = 0.30, busiest-rank KV under
+// it and nothing waiting). One row is not enough for the analyzer to act on;
+// routeQueuesToIdleRoom says what more it needs.
 const idleKvUsage = 0.30
 
-// replicaIdle reports whether rm is a Ready replica the router could hand
-// work to: its busiest engine rank under idleKvUsage and nothing waiting.
+// replicaIdle reports whether rm reads idle on this cycle's row: Ready, its
+// busiest engine rank under idleKvUsage and nothing waiting.
 //
-// Both figures are one-minute peaks (the collector's max_over_time), so an
-// idle replica was idle for the whole minute, not at one scrape. The KV is the
+// Both figures are one-minute peaks (the collector's max_over_time), but a
+// replica Ready for less than that minute has a peak over the seconds since it
+// came up, so one idle row is not an idle minute (routeQueuesToIdleRoom). The KV is the
 // larger of the utilization the row reports and its busiest-rank tokens over
 // its cache: in production the two are the same number (TokensInUse is
 // KvCacheUsage times the cache), and where a row carries only one of them the
@@ -123,36 +122,15 @@ func replicaIdle(rm domain.ReplicaMetrics) bool {
 	return kv < idleKvUsage
 }
 
-// rolesWithIdleReplica is the set of roles (domain.CanonicalRole) with at least
-// one idle Ready replica this cycle (replicaIdle). While a role is in it, a
-// queue standing on one of its replicas is the router's to move, not a
-// shortfall of the role: the router has a replica with room it could hand
-// those requests to. A role busy on every replica is not in it, and its queues
-// count in full. Bridges count, as in roleSaturated: a Ready warm-pool Pod
-// lent to the role is routed to like one of its own.
-func rolesWithIdleReplica(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string) map[string]bool {
-	out := map[string]bool{}
-	for _, rm := range metrics {
-		if replicaIdle(rm) {
-			out[domain.CanonicalRole(rolesByVariant[rm.VariantName])] = true
-		}
-	}
-	return out
-}
-
 // replicaRouting is what the cycle's routing says about how one replica's
-// demand is charged. Built per row in priceReplicas from what newCycle decided
-// over every row, since a replica cannot tell from its own row whether a
-// sibling had room.
+// resident KV is charged. Built per row in priceReplicas from what newCycle
+// decided over every row, since a replica cannot tell from its own row
+// whether a sibling is busy. Its waiting queue is charged in full here and
+// moved to an idle sibling's room, if at all, once every row is priced
+// (routeQueuesToIdleRoom).
 type replicaRouting struct {
-	// queueRoutable is set while the replica's role has an idle Ready
-	// replica (rolesWithIdleReplica). The replica's own waiting queue is then
-	// charged neither as residency nor as backlog: only this engine drains
-	// it, and a replica added cannot take it. False leaves the queue charged
-	// in full, as on a role busy everywhere.
-	queueRoutable bool
 	// kvFromInstant is set when the replica's resident KV is charged at its
-	// instant reading rather than its one-minute peak (residentNowCharge):
+	// instant reading rather than its one-minute peak (residentCharge):
 	// it is Ready, idle NOW (KvUsageInstant under idleKvUsage) while a
 	// sibling of its role is busy now. Its peak is load that has moved to
 	// that sibling, and the sibling's own reading already counts it.

@@ -85,6 +85,10 @@ type settleReading struct {
 // k2Settle).
 type settleMemo struct {
 	pods map[string]settleReading
+	// idle is each replica's current run of idle readings, for the queue
+	// routing's settled-idle test (routeQueuesToIdleRoom). Here because it is
+	// the same per-model, per-replica memory and is swept with it.
+	idle map[string]idleRun
 	seen time.Time
 }
 

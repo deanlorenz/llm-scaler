@@ -201,29 +201,6 @@ func waitingQueueDemand(rm domain.ReplicaMetrics, role string) int64 {
 	return int64(demand)
 }
 
-// localQueueCharge is the residency charge a replica's own waiting queue puts
-// on its demand: waitingQueueDemand, or zero while the replica's role has an
-// idle Ready replica (replicaRouting.queueRoutable).
-//
-// The queue sits in this one engine and only it drains it; a replica added
-// cannot take it. While the router has an idle replica it could have handed
-// those requests to, the queue is the router's imbalance, which the
-// load-imbalance metrics report, not demand the role is short of. Charged,
-// it ordered replicas the fleet had already: measured in the imbalance audit,
-// 439 requests on one of four prefill pods with three idle priced prefill at
-// 2.87M tokens against 232k without the queue -- util 0.77, 3.63 replicas
-// implied while three sat empty. The tokens the replica holds are still
-// charged in full; only the queue's projected footprint is left out.
-//
-// With no idle replica the queue is charged as before: every replica of the
-// role is busy, the fleet is short, and the queue is the demand that says so.
-func localQueueCharge(rm domain.ReplicaMetrics, role string, routing replicaRouting) int64 {
-	if routing.queueRoutable {
-		return 0
-	}
-	return waitingQueueDemand(rm, role)
-}
-
 // residentCharge is the resident KV a replica's demand is charged for, in
 // tokens of capacityTokens: peakTokens -- the collector's one-minute peak --
 // or, where routing says the peak has moved to a sibling

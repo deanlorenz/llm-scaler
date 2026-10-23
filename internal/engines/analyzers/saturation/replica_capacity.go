@@ -77,12 +77,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 
 	// Compute demand: tokens already resident in KV cache plus the role-aware
-	// footprint of requests still waiting in the local engine queue -- unless
-	// the router could have placed them elsewhere (localQueueCharge).
+	// footprint of requests still waiting in the local engine queue, in full;
+	// a sibling idle for long enough may take some of it (routeQueuesToIdleRoom).
 	// The resident half is the one-minute peak, or the instant reading where
 	// that peak is load the router has since moved to a sibling
 	// (residentCharge).
-	localQueueDemand := localQueueCharge(rm, role, routing)
+	localQueueDemand := waitingQueueDemand(rm, role)
 	residentDemand := residentCharge(rm, rm.TokensInUse, rm.TotalKvCapacityTokens, routing)
 	replicaDemand := residentDemand + localQueueDemand
 
@@ -354,7 +354,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
-		"queueRoutable", routing.queueRoutable,
 		"residentDemand", residentDemand, "kvFromInstant", routing.kvFromInstant, "kvUsageInstant", rm.KvUsageInstant,
 		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
 		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
@@ -416,7 +415,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		TokensInUse:                 rm.TokensInUse,
 		QueueLength:                 rm.QueueLength,
 		LocalQueueDemand:            localQueueDemand,
-		QueueRoutable:               routing.queueRoutable,
 		TotalKvCapacityTokens:       rm.TotalKvCapacityTokens,
 		MemoryBoundCapacity:         k1,
 		ComputeBoundCapacity:        k2,
@@ -505,7 +503,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	// per-request charge lowers the queue depth at which that happens. Tracked
 	// separately; fixing it means pairing the fallback's demand and capacity units,
 	// not adjusting this line.
-	localQueueDemand := localQueueCharge(rm, role, routing)
+	localQueueDemand := waitingQueueDemand(rm, role)
 	replicaDemand := kvUsageDemand + localQueueDemand
 
 	logger.V(logging.DEFAULT).Info("replica-capacity-store-fallback",
@@ -514,7 +512,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		"storeEffectiveCapacity", rec.EffectiveCapacity, "storeLearnedFrom", rec.LearnedFrom,
 		"kvCacheUsagePct", rm.KvCacheUsage, "effectiveCapacity", effectiveCapacity,
 		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
-		"queueRoutable", routing.queueRoutable, "kvFromInstant", routing.kvFromInstant)
+		"kvFromInstant", routing.kvFromInstant)
 
 	return &capacity.ReplicaCapacity{
 		PodName:               rm.PodName,
@@ -523,7 +521,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		TokensInUse:           replicaDemand,
 		QueueLength:           rm.QueueLength,
 		LocalQueueDemand:      localQueueDemand,
-		QueueRoutable:         routing.queueRoutable,
 		TotalKvCapacityTokens: effectiveCapacity, // synthetic: store-derived
 		MemoryBoundCapacity:   effectiveCapacity,
 		ComputeBoundCapacity:  effectiveCapacity,
