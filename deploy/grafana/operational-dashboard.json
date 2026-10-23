@@ -2698,23 +2698,23 @@
           },
           "targets": [
             {
-              "expr": "max by (model_name, role) (wva_load_kv_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
-              "legendFormat": "{{model_name}} {{role}} KV max/mean",
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_kv_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} KV max/mean",
               "refId": "A"
             },
             {
-              "expr": "max by (model_name, role) (wva_load_queue_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
-              "legendFormat": "{{model_name}} {{role}} queue max/mean",
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_queue_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} queue max/mean",
               "refId": "B"
             },
             {
-              "expr": "max by (model_name, role) (wva_load_idle_replicas_while_saturated{$namespace_label=~\"$namespace\"})",
-              "legendFormat": "{{model_name}} {{role}} idle while saturated",
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_idle_replicas_while_saturated{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} idle while saturated",
               "refId": "C"
             },
             {
-              "expr": "max by (model_name, role) (wva_load_imbalanced{$namespace_label=~\"$namespace\"})",
-              "legendFormat": "{{model_name}} {{role}} imbalanced",
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_imbalanced{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} imbalanced",
               "refId": "D"
             }
           ],

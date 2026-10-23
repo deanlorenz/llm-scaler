@@ -47,3 +47,43 @@ tests:
       - eval_time: 19m
         alertname: WVALoadImbalanced
         exp_alerts: []
+
+  # 3. Review r1: a persistent imbalance whose gauge dips for one sample
+  #    every 13 minutes. Without keep_firing_for it paged at 11m, resolved
+  #    at 12m and paged again at 24m. It stays firing.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m4",role="prefill",namespace="wva",pod="wva-a"}'
+        values: '1x11 0 1x11 0 1x11'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 12m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 18m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 25m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+
+  # 4. An imbalance that has cleared resolves once keep_firing_for (15m)
+  #    has passed since the gauge last read 1 (at 11m).
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m5",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x11 0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m5, role: decode}
+      - eval_time: 30m
+        alertname: WVALoadImbalanced
+        exp_alerts: []

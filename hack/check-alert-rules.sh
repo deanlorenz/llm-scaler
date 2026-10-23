@@ -26,7 +26,8 @@
 #      refusing requests in another namespace pages neither.
 #      load-imbalance-alerts: a role kept imbalanced for 10 minutes pages
 #      once per model and role, from two controller pods too; one that
-#      clears or flips inside the window does not.
+#      clears or flips inside the window does not; a dip does not resolve a
+#      firing page, and a cleared one resolves after keep_firing_for.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.

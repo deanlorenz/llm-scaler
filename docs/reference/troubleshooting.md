@@ -368,8 +368,11 @@ role has.
 
 The router (EPP) picks the replica for each request. When its scorers keep
 choosing one replica, that replica fills and queues while its siblings idle.
-A replica count does not fix this: new replicas are routed to no more than
-the idle ones are. The usual cause is the role's scheduling profile, where
+A replica count is unlikely to fix this: the warning needs an idle replica
+that has been Ready for at least 2 minutes, so the role already has capacity
+the router is not using, and new replicas are routed to no more than the idle
+ones are. A scale-up in progress does not raise it: a replica Ready for less
+than 2 minutes is never counted idle. The usual cause is the role's scheduling profile, where
 the largest weight wins ties it should not. With `prefix-cache-scorer: 3`
 against `queue-scorer: 2`, the replica that saw a prefix gets the request
 however busy it is. One measured prefill fleet held 439 queued requests on one
@@ -399,6 +402,10 @@ replica while three of its four sat idle.
 
 4. Change one weight, restart the router, and measure the spread again over
    repeated runs. No weight set is known to be right for every workload.
+   **Restarting the router drops traffic**: it runs as one replica with the
+   `Recreate` strategy, so requests fail for 10 to 30 s while it restarts
+   ([changing router configuration](router-configuration.md#changing-router-configuration)).
+   Do it in a quiet window, not in the middle of the incident that paged you.
 
 What the scaling manager does meanwhile: capacity is learned per replica from
 that replica's own readings. But a deep queue pinned on one replica still

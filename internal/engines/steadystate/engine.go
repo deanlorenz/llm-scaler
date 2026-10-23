@@ -306,6 +306,9 @@ type Engine struct {
 	// one replica saturated beside an idle one (observeLoadBalance). Built on
 	// first use.
 	loadBalance *balance.Tracker
+	// loadBalanceNow is the clock observeLoadBalance reads; nil is time.Now.
+	// A test sets it to step cycles without waiting for them.
+	loadBalanceNow func() time.Time
 }
 
 // NewEngine creates a new instance of the saturation engine.
@@ -1524,6 +1527,9 @@ func (e *Engine) optimizeV2(
 		if err != nil {
 			msg := "Model data preparation failed"
 			logger.Error(err, msg, "modelID", modelID)
+			// Nothing measured the load this cycle: drop the series rather
+			// than leave the last value, a page included, standing for it.
+			e.forgetLoadBalance(namespace, modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
 			reportSignalReason(namespace, modelID, nil)

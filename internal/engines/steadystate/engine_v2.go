@@ -149,6 +149,12 @@ func (e *Engine) runAnalyzers(
 	// e.g. unit tests, in which case the build step is a no-op join).
 	metaByVariant := metadataByVariant(variantMetadata)
 
+	// Observe only: how evenly the router loads each role (load_balance.go).
+	// Before the analyzers, so a failing analyzer does not leave the series at
+	// a value from a cycle that no longer stands: the rows are this cycle's
+	// whatever the analysis makes of them.
+	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates, config.QueueLengthThreshold)
+
 	// Run saturation analyzer (always needed for PerReplicaCapacity).
 	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
@@ -156,8 +162,6 @@ func (e *Engine) runAnalyzers(
 		return nil, err
 	}
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	// Observe only: how evenly the router loads each role (load_balance.go).
-	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates, config.QueueLengthThreshold)
 
 	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
 	// reports demand and capacity only: the engine applies the thresholds

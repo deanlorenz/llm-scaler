@@ -13,12 +13,13 @@ package balance
 import (
 	"math"
 	"sort"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// Thresholds that classify one replica. They are fractions of one engine's KV
-// cache, read on the replica's busiest engine rank
+// Thresholds that classify one replica. The KV figures are fractions of one
+// engine's KV cache, read on the replica's busiest engine rank
 // (domain.ReplicaMetrics.BusiestRankKvUsage), which for a pod of one rank is
 // the pod's own utilization.
 const (
@@ -28,10 +29,23 @@ const (
 	// IdleKvUsage is the KV utilization below which a replica with nothing
 	// waiting is idle.
 	IdleKvUsage = 0.30
-	// SustainCycles is how many consecutive cycles a role must read
-	// imbalanced before it is reported as imbalanced (Reading.Sustained), so
-	// that one cycle's burst does not warn.
-	SustainCycles = 2
+	// IdleAfterReady is how long a replica must have been Ready before it can
+	// read idle. A replica that has just passed readiness has had no time to
+	// receive work: every scale-up of a saturated role would otherwise read as
+	// a saturated replica beside an idle one. The KV figure is a one-minute
+	// peak, so this covers that window and a minute for the router to fill
+	// the replica. A replica whose Ready time is unknown is not idle either.
+	IdleAfterReady = 2 * time.Minute
+	// SustainFor is how long a role must read imbalanced, on every cycle,
+	// before it is reported as imbalanced (Reading.Sustained). It exceeds the
+	// one-minute window the KV and queue peaks are read over, so one burst,
+	// which stays in that window for a minute, does not warn.
+	SustainFor = 2 * time.Minute
+	// ClearAfter is how long a role reported imbalanced must read balanced,
+	// on every cycle, before the report clears. One cycle on which the
+	// saturated replica's peak dips under SaturatedKvUsage does not clear it,
+	// so a persistent imbalance does not flap the gauge the alert reads.
+	ClearAfter = 2 * time.Minute
 )
 
 // Distribution is one role's load spread over its ready replicas in one cycle.
@@ -59,11 +73,15 @@ type Distribution struct {
 	// holds requests waiting for their remote KV, so decode is judged on KV
 	// alone.
 	Saturated int
-	// Idle counts ready replicas under IdleKvUsage with nothing waiting.
+	// Idle counts ready replicas under IdleKvUsage with nothing waiting that
+	// have been Ready for at least IdleAfterReady.
 	Idle int
 
 	// BusiestPod and IdlePods name the replicas behind the verdict, for the
-	// warning line.
+	// warning line. BusiestPod is ranked by the signal that judges the role
+	// saturated: a saturated replica before one that is not, then, on prefill
+	// and aggregated roles, the deepest busiest-rank queue, then the highest
+	// KV. It is never an idle replica, and is empty when every replica is idle.
 	BusiestPod string
 	IdlePods   []string
 }
@@ -102,25 +120,48 @@ func maxToMean(maxV, mean float64, n int) (float64, bool) {
 	return maxV / mean, true
 }
 
+// busiestKey orders replicas for Distribution.BusiestPod: compared field by
+// field, larger is busier.
+type busiestKey struct {
+	saturated bool
+	queue     int
+	kv        float64
+}
+
+func (k busiestKey) above(o busiestKey) bool {
+	if k.saturated != o.saturated {
+		return k.saturated
+	}
+	if k.queue != o.queue {
+		return k.queue > o.queue
+	}
+	return k.kv > o.kv
+}
+
 // Measure computes the distribution of every role that has a ready replica
-// among rows. rolesByVariant maps a variant to its role as discovery recorded
-// it; a variant it does not name is read as aggregated (domain.RoleBoth), as
-// domain.CanonicalRole reads an empty role. queueThreshold is the policy's
-// queueLengthThreshold; at or below zero no replica is saturated on its queue.
+// among rows, as of now. rolesByVariant maps a variant to its role as
+// discovery recorded it; a variant it does not name is read as aggregated
+// (domain.RoleBoth), as domain.CanonicalRole reads an empty role.
+// queueThreshold is the policy's queueLengthThreshold; at or below zero no
+// replica is saturated on its queue.
 //
 // A replica that is not Ready is left out: nothing routes to it, so its load
-// says nothing about routing. A KV reading that is not a finite fraction is
-// read as zero, and a negative queue as empty.
-func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64) map[string]Distribution {
+// says nothing about routing. So is one whose KV reading is not a finite,
+// non-negative number: an unknown load is neither saturated nor idle. A KV
+// reading over 1 is read as 1, and a negative queue as empty.
+func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64, now time.Time) map[string]Distribution {
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
-	busiestKv := map[string]float64{}
+	busiest := map[string]busiestKey{}
 	for _, rm := range rows {
 		if !rm.Ready {
 			continue
 		}
+		kv, ok := fraction(rm.BusiestRankKvUsage())
+		if !ok {
+			continue
+		}
 		role := domain.CanonicalRole(rolesByVariant[rm.VariantName])
-		kv := fraction(rm.BusiestRankKvUsage())
 		queue := float64(max(rm.QueueLength, 0))
 		d := out[role]
 		d.Role = role
@@ -131,15 +172,22 @@ func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 		s.kv += kv
 		s.queue += queue
 		sums[role] = s
-		if d.BusiestPod == "" || kv > busiestKv[role] {
-			d.BusiestPod, busiestKv[role] = rm.PodName, kv
-		}
+		isSaturated := saturated(rm, role, kv, queueThreshold)
 		switch {
-		case saturated(rm, role, kv, queueThreshold):
+		case isSaturated:
 			d.Saturated++
-		case kv < IdleKvUsage && rm.QueueLength <= 0:
+		case kv < IdleKvUsage && rm.QueueLength <= 0 && readyLongEnough(rm, now):
 			d.Idle++
 			d.IdlePods = append(d.IdlePods, rm.PodName)
+			out[role] = d
+			continue // an idle replica is never the busiest
+		}
+		k := busiestKey{saturated: isSaturated, kv: kv}
+		if role != domain.RoleDecode {
+			k.queue = max(rm.BusiestRankQueue(), 0)
+		}
+		if d.BusiestPod == "" || k.above(busiest[role]) {
+			d.BusiestPod, busiest[role] = rm.PodName, k
 		}
 		out[role] = d
 	}
@@ -152,6 +200,12 @@ func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 	return out
 }
 
+// readyLongEnough reports whether the replica has been Ready for at least
+// IdleAfterReady. An unknown Ready time is not long enough.
+func readyLongEnough(rm domain.ReplicaMetrics, now time.Time) bool {
+	return !rm.ReadySince.IsZero() && now.Sub(rm.ReadySince) >= IdleAfterReady
+}
+
 func saturated(rm domain.ReplicaMetrics, role string, kv, queueThreshold float64) bool {
 	if kv >= SaturatedKvUsage {
 		return true
@@ -162,9 +216,11 @@ func saturated(rm domain.ReplicaMetrics, role string, kv, queueThreshold float64
 	return float64(rm.BusiestRankQueue()) >= queueThreshold
 }
 
-func fraction(v float64) float64 {
+// fraction is v clamped to at most 1, and false when v is not a finite,
+// non-negative number.
+func fraction(v float64) (float64, bool) {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-		return 0
+		return 0, false
 	}
-	return min(v, 1)
+	return min(v, 1), true
 }
