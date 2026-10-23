@@ -1404,8 +1404,8 @@ Work down the list in order.
    - `swinging` (`wva_utilization_share_swinging == 1`): the role reversed
      direction `stabilization.swingReversals` times (three by default)
      within the swing window (a transfer called off on a reversal counts as
-     one) and is planned on its mean need, so it may look short and still
-     not receive. The controller logs
+     the move it would have made) and is planned on its mean need, so it
+     may look short and still not receive. The controller logs
      `Utilization share: planned on its mean need` with the role,
      `meanNeedGPUs`, `currentNeedGPUs`, the `flappingWindow` and
      `swingReversals` when the rule takes a role, and

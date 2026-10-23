@@ -1145,7 +1145,7 @@ func (st *utilizationShareState) reportSwinging(logger logr.Logger, key string, 
 			continue
 		}
 		n := plan.SwingNeeds[role]
-		logger.Info("Utilization share: planned on its mean need -- its transfers changed direction swingReversals times "+
+		logger.Info("Utilization share: planned on its mean need -- its transfers, landed or called off, changed direction swingReversals times "+
 			"within the flappingWindow -- until its need stays more than a quarter from that mean for longer than a move "+
 			"takes and than any earlier swing, or the window passes",
 			"role", role, "meanNeedGPUs", fmt.Sprintf("%.2f", n.Mean), "currentNeedGPUs", fmt.Sprintf("%.2f", n.Current),

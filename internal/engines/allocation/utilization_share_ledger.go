@@ -283,10 +283,10 @@ type ShareLedger struct {
 	// receiving at all.
 	noPair map[sharePair]time.Time
 	moves  map[string][]shareMove
-	// cancels is when each role's transfers were cancelled on a clear
-	// reversal, one entry per cycle: each counts toward a swing as one change
-	// of direction (rederive), and holds nothing.
-	cancels    map[string][]time.Time
+	// cancels are the moves each role's cancelled transfers would have made,
+	// one per cycle and direction: each counts toward a swing as the move it
+	// was (rederive), and holds nothing.
+	cancels    map[string][]shareMove
 	swingUntil map[string]time.Time
 	// stepped marks the roles whose need has stayed on one side of its mean
 	// for longer than a move takes (RecordNeeds): a step, not a swing.
@@ -341,7 +341,7 @@ func NewShareLedger() *ShareLedger {
 		lastGot:     map[string]time.Time{},
 		noPair:      map[sharePair]time.Time{},
 		moves:       map[string][]shareMove{},
-		cancels:     map[string][]time.Time{},
+		cancels:     map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
 		stepped:     map[string]bool{},
 		needs:       map[string][]shareNeedSample{},
@@ -564,20 +564,27 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	// minutes. Only the cancelled pair is held, so start and cancel cannot
 	// loop.
 	//
-	// The cancel itself is one change of direction toward a swing
-	// (recordCancel), of the SwingReversals a swing takes: a load that
-	// swaps faster than the release window has every transfer cancelled
-	// before it moves anything, and counting only the moves that land, it
-	// never reached a swing -- a transfer started and was called off at
-	// every swap.
+	// The cancel still counts toward a swing as the move it would have been
+	// (recordCancel): a load that swaps faster than the release window has
+	// every transfer cancelled before it moves anything, and counting only
+	// the moves that land, it never reached a swing -- a transfer started and
+	// was called off at every swap. It counts in its direction, so it is a
+	// change of direction only when it reverses the role's move before it:
+	// counted as one whatever its direction, a single wobble called off made
+	// a single swap back a swing. And only a transfer that recorded a move
+	// counts: a spare return (Entitled) has no counterpart, and counted, a
+	// bursty model whose returns were called off as its load came back was
+	// planned on its mean without having traded a GPU with anyone.
 	rc := t.Receiver
 	if rc == "" {
 		rc = l.setReceiver(t.SetID)
 	}
 	l.Forget(t.ID, tm)
-	l.recordCancel(t.Donor, now, tm)
-	if rc != "" {
-		l.recordCancel(rc, now, tm)
+	if !t.Entitled {
+		l.recordCancel(t.Donor, false, now, tm)
+		if rc != "" {
+			l.recordCancel(rc, true, now, tm)
+		}
 	}
 	if !t.Entitled && rc != "" {
 		l.noPair[sharePair{t.Donor, rc}] = now.Add(tm.ReversalHold)
@@ -914,16 +921,17 @@ func (l *ShareLedger) recordMove(role string, received bool, id string, now time
 	l.rederive(role, tm)
 }
 
-// recordCancel notes that a transfer of role was cancelled on a clear
-// reversal: one change of direction toward a swing, once per cycle however
-// many transfers went (a set's contributors go with its primary).
-func (l *ShareLedger) recordCancel(role string, now time.Time, tm ShareTimings) {
-	cs := slices.DeleteFunc(l.cancels[role], func(at time.Time) bool { return now.Sub(at) > 2*tm.SwingWindow })
-	if n := len(cs); n > 0 && cs[n-1].Equal(now) {
+// recordCancel notes that a transfer of role, which would have had it receive
+// or give, was cancelled on a clear reversal: an attempted move toward a
+// swing, once per cycle and direction however many transfers went (a set's
+// contributors go with its primary).
+func (l *ShareLedger) recordCancel(role string, received bool, now time.Time, tm ShareTimings) {
+	cs := slices.DeleteFunc(l.cancels[role], func(m shareMove) bool { return now.Sub(m.at) > 2*tm.SwingWindow })
+	if slices.ContainsFunc(cs, func(m shareMove) bool { return m.at.Equal(now) && m.received == received }) {
 		l.cancels[role] = cs
 		return
 	}
-	l.cancels[role] = append(cs, now)
+	l.cancels[role] = append(cs, shareMove{at: now, received: received})
 	l.rederive(role, tm)
 }
 
@@ -939,30 +947,28 @@ func (l *ShareLedger) unrecord(role, id string, tm ShareTimings) {
 
 // rederive recomputes role's last move each way and its swing from its moves:
 // a swing begins at a move or cancel where the changes of direction within
-// SwingWindow before it -- between consecutive moves, and one per cancel --
-// number SwingReversals (config.DefaultSwingReversals unless the policy sets
-// stabilization.swingReversals), and lasts SwingWindow.
+// SwingWindow before it -- between consecutive moves, landed or cancelled
+// (recordCancel), in time order -- number SwingReversals
+// (config.DefaultSwingReversals unless the policy sets
+// stabilization.swingReversals), and lasts SwingWindow. The last move each way
+// is of landed moves only: a cancel holds nothing.
 func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 	delete(l.lastGave, role)
 	delete(l.lastGot, role)
 	delete(l.swingUntil, role)
-	ms, cs := l.moves[role], l.cancels[role]
-	for _, m := range ms {
+	for _, m := range l.moves[role] {
 		if m.received {
 			l.lastGot[role] = m.at
 		} else {
 			l.lastGave[role] = m.at
 		}
 	}
+	ms := slices.SortedStableFunc(slices.Values(slices.Concat(l.moves[role], l.cancels[role])),
+		func(a, b shareMove) int { return a.at.Compare(b.at) })
 	reversals := func(at time.Time) int {
 		n := 0
 		for i := 1; i < len(ms) && !ms[i].at.After(at); i++ {
 			if at.Sub(ms[i-1].at) <= tm.SwingWindow && ms[i].received != ms[i-1].received {
-				n++
-			}
-		}
-		for _, c := range cs {
-			if !c.After(at) && at.Sub(c) <= tm.SwingWindow {
 				n++
 			}
 		}
@@ -978,16 +984,14 @@ func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 	for _, m := range ms {
 		mark(m.at)
 	}
-	for _, c := range cs {
-		mark(c)
-	}
 	if !until.IsZero() {
 		l.swingUntil[role] = until
 	}
 }
 
-// Swinging reports whether role is planned on its mean need now: its moves
-// changed direction SwingReversals times within the swing window, and its
+// Swinging reports whether role is planned on its mean need now: its moves,
+// landed or cancelled, changed direction SwingReversals times within the swing
+// window, and its
 // need has not since settled away from its mean for longer than a move takes
 // (stepped).
 func (l *ShareLedger) Swinging(role string, now time.Time) bool {

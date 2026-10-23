@@ -24,6 +24,7 @@ type stallCycle struct {
 	swinging  []string
 	donorPeak int
 	started   int
+	cancelled int
 	// swingNeeds is the plan's SwingNeeds: what each swinging role was
 	// planned on, and what it read.
 	swingNeeds map[string]ShareSwingNeed
@@ -140,7 +141,7 @@ func stallLoopSized(tm ShareTimings, g int, initial map[string]int, lag bool, ph
 
 		out = append(out, stallCycle{at: t, held: map[string]int{"A": held["A"], "B": held["B"]},
 			swinging: plan.Swinging, donorPeak: plan.Withheld[ShareWithheldDonorPeak], started: len(plan.Started),
-			swingNeeds: maps.Clone(plan.SwingNeeds)})
+			cancelled: len(plan.Cancelled), swingNeeds: maps.Clone(plan.SwingNeeds)})
 	}
 	return out
 }
@@ -313,7 +314,7 @@ func TestShareStepAfterASwapIsNotPlannedOnTheMean(t *testing.T) {
 // never stays on one side of its mean for a move's latency, so the swing rule
 // holds once it starts, and the transfers stop chasing each swap. Most
 // transfers it starts are called off within the release window, before
-// anything moves, and each cancel counts as a change of direction: counting
+// anything moves, and each cancel counts as the move it would have made: counting
 // only the moves that landed, the rule never started, and a transfer started
 // and was cancelled at every swap. Control: with the swing window at zero --
 // the rule off -- the same load starts more transfers. With 1-GPU replicas
@@ -350,8 +351,8 @@ func TestShareFastSwapsStayPlannedOnTheMean(t *testing.T) {
 			return swinging, cycles, started
 		}
 		swinging, cycles, started := run(tm)
-		if swinging*3 < cycles {
-			t.Errorf("%d-GPU replicas: swaps every 8 minutes were planned on the mean in %d of %d cycles, want at least a third",
+		if swinging*4 < cycles*3 {
+			t.Errorf("%d-GPU replicas: swaps every 8 minutes were planned on the mean in %d of %d cycles, want at least three quarters",
 				g, swinging, cycles)
 		}
 		off := tm
@@ -533,6 +534,65 @@ func singleSwapBack(g int) ([]stallPhase, func(need float64, held int) float64) 
 		{20 * m, stallNeeds(0.7*x, 2.9*x)}, {60 * m, stallNeeds(2.9*x, 0.65*x)}}
 	served := func(need float64, held int) float64 { return math.Min(need, 1.5*float64(held)) }
 	return phases, served
+}
+
+// A bursty model's spare returns called off do not hold its swap back. A
+// holds 3 of 4 replicas at a need of 1.7; three 5-minute dips to 0.6 each
+// start a return of its spare, called off as the load comes back. Its load
+// then goes to B for 20 minutes and comes back: one swap back, no swing. A
+// return trades no GPU with another model, yet each called-off return
+// counted as a change of direction: A was on its mean after the swap back
+// and reached 3:1 after 28 minutes, against 8m30s with the rule off. With
+// 1-GPU replicas and with whole 8-GPU nodes, B settling at 0.9 to 1.2
+// replicas (lower, the headroom spare hides it).
+func TestShareCancelledReturnsDoNotHoldASwapBack(t *testing.T) {
+	const m = time.Minute
+	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle, ReplicaStart: 240 * time.Second}, nil)
+	off := tm
+	off.SwingWindow = 0
+	for _, g := range []int{1, 8} {
+		x := float64(g)
+		initial := map[string]int{"A": 3 * g, "B": g}
+		for _, bf := range []float64{0.9, 1.0, 1.1, 1.2} {
+			name := fmt.Sprintf("%d-GPU replicas, B at %.1f", g, bf)
+			phases := make([]stallPhase, 0, 9)
+			phases = append(phases, stallPhase{60 * m, stallNeeds(1.7*x, 0.3*x)})
+			for range 3 {
+				phases = append(phases, stallPhase{5 * m, stallNeeds(0.6*x, 0.3*x)}, stallPhase{10 * m, stallNeeds(1.7*x, 0.3*x)})
+			}
+			phases = append(phases, stallPhase{20 * m, stallNeeds(0.6*x, 2.9*x)})
+			var back time.Duration
+			for _, p := range phases {
+				back += p.dur
+			}
+			phases = append(phases, stallPhase{60 * m, stallNeeds(2.9*x, bf*x)})
+			cycles := stallLoopSized(tm, g, initial, true, phases, nil)
+			cancelled, onMean := 0, 0
+			for _, c := range cycles {
+				if c.at < back {
+					cancelled += c.cancelled
+				} else if slices.Contains(c.swinging, "A") {
+					onMean++
+				}
+			}
+			if cancelled < 3 {
+				t.Fatalf("%s, setup: %d transfers called off before the swap back, want the three returns", name, cancelled)
+			}
+			free, ok := stallReached(stallLoopSized(off, g, initial, true, phases, nil), back, 3*g, g)
+			if !ok {
+				t.Fatalf("%s, control: with the swing rule off the swap back never reached 3:1", name)
+			}
+			done, reached := stallReached(cycles, back, 3*g, g)
+			if onMean > 0 {
+				t.Errorf("%s: A was planned on its mean for %d cycles after a single swap back", name, onMean)
+			}
+			if !reached || done > free {
+				t.Errorf("%s: the swap back reached 3:1 after %v (reached %v), want no later than with the rule off (%v)",
+					name, done, reached, free)
+			}
+			t.Logf("%s: %d called off before the swap back; reached 3:1 after %v, rule off %v", name, cancelled, done, free)
+		}
+	}
 }
 
 // stabilization.swingReversals sets how many changes of direction a swing

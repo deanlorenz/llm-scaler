@@ -1870,7 +1870,9 @@ replicas. Every figure is a mean of five seeds.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
    direction three times (`stabilization.swingReversals`, 2 to 20) within
    eight decide-to-serve latencies (about 96 minutes) is following load it
-   cannot catch; a transfer cancelled on a reversal counts as one change.
+   cannot catch; a transfer cancelled on a reversal counts as the move it
+   would have made, a change only when it reverses the one before, and a
+   cancelled spare return, which moves nothing between roles, not at all.
    (Two, as first written, took a single swap
    back for a swing -- counting the move that first raised the model -- and
    held both models halfway: issue #269. Moves alone never reached three for
