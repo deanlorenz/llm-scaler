@@ -1,8 +1,11 @@
 # Shared rules for the analyzers' learners
 
-- **Status:** proposed, revision 4. No code changed. It describes main
+- **Status:** proposed, revision 5. No code changed. It describes main
   73a464475 (with #272 and #281) plus the heads of #273 (3e611e3fb), #282
-  (c130c24ca, round 4) and #283 (40762ccd1); line numbers are #283's. #282's
+  (c130c24ca, round 4) and #283 (40762ccd1). Line numbers are #283's for code
+  on main or #283. Code that exists only on #273 or #282 (#273's rows, rows 5
+  and 11, [the mu choice](#the-mu-choice): `siblingYield`,
+  `MaxTokensOverCompletions`) is cited at that PR's head. #282's
   round-5 fix (the sibling yield reads every Ready full replica, queued ones
   included, and only when at least one is unqueued) was not pushed when this
   was written. Rows 5 and 11 and [the mu choice](#the-mu-choice) are re-checked
@@ -24,20 +27,24 @@
 
 ## Revision notes
 
-Four reviews each of revisions 2 and 3 (architect, statistician, SRE,
+Four reviews each of revisions 2, 3 and 4 (architect, statistician, SRE,
 skeptic). Round 1 is summarised at the end. A dash means the row was not a
-blocker that round.
+blocker that round, and nothing in it changed.
 
-| blocker | round 2 | round 3 | where |
-| --- | --- | --- | --- |
-| The harness ran on two clocks | Every wall-clock read in the analyzers moves onto one injected clock **in PR 0**. Two replays at different wall times must give identical output | `store.go`'s five wall-clock sites are listed, and the engine's calls into the store take the same clock | [2.2](#22-one-clock) |
-| The recorder sees too little | The recorder lives **inside** each analyzer; a test fails when an exported method goes unrecorded | It records at the **input boundary**: each variant's `capacity.Record` and the SLO analyzer's router latency go into the `Analyze` event, the engine's store mutations are events in the same stream, and `*capacity.Store` is in the coverage test. Nested exported calls record once. The test proves recording, not only classification | [2.4](#24-the-recorder) |
-| A mid-run snapshot is not the analyzer's state | - | A recording starts only at a controller start, and keeps its head at the cap. No mid-run snapshot. The claim that `ExportLearnedState` touches `LastUsed` was false and is removed | [2.4](#24-the-recorder) |
-| Goldens without a stated rule | Change behind a switch; off equals the parent, on moves only named outputs | One switch per named change, set on by the constructor. Committed goldens are the all-on run; the off-run compares against the base commit's goldens. Runs: all off, each alone, all on. New recordings land with base goldens first. One golden file per output. The check re-runs on PR edits | [2.5](#25-replay-and-the-golden-rule) |
-| Presence and idle | A known bit per gauge; idle is a two-gauge rule | ITL presence is three-state. Idle needs **positive** evidence, so two failed queries do not restart the settle fleet-wide | [2.3](#23-presence-bits), [4.3](#43-what-the-tracker-owns) |
-| Property tests | Twelve classes, thresholds enumerated, findings mapped | A known-failures ledger; a mutant per mapping row; estimands declared, so section 5's estimators can pass; time base is an input family | [2.6](#26-property-tests), [2.7](#27-past-findings-against-the-test-classes) |
-| Settle tracker ownership | The saturation analyzer owns the one tracker | The **engine** owns it and observes rows at the top of `runAnalyzers`, before the balance tracker and every analyzer. The throughput analyzer takes the view at registration | [4.2](#42-one-owner) |
-| PR 4a was called neutral | - | Its two behaviour changes are named, each behind a switch, tested by the restart suite with a negative control | [7](#7-migration) |
+| blocker | round 2 | round 3 | round 4 | where |
+| --- | --- | --- | --- | --- |
+| The harness ran on two clocks | Every wall-clock read in the analyzers moves onto one injected clock **in PR 0**. Two replays at different wall times must give identical output | `store.go`'s five wall-clock sites are listed, and the engine's calls into the store take the same clock | - | [2.2](#22-one-clock) |
+| The recorder sees too little | The recorder lives **inside** each analyzer; a test fails when an exported method goes unrecorded | It records at the **input boundary**: each variant's `capacity.Record` and the SLO analyzer's router latency go into the `Analyze` event, the engine's store mutations are events in the same stream, and `*capacity.Store` is in the coverage test. Nested exported calls record once. The test proves recording, not only classification | **The store events record what the engine supplies, not what the store ends up holding.** A live record carries analyzer state (`EffectiveCapacity`, `PriorLiveCapacity`, the carried k1), so `LoadFromScaleTarget` records the parsed `EngineParams`, accelerator, GPU count, `RollingOut` and `now`, and replay runs the one shared store method on its own store. `EvictStale` records the timeout and `now`; replay recomputes what goes. Each `Analyze` result is recorded, and 0b proves a replay at the recording's commit reproduces it byte for byte. `Judging()` is in `start`. The `With...` builders are a coverage bucket of their own | [2.4](#24-the-recorder) |
+| A mid-run snapshot is not the analyzer's state | - | A recording starts only at a controller start, and keeps its head at the cap. No mid-run snapshot. The claim that `ExportLearnedState` touches `LastUsed` was false and is removed | The cap is per recording, with a per-volume ceiling that holds two, so the recording after a container restart has room | [2.4](#24-the-recorder) |
+| Goldens without a stated rule | Change behind a switch; off equals the parent, on moves only named outputs | One switch per named change, set on by the constructor. Committed goldens are the all-on run; the off-run compares against the base commit's goldens. Runs: all off, each alone, all on. New recordings land with base goldens first. One golden file per output. The check re-runs on PR edits | The full store-record check runs in the all-off run only; the other runs compare the engine-supplied fields, and the analyzer-written store fields are a golden output. "All off" means this PR's switches. Replay runs every recorded analyzer together, or checks only the fields one analyzer reads. Each package exposes its switches through one exported test hook, a seam in the coverage test | [2.4](#24-the-recorder), [2.5](#25-replay-and-the-golden-rule) |
+| Presence and idle | A known bit per gauge; idle is a two-gauge rule | ITL presence is three-state. Idle needs **positive** evidence, so two failed queries do not restart the settle fleet-wide | Idle evidence is role-aware: a prefill pod never has an ITL, so its idle reads the request or prompt-token rate. KV means peak KV. A listed row with unknown gauges is a sighting, and an idle run spans at most 1 min | [4.3](#43-what-the-tracker-owns) |
+| Property tests | Twelve classes, thresholds enumerated, findings mapped | A known-failures ledger; a mutant per mapping row; estimands declared, so section 5's estimators can pass; time base is an input family | A section-5 estimator that over-prices when one pod is genuinely slow declares where it starts to, and the case is in the ledger, owned by PR 3 | [2.6](#26-property-tests) |
+| Settle tracker ownership | The saturation analyzer owns the one tracker | The **engine** owns it and observes rows at the top of `runAnalyzers`, before the balance tracker and every analyzer. The throughput analyzer takes the view at registration | The engine's observation is a recorded event with the engine's own clock read. A rollout is detected from the rows' `Revision`, not from `capacity.Record.RollingOut`, which is filed later in the cycle | [4.2](#42-one-owner), [4.3](#43-what-the-tracker-owns) |
+| PR 4a was called neutral | - | Its two behaviour changes are named, each behind a switch, tested by the restart suite with a negative control | 4.4 states what an operator sees during the ITL wait (the floor is silent for about 2.75 min, the SLO side, masked by the 300 s scale-down stabilization). 4a runs the closed-loop probe through a restart, and the missing-row case runs through ITL | [4.4](#44-the-cost-after-a-controller-restart), [7](#7-migration) |
+
+Also in round 4: the start-time and B last-admitted stamp is due in PR 5 or the
+first PR that publishes either age. 6.2 no longer contradicts the deferred
+Forget row. The status line says which branch each cited line is from.
 
 Also in round 3: the closed-loop probe is a fleet simulator and moves to PR 3,
 its first user. PR 0 splits into 0a and 0b. Counters that are zero by
@@ -271,16 +278,60 @@ the analyzers without passing an analyzer method:
   (`slo/analyzer.go:382`), a Prometheus query.
 
 So the store's recorder logs each **engine-side** mutation in the same
-stream: `LoadFromScaleTarget`, with the parsed record it filed (not the scale
-target), and `EvictStale`. The store's other mutators, `Update`
-(`replica_capacity.go:371`) and `Delete` (`forget_variant.go:76`), are called
-by the saturation analyzer, so replay reproduces them from the analyzer
-events; recording them too would apply them twice. The `Analyze` event carries each variant's
-`capacity.Record` as read at the top of `Analyze`, and the SLO event carries
-the router latency. Replay applies the store events to a replay-owned store,
-checks it against the records in each `Analyze` event before the call (a
-mismatch fails the replay), and serves the latency from the recording; it
+stream, as **what the engine supplied**, never as the record the store ended
+up holding. For a live variant the filed record is partly analyzer state: with
+the same arguments and hardware the live record is kept and only
+`EngineParams` and `RollingOut` are swapped (`store.go:245-255`); on an
+arguments change `PriorLiveCapacity` and `PriorLiveAt` come from the run's
+last `EffectiveCapacity` and `LearnedAt` (`:264-266`); and the carried k1 is
+the run's measured `TotalKvCapacityTokens` (`:276-278`). All of these were
+written by the saturation analyzer's `Update` (`replica_capacity.go:371`). A
+replay that copied them back would price every stored-figure reader (the
+zero-replica estimate, the sibling clamp, the compatible lookup) from the
+run's k2, not its own, and a PR that moves k2 would report those outputs as
+unmoved.
+
+- **`LoadFromScaleTarget`** records the parsed `EngineParams`, the
+  accelerator, the GPU count, `RollingOut` and `now`. The function splits
+  into parsing the scale target and one store method that takes those values;
+  production and replay call the same method, and replay calls it on its own
+  store, so the kept live record and `PriorLiveCapacity` come from the
+  replay's own `Update`s.
+- **`EvictStale`** records the timeout and `now`. Replay recomputes what it
+  removes; what the run removed is recorded as a check, not applied.
+- The store's other mutators, `Update` (`replica_capacity.go:371`) and
+  `Delete` (`forget_variant.go:76`), are called by the saturation analyzer,
+  so replay reproduces them from the analyzer events; recording them too
+  would apply them twice.
+
+The `Analyze` event carries each variant's `capacity.Record` as read at the
+top of `Analyze`, and the SLO event carries the router latency. Replay checks
+its own store against those records before each call:
+
+| run | store check before each `Analyze` |
+| --- | --- |
+| all off | the whole record. A mismatch fails the replay |
+| any other run | the engine-supplied fields only (`EngineParams`, accelerator, GPU count, `RollingOut`). A mismatch fails the replay |
+
+The analyzer-written fields (`EffectiveCapacity`, `TotalKvCapacityTokens`,
+`PriorLiveCapacity`, `PriorLiveAt`, `LearnedFrom`) are a golden output, one
+file under [2.5](#25-replay-and-the-golden-rule), so a named k2 change shows
+where it reaches the store. Latency is served from the recording; replay
 never queries Prometheus.
+
+**A replay runs every recorded analyzer together,** in `seq` order. The SLO
+analyzer's `Analyze` runs after the saturation analyzer's `Update` has
+rewritten the record, so an SLO-only replay has nothing to reproduce those
+writes. A replay of one analyzer alone therefore checks only the record fields
+that analyzer reads, listed beside its recorder (the SLO analyzer reads only
+`EngineParams`, `slo/analyzer.go:433`).
+
+**Each result is recorded.** The `Analyze` event also records its
+`AnalyzerResult` (minus `AnalyzedAt`), and each store event what it returned.
+Recording inputs only, a replay that misses an input still gives stable
+goldens; the recorded result is what catches it. 0b's acceptance: a replay at
+the recording's own commit reproduces every recorded result byte for byte. A
+recording that fails this is not committed as a fixture.
 
 **Nested calls record once.** `Analyze` calls `a.StableAcceleratorFor` per
 variant and per replica, and the throughput `Analyze` calls its own
@@ -294,9 +345,10 @@ and `now`:
 
 | event | content |
 | --- | --- |
-| `start` (first line) | cold start, or the restored document as `RestoreLearnedState` received it; the store's records; the configuration the `With...` builders set (`WithHorizons`, `WithOptimizationInterval`, `WithStateTimeout`). Replay refuses a recording without it |
-| `Analyze` | the full `AnalyzerInput`: every `ReplicaMetrics` field with its presence bits (instant and peak KV, ReadySince, the warm-pool flag, per-replica generation, completion and prompt rates, queue, ITL, KV capacity); per-variant GPU count, role, accelerator (`VariantStates`); each variant's `capacity.Record`; the scheduler queue; the arrival rate; the policy; for the SLO analyzer, the router latency |
-| store mutations, engine-side | `LoadFromScaleTarget` (the record filed), `EvictStale` (the timeout and what it removed) |
+| `start` (first line) | cold start, or the restored document as `RestoreLearnedState` received it; the store's records; the configuration the `With...` builders set (`WithHorizons`, `WithOptimizationInterval`, `WithStateTimeout`); whether the SLO analyzer had a router (`Judging()`), so its replay builds a recorded-latency router exactly when the run had one. Replay refuses a recording without it |
+| `Analyze` | the full `AnalyzerInput`: every `ReplicaMetrics` field with its presence bits (instant and peak KV, ReadySince, `Revision`, the warm-pool flag, per-replica generation, completion and prompt rates, queue, ITL, KV capacity); per-variant GPU count, role, accelerator (`VariantStates`); each variant's `capacity.Record`; the scheduler queue; the arrival rate; the policy; for the SLO analyzer, the router latency; and the `AnalyzerResult` it returned, minus `AnalyzedAt` |
+| store mutations, engine-side | `LoadFromScaleTarget` (the parsed `EngineParams`, accelerator, GPU count, `RollingOut`, `now`), `EvictStale` (the timeout and `now`; what it removed, as a check) |
+| settle observation, engine-side (from PR 1) | the model and the engine's own `now`, read where the engine observes the tracker; the rows are the next `Analyze` event's ([4.2](#42-one-owner)) |
 | `RestoreLearnedState`, `ExportLearnedState` | the document in or out |
 | `ForgetVariant`, `ForgetLearnedState` | the variant, key and cause (annotation, model gone) |
 | `EvictStaleHistory`, `NoteVariantsPresent`, SLO `BeginCycle`, `EvictStale`, `NoteVariantsPresent`, throughput `Observe` (engine-called only) | the arguments |
@@ -313,13 +365,19 @@ recorded. Revision 3 said otherwise; it was wrong.
 **Coverage test,** in two parts, run over `*SaturationAnalyzer`,
 `*slo.Analyzer`, `*ThroughputAnalyzer` and `*capacity.Store`:
 
-1. By reflection, the exported method set equals the recorded methods plus a
-   short reviewed list of pure readers (`Name`, `Horizons`, `ForgottenToken`,
-   `BorrowTickGap`, `StateTimeout`, `Judging`, `Get`, `FindCompatible`,
-   `FindClampBound`, `IsStale`, `VariantState`), plus, for the store, the
-   mutators named as analyzer-internal with the analyzer event that
-   reproduces each (`Update`, `Delete`). A new method fails until it is
-   classified.
+1. By reflection, the exported method set equals the union of five reviewed
+   buckets, and a new method fails until it is classified:
+   - the recorded methods;
+   - pure readers (`Name`, `Horizons`, `ForgottenToken`, `BorrowTickGap`,
+     `StateTimeout`, `Judging`, `Get`, `FindCompatible`, `FindClampBound`,
+     `IsStale`, `VariantState`);
+   - configuration builders, captured in `start` (`WithHorizons`,
+     `WithOptimizationInterval`, `WithStateTimeout`);
+   - for the store, the mutators named as analyzer-internal with the analyzer
+     event that reproduces each (`Update`, `Delete`);
+   - test seams: the one switch hook per package
+     ([2.5](#25-replay-and-the-golden-rule)). A test asserts no production
+     path calls it.
 2. A table test calls each recorded method once with a recorder and asserts
    exactly one event of its kind. One `Analyze` emits exactly one `Analyze`
    event, whatever it calls inside.
@@ -344,10 +402,10 @@ to start mid-run. None of the PRs here needs it.
 | default | off |
 | volume | a separate `emptyDir` named by a recorder overlay (to be added under `config/`). Never `/tmp`, the controller's 64Mi `emptyDir`: the kubelet evicts the pod when it fills |
 | size | about 1–1.5 KB per replica per cycle. At a 15 s cycle: 8 replicas fill 64Mi in about 33 h, 50 replicas in about 6 h; 100 replicas write about 0.5 MB/min |
-| cap | a byte cap (default 256Mi). At the cap the recorder keeps the head, stops writing, and counts and logs the lines it drops. A controller restart starts a new recording. No recording starts mid-run |
+| cap | a byte cap **per recording** (default 256Mi), and a per-volume ceiling that holds two recordings at the cap. Files are named by start time. At the cap the recorder keeps the head, stops writing, and counts and logs the lines it drops. A controller restart starts a new recording; a container restart (crash, OOM) keeps the `emptyDir`, so the recording after it has room of its own (PR 5's restart fixture is that recording). At the volume ceiling the oldest closed recording is deleted first. No recording starts mid-run |
 | external sink | instead of the volume, a file a log shipper reads. Never the controller log: the kubelet rotates it, and it interleaves |
 | collection | `testing.md` says how to copy the files out (`kubectl cp`) before teardown; the benchmark harness does it on every exit path |
-| content | inputs only. No prompts, payloads or headers: the collector never sees them |
+| content | inputs, plus each `Analyze` result as a fidelity check. No prompts, payloads or headers: the collector never sees them |
 | before commit | an export step maps namespace, model, pod, variant and `Metadata` values to stable pseudonyms, drops cluster names, and gzips. A committed fixture stays under a stated size limit |
 
 ### 2.5 Replay and the golden rule
@@ -368,8 +426,18 @@ post-step, not from `Analyze`, so an analyzer replay does not compare them.
   constructor sets **on**, so production runs the new behaviour in the PR that
   adds it. It is a test seam, never a feature flag: no option, flag or
   ConfigMap key reaches it.
+- **One exported hook per package.** The replay drives the saturation, SLO
+  and throughput analyzers and the store together, four packages, and a test
+  in one package cannot set another's unexported field. So each package
+  exposes its switches to the replay through one exported test hook (for
+  example `SetSwitchesForReplay(map[string]bool)`). The coverage test
+  ([2.4](#24-the-recorder)) lists the hook as a seam, and a test asserts no
+  production path calls it.
 - **The committed goldens are the all-on run.**
-- **The replay runs all off, each switch on alone, and all on:**
+- **The replay runs all off, each switch on alone, and all on.** "All off"
+  means **this PR's** switches off. A seam an earlier PR left in the package
+  stays at its constructor default (on), because the base goldens are the
+  base's all-on run.
 
 | run | must hold |
 | --- | --- |
@@ -415,7 +483,8 @@ in **PR 3**, the first PR that needs it, as `D/closed_loop_probe_test.go`,
 with one known-failing case as its negative control (one slow pod's confirmed
 low rate, #282 round 3 H1). Holds, latches, the sibling yield and the
 self-sealing low mu are closed-loop behaviours; a PR that changes one runs the
-probe and pastes the result. PRs 3, 4b and 5 must.
+probe and pastes the result. PRs 3, 4a, 4b and 5 must; 4a runs it through a
+controller restart ([4.4](#44-the-cost-after-a-controller-restart)).
 
 ### 2.6 Property tests
 
@@ -435,7 +504,7 @@ class below runs on it as well as on direct inputs.
 | First sample | one reading does not set a figure that a second, identifying reading would move by more than the band |
 | Stale value | from identifying data **at N ≥ 2**, the figure converges (catches A3: B stuck at 6 ms) |
 | Missing and duplicated values | a missing gauge (presence false), a single missed row, and two rows for one pod each leave the figure where it was. A series doubled inside PromQL reaches the analyzer as one value at 2x: that is the heterogeneity case here, and a collector test |
-| Contamination **paired with** heterogeneity | a **state-flagged** contaminant is dropped, and a genuinely slower replica with no flag moves the estimate by its weight under the declared estimand. A learner using a value estimator allowed by [section 5](#5-fits-exclude-by-state-then-fit-untrimmed) (mu's lower median across pods, half the served max, 0.8 of the siblings' median) runs the heterogeneity case with the deviation it declares, on the side it declares, which must be the safe side |
+| Contamination **paired with** heterogeneity | a **state-flagged** contaminant is dropped, and a genuinely slower replica with no flag moves the estimate by its weight under the declared estimand. A learner using a value estimator allowed by [section 5](#5-fits-exclude-by-state-then-fit-untrimmed) (mu's lower median across pods, half the served max, 0.8 of the siblings' median) runs the heterogeneity case with the deviation it declares, on the side it declares. Where that side is the risky one (mu's lower median against one slow pod at N ≥ 3, for example {1, 1, 1, 0.5} prices 14 % above the mean; half the served max; the sibling yield), the learner declares the deviation at which it starts to over-price, and the case goes into the known-failures ledger with PR 3 as its owner |
 | Redistribution invariance | the same fleet load moved between replicas leaves fleet demand and learned figures within a declared tolerance |
 | N-dependence | under iid noise, an estimate's expectation does not depend on N in {1, 2, 4, 16} beyond a declared bias (catches the max across replicas, +13.6 % at 16) |
 | Known truth | with a true mu and k2, the priced capacity is at most truth × (1 + ε) under every family, idle replicas included. At the documented target the steady order equals λ / (mu · target) |
@@ -447,7 +516,9 @@ class below runs on it as well as on direct inputs.
 **Known-failures ledger.** Several classes fail on today's code by design: known
 truth on the time-base family (A5, an open defect), first sample on k2 and
 start time, N-dependence on the prefill bound's max and on mu's lower median,
-edges on the k2 key boundary. 0b commits a ledger of (class, learner, finding,
+edges on the k2 key boundary, and heterogeneity and known truth on mu with one
+genuinely slow pod at N in {4, 16} (owner PR 3; #282 is evaluating a fold to
+the mean of admitted replicas, the likely resolution). 0b commits a ledger of (class, learner, finding,
 measured result, the PR that clears it or "open"). A listed case runs and must
 still fail; a listed case that starts passing fails the build until its row is
 removed. A PR that fixes one removes its row. Nothing is skipped and no
@@ -521,7 +592,7 @@ none carries ReadySince until #283 merges.
 | 1 | the 0b recording | the settle tracker's verdicts per reason | the settle suite (section 8); the balance tracker's unit test |
 | 2 | flow control off; a P/D run; a pod restarted under the same name | P1-obs admitted, settle refusals per reason, joined refusals with a known ReadySince | restart suite: same-name restart, LWS group with mixed Ready times, bridge lend, node clock 90 s behind, controller restart. 8-GPU DP: `D/dp_ranks_test.go` |
 | 3 | flow control off (mu is written only beside P1-obs) | mu samples written, mu yields | closed-loop probe (lands here) |
-| 4a | a run that reaches OLS: stepped concurrency giving ≥ 10 steady rows spread ≥ 0.30, with the SLO analyzer recorded | OLS cycles, pinned cycles | restart suite (PR 2) for its two named changes |
+| 4a | a run that reaches OLS: stepped concurrency giving ≥ 10 steady rows spread ≥ 0.30, with the SLO analyzer recorded | OLS cycles, pinned cycles | restart suite (PR 2) and the settle suite's one-missing-row case, both through ITL, for its two named changes; the closed-loop probe through a controller restart |
 | 4b | a throughput-analyzer run with its recorder on | its OLS and pinned cycles | negative control on the parent |
 | 5 | a controller restart with the snapshot on | restored keys, start samples | restart suite plus restore-then-run |
 
@@ -663,7 +734,7 @@ One tracker in `internal/signals/settle` replaces them.
 | --- | --- |
 | owner | **the engine**, one tracker per model, swept with the model. It observes this cycle's rows into the tracker at the top of `runAnalyzers`, before `observeLoadBalance` (`engine_v2.go:156`) and before any analyzer. An analyzer-owned tracker would be written after the balance tracker reads it (`observeLoadBalance` runs before `runV2AnalysisOnly`), one cycle late on every join |
 | readers | the balance tracker (#283), the saturation, SLO and throughput analyzers, each through a **read-only view**. None writes. The engine builds the saturation and SLO analyzers (`steadystate/engine.go:335, 404`) and passes the view at construction. The throughput analyzer is built in `cmd/main.go:916` and added by `RegisterAnalyzer` after the engine exists, so it takes the view at registration through an optional interface (`settleViewTaker`), as the engine's other capabilities are reached |
-| replay | the tracker is a function of the `AnalyzerInput` rows and the clock only, so each analyzer's replay rebuilds its own copy from its own recording, with no other analyzer replayed alongside |
+| replay | the tracker is a function of the rows and the engine's clock read only. The engine's observation is an engine-side event in the stream ([2.4](#24-the-recorder)): the model and the `now` the engine read, which is earlier than the `a.now()` each analyzer reads inside `Analyze`. Replay applies it as the engine did, at that instant, with the next `Analyze` event's rows. It reads nothing from the store, so a rollout is detected from the rows (4.3) |
 | concurrency | the tracker holds its own lock; one writer per model per cycle, any number of readers |
 | key | (model, pod, variant, bridge). A warm-pool lend keeps the pool's Ready time but changes variant and bridge, so it is a new key and a new settle. A lend is detected by the key change, not by absence |
 | prerequisite | #283 merges before PR 1 |
@@ -685,15 +756,30 @@ it. The test fails on the parent.
   reading, because a window outlives the settle.
 - **The events that start a settle:** a replica joins, load returns after idle,
   the engine restarts (an engine or LWS group restart under the same name gives
-  a new Ready time), a warm-pool lend, a rollout. PR 2 names which pod's Ready
+  a new Ready time), a warm-pool lend, a rollout. A rollout is detected from
+  the rows (a pod with a new `Revision`, or a new pod), not from
+  `capacity.Record.RollingOut`: `LoadFromScaleTarget` files that bit later in
+  the cycle than the engine observes the tracker. PR 2 names which pod's Ready
   time stands for an LWS group.
 - **The ready time:** the later of the Pod's Ready time and the controller's
   first sight of it, as #283 does. A node clock behind the controller's, or a
   lend that keeps the pool's Ready time, makes the Pod time too old.
-- **Idle needs positive evidence.** A row counts toward idle only when KV is
-  known and 0, **and** either ITL is known-empty (series present, window
-  empty) or the generation-token rate is known and 0. Two such rows in a row
-  make the replica idle (#273's `idleRows`). A row where a gauge it needs is
+- **Idle needs positive evidence, and the evidence is role-aware.** KV here
+  is **peak** KV over the rule's window, not instant KV: prefill KV is freed
+  once a prefix is handed to decode, so an instant 0 between requests is the
+  ordinary case on a lightly loaded prefill pod.
+
+  | role | a row counts toward idle when | load returns when |
+  | --- | --- | --- |
+  | decode, aggregated | peak KV known and 0, **and** either ITL is known-empty (series present, window empty) or the generation-token rate is known and 0 | a finite ITL, or the generation-token rate known and > 0 |
+  | prefill | peak KV known and 0, **and** the request rate (or prompt-token rate, `PrefillComputedTokenRate`) known and 0 | the same rate known and > 0 |
+
+  ITL-empty is not evidence on a prefill pod: the P/D sidecar rewrites prefill
+  requests to `max_tokens=1`, so a busy prefill pod records no inter-token
+  intervals and reads known-empty on every row. Two counting rows in a row make
+  the replica idle (#273's `idleRows`), and "in a row" spans at most the 1 min
+  gap: two idle rows further apart than that, with only unknown rows between,
+  do not make the replica idle. A row where a gauge it needs is
   unknown neither counts toward idle nor breaks an idle run. So Prometheus
   timing out the KV and ITL queries for two cycles does not mark a busy fleet
   idle, and the next good row does not restart every replica's settle as
@@ -702,7 +788,9 @@ it. The test fails on the parent.
   replica whose ITL is missing. A row whose bits are all false is a failed
   scrape: it neither counts toward idle nor restarts a settle.
 - **Gaps and lookback.** A gap longer than the rule's period restarts the
-  judgement. A rule compares against the reading one period back, not one cycle
+  judgement. A gap is **missing rows**, not unknown gauges: a row is a
+  sighting whenever the pod is listed, whatever its bits, so a Prometheus
+  brownout longer than 1 min does not restart every replica's settle. A rule compares against the reading one period back, not one cycle
   back: cycle-to-cycle one-minute peaks share 45 s.
 
 Each learner keeps its own predicate and thresholds over the trace the tracker
@@ -719,6 +807,19 @@ with the snapshot off (the default) every k2 window is empty, so a saturated
 fleet prices from k1, the high figure, for 1 min longer than today. ITL does
 not refit for 2 min (a named change in PR 4a). #273 chose the current behaviour to avoid exactly this
 delay.
+
+What an operator sees during the ITL wait, and which side it errs on: with no
+line there is no derived mu (`deriveMu` returns nothing on a zero model), and
+with the snapshot off the measured-mu window is empty too, so the role has no
+mu and the throughput floor is silent ("a role with no throughput on record is
+silent"). Today that gap is the 3 unstamped readings a pinned A needs, about
+45 s at a 15 s cycle. After 4a it is the 2 min settle plus those readings,
+about 2.75 min, during which only occupancy holds the fleet: the **SLO side**.
+On a default install it is masked by the 300 s scale-down stabilization
+(`WVA_SO_SCALE_DOWN_STABILIZATION`, `deploy/lib/scaledobject.sh:3894`). An
+operator who lowers that under about 3 min, or whose load rises during the
+gap, gets an under-order. PR 4a runs the closed-loop probe through a
+controller restart and pastes the result.
 
 So: with the snapshot on, first sight is persisted (PR 5) and the wait applies
 only to replicas with no record. With it off, the wait is accepted, logged on
@@ -811,13 +912,15 @@ only; `restored` is rendered as a separate column.
   for the `wva_learned_state_*` series it overlaps.
 - **Deletion.** There are no per-key series, so nothing is deleted per key.
   A variant's learner series are deleted when the model is deleted, where the
-  engine deletes the others. They are **reset** (set from the new key) when
-  the pricing key changes or is forgotten.
+  engine deletes the others. When the pricing key changes they are set from
+  the new key; when no key remains (every key forgotten), the variant's
+  learner series are deleted.
 - **Forget reaches every learner.** The `Report` carries `pricingKey` and
   `forgotten{key, by: operator | evicted}`; the engine applies both. Every
   learner implements `Forget(key, by)`. The `llm-d.ai/forget-learned-state`
-  annotation calls it on all of them, and a spec asserts that every registered
-  learner is reached.
+  annotation calls it on all of them through a plain list of learner names in
+  `learn`, not a registry, and a spec asserts that every learner on the list
+  is reached.
 
 ### 6.3 Who does what
 
@@ -843,11 +946,11 @@ or deprecated, docs rows rewritten, tools updated.
 | PR | change | recording (exists?) | what an operator sees |
 | --- | --- | --- | --- |
 | **0a** | One clock (2.2), including the capacity store and the engine's calls into it; presence bits with ITL's three states (2.3). Unit tests, the `EpisodeGap` negative control, the one-cycle boundary test | none needed | Nothing, beyond 2.2's one-cycle boundary. Metrics: none |
-| **0b** | The recorder at the input boundary in each analyzer and the store (2.4), replay with goldens and the golden rule (2.5), per-path counters, property tests with the known-failures ledger and a mutant per mapping row (2.6, 2.7) | E1 re-run from a build with #283 and 0a (no) | Nothing. A recorder flag and overlay in `testing.md`. Metrics: none |
+| **0b** | The recorder at the input boundary in each analyzer and the store (2.4), with each `Analyze` result recorded and the test that a replay at the recording's commit reproduces it byte for byte; the store split into parsing and one shared method; one switch hook per package; replay with goldens and the golden rule (2.5), per-path counters, property tests with the known-failures ledger and a mutant per mapping row (2.6, 2.7) | E1 re-run from a build with #283 and 0a (no) | Nothing. A recorder flag and overlay in `testing.md`. Metrics: none |
 | **1** | `internal/signals/settle`, written by the engine at the top of `runAnalyzers`, read-only views for the balance tracker and the analyzers. #283's one-missing-row forget becomes the gap rule, a named change proved by a unit test on the balance tracker (4.2). 2.3's A4 and 273-r3 #2 negative controls | 0b's (no) | The imbalance timers no longer restart on one missed scrape |
 | **2** | k2 (#3, #4) onto the tracker. The Pod Ready time switched on. The LWS rule named. `learn` lands. `learner-write` for k2. Restart suite | flow control off, P/D, same-name restart (no) | A pod back from a restart under the same name waits again: more `P1-obs-unsettled`. After a controller restart every replica waits once: `P1-obs-unsettled` across the fleet for 1 min, and with the snapshot off k2-less fleets price at k1 for that minute (SLO side). `learner-start` and k2 writes are visible |
 | **3** | Mu (#5, #6). Its joined test reads k2's stamp. Exact repeats count as use. Unknown age resolves safe. The latch persisted or restored safe-side. Two prefill pods in one spacing pin #7's max before the fold is touched. The closed-loop probe and its fleet simulator land here (2.5) | flow control off (no) | `learner-write` for mu, including choice flips. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds`, `startSource`. Measured mu waits out the post-restart settle |
-| **4a** | ITL #1 and #13 onto the tracker. Neutral on the recording except two named changes, each behind its own switch: ITL waits the settle after a controller restart (today it takes the first cycle as settled), and one missing row no longer restarts a settle (the 1 min absence rule, 4.2). Neither occurs in the OLS recording, so the restart suite (PR 2) runs against both, each with a negative control on the parent | a run that reaches OLS, SLO analyzer recorded with its router latency (no) | No ITL refit for 2 min after a controller restart. A missed scrape no longer restarts ITL's settle |
+| **4a** | ITL #1 and #13 onto the tracker. Neutral on the recording except two named changes, each behind its own switch: ITL waits the settle after a controller restart (today it takes the first cycle as settled), and one missing row no longer restarts a settle (the 1 min absence rule, 4.2). Neither occurs in the OLS recording, so the restart suite (PR 2) and the settle suite's one-missing-row case, both run through ITL, cover them, each with a negative control on the parent. The closed-loop probe runs through a controller restart (4.4) | a run that reaches OLS, SLO analyzer recorded with its router latency (no) | No ITL refit for 2 min after a controller restart; with the snapshot off the throughput floor is silent for about 2.75 min (SLO side, masked by the default 300 s scale-down stabilization). A missed scrape no longer restarts ITL's settle |
 | **4b** | ITL #16 (throughput analyzer) gains #273's fixes: a named change behind a switch, with its own fixture, a negative control on the parent and the probe for the slope hold | a throughput-analyzer recording (no) | `learner-write` when A or B moves. Throughput-analyzer fleets may change, as named |
 | **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change that bounds **both** sides (for example: adopt a first sample only within [S0/3, 3·S0] of the default, or blend toward it until N distinct pods agree). First sight persisted. The writer stays central with per-learner adapters, and reads a v1 document from the previous release. Restart suite plus restore-then-run | controller restart with the snapshot on (no) | Start estimates no longer take one pod's first sample raw. `restored: true` on restored lines. With the snapshot on, only replicas with no record wait after a restart |
 
@@ -863,7 +966,10 @@ belong to the utilization-share work.
   once. Its tests cover every case the four versions were fixed for: k == 0, KV
   zero with an ITL present, k > 0 with no ITL, one missing row on a busy
   replica, the KV and ITL queries both failing for two cycles on a busy fleet,
-  an idle replica's empty ITL window, a restart under the same name, an LWS group with mixed Ready times,
+  an idle replica's empty ITL window, a P/D prefill pod under light load
+  (instant KV 0 between requests, ITL always empty: it must not go idle while
+  its request rate is above 0), a Prometheus brownout longer than 1 min with
+  every pod still listed, a restart under the same name, an LWS group with mixed Ready times,
   a missed cycle, a slow fill, a just-Ready pod, a bridge lend, clock skew.
 - **A shared write path already changed a learner silently.** #282 turned #5's
   in-spacing fold from a max into a lower median. #7 kept its max only through
@@ -894,7 +1000,7 @@ Round-3 lows, each settled in the PR named.
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |
-| The snapshot gains a last-admitted stamp for start time and B; a v1 document's figure publishes 0 (as old as can be) | 5 |
+| The snapshot gains a last-admitted stamp for start time and B; a v1 document's figure publishes 0 (as old as can be) | 5, or the first PR that publishes a start-time or B age, whichever is earlier |
 
 ## Review notes (round 1)
 
