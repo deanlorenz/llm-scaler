@@ -140,7 +140,7 @@ cycles of a fleet that is coping have none.
 | `role` | `prefill`, `decode` or `both` |
 | `demandBeforeFloor`, `flooredTo` | the role's demand before and after the floor, in the same unit as `analyzer-result`'s `demand` |
 | `residentDemand` | `demandBeforeFloor` with the queues' residency charge removed: what the replicas hold now |
-| `perReplicaCapacity` | the per-replica capacity the floor converts replicas into demand with |
+| `perReplicaCapacity` | the per-replica capacity the floor converts replicas into demand with. For a `derived` rate it is the variant's capacity times `scaleUpThreshold`: that rate is already the rate at the target fill, so the engine's scale-up headroom is not applied to it a second time |
 | `arrivalRate`, `saturatedThroughput`, `replicasImplied` | the requests per second arriving, what one replica completes at saturation, and the replicas their ratio asks for |
 | `backlogRequests`, `projectedBacklog`, `drainSeconds` | the queue measured, the queue the floor priced over the next replica's start time, and how fast it is to be drained |
 | `heldAtFleet` | `true` when the floor was capped at what the current fleet supplies at the scale-up threshold: it may hold the fleet up, but not order more replicas |

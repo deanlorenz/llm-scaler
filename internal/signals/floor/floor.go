@@ -71,7 +71,9 @@ type Floor struct {
 type Term struct {
 	// Mu is the saturated completion rate of one replica, requests/s.
 	Mu float64
-	// PerReplica is the tokens one replica of the role is worth (P).
+	// PerReplica is the tokens one replica of the role is worth (P), as the
+	// floor prices it: cost x Mu, which for a derived mu is P x
+	// scaleUpThreshold (replicaCost).
 	PerReplica float64
 	// Backlog is the queued requests priced into the floor: the role's own
 	// engine queues plus the scheduler's.
@@ -201,6 +203,35 @@ func borrowedReading(rc capacity.ReplicaCapacity) bool {
 		return true
 	}
 	return rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived
+}
+
+// replicaCost is the tokens one unit of arrival rate costs on this replica,
+// P / mu, with the engine's scale-up headroom taken out of a DERIVED mu.
+//
+// The engine scales out at scaleUpThreshold of what a replica is worth (RC =
+// D / scaleUpThreshold - anticipated). A measured mu is the replica's rate at
+// saturation, the same moment that measures P, so the headroom is applied
+// once, by the engine, and the fleet scales out at scaleUpThreshold of the
+// saturated rate -- as occupancy does at scaleUpThreshold of P.
+//
+// A derived mu already has the headroom in it. It is priced at kPrice =
+// kvCacheThreshold x scaleUpThreshold of the KV cache (0.68 on the defaults),
+// the fill the autoscaler targets, not at saturation. Divided through the
+// engine's threshold a second time, the floor scaled out at 85 % of the rate
+// AT the target fill, and since throughput is concave in fill that cost about
+// half the fill: on the run that showed it, a decode replica reached the
+// floor's equilibrium at 97 sequences (k 0.32) where occupancy's was 205
+// (k 0.68), and the floor ordered a third replica for two that held 95-97
+// sequences each with no queue. Multiplying the cost by scaleUpThreshold
+// cancels the engine's division, so the role scales out when arrivals exceed
+// replicas x mu(kPrice): occupancy and the floor then agree at the documented
+// target. A threshold outside (0, 1] leaves the cost as it was.
+func replicaCost(rc capacity.ReplicaCapacity, p, scaleUpThreshold float64) float64 {
+	cost := p / rc.SaturatedThroughput
+	if rc.SaturatedThroughputDerived && scaleUpThreshold > 0 && scaleUpThreshold <= 1 {
+		cost *= scaleUpThreshold
+	}
+	return cost
 }
 
 func Estimate(
@@ -338,14 +369,14 @@ func Estimate(
 			continue
 		}
 		if borrowedReading(rc) {
-			borrowedCosts[role] = append(borrowedCosts[role], p/rc.SaturatedThroughput)
+			borrowedCosts[role] = append(borrowedCosts[role], replicaCost(rc, p, scaleUpThreshold))
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
 			if rc.SaturatedThroughputLineBorrowed {
 				lineBorrowed[role] = true
 			}
 			continue
 		}
-		costs[role] = append(costs[role], p/rc.SaturatedThroughput)
+		costs[role] = append(costs[role], replicaCost(rc, p, scaleUpThreshold))
 		mus[role] = append(mus[role], rc.SaturatedThroughput)
 		if cur, seen := smallestP[role]; !seen || p < cur {
 			smallestP[role] = p

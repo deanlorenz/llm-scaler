@@ -356,6 +356,7 @@ role from arrival rate and backlog instead. Per role:
 
 ```
 cost   = median over the role's own replicas of (P / mu)   // tokens per unit arrival rate
+         x scaleUp for a derived mu                        // replicaCost
 mu     = median over the role's own mus
 horizon = max(drainSeconds, startSeconds[role])            // BacklogDrainSeconds = 60
 b      = backlogAtLanding(observed, lambda, mu, startSeconds, ready, starting)
@@ -365,6 +366,17 @@ replicasImplied = rate / mu
 ```
 
 Medians, not maxima: one replica draining a batch must not set the role's price.
+
+The `x scaleUp` on a derived mu is not extra headroom; it removes a second
+copy. The engine scales out at `scaleUp` of what a replica is worth
+(`RC = D / scaleUp - anticipated`). A measured mu is the rate at saturation, so
+one `scaleUp` is right for it. A derived mu is already the rate at `kPrice`,
+the target fill, so the engine's division applied the headroom twice: on the
+defaults the floor scaled out at 85 % of the rate at 0.68 fill, which with
+throughput concave in fill is about 0.32 fill (97 sequences on the run that
+found it, against 205 at 0.68). With the factor, a replica at `kPrice` serving
+`mu` arrivals reads `RC = 0` from occupancy and from the floor alike
+(`TestThroughputFloor_AgreesWithOccupancyAtTheTarget`).
 
 The projection is what makes a backlog an *order* rather than a residency:
 

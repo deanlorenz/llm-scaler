@@ -135,6 +135,13 @@ figure is a **floor** under the occupancy demand: it only ever raises demand.
 mu is measured per request shape, so a shape change re-prices the fleet with no
 threshold re-tuned. This catches a shape change before a queue forms.
 
+On a decode role mu can also be computed from the replica's inter-token latency
+line, for a shape it has not yet run saturated. That figure is the rate at the
+fill the autoscaler targets (`kvCacheThreshold x scaleUpThreshold` of the KV
+cache, 0.68 on the defaults), not at saturation, so the floor does not apply
+the `scaleUpThreshold` headroom to it again: a replica at the target fill,
+serving exactly that rate, is "full" to the floor and to occupancy alike.
+
 Three rules keep it honest. Each was learned from a measured mistake; the runs
 are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 
