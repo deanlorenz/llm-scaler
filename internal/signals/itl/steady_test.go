@@ -2,6 +2,8 @@ package itl
 
 import (
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -178,10 +180,11 @@ var _ = Describe("Tracker steady readings", func() {
 	// to 0.12, so every reading stays steady. The pinned fit prices every
 	// multi-replica fleet and should follow on the main window's 20 readings;
 	// fitted on the carried steady window (40 readings, 5 minutes) it takes
-	// twice as long -- 9 cycles for two replicas, 4 for four, 2 for eight.
-	// The median answers the new A whole once the new level holds half the
-	// window's weight, so these are the cycles to that flip; least squares
-	// took 17, 8, 4 and 2 here to come within 5%.
+	// about twice as long -- 13 cycles for two replicas, 6 for four, 3 for
+	// eight. Least squares took 17, 8, 4 and 2 here, and the weighted median
+	// 10, 5, 2 and 1, but it answered the new A whole on the cycle the new
+	// level held half the weight, the same jump that made it flap between two
+	// shapes served side by side.
 	DescribeTable("follows a shape change at the same fill on the main window, not the carry",
 		func(replicas, cycles int) {
 			fleet := func(itl float64) []domain.ReplicaMetrics {
@@ -207,9 +210,58 @@ var _ = Describe("Tracker steady readings", func() {
 			}
 			Fail(fmt.Sprintf("%d replicas: A never reached 95%% of %.2f", replicas, after.A))
 		},
-		Entry("1 replica", 1, 10), Entry("2 replicas", 2, 5),
-		Entry("4 replicas", 4, 2), Entry("8 replicas", 8, 1),
+		Entry("1 replica", 1, 13), Entry("2 replicas", 2, 6),
+		Entry("4 replicas", 4, 3), Entry("8 replicas", 8, 1),
 	)
+
+	// The round-2 statistics review's probe: a stationary fleet whose
+	// replicas serve two shapes at the same fill (a prefix-aware router keeps
+	// similar prompts together), half at slope 0.08 and half at 0.12, k
+	// jittering by +-0.02 and 1 ms of ITL noise. The weighted median jumped
+	// between the two groups as k jitter moved their weight across one half:
+	// A ranged 0.081 to 0.119, 36% of its mean, with 15 cycle-to-cycle jumps
+	// over 10% in 50 cycles. Least squares held to 2%, with none.
+	DescribeTable("prices a fleet of two shapes at their blend, without flapping",
+		func(replicas int) {
+			rng := rand.New(rand.NewPCG(1, 2))
+			lo, hi, sum, n := math.Inf(1), math.Inf(-1), 0.0, 0
+			for c := range 80 {
+				rows := make([]domain.ReplicaMetrics, replicas)
+				for i := range rows {
+					slope := 0.08
+					if i%2 == 1 {
+						slope = 0.12
+					}
+					k := 0.6 + 0.04*(rng.Float64()-0.5)
+					rows[i] = row(fmt.Sprintf("p%d", i), k, DefaultBaselineSec+slope*k+0.001*rng.NormFloat64())
+				}
+				r := observe(rows...)
+				if c < 30 {
+					continue
+				}
+				Expect(r.Tier).To(Equal(TierPinnedB))
+				lo, hi, sum, n = math.Min(lo, r.Model.A), math.Max(hi, r.Model.A), sum+r.Model.A, n+1
+			}
+			mean := sum / float64(n)
+			Expect(mean).To(BeNumerically("~", 0.10, 0.005), "the blend of 0.08 and 0.12")
+			Expect((hi-lo)/mean).To(BeNumerically("<", 0.10), "A from %.4f to %.4f", lo, hi)
+		},
+		Entry("2 replicas", 2), Entry("4 replicas", 4),
+	)
+
+	It("prices a slower replica of three in, not out", func() {
+		var r Reading
+		for range 40 {
+			r = observe(row("a", 0.6, DefaultBaselineSec+0.08*0.6), row("b", 0.6, DefaultBaselineSec+0.08*0.6),
+				row("c", 0.6, DefaultBaselineSec+0.12*0.6))
+		}
+		// With a third of the readings each, a sixth of the middle half of
+		// the weight is the slow replica's: 0.0867. The 20-reading window
+		// holds the three unevenly, so the fit reads 0.088. The weighted
+		// median answered 0.08.
+		Expect(r.Model.A).To(BeNumerically(">", 0.085))
+		Expect(r.Model.A).To(BeNumerically("<", (0.08+0.08+0.12)/3), "the trim still leans to the majority")
+	})
 
 	It("fits the pinned line on every reading while too few are steady", func() {
 		observe(row("p0", 0.40, 0.04))

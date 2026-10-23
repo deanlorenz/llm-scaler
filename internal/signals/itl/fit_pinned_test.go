@@ -85,9 +85,10 @@ var _ = Describe("FitPinnedB", func() {
 			"the slope of the thirteen readings of replicas at work")
 	})
 
-	It("is the weighted median of the readings' slopes", func() {
-		// Slopes 0.1, 0.2, 0.9 through B, weighted by k 0.5, 0.3, 0.3: the
-		// first carries 0.5 of 1.1, short of half, so the median is the second.
+	It("is the interquartile mean of the readings' slopes", func() {
+		// Slopes 0.1, 0.2, 0.9 through B, weighted by k 0.5, 0.3, 0.3: of
+		// 1.1, the middle half runs from 0.275 to 0.825, so 0.1 counts for
+		// 0.225 of it, 0.2 for 0.3 and 0.9 for 0.025.
 		b := DefaultBaselineSec
 		obs := []Observation{
 			{K: 0.5, ITLSec: b + 0.1*0.5},
@@ -96,17 +97,32 @@ var _ = Describe("FitPinnedB", func() {
 		}
 		got, ok := FitPinnedB(obs, b)
 		Expect(ok).To(BeTrue())
-		Expect(got.A).To(BeNumerically("~", 0.2, 1e-12))
+		Expect(got.A).To(BeNumerically("~", (0.225*0.1+0.3*0.2+0.025*0.9)/0.55, 1e-12))
 
-		By("the first slope alone when it carries more than half")
-		got, ok = FitPinnedB(obs[:2:2], b)
-		Expect(ok).To(BeTrue())
-		Expect(got.A).To(BeNumerically("~", 0.1, 1e-12), "0.5 of 0.8")
-
-		By("and the mean of the two slopes the halves meet between")
+		By("the mean of two slopes of equal weight")
 		got, ok = FitPinnedB([]Observation{obs[0], {K: 0.5, ITLSec: b + 0.3*0.5}}, b)
 		Expect(ok).To(BeTrue())
 		Expect(got.A).To(BeNumerically("~", 0.2, 1e-12))
+
+		By("the one slope when there is one")
+		got, ok = FitPinnedB(obs[:1:1], b)
+		Expect(ok).To(BeTrue())
+		Expect(got.A).To(BeNumerically("~", 0.1, 1e-12))
+	})
+
+	It("moves with the weight between two groups of slopes rather than jumping", func() {
+		// Two replicas at the same fill serving two shapes. The weighted
+		// median answered 0.08 or 0.12, whichever carried more than half.
+		b := DefaultBaselineSec
+		pair := func(kSlow, kFast float64) []Observation {
+			return []Observation{{K: kFast, ITLSec: b + 0.08*kFast}, {K: kSlow, ITLSec: b + 0.12*kSlow}}
+		}
+		lighter, ok := FitPinnedB(pair(0.59, 0.61), b)
+		Expect(ok).To(BeTrue())
+		heavier, ok := FitPinnedB(pair(0.61, 0.59), b)
+		Expect(ok).To(BeTrue())
+		Expect(lighter.A).To(BeNumerically("~", 0.0993, 1e-4))
+		Expect(heavier.A).To(BeNumerically("~", 0.1007, 1e-4))
 	})
 
 	It("refuses a fit that says load makes a replica faster", func() {

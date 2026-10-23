@@ -198,15 +198,21 @@ reading, it took each load step whole: on the issue #270 rerun `A` went from
 0.077 to 0.207 on the cycle the load stepped, and the derived mu fell from 6.4
 to 2.65 requests/s for two and a half minutes.
 
-`FitPinnedB` fits by least absolute deviations: `A` is the median of the
-readings' own slopes `(ITL_i - B) / k_i`, weighted by `k_i`. A saturated fleet
+`FitPinnedB` takes `A` as the interquartile mean of the readings' own slopes
+`(ITL_i - B) / k_i`, weighted by `k_i`: the mean of the slopes that hold the
+middle half of the weight, a quarter trimmed from either end. A saturated fleet
 has few steady readings, so the pinned fit takes every reading, and a
 replica's first reading after it starts serving (a pod that joined, or one the
 load came back to) sits many times above the line. On a two-namespace run,
 three such readings of sixteen, at about 0.46 of `k` and 435 to 496 ms, moved
 least squares' `A` from 0.101 to 0.170, and the derived mu read 3.1 to 4.2
 requests/s against the 6.1 to 6.2 each replica served, for a whole
-twenty-minute phase. The median sets them aside.
+twenty-minute phase. They carried 11% of the weight, all in the top quarter,
+and the trim sets them aside. The weighted median trims them as well, but it
+jumps from one group of slopes to another as their weight crosses one half: a
+stationary fleet serving two shapes side by side (slopes 0.08 and 0.12, half
+each) had `A` swing 36% of its mean between them, where the interquartile mean
+holds to 2% at their blend.
 
 `itl-window` counts every row under one reason (`offered`, `notReady`,
 `noITL`, `noK`, `belowBand`, `aboveBand`), so they add up to `replicas`, and
@@ -226,8 +232,8 @@ one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
 pinned fit reads the steady readings the main window spans, reaching into the
 carry only for the `DefaultMinSamples` it needs through a step. `A` moves with
 the workload, and fitted on the carried window it followed a heavier shape at
-the same fill twice as slowly (two replicas: 9 cycles to the new `A`, against
-5). A level the fleet only passed through
+the same fill twice as slowly (two replicas: 13 cycles to the new `A`, against
+6). A level the fleet only passed through
 never settles, so it never reaches the steady readings and teaches nothing.
 A reading with no `k` (the collector's zero value) is not traced, so one
 missed scrape does not make its replica unsteady. A replica the load comes back

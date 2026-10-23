@@ -260,7 +260,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 // The carry is the full fit's: it keeps a step's old level until the new one
 // settles, which B needs and A does not. A moves with the workload, and
 // fitted on the carried window it followed a heavier shape at the same fill
-// twice as slowly -- two replicas take 9 cycles to price the new A, against 5
+// twice as slowly -- two replicas take 13 cycles to price the new A, against 6
 // on the main window alone. Under least squares it was 17 against 8, and a
 // minute in priced 0.090 for a true 0.12, so the derived mu read about 30%
 // high. Through a load step the main
