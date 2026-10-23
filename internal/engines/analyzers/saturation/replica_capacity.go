@@ -194,8 +194,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	adm.unsettled = a.k2Unsettled(k2SettleInput{
 		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
 		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
-		perRequest: k2SettlePerRequest(rm, role), threshold: config.QueueLengthThreshold,
-		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref,
+		perRequest: k2SettlePerRequest(rm, role, shapeKeyInput, fleetOutput), threshold: config.QueueLengthThreshold,
+		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready,
 	})
 	d := a.computeK2(
 		historyKey,
@@ -268,13 +268,23 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// window is keyed by -- a rate divided by one shape and stored under
 		// another is the fault the key exists to prevent.
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
-			a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
-			if args != "" {
-				a.mu.Lock()
-				if _, ok := a.saturatedThroughput[throughputKey]; ok {
-					a.throughputWindowArgs[throughputKey] = args
+			// Not every admitted k2 reading is a service rate: a replica that
+			// has completed nothing, or completes a fraction of what its ITL
+			// line prices, is filling (throughput_admission.go).
+			if why := throughputRefusal(rm.RequestRate, mu, derived); why != "" {
+				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
+					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
+					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
+					"derivedOK", derived.ok, "derivedRate", derived.rate, "reason", why)
+			} else {
+				a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
+				if args != "" {
+					a.mu.Lock()
+					if _, ok := a.saturatedThroughput[throughputKey]; ok {
+						a.throughputWindowArgs[throughputKey] = args
+					}
+					a.mu.Unlock()
 				}
-				a.mu.Unlock()
 			}
 		} else {
 			// The replica is full and queued -- the one moment its throughput can
@@ -314,9 +324,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// "Measured this shape" is precise: an OWN reading (not borrowed from a
 	// neighbouring output bucket, which is exactly the stale figure the
 	// derivation exists to replace) with enough samples to order on. A borrowed
-	// or thin reading loses to derived, as before.
+	// or thin reading loses to derived, as before. So does one that disagrees
+	// with derived by more than 2x and has had no sample for a while: under
+	// flow control the queue that writes a sample rarely builds, and one
+	// stale reading must not pin the fleet either way (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) {
+	if useDerived(derived.ok, reading) || measuredYieldsToDerived(reading, derived, a.now()) {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure

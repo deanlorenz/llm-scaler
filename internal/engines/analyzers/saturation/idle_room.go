@@ -178,13 +178,16 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	defer a.mu.Unlock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = &settleMemo{pods: make(map[string][]settleReading)}
+		memo = newSettleMemo()
 		a.k2Settle[model] = memo
 	}
 	if memo.idle == nil {
 		memo.idle = make(map[string]idleRun)
 	}
 	memo.seen = now
+	// The end of this cycle's pricing: a replica first seen Ready from the
+	// next cycle on has joined the fleet (settleMemo.noteReady).
+	memo.pastFirstCycle = true
 	for i := range caps {
 		rm := rows[i]
 		key := rm.VariantName + "/" + rm.PodName

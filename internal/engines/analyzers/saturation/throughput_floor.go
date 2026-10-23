@@ -202,6 +202,9 @@ type throughputReading struct {
 	bucket   string
 	samples  int
 	borrowed bool
+	// sampledAt is when the key's own window took its newest sample
+	// (throughputSampledAt); zero for any other reading, or when unknown.
+	sampledAt time.Time
 }
 
 // saturatedThroughputReading is saturatedThroughputFor with the window's
@@ -230,7 +233,8 @@ func (a *SaturationAnalyzer) saturatedThroughputReadingUnder(key, args string, s
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
 		ra.Touch()
-		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len()}
+		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len(),
+			sampledAt: a.throughputSampledAt[key]}
 	}
 	// The key's own window from before the variant's arguments changed: a
 	// hold-only figure, with the same authority as a neighbouring bucket's

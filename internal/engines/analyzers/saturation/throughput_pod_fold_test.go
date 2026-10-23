@@ -35,6 +35,7 @@ func measuredMuBias(t *testing.T, n, trials int) float64 {
 			for i := range rows {
 				rows[i] = makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "variant-m", 600_000, 1_162_240, 30, 1000, out)
 				rows[i].GenerationTokenRate = trueMu * out * (1 + sigma*rng.NormFloat64())
+				rows[i].RequestRate = trueMu
 			}
 			_, err := a.Analyze(logr.NewContext(t.Context(), logr.Discard()), makeAnalyzerInput(rows, states))
 			require.NoError(t, err)
@@ -81,9 +82,11 @@ func learnedUnder(t *testing.T, saturated int) (mu, k2, price float64) {
 			if i < saturated {
 				rows[i] = makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "variant-m", 600_000, 1_162_240, 30, 1000, 500)
 				rows[i].GenerationTokenRate = 6.0 * 500
+				rows[i].RequestRate = 6.0
 			} else {
 				rows[i] = makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "variant-m", 50_000, 1_162_240, 0, 1000, 500)
 				rows[i].GenerationTokenRate = 0.6 * 500
+				rows[i].RequestRate = 0.6
 			}
 		}
 		res, err := a.Analyze(logr.NewContext(t.Context(), logr.Discard()), makeAnalyzerInput(rows, states))

@@ -90,6 +90,7 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 		starvedRow.KvUsageInstant = 0.30
 		starvedRow.AvgITL = 0
 		starvedRow.GenerationTokenRate = tokenRate
+		starvedRow.RequestRate = tokenRate / 1000
 		return append(out, starvedRow)
 	}
 
@@ -157,8 +158,10 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 
 	// And wva_learned_state_borrowed says the same: a line held but not used
 	// is not a borrow. The result is read through Analyze, one cycle later,
-	// on the same fixture.
-	at := base.Add(4 * 2 * time.Minute)
+	// on the same fixture. A minute after the last, as the four before it: a
+	// replica unseen for over K2SettleMaxGap is one that has rejoined the
+	// fleet, and its saturated reading waits a window (throughput_admission.go).
+	at := base.Add(4 * time.Minute)
 	a.now = func() time.Time { return at }
 	res, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows(5410), states))
 	require.NoError(t, err)

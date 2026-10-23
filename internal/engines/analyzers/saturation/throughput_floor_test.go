@@ -830,8 +830,11 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// it lands on the same history key as the variant's own replicas. Its
 		// engine runs on the pool's terms; its saturated rate must not price
 		// the variant -- and the window is a max, so one reading would.
+		// The variant's own replica serves beside it, unsaturated, from the
+		// first cycle: a replica that joined the fleet a cycle ago is still
+		// filling and records nothing (throughput_admission.go).
 		in := makeAnalyzerInput(
-			[]domain.ReplicaMetrics{decode("bridge-0", 1_158_912, 10, 9.9)},
+			[]domain.ReplicaMetrics{decode("bridge-0", 1_158_912, 10, 9.9), decode("decode-0", 600_000, 0, runMu)},
 			states(1, 0)[:1])
 		in.ReplicaMetrics[0].FromWarmPool = true
 		_, err := analyzer.Analyze(ctx, in)

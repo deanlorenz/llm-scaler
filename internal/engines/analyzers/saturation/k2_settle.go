@@ -120,7 +120,23 @@ type settleMemo struct {
 	// routing's settled-idle test (routeQueuesToIdleRoom). Here because it is
 	// the same per-model, per-replica memory and is swept with it.
 	idle map[string]idleRun
-	seen time.Time
+	// readySince is when each replica was first seen Ready, for the joined
+	// test (noteReady); the zero time for one already Ready on the memo's
+	// first cycle, whose age the analyzer cannot know. Dropped with the
+	// replica's readings, and on any cycle the replica is not Ready.
+	readySince map[string]time.Time
+	// pastFirstCycle is set once the memo's first cycle has ended
+	// (noteIdleRuns, which runs once at the end of every cycle's pricing).
+	pastFirstCycle bool
+	seen           time.Time
+}
+
+// newSettleMemo is an empty memo in its first cycle.
+func newSettleMemo() *settleMemo {
+	return &settleMemo{
+		pods:       make(map[string][]settleReading),
+		readySince: make(map[string]time.Time),
+	}
 }
 
 // k2SettleInput is what the settle test reads for one replica.
@@ -135,6 +151,9 @@ type k2SettleInput struct {
 	// waitingQueueDemand charges it.
 	perRequest float64
 	threshold  float64
+	// ready is the row's Pod Ready (domain.ReplicaMetrics.Ready), for the
+	// joined test.
+	ready bool
 	// rate is the replica's own service rate this cycle (saturatedCompletionRate)
 	// and rateOK whether it has one; ref is the rate on record for the bucket,
 	// zero when there is none; k2Ref is the mean of the bucket's k2 window,
@@ -156,9 +175,10 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	a.mu.Lock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = &settleMemo{pods: make(map[string][]settleReading)}
+		memo = newSettleMemo()
 		a.k2Settle[model] = memo
 	}
+	joined := memo.noteReady(pod, in.ready, now)
 	trace := memo.pods[pod]
 	settled := settledOverWindow(trace, now, in.tokens, in.threshold)
 	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})
@@ -173,10 +193,20 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	maps.DeleteFunc(memo.pods, func(_ string, rs []settleReading) bool {
 		return len(rs) == 0 || now.Sub(rs[len(rs)-1].at) > K2SettleMaxGap
 	})
+	maps.DeleteFunc(memo.readySince, func(p string, _ time.Time) bool {
+		_, live := memo.pods[p]
+		return !live
+	})
 	a.mu.Unlock()
 
 	if in.queue < int(in.threshold) || in.tokens <= 0 {
 		return "" // not a saturated reading; nothing to judge
+	}
+	// A replica that joined under a window ago is filling, whatever its queue
+	// says: its one-minute gauges still hold the minute before it was routed
+	// to (throughput_admission.go).
+	if joined {
+		return k2UnsettledJoined
 	}
 	perRank := float64(in.tokens) / float64(max(in.ranks, 1))
 	if !(float64(in.queue)*in.perRequest > perRank) {
@@ -202,13 +232,29 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 
 // k2SettlePerRequest is a waiting request's footprint on role: the prompt for
 // prefill, the prompt and the generation otherwise (waitingQueueDemand).
-func k2SettlePerRequest(rm domain.ReplicaMetrics, role string) float64 {
-	per := rm.AvgInputTokens
-	if domain.CanonicalRole(role) != domain.RolePrefill {
-		per += rm.AvgOutputTokens
+//
+// The replica's own lengths where it has them, the fleet's (fleetIn,
+// fleetOut) where it does not. A replica that has completed nothing reports
+// no lengths at all -- the collector's per-pod mean is 0/0 and dropped -- and
+// a footprint of zero made every queue on it the overflow of a batch "at
+// least as large", so the settle test admitted it on sight. That is exactly
+// the replica the test is for: measured on E1 (2026-10-23), one just joined
+// read queue 218 on 174 359 resident with no completion, and its 0.066 req/s
+// went into the throughput window as a saturated reading.
+func k2SettlePerRequest(rm domain.ReplicaMetrics, role string, fleetIn, fleetOut float64) float64 {
+	in, out := rm.AvgInputTokens, rm.AvgOutputTokens
+	if !(in > 0) {
+		in = fleetIn
 	}
-	if !(per > 0) {
-		return 0
+	if !(out > 0) {
+		out = fleetOut
+	}
+	per := 0.0
+	if in > 0 {
+		per = in
+	}
+	if domain.CanonicalRole(role) != domain.RolePrefill && out > 0 {
+		per += out
 	}
 	return per
 }

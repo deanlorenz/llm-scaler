@@ -35,6 +35,7 @@ func runSettleCycles(t *testing.T, cycles []settleCycle) ([]string, []int64) {
 		ctx, logs := observedCtx(t)
 		rm := makeReplicaMetrics("pod-s", "variant-s", c.tokens, 376_480, c.queue, 1000, 500)
 		rm.GenerationTokenRate = c.gps
+		rm.RequestRate = c.gps / 500 // completing at the rate it generates
 		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
 			[]domain.VariantReplicaState{
 				{VariantName: "variant-s", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},
@@ -79,6 +80,7 @@ func TestK2Settle_ALoadStepRecordsNoThroughput(t *testing.T) {
 	// A rate on record, so the step's own rate has something to fall short of.
 	rm := makeReplicaMetrics("pod-s", "variant-s", 270_539, 376_480, 30, 1000, 500)
 	rm.GenerationTokenRate = 3000
+	rm.RequestRate = 6
 	states := []domain.VariantReplicaState{{VariantName: "variant-s", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode}}
 	_, err := analyzer.Analyze(t.Context(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, states))
 	require.NoError(t, err)
