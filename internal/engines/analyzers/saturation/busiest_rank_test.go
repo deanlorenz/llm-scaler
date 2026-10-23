@@ -331,9 +331,7 @@ func TestHotRankHoldLeavesPrefillToThePrefillHold(t *testing.T) {
 	}
 	a := NewSaturationAnalyzer(store)
 	rows := make([]domain.ReplicaMetrics, 0, 4)
-	// dec-b busy, not idle: an idle decode sibling is room the router could
-	// use, and decode would not be saturated (roleSaturated).
-	for _, p := range []brPod{brHot("dec-a", 0.1, 1.0, brQueueThr), brUniform("dec-b", 0.4, 0)} {
+	for _, p := range []brPod{brHot("dec-a", 0.1, 1.0, brQueueThr), brUniform("dec-b", 0.1, 0)} {
 		rm := brRow(p)
 		rm.VariantName = "dec"
 		rows = append(rows, rm)

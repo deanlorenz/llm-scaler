@@ -64,31 +64,44 @@ func imbK2Windows(a *SaturationAnalyzer, role string) int {
 	return n
 }
 
-// One decode replica full and queued while its three siblings idle is not
-// decode saturated: prefill learns, and its demand is not held. Every decode
-// replica full and queued still is, and one full among busy-but-not-full
-// siblings still is too -- only an idle sibling is room.
-func TestImbalanceDecodeSaturationNeedsNoIdleSibling(t *testing.T) {
+// One decode replica full and queued is decode saturated for what prefill
+// LEARNS, whatever its siblings do: KV prefilled for it waits on it, and a
+// prefill k2 learned from that wait is never corrected. Only prefill's DEMAND
+// hold relaxes, and only once a decode sibling has been idle room for
+// IdleSettledFor. Every decode replica full and queued, or one full among
+// busy siblings, holds as well; a balanced decode that is not full does
+// neither.
+func TestImbalanceDecodeGateKeepsPrefillFromLearningBackPressure(t *testing.T) {
 	states := []domain.VariantReplicaState{
 		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
 		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
 	}
 	roles := map[string]string{"decode-v": domain.RoleDecode, "prefill-v": domain.RolePrefill}
 	decode := func(fracs []float64, queues []int) []domain.ReplicaMetrics {
-		rows := make([]domain.ReplicaMetrics, 0, len(fracs))
+		rows := make([]domain.ReplicaMetrics, 0, len(fracs)+1)
 		for i, f := range fracs {
 			rows = append(rows, imbRow("decode-"+string(rune('0'+i)), "decode-v", f, queues[i], 6000, 1000, 0.3))
 		}
 		return rows
 	}
-	run := func(name string, rows []domain.ReplicaMetrics, wantSaturated bool) {
+	run := func(name string, rows []domain.ReplicaMetrics, settle, wantSaturated, wantHeld bool) {
 		t.Helper()
-		a, _ := imbAnalyzer()
+		a, clock := imbAnalyzer()
 		rows = append(rows, imbRow("prefill-0", "prefill-v", 0.35, 30, 6000, 1, 4.77))
 		sat := roleSaturated(rows, roles, domain.RoleDecode, 5, 0.8)
-		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
-		if err != nil {
-			t.Fatal(err)
+		var r *domain.AnalyzerResult
+		if settle {
+			r = imbSettle(t, a, clock, makeAnalyzerInput(rows, states))
+		} else {
+			// Two cycles: a prefill reading under a deep queue is admitted
+			// the cycle after it first shows (k2_settle.go).
+			for range 2 {
+				var err error
+				if r, err = a.Analyze(context.Background(), makeAnalyzerInput(rows, states)); err != nil {
+					t.Fatal(err)
+				}
+				*clock = clock.Add(imbCycle)
+			}
 		}
 		_, held := r.HeldRoleDemand[domain.RolePrefill]
 		n := imbK2Windows(a, domain.RolePrefill)
@@ -97,17 +110,54 @@ func TestImbalanceDecodeSaturationNeedsNoIdleSibling(t *testing.T) {
 		if sat != wantSaturated {
 			t.Errorf("%s: decode saturated = %v, want %v", name, sat, wantSaturated)
 		}
-		if wantSaturated && (n != 0 || !held) {
-			t.Errorf("%s: decode saturated, yet prefill recorded %d k2 windows (want 0) and held=%v (want true)", name, n, held)
+		if wantSaturated && n != 0 {
+			t.Errorf("%s: decode has a full, queued replica, yet prefill recorded %d k2 windows from its back-pressure", name, n)
 		}
-		if !wantSaturated && (n != 1 || held) {
-			t.Errorf("%s: decode has room, yet prefill recorded %d k2 windows (want 1) and held=%v (want false)", name, n, held)
+		if !wantSaturated && n != 1 {
+			t.Errorf("%s: decode is not saturated, yet prefill recorded %d k2 windows (want 1)", name, n)
+		}
+		if held != wantHeld {
+			t.Errorf("%s: prefill demand held = %v, want %v", name, held, wantHeld)
 		}
 	}
-	run("imbalanced", decode([]float64{0.95, 0.02, 0.02, 0.02}, []int{20, 0, 0, 0}), false)
-	run("uniformly saturated", decode([]float64{0.95, 0.95, 0.95, 0.95}, []int{20, 20, 20, 20}), true)
-	run("full among busy", decode([]float64{0.95, 0.5, 0.5, 0.5}, []int{20, 0, 0, 0}), true)
-	run("balanced, not full", decode([]float64{0.2525, 0.2525, 0.2525, 0.2525}, []int{0, 0, 0, 0}), false)
+	imbalanced := []float64{0.95, 0.02, 0.02, 0.02}
+	run("imbalanced, one cycle", decode(imbalanced, []int{20, 0, 0, 0}), false, true, true)
+	run("imbalanced, siblings idle for long enough", decode(imbalanced, []int{20, 0, 0, 0}), true, true, false)
+	run("uniformly saturated", decode([]float64{0.95, 0.95, 0.95, 0.95}, []int{20, 20, 20, 20}), false, true, true)
+	run("full among busy", decode([]float64{0.95, 0.5, 0.5, 0.5}, []int{20, 0, 0, 0}), true, true, true)
+	run("balanced, not full", decode([]float64{0.2525, 0.2525, 0.2525, 0.2525}, []int{0, 0, 0, 0}), false, false, false)
+}
+
+// The shape-swap replay's prefill reading (queue 30 at 357 800 resident)
+// while decode-1 is full with 81 waiting and decode-0 sits at 26 % of its
+// cache with nothing waiting: the reading is decode-1's back-pressure, and
+// prefill must not record it as its k2, on any cycle.
+func TestImbalanceDecodeGateHoldsBesideAnUnderloadedSibling(t *testing.T) {
+	a, clock := imbAnalyzer()
+	const prefillVariant = "prefill-v"
+	decode := func(pod string, tok int64, q int) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics(pod, decodeVariant, tok, runKvCapacity, q, 6000, 1000)
+		rm.RequestRate = 4.73
+		rm.GenerationTokenRate = rm.RequestRate * rm.AvgOutputTokens
+		return rm
+	}
+	prefill := makeReplicaMetrics("prefill-0", prefillVariant, 357_800, 1_149_312, 30, 6000, 1)
+	prefill.RequestRate = 4.77
+	prefill.GenerationTokenRate = prefill.RequestRate
+	states := []domain.VariantReplicaState{
+		{VariantName: decodeVariant, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: prefillVariant, Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	in := makeAnalyzerInput([]domain.ReplicaMetrics{
+		prefill,
+		decode("decode-0", 300_000, 0),
+		decode("decode-1", 1_039_474, 81),
+	}, states)
+	in.ArrivalRate = runLambda
+	imbSettle(t, a, clock, in)
+	if n := imbK2Windows(a, domain.RolePrefill); n != 0 {
+		t.Errorf("prefill recorded %d k2 windows from decode-1's back-pressure while decode-1 was full and queued", n)
+	}
 }
 
 // replicaIdle is the balance package's idle: Ready, busiest-rank KV under 0.30,

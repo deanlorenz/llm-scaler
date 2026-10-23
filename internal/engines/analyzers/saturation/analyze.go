@@ -760,7 +760,14 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	// prefill first. Only the disaggregated case has a prefill
 	// entry to hold; the model-level total moves by the same amount so
 	// RoleDemand and TotalDemand keep moving together.
-	if c.decodeSaturated && d.roleDemand != nil {
+	//
+	// One thing relaxes the hold and nothing else: a decode replica that
+	// has been idle room for IdleSettledFor (routeQueuesToIdleRoom). Then
+	// decode has room the router is not using, and prefill's demand is its
+	// own to be ordered on; what prefill may LEARN stays gated on
+	// decodeSaturated alone (roleSaturated says why).
+	prefillHeld := c.decodeSaturated && c.idleRoom[domain.RoleDecode].replicas == 0
+	if prefillHeld && d.roleDemand != nil {
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		// The scheduler queue's share is exempt: those requests have been
 		// given to no pod and have had no first token, so prefill is what
@@ -805,7 +812,7 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	{
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
-			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
+			c.rolesByVariant, c.cfg.KvCacheThreshold, prefillHeld)
 		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
 			d.roleDemand, total, scaleUp, scaleDown)
 		if after > total {

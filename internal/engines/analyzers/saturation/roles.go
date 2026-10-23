@@ -175,24 +175,8 @@ func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
 	return busyNow && rm.Ready && ok && k < idleKvUsage
 }
 
-// roleSaturated reports whether the given role is saturated this cycle: a
-// Ready replica of it full and queued, AND no Ready replica of it idle
-// (replicaIdle).
-//
-// The second half is the router's share. One decode replica full and queued
-// while a sibling sits idle is routing, not a role out of room: the router
-// could send the hot replica's next request to the idle one, and a replica
-// added would be one more the router need not use. Measured: an argmax picker
-// held 439 requests on one pod while three sat idle. Read as decode saturated,
-// that one pod withheld prefill's learning and held prefill's demand for the
-// whole model. Only an idle sibling clears it: a sibling between idle and full
-// is not counted as room, so a role loaded everywhere and full somewhere stays
-// saturated, as before -- the gate protects prefill's k2 from back-pressure
-// readings, and a k2 learned too low is never corrected (it orders replicas,
-// so nothing saturates to write a higher one).
-//
-// A replica is full and queued when its local queue is at or over the
-// threshold, as computeK2
+// roleSaturated reports whether any replica of the given role is full and
+// queued this cycle: its local queue at or over the threshold, as computeK2
 // admits a P1-obs reading on, AND its resident KV at or over its k1 (the
 // cache times kvCacheThreshold) and within the cache's physical ceiling (a
 // reading above it is a scrape artifact there, and no more a saturation
@@ -208,20 +192,23 @@ func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
 // learning and hold prefill's demand for as long as the Pod sat unready.
 // Both tests read the replica's busiest engine rank (BusiestRankQueue,
 // kvFull), as computeK2 does: the thresholds are one engine's.
+//
+// One under-loaded decode replica beside a full one does not clear it. The
+// back-pressure that makes a prefill reading decode's is the full replica's:
+// KV prefilled for it waits on it, whatever its siblings are doing, and a
+// prefill k2 learned from that wait is never corrected (k2 is never raised).
+// The idle sibling's room relaxes only the hold on prefill's DEMAND
+// (applyFloorAndHolds), never what prefill may learn.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
-	saturated := false
 	for _, rm := range metrics {
 		if !rm.Ready || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
-		if replicaIdle(rm) {
-			return false
-		}
 		if rm.BusiestRankQueue() >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
-			saturated = true
+			return true
 		}
 	}
-	return saturated
+	return false
 }
 
 // kvFull reports whether rm's busiest engine rank is full: its resident KV,

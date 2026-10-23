@@ -775,10 +775,8 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// A warm-pool bridge lent to the variant carries a queue of its own;
 		// aggregation counts its demand toward the variant, but it is not
 		// this variant's backlog to size for and its residency charge is not
-		// one the floor put there. The own replica is busy, not idle: beside
-		// an idle sibling the bridge's queue would be the router's to move,
-		// and charged nowhere (localQueueCharge).
-		own := decode("decode-0", 400_000, 0, runMu)
+		// one the floor put there.
+		own := decode("decode-0", 300_000, 0, runMu)
 		bridge := decode("bridge-0", 300_000, 600, runMu)
 		bridge.FromWarmPool = true
 		in := makeAnalyzerInput([]domain.ReplicaMetrics{own, bridge, prefill("prefill-0", 0)}, states(1, 1))
@@ -786,11 +784,11 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		result, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
 		// The bridge's 600 queued requests are charged once, by aggregation,
-		// as 600 x 7000 = 4.2M of residency on top of 0.7M resident. The floor
+		// as 600 x 7000 = 4.2M of residency on top of 0.6M resident. The floor
 		// neither takes that charge out (it is not one it put there) nor
 		// re-prices it as a backlog: either mistake would land at
 		// (6 + 600/60) / 5.4 = 2.96 replicas' worth (2.75M) instead.
-		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 700_000+600*7000, 1),
+		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 600_000+600*7000, 1),
 			"the bridge's queue stays as the residency aggregation charged, and enters no backlog")
 	})
 
