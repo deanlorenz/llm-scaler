@@ -44,6 +44,15 @@ type ReplicaCapacity struct {
 	// back out and price the same requests as work to be done instead.
 	QueueLength      int
 	LocalQueueDemand int64
+	// QueueRoutable is set while the replica's role has an idle Ready
+	// replica this cycle: busiest-rank KV under 30 % and nothing waiting
+	// (the saturation analyzer's replicaIdle). A request in this replica's
+	// engine queue is drained only by this engine, and a replica added
+	// cannot take it, so while the router has an idle replica it could have
+	// used the queue is the router's imbalance, not a shortfall of the role:
+	// floor.Estimate is not handed it as backlog. A role with no idle replica
+	// leaves this false and its queues count in full.
+	QueueRoutable bool
 
 	// FromWarmPool marks a BRIDGE: a warm pool Pod lent to this variant rather
 	// than one of its own replicas. Carried through from the collector so

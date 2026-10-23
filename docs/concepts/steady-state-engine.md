@@ -212,6 +212,10 @@ a role that is busy everywhere is never treated as imbalanced.
 - **Decode is saturated only when it has no idle replica.** One full decode
   replica beside idle siblings does not stop prefill learning, and does not
   hold prefill's demand.
+- **A queue on one replica is not a backlog to size for.** Only that engine
+  can drain it, and new replicas cannot take it. The throughput floor leaves it
+  out while the role has an idle replica. The scheduler's queue still counts,
+  because the router can place those requests anywhere.
 
 ### 3. The scaling signal
 

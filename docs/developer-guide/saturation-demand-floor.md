@@ -48,7 +48,14 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`.
+  `lambda`. An engine's own queue is left out while its role has an idle
+  Ready replica (`capacity.ReplicaCapacity.QueueRoutable`, set from
+  `rolesWithIdleReplica`): only that engine drains it, so it is the router's
+  imbalance, not a shortfall replicas fix. Measured in the imbalance audit,
+  100 requests on one of four replicas at half the fleet's throughput implied
+  4.31 replicas against 2.35 balanced, 300 implied 8.24; both read 2.35 now.
+  A role with no idle replica counts its queues in full, as before. The
+  scheduler's queue always counts: the router can still place those.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
   were resident at once) comes out -- but only where the floor's figure can

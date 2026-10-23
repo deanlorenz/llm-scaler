@@ -123,6 +123,23 @@ func replicaIdle(rm domain.ReplicaMetrics) bool {
 	return kv < idleKvUsage
 }
 
+// rolesWithIdleReplica is the set of roles (domain.CanonicalRole) with at least
+// one idle Ready replica this cycle (replicaIdle). While a role is in it, a
+// queue standing on one of its replicas is the router's to move, not a
+// shortfall of the role: the router has a replica with room it could hand
+// those requests to. A role busy on every replica is not in it, and its queues
+// count in full. Bridges count, as in roleSaturated: a Ready warm-pool Pod
+// lent to the role is routed to like one of its own.
+func rolesWithIdleReplica(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for _, rm := range metrics {
+		if replicaIdle(rm) {
+			out[domain.CanonicalRole(rolesByVariant[rm.VariantName])] = true
+		}
+	}
+	return out
+}
+
 // roleSaturated reports whether the given role is saturated this cycle: a
 // Ready replica of it full and queued, AND no Ready replica of it idle
 // (replicaIdle).

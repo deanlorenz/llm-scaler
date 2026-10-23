@@ -151,6 +151,10 @@ type cycle struct {
 	rolesByVariant  map[string]string
 	accelByVariant  map[string]string
 	decodeSaturated bool
+	// idleRoles is the roles with an idle Ready replica this cycle
+	// (rolesWithIdleReplica). A replica's own waiting queue is not the
+	// role's to size for while its role is in it.
+	idleRoles map[string]bool
 
 	// observeFleetShape: the one shape the fleet is serving, and the tracker's
 	// view of whether it just changed.
@@ -260,6 +264,8 @@ func (a *SaturationAnalyzer) newCycle(
 	c.decodeSaturated = a.rememberDecodeSaturation(input.Namespace, input.ModelID,
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
+	// Decided over every row before any is priced, for the same reason.
+	c.idleRoles = rolesWithIdleReplica(input.ReplicaMetrics, c.rolesByVariant)
 
 	return c
 }
@@ -553,6 +559,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// order it has earned.
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
+			// A property of the cycle's routing, like the line above.
+			rc.QueueRoutable = c.idleRoles[domain.CanonicalRole(role)]
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
 	}

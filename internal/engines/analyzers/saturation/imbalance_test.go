@@ -141,3 +141,74 @@ func TestImbalanceReplicaIdleMatchesBalance(t *testing.T) {
 		}
 	}
 }
+
+// imbFloorFleet is an aggregated variant of four replicas whose measured mu is
+// about 1 req/s, learned over four saturated cycles a minute apart, and the
+// analyzer handed back for one more cycle at lambda 2 -- half the fleet's
+// throughput.
+func imbFloorFleet(t *testing.T, rows []domain.ReplicaMetrics) (implied float64) {
+	t.Helper()
+	states := []domain.VariantReplicaState{
+		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	a, clock := imbAnalyzer()
+	for i := 0; i < 4; i++ {
+		var seed []domain.ReplicaMetrics
+		for _, p := range []string{"r0", "r1", "r2", "r3"} {
+			// Distinct readings per cycle, so each counts as a sample.
+			seed = append(seed, imbRow(p, "agg-v", 0.95, 10, 1000, 1000, []float64{1.0, 1.02, 0.98, 1.01}[i]))
+		}
+		in := makeAnalyzerInput(seed, states)
+		in.ArrivalRate = 4.0
+		if _, err := a.Analyze(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+		*clock = clock.Add(ThroughputSampleSpacing + time.Second)
+	}
+	in := makeAnalyzerInput(rows, states)
+	in.ArrivalRate = 2.0
+	r, err := a.Analyze(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.TotalDemand / (0.85 * imbVariant(t, r, "agg-v").PerReplicaCapacity)
+}
+
+// imbFleet is four agg-v replicas r0..r3 at the given KV fractions, queues and
+// request rates.
+func imbFleet(fracs []float64, queues []int, rates []float64) []domain.ReplicaMetrics {
+	var rows []domain.ReplicaMetrics
+	for i := range fracs {
+		rows = append(rows, imbRow("r"+string(rune('0'+i)), "agg-v", fracs[i], queues[i], 1000, 1000, rates[i]))
+	}
+	return rows
+}
+
+// A queue the router pinned on one replica, while a sibling idles, is not a
+// backlog the role can be sized for: replicas added cannot drain another
+// engine's queue. With every replica busy it is, and counts as before.
+func TestImbalanceFloorBacklogLeavesAPinnedQueueOut(t *testing.T) {
+	light := []float64{0.10, 0.10, 0.10}
+	balanced := imbFloorFleet(t, imbFleet([]float64{0.3125, 0.3125, 0.3125, 0.3125}, []int{0, 0, 0, 0}, []float64{0.5, 0.5, 0.5, 0.5}))
+	q100 := imbFloorFleet(t, imbFleet(append([]float64{0.95}, light...), []int{100, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
+	q300 := imbFloorFleet(t, imbFleet(append([]float64{0.95}, light...), []int{300, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
+	busyQ0 := imbFloorFleet(t, imbFleet([]float64{0.95, 0.95, 0.95, 0.95}, []int{0, 0, 0, 0}, []float64{0.5, 0.5, 0.5, 0.5}))
+	busyQ100 := imbFloorFleet(t, imbFleet([]float64{0.95, 0.95, 0.95, 0.95}, []int{100, 100, 100, 100}, []float64{0.5, 0.5, 0.5, 0.5}))
+	hotAmongBusy := imbFloorFleet(t, imbFleet([]float64{0.95, 0.5, 0.5, 0.5}, []int{100, 0, 0, 0}, []float64{1.0, 0.33, 0.33, 0.34}))
+	t.Logf("implied replicas: balanced %.2f; one replica queued 100 / 300 beside idle siblings %.2f / %.2f", balanced, q100, q300)
+	t.Logf("implied replicas: every replica full, queue 0 / 100 each %.2f / %.2f; queued 100 beside busy siblings %.2f",
+		busyQ0, busyQ100, hotAmongBusy)
+	for name, got := range map[string]float64{"queue 100": q100, "queue 300": q300} {
+		if got > balanced+0.5 {
+			t.Errorf("%s pinned on one replica beside idle siblings implies %.2f replicas, balanced %.2f", name, got, balanced)
+		}
+	}
+	if !(busyQ100 > busyQ0+1) {
+		t.Errorf("every replica full and queued 100 implies %.2f replicas, no more than queue 0's %.2f: the backlog of a short fleet was dropped",
+			busyQ100, busyQ0)
+	}
+	if !(hotAmongBusy > balanced+0.5) {
+		t.Errorf("a queue beside busy (not idle) siblings implies %.2f replicas, no more than balanced %.2f: only an idle sibling may drop it",
+			hotAmongBusy, balanced)
+	}
+}
