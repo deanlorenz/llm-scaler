@@ -142,6 +142,15 @@ last; it is the unit change that makes the other two land.
   observability yes, a metric for KEDA to threshold instead of WVA computing
   the target no.
 
+- **[One learner lifecycle for the analyzers](analyzer-learner.md)** —
+  proposed. Fourteen learned quantities each admit, fit, forget and log in
+  their own way, and the same defects (transients admitted, a first sample
+  taken raw, stale values, missing readings read as zero, one reading
+  dominating) were fixed in one after another. One lifecycle (admit with a
+  reason, fit, predict with an age, validate, refit / forget / hold) and one
+  settled-replica tracker; each learner keeps its model and its direction
+  policy, so k2 still only falls.
+
 - **[Learned-state sharing by similarity](learned-state-sharing-by-similarity.md)**
   — each variant stores only its own k2, throughput and ITL readings, and a
   variant with none reads the most compatible other variant's: same flags,
