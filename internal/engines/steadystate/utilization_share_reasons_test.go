@@ -97,7 +97,7 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 		l := allocation.NewShareLedger()
 		held := map[string]int{"ns/B/both": 4, "ns/C/both": 6}
 		// B gives, receives, gives, receives: three reversals within the
-		// swing window (allocation.ShareSwingReversals).
+		// swing window (config.DefaultSwingReversals).
 		for i, pair := range [][2]string{{"ns/B/both", "ns/C/both"}, {"ns/C/both", "ns/B/both"}, {"ns/B/both", "ns/C/both"},
 			{"ns/C/both", "ns/B/both"}} {
 			l.Start(allocation.ShareTransfer{Donor: pair[0], Receiver: pair[1], GPUs: 1, DonorGPUs: 1},

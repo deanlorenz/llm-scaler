@@ -476,12 +476,9 @@ func TestShareRecurringDonorPeakIsKept(t *testing.T) {
 func TestShareSingleSwapBackIsNotHeldOnTheMean(t *testing.T) {
 	const m = time.Minute
 	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle, ReplicaStart: 240 * time.Second}, nil)
-	const back = 50 * m
+	const back = singleSwapBackAt
 	for _, g := range []int{1, 8} {
-		x := float64(g)
-		phases := []stallPhase{{5 * m, stallNeeds(0.1*x, 0.1*x)}, {25 * m, stallNeeds(2.9*x, 0.17*x)},
-			{20 * m, stallNeeds(0.7*x, 2.9*x)}, {60 * m, stallNeeds(2.9*x, 0.65*x)}}
-		served := func(need float64, held int) float64 { return math.Min(need, 1.5*float64(held)) }
+		phases, served := singleSwapBack(g)
 		initial := map[string]int{"A": g, "B": g}
 		for _, order := range []struct {
 			name   string
@@ -519,6 +516,79 @@ func TestShareSingleSwapBackIsNotHeldOnTheMean(t *testing.T) {
 				}
 			}
 			t.Logf("%s: swap back reached %d:%d after %v; rule off: %v", name, a3, b3, done, free)
+		}
+	}
+}
+
+// singleSwapBackAt is when the scenario of singleSwapBack swaps back for good.
+const singleSwapBackAt = 50 * time.Minute
+
+// singleSwapBack is the swap and swap back of issue #269 with g-GPU replicas
+// (TestShareSingleSwapBackIsNotHeldOnTheMean), and the demand a short model
+// is measured at: at most 1.5 GPUs per GPU it holds.
+func singleSwapBack(g int) ([]stallPhase, func(need float64, held int) float64) {
+	const m = time.Minute
+	x := float64(g)
+	phases := []stallPhase{{5 * m, stallNeeds(0.1*x, 0.1*x)}, {25 * m, stallNeeds(2.9*x, 0.17*x)},
+		{20 * m, stallNeeds(0.7*x, 2.9*x)}, {60 * m, stallNeeds(2.9*x, 0.65*x)}}
+	served := func(need float64, held int) float64 { return math.Min(need, 1.5*float64(held)) }
+	return phases, served
+}
+
+// stabilization.swingReversals sets how many changes of direction a swing
+// takes. At 2 -- the rule before the default became three -- the single swap
+// back of issue #269 is a swing again: the busy model is planned on its mean
+// after it, and reaches 3:1 later than with the rule off. At 3, set
+// explicitly, it is not held, as with the default. Both orders, 1-GPU
+// replicas and whole 8-GPU nodes.
+func TestShareSwingReversalsSetsWhatASwingTakes(t *testing.T) {
+	derived, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle, ReplicaStart: 240 * time.Second}, nil)
+	const back = singleSwapBackAt
+	for _, g := range []int{1, 8} {
+		phases, served := singleSwapBack(g)
+		initial := map[string]int{"A": g, "B": g}
+		for _, order := range []struct {
+			name   string
+			phases []stallPhase
+			busy   string
+			final  [2]int
+		}{
+			{"A then B", phases, "A", [2]int{3 * g, g}},
+			{"B then A", stallSwap(phases), "B", [2]int{g, 3 * g}},
+		} {
+			off := derived
+			off.SwingWindow = 0
+			free, ok := stallReached(stallLoopSized(off, g, initial, true, order.phases, served), back, order.final[0], order.final[1])
+			if !ok {
+				t.Fatalf("%d-GPU replicas, %s, control: with the swing rule off the swap back never reached %v", g, order.name, order.final)
+			}
+			for _, n := range []int{2, 3} {
+				name := fmt.Sprintf("%d-GPU replicas, %s, swingReversals %d", g, order.name, n)
+				tm := derived
+				tm.SwingReversals = n
+				cycles := stallLoopSized(tm, g, initial, true, order.phases, served)
+				held := 0
+				for _, c := range cycles {
+					if c.at >= back && slices.Contains(c.swinging, order.busy) {
+						held++
+					}
+				}
+				done, reached := stallReached(cycles, back, order.final[0], order.final[1])
+				switch {
+				case n == 2 && held == 0:
+					t.Errorf("%s: the busy role was never planned on its mean after the swap back; two reversals must make a swing", name)
+				case n == 2 && reached && done <= free:
+					t.Errorf("%s: the swap back reached %v after %v, no later than with the rule off (%v); it was not held",
+						name, order.final, done, free)
+				case n == 3 && held > 0:
+					t.Errorf("%s: the busy role was planned on its mean for %d cycles after a single swap back", name, held)
+				case n == 3 && (!reached || done > free):
+					t.Errorf("%s: the swap back reached %v after %v (reached %v), want no later than with the rule off (%v)",
+						name, order.final, done, reached, free)
+				}
+				t.Logf("%s: held on the mean %d cycles; reached %v after %v (reached %v); rule off: %v",
+					name, held, order.final, done, reached, free)
+			}
 		}
 	}
 }

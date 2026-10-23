@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
@@ -174,9 +175,13 @@ type ShareTimings struct {
 	// transfer's start, and a cancelled transfer's donor from giving to the
 	// same receiver again, measured from the cancellation.
 	ReversalHold time.Duration
-	// SwingWindow: a role whose transfers change direction ShareSwingReversals
+	// SwingWindow: a role whose transfers change direction SwingReversals
 	// times within it is planned on its mean need for the next SwingWindow.
 	SwingWindow time.Duration
+	// SwingReversals is stabilization.swingReversals: the changes of direction
+	// within SwingWindow that make a swing. Zero takes
+	// config.DefaultSwingReversals.
+	SwingReversals int
 	// MoveLatency is how long a move takes from decision to serving: release,
 	// model load and the cycles in between. Zero takes SwingWindow/8, what
 	// the swing window is derived from when not overridden.
@@ -189,6 +194,15 @@ func (tm ShareTimings) moveLatency() time.Duration {
 		return tm.MoveLatency
 	}
 	return tm.SwingWindow / 8
+}
+
+// Reversals is the changes of direction a swing takes: tm.SwingReversals, or
+// config.DefaultSwingReversals when it is not set.
+func (tm ShareTimings) Reversals() int {
+	if tm.SwingReversals > 0 {
+		return tm.SwingReversals
+	}
+	return config.DefaultSwingReversals
 }
 
 // unpacedHorizon is how much of its burst a receiver must have left for its
@@ -551,7 +565,7 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	// loop.
 	//
 	// The cancel itself is one change of direction toward a swing
-	// (recordCancel), of the ShareSwingReversals a swing takes: a load that
+	// (recordCancel), of the SwingReversals a swing takes: a load that
 	// swaps faster than the release window has every transfer cancelled
 	// before it moves anything, and counting only the moves that land, it
 	// never reached a swing -- a transfer started and was called off at
@@ -887,20 +901,9 @@ func (l *ShareLedger) GivingBlocked(role string, now time.Time) bool {
 	return now.Before(l.giveAfter[role]) || l.GivingBusy(role, now)
 }
 
-// ShareSwingReversals is how many times a role's moves must change direction
-// within the swing window before it is planned on its mean need: one and a
-// half cycles. At two, a single swap back counted as a swing -- a model raised
-// for a load, drained when the load went to the other model and raised again
-// when it came back has changed direction twice -- and both models were held
-// halfway, on their means, until the busy one's need had outlasted the earlier
-// halves: the swap back of issue #269 sat at 2:2 for eleven minutes and
-// reached its split after 28, against 9 with the rule off. A load that really
-// oscillates reverses a third time within the window, and is held from then.
-const ShareSwingReversals = 3
-
 // recordMove notes a role's transfer direction, holds it from reversing, and
-// marks it swinging when its moves changed direction ShareSwingReversals
-// times within the swing window (§6.7 rule 5).
+// marks it swinging when its moves changed direction SwingReversals times
+// within the swing window (§6.7 rule 5).
 func (l *ShareLedger) recordMove(role string, received bool, id string, now time.Time, tm ShareTimings) {
 	// Kept for as long as anything derived from them can still matter: the
 	// reversal hold, and a swing (SwingWindow) begun by moves up to a
@@ -937,7 +940,8 @@ func (l *ShareLedger) unrecord(role, id string, tm ShareTimings) {
 // rederive recomputes role's last move each way and its swing from its moves:
 // a swing begins at a move or cancel where the changes of direction within
 // SwingWindow before it -- between consecutive moves, and one per cancel --
-// number ShareSwingReversals, and lasts SwingWindow.
+// number SwingReversals (config.DefaultSwingReversals unless the policy sets
+// stabilization.swingReversals), and lasts SwingWindow.
 func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 	delete(l.lastGave, role)
 	delete(l.lastGot, role)
@@ -965,8 +969,9 @@ func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 		return n
 	}
 	var until time.Time
+	need := tm.Reversals()
 	mark := func(at time.Time) {
-		if reversals(at) >= ShareSwingReversals && at.Add(tm.SwingWindow).After(until) {
+		if reversals(at) >= need && at.Add(tm.SwingWindow).After(until) {
 			until = at.Add(tm.SwingWindow)
 		}
 	}
@@ -982,7 +987,7 @@ func (l *ShareLedger) rederive(role string, tm ShareTimings) {
 }
 
 // Swinging reports whether role is planned on its mean need now: its moves
-// changed direction ShareSwingReversals times within the swing window, and its
+// changed direction SwingReversals times within the swing window, and its
 // need has not since settled away from its mean for longer than a move takes
 // (stepped).
 func (l *ShareLedger) Swinging(role string, now time.Time) bool {
