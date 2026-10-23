@@ -551,6 +551,10 @@ Three lines carry the whole chain, all at `logging.DEFAULT`:
   sequence count, the ITL line or the pricing point. `kvReqPerSeq` is the
   priced shape and `kvReqFleet` the fleet's own; `muShortWindow` says whether
   the pair moved to the short window.
+  It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
+  `itl-line-borrowed`, `itl-gps-mismatch`), carries `namespace` beside
+  `variant`: one Deployment applied to two namespaces logs the same variant
+  name in both, and only the namespace tells their lines apart.
 - `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`, `k2Source`,
   `boundBy`, `saturatedThroughput`, `saturatedThroughputBucket`.
 - `throughput-demand-floor` — `arrivalRate`, `backlogRequests`,

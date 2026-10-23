@@ -148,7 +148,7 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 		return
 	}
 	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
-		"variant", rm.VariantName, "pod", rm.PodName,
+		"namespace", rm.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
 		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
 		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
