@@ -156,6 +156,8 @@ func (e *Engine) runAnalyzers(
 		return nil, err
 	}
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	// Observe only: how evenly the router loads each role (load_balance.go).
+	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates, config.QueueLengthThreshold)
 
 	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
 	// reports demand and capacity only: the engine applies the thresholds
@@ -651,6 +653,9 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 func (e *Engine) onNothingObserved(namespace, modelID string) {
 	e.zeroObservedReplicas(namespace, modelID)
 	e.dropServiceRateSeries(namespace, modelID)
+	// No ready replica, so no distribution: a parked role must not keep
+	// reporting the imbalance it had.
+	e.forgetLoadBalance(namespace, modelID)
 }
 
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
@@ -774,6 +779,9 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
+	// Published before the model reached recordAnalyzerMetrics, so tracked
+	// apart from lastAnalyzerSeries.
+	e.retainLoadBalance(activeKeys)
 }
 
 // evictAllAnalyzerSeries removes every analyzer series the engine has published,
@@ -795,6 +803,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		metrics.DeleteSLOModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
+	e.retainLoadBalance(nil)
 }
 
 // livenessThreshold is how long an analyzer stays live after its last
