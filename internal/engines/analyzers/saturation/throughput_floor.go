@@ -576,10 +576,19 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// the 260 123 resident, the analyzer's rc falling 312 936 -> 47 265 in
 		// one cycle; at 07:46:12 a term that could not order (mayOrder=false)
 		// took 356 392 to 274 556.
-		trusted := term.MayOrder && !term.Held && term.ArrivalDemand >= FloorLagFraction*resident
+		//
+		// Blended, not switched (floorTrust). A hard switch at
+		// FloorLagFraction made demand fall as lambda rose: in review, the
+		// replica above went 499 446 -> 260 123 between 2.95 and 3.0 req/s,
+		// so a fleet sitting near the line flipped between the two demands
+		// cycle to cycle.
 		want := max(measured, tokens)
-		if trusted {
-			want = max(resident, tokens)
+		if term.MayOrder && !term.Held {
+			trust := 1.0
+			if resident > 0 {
+				trust = floorTrust(term.ArrivalDemand / resident)
+			}
+			want -= trust * (want - max(resident, tokens))
 		}
 		if want == measured {
 			continue
@@ -665,6 +674,25 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // 0.8-0.9 of it. A load step whose lambda still reads the minute before reads
 // 0.13 (0.8 req/s against a replica holding 260 123 tokens at mu 6).
 const FloorLagFraction = 0.5
+
+// FloorTrustFraction is the share of the resident KV the arrival half must
+// account for before the floor's drain price replaces the queues' residency
+// charge in full. Between FloorLagFraction and it the two are blended in
+// proportion (floorTrust); 0.8 is the bottom of what a fleet draining a
+// backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
+const FloorTrustFraction = 0.8
+
+// floorTrust is how far the floor's drain price may replace the queues'
+// residency charge, from 0 at FloorLagFraction of the resident KV or less to
+// 1 at FloorTrustFraction or more, given ratio = ArrivalDemand / resident.
+// Linear between, so the demand moves continuously with lambda rather than
+// dropping by the whole queue at one point.
+func floorTrust(ratio float64) float64 {
+	if !(ratio > FloorLagFraction) {
+		return 0
+	}
+	return min((ratio-FloorLagFraction)/(FloorTrustFraction-FloorLagFraction), 1)
+}
 
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler

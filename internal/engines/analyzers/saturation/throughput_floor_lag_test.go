@@ -59,3 +59,33 @@ func TestThroughputFloor_PricesABacklogAsDrainWhenLambdaHolds(t *testing.T) {
 	assert.Less(t, got, resident+charge)
 	assert.Greater(t, got, resident)
 }
+
+// The swap is blended in, not switched on: demand moves continuously as the
+// arrival rate crosses FloorLagFraction of the resident KV. A hard switch
+// took this replica from 499 446 to 260 123 between 2.95 and 3.0 req/s.
+func TestThroughputFloor_TheSwapIsContinuousInLambda(t *testing.T) {
+	const resident, charge = 260_123.0, 239_323.0
+	below := floorOneReplica(2.95, 6.0, 2, resident, charge, 160)
+	above := floorOneReplica(3.0, 6.0, 2, resident, charge, 160)
+	t.Logf("demand at 2.95 req/s %.0f, at 3.0 req/s %.0f", below, above)
+	assert.InDelta(t, below, above, 0.02*below, "a 2 %% rise in lambda moves demand by at most 2 %%")
+	prev := resident + charge
+	for _, lambda := range []float64{2.8, 3.2, 3.6, 4.0, 4.4, 4.8, 5.2, 6.0, 8.0} {
+		got := floorOneReplica(lambda, 6.0, 2, resident, charge, 160)
+		t.Logf("lambda %.1f: demand %.0f", lambda, got)
+		assert.LessOrEqual(t, prev-got, 0.15*(resident+charge),
+			"at %.1f req/s demand fell by more than 15 %% of the measured demand in one step", lambda)
+		assert.GreaterOrEqual(t, got, resident, "never under the resident KV")
+		prev = got
+	}
+}
+
+// floorTrust: nothing at or under FloorLagFraction, everything at or over
+// FloorTrustFraction, linear between.
+func TestFloorTrust(t *testing.T) {
+	assert.Zero(t, floorTrust(0.13))
+	assert.Zero(t, floorTrust(FloorLagFraction))
+	assert.InDelta(t, 0.5, floorTrust((FloorLagFraction+FloorTrustFraction)/2), 1e-12)
+	assert.InDelta(t, 1.0, floorTrust(FloorTrustFraction), 1e-12)
+	assert.InDelta(t, 1.0, floorTrust(1.4), 1e-12)
+}
