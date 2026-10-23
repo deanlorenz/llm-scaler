@@ -314,8 +314,21 @@ Two sources, added.
 ### A replica's own demand
 
 ```
-replicaDemand = rm.TokensInUse + waitingQueueDemand(rm, role)
+replicaDemand = rm.TokensInUse + localQueueCharge(rm, role, routing)
 ```
+
+`localQueueCharge` is `waitingQueueDemand(rm, role)`, or zero while the
+replica's role has an idle Ready replica (`replicaRouting.queueRoutable`, from
+`cycle.idleRoles`, built in `newCycle` by `rolesWithIdleReplica`). Idle is
+`replicaIdle`: busiest-rank KV under `idleKvUsage` (0.30) and nothing waiting,
+the numbers of `internal/signals/balance`. A queue in one engine is drained by
+that engine only, so beside an idle sibling it is the router's imbalance, not
+demand. Measured in the imbalance audit, 439 requests on one of four prefill
+pods with three idle priced prefill at 2,866,448 tokens against 232,448
+without the queue; it now reads 232,448. A role with no idle replica is
+charged its queues in full, as before. The same flag
+(`capacity.ReplicaCapacity.QueueRoutable`) keeps the queue out of the
+throughput floor's backlog.
 
 ### The scheduler queue
 

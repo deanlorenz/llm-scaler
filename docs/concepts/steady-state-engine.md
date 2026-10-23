@@ -115,7 +115,8 @@ demand = tokens_in_use          (live: kv_cache_usage × capacity)
 ```
 
 The scheduler-queue term counts load that has not reached a pod yet. When known, the
-prefix-cache hit rate discounts its input tokens.
+prefix-cache hit rate discounts its input tokens. The local-queue term is left out
+while another replica of the same role is idle; see [uneven routing](#uneven-routing).
 
 #### The throughput floor
 
@@ -212,9 +213,10 @@ a role that is busy everywhere is never treated as imbalanced.
 - **Decode is saturated only when it has no idle replica.** One full decode
   replica beside idle siblings does not stop prefill learning, and does not
   hold prefill's demand.
-- **A queue on one replica is not a backlog to size for.** Only that engine
-  can drain it, and new replicas cannot take it. The throughput floor leaves it
-  out while the role has an idle replica. The scheduler's queue still counts,
+- **A queue on one replica is not demand.** Only that engine can drain it, and
+  new replicas cannot take it. While the role has an idle replica, the queue is
+  left out of the demand and out of the throughput floor's backlog. The tokens
+  the replica already holds still count. The scheduler's queue still counts,
   because the router can place those requests anywhere.
 
 ### 3. The scaling signal

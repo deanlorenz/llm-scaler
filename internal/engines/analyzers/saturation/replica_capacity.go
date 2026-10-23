@@ -62,6 +62,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// template revision this cycle (revisionsMixed): mid-rollout, whatever
 	// its scale target's status says.
 	revisionsMixed bool,
+	// routing is what the cycle's routing says about this replica's demand
+	// (replicaRouting): whether its own queue is the router's to move.
+	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	if rm.TotalKvCapacityTokens <= 0 {
@@ -70,12 +73,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// capacity from the capacity store. A better approach would be to estimate
 		// TotalKvCapacityTokens from deployment args (num_gpu_blocks_override, block_size)
 		// or use a dedicated percentage-based demand signal.
-		return a.computeReplicaCapacityFallback(rm, config, modelID, namespace, role, accelerator, logger)
+		return a.computeReplicaCapacityFallback(rm, config, modelID, namespace, role, accelerator, routing, logger)
 	}
 
 	// Compute demand: tokens already resident in KV cache plus the role-aware
-	// footprint of requests still waiting in the local engine queue.
-	localQueueDemand := waitingQueueDemand(rm, role)
+	// footprint of requests still waiting in the local engine queue -- unless
+	// the router could have placed them elsewhere (localQueueCharge).
+	localQueueDemand := localQueueCharge(rm, role, routing)
 	replicaDemand := rm.TokensInUse + localQueueDemand
 
 	// k1: memory-bound capacity
@@ -346,6 +350,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
+		"queueRoutable", routing.queueRoutable,
 		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
 		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
 		"requestRate", rm.RequestRate,
@@ -406,6 +411,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		TokensInUse:                 rm.TokensInUse,
 		QueueLength:                 rm.QueueLength,
 		LocalQueueDemand:            localQueueDemand,
+		QueueRoutable:               routing.queueRoutable,
 		TotalKvCapacityTokens:       rm.TotalKvCapacityTokens,
 		MemoryBoundCapacity:         k1,
 		ComputeBoundCapacity:        k2,
@@ -438,6 +444,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	modelID, namespace string,
 	role string,
 	accelerator string,
+	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	rec := a.capacityStore.Get(namespace, modelID, rm.VariantName)
@@ -490,7 +497,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	// per-request charge lowers the queue depth at which that happens. Tracked
 	// separately; fixing it means pairing the fallback's demand and capacity units,
 	// not adjusting this line.
-	localQueueDemand := waitingQueueDemand(rm, role)
+	localQueueDemand := localQueueCharge(rm, role, routing)
 	replicaDemand := kvUsageDemand + localQueueDemand
 
 	logger.V(logging.DEFAULT).Info("replica-capacity-store-fallback",
@@ -498,7 +505,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		"reason", "no vllm:cache_config_info; using capacity-store record",
 		"storeEffectiveCapacity", rec.EffectiveCapacity, "storeLearnedFrom", rec.LearnedFrom,
 		"kvCacheUsagePct", rm.KvCacheUsage, "effectiveCapacity", effectiveCapacity,
-		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand)
+		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
+		"queueRoutable", routing.queueRoutable)
 
 	return &capacity.ReplicaCapacity{
 		PodName:               rm.PodName,
@@ -507,6 +515,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		TokensInUse:           replicaDemand,
 		QueueLength:           rm.QueueLength,
 		LocalQueueDemand:      localQueueDemand,
+		QueueRoutable:         routing.queueRoutable,
 		TotalKvCapacityTokens: effectiveCapacity, // synthetic: store-derived
 		MemoryBoundCapacity:   effectiveCapacity,
 		ComputeBoundCapacity:  effectiveCapacity,

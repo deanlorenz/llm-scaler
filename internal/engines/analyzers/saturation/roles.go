@@ -140,6 +140,19 @@ func rolesWithIdleReplica(metrics []domain.ReplicaMetrics, rolesByVariant map[st
 	return out
 }
 
+// replicaRouting is what the cycle's routing says about how one replica's
+// demand is charged. Built per row in priceReplicas from what newCycle decided
+// over every row, since a replica cannot tell from its own row whether a
+// sibling had room.
+type replicaRouting struct {
+	// queueRoutable is set while the replica's role has an idle Ready
+	// replica (rolesWithIdleReplica). The replica's own waiting queue is then
+	// charged neither as residency nor as backlog: only this engine drains
+	// it, and a replica added cannot take it. False leaves the queue charged
+	// in full, as on a role busy everywhere.
+	queueRoutable bool
+}
+
 // roleSaturated reports whether the given role is saturated this cycle: a
 // Ready replica of it full and queued, AND no Ready replica of it idle
 // (replicaIdle).

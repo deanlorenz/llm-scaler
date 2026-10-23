@@ -212,3 +212,57 @@ func TestImbalanceFloorBacklogLeavesAPinnedQueueOut(t *testing.T) {
 			hotAmongBusy, balanced)
 	}
 }
+
+// A queue the router pinned on one prefill replica, while its siblings idle,
+// is not charged as resident prompt: only that engine drains it. With every
+// prefill replica busy it is, in full.
+func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	const prompt = 6000.0
+	run := func(fracs []float64, queues []int) float64 {
+		t.Helper()
+		a, _ := imbAnalyzer()
+		rows := []domain.ReplicaMetrics{
+			imbRow("decode-0", "decode-v", 0.25, 0, prompt, 1000, 0.5),
+			imbRow("decode-1", "decode-v", 0.25, 0, prompt, 1000, 0.5),
+		}
+		for i := range fracs {
+			rows = append(rows, imbRow("prefill-"+string(rune('0'+i)), "prefill-v", fracs[i], queues[i], prompt, 1, 1.0))
+		}
+		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.RoleDemand[domain.RolePrefill]
+	}
+	resident := func(fracs []float64) float64 {
+		var s float64
+		for _, f := range fracs {
+			s += float64(int64(f * float64(imbKv)))
+		}
+		return s
+	}
+	hot := []float64{0.20, 0, 0, 0}
+	pinned := run(hot, []int{439, 0, 0, 0})
+	none := run(hot, []int{0, 0, 0, 0})
+	busy := []float64{0.35, 0.35, 0.35, 0.35}
+	busyQ := run(busy, []int{100, 100, 100, 100})
+	busyQ0 := run(busy, []int{0, 0, 0, 0})
+	amongBusy := run(busy, []int{439, 0, 0, 0})
+	t.Logf("prefill demand: 439 queued on one, three idle %.0f; no queue %.0f", pinned, none)
+	t.Logf("prefill demand: every replica 0.35 KV, queue 100 each %.0f, queue 0 %.0f; 439 on one beside busy siblings %.0f",
+		busyQ, busyQ0, amongBusy)
+	if pinned != none {
+		t.Errorf("439 requests pinned on one prefill replica beside three idle ones priced prefill at %.0f, %.0f without them",
+			pinned, none)
+	}
+	if want := resident(busy) + 4*100*prompt; busyQ != want {
+		t.Errorf("every prefill replica busy and queued 100: demand %.0f, want the resident KV plus the whole queue, %.0f", busyQ, want)
+	}
+	if want := resident(busy) + 439*prompt; amongBusy != want {
+		t.Errorf("439 queued beside busy (not idle) siblings: demand %.0f, want %.0f -- only an idle sibling may drop it", amongBusy, want)
+	}
+}

@@ -50,7 +50,8 @@ type ReplicaCapacity struct {
 	// engine queue is drained only by this engine, and a replica added
 	// cannot take it, so while the router has an idle replica it could have
 	// used the queue is the router's imbalance, not a shortfall of the role:
-	// floor.Estimate is not handed it as backlog. A role with no idle replica
+	// floor.Estimate is not handed it as backlog, and LocalQueueDemand (so
+	// ReplicaDemand) carries no charge for it. A role with no idle replica
 	// leaves this false and its queues count in full.
 	QueueRoutable bool
 

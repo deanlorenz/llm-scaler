@@ -546,7 +546,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName], c.logger)
+			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName],
+			replicaRouting{queueRoutable: c.idleRoles[domain.CanonicalRole(role)]}, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through
@@ -559,8 +560,6 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// order it has earned.
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
-			// A property of the cycle's routing, like the line above.
-			rc.QueueRoutable = c.idleRoles[domain.CanonicalRole(role)]
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
 	}
