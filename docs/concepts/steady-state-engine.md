@@ -195,6 +195,24 @@ It is off by default. Turn it on for every model or for one with
 Its extra prefill lasts until the variant's learned state is reset, because a
 prefill held that large rarely queues on its own.
 
+#### Uneven routing
+
+The router can load one replica while another replica of the same role sits
+idle. More replicas do not fix that: the router could already use the idle one.
+So where a role has an **idle** replica, the engine does not let the hot
+replica speak for the role. Idle means Ready, under 30% of its KV cache at its
+busiest engine, and nothing waiting, for the whole minute. It is the same
+definition the `wva_load_*` imbalance metrics use, so what the engine sets
+aside here, those metrics report.
+
+When no replica of the role is idle, every rule below is off and the engine
+behaves exactly as before. Too few replicas is the error that hurts latency, so
+a role that is busy everywhere is never treated as imbalanced.
+
+- **Decode is saturated only when it has no idle replica.** One full decode
+  replica beside idle siblings does not stop prefill learning, and does not
+  hold prefill's demand.
+
 ### 3. The scaling signal
 
 The engine aggregates to model level:

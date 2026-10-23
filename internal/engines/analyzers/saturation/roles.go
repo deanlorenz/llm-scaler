@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"math"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -89,8 +90,57 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 	return accelerator
 }
 
-// roleSaturated reports whether any replica of the given role is full and
-// queued this cycle: its local queue at or over the threshold, as computeK2
+// idleKvUsage is the busiest-rank KV utilization below which a Ready replica
+// with nothing waiting is idle: the router has a replica of the role it could
+// hand work to, with room for it. The number and the rule in replicaIdle are
+// the load-imbalance diagnostic's (internal/signals/balance: IdleKvUsage =
+// 0.30, busiest-rank KV under it and nothing waiting). Keep the two identical:
+// a replica the analyzer calls idle is one that metric reports as idle, so
+// whatever the analyzer stops counting because of it, the metric shows.
+const idleKvUsage = 0.30
+
+// replicaIdle reports whether rm is a Ready replica the router could hand
+// work to: its busiest engine rank under idleKvUsage and nothing waiting.
+//
+// Both figures are one-minute peaks (the collector's max_over_time), so an
+// idle replica was idle for the whole minute, not at one scrape. The KV is the
+// larger of the utilization the row reports and its busiest-rank tokens over
+// its cache: in production the two are the same number (TokensInUse is
+// KvCacheUsage times the cache), and where a row carries only one of them the
+// other cannot make it read idle. A reading that is not a finite fraction is
+// zero, as the balance package reads it.
+func replicaIdle(rm domain.ReplicaMetrics) bool {
+	if !rm.Ready || rm.QueueLength > 0 {
+		return false
+	}
+	kv := rm.BusiestRankKvUsage()
+	if math.IsNaN(kv) || math.IsInf(kv, 0) || kv < 0 {
+		kv = 0
+	}
+	if rm.TotalKvCapacityTokens > 0 {
+		kv = max(kv, float64(rm.BusiestRankTokens())/float64(rm.TotalKvCapacityTokens))
+	}
+	return kv < idleKvUsage
+}
+
+// roleSaturated reports whether the given role is saturated this cycle: a
+// Ready replica of it full and queued, AND no Ready replica of it idle
+// (replicaIdle).
+//
+// The second half is the router's share. One decode replica full and queued
+// while a sibling sits idle is routing, not a role out of room: the router
+// could send the hot replica's next request to the idle one, and a replica
+// added would be one more the router need not use. Measured: an argmax picker
+// held 439 requests on one pod while three sat idle. Read as decode saturated,
+// that one pod withheld prefill's learning and held prefill's demand for the
+// whole model. Only an idle sibling clears it: a sibling between idle and full
+// is not counted as room, so a role loaded everywhere and full somewhere stays
+// saturated, as before -- the gate protects prefill's k2 from back-pressure
+// readings, and a k2 learned too low is never corrected (it orders replicas,
+// so nothing saturates to write a higher one).
+//
+// A replica is full and queued when its local queue is at or over the
+// threshold, as computeK2
 // admits a P1-obs reading on, AND its resident KV at or over its k1 (the
 // cache times kvCacheThreshold) and within the cache's physical ceiling (a
 // reading above it is a scrape artifact there, and no more a saturation
@@ -107,15 +157,19 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 // Both tests read the replica's busiest engine rank (BusiestRankQueue,
 // kvFull), as computeK2 does: the thresholds are one engine's.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
+	saturated := false
 	for _, rm := range metrics {
 		if !rm.Ready || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
+		if replicaIdle(rm) {
+			return false
+		}
 		if rm.BusiestRankQueue() >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
-			return true
+			saturated = true
 		}
 	}
-	return false
+	return saturated
 }
 
 // kvFull reports whether rm's busiest engine rank is full: its resident KV,

@@ -412,10 +412,13 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 
 	It("decides decode's saturation over every decode row, whatever order the rows come in", func() {
 		// The prefill row first, then the saturated decode: the gate must not
-		// depend on having seen decode before pricing prefill.
+		// depend on having seen decode before pricing prefill. decode-0 is
+		// busy but not full (41 % of its cache): an IDLE sibling would be
+		// room the router could use, and decode would not be saturated
+		// (roleSaturated).
 		in := makeAnalyzerInput([]domain.ReplicaMetrics{
 			prefill(),
-			decode("decode-0", 300_000, 0),
+			decode("decode-0", 480_000, 0),
 			decode("decode-1", 1_039_474, 81),
 		}, states)
 		_, err := analyzer.Analyze(ctx, in)

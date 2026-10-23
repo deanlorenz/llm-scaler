@@ -262,6 +262,14 @@ Properties, each with a spec in `throughput_floor_test.go`:
   allocate the blocks a pull needs, which the transfer pipeline does not
   produce.
 
+  And no Ready decode replica idle (`replicaIdle` in `roles.go`: busiest-rank
+  KV under `idleKvUsage` = 0.30 and nothing waiting, the numbers of
+  `internal/signals/balance`). One decode pod full and queued while its
+  siblings idle is the router's choice, not a role out of room, and it used to
+  gate prefill's learning and hold prefill's demand for the whole model. Only
+  an idle sibling clears the test: a sibling busy but not full is not counted
+  as room, so a decode loaded everywhere and full somewhere gates as before.
+
   The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's
   occupancy dropped under k1 on the fourth cycle while its queue and
