@@ -101,3 +101,83 @@ func TestEveryEPPScrapeFailingWakesThroughThePrometheusFallback(t *testing.T) {
 	assert.NotEqual(t, constants.ScalingBlockedNoWakeSignal, wakeReasons(t, registry)[f.model],
 		"a pool that could not be read is not a pool that exports no queue")
 }
+
+// noReadyEPPSource is the real pod-scraping source over an EPP Service that
+// selects no Ready pod: one pod NotReady (a crash loop, a rollout, a failing
+// readiness probe), or no pod at all (the EPP scaled to zero).
+func noReadyEPPSource(t *testing.T, ctx context.Context, ns string, withPod bool) *pod.PodScrapingSource {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	selector := map[string]string{"app": "epp"}
+	objs := []runtime.Object{&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "epp", Namespace: ns},
+		Spec:       corev1.ServiceSpec{Selector: selector},
+	}}
+	if withPod {
+		objs = append(objs, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "epp-0", Namespace: ns, Labels: selector},
+			Status: corev1.PodStatus{
+				PodIP:      "127.0.0.1",
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}},
+			},
+		})
+	}
+	k8s := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	src, err := pod.NewPodScrapingSource(ctx, k8s, pod.PodScrapingSourceConfig{
+		ServiceName:      "epp",
+		ServiceNamespace: ns,
+		MetricsPort:      9090,
+		ScrapeTimeout:    time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(src.Close)
+	return src
+}
+
+// TestNoReadyEPPPodWakesThroughThePrometheusFallback is the zero-Ready case of
+// the test above. With no Ready EPP pod there is nothing to scrape, which is a
+// failure to look, not an EPP that exports no queue. The source used to return
+// an empty answer with a nil error, so Prometheus was never asked, no error was
+// counted, and the model stayed parked behind no-wake-signal.
+//
+// Waking on the Prometheus queue here is deliberate. With no EPP serving, the
+// last sample can be up to DefaultFallbackMaxAge (90 s) old. A wrong wake
+// costs one replica until scale to zero parks it again; a missed wake parks a
+// model with real demand for as long as the EPP stays down.
+func TestNoReadyEPPPodWakesThroughThePrometheusFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		withPod bool
+	}{
+		{"every EPP pod NotReady", true},
+		{"no EPP pod at all", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			registry := prometheus.NewRegistry()
+			require.NoError(t, metrics.InitMetrics(registry))
+
+			f := newWakeFixture(t, "eppnoready")
+			ds := f.engine.Datastore.(stubSourceDatastore)
+			ds.src = noReadyEPPSource(t, ctx, f.ns, tc.withPod)
+			f.engine.Datastore = ds
+			prom := newFakeQueueSource([]source.MetricValue{queued(4, f.model, time.Second)}, nil)
+			f.engine.QueueFallback = NewQueueFallback(prom)
+
+			for i := 1; i < f.engine.QueueFallback.Threshold; i++ {
+				require.Error(t, f.engine.optimize(ctx),
+					"tick %d found no Ready EPP pod; below the threshold that must surface", i)
+			}
+			require.NoError(t, f.engine.optimize(ctx), "at the threshold the fallback answers")
+
+			_, published, _ := f.woken()
+			require.True(t, published, "a queue of 4 in Prometheus must wake the model while no EPP pod is Ready")
+			assert.Equal(t, 1, prom.refreshes, "the fallback read Prometheus")
+			assert.NotEqual(t, constants.ScalingBlockedNoWakeSignal, wakeReasons(t, registry)[f.model],
+				"a pool with no Ready EPP pod is not a pool that exports no queue")
+		})
+	}
+}

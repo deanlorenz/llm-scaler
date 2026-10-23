@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sourcepkg "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
@@ -875,6 +876,99 @@ vllm_num_requests_waiting{namespace="test-ns"} 3
 			Expect(err).NotTo(HaveOccurred())
 			Expect(logged).To(HaveLen(2))
 			Expect(logged[1]).To(ContainSubstring("recovered"))
+		})
+
+		// No Ready pod is not an empty answer either. Refresh used to return an
+		// empty all_metrics and a nil error here, which the scale-from-zero
+		// engine read as "the EPP exports no queue", so a crash-looping or
+		// scaled-to-zero EPP parked the model behind no-wake-signal.
+		DescribeTable("should return ErrNoReadyPods when the service selects no Ready pod",
+			func(objs func() []ctrlclient.Object) {
+				source, err := NewPodScrapingSource(ctx, fakeClient.WithObjects(objs()...).Build(),
+					PodScrapingSourceConfig{
+						ServiceName:      "test-pool-epp",
+						ServiceNamespace: "test-ns",
+						MetricsPort:      9090,
+					})
+				Expect(err).NotTo(HaveOccurred())
+
+				results, err := source.Refresh(ctx, sourcepkg.RefreshSpec{})
+				Expect(err).To(MatchError(ErrNoReadyPods))
+				Expect(err.Error()).To(ContainSubstring("test-ns/test-pool-epp"))
+				Expect(results).To(BeNil())
+			},
+			Entry("every pod NotReady", func() []ctrlclient.Object {
+				notReady := readyPod1.DeepCopy()
+				notReady.Status.Conditions[0].Status = corev1.ConditionFalse
+				return []ctrlclient.Object{service, notReady}
+			}),
+			Entry("no pod at all", func() []ctrlclient.Object { return []ctrlclient.Object{service} }),
+		)
+
+		It("should log a new all-failing spell after a spell with no Ready pod", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			var port int32
+			_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+			Expect(err).NotTo(HaveOccurred())
+
+			k8s := fakeClient.WithObjects(service, readyPod1.DeepCopy()).Build()
+			source, err := NewPodScrapingSource(ctx, k8s, PodScrapingSourceConfig{
+				ServiceName:      "test-pool-epp",
+				ServiceNamespace: "test-ns",
+				MetricsPort:      port,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			var logged []string
+			source.log = funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 0})
+
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).To(HaveOccurred())
+			Expect(logged).To(HaveLen(1))
+
+			Expect(k8s.Delete(ctx, readyPod1.DeepCopy())).To(Succeed())
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).To(MatchError(ErrNoReadyPods))
+			Expect(logged).To(HaveLen(1), "no pod to fail is not a line of its own")
+
+			Expect(k8s.Create(ctx, readyPod1.DeepCopy())).To(Succeed())
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).To(HaveOccurred())
+			Expect(logged).To(HaveLen(2), "the pods came back and failed again: a new spell, a new line")
+			Expect(logged[1]).To(ContainSubstring("failing on every pod"))
+		})
+
+		It("should not log a cancelled context as an outage", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(w, "llm_d_epp_flow_control_queue_size{target_model_name=\"m\"} 2\n")
+			}))
+			defer server.Close()
+			var port int32
+			_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+			Expect(err).NotTo(HaveOccurred())
+
+			source, err := NewPodScrapingSource(ctx, fakeClient.WithObjects(service, readyPod1).Build(),
+				PodScrapingSourceConfig{
+					ServiceName:      "test-pool-epp",
+					ServiceNamespace: "test-ns",
+					MetricsPort:      port,
+				})
+			Expect(err).NotTo(HaveOccurred())
+			var logged []string
+			source.log = funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 0})
+
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			_, err = source.Refresh(cancelled, sourcepkg.RefreshSpec{})
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(err.Error()).To(ContainSubstring("scrape of every Ready pod"), "the scrape path was reached")
+			Expect(logged).To(BeEmpty(), "shutdown is not an EPP outage")
+
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logged).To(BeEmpty(), "nothing was failing, so nothing recovered")
 		})
 	})
 

@@ -32,6 +32,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
+// ErrNoReadyPods is returned, wrapped, by Refresh when the service selects no
+// Ready pod: every pod NotReady, or no pod at all. Nothing was scraped, so the
+// answer is unknown rather than empty.
+var ErrNoReadyPods = errors.New("no Ready pods to scrape")
+
 // PodScrapingSource implements MetricsSource for direct pod scraping.
 type PodScrapingSource struct {
 	config     PodScrapingSourceConfig
@@ -123,9 +128,9 @@ func (p *PodScrapingSource) Close() {
 }
 
 // Refresh executes queries and updates the cache.
-// Called by engine/reconciler on-demand. It returns an error when there are
-// Ready pods and none of them could be scraped; a partial failure returns the
-// pods that answered and a nil error.
+// Called by engine/reconciler on-demand. It returns an error when there is no
+// Ready pod (ErrNoReadyPods) or when none of the Ready pods could be scraped; a
+// partial failure returns the pods that answered and a nil error.
 func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -138,15 +143,18 @@ func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec
 		return nil, fmt.Errorf("failed to discover pods: %w", err)
 	}
 
+	// No Ready pod is a failure to look too: an EPP in a crash loop, mid
+	// rollout, or scaled to zero. This used to return an empty answer with a nil
+	// error, which the scale-from-zero engine read as "the EPP exports no
+	// queue" and so never engaged its Prometheus fallback. The all-failing
+	// state is cleared without a line: there were no pods to fail, so the next
+	// all-failing spell is a new one and is logged again.
 	if len(pods) == 0 {
-		logger.V(logging.DEBUG).Info("No ready pods found for scraping")
-		return map[string]*source.MetricResult{
-			"all_metrics": {
-				QueryName:   "all_metrics",
-				Values:      []source.MetricValue{},
-				CollectedAt: time.Now(),
-			},
-		}, nil
+		p.allFailing = false
+		logger.V(logging.DEBUG).Info("No ready pods found for scraping",
+			"namespace", p.config.ServiceNamespace, "service", p.config.ServiceName)
+		return nil, fmt.Errorf("service %s/%s: %w",
+			p.config.ServiceNamespace, p.config.ServiceName, ErrNoReadyPods)
 	}
 
 	// Scrape all pods concurrently
@@ -160,6 +168,12 @@ func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec
 	if len(results) == 0 {
 		err := fmt.Errorf("scrape of every Ready pod (%d) of service %s/%s failed: %w",
 			len(pods), p.config.ServiceNamespace, p.config.ServiceName, firstErr)
+		// A cancelled or expired context fails every scrape too, at shutdown or
+		// when the caller gave up. That is not an EPP outage: no line, and the
+		// state is left as it was.
+		if ctx.Err() != nil {
+			return nil, err
+		}
 		if !p.allFailing {
 			p.allFailing = true
 			p.log.Info("EPP metrics scrape failing on every pod; logged once until a scrape succeeds",
