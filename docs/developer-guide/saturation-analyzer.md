@@ -208,7 +208,12 @@ fleet of two or more replicas ever had the spread for a full fit: on the issue
 #270 rerun, `itl-window` was `ready` on 0 of 294 multi-replica cycles, and `B`
 stayed at the 6 ms default. Carried, the old level is still there when the new
 one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
-1 to 16 replicas learns the true `B`. A level the fleet only passed through
+1 to 16 replicas learns the true `B`. The carry is the full fit's only: the
+pinned fit reads the steady readings the main window spans, reaching into the
+carry only for the `DefaultMinSamples` it needs through a step. `A` moves with
+the workload, and fitted on the carried window it followed a heavier shape at
+the same fill twice as slowly (two replicas: 17 cycles to 95% of the new `A`,
+against 8). A level the fleet only passed through
 never settles, so it never reaches the steady readings and teaches nothing.
 A reading with no `k` (the collector's zero value) is not traced, so one
 missed scrape does not make its replica unsteady.

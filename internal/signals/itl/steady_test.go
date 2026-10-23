@@ -1,6 +1,7 @@
 package itl
 
 import (
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -172,6 +173,40 @@ var _ = Describe("Tracker steady readings", func() {
 				"cycle %d after the step: A from the transient", j)
 		}
 	})
+
+	// A heavier shape at the same fill: k holds at 0.6 while A steps from 0.08
+	// to 0.12, so every reading stays steady. The pinned fit prices every
+	// multi-replica fleet and should follow on the main window's 20 readings;
+	// fitted on the carried steady window (40 readings, 5 minutes) it took
+	// twice as long -- 17 cycles for two replicas, 8 for four, 4 for eight.
+	DescribeTable("follows a shape change at the same fill on the main window, not the carry",
+		func(replicas, cycles int) {
+			fleet := func(itl float64) []domain.ReplicaMetrics {
+				rows := make([]domain.ReplicaMetrics, replicas)
+				for i := range rows {
+					rows[i] = row(string(rune('a'+i)), 0.6, itl)
+				}
+				return rows
+			}
+			before, after := Model{A: 0.08, B: DefaultBaselineSec}, Model{A: 0.12, B: DefaultBaselineSec}
+			var r Reading
+			for range 30 {
+				r = observe(fleet(before.ITLAt(0.6))...)
+			}
+			Expect(r.Model.A).To(BeNumerically("~", before.A, 1e-9))
+			for c := range 30 {
+				r = observe(fleet(after.ITLAt(0.6))...)
+				Expect(r.Tier).To(Equal(TierPinnedB))
+				if r.Model.A > 0.95*after.A {
+					Expect(c).To(Equal(cycles), "%d replicas: cycles to 95%% of the new A", replicas)
+					return
+				}
+			}
+			Fail(fmt.Sprintf("%d replicas: A never reached 95%% of %.2f", replicas, after.A))
+		},
+		Entry("1 replica", 1, 17), Entry("2 replicas", 2, 8),
+		Entry("4 replicas", 4, 4), Entry("8 replicas", 8, 2),
+	)
 
 	It("fits the pinned line on every reading while too few are steady", func() {
 		observe(row("p0", 0.40, 0.04))

@@ -111,7 +111,8 @@ type Reading struct {
 // pinned fit would otherwise take whole: on the issue #270 rerun A jumped from
 // 0.077 to 0.207 on the cycle the load stepped, with every new reading
 // unsteady and 10 steady ones held, and the derived mu fell from 6.4 to 2.65
-// requests/s for two and a half minutes.
+// requests/s for two and a half minutes. It does not take the carry: see
+// pinnedReadings.
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now time.Time) Reading {
 	var r Reading
 	t.mu.Lock()
@@ -233,10 +234,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	// The sample floor still applies when the spread is waived: the pinned
 	// fit answers from a single pair, and a line should not rest on one
 	// reading from one replica on one cycle.
-	pinned := obs
-	if len(steadyObs) >= DefaultMinSamples {
-		pinned = steadyObs
-	}
+	pinned := pinnedReadings(obs, steadyObs)
 	if len(pinned) < DefaultMinSamples {
 		return r
 	}
@@ -247,6 +245,32 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// pinnedReadings is what the pinned fit reads: the steady readings the main
+// window spans, never more than it holds, reaching back into the carry only
+// as far as DefaultMinSamples needs, and every reading of the main window when
+// fewer than DefaultMinSamples are steady at all. Both windows are in time
+// order.
+//
+// The carry is the full fit's: it keeps a step's old level until the new one
+// settles, which B needs and A does not. A moves with the workload, and
+// fitted on the carried window it followed a heavier shape at the same fill
+// twice as slowly -- two replicas took 17 cycles to price 95% of the new A,
+// against 8 on the main window alone, and a minute in priced 0.090 for a true
+// 0.12, so the derived mu read about 30% high. Through a load step the main
+// window's steady readings run short, and the newest DefaultMinSamples, the
+// old level's, hold A until the new level settles.
+func pinnedReadings(obs, steady []Observation) []Observation {
+	if len(steady) < DefaultMinSamples {
+		return obs
+	}
+	start := len(steady)
+	for start > 0 && len(obs) > 0 && len(steady)-start < len(obs) &&
+		!steady[start-1].Timestamp.Before(obs[0].Timestamp) {
+		start--
+	}
+	return steady[min(start, len(steady)-DefaultMinSamples):]
 }
 
 // Sweep prunes every window and forgets the window and intercept of each key
