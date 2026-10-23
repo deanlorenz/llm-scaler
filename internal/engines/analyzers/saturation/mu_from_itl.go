@@ -360,6 +360,10 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
+		// Of those, the readings of a replica still inside its settle (it
+		// joined, or the load came back to it): left out of the pinned fit
+		// as well.
+		"settling", r.Settling,
 		// Ready needs minSamples steady readings AND this much spread among
 		// them; without it a window that never becomes Ready does not say
 		// which of the two it lacked.
@@ -391,7 +395,8 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// DefaultMinObservableK and is priced from the readings the window
 		// already holds from when it was working.
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
-			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored)
+			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
+			"slopeHeld", r.SlopeHeld)
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}

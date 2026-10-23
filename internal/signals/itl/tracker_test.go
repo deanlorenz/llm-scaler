@@ -1,6 +1,7 @@
 package itl
 
 import (
+	"fmt"
 	"math"
 	"time"
 
@@ -163,7 +164,13 @@ var _ = Describe("Tracker", func() {
 		Expect(b).To(Equal(0.5))
 	})
 
-	It("prices a saturated fleet from its replicas at work, not from their first readings", func() {
+	// extra adds joiners that arrive with bpxrs and follow its first rows: a
+	// k-0.091 row without an ITL, the warm-up reading, then above the band
+	// (the round-3 statistics review's probe). The interquartile mean held to
+	// 0.102 up to two of them and read 0.127 with three, the warm-ups 27% of
+	// the window's weight: a scale-up from three to six priced mu about 20%
+	// low.
+	DescribeTable("prices a saturated fleet from its replicas at work, not from their first readings", func(extra int) {
 		// One namespace of a two-namespace run (Qwen3-32B-FP8 on H200, vLLM),
 		// the 14 requests/s phase: one replica from idle, two more joining at
 		// 14:19:42. Every replica sat above the band but for a dip now and
@@ -218,20 +225,32 @@ var _ = Describe("Tracker", func() {
 			{"14:21:28", []cell{{"s92zt", 0.937, 0.0701}, {"wnx8v", 0.799, 0.0831}, {"bpxrs", 0.801, 0.0905}}},
 		}
 		var r Reading
-		for _, c := range cycles {
+		for ci, c := range cycles {
 			at, err := time.Parse(time.TimeOnly, c.at)
 			Expect(err).NotTo(HaveOccurred())
-			rows := make([]domain.ReplicaMetrics, 0, len(c.cells))
+			rows := make([]domain.ReplicaMetrics, 0, len(c.cells)+extra)
 			for _, x := range c.cells {
 				rows = append(rows, row(x.pod, x.k, x.itlS))
+			}
+			for j := range extra {
+				pod := fmt.Sprintf("join%d", j)
+				switch since := ci - 24; {
+				case since == 0:
+					rows = append(rows, row(pod, 0.091, 0))
+				case since == 1:
+					rows = append(rows, row(pod, 0.507-0.01*float64(j), 0.503))
+				case since > 1:
+					rows = append(rows, row(pod, 0.932, 0.07))
+				}
 			}
 			offset := time.Duration(at.Hour())*time.Hour + time.Duration(at.Minute())*time.Minute +
 				time.Duration(at.Second())*time.Second
 			r = t.Observe("key", "v", rows, now.Add(offset))
 		}
-		Expect(r.Held).To(Equal(10), "the run's window held 10 on this cycle too")
+		Expect(r.Held).To(Equal(10+extra), "the run's window held 10 on this cycle too")
 		Expect(r.Tier).To(Equal(TierPinnedB))
-		// The dips' own slopes through the 6 ms floor are 0.085 to 0.105.
+		// The dips' own slopes through the 6 ms floor are 0.085 to 0.105, and
+		// the six of them past their replica's settle average 0.097.
 		Expect(r.Model.A).To(BeNumerically("~", 0.100, 0.005))
 		// The first reading is the warm-up one, of a replica the load came
 		// back to after five idle cycles: it starts over as a joiner, as the
@@ -239,7 +258,7 @@ var _ = Describe("Tracker", func() {
 		// after that.
 		Expect(r.SteadyHeld).To(BeZero(), "the load coming back is not a steady reading")
 		Expect(r.SteadySpread).To(BeZero())
-	})
+	}, Entry("the run as it was", 0), Entry("one more joiner", 1), Entry("two more", 2), Entry("three more: a fleet of three growing to six", 3))
 
 	It("forgets intercepts and keeps the readings", func() {
 		t.Observe("key", "v", onLine(10, 0.2, 0.7), now)

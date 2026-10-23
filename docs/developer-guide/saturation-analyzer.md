@@ -198,21 +198,41 @@ reading, it took each load step whole: on the issue #270 rerun `A` went from
 0.077 to 0.207 on the cycle the load stepped, and the derived mu fell from 6.4
 to 2.65 requests/s for two and a half minutes.
 
-`FitPinnedB` takes `A` as the interquartile mean of the readings' own slopes
-`(ITL_i - B) / k_i`, weighted by `k_i`: the mean of the slopes that hold the
-middle half of the weight, a quarter trimmed from either end. A saturated fleet
-has few steady readings, so the pinned fit takes every reading, and a
-replica's first reading after it starts serving (a pod that joined, or one the
-load came back to) sits many times above the line. On a two-namespace run,
-three such readings of sixteen, at about 0.46 of `k` and 435 to 496 ms, moved
+A saturated fleet has few steady readings: `k` swings between above the band
+and its dips into it by more than `DefaultMaxKDrift`, and on a two-namespace
+run the steady readings numbered 0 on almost every cycle. So the pinned fit
+takes every reading, and a replica's first readings after it starts serving (a
+pod that joined, or one the load came back to) sit many times above the line.
+Three such readings of sixteen, at about 0.46 of `k` and 435 to 496 ms, moved
 least squares' `A` from 0.101 to 0.170, and the derived mu read 3.1 to 4.2
 requests/s against the 6.1 to 6.2 each replica served, for a whole
-twenty-minute phase. They carried 11% of the weight, all in the top quarter,
-and the trim sets them aside. The weighted median trims them as well, but it
-jumps from one group of slopes to another as their weight crosses one half: a
-stationary fleet serving two shapes side by side (slopes 0.08 and 0.12, half
-each) had `A` swing 36% of its mean between them, where the interquartile mean
-holds to 2% at their blend.
+twenty-minute phase.
+
+Those readings are left out by the replica's state, not by their value: a
+reading taken while its replica is inside its settle (it joined, or the load
+came back to it, less than `DefaultSteadyFor` ago) is marked when it is taken,
+and the pinned fit skips it. When fewer than `DefaultMinSettledSamples` (3)
+readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
+key with no `A` yet gets no line. `itl-window` reports the marked readings as
+`settling`.
+
+`FitPinnedB` then takes `A` as the `k`-weighted mean of the readings' own
+slopes, `sum(ITL_i - B) / sum(k_i)`, with nothing trimmed. A trim by value
+cannot tell a warm-up from a replica that is really slower, since both sit
+above the line:
+
+- The interquartile mean set aside one replica at slope 0.12 among four at
+  0.08 entirely, pricing the fleet's capacity 8.5% high. It also let the
+  warm-ups through once they carried more than a quarter of the weight: a
+  fleet of three growing to six read `A` = 0.127, with mu about 20% low.
+- The weighted median jumped from one group of slopes to the other as their
+  weight crossed one half. A fleet serving two shapes side by side (0.08 and
+  0.12, half each) had `A` swing 36% of its mean.
+
+The mean blends a slow replica in at its weight, holds that two-shape fleet to
+2%, and on the same fixture with three extra joiners reads 0.097. Replayed over
+the two-namespace runs, the pinned `A` has a median of 0.097 and 0.101 for the
+first run's two namespaces (worst 0.102) and 0.079 for the second.
 
 `itl-window` counts every row under one reason (`offered`, `notReady`,
 `noITL`, `noK`, `belowBand`, `aboveBand`), so they add up to `replicas`, and
@@ -232,13 +252,16 @@ one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
 pinned fit reads the steady readings the main window spans, reaching into the
 carry only for the `DefaultMinSamples` it needs through a step. `A` moves with
 the workload, and fitted on the carried window it followed a heavier shape at
-the same fill twice as slowly (two replicas: 13 cycles to the new `A`, against
-6). A level the fleet only passed through
+the same fill twice as slowly (two replicas: 17 cycles to the new `A`, against
+8). A level the fleet only passed through
 never settles, so it never reaches the steady readings and teaches nothing.
 A reading with no `k` (the collector's zero value) is not traced, so one
 missed scrape does not make its replica unsteady. A replica the load comes back
-to after two or more rows without an ITL starts over as a joiner and waits out
-`DefaultSteadyFor`. An idle replica leaves nothing in its trace, so its first
+to after two or more rows with neither an ITL nor a `k` starts over as a joiner
+and waits out `DefaultSteadyFor`. A row with a `k` and no ITL is a busy replica
+whose ITL was not read (the collector drops a failed query's values whole), and
+does not count toward idling: counted, an `avg_itl` query that failed on two
+cycles running restarted every replica of a busy fleet. An idle replica leaves nothing in its trace, so its first
 reading, which carries the warm-up ITL, was otherwise steady: on a load step
 that brought an idle replica back, the full fit stored `B` = 77 ms against a
 true 12 ms. One such row between two readings is a missed scrape.

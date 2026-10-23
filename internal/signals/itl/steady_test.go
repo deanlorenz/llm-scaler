@@ -180,11 +180,12 @@ var _ = Describe("Tracker steady readings", func() {
 	// to 0.12, so every reading stays steady. The pinned fit prices every
 	// multi-replica fleet and should follow on the main window's 20 readings;
 	// fitted on the carried steady window (40 readings, 5 minutes) it takes
-	// about twice as long -- 13 cycles for two replicas, 6 for four, 3 for
-	// eight. Least squares took 17, 8, 4 and 2 here, and the weighted median
-	// 10, 5, 2 and 1, but it answered the new A whole on the cycle the new
-	// level held half the weight, the same jump that made it flap between two
-	// shapes served side by side.
+	// about twice as long. The k-weighted mean takes 16, 8, 4 and 2 cycles
+	// here, as least squares did (17, 8, 4, 2). The weighted median took 10,
+	// 5, 2 and 1 and the interquartile mean 13, 6, 3 and 1, both by trimming
+	// the new level until it held most of the weight, and the median then
+	// answered the new A whole on one cycle, the same jump that made it flap
+	// between two shapes served side by side.
 	DescribeTable("follows a shape change at the same fill on the main window, not the carry",
 		func(replicas, cycles int) {
 			fleet := func(itl float64) []domain.ReplicaMetrics {
@@ -210,8 +211,8 @@ var _ = Describe("Tracker steady readings", func() {
 			}
 			Fail(fmt.Sprintf("%d replicas: A never reached 95%% of %.2f", replicas, after.A))
 		},
-		Entry("1 replica", 1, 13), Entry("2 replicas", 2, 6),
-		Entry("4 replicas", 4, 3), Entry("8 replicas", 8, 1),
+		Entry("1 replica", 1, 16), Entry("2 replicas", 2, 8),
+		Entry("4 replicas", 4, 4), Entry("8 replicas", 8, 2),
 	)
 
 	// The round-2 statistics review's probe: a stationary fleet whose
@@ -224,7 +225,7 @@ var _ = Describe("Tracker steady readings", func() {
 	DescribeTable("prices a fleet of two shapes at their blend, without flapping",
 		func(replicas int) {
 			rng := rand.New(rand.NewPCG(1, 2))
-			lo, hi, sum, n := math.Inf(1), math.Inf(-1), 0.0, 0
+			lo, hi, sum, n, prev := math.Inf(1), math.Inf(-1), 0.0, 0, 0.0
 			for c := range 80 {
 				rows := make([]domain.ReplicaMetrics, replicas)
 				for i := range rows {
@@ -240,6 +241,11 @@ var _ = Describe("Tracker steady readings", func() {
 					continue
 				}
 				Expect(r.Tier).To(Equal(TierPinnedB))
+				if prev > 0 {
+					Expect(math.Abs(r.Model.A-prev)).To(BeNumerically("<=", 0.10*prev),
+						"cycle %d: A from %.4f to %.4f", c, prev, r.Model.A)
+				}
+				prev = r.Model.A
 				lo, hi, sum, n = math.Min(lo, r.Model.A), math.Max(hi, r.Model.A), sum+r.Model.A, n+1
 			}
 			mean := sum / float64(n)
@@ -249,21 +255,36 @@ var _ = Describe("Tracker steady readings", func() {
 		Entry("2 replicas", 2), Entry("4 replicas", 4),
 	)
 
-	It("prices a slower replica of three in, not out", func() {
-		var r Reading
-		for range 40 {
-			r = observe(row("a", 0.6, DefaultBaselineSec+0.08*0.6), row("b", 0.6, DefaultBaselineSec+0.08*0.6),
-				row("c", 0.6, DefaultBaselineSec+0.12*0.6))
-		}
-		// With a third of the readings each, a sixth of the middle half of
-		// the weight is the slow replica's: 0.0867. The 20-reading window
-		// holds the three unevenly, so the fit reads 0.088. The weighted
-		// median answered 0.08.
-		Expect(r.Model.A).To(BeNumerically(">", 0.085))
-		Expect(r.Model.A).To(BeNumerically("<", (0.08+0.08+0.12)/3), "the trim still leans to the majority")
-	})
+	// One replica serving a heavier shape among replicas at 0.08, all steady
+	// at one fill. The interquartile mean set it aside entirely from four
+	// replicas up (0.080 for four), and the weighted median from two.
+	DescribeTable("prices one slower replica in, not out, whatever the fleet's size",
+		func(replicas int) {
+			fleet := make([]domain.ReplicaMetrics, replicas)
+			fleet[0] = row("slow", 0.6, DefaultBaselineSec+0.12*0.6)
+			for i := 1; i < replicas; i++ {
+				fleet[i] = row(fmt.Sprintf("p%d", i), 0.6, DefaultBaselineSec+0.08*0.6)
+			}
+			var r Reading
+			for range 40 {
+				r = observe(fleet...)
+			}
+			// The window holds the newest 20 readings in replica order, so
+			// the slow replica's share of them is not exactly 1/replicas.
+			var slow, all float64
+			for i := range DefaultWindowMaxSize {
+				all++
+				if (40*replicas-DefaultWindowMaxSize+i)%replicas == 0 {
+					slow++
+				}
+			}
+			Expect(r.Tier).To(Equal(TierPinnedB))
+			Expect(r.Model.A).To(BeNumerically("~", (0.12*slow+0.08*(all-slow))/all, 1e-9))
+		},
+		Entry("1 of 3", 3), Entry("1 of 4", 4), Entry("1 of 5", 5), Entry("1 of 8", 8),
+	)
 
-	It("fits the pinned line on every reading while too few are steady", func() {
+	It("fits the pinned line on the readings of replicas past their settle while too few are steady", func() {
 		observe(row("p0", 0.40, 0.04))
 		rows := make([]domain.ReplicaMetrics, 0, 11)
 		rows = append(rows, row("p0", 0.40, 0.04))
@@ -273,8 +294,106 @@ var _ = Describe("Tracker steady readings", func() {
 		r := observe(rows...)
 		Expect(r.SteadyHeld).To(Equal(2), "the newcomers wait out DefaultSteadyFor")
 		Expect(r.Held).To(Equal(12))
-		Expect(r.Tier).To(Equal(TierPinnedB), "a fleet that has not settled still gets a line")
+		Expect(r.Settling).To(Equal(10))
+		Expect(r.Tier).To(BeEmpty(), "two readings of p0 are too few, and there is no A to hold")
+
+		for c := 1; c < int(DefaultSteadyFor/cycle); c++ {
+			r = observe(rows...)
+			Expect(r.Settling).To(Equal(10))
+			Expect(r.Tier).To(BeEmpty(), "cycle %d: the window is the newcomers' but for p0", c)
+		}
+		r = observe(rows...)
+		Expect(r.Settling).To(BeZero(), "the newcomers are past their settle")
+		Expect(r.Tier).To(Equal(TierPinnedB))
+		Expect(r.Model.A).To(BeNumerically("~", (0.04-DefaultBaselineSec)/0.40, 1e-9))
 	})
+
+	// The round-3 statistics review's probe, on the fixture of "prices a
+	// saturated fleet from its replicas at work": a scale-up whose joiners'
+	// first readings are warm-ups (k 0.46 at 0.5 s, slopes near 1.0 against
+	// 0.1). Taking every reading, the interquartile mean set them aside only
+	// while they carried less than a quarter of the weight: a fleet of three
+	// growing to six read A = 0.127, and mu about 20% low. Set aside by state,
+	// they never reach the fit, however many there are, and while the window
+	// holds too few readings of replicas past their settle the last A holds.
+	DescribeTable("prices a scale-up from the replicas past their settle, however many join",
+		func(joiners int) {
+			line := Model{A: 0.1, B: DefaultBaselineSec}
+			// The replicas already serving swing in k by more than
+			// DefaultMaxKDrift from cycle to cycle, as a saturated fleet's do
+			// between above the band and its dips, so almost nothing is steady
+			// and the pinned fit reads every reading but the settling ones.
+			cycle := 0
+			fleet := func(extra func(i int, k float64) (float64, float64)) []domain.ReplicaMetrics {
+				k := 0.6 + 0.15*float64(cycle%2)
+				cycle++
+				rows := []domain.ReplicaMetrics{row("a", k, line.ITLAt(k)), row("b", k, line.ITLAt(k)),
+					row("c", k, line.ITLAt(k))}
+				for i := range joiners {
+					kj, itl := extra(i, k)
+					rows = append(rows, row(fmt.Sprintf("j%d", i), kj, itl))
+				}
+				return rows
+			}
+			for range 10 {
+				observe(fleet(func(int, float64) (float64, float64) { return 0, 0 })[:3]...)
+			}
+			// Three cycles of warm-ups, then the joiners at work.
+			for c := range 16 {
+				r := observe(fleet(func(i int, k float64) (float64, float64) {
+					if c < 3 {
+						kw := 0.46 + 0.01*float64(i)
+						return kw, DefaultBaselineSec + 1.0*kw
+					}
+					return k, line.ITLAt(k)
+				})...)
+				Expect(r.Tier).To(Equal(TierPinnedB))
+				Expect(r.SteadyHeld).To(BeNumerically("<", DefaultMinSamples))
+				Expect(r.Model.A).To(BeNumerically("~", line.A, 1e-9), "cycle %d", c)
+			}
+		},
+		Entry("3 join 3", 3), Entry("6 join 3", 6), Entry("12 join 3", 12),
+	)
+
+	It("holds the last A while every reading in the window is a settling replica's", func() {
+		line := Model{A: 0.1, B: DefaultBaselineSec}
+		for c := range 12 {
+			k := 0.6 + 0.15*float64(c%2)
+			observe(row("a", k, line.ITLAt(k)))
+		}
+		// "a" leaves; four replicas join and warm up, and fill the window.
+		var r Reading
+		for c := range 6 {
+			rows := make([]domain.ReplicaMetrics, 4)
+			for i := range rows {
+				rows[i] = row(fmt.Sprintf("j%d", i), 0.5, DefaultBaselineSec+0.9*0.5)
+			}
+			r = observe(rows...)
+			Expect(r.Tier).To(Equal(TierPinnedB), "cycle %d", c)
+			Expect(r.Model.A).To(BeNumerically("~", line.A, 1e-9), "cycle %d", c)
+		}
+		Expect(r.SlopeHeld).To(BeTrue(), "the window holds the joiners' readings alone")
+	})
+
+	// A fleet-wide shape alternating every P cycles between slopes 0.08 and
+	// 0.12, two replicas at one fill. A period shorter than the window is
+	// priced near the blend; the interquartile mean swung +-8% around it at
+	// periods 4 and 6, against +-4% here.
+	DescribeTable("prices a shape that alternates faster than the window near its blend",
+		func(period int) {
+			for c := range 200 {
+				slope := 0.08
+				if (c/period)%2 == 1 {
+					slope = 0.12
+				}
+				r := observe(row("a", 0.6, DefaultBaselineSec+slope*0.6), row("b", 0.6, DefaultBaselineSec+slope*0.6))
+				if c >= 60 {
+					Expect(r.Model.A).To(BeNumerically("~", 0.10, 0.005), "cycle %d", c)
+				}
+			}
+		},
+		Entry("period 4", 4), Entry("period 6", 6),
+	)
 
 	It("takes the replicas it first sees as steady, so a restart does not delay the first full fit", func() {
 		rows := make([]domain.ReplicaMetrics, 10)
@@ -403,10 +522,43 @@ var _ = Describe("Tracker steady readings", func() {
 		Expect(observe(row("p", 0.60, 0.05)).Unsteady).To(Equal(1))
 	})
 
-	It("forgets a stale key's steady readings and traces with its window", func() {
-		observe(row("p", 0.5, 0.06))
+	// The round-3 statistics review's probe: the avg_itl query fails on
+	// consecutive cycles while kv_usage_instant is read (the collector drops
+	// a failed query's values whole). The replicas never stopped serving --
+	// their k says so -- and counted idle on the missing ITL alone, all four
+	// restarted as joiners: 32 of the next 48 readings unsteady, and 8 cycles
+	// with the whole fleet held out.
+	DescribeTable("does not take an ITL the collector did not read on a busy replica as idling",
+		func(gap int) {
+			fleet := func(itl float64) []domain.ReplicaMetrics {
+				rows := make([]domain.ReplicaMetrics, 4)
+				for i := range rows {
+					rows[i] = row(fmt.Sprintf("p%d", i), 0.6, itl)
+				}
+				return rows
+			}
+			for range 20 {
+				observe(fleet(trueLine.ITLAt(0.6))...)
+			}
+			for range gap {
+				Expect(observe(fleet(0)...).NoITL).To(Equal(4))
+			}
+			for c := range 12 {
+				r := observe(fleet(trueLine.ITLAt(0.6))...)
+				Expect(r.Unsteady).To(BeZero(), "cycle %d after a gap of %d", c, gap)
+			}
+		},
+		Entry("two cycles", 2), Entry("three cycles", 3),
+	)
+
+	It("forgets a stale key's steady readings, traces and held slope with its window", func() {
+		for range DefaultMinSamples {
+			observe(row("p", 0.5, 0.06))
+		}
+		Expect(t.slopes).To(HaveKey("key"))
 		t.Sweep(now, func(string) bool { return true })
 		Expect(t.steady).To(BeEmpty())
 		Expect(t.traces).To(BeEmpty())
+		Expect(t.slopes).To(BeEmpty())
 	})
 })

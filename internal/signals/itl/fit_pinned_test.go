@@ -51,44 +51,10 @@ var _ = Describe("FitPinnedB", func() {
 		Expect(got.A).To(BeNumerically("~", want.A, 1e-9))
 	})
 
-	It("sets aside a new replica's first readings", func() {
-		// One namespace's window on a two-namespace run (Qwen3-32B-FP8 on
-		// H200, 14 requests/s over three replicas), 14:24 to 14:35. Three
-		// readings are a replica's first after it began serving -- one the load
-		// came back to, two that had just joined -- at about 0.46 of k and
-		// 435 to 496 ms. The others are the replicas at work, at slopes of 0.09
-		// to 0.13 through the 6 ms floor; each served 6.1 to 6.2 requests/s.
-		// k is the instantaneous fill where the run logged it, and the
-		// minute's maximum held to the band (0.790) where it did not.
-		obs := []Observation{
-			{K: 0.471, ITLSec: 0.4355},
-			{K: 0.790, ITLSec: 0.0795},
-			{K: 0.790, ITLSec: 0.0903},
-			{K: 0.790, ITLSec: 0.0824},
-			{K: 0.790, ITLSec: 0.0850},
-			{K: 0.790, ITLSec: 0.0852},
-			{K: 0.790, ITLSec: 0.0850},
-			{K: 0.790, ITLSec: 0.0864},
-			{K: 0.790, ITLSec: 0.0863},
-			{K: 0.798, ITLSec: 0.0857},
-			{K: 0.463, ITLSec: 0.4904},
-			{K: 0.766, ITLSec: 0.1036},
-			{K: 0.463, ITLSec: 0.4957},
-			{K: 0.794, ITLSec: 0.0806},
-			{K: 0.753, ITLSec: 0.0859},
-			{K: 0.760, ITLSec: 0.0830},
-		}
-		got, ok := FitPinnedB(obs, DefaultBaselineSec)
-		Expect(ok).To(BeTrue())
-		// Least squares answered 0.170 here, and the derived mu 3.3 requests/s.
-		Expect(got.A).To(BeNumerically("~", 0.100, 0.003),
-			"the slope of the thirteen readings of replicas at work")
-	})
-
-	It("is the interquartile mean of the readings' slopes", func() {
-		// Slopes 0.1, 0.2, 0.9 through B, weighted by k 0.5, 0.3, 0.3: of
-		// 1.1, the middle half runs from 0.275 to 0.825, so 0.1 counts for
-		// 0.225 of it, 0.2 for 0.3 and 0.9 for 0.025.
+	It("is the k-weighted mean of the readings' slopes", func() {
+		// Slopes 0.1, 0.2, 0.9 through B, weighted by k 0.5, 0.3, 0.3: the
+		// latency above the floor, 0.05 + 0.06 + 0.27, over the load, 1.1.
+		// Nothing is trimmed, the 0.9 included.
 		b := DefaultBaselineSec
 		obs := []Observation{
 			{K: 0.5, ITLSec: b + 0.1*0.5},
@@ -97,7 +63,7 @@ var _ = Describe("FitPinnedB", func() {
 		}
 		got, ok := FitPinnedB(obs, b)
 		Expect(ok).To(BeTrue())
-		Expect(got.A).To(BeNumerically("~", (0.225*0.1+0.3*0.2+0.025*0.9)/0.55, 1e-12))
+		Expect(got.A).To(BeNumerically("~", (0.5*0.1+0.3*0.2+0.3*0.9)/1.1, 1e-12))
 
 		By("the mean of two slopes of equal weight")
 		got, ok = FitPinnedB([]Observation{obs[0], {K: 0.5, ITLSec: b + 0.3*0.5}}, b)
@@ -121,9 +87,33 @@ var _ = Describe("FitPinnedB", func() {
 		Expect(ok).To(BeTrue())
 		heavier, ok := FitPinnedB(pair(0.61, 0.59), b)
 		Expect(ok).To(BeTrue())
-		Expect(lighter.A).To(BeNumerically("~", 0.0993, 1e-4))
-		Expect(heavier.A).To(BeNumerically("~", 0.1007, 1e-4))
+		Expect(lighter.A).To(BeNumerically("~", (0.59*0.12+0.61*0.08)/1.2, 1e-12))
+		Expect(heavier.A).To(BeNumerically("~", (0.61*0.12+0.59*0.08)/1.2, 1e-12))
 	})
+
+	// The round-3 statistics review's probe: one replica serving a heavier
+	// shape (slope 0.12) among replicas at 0.08, all at the same fill. Its
+	// readings are as real as theirs, and the fleet's capacity is the blend.
+	// The interquartile mean set the slow replica aside entirely from four
+	// replicas up -- 0.080 against a blend of 0.090 for four, priced capacity
+	// 8.5% high -- and the weighted median did from two.
+	DescribeTable("blends one slower replica in whole, whatever the fleet's size",
+		func(replicas int) {
+			b := DefaultBaselineSec
+			obs := make([]Observation, 0, 4*replicas)
+			for range 4 {
+				obs = append(obs, Observation{K: 0.6, ITLSec: b + 0.12*0.6})
+				for range replicas - 1 {
+					obs = append(obs, Observation{K: 0.6, ITLSec: b + 0.08*0.6})
+				}
+			}
+			got, ok := FitPinnedB(obs, b)
+			Expect(ok).To(BeTrue())
+			blend := (0.12 + 0.08*float64(replicas-1)) / float64(replicas)
+			Expect(got.A).To(BeNumerically("~", blend, 1e-12))
+		},
+		Entry("1 of 2", 2), Entry("1 of 3", 3), Entry("1 of 4", 4), Entry("1 of 5", 5), Entry("1 of 8", 8),
+	)
 
 	It("refuses a fit that says load makes a replica faster", func() {
 		// A negative slope is measurement noise, not a model: more cache in use

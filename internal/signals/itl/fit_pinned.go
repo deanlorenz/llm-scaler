@@ -1,9 +1,7 @@
 package itl
 
 import (
-	"cmp"
 	"math"
-	"slices"
 )
 
 // DefaultBaselineSec is the per-token latency of an unloaded replica: the
@@ -20,32 +18,25 @@ import (
 const DefaultBaselineSec = 0.006
 
 // FitPinnedB fits ITL(k) = A*k + B with B held at the value given: A is the
-// interquartile mean of the readings' own slopes (ITL_i - B) / k_i, each
-// weighted by k_i -- the mean of the slopes that hold the middle half of the
-// weight, a quarter trimmed from either end.
+// mean of the readings' own slopes (ITL_i - B) / k_i, each weighted by k_i,
+// which is sum(ITL_i - B) / sum(k_i) -- the line through B that the readings'
+// total latency above the floor lies on. On readings that share one k it is
+// least squares through B; across k it gives each reading its weight in load
+// rather than its square.
 //
-// Not least squares, because the readings a pinned fit gets are not noise
-// around the line. Below DefaultMinSamples steady readings it takes every
-// reading, and a replica's first reading after it starts serving -- a pod
-// that joined, or one the load came back to after a minute without tokens --
-// carries an ITL many times the line's: on a two-namespace run, every new
-// replica's first reading was about 0.46 of k at 435 to 496 ms, slopes of 0.9
-// to 1.06 against 0.09 to 0.10 for the readings around them. Least squares
-// weighs a reading by its squared error, so three of sixteen moved A from
-// 0.101 to 0.170, and the derived mu read 3.1 to 4.2 requests/s against the
-// 6.1 to 6.2 each replica served, for the whole of a twenty-minute phase.
-// Those three carried 11% of the weight, all in the top quarter, so the trim
-// sets them aside, and on readings that are all on one line the mean is that
-// line's slope, as least squares is.
-//
-// Not the weighted median, the least-absolute-deviations A, though it trims
-// as well: the median jumps from one group of slopes to the other as their
-// weight crosses one half. A stationary fleet whose replicas serve two shapes
-// at the same fill (slopes 0.08 and 0.12, half each) had A swing between the
-// two every few cycles, 36% of its mean, where least squares held to 2%; and
-// with one replica of three at 0.12 the median priced the fleet as if it did
-// not exist. The interquartile mean moves with the weight, so it returns the
-// blend there, as least squares does.
+// Nothing is trimmed by value. A value cannot tell a transient from a replica
+// that is really slower: a replica's first readings after it starts serving
+// sit far above the line (on a two-namespace run, about 0.46 of k at 435 to
+// 496 ms, slopes of 0.9 to 1.06 against 0.09 to 0.10 around them), and so does
+// a replica serving a heavier shape. Trimmed, the slow replica was priced as if
+// it did not exist: the interquartile mean set aside one replica at 0.12 among
+// four at 0.08 entirely and over-priced the fleet's capacity by 8.5%, and it
+// still let the warm-ups through once they carried more than a quarter of the
+// weight, which three joiners on a fleet of six did. The weighted median jumped
+// between two groups of slopes as their weight crossed a half. The transients
+// are known instead, by the replica's state: Tracker keeps the readings of a
+// replica still inside its settle out of this fit (see pinnedReadings), and
+// what reaches it is blended in whole.
 //
 // This is the fit for a fleet whose replicas sit at similar loads. A router
 // that balances well gives every replica nearly the same k, and a full
@@ -64,19 +55,18 @@ func FitPinnedB(obs []Observation, b float64) (Model, bool) {
 	if len(obs) == 0 || !(b > 0) {
 		return Model{}, false
 	}
-	slopes := make([]weightedSlope, 0, len(obs))
-	var total float64
+	var above, load float64
 	for _, o := range obs {
 		if !(o.K > 0) || !(o.ITLSec > 0) || math.IsInf(o.K, 0) || math.IsInf(o.ITLSec, 0) {
 			continue
 		}
-		slopes = append(slopes, weightedSlope{a: (o.ITLSec - b) / o.K, w: o.K})
-		total += o.K
+		above += o.ITLSec - b
+		load += o.K
 	}
-	if len(slopes) == 0 || !(total > 0) {
+	if !(load > 0) {
 		return Model{}, false
 	}
-	a := interquartileMean(slopes, total)
+	a := above / load
 	if !(a >= 0) {
 		return Model{}, false
 	}
@@ -85,28 +75,4 @@ func FitPinnedB(obs []Observation, b float64) (Model, bool) {
 		return Model{}, false
 	}
 	return m, true
-}
-
-// weightedSlope is one reading's slope through the pinned intercept, and the
-// weight the fit gives it: its k.
-type weightedSlope struct {
-	a, w float64
-}
-
-// interquartileMean is the weighted mean of the slopes over the middle half
-// of total: sorted by slope, each slope counts for the part of its weight
-// that lies between a quarter and three quarters of total, so a slope
-// straddling either cut counts in part. It sorts s.
-func interquartileMean(s []weightedSlope, total float64) float64 {
-	slices.SortFunc(s, func(x, y weightedSlope) int { return cmp.Compare(x.a, y.a) })
-	lo, hi := total/4, 3*total/4
-	var cum, sum, mass float64
-	for _, x := range s {
-		if in := min(cum+x.w, hi) - max(cum, lo); in > 0 {
-			sum += in * x.a
-			mass += in
-		}
-		cum += x.w
-	}
-	return sum / mass
 }

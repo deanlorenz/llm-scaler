@@ -62,13 +62,14 @@ type replicaTrace struct {
 	// it is new, not merely new to this process.
 	joined  bool
 	samples []kSample
-	// idle counts the replica's latest rows in a row that carried no ITL: no
-	// tokens in the rate window, so nothing was served.
+	// idle counts the replica's latest rows in a row that carried neither an
+	// ITL nor a k: no tokens in the rate window and nothing in the cache, so
+	// nothing was served.
 	idle int
 }
 
-// idleRows is how many rows without an ITL in a row make a replica idle
-// rather than one that missed a scrape.
+// idleRows is how many rows in a row with neither an ITL nor a k make a
+// replica idle rather than one that missed a scrape.
 //
 // An idle replica leaves nothing in its trace -- vLLM reports a KV fill of 0
 // with nothing running, and a k of 0 is not traced -- so when the load comes
@@ -81,13 +82,22 @@ type replicaTrace struct {
 // side of it does not hold that replica out for DefaultSteadyFor.
 const idleRows = 2
 
-// serving notes whether this row of the replica carried an ITL. A replica
-// that comes back with one after idleRows or more rows without starts its
-// trace over as a joiner: it waits out DefaultSteadyFor, and its trace
-// begins at now.
-func (rt *replicaTrace) serving(hasITL bool, now time.Time) {
+// serving notes whether this row of the replica carried an ITL, and whether
+// it carried a traceable k. A replica that comes back with an ITL after
+// idleRows or more rows with neither starts its trace over as a joiner: it
+// waits out DefaultSteadyFor, and its trace begins at now.
+//
+// A row with a k and no ITL is not idle: the replica has work in its cache,
+// and its ITL was not read. The collector drops a whole query's values when
+// the query errors, so an avg_itl query that failed on two cycles running,
+// with kv_usage_instant read on both, restarted every replica of a busy fleet
+// and cost it DefaultSteadyFor of steady readings. Such a row leaves the count
+// as it was: it neither idles the replica nor says it served.
+func (rt *replicaTrace) serving(hasITL, hasK bool, now time.Time) {
 	if !hasITL {
-		rt.idle++
+		if !hasK {
+			rt.idle++
+		}
 		return
 	}
 	if rt.idle >= idleRows {
@@ -114,7 +124,7 @@ type keyTraces struct {
 // DefaultSteadyFor. So does one the load came back to after it idled: see
 // idleRows.
 func (rt *replicaTrace) steady(k float64, now time.Time) bool {
-	if rt.joined && now.Sub(rt.since) < DefaultSteadyFor {
+	if rt.settling(now) {
 		return false
 	}
 	cutoff := now.Add(-DefaultSteadyFor)
@@ -127,6 +137,15 @@ func (rt *replicaTrace) steady(k float64, now time.Time) bool {
 		}
 	}
 	return true
+}
+
+// settling reports whether the replica is still inside its settle: it joined
+// after the key was first observed, or the load came back to it after it
+// idled, less than DefaultSteadyFor ago. Its ITL still covers its warm-up --
+// on a two-namespace run, a first reading about 0.46 of k at 435 to 496 ms
+// against a line near 0.09 -- and nothing about its k says so.
+func (rt *replicaTrace) settling(now time.Time) bool {
+	return rt.joined && now.Sub(rt.since) < DefaultSteadyFor
 }
 
 // note records k at now and forgets what is older than DefaultSteadyFor.
@@ -160,7 +179,7 @@ func (w *Window) dropBefore(cutoff time.Time) {
 // steady readings for DefaultSteadyFor against it. A row without a k neither
 // judges the replica nor restarts its trace; one that is not Ready, is lent by
 // the warm pool, or is missing from the cycle restarts it, and so does load
-// coming back after idleRows rows without an ITL.
+// coming back after idleRows rows with neither an ITL nor a k.
 func traceable(k float64) bool {
 	return k > 0 && !math.IsInf(k, 0)
 }
