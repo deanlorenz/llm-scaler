@@ -314,8 +314,20 @@ Two sources, added.
 ### A replica's own demand
 
 ```
-replicaDemand = rm.TokensInUse + localQueueCharge(rm, role, routing)
+replicaDemand = residentCharge(rm, rm.TokensInUse, capacity, routing) + localQueueCharge(rm, role, routing)
 ```
+
+`residentCharge` is `rm.TokensInUse`, the collector's one-minute peak, except
+for a Ready replica idle NOW (`KvUsageInstant` under `idleKvUsage`) while a
+replica of its role is busy now (`cycle.busyNowRoles`, from `rolesBusyNow`):
+that one is charged `KvUsageInstant x capacity`, never above the peak
+(`replicaRouting.kvFromInstant`). Summed per pod, peaks count a load the router
+moved within the minute once on every pod it visited: four pods each full for
+15 s, one full now, read 4,416,512 tokens for a load of 1,173,863. With no
+replica busy now (light everywhere, a load that just stopped, or no instant
+reading at all) every peak stands. Only demand reads this; `kvFull`, k2 and its
+admission keep the peak. The waiting queue is a peak too and has no instant
+reading, so its charge is not changed by this.
 
 `localQueueCharge` is `waitingQueueDemand(rm, role)`, or zero while the
 replica's role has an idle Ready replica (`replicaRouting.queueRoutable`, from

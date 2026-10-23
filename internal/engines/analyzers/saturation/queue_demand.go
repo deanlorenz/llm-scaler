@@ -224,6 +224,32 @@ func localQueueCharge(rm domain.ReplicaMetrics, role string, routing replicaRout
 	return waitingQueueDemand(rm, role)
 }
 
+// residentCharge is the resident KV a replica's demand is charged for, in
+// tokens of capacityTokens: peakTokens -- the collector's one-minute peak --
+// or, where routing says the peak has moved to a sibling
+// (replicaRouting.kvFromInstant), the replica's instant reading. Never above
+// the peak.
+//
+// Summing per-pod peaks counts a load the router moved within the minute once
+// on every pod it visited: measured in the imbalance audit's fixture, four
+// pods each full for 15 s of a minute, one full now, priced 4.42M tokens for a
+// load of 1.17M. Charged at its instant reading, a pod idle now beside a
+// sibling busy now adds what it holds now, and the sibling's own peak carries
+// the load. Where no sibling is busy now the peak stands, so a role busy on
+// every replica, a light one and a load that has just stopped all price as
+// before. Only demand reads this; the saturation tests, k2 and its admission
+// keep the peak.
+func residentCharge(rm domain.ReplicaMetrics, peakTokens, capacityTokens int64, routing replicaRouting) int64 {
+	if !routing.kvFromInstant || capacityTokens <= 0 {
+		return peakTokens
+	}
+	k, ok := instantKv(rm)
+	if !ok {
+		return peakTokens
+	}
+	return min(peakTokens, int64(math.Round(k*float64(capacityTokens))))
+}
+
 // schedulerQueueDemand holds the estimated token demand from scheduler-queued
 // requests, broken down by P/D role for disaggregated models.
 type schedulerQueueDemand struct {

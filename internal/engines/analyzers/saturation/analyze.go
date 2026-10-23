@@ -155,6 +155,10 @@ type cycle struct {
 	// (rolesWithIdleReplica). A replica's own waiting queue is not the
 	// role's to size for while its role is in it.
 	idleRoles map[string]bool
+	// busyNowRoles is the roles with a Ready replica busy NOW by its
+	// instant KV (rolesBusyNow). A sibling idle now is charged its instant
+	// KV, not its one-minute peak, while its role is in it.
+	busyNowRoles map[string]bool
 
 	// observeFleetShape: the one shape the fleet is serving, and the tracker's
 	// view of whether it just changed.
@@ -266,6 +270,7 @@ func (a *SaturationAnalyzer) newCycle(
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
 	// Decided over every row before any is priced, for the same reason.
 	c.idleRoles = rolesWithIdleReplica(input.ReplicaMetrics, c.rolesByVariant)
+	c.busyNowRoles = rolesBusyNow(input.ReplicaMetrics, c.rolesByVariant)
 
 	return c
 }
@@ -547,7 +552,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName],
-			replicaRouting{queueRoutable: c.idleRoles[domain.CanonicalRole(role)]}, c.logger)
+			replicaRouting{
+				queueRoutable: c.idleRoles[domain.CanonicalRole(role)],
+				kvFromInstant: kvFromInstant(rm, c.busyNowRoles[domain.CanonicalRole(role)]),
+			}, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through

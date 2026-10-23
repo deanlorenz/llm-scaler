@@ -337,7 +337,8 @@ it has never saturated under. See [Prefill, specifically](#prefill-specifically)
 ### Demand — `analyzers/saturation`
 
 ```
-replicaDemand  = TokensInUse + localQueueCharge(role)  // 0 beside an idle sibling
+replicaDemand  = residentCharge(TokensInUse)          // instant KV for a pod idle now beside one busy now
+               + localQueueCharge(role)              // 0 beside an idle sibling
 inputTokensRaw = max(QueueBytes / BytesPerToken, QueueSize x avgInput)
 prefill charge = inputTokensRaw x (1 - prefillHitRate)
 decode charge  = QueueSize x avgOutput            // split fleet

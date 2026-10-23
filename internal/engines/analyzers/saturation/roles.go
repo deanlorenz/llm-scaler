@@ -151,6 +151,50 @@ type replicaRouting struct {
 	// it, and a replica added cannot take it. False leaves the queue charged
 	// in full, as on a role busy everywhere.
 	queueRoutable bool
+	// kvFromInstant is set when the replica's resident KV is charged at its
+	// instant reading rather than its one-minute peak (residentNowCharge):
+	// it is Ready, idle NOW (KvUsageInstant under idleKvUsage) while a
+	// sibling of its role is busy now. Its peak is load that has moved to
+	// that sibling, and the sibling's own reading already counts it.
+	kvFromInstant bool
+}
+
+// instantKv is rm's instantaneous KV utilization (KvUsageInstant) and whether
+// it is a usable fraction.
+func instantKv(rm domain.ReplicaMetrics) (float64, bool) {
+	k := rm.KvUsageInstant
+	return k, !math.IsNaN(k) && k >= 0 && k <= 1
+}
+
+// rolesBusyNow is the set of roles (domain.CanonicalRole) with a Ready replica
+// whose instantaneous KV is at or over idleKvUsage this cycle.
+//
+// The collector's KV and queue rows are one-minute peaks, which is what the
+// saturation tests want, and summed per pod they over-read demand when the
+// router moves its hot pod within the minute: four pods each full for 15 s
+// read as four full pods. A role busy now has its load visible on the
+// replicas that carry it now, so a sibling that is idle now (instant KV under
+// idleKvUsage) is charged at its instant reading instead of its peak
+// (replicaRouting.kvFromInstant). A role with no replica busy now -- light
+// everywhere, or a load that has just stopped -- keeps every peak, as does a
+// fleet whose instant reading is missing, which has no replica busy now
+// either.
+func rolesBusyNow(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for _, rm := range metrics {
+		if k, ok := instantKv(rm); rm.Ready && ok && k >= idleKvUsage {
+			out[domain.CanonicalRole(rolesByVariant[rm.VariantName])] = true
+		}
+	}
+	return out
+}
+
+// kvFromInstant reports whether rm's resident KV is charged at its instant
+// reading this cycle (replicaRouting.kvFromInstant): Ready, idle now, its
+// role busy now.
+func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
+	k, ok := instantKv(rm)
+	return busyNow && rm.Ready && ok && k < idleKvUsage
 }
 
 // roleSaturated reports whether the given role is saturated this cycle: a

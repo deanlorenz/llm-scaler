@@ -218,6 +218,11 @@ a role that is busy everywhere is never treated as imbalanced.
   left out of the demand and out of the throughput floor's backlog. The tokens
   the replica already holds still count. The scheduler's queue still counts,
   because the router can place those requests anywhere.
+- **A load that moved is counted once.** KV use is read as each pod's peak over
+  the last minute. If the router moves its hot pod during that minute, every pod
+  it visited shows a full peak. A pod that is idle now, while another pod of
+  its role is busy now, is charged what it holds now. If no pod of the role is
+  busy now, every peak counts.
 
 ### 3. The scaling signal
 

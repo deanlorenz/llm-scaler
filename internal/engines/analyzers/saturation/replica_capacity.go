@@ -79,8 +79,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// Compute demand: tokens already resident in KV cache plus the role-aware
 	// footprint of requests still waiting in the local engine queue -- unless
 	// the router could have placed them elsewhere (localQueueCharge).
+	// The resident half is the one-minute peak, or the instant reading where
+	// that peak is load the router has since moved to a sibling
+	// (residentCharge).
 	localQueueDemand := localQueueCharge(rm, role, routing)
-	replicaDemand := rm.TokensInUse + localQueueDemand
+	residentDemand := residentCharge(rm, rm.TokensInUse, rm.TotalKvCapacityTokens, routing)
+	replicaDemand := residentDemand + localQueueDemand
 
 	// k1: memory-bound capacity
 	k1 := memoryBound(rm.TotalKvCapacityTokens, config.KvCacheThreshold)
@@ -351,6 +355,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
 		"queueRoutable", routing.queueRoutable,
+		"residentDemand", residentDemand, "kvFromInstant", routing.kvFromInstant, "kvUsageInstant", rm.KvUsageInstant,
 		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
 		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
 		"requestRate", rm.RequestRate,
@@ -483,7 +488,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	//
 	// This is a coarse approximation — KvCacheUsage reflects memory pressure, not
 	// exact token demand — but it's sufficient when token-level metrics are absent.
-	kvUsageDemand := int64(rm.KvCacheUsage * float64(rec.EffectiveCapacity))
+	// The peak, or the instant reading where the peak has moved to a sibling,
+	// as on the main path (residentCharge).
+	kvUsageDemand := residentCharge(rm, int64(rm.KvCacheUsage*float64(rec.EffectiveCapacity)),
+		rec.EffectiveCapacity, routing)
 
 	// Add the role-aware footprint of requests waiting in the local engine queue,
 	// matching the main path.
@@ -506,7 +514,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		"storeEffectiveCapacity", rec.EffectiveCapacity, "storeLearnedFrom", rec.LearnedFrom,
 		"kvCacheUsagePct", rm.KvCacheUsage, "effectiveCapacity", effectiveCapacity,
 		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
-		"queueRoutable", routing.queueRoutable)
+		"queueRoutable", routing.queueRoutable, "kvFromInstant", routing.kvFromInstant)
 
 	return &capacity.ReplicaCapacity{
 		PodName:               rm.PodName,

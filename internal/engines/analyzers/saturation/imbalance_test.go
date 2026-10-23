@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -264,5 +265,49 @@ func TestImbalanceResidencyLeavesAPinnedQueueOut(t *testing.T) {
 	}
 	if want := resident(busy) + 439*prompt; amongBusy != want {
 		t.Errorf("439 queued beside busy (not idle) siblings: demand %.0f, want %.0f -- only an idle sibling may drop it", amongBusy, want)
+	}
+}
+
+// The collector's KV reading is each pod's one-minute peak. A router that
+// moves its hot pod within the minute leaves a full peak on every pod it
+// visited, and summed they read as that many full pods. A pod idle now beside
+// a sibling busy now is charged what it holds now; with no sibling busy now
+// every peak stands.
+func TestImbalanceDemandDoesNotSumAMovedPeak(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "agg-v", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1},
+	}
+	const peak = 0.95
+	run := func(instants []float64) float64 {
+		t.Helper()
+		a, _ := imbAnalyzer()
+		var rows []domain.ReplicaMetrics
+		for i, k := range instants {
+			rm := imbRow("r"+string(rune('0'+i)), "agg-v", peak, 0, 1000, 1000, 0.5)
+			rm.KvUsageInstant = k
+			rows = append(rows, rm)
+		}
+		r, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.TotalDemand
+	}
+	tokens := func(f float64) float64 { return float64(int64(f * float64(imbKv))) }
+	allPeaks := 4 * tokens(peak)
+	moved := run([]float64{0.95, 0.02, 0.02, 0.02})
+	busy := run([]float64{0.90, 0.85, 0.92, 0.88})
+	stopped := run([]float64{0.02, 0.02, 0.02, 0.02})
+	missing := run([]float64{0, 0, 0, 0})
+	t.Logf("demand, four pods each peaking at %.2f: moved (one full now) %.0f; busy everywhere %.0f; stopped %.0f; no instant reading %.0f; sum of peaks %.0f",
+		peak, moved, busy, stopped, missing, allPeaks)
+	if want := tokens(peak) + 3*math.Round(0.02*float64(imbKv)); moved != want {
+		t.Errorf("a load moved among four pods within the minute priced %.0f, want the busy pod's peak plus what the idle three hold now, %.0f",
+			moved, want)
+	}
+	for name, got := range map[string]float64{"busy everywhere": busy, "stopped": stopped, "no instant reading": missing} {
+		if got != allPeaks {
+			t.Errorf("%s: demand %.0f, want every pod's peak, %.0f", name, got, allPeaks)
+		}
 	}
 }
