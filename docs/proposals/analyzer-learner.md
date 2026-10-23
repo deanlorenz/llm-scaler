@@ -1,18 +1,44 @@
 # Shared rules for the analyzers' learners
 
-- **Status:** proposed. No code changed. It describes main (with #272 and #281)
-  plus the heads of #273 (3e611e3fb), #282 (0422dc146) and #283 (40762ccd1).
+- **Status:** proposed, revision 3. No code changed. It describes main
+  73a464475 (with #272 and #281) plus the heads of #273 (3e611e3fb), #282
+  (c130c24ca, round 4) and #283 (40762ccd1). Rows 5 and 11 are re-checked
+  against #282's merge commit before this proposal merges.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
 - **Decision:**
-  1. Build the test harness first. Every later step is judged by it.
-  2. Share one **settle tracker**, one **vocabulary**, and one **set of
-     observability rules**. Do not share a loop that drives the learners, a
-     direction enum, or a robust-fit library.
-  3. Fix the clock mix before anything moves.
-- **Shape:** six PRs. PR 0 is the harness. Each later PR says what changes for
-  an operator.
+  1. Build the test harness first, and make it deterministic: PR 0 carries the
+     clock fix, the presence bits and the recorder. Every later step is judged
+     by it.
+  2. Share one **settle tracker** (one owner), one **vocabulary**, and one
+     **set of observability rules**. Do not share a loop that drives the
+     learners, a direction enum, or a robust-fit library.
+  3. Each behaviour change ships behind a temporary switch, so a replay proves
+     that nothing else moved.
+- **Shape:** seven PRs (0, 1, 2, 3, 4a, 4b, 5). Each says what an operator
+  sees and which recording it needs.
+
+## Revision notes (round 2)
+
+Four reviews of revision 2 (architect, statistician, SRE, skeptic). Round 1 is
+summarised at the end.
+
+| blocker | resolution | where |
+| --- | --- | --- |
+| The harness ran on two clocks | Every wall-clock read in the analyzers moves onto one injected clock **in PR 0**. Two replays at different wall times must give identical output | [2.2](#22-one-clock) |
+| A recorder outside the analyzer hides its capabilities and records too little | The recorder lives **inside** each analyzer and records every input and every state-changing entry point, from a state snapshot. A test fails when an exported method goes unrecorded | [2.4](#24-the-recorder) |
+| "Compare up to the first divergence" checks nothing after a named change | Change behind a switch. Off: identical to the parent's goldens for the whole run. On: diff per output, and only named outputs move. Goldens change only with a pasted summary | [2.5](#25-replay-and-the-golden-rule) |
+| No PR adds the presence bits; "KV zero is idle" contradicts #273 | PR 0 adds a known/absent bit per gauge. Idle is a two-gauge rule, as #273 has it | [2.3](#23-presence-bits), [4](#4-settled-replicas) |
+| Property tests miss half the historical highs, and reward value trimming | Nine new test classes, each threshold enumerated, and a map of which class catches each past finding. What still escapes is listed | [2.6](#26-property-tests), [2.7](#27-past-findings-against-the-test-classes) |
+| Two settle trackers (engine and analyzer) | The saturation analyzer owns the one tracker. The engine's balance tracker and the other analyzers read a read-only view. Keyed by (model, pod, variant, bridge) | [4.2](#42-one-owner) |
+
+Also written in: `restored: true` is a field, not a source value. `learner-write`
+is at most one line per key per cycle, against the last logged value, with a
+heartbeat. Per-key series deletion is gone. The count and "cleared" lines are
+removed, and one start line per model is defined. Start time has two risky
+sides. PR 4 is split. Each PR names its recording. The closed-loop probe is
+named. Clocks, the dependency order and the risk-side table are completed.
 
 ## Why
 
@@ -21,11 +47,11 @@ the reviews of #273 and #282 found six kinds of defect:
 
 | defect class | where it hit |
 | --- | --- |
-| **A transient admitted as a reading.** A replica that just joined, the first minute of a load step, a slow fill. | ITL intercept learned from a ramp (#273). k2 taken at 8 % KV behind a 160-request step (#282). k2 recorded mid-fill on long outputs (#282). A replica just Ready counted as idle room (#282). |
+| **A transient admitted as a reading.** A replica that just joined, the first minute of a load step, a slow fill. | ITL intercept learned from a ramp (#273). k2 taken at 8 % KV behind a 160-request step (#282). k2 recorded mid-fill on long outputs (#282). A replica just Ready counted as idle room (#282). A filling replica's token rate taken as mu, 11 % high (#282 round 4). |
 | **The first sample adopted raw.** | A fresh pod's 0.0995 req/s became the bucket's mu (E1, #282). k2 prices its first admitted reading at once. The start-time estimator's first measurement replaces the 70 s default. |
 | **A stale value never refreshed.** | A measured mu outranked a derived one for the rest of a run (#282). The 6 ms default intercept stayed on every multi-replica fleet (#273). |
 | **A missing reading read as a value.** | k == 0 meant "not collected" and was traced as zero load (#273). A NaN KV read as 0, and so as idle (#283 review). |
-| **One reading dominates.** | Least squares pulled by three joined-pod readings out of sixteen (#273: now dropped by state, then a k-weighted mean). The saturated throughput sample was the hottest replica (#282: now a lower median, bounded by the served rate). |
+| **One reading dominates.** | Least squares pulled by three joined-pod readings out of sixteen (#273: now dropped by state, then a k-weighted mean). The saturated throughput sample was the hottest replica (#282: now a lower median, bounded by the served rate). One slow replica set the fleet's mu (#282 round 4: now yields to its full siblings). |
 | **A hard edge with no hysteresis.** The most frequent class. | The k2 key boundary swung capacity 39 % at constant load. Demand fell 48 % for a 2 % rise in lambda. Mu flipped between measured and derived 11 times in 20 cycles under 4 % noise. `backlogGrew` swung demand 1.54x on one request (fixed on #282 by e7d9f0ff1). |
 
 The joined-replica test now exists four times, with four sets of rules (see
@@ -37,6 +63,14 @@ so the harness comes first.
 is too low costs money. [The k2 design](../plans/analyzers/k2-capacity-model.md)
 draws its rule from that: nothing outside admission raises k2. No floor, no
 age-out, no reset. That rule stays.
+
+**What this answers for an operator,** after PR 5:
+
+| question | answered by |
+| --- | --- |
+| Why did a light model run at 0.95 utilisation? | `throughput-demand-floor` names `muKey` and `muSource` (PR 3); mu's `learner-write` shows the first sample, its pod and its joined age. The `[1m]` peak after a swap belongs to no learner and stays open |
+| Why did a fleet hold 3 replicas? | `heldAtFleet`/`heldWhy` (exist), `muSource`, `startEstimateSeconds` and `startSource` (PR 3), `k2-decision`'s P-code |
+| Why did the second GPU transfer wait? | **Not answered here.** The share planner's holds are out of scope; they belong to the utilization-share work (#272 and its follow-ups) |
 
 ## 1. Inventory
 
@@ -50,14 +84,14 @@ off by default).
 | 2 | Shared and borrowed ITL line | `D/analyzer.go` `publishLine`/`borrowLine` | `EnableLearnedStateReuse` (off), same fingerprint | none | Ages on last write. May hold a fleet, never order one | yes |
 | 3 | k2, KV at saturation | `D/replica_capacity.go` `k2Chain`, `D/k2_settle.go`, `D/keys.go` | Queue ≥ threshold; downstream not saturated; not a bridge; not mid-rollout; under the physical ceiling. Joined under 1 min: refused. When queue × footprint exceeds what the busiest rank holds, also: rate ≥ 0.7 of mu on record **and** residency ≥ 0.7 of k2 on record, **or** residency within ±25 % of the reading 1 min back with the queue standing on every cycle | Mean of a 10-sample window. Admitted readings raise it as well as lower it. The first admitted reading prices at once | Key: the fleet's tracked output length for decode and aggregated, prefill's own average. 24 h write gap starts a new episode. Evicted 7 d after last read | yes, with args tags and stash |
 | 4 | Borrowed k2 (lower bound) | `D/k2_borrow.go` | Only when lower than the variant's own k2. KV total within 3 % | none | Held 30 min, then relaxed **upward** over 6 h of serving time. Re-arms on an args change or a figure ≥ 20 % lower | yes |
-| 5 | Measured mu | `D/throughput_floor.go`, `D/throughput_admission.go` | Only on a P1-obs k2 write, so it inherits k2's joined test. RequestRate > 0. Not under half the highest rate a Ready sibling served (`servedBounds`). Not under 0.5 of derived, unless the same pod read that low on every saturated cycle for 2 min | One sample a minute. Within the minute a reading rewrites the last sample: max per pod, lower median across pods | See [the mu choice](#the-mu-choice) below. Evicted 7 d after last read | window yes, choice no |
+| 5 | Measured mu | `D/throughput_floor.go`, `D/throughput_admission.go` | Only on a P1-obs k2 write, so it inherits k2's joined test. RequestRate > 0. Not filling: generated tokens at most 1.15x completions × output length (`MaxTokensOverCompletions`, round 4). Not under half the highest rate a Ready replica of the variant served, its own included (`servedBounds`). Not under 0.5 of derived, unless the same pod read that low on every saturated cycle for 2 min | One sample a minute. Within the minute a reading rewrites the last sample: max per pod, lower median across pods | See [the mu choice](#the-mu-choice) below. Evicted 7 d after last read | window yes, choice no |
 | 6 | Derived mu | `D/mu_from_itl.go` `deriveMu` | none: a formula on #1 per replica | none | As fresh as the line | no |
-| 7 | Prefill throughput bound | `D/prefill_bound.go` | `EnablePrefillThroughputBound`. Saturated, serving rows. No joined test, no rate check, no band | Window max. It writes through #5's fold with pod `""`, so it kept its max only because every prefill pod folds under one empty key | **Only rises.** Touched on every read, so never ages while pricing | with #5 |
+| 7 | Prefill throughput bound | `D/prefill_bound.go` | `EnablePrefillThroughputBound`. Saturated, serving rows. No joined test, no rate check, no band | Window max. It writes through #5's fold with pod `""`, so it kept its max only because every prefill pod folds under one empty key | **Only rises.** The prior max is read before the write and put back with `RaiseLast`, so it survives the 24 h episode reset. Touched on every read, so never ages while pricing. Cleared only by an args change or a forget | with #5 |
 | 8 | Fleet shape and shape-change hold | `D/shape_change.go`, `D/fleet_shape.go` | Tolerance band on the router's prompt length | Rate-weighted mean | Hold up to 5 min | no |
 | 9 | Decode-saturation memory | `D/roles.go` `roleSaturated` | One full decode pod gates prefill learning (the #282 fix that changed this was reverted, 7ab00fa8c). Bridges count | none | 1 min | no |
 | 10 | Idle room | `D/idle_room.go` | Decode only. Idle on every reading for 2 min, no gap > 1 min, not a bridge | none | Run resets on a non-idle reading | no |
-| 11 | Floor arrival rate, trust and backlog memory | `D/throughput_floor.go`, `internal/signals/floor/` | none | Blend from 0.5 to 0.8 of resident demand. A queue counts as grown past a noise band over a minute (#282). An engine's queue is backlog only up to what it drains (#282) | Last cycle's backlog per role | no |
-| 12 | Replica start time | `D/start_est.go` | Each pod once, not a bridge, 0–3600 s. A sample over 3x the estimate is refused until 3 in a row, counted per variant **by cycle**: one pod can pass it alone in a minute | EWMA α 0.3. The first sample replaces the default | Seen pods not persisted: after a restart every running pod is folded again. The floor reads it as a min per role, share pacing as a max | yes |
+| 11 | Floor arrival rate, trust and backlog memory | `D/throughput_floor.go`, `internal/signals/floor/` | none | Blend from 0.5 to 0.8 of resident demand. A queue counts as grown past a noise band over a minute. An engine's own queue is capped at what it drains (mu × T) **only while it stands**; while the role's backlog grows it is charged in full (round 4) | Last cycle's backlog per role; `backlogGrew` remembers 1 min, so the full charge outlives growth by up to a minute (an over-order) | no |
+| 12 | Replica start time | `D/start_est.go` | Each pod once, not a bridge, 0–3600 s. A sample over 3x the estimate is refused until 3 such, counted per variant **per rejected sample**: three outlier pods in one cycle exhaust the guard, and one pod repeating passes on its fourth cycle | EWMA α 0.3. The first sample replaces the default | Seen pods not persisted: after a restart every running pod is folded again. The floor reads it as a min per role, share pacing as a max | yes |
 | 13 | SLO analyzer line | `internal/engines/analyzers/slo/` | Its own ITL tracker, same rules as #1 | Same as #1 | 24 h unseen | no |
 | 14 | Share need history | `internal/engines/allocation/utilization_share_ledger.go` `RecordNeeds`, `PeakNeed`, `PeakKnown` | A peak needs two readings in a row. After a restart a full swing window before a peak is known | Mean over the swing window. Step detector `ShareStepSpread` 0.25 | Trimmed to the window | yes, `wva-utilization-share-history` |
 | 15 | Share release time | same file, `MeasuredRelease` | Completed releases | 90th percentile of recent releases, needs ≥ 3 | Recent releases only | no |
@@ -68,25 +102,29 @@ off by default).
 A measured mu and a derived mu are both offered every cycle, and
 `measuredYieldsToDerived` picks one. It keeps the measured window either way.
 
-- A measurement under derived yields **at once** while a Ready sibling serves
-  more than 2x it.
-- Otherwise it yields only when stale. Freshness is the last saturated reading
-  that **agreed** with it within 2x, not its newest sample. A stale measurement
-  above derived yields after 5 min. One below derived yields after 30 min.
-- The choice is latched: out at 2.0, back at 1.6.
+| rule | when |
+| --- | --- |
+| Yields to derived **at once** | the measurement is under derived and a Ready replica (its own included) serves more than 2x it |
+| Yields to the full siblings (round 4, `siblingYield`) | the measurement is under 0.8 of the lower median served by Ready replicas with a full cache and no queue. Logged as `saturated-throughput-yields-to-siblings`, bucket `served-siblings`. Remembered in `muChoice` until the measurement comes within 0.8 or the window starts over |
+| Yields when stale | freshness is the last saturated reading that **agreed** with it within 2x. Above derived: after 5 min. Below derived: after 30 min |
+| Latch | out at 2.0, back at 1.6 |
 
-Open: the latch is not persisted, so a restart reverts a yield in the 1.6–2x
-band. A one-replica variant with no line has nothing to yield to.
+**Named, not fixed here:** the latch is not persisted. After a restart a
+measured mu between 1.6x and 2x **above** derived comes back unlatched and
+prices from the **higher** measured figure, the SLO side. PR 3 either persists
+the choice or restores it to the safe side ([3.5](#35-hysteresis)). A
+one-replica variant with no line has nothing to yield to.
 
 Also learned and not tabled: the hot-rank hysteresis memo and the share swing,
 which stabilize the controller's own decisions rather than learn from replicas.
 
 The snapshot carries #1–#5 and #12, plus the accelerators, the forgotten set,
 `K2BorrowedSince`, `PriorK2` (read by rollback builds) and both stashes. A
-restore never makes a figure younger.
+restore never makes a figure younger, and an unknown age resolves to the safe
+side ([3.4](#34-which-side-breaks-the-slo)).
 
 Row 16 has none of #273's fixes (steady gate, settling stamp, k > 0 guard). It
-moves with row 1.
+moves in PR 4b.
 
 ## 2. Harness first (PR 0)
 
@@ -114,36 +152,224 @@ most, so k2's main path), **shape changes**, **controller restarts and the
 snapshot**, **warm-pool bridges**, and **borrowed lines** (reuse on). All three
 runs are one model, decode only, one shape, 1 GPU per replica.
 
-### 2.2 What PR 0 adds
+PR 0 has five parts: one clock, presence bits, the recorder, replay with
+goldens, and property tests. It changes nothing in production.
 
-- **A recorder.** Behind a flag, the analyzer writes its per-cycle inputs as
-  JSON lines: every `ReplicaMetrics` field it reads (instant and peak KV with
-  presence, ReadySince, the warm-pool flag, per-replica generation and
-  completion rates, prefill rate, queue, ITL, KV capacity), the policy, and
-  `now`. `docs/developer-guide/testing.md` says how to turn it on for a run.
-- **Replay with goldens.** A replay drives the analyzer from a recording and
-  compares its outputs (priced figures, rc and sc, window contents) to golden
-  CSV committed beside the fixture. A `make` target regenerates the goldens, so
-  each named change shows as a golden diff. A replay is open loop: it compares
-  up to the first divergence and reports the rest as "diverged, not compared".
-- **Per-path counters that must be above zero.** P1-obs admitted, settle
-  refusals per reason, mu samples written, mu yields, OLS cycles, pinned
-  cycles, instant-KV rows, joined refusals with a known ReadySince. A replay
-  that touched none of a PR's paths fails rather than passes.
-- **Property tests, one per defect class.**
-  - Transient, first sample, stale value, missing value, one dominant reading:
-    a synthetic case each, run against every learner it applies to.
-  - **Hard edges:** perturb each input by a few percent of noise and jitter.
-    The output may move by a bounded amount and must not alternate cycle to
-    cycle.
-  - **Monotonicity:** demand does not fall as lambda or the queue rises. The
-    order stays bounded by what the fleet can drain.
-- **Recorded runs needed before the k2 PR:** one with flow control off and one
-  P/D run, both with the recorder on.
+### 2.2 One clock
 
-Holds, latches and the self-sealing low mu are closed-loop behaviours. A log
-replay cannot show them. A PR that changes one also needs a closed-loop probe,
-as #282's review used.
+A replay drives `a.now()` from the recording. Every other read of wall time
+then stamps replay time, so goldens differ from run to run, and an episode
+reset or an eviction depends on when the replay ran. Each site below takes
+`now` from its caller, or from the one clock injected into the analyzer.
+
+| site | what reads wall time today |
+| --- | --- |
+| `internal/signals/capacity/rolling_average.go` (the k2 and mu windows) | `NewRollingAverage`, `Add`, `Observe`, `Touch` (the use clock, also called by the prefill bound), `Stale`, `WriteGapExceeds`, `WriteAge`. Each gains an `...At` form |
+| `internal/signals/capacity/store.go` (the k2 store) | `LearnedAt` |
+| `D/analyze.go` | `AnalyzedAt` (also excluded from goldens) |
+| `D/analyzer.go` | the accelerator memo touch; the pending-restore sweep `alive(a.now(), time.Now())` and `pruneWindows(time.Now())` |
+| `D/roles.go` | the accelerator memo |
+| `D/learned_snapshot.go` | the snapshot writer and restore stamps |
+| `internal/engines/analyzers/throughput/analyzer.go` | `now := time.Now()` inline in `Analyze`, no seam at all |
+| `internal/engines/analyzers/slo/` | already has a `now` field; wired to the same clock |
+
+The snapshot compares persisted wall stamps on restore, so in production the
+injected clock **is** wall time. In replay it is the recorded clock.
+
+**Acceptance:**
+
+- The same recording replayed twice, with the wall clock 30 days apart, gives
+  byte-identical outputs.
+- A test fails on any `time.Now()` in these packages outside the injected clock.
+- Negative control: a fake clock that jumps past `EpisodeGap` resets the k2
+  window. It fails on the parent, where the window stamps wall time.
+
+Tests can already age a window with `ObservedAt` (`sweep_keying_test.go`,
+`eviction_regression_test.go`). What they cannot do is age it **on the same
+fake clock** that `a.now()` uses. That is the defect.
+
+### 2.3 Presence bits
+
+Only `KvUsageInstantKnown` exists (`internal/domain/replica_metrics.go`). The
+collector turns NaN, Inf and absent series into 0 (`collector/extract.go`). PR
+0 adds a `...Known` bit beside each gauge a learner reads: peak KV, ITL
+(`AvgITL`), the engine queue, request rate, generation-token rate and
+prompt-token rate. A bit is true when the series was present and finite.
+
+- The recorder writes the bit. It never encodes "missing" as NaN:
+  `encoding/json` refuses NaN and would drop the whole line.
+- Negative control: #273's A4 case (k == 0 unsettles a replica) and 273-r3 #2
+  (a missed scrape restarts a settle) fail on the parent once the tracker
+  reads the bits.
+- Until a learner moves onto the tracker it ignores the bits, so this part
+  changes no output.
+
+### 2.4 The recorder
+
+A wrapper around `domain.Analyzer` is ruled out. The engine reaches six
+capabilities by type assertion (`variantForgetter`, `staleHistoryEvictor`,
+`learnedStater`, `acceleratorStabiliser`, `presenceNoter`, `sloStateKeeper`).
+A wrapper hides them: with the flag on, forget, eviction, snapshot restore and
+export, and accelerator stabilisation would silently stop.
+
+So the recorder is a field inside each analyzer (`a.rec`, nil when off). The
+saturation, SLO and throughput analyzers each get one. One `a.rec.note(kind,
+now, args)` sits at the top of every exported method that reads input or
+changes state.
+
+**What it records,** one recording per analyzer instance, all models in call
+order (borrowed lines cross models), each event with `seq` and `now`:
+
+| event | content |
+| --- | --- |
+| `snapshot` (first line of every segment) | the full learned state, read **without** touching `LastUsed` (`ExportLearnedState` touches it today, so PR 0 adds a non-touching read). A recording that has neither a snapshot nor a cold-start mark is refused by replay |
+| `Analyze` | the full `AnalyzerInput`: every `ReplicaMetrics` field with its presence bits (instant and peak KV, ReadySince, the warm-pool flag, per-replica generation, completion and prompt rates, queue, ITL, KV capacity); per-variant GPU count, role, accelerator and fingerprint (`VariantStates`); the scheduler queue; the arrival rate; the policy |
+| `RestoreLearnedState`, `ExportLearnedState` | the document in or out |
+| `ForgetVariant`, `ForgetLearnedState` | the variant, key and cause (annotation, model gone) |
+| `EvictStaleHistory`, `NoteVariantsPresent` | the arguments |
+| `HoldLowerBounds` | the flag |
+| `StableAcceleratorFor` | the arguments and the answer (it moves the memo, and the engine calls it too) |
+| borrowed lines | `publishLine` and `borrowLine` across models, as they happen |
+
+**Coverage test:** a test lists the exported methods of `*SaturationAnalyzer`
+by reflection. Each must either record or appear in a short, reviewed list of
+pure readers. A new method fails the test until it is classified. A second
+test asserts the engine's six type assertions still hold with recording on.
+
+**Where recordings go:**
+
+| item | rule |
+| --- | --- |
+| default | off |
+| volume | a separate `emptyDir` named by a recorder overlay (to be added under `config/`). Never `/tmp`, the controller's 64Mi `emptyDir`: the kubelet evicts the pod when it fills |
+| size | about 1–1.5 KB per replica per cycle. At a 15 s cycle: 8 replicas fill 64Mi in about 33 h, 50 replicas in about 6 h; 100 replicas write about 0.5 MB/min |
+| cap and rotation | a byte cap (default 256Mi on the recorder volume) split into segments. Each segment starts with a `snapshot`, so any segment replays alone. The first segment and the newest are kept. Dropped and failed lines are counted and logged |
+| external sink | instead of the volume, a file a log shipper reads. Never the controller log: the kubelet rotates it, and it interleaves |
+| collection | `testing.md` says how to copy the files out (`kubectl cp`) before teardown; the benchmark harness does it on every exit path |
+| content | inputs only. No prompts, payloads or headers: the collector never sees them |
+| before commit | an export step maps namespace, model, pod, variant and `Metadata` values to stable pseudonyms, drops cluster names, and gzips. A committed fixture stays under a stated size limit |
+
+### 2.5 Replay and the golden rule
+
+A replay drives the analyzer from a recording and writes its outputs to golden
+CSV committed beside the fixture.
+
+**What it compares:** analyzer outputs only. Role demand; variant capacities
+with their sources and keys; priced figures; per-key window contents; the
+learner reports. Required and spare capacity come from the engine's threshold
+post-step, not from `Analyze`, so an analyzer replay does not compare them.
+`AnalyzedAt` is excluded.
+
+**The rule.** Each named change lands behind a temporary switch (an unexported
+field, removed in the next PR). The replay runs twice:
+
+| run | must hold |
+| --- | --- |
+| switch off | identical to the **parent's** goldens, every cycle of every output, for the whole recording. A divergence is a bug, and the PR does not merge with one |
+| switch on | the replay reports, per output and per key, the first diverging cycle, the number of changed rows, and the sign and size of the change. Only the outputs the PR names may move |
+
+The replay is open loop: recorded inputs do not depend on outputs, so later
+cycles stay comparable after a divergence. What the fleet would then have done
+is the closed-loop probe's question.
+
+**Goldens change only with a named change.** The PR body has a `goldens:`
+section listing each output it expects to move and in which direction, and
+pastes the replay's per-output summary (never the CSV). CI fails when a golden
+file changes and that section is missing, or when an output moves that the
+section does not name. Goldens are written only by the `make` target, never by
+hand.
+
+**Per-path counters must be above zero.** P1-obs admitted, settle refusals per
+reason, mu samples written, mu yields (served, sibling, stale), OLS cycles,
+pinned cycles, instant-KV rows, joined refusals with a known ReadySince. A
+replay that touched none of a PR's paths fails rather than passes.
+
+**The closed-loop probe.** #282's model reviews drove `Analyze` cycle by cycle
+and fed the order back as replicas (a scratch test, not in the repo). PR 0
+commits it as `D/closed_loop_probe_test.go`. Holds, latches, the sibling yield
+and the self-sealing low mu are closed-loop behaviours; a PR that changes one
+runs the probe and pastes the result. PRs 3, 4b and 5 must.
+
+### 2.6 Property tests
+
+Each class is a synthetic case, run against every learner it applies to.
+
+| class | what it asserts |
+| --- | --- |
+| Transient | a joiner, a load step, a slow fill and a filling token rate are each refused or stamped, per event |
+| First sample | one reading does not set a figure that a second, identifying reading would move by more than the band |
+| Stale value | from identifying data **at N ≥ 2**, the figure converges (catches A3: B stuck at 6 ms) |
+| Missing and duplicated values | a missing gauge (presence false), a single missed row, and a duplicated series each leave the figure where it was |
+| Contamination **paired with** heterogeneity | a state-flagged contaminant is dropped, **and** a genuinely slower replica with no flag moves the estimate by its weight. Both must pass, so a value trim (IQM, lower median) cannot |
+| Redistribution invariance | the same fleet load moved between replicas leaves fleet demand and learned figures within a declared tolerance |
+| N-dependence | under iid noise, an estimate's expectation does not depend on N in {1, 2, 4, 16} (catches the max across replicas, +13.6 % at 16) |
+| Time base | inputs come from a simulated per-second path, then pass through rate[1m], max_over_time[1m] and instant sampling at a 15 s cycle. Consecutive one-minute windows share 45 s |
+| Known truth | with a true mu and k2, the priced capacity is at most truth × (1 + ε) under every family above. At the documented target the steady order equals λ / (mu · target), and the units check |
+| Liveness | from clean identifying data each learner reaches truth within a stated time, **per topology**: N ≥ 2, P/D, flow control on and off, 8-GPU DP ranks |
+| Monotonicity | along a trajectory, not only between two static inputs: demand does not fall as lambda or the queue rises, and stays bounded by what the fleet can drain |
+| Edges by enumeration | the operating point is put on **each** threshold below, with noise of the gauges' real autocorrelation. Between declared latched switches the output is Lipschitz in the input, and it reverses at most once per excursion across a threshold |
+
+Thresholds the enumeration covers (each PR adds any it introduces):
+
+| learner | thresholds |
+| --- | --- |
+| ITL | OLS at 10 rows and spread 0.30; slope held under 3 readings; settle 2 min; 20 / 40 rows; 30 min window, 5 min carry |
+| k2 | joined 1 min; 0.7 of mu; 0.7 of k2; ±25 % at 1 min back; window 10; episode gap 24 h; eviction 7 d; the key boundaries |
+| borrowed k2 | 3 % KV; 30 min hold; 6 h relaxation; 20 % re-arm |
+| mu | half of served; 0.5 of derived; 2 min confirm; 1.15 tokens over completions; 0.8 of siblings; 2x stale agreement; 5 / 30 min staleness; latch 2.0 / 1.6 |
+| floor | blend 0.5–0.8; growth band max(2, 5 %) over 1 min; the standing-queue cap |
+| shape, idle, decode memory | shape tolerance band and 5 min hold; idle 2 min with 1 min gap; decode memory 1 min |
+| start time | 3x outlier, 3 confirmations, 0–3600 s, α 0.3 |
+| share (#14, #15) | step spread 0.25; p90 at ≥ 3 releases (listed for later; see 2.7) |
+
+### 2.7 Past findings against the test classes
+
+| finding | caught by |
+| --- | --- |
+| GPS ratio first raw; pinned B from unsteady readings; k2 at 8 % behind a step | first sample, transient |
+| Full fit never runs at N ≥ 2, B stays 6 ms (#273 A3) | stale value at N ≥ 2 |
+| k == 0 unsettles; router queue without engine metrics | missing values |
+| Instant k against a rate[1m] ITL (#273 A5); sum of per-pod one-minute peaks; settle refuses one cycle of a fill (#282 F1) | time base |
+| k2 key flips on the output-length boundary; measured/derived flips near 2x; the 0.30 idle line; `backlogGrew` | edges by enumeration (the operating point on the boundary, or the ratio built at 2) |
+| Headroom counted twice (+17.6 %); KV and throughput units mixed; idle room counted twice; the rules together always pick the higher mu | known truth |
+| Max across replicas (+13.6 % at 16) | N-dependence |
+| Prefill double scrape | duplicated values |
+| Demand falls when λ lags a step; local queue priced as drainable | monotonicity along a trajectory |
+| Weighted median flapping between modes | edges, on a **bimodal** fleet |
+| IQM breaks at 25 % contamination | contamination swept to 50 % |
+| A genuinely slow replica trimmed away (#273 r3, #282 r3) | contamination paired with heterogeneity (the old "one reading dominates" test rewarded the trim) |
+| No floor under flow control; prefill never learns (#144) | liveness per topology |
+| Imbalance audit (load moved between replicas) | redistribution invariance |
+| Settle holes: fall, rate escape, restart, idle return, lend | transient, one case per event |
+| Restart fix stubbed | per-path counter "joined refusals with a known ReadySince" |
+| "For good" self-sealing low mu | closed-loop probe |
+
+**Still escaping:**
+
+| finding | why |
+| --- | --- |
+| Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |
+| Alert debounce and sustain (#283 M2/M3) | not a learner |
+| Speculative decoding; shape dependence of the ITL line (#274) | no generator models them |
+| A self-sealing error in a PR that does not touch a hold | the probe runs only when a PR names a closed-loop change |
+
+### 2.8 Recordings each PR needs
+
+None exists yet: no recorder has run. No recorded run has ever reached OLS, and
+none carries ReadySince until #283 merges.
+
+| PR | recording needed | counters that must be above zero | synthetic stand-in |
+| --- | --- | --- | --- |
+| 0 | the E1 scenario re-run with the recorder on, after #283 and the presence part merge. PR 0's goldens commit with it | instant-KV rows, joined refusals with a known ReadySince | — |
+| 1 | the PR 0 recording | settle refusals per reason | the settle suite (section 8) |
+| 2 | flow control off; a P/D run; a pod restarted under the same name | P1-obs admitted, settle refusals with a known ReadySince | restart suite: same-name restart, LWS group with mixed Ready times, bridge lend, node clock 90 s behind, controller restart. 8-GPU DP: `D/dp_ranks_test.go` |
+| 3 | flow control off (mu is written only beside P1-obs) | mu samples written, mu yields | closed-loop probe |
+| 4a | a run that reaches OLS: stepped concurrency giving ≥ 10 steady rows spread ≥ 0.30, with the SLO analyzer recorded | OLS cycles, pinned cycles | — |
+| 4b | a throughput-analyzer run with its recorder on | its OLS and pinned cycles | negative control on the parent |
+| 5 | a controller restart with the snapshot on | restored keys, start samples | restart suite plus restore-then-run |
+
+LWS and SGLang have no recording. Their synthetic suites stand in until one
+exists, and the PR says so.
 
 ## 3. A shared vocabulary, not a shared loop
 
@@ -157,16 +383,30 @@ fixed order, and a generic loop would change it.
 
 ### 3.2 The order the learners depend on
 
-`Analyze` runs `fitLines`, then `priceReplicas` (once per replica), then
-`applyFloorAndHolds`. Inside that:
+`Analyze` runs eight stages: `installRestored` → `observeFleetShape` →
+`resolvePricing` → `fitLines` → `priceReplicas` (once per replica) →
+`settleShape` → `priceDemand` → `applyFloorAndHolds`.
 
 | edge | what reads what | which value |
 | --- | --- | --- |
+| restore → fit | `installRestored` installs windows and P2-prior bounds | before `fitLines` |
+| shape → k2 key | the shape tracker sets the output length that keys k2 (row 3) | before pricing |
 | ITL → derived mu → mu admission | mu's 0.5-of-derived test reads the line | this cycle's line (fitted first) |
 | k2 → mu observation | a mu sample is written only beside a P1-obs k2 write | the same replica, same cycle |
-| mu → k2 settle | k2's rate path reads mu on record | the record as that replica is priced, earlier replicas of this cycle included |
+| mu → k2 settle | k2's rate path reads mu on record | as that replica is priced, earlier replicas of this cycle included |
 | k2 window → later replicas | each replica's P1-obs writes the window, the next replica is priced from it | then the median across replicas |
-| mu choice in the floor | measured or derived is picked after every replica is priced | this cycle's figures |
+| served → mu choice | `servedBounds` (max and full-sibling median) | this cycle's rows, before pricing |
+| mu choice in the floor | measured, derived or siblings, picked after every replica is priced | this cycle's figures |
+| settle shape → holds | `settleShape` clears `shapeChanged` | read by `applyFloorAndHolds` |
+
+Edges that read the **previous** cycle. A reorder breaks these silently:
+
+| state | read by |
+| --- | --- |
+| mu-choice latch and sibling memory (`muChoice`) | the next cycle's mu choice |
+| decode-saturation memory (#9) | prefill learning |
+| last cycle's backlog and `backlogGrew` (#11) | the floor's growth test and the full queue charge |
+| hot-rank memo | the hot-rank hold |
 
 A PR that moves a learner keeps this order, or names the change.
 
@@ -187,74 +427,113 @@ the counts; it does not call a per-reading admit.
 
 ### 3.4 Which side breaks the SLO
 
-Each learner declares which side of its error breaks the SLO, and which moves
-toward that side need evidence. The constraint applies to **admission and
-forgetting**, never to the fit.
+Each learner declares which side of its error breaks the SLO. **Any move toward
+that side that is not driven by a new admitted reading needs a reason in this
+table**, inside a fit or out: carries, `RaiseLast`, defaults, stashes,
+restores, exact repeats and unknown ages. Two rules apply to all:
 
-| learner | side that breaks the SLO | moves toward it allowed without new evidence |
+- An unknown age resolves to the safe side. (`measuredYieldsToDerived` treats
+  a missing `SampledAt` as "as stale as can be", which skips the 30 min low
+  hold. That is the risky move; PR 3 fixes it.)
+- An exact repeat of a float (`rate == lastRead`) is evidence of use, not of
+  saturation: it is the signature of a frozen series. Today mu counts it as a
+  write and keeps its episode alive; PR 3 fixes it.
+
+| learner | side that breaks the SLO | moves toward it without new evidence, today |
 | --- | --- | --- |
-| k2 | too high | none. No floor, age-out, reset or forget. The window mean still rises on admitted readings |
+| k2 | too high | none. The window mean rises on admitted readings only. A too-low k2 is **permanent** on a serving variant: touched on every read, never evicted, and its episode resets only on a write, which needs the saturation a low k2 prevents. The only exit is `llm-d.ai/forget-learned-state`; the runbook says so |
 | borrowed k2 | too high | the upward relaxation over 6 h of serving time |
-| measured mu | too high | yielding to a higher derived figure, after 30 min stale (5 min toward a lower one) |
-| ITL line and derived mu | A or B too low | none beyond refit on admitted readings |
-| prefill bound | too high | its window max only rises. This is the risky direction and it is unreviewed |
-| start time | too low | none. Its consumers decide: the floor reads a min, share pacing a max |
+| measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice)). An unknown age (above). Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it, and the sibling yield |
+| ITL line and derived mu | A or B too low | the 6 ms default B or a stashed B. With B pinned below the true intercept, the pinned A absorbs the error and the prediction at kPrice is low by (B_true − B_pin)(1 − kPrice / k̄): **risky whenever the fleet runs above its pricing point**, the under-provisioned fleet that most needs a correct line |
+| prefill bound | too high | its window max only rises, survives the episode reset through `RaiseLast`, and never ages while read. A max of n noisy readings sits about σ·√(2 ln n) above their mean, about 2σ at n = 10. Unreviewed |
+| start time | **both** | too low under-orders a fleet that is behind (λ > mu · ready). Too high, in `internal/signals/floor/floor.go`: `DrainHorizon` under-prices the backlog whenever S exceeds 60 s, `startingCredit` credits a stuck pod for up to 2S, and a fleet with spare projects more drain and orders less. Share pacing errs the other way: too low moves GPUs for bursts that end first. PR 5 bounds both sides |
+| share need history (#14) | too low for the role, too high for its neighbours | `PeakNeed` is a max of adjacent-pair minima, low by design; trimming to the swing window ages a peak out with no new evidence |
+| share release time (#15) | too low | p90 over ≥ 3 releases is the max at n = 3 |
 
 A clamp that stops k2's fit from rising would turn it into a running minimum:
 one admitted low reading would then price the fleet for good.
 
-### 3.5 Clocks
+### 3.5 Hysteresis
 
-Five clocks are in use:
+Every threshold that switches a source, a role verdict or a demand term
+declares:
+
+| item | rule |
+| --- | --- |
+| set, clear, dwell | three values, stated in the code comment and the developer guide |
+| safe side | which side is safe. The clear direction is never faster toward the risky side |
+| restart | an unpersisted latch restores to the safe-side choice. The mu latch does not today ([the mu choice](#the-mu-choice)) |
+| tuning | dwell is tuned on noise with the gauges' real autocorrelation, not iid noise, which over-counts flips |
+
+### 3.6 Clocks
+
+The clock fix itself is [2.2](#22-one-clock). The clocks in use:
 
 | clock | used by |
 | --- | --- |
 | **write** | ITL line age, the shared line |
-| **use** | k2 and mu eviction, 7 d after the last read |
-| **write gap** | k2's new episode after 24 h without a write, on the same window as the use clock |
-| **agreement** | mu freshness: the last saturated reading within 2x |
+| **use** | k2 and mu eviction, 7 d after the last read; the prefill bound's `Touch` |
+| **write gap** | k2's and mu's new episode after 24 h without a write, on the same window as the use clock. The prefill bound defeats it (`RaiseLast`) |
+| **agreement** | mu freshness: the last saturated reading within 2x. Refused readings set it too |
 | **serving** | the borrowed k2 relaxation, and the hold clocks that only a serving row advances |
-
-**A defect to fix first:** `capacity.RollingAverage` (the k2 and mu windows)
-stamps `time.Now()` in `Add`, `Observe` and `NewRollingAverage`. The ITL
-tracker, the settle memo and the mu choice use the cycle clock `a.now()`. So
-mu's episode reset runs on wall time while its freshness runs on the cycle
-clock, and no test can age a window past `EpisodeGap`. PR 1 adds `AddAt`,
-`ObserveAt` and `NewRollingAverageAt`, and every learner takes `now` from its
-caller.
+| **existence** | `VariantTimeout` (last reported or found to exist), the ITL sweep at 24 h unseen, `evictStartSeenPods` |
+| **since event** | the settle tracker: time since join, idle return, restart or lend |
+| **cycle count** | start-time outliers, #273's `idleRows`, `PeakNeed`'s two in a row |
 
 An age shown to an operator is the age of the last **admitted reading**, never
 of the last use. A use-touched k2 otherwise reads young however old its
-evidence is.
+evidence is. Mu publishes its last admitted time; its freshness (agreement) is
+a different clock and is logged, not published as an age.
 
 ## 4. Settled replicas
 
-Four components decide whether a replica has settled:
+### 4.1 Four rules today
 
 | | ITL steady trace (#273) | k2 settle and first sight (#282 `D/k2_settle.go`) | `noteReady` (#282 `D/throughput_admission.go`) | balance tracker (#283 `internal/signals/balance/tracker.go`) |
 | --- | --- | --- | --- | --- |
 | joined wait | 2 min | 1 min lookback, queue standing | 1 min | 2 min |
 | ready time | first sight | first sight | Pod Ready time, wired but stubbed to zero (`replicaReadySince`, TODO(#283)) | later of Pod Ready and first sight of that Ready time |
 | restart events | joined, load back after idle | joined | joined | joined, warm-pool lend |
+| key includes variant and bridge | no | no | no | yes: `(pod, variant, bridge)` |
 | first cycle after a controller restart | taken as settled | taken as established | taken as established | waits again |
 
-One tracker replaces them, in `internal/signals/settle`. It is owned per
-analyzer instance (the SLO analyzer feeds its own), keyed per model and pod,
-and swept with the model. It owns:
+### 4.2 One owner
+
+One tracker in `internal/signals/settle` replaces them.
+
+| question | answer |
+| --- | --- |
+| owner | the saturation analyzer, one tracker per model, swept with the model |
+| other readers | the engine's balance tracker (#283), the SLO analyzer and the throughput analyzer get a **read-only view**, injected by the engine at construction. None writes |
+| no saturation analyzer configured | the engine builds the tracker and feeds it the same rows. Either way there is one writer per model |
+| concurrency | the tracker holds its own lock; one writer per model per cycle, any number of readers |
+| key | (model, pod, variant, bridge). A warm-pool lend keeps the pool's Ready time but changes variant and bridge, so it is a new key and a new settle. A lend is detected by the key change, not by absence |
+| prerequisite | #283 merges before PR 1 |
+
+**Difference to reconcile with #283.** #283 rebuilds its sightings from this
+cycle's rows, so one missing row forgets a replica. The shared tracker keeps a
+sighting across an absence up to one rule period (1 min): a single missing row
+is a missed scrape, and restarting a busy replica's settle for k2, mu and ITL
+would re-open #273's A4. When the balance tracker moves onto the view in PR 1,
+its imbalance timers take this rule. That is a named change for #283's metrics.
+
+### 4.3 What the tracker owns
 
 - **A stamp per reading, taken when observed.** The learner stores it with the
   reading, because a window outlives the settle.
 - **The events that start a settle:** a replica joins, load returns after idle,
   the engine restarts (an engine or LWS group restart under the same name gives
-  a new Ready time), a warm-pool lend, a rollout.
+  a new Ready time), a warm-pool lend, a rollout. PR 2 names which pod's Ready
+  time stands for an LWS group.
 - **The ready time:** the later of the Pod's Ready time and the controller's
   first sight of it, as #283 does. A node clock behind the controller's, or a
-  lend that keeps the pool's Ready time, makes the Pod time too old. Accepted
-  cost: after a controller restart, or with an unreadable Pod listing, every
-  replica waits the window again. That is logged.
-- **Presence per gauge.** KV zero is idle: a value. A row with k > 0 and no ITL
-  is a busy replica whose ITL is missing, not "no reading". The collector
-  supplies a presence bit per gauge, as `KvUsageInstantKnown` does now.
+  lend that keeps the pool's Ready time, makes the Pod time too old.
+- **Idle, a two-gauge rule.** A row counts toward idle only when neither an ITL
+  nor a k > 0 is known; two such rows in a row make the replica idle (#273's
+  `idleRows`). A row with KV 0 and an ITL present is a reading (a light or
+  draining replica), not idle. A row with k > 0 and no ITL is a busy replica
+  whose ITL is missing. Once the presence bits land, a row whose bits are all
+  false is a failed scrape: it neither counts toward idle nor restarts a settle.
 - **Gaps and lookback.** A gap longer than the rule's period restarts the
   judgement. A rule compares against the reading one period back, not one cycle
   back: cycle-to-cycle one-minute peaks share 45 s.
@@ -262,14 +541,30 @@ and swept with the model. It owns:
 Each learner keeps its own predicate and thresholds over the trace the tracker
 returns. k2's rule needs a second gauge, a precondition and a cross-learner
 read, and stays k2's. Before PR 1 merges, all four rules above are written
-against the API.
+against the API (the review sketch already writes k2's against `Back` and
+`Trace`).
+
+### 4.4 The cost after a controller restart
+
+Under the shared tracker every replica waits the window again after a
+controller restart. This is **on the SLO side**: capacity is `min(k1, k2)`, and
+with the snapshot off (the default) every k2 window is empty, so a saturated
+fleet prices from k1, the high figure, for 1 min longer than today. ITL does
+not refit for 2 min. #273 chose the current behaviour to avoid exactly this
+delay.
+
+So: with the snapshot on, first sight is persisted (PR 5) and the wait applies
+only to replicas with no record. With it off, the wait is accepted, logged on
+the `learner-start` line ([6.1](#61-logs)), and named in the operator column of
+PRs 2, 3 and 4a.
 
 ## 5. Fits: exclude by state, then fit untrimmed
 
 The pinned ITL fit changed five times inside #273. A weighted median jumped
 between two groups of slopes. A trimmed mean dropped a genuinely slower replica
-and priced capacity 8.5 % high, on the SLO side. What holds is: stamp each reading by the
-replica's state, drop the settling ones, and fit the rest without trimming.
+and priced capacity 8.5 % high, on the SLO side. What holds is: stamp each
+reading by the replica's state, drop the settling ones, and fit the rest
+without trimming.
 
 So there is no shared robust fit and no default fit. A value-based estimator
 (median, trimmed or lower median) is allowed only where no state identifies the
@@ -280,89 +575,143 @@ Existing fits stay until a replay justifies a change.
 
 ### 6.1 Logs
 
-- **`learner-write`**, at the shipped default verbosity, whenever a learned
-  figure moves past its band or is set for the first time. Fields: `learner`,
-  `modelID`, `namespace`, `variant`, `role`, `key`, `pod`, the reading and its
-  time base, `value`, `previousValue`, `source`, `samples`, and the admission
-  tests it passed with their margins. E1's 0.0995 req/s was **admitted**; this
-  is the line that would have shown it.
-- **Every pricing and decision line names its learner key and source.**
-  `throughput-demand-floor` gains `muKey`, `muSource` and
-  `startEstimateSeconds`.
-- **Sources are per learner,** in the vocabularies already shipped. k2 keeps
-  `P1-obs`, `P2-hist`, `P2-prior`, `P2-borrow`, `P3-k2`, `P4-k1`: the
-  troubleshooting runbook gives each a different remedy. Mu keeps measured,
-  derived, neighbour, borrowed-line. Start time keeps measured, seed. Each adds
-  **`restored`** until its first admitted reading after a restart.
-- **The per-replica lines stay:** `k2-decision`, `itl-window`,
-  `saturated-throughput-refused`, `saturated-throughput-low-confirmed`.
-  `hack/benchmark/dump_k2_decisions.py`, `post_run_analyze.sh` and the fixture
-  extractor parse them. A PR that changes one updates those tools in the same
-  PR, and the tools fail when they find zero lines in a run.
-- A reason's "cleared" line waits until the reason has been absent for several
-  cycles. After a restart, one summary line per model, not one line per key.
-- Count lines cover only keys offered a reading or read for pricing this cycle.
+**`learner-write`**, at the shipped default verbosity:
+
+| item | rule |
+| --- | --- |
+| when | at most **one line per key per cycle**, written after the last replica of the cycle is priced |
+| trigger | the value differs from the **last logged** value (not last cycle's) by more than the learner's band, or is set for the first time. Against the last logged value a slow drift still logs, and noise under the band does not |
+| band | per learner, stated in its PR, and above its measured cycle-to-cycle noise (mu's must exceed the 4 % that flipped it 11 times in 20 cycles) |
+| heartbeat | a key that has not logged for 10 min logs once |
+| source change | a mu choice flip (measured, derived, siblings) is a `learner-write` with `source` changing, so latch flaps count from one line |
+| fields | `learner`, `modelID`, `namespace`, `variant`, `role`, `key`, `value`, `previousValue`, `source`, `samples`, `pods` (each contributing pod with its reading and time base), and the admission tests passed with their margins |
+| ceiling | keys × 1 per cycle. 100 variants × about 9 keys = 900 lines per cycle (about 450 KB), reached once after a snapshot-off restart when every key is set for the first time. Steady state: a few lines a minute |
+
+E1's 0.0995 req/s was **admitted**; this is the line that would have shown it.
+
+**Decision lines name their learner key and source.**
+`throughput-demand-floor` gains `muKey`, `muSource`, `startEstimateSeconds` and
+`startSource` (measured or seed).
+
+**Sources stay per learner,** in the vocabularies already shipped. k2 keeps
+`P1-obs`, `P2-hist`, `P2-prior`, `P2-borrow`, `P3-k2`, `P4-k1`: the
+troubleshooting runbook gives each a different remedy. Mu keeps measured,
+derived, served-siblings, neighbour, borrowed-line. Start time keeps measured,
+seed. **A restore is a field, not a source:** each line adds `restored: true`
+until the learner's first admitted reading after a restart, and keeps its
+source. No metric gains a `restored` label value; a restored figure shows as
+`time() - ..._last_admitted_timestamp_seconds` older than the restart.
+
+| learner | restored? | prices at once? |
+| --- | --- | --- |
+| k2 | yes | yes, as `P2-hist` (or `P2-prior`) |
+| ITL | B and its stash | no: the line is not usable until refit |
+| mu | window yes, choice no | the window yes; the choice starts unlatched |
+| start time | yes | yes |
+
+**`learner-start`**, one line per model at the first cycle after a controller
+start: restored keys per learner, cold keys, the oldest last-admitted age, and
+`settleUntil`, the time the fleet-wide settle wait ends. It is the line that
+logs "every replica waits again". There are no per-key restart lines, no count
+lines and no "cleared" lines: counts are metrics only.
+
+**Lines the tools parse stay stable, or are versioned.**
+`hack/benchmark/dump_k2_decisions.py` parses `k2-decision`,
+`replica-capacity-decision`, `scheduler-queue-demand`,
+`throughput-demand-floor`, `scheduler-queue-prefill-share-dropped`,
+`prefill-demand-held`, `hot-rank-hold`, `replica-capacity-skipped`,
+`replica-capacity-store-fallback`, `variant-capacity-source`,
+`zero-replica-capacity-estimate`, `itl-window`, `itl-fit`, `derived-mu` and the
+shared-cache decision line. `post_run_analyze.sh` and the fixture extractor
+also read `saturated-throughput-refused` and
+`saturated-throughput-low-confirmed`. A PR that changes any line a tool in
+`hack/benchmark/` parses either keeps its fields (adding is fine) or bumps a
+`v` field and updates the tools in the same PR. The tools fail when they find
+zero lines in a run. The P-code legend in `dump_k2_decisions.py` stays P-codes
+only; `restored` is rendered as a separate column.
 
 ### 6.2 Metrics
 
 - Labels: `namespace`, `model_name`, `variant_name`, `role`, and
   `controller_instance` when set. No pod, no bucket. The vocabulary is
-  [Every signal as a metric](signals-as-metrics.md).
-- A gauge describes the key that priced the variant this cycle, and says so.
+  [Every signal as a metric](signals-as-metrics.md), within its budget of about
+  60 series per model.
+- Series are per variant. A gauge describes the key that priced the variant
+  this cycle, and says so.
 - Ages are published as `..._last_admitted_timestamp_seconds`, so that
   `time() - x` stays honest through a stalled analyzer.
 - Each PR states its series count per variant, and a kept or replaced table
   for the `wva_learned_state_*` series it overlaps.
-- **Deletion:** the engine deletes a model's learner series where it deletes
-  the others. A learner's eviction and an operator's
-  `llm-d.ai/forget-learned-state` delete that key's series.
+- **Deletion.** There are no per-key series, so nothing is deleted per key.
+  A variant's learner series are deleted when the model is deleted, where the
+  engine deletes the others. They are **reset** (set from the new key) when
+  the pricing key changes or is forgotten.
+- **Forget reaches every learner.** The `Report` carries `pricingKey` and
+  `forgotten{key, by: operator | evicted}`; the engine applies both. Every
+  learner implements `Forget(key, by)`. The `llm-d.ai/forget-learned-state`
+  annotation calls it on all of them, and a spec asserts that every registered
+  learner is reached.
 
 ### 6.3 Who does what
 
-`internal/signals/learn` holds only vocabulary types and returns a `Report`
-(counts by reason, source, samples, last admitted time, writes). It never logs
-and never registers a metric. The analyzer logs; the engine publishes. `learn`
-imports nothing above `internal/domain`, and `settle` imports nothing, so
+`internal/signals/learn` holds vocabulary types: `Report` (counts by reason,
+source, samples, last admitted time, writes, `pricingKey`, `forgotten`),
+`Source`, `Reason`. The learners fill the Report; `learn` never logs and never
+registers a metric. The analyzer logs; the engine publishes. `learn` imports
+only the standard library, and `settle` likewise, so `domain` and
 `internal/metrics` can use their types without a cycle.
+
+The engine takes reports through an optional interface,
+`TakeLearnerReports() map[model][]learn.Report`, as it takes
+`TakeRestoreOutcomes`. The map is overwritten per model each cycle, so it stays
+bounded when metrics are off. `learn` lands with its first user (PR 2), not as
+a standing package.
 
 ## 7. Migration
 
-Each PR replays the PR 0 fixtures, shows its golden diff, and says what an
-operator sees: log lines added or changed, metric series added or deprecated,
-docs rows rewritten, tools updated.
+Each PR replays the fixtures under [the golden rule](#25-replay-and-the-golden-rule)
+and says what an operator sees: log lines added or changed, metric series added
+or deprecated, docs rows rewritten, tools updated.
 
-| PR | change | what an operator sees |
-| --- | --- | --- |
-| **0** | The recorder, replay with goldens, per-path counters, property tests | Nothing. A recorder flag in `testing.md` |
-| **1** | Clocks (3.5) and `internal/signals/settle`. #283's balance tracker is its first user | Nothing in production, where the two clocks agree |
-| **2** | k2 (#3, #4) onto the tracker. The Pod Ready time switched on. `learner-write` for k2 | A pod back from a restart under the same name waits again: more `P1-obs-unsettled` after restarts. k2 writes are visible |
-| **3** | Mu (#5, #6). Its joined test reads k2's stamp rather than recomputing it. Two prefill pods in one spacing pin #7's max before the fold is touched | `learner-write` for mu. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds` |
-| **4** | ITL: #1, #13 and #16 onto the tracker. #16 gains #273's fixes, a named change with a negative control | `learner-write` when A or B moves. Throughput-analyzer fleets may change, as named |
-| **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change. The snapshot writer stays central with per-learner adapters, and reads a v1 document from the previous release | Start estimates no longer take one pod's first sample raw. `restored` sources |
+| PR | change | recording (exists?) | what an operator sees |
+| --- | --- | --- | --- |
+| **0** | One clock (2.2), presence bits (2.3), the recorder in each analyzer (2.4), replay with goldens and the golden rule (2.5), per-path counters, property tests (2.6), the closed-loop probe | E1 re-run after #283 (no: needs #283 and this PR) | Nothing. A recorder flag and overlay in `testing.md` |
+| **1** | `internal/signals/settle`, owned by the saturation analyzer, read-only view for the balance tracker. #283's one-missing-row forget becomes the gap rule, a named change | PR 0's (no) | The imbalance timers no longer restart on one missed scrape |
+| **2** | k2 (#3, #4) onto the tracker. The Pod Ready time switched on. The LWS rule named. `learn` lands. `learner-write` for k2. Restart suite | flow control off, P/D, same-name restart (no) | A pod back from a restart under the same name waits again: more `P1-obs-unsettled`. After a controller restart every replica waits once: `P1-obs-unsettled` across the fleet for 1 min, and with the snapshot off k2-less fleets price at k1 for that minute (SLO side). `learner-start` and k2 writes are visible |
+| **3** | Mu (#5, #6). Its joined test reads k2's stamp. Exact repeats count as use. Unknown age resolves safe. The latch persisted or restored safe-side. Two prefill pods in one spacing pin #7's max before the fold is touched. Closed-loop probe | flow control off (no) | `learner-write` for mu, including choice flips. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds`, `startSource`. Measured mu waits out the post-restart settle |
+| **4a** | ITL #1 and #13 onto the tracker. A neutral refactor: zero golden diff with no switch | a run that reaches OLS, SLO analyzer recorded (no) | No ITL refit for 2 min after a controller restart |
+| **4b** | ITL #16 (throughput analyzer) gains #273's fixes: a named change behind a switch, with its own fixture, a negative control on the parent and the probe for the slope hold | a throughput-analyzer recording (no) | `learner-write` when A or B moves. Throughput-analyzer fleets may change, as named |
+| **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change that bounds **both** sides (for example: adopt a first sample only within [S0/3, 3·S0] of the default, or blend toward it until N distinct pods agree). First sight persisted. The writer stays central with per-learner adapters, and reads a v1 document from the previous release. Restart suite plus restore-then-run | controller restart with the snapshot on (no) | Start estimates no longer take one pod's first sample raw. `restored: true` on restored lines. With the snapshot on, only replicas with no record wait after a restart |
 
 Later, each after a recorded run that covers it: idle room and the decode gate
-(#9, #10) after a P/D run; the prefill bound (#7). Out of scope: drift actions,
-fit changes, #8, #11, #14, #15.
+(#9, #10) after a P/D run; the prefill bound (#7), with a double-scrape fixture
+and its own-reading witness. Out of scope: drift actions, fit changes, #8, #11,
+#14, #15, and the share planner's holds (why a second transfer waited), which
+belong to the utilization-share work.
 
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at
   once. Its tests cover every case the four versions were fixed for: k == 0, KV
-  zero as idle, k > 0 with no ITL, a restart, a missed cycle, a slow fill, a
-  just-Ready pod, a bridge lend, clock skew.
+  zero with an ITL present, k > 0 with no ITL, one missing row on a busy
+  replica, a restart under the same name, an LWS group with mixed Ready times,
+  a missed cycle, a slow fill, a just-Ready pod, a bridge lend, clock skew.
 - **A shared write path already changed a learner silently.** #282 turned #5's
   in-spacing fold from a max into a lower median. #7 kept its max only through
   an empty pod name.
 - **Self-sealing errors.** Each capacity learner is witnessed only when
   saturated, and the error that over-orders stops saturation. A too-low k2 or
-  mu removes its own witness. Validation residuals are one-sided by
+  mu removes its own witness; for k2 it is permanent until forgotten
+  ([3.4](#34-which-side-breaks-the-slo)). Validation residuals are one-sided by
   construction, and must not be read as two-sided.
 - **The prefill bound** is reviewed before it moves: a double scrape once
-  doubled its input, and its max kept it.
+  doubled its input, its max kept it, and `RaiseLast` keeps it past a reset.
+- **The recorder can evict the controller** if pointed at `/tmp`. It is off by
+  default and has its own volume and cap.
 - **Open defects this does not fix:** instantaneous k paired with a rate[1m]
   ITL; speculative decoding; shape dependence of the ITL line (#274).
 
-## Review notes
+## Review notes (round 1)
 
 Four reviews of the first draft (architect, statistician, SRE, skeptic):
 
