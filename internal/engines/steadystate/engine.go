@@ -2082,7 +2082,7 @@ func (e *Engine) prepareModelData(
 		// because it is model-level and comes from EPP: it does not depend on any
 		// engine pod being scraped, which is the thing that has gone wrong.
 		queued := 0
-		if sq := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID); sq != nil {
+		if sq := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID, namespace); sq != nil {
 			queued = int(sq.QueueSize)
 		}
 		metrics.SetUnmeasuredQueue(namespace, modelID, queued)
@@ -2116,7 +2116,7 @@ func (e *Engine) prepareModelData(
 	for _, m := range variantMetadata {
 		variantStates = append(variantStates, m.ToReplicaState())
 	}
-	schedulerQueue := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID)
+	schedulerQueue := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID, namespace)
 	arrivalRate := e.ReplicaMetricsCollector.CollectModelArrivalRate(ctx, modelID, namespace)
 
 	return &modelData{

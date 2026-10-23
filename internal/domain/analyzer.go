@@ -79,9 +79,10 @@ type AnalyzerInput struct {
 // These are model-scoped, not per-pod, since the scheduler queues requests
 // before routing them to a specific backend pod.
 //
-// TODO(#2309): The upstream metrics lack a namespace label. If the same model
-// name exists in different namespaces, these values may include cross-namespace
-// data. Once the upstream adds a namespace label, queries should filter by it.
+// They are scoped to one namespace as well as one model: the EPP exports no
+// namespace itself (gateway-api-inference-extension #2309), and the collector
+// selects by the namespace Prometheus stamps on the scraped series, so two
+// namespaces serving the same model name each read their own router's queue.
 type SchedulerQueueMetrics struct {
 	// QueueSize is the number of requests currently queued in the
 	// scheduler's flow control layer for this model.

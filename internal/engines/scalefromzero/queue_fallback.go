@@ -112,8 +112,12 @@ const fallbackQueryName = "sfz_flow_control_queue_size"
 // gateway-api-inference-extension kept inference_extension_, so which exists
 // depends on the EPP build. PromQL `or` is exactly that preference: the left
 // side wherever it has series, the right side only where it does not.
-const fallbackQuery = `sum by (model_name, target_model_name) (llm_d_epp_flow_control_queue_size)` +
-	` or sum by (model_name, target_model_name) (inference_extension_flow_control_queue_size)`
+//
+// The namespace stays in the grouping key so that each pool reads its own
+// router's queue: grouped by model name alone, a parked model in one namespace
+// was woken by the queue of a same-named model in another.
+const fallbackQuery = `sum by (namespace, model_name, target_model_name) (llm_d_epp_flow_control_queue_size)` +
+	` or sum by (namespace, model_name, target_model_name) (inference_extension_flow_control_queue_size)`
 
 // NewQueueFallback builds the fallback over a Prometheus metrics source and
 // registers the query it needs on that source, so it depends on nothing else
@@ -181,8 +185,11 @@ func (f *QueueFallback) ScrapeSucceeded(ctx context.Context, pool string) {
 // scrape error. Reporting a false "no demand" on an unanswerable question would
 // convert a visible collection failure into a silently unwoken model, which is
 // the failure this whole path exists to prevent.
+//
+// namespace is the pool's: only the series of the router in that namespace are
+// this model's demand (see eppSeriesInNamespace).
 func (f *QueueFallback) PendingAfterScrapeFailure(
-	ctx context.Context, pool, modelID string, scrapeErr error,
+	ctx context.Context, pool, namespace, modelID string, scrapeErr error,
 ) (pending source.MetricValue, hasPending, engaged bool) {
 	if f == nil {
 		return source.MetricValue{}, false, false
@@ -221,7 +228,7 @@ func (f *QueueFallback) PendingAfterScrapeFailure(
 		return source.MetricValue{}, false, false
 	}
 
-	pending, hasPending = pendingFromPromValues(values, modelID, f.MaxAge)
+	pending, hasPending = pendingFromPromValues(values, namespace, modelID, f.MaxAge)
 	if hasPending {
 		logger.V(logging.DEBUG).Info("Scale-from-zero: pending requests seen via the Prometheus fallback",
 			"pool", pool, "modelID", modelID, "value", pending.Value, "sampleAge", pending.Age())
@@ -267,12 +274,12 @@ func (f *QueueFallback) valuesLocked(ctx context.Context) ([]source.MetricValue,
 // A sample older than maxAge is not demand. A live scrape cannot return a stale
 // value; a query answers from whatever Prometheus last stored, so without this a
 // queue that drained long ago would keep waking the model that drained it.
-func pendingFromPromValues(values []source.MetricValue, modelID string, maxAge time.Duration) (source.MetricValue, bool) {
+func pendingFromPromValues(values []source.MetricValue, namespace, modelID string, maxAge time.Duration) (source.MetricValue, bool) {
 	for _, v := range values {
 		if v.Value <= 0 {
 			continue
 		}
-		if eppSeriesModel(v.Labels) != modelID {
+		if eppSeriesModel(v.Labels) != modelID || !eppSeriesInNamespace(v.Labels, namespace) {
 			continue
 		}
 		if v.IsStale(maxAge) {
@@ -291,4 +298,14 @@ func eppSeriesModel(labels map[string]string) string {
 		return v
 	}
 	return labels["model_name"]
+}
+
+// eppSeriesInNamespace reports whether an EPP series belongs to namespace: the
+// label Prometheus stamps on it at scrape time names the router's namespace. A
+// series without the label cannot be attributed and is kept, as it was before
+// the label was read. The collector applies the same rule to the same series
+// (eppSeriesInNamespace in internal/collector).
+func eppSeriesInNamespace(labels map[string]string, namespace string) bool {
+	ns := labels["namespace"]
+	return ns == "" || ns == namespace
 }

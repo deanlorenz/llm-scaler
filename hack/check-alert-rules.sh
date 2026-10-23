@@ -21,8 +21,9 @@
 #      learned-state-alerts: a snapshot that cannot be written raises
 #      WVALearnedStateSnapshotFailing, and one that recovers stops it.
 #      utilization-share-alerts: a frozen group, floors past the quota and an
-#      invalid optimizer block fire, passing states do not, and a parked model
-#      with no wake signal pages once, not twice.
+#      invalid optimizer block fire, passing states do not, a parked model
+#      with no wake signal pages once, not twice, and a same-named model
+#      refusing requests in another namespace pages neither.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.

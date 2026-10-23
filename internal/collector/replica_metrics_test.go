@@ -1929,7 +1929,7 @@ func TestCollectSchedulerQueueMetrics_PicksItsModel(t *testing.T) {
 	ts := time.Now()
 	mockSource := &mockMetricsSource{
 		refreshFunc: func(_ context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
-			assert.Empty(t, spec.Params, "the flow-control metrics have no namespace or model to scope by")
+			assert.Empty(t, spec.Params, "one cluster-wide execution serves every model; the series are picked in Go")
 			return map[string]*source.MetricResult{
 				"scheduler_queue_size": {Values: []source.MetricValue{
 					{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: 3, Timestamp: ts},
@@ -1947,11 +1947,68 @@ func TestCollectSchedulerQueueMetrics_PicksItsModel(t *testing.T) {
 	}
 
 	collector := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil)
-	got := collector.CollectSchedulerQueueMetrics(context.Background(), "model-a")
+	got := collector.CollectSchedulerQueueMetrics(context.Background(), "model-a", "test-ns")
 
 	require.NotNil(t, got)
 	assert.Equal(t, int64(7), got.QueueSize)
 	assert.Equal(t, int64(2048), got.QueueBytes)
+}
+
+// TestCollectSchedulerQueueMetrics_PicksItsNamespace pins that two namespaces
+// serving the same model name each read their own router's queue. Summed, the
+// idle namespace (sg1) was charged the saturated one's (sg2) 52 queued requests
+// as its own demand.
+func TestCollectSchedulerQueueMetrics_PicksItsNamespace(t *testing.T) {
+	ts := time.Now()
+	series := func(ns string, v float64) source.MetricValue {
+		return source.MetricValue{Labels: map[string]string{
+			seriesNamespaceLabel: ns, seriesModelLabel: "m", seriesTargetModelLabel: "m",
+		}, Value: v, Timestamp: ts}
+	}
+	mockSource := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return map[string]*source.MetricResult{
+				"scheduler_queue_size":  {Values: []source.MetricValue{series("sg1", 0), series("sg2", 52)}},
+				"scheduler_queue_bytes": {Values: []source.MetricValue{series("sg1", 0), series("sg2", 208000)}},
+			}, nil
+		},
+	}
+	collector := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil)
+
+	sg1 := collector.CollectSchedulerQueueMetrics(context.Background(), "m", "sg1")
+	require.NotNil(t, sg1, "sg1's router exports its queue, at zero")
+	assert.Equal(t, int64(0), sg1.QueueSize, "sg1 must not read sg2's queue")
+	assert.Equal(t, int64(0), sg1.QueueBytes)
+
+	sg2 := collector.CollectSchedulerQueueMetrics(context.Background(), "m", "sg2")
+	require.NotNil(t, sg2)
+	assert.Equal(t, int64(52), sg2.QueueSize)
+	assert.Equal(t, int64(208000), sg2.QueueBytes)
+
+	// A namespace with no router series of its own reads nothing, not a
+	// neighbour's queue.
+	assert.Nil(t, collector.CollectSchedulerQueueMetrics(context.Background(), "m", "sg3"))
+}
+
+// TestCollectSchedulerQueueMetrics_KeepsUnlabelledSeries pins that a series
+// with no namespace label -- a scrape that does not add one -- is read as it was
+// before the label was read, so such an install keeps its queue signal.
+func TestCollectSchedulerQueueMetrics_KeepsUnlabelledSeries(t *testing.T) {
+	ts := time.Now()
+	mockSource := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return map[string]*source.MetricResult{
+				"scheduler_queue_size": {Values: []source.MetricValue{
+					{Labels: map[string]string{seriesTargetModelLabel: "m"}, Value: 9, Timestamp: ts},
+				}},
+			}, nil
+		},
+	}
+	collector := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil)
+
+	got := collector.CollectSchedulerQueueMetrics(context.Background(), "m", "any-ns")
+	require.NotNil(t, got)
+	assert.Equal(t, int64(9), got.QueueSize)
 }
 
 // TestCollectModelArrivalRate_TargetModelOnly pins that the arrival rate keeps its

@@ -13,6 +13,11 @@
 # The fixture's exprs are the queries the registry builds; the Go test
 # TestPerPodQueriesMatchPromtoolFixture fails if either side changes alone.
 #
+# A second fixture evaluates the scheduler flow-control queue queries over two
+# namespaces serving the same model name. Grouped by model name alone they
+# returned one summed series, and the idle namespace read the busy one's queue
+# as its own demand (TestEPPQueueQueriesMatchPromtoolFixture pins its exprs).
+#
 # PROMTOOL is the promtool binary (make promtool installs a pinned one).
 set -u
 
@@ -39,3 +44,19 @@ if ! (cd "$(dirname "$FIXTURE")" && "$PROMTOOL" test rules "$(basename "$FIXTURE
   exit 1
 fi
 echo "ok: the per-pod queries fold data-parallel ranks ($N queries)"
+
+QFIXTURE="$ROOT/internal/collector/registration/testdata/epp-queue-namespace.test.yaml"
+if [ ! -f "$QFIXTURE" ]; then
+  echo "FAIL: $QFIXTURE is missing" >&2
+  exit 1
+fi
+QN=$(grep -c '^      - expr:' "$QFIXTURE")
+if [ "$QN" -ne 2 ]; then
+  echo "FAIL: $QN query cases in $(basename "$QFIXTURE"), not 2. Update the count deliberately." >&2
+  exit 1
+fi
+if ! (cd "$(dirname "$QFIXTURE")" && "$PROMTOOL" test rules "$(basename "$QFIXTURE")"); then
+  echo "FAIL: a scheduler queue query does not keep namespaces apart" >&2
+  exit 1
+fi
+echo "ok: the scheduler queue queries keep each namespace's queue apart ($QN queries)"

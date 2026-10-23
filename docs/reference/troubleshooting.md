@@ -22,6 +22,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason=~"no-wake-signal\|wake-no-capacity\|wake-nominal-lent-out"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch, a limiter with no room for the wake, a borrowing cooldown | [will not wake](#a-model-will-not-wake-from-zero) |
 | will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
+| a lightly loaded model reads busy | `util` in `analyzer-result` far above what its load implies; `eppQueueSize` above 0 in its `scheduler-queue-demand` line while its own router queues nothing | v0.10.0-rc2 and earlier: another namespace serving the same model name, whose router queue was read as this model's | [reads busy](#a-lightly-loaded-model-reads-busy) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced\|released-to-lender"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, a waiting lender was handed it back (opt-in), demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
@@ -259,6 +260,34 @@ No reason, and still not parked? A model that has never served a request has
 no request counter yet, so the controller keeps it where it is. Send one
 request. Full runbook: [scale-to-zero
 guide](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
+
+## A lightly loaded model reads busy
+
+**Symptom**: two namespaces serve the same model name. One carries a fraction
+of the other's load, yet its `util` in `analyzer-result` is close to the busy
+one's.
+
+v0.10.0-rc2 and earlier read the router's queue (`llm_d_epp_flow_control_queue_size`)
+by model name alone, so each namespace was charged the sum of both routers'
+queues. The quiet model carried its busy twin's queue as its own demand.
+
+1. **Read the queue the controller charged** to the quiet model:
+   ```bash
+   $LOGS | grep scheduler-queue-demand | grep '"namespace": "<ns>"' | tail -5
+   ```
+2. **Read the queue its own router holds**, in Prometheus:
+   ```promql
+   sum by (namespace, model_name, target_model_name) (llm_d_epp_flow_control_queue_size)
+   ```
+   If `eppQueueSize` in step 1 matches the other namespace's queue and not this
+   one's, this is the cause. Upgrade the controller. It reads each namespace's
+   router queue on its own.
+
+The controller tells the namespaces apart by the `namespace` label Prometheus
+adds when it scrapes the router. ServiceMonitors and PodMonitors add it. A
+custom scrape job that drops it leaves the queue unattributed, and every
+namespace reads it as before. A router deployed outside its model's namespace
+is read by no model.
 
 ## A model is flapping
 

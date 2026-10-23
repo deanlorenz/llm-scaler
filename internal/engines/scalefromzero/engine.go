@@ -482,7 +482,7 @@ func (e *Engine) processInactiveModel(
 		reason := prometheus.CategorizePrometheusError(err)
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeQueueLength, reason)
 		fallbackPending, fallbackHasPending, onFallback = e.QueueFallback.PendingAfterScrapeFailure(
-			ctx, namespacedPoolName, group.modelID, err)
+			ctx, namespacedPoolName, pool.Namespace, group.modelID, err)
 		if !onFallback {
 			// No second transport, not yet past the failure threshold, or
 			// Prometheus is down too. Surface the scrape error, as before.

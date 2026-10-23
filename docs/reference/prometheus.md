@@ -368,6 +368,20 @@ label matchers that change a query's result.
 
 
 
+### The router's namespace label
+
+The router (EPP) does not put a namespace on its own metrics. The controller
+reads the `namespace` label Prometheus adds when it scrapes the router, and
+uses it to tell apart two namespaces that serve the same model name. That
+applies to the router's queue (`llm_d_epp_flow_control_queue_size` and
+`_bytes`), its arrival rate, its latency series, and the
+`WVAModelParkedWhileRequestsRefused` alert, which matches it to the model's
+`exported_namespace`.
+
+ServiceMonitors and PodMonitors add the label. If a custom scrape job drops it,
+the arrival rate reads zero, and every namespace reads the router's queue as
+its own. Keep the label on router series.
+
 ## llm-scaling-manager metrics
 
 The metrics below describe the scaling manager's decisions and its own health.
@@ -1129,7 +1143,7 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 | --- | --- | --- | --- | --- |
 | `wva_variant_at_max_replicas` | gauge | `namespace`, `variant_name` | `1` while the variant's target sits on its own `maxReplicaCount`. Not a GPU shortage (that is `wva_decisions_limited_total`): the operator's ceiling binds, so the fix is a higher `maxReplicaCount`, not more GPUs. | Alone it is normal (a well-sized variant under load). With utilization above the scale-up threshold, demand is going unserved. |
 | `wva_unmeasured_queue` | gauge | `namespace`, `model_name` | Requests queued in EPP flow control for a model with **no** attributed replica to act on. `0` is normal, including for an idle model at zero. | Non-zero: traffic queues while the scaling manager is blind to the pods serving it. Usual causes: FMA launcher pods not scraped, a PodMonitor selecting a port the pods do not declare, ownerReferences that reach no scale target. |
-| `wva_model_replicas` | gauge | `namespace`, `model_name` | Replicas serving a model, summed across its variants. Exists to join against EPP metrics, which carry `model_name` and no namespace. | `0` with demand is a parked model that did not wake; see the `WVAModelParkedWhileRequestsRefused` alert. |
+| `wva_model_replicas` | gauge | `namespace`, `model_name` | Replicas serving a model, summed across its variants. Exists to join against EPP metrics, which carry `model_name` and the router's namespace (added at scrape time) but no variant. | `0` with demand is a parked model that did not wake; see the `WVAModelParkedWhileRequestsRefused` alert. |
 | `wva_scale_from_zero_wake_seconds` | histogram | `namespace`, `model_name` | Time from the first activation published to the model being observed serving. Buckets 1 s to 300 s. | Wakes are slow. With a warm pool or FMA the distribution is bimodal; a shift toward the slow mode is the regression. |
 | `wva_saturation_metrics_up` | gauge | `variant_name`, `namespace` | `1` when the variant got a fresh decision this cycle; `0` when the analyzer knew the variant but its saturation and capacity gauges were not refreshed. | Gate alerts on the saturation gauges with this, rather than trusting a stale value. |
 | `wva_replica_start_seconds` | histogram | `variant_name`, `namespace` | Pod creation to Ready, one observation per replica started. Buckets 5 s to 900 s. | Scale-ups land late. It is also an input: the demand floor projects the queue over the start time. |

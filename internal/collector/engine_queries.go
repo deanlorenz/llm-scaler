@@ -175,6 +175,23 @@ func eppSeriesModel(labels map[string]string) string {
 	return labels[seriesModelLabel]
 }
 
+// seriesNamespaceLabel is the label Prometheus stamps on every scraped series:
+// the namespace of the target it was scraped from. For an EPP series that is
+// the router's namespace, which is its InferencePool's and so its model's.
+const seriesNamespaceLabel = "namespace"
+
+// eppSeriesInNamespace reports whether an EPP series belongs to namespace.
+//
+// A series with no namespace label at all is kept. Such a series cannot be
+// attributed to any namespace -- a scrape configuration that does not add the
+// label -- and keeping it is exactly what this collector did before it read the
+// label, so an install of that kind behaves as it always has. Every scrape
+// this project installs (ServiceMonitor and PodMonitor) adds it.
+func eppSeriesInNamespace(labels map[string]string, namespace string) bool {
+	ns := labels[seriesNamespaceLabel]
+	return ns == "" || ns == namespace
+}
+
 // filterResultsToModel restricts the named results to the series belonging to
 // modelID, replacing each entry with a model-scoped copy.
 //

@@ -242,14 +242,21 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 	// identity labels stay in the grouping key and the collector picks the
 	// model per series — target_model_name when set, else model_name (see
 	// eppSeriesModel). That replaces the "or" clause the model-scoped versions
-	// used to need, and, since these metrics have no namespace label to scope
-	// them by either, one cluster-wide execution per cycle now serves every
-	// model the controller manages instead of two per model.
+	// used to need. One cluster-wide execution per cycle serves every model the
+	// controller manages, instead of two per model.
 	//
-	// TODO(#2309): These metrics currently lack a namespace label in the upstream
-	// gateway-api-inference-extension EPP. If the same model name exists in
-	// different namespaces, these queries aggregate across all of them. Once the
-	// upstream adds a namespace label, they should group by (and be scoped to) it.
+	// The namespace stays in the grouping key, and the collector keeps only its
+	// own namespace's series (eppSeriesInNamespace). The EPP does not export a
+	// namespace itself (gateway-api-inference-extension #2309), but Prometheus
+	// stamps the scraped target's namespace on every series, and the arrival-rate
+	// query already matches on that label. Grouped by model name alone, two
+	// namespaces serving the same model read the sum of both routers' queues: a
+	// model at 32 concurrent requests was charged its saturated twin's queue and
+	// read a utilization of 0.95 where its own load gave 0.3.
+	//
+	// The `or` compares whole label sets, so with the namespace in them it now
+	// prefers llm-d's family per namespace: two EPP builds in two namespaces are
+	// each read under the name they export.
 
 	// Number of requests queued in the scheduler's flow control layer.
 	//
@@ -264,18 +271,18 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name: QuerySchedulerQueueSize,
 		Type: source.QueryTypePromQL,
-		Template: `sum by (model_name, target_model_name) (llm_d_epp_flow_control_queue_size)` +
-			` or sum by (model_name, target_model_name) (inference_extension_flow_control_queue_size)`,
-		Description: "Requests queued in scheduler flow control, per model",
+		Template: `sum by (namespace, model_name, target_model_name) (llm_d_epp_flow_control_queue_size)` +
+			` or sum by (namespace, model_name, target_model_name) (inference_extension_flow_control_queue_size)`,
+		Description: "Requests queued in scheduler flow control, per namespace and model",
 	})
 
 	// Total bytes of request bodies queued in the scheduler's flow control layer
 	registry.MustRegister(source.QueryTemplate{
 		Name: QuerySchedulerQueueBytes,
 		Type: source.QueryTypePromQL,
-		Template: `sum by (model_name, target_model_name) (llm_d_epp_flow_control_queue_bytes)` +
-			` or sum by (model_name, target_model_name) (inference_extension_flow_control_queue_bytes)`,
-		Description: "Bytes queued in scheduler flow control, per model",
+		Template: `sum by (namespace, model_name, target_model_name) (llm_d_epp_flow_control_queue_bytes)` +
+			` or sum by (namespace, model_name, target_model_name) (inference_extension_flow_control_queue_bytes)`,
+		Description: "Bytes queued in scheduler flow control, per namespace and model",
 	})
 
 	registerSGLangSaturationQueries(registry)
