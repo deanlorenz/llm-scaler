@@ -56,10 +56,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// no saturated cycle and no bucket. It is preferred over the measured
 	// window when present (mu_from_itl.go).
 	derived derivedMu,
-	// served is the highest rate a Ready replica of the variant served this
-	// cycle (servedBounds), in the same requests/s mu is measured in: a
-	// lower bound on what one replica sustains.
-	served float64,
+	// served is what the variant's Ready replicas served this cycle
+	// (servedBounds), in the same requests/s mu is measured in: the highest
+	// rate, a lower bound on what one replica sustains, and the median of
+	// those at their batch limit.
+	served servedRates,
 	downstreamSaturated bool,
 	// revisionsMixed is the variant's replicas reporting more than one pod
 	// template revision this cycle (revisionsMixed): mid-rollout, whatever
@@ -275,7 +276,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Nor is one under half of what a Ready replica of the variant
 			// served this cycle (served): a served rate is a lower bound on
 			// what one replica sustains.
-			why := throughputRefusal(rm.RequestRate, mu, derived, served)
+			why := throughputRefusal(rm.RequestRate, mu, derived, served.max)
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),
@@ -292,7 +293,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
-					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served, "reason", why)
+					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
 			} else {
 				a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
 				if args != "" {
@@ -348,12 +349,21 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// stale pair that disagrees prices the lower figure, latched so the
 	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served, a.now()) {
+	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served.max, a.now()) {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
+	} else if rate, ok := a.siblingYield(throughputKey, reading, served.saturated); ok {
+		// A measurement under what the variant's Ready, full replicas serve
+		// is one slow replica's, not the variant's (siblingYield).
+		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",
+			"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
+			"pod", rm.PodName, "role", role, "measuredRate", reading.rate, "siblingRate", rate,
+			"siblingRateNow", served.saturated, "tolerance", SiblingMuTolerance)
+		saturatedThroughput = rate
+		throughputBucket = servedBucket
 	}
 	// Prefill with no window of its own under the arguments it runs is
 	// priced on its lower bound when it has one (prefill_bound.go). Only
@@ -585,6 +595,10 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 // from the ITL model rather than measured. classifyOutputLength can never
 // produce it, so it cannot be spoofed by a real output bucket.
 const derivedBucket = "derived"
+
+// servedBucket is the bucket name logged for a measured mu that yielded to
+// what the variant's Ready, full replicas serve (siblingYield).
+const servedBucket = "served-siblings"
 
 // computeK2 determines the compute-bound capacity using a priority chain:
 // 1. Observed (queue saturated) → use tokensInUse as k2

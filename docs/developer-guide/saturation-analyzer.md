@@ -300,6 +300,22 @@ above the derived figure (`measuredYieldsToDerived`, `muChoice`):
   serves (`servedBounds`,
   `TestMuChoice_ALowMeasurementAServedRateContradictsYields`). With no line
   there is nothing to yield to, and the measurement stands.
+- **Its full siblings serve more.** A measurement under
+  `SiblingMuTolerance` (0.8) of the median rate served by the variant's
+  Ready replicas with a full cache and no queue yields to that median, line
+  or no line, logged as `saturated-throughput-yields-to-siblings` with the
+  bucket `served-siblings` (`siblingYield`). A replica at 0.55x its siblings
+  passes the 2x served bound and, as the only queued replica, is the window.
+  In review it priced the fleet at 1.8x the replicas for as long as it
+  stayed slow. Neither the bound nor the 30-minute hold released it
+  (`TestMuChoice_AModeratelySlowReplicaYieldsToItsFullSiblings`). The
+  yield is remembered after the larger fleet stops filling the siblings,
+  until newer sibling evidence moves it or the window starts over. Queued
+  replicas are left out of the median, so a slow replica is never its own
+  sibling. 0.8 because equally saturated replicas at one shape read within
+  about 10 % of each other (0.90-1.07 on E1). It bounds what one slow
+  replica can over-order to 1.25x
+  (`TestMuChoice_AMeasurementNearItsFullSiblingsStands`).
 - **Latched.** Once a measurement has yielded it stays yielded until it comes
   back within `MeasuredDerivedReturnRatio` (1.6x) of derived, or the bucket
   reads saturated in agreement again. Derived mu is recomputed every cycle
@@ -687,6 +703,7 @@ unchanged, so stored windows are still found.
 | `MeasuredDerivedReturnRatio` | 1.6 | `saturation` |
 | `MeasuredMuFreshFor` | 5m | `saturation` |
 | `MeasuredLowHoldFor` | 30m | `saturation` |
+| `SiblingMuTolerance` | 0.8 | `saturation` |
 | `FloorLagFraction` | 0.5 | `saturation` |
 | `FloorTrustFraction` | 0.8 | `saturation` |
 | `BacklogGrowthLookback` | 1m | `saturation` |

@@ -267,3 +267,57 @@ func TestMuChoice_AStaleLowMeasurementHoldsForAtMostMeasuredLowHoldFor(t *testin
 		}
 	}
 }
+
+// Review probe (round 4, a moderately slow replica). p0 is queued and full
+// at 2.0 req/s -- a throttled GPU, say -- while p1-p3 are full with nothing
+// queued and serve 3.6. 2.0 is above half of 3.6, so the served bound does
+// not refuse it; p0 is the only queued replica, so it is the window, and the
+// fleet was priced at 1.8x the replicas: 12.8 req/s at 2.0 is 7.5 replicas
+// against the 4.2 it needs at 3.6. A measurement under SiblingMuTolerance of
+// what the Ready, full replicas serve yields to them -- and stays yielded
+// once the larger fleet stops filling them, the evidence then gone.
+func TestMuChoice_AModeratelySlowReplicaYieldsToItsFullSiblings(t *testing.T) {
+	for _, line := range []bool{true, false} {
+		a := newE1Analyzer(t, line)
+		start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+		var trace strings.Builder
+		for i := range 60 { // ten minutes full, then five with the siblings below full
+			sibTokens := int64(330_000)
+			if i >= 40 {
+				sibTokens = 200_000
+			}
+			rows := []e1Row{{"p0", 30, 330_000, 2.0, 2.0*498 + float64(i%3)}}
+			for _, p := range []string{"p1", "p2", "p3"} {
+				rows = append(rows, e1Row{p, 0, sibTokens, 3.6, 3.6*498 + float64(i%3)})
+			}
+			implied, mu, bucket := muChoiceFleet(t, a, start.Add(time.Duration(i)*15*time.Second), 2.0+3*3.6, rows)
+			if i%4 == 0 {
+				fmt.Fprintf(&trace, " %dm:%.1f(%s %.2f)", i/4, implied, bucket, mu)
+			}
+			// Past the first sample: 12.8 req/s at 3.6 is 4.2 replicas, at
+			// the 2.0 the slow replica serves 7.5.
+			if i >= 8 {
+				assert.Less(t, implied, 5.5, "line=%v %ds: a replica at 0.55x its full siblings priced the fleet at %.1f replicas (mu %.2f from %s)",
+					line, i*15, implied, mu, bucket)
+			}
+		}
+		t.Logf("line=%v, one replica at 2.0 beside three full at 3.6, implied replicas:%s", line, trace.String())
+	}
+}
+
+// Within SiblingMuTolerance the measurement stands: equally saturated
+// replicas read a few percent apart.
+func TestMuChoice_AMeasurementNearItsFullSiblingsStands(t *testing.T) {
+	a := newE1Analyzer(t, false)
+	start := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+	for i := range 20 {
+		rows := []e1Row{{"p0", 30, 330_000, 3.3, 3.3*498 + float64(i%3)}}
+		for _, p := range []string{"p1", "p2", "p3"} {
+			rows = append(rows, e1Row{p, 0, 330_000, 3.6, 3.6*498 + float64(i%3)})
+		}
+		_, mu, bucket := muChoiceFleet(t, a, start.Add(time.Duration(i)*15*time.Second), 3.3+3*3.6, rows)
+		if i >= 8 {
+			assert.NotEqual(t, servedBucket, bucket, "%ds: a measurement %.2f at 0.92x its full siblings yielded to them", i*15, mu)
+		}
+	}
+}

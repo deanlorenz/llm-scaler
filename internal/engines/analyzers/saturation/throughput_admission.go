@@ -106,6 +106,14 @@ import (
 // it was one replica's. With no line there is no derived figure to give way
 // to, and the measurement stands.
 //
+// Nor does a measurement outrank what the variant's Ready replicas serve
+// with a full cache and no queue: under SiblingMuTolerance of their median it
+// yields to it, line or no line, and stays yielded once they stop filling
+// (siblingYield). A replica at 0.55x its siblings passes the served bound
+// above, and as the only queued replica it is the window: in review it priced
+// the fleet at 1.8x the replicas for as long as it stayed slow, and neither
+// the bound nor MeasuredLowHoldFor released it.
+//
 // The yield is latched: once a stale measurement has given way it stays given
 // way until the two figures come back within MeasuredDerivedReturnRatio, or
 // the bucket reads saturated again. Derived mu is recomputed every cycle from
@@ -221,16 +229,33 @@ func throughputKeyInput(role string, shapeKeyInput, shapeKeyOutput, fleetHitRate
 	return shapeKeyInput
 }
 
-// servedBounds is, per variant, the highest rate one of its Ready own
-// replicas served this cycle, queued or not, in the requests/s its saturated
-// throughput is measured in (saturatedCompletionRate at the fleet's shape). A
-// replica that served a rate sustains it, so this is a lower bound on the
-// variant's mu (throughputRefusal, measuredYieldsToDerived). Warm-pool
-// bridges run the pool's engine and are left out, as a Pod that is not Ready
-// is, whose rate is not a capacity (admissionOf).
-func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
-	fleetOutput, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) map[string]float64 {
-	out := make(map[string]float64)
+// servedRates is what a variant's Ready own replicas served this cycle, in
+// the requests/s its saturated throughput is measured in (servedBounds).
+type servedRates struct {
+	// max is the highest rate any of them served, queued or not: a lower
+	// bound on the variant's mu (throughputRefusal, measuredYieldsToDerived).
+	max float64
+	// saturated is the lower median of the rates served by those whose cache
+	// is full (kvFull) with no queue past the threshold, zero when none is:
+	// what a replica at its batch limit serves, read from the replicas the
+	// window does not sample -- only a queued replica writes one -- and the
+	// evidence a measured mu yields to (siblingYield). The queued ones are
+	// left out so that a slow replica, full and queued alone, is never its
+	// own sibling evidence.
+	saturated float64
+}
+
+// servedBounds is, per variant, what its Ready own replicas served this
+// cycle (servedRates), at the fleet's shape (saturatedCompletionRate). A
+// replica that served a rate sustains it, so the highest is a lower bound on
+// the variant's mu; and one whose cache is full serves about its limit, so
+// the median of those that are not queued is a reading of it. Warm-pool bridges run the pool's
+// engine and are left out, as a Pod that is not Ready is, whose rate is not
+// a capacity (admissionOf).
+func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold,
+	fleetOutput, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) map[string]servedRates {
+	out := make(map[string]servedRates)
+	full := make(map[string]map[string]float64)
 	for _, rm := range rows {
 		if rm.FromWarmPool || !rm.Ready {
 			continue
@@ -238,11 +263,71 @@ func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string
 		role := rolesByVariant[rm.VariantName]
 		rate, ok := saturatedCompletionRate(rm, role, fleetOutput,
 			throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate))
-		if ok && rate > out[rm.VariantName] && !math.IsInf(rate, 1) {
-			out[rm.VariantName] = rate
+		if !ok || !(rate > 0) || math.IsInf(rate, 1) {
+			continue
+		}
+		s := out[rm.VariantName]
+		s.max = max(s.max, rate)
+		out[rm.VariantName] = s
+		if kvFull(rm, kvCacheThreshold) && rm.BusiestRankQueue() < int(queueThreshold) {
+			if full[rm.VariantName] == nil {
+				full[rm.VariantName] = make(map[string]float64)
+			}
+			full[rm.VariantName][rm.PodName] = rate
 		}
 	}
+	for v, reads := range full {
+		s := out[v]
+		s.saturated = lowerMedian(reads)
+		out[v] = s
+	}
 	return out
+}
+
+// SiblingMuTolerance is how far under the rate its Ready, full siblings
+// serve (servedRates.saturated) a measured mu may sit before it yields to
+// them (siblingYield). Equally saturated replicas at one shape read within
+// about 10 % of each other: on E1 (2026-10-23) the generated-token rate over
+// completions of replicas at full KV read 0.90-1.07 over 24 scrape
+// intervals. 0.8 keeps that inside, and bounds what one slow replica can
+// over-order to 1.25x.
+const SiblingMuTolerance = 0.8
+
+// siblingYield reports the rate a measured mu of the throughput key yields
+// to, and whether it does: the newest median its Ready, full siblings served
+// (sibling, servedRates.saturated; zero when none is full this cycle), while
+// the measurement sits under SiblingMuTolerance of it.
+//
+// Remembered, not read fresh each cycle. Only queued replicas are measured, so
+// one slow replica -- a throttled GPU, a CPU-starved pod -- can be the only
+// reading. Below half its siblings the served bound refuses it
+// (throughputRefusal); at 0.55x it passes, sets the window, and prices the
+// fleet at 1.8x the replicas. A fleet ordered that large stops saturating, so
+// its siblings stop reading full, and evidence read only while it lasts would
+// give way to the slow figure again the cycle after. The yield holds until
+// newer sibling evidence moves it, the measurement comes within the
+// tolerance of it, or the window starts over (recordSaturatedThroughputFrom).
+func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, sibling float64) (float64, bool) {
+	if !(reading.rate > 0) {
+		return 0, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.throughputMuChoice[key]
+	if sibling > 0 {
+		if c == nil {
+			if !(reading.rate < SiblingMuTolerance*sibling) {
+				return 0, false
+			}
+			c = &muChoice{}
+			a.throughputMuChoice[key] = c
+		}
+		c.sibling = sibling
+	}
+	if c == nil || !(reading.rate < SiblingMuTolerance*c.sibling) {
+		return 0, false
+	}
+	return c.sibling, true
 }
 
 // muChoice is one throughput key's memory for choosing between its measured
@@ -255,6 +340,10 @@ type muChoice struct {
 	// yielded is set while a stale measurement has given way to the derived
 	// figure, and latches it (measuredYieldsToDerived).
 	yielded bool
+	// sibling is the newest rate the key's Ready, full replicas served
+	// (servedRates.saturated), which a measurement under SiblingMuTolerance
+	// of it yields to (siblingYield); zero when none was read.
+	sibling float64
 	// low is, per replica, its current run of saturated readings refused as
 	// under MinMeasuredOfDerived of the derived figure.
 	low map[string]lowRun

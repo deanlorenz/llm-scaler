@@ -472,7 +472,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
 	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
-	served := servedBounds(c.input.ReplicaMetrics, c.rolesByVariant, c.fleetOutput,
+	served := servedBounds(c.input.ReplicaMetrics, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for _, rm := range c.input.ReplicaMetrics {
 		select {

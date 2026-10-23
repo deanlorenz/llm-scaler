@@ -145,7 +145,7 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 		// A new window's freshness is its own; a replica's run of low
 		// readings is about the replica, and stands.
 		if c, ok := a.throughputMuChoice[key]; ok {
-			c.saturatedAt, c.yielded = time.Time{}, false
+			c.saturatedAt, c.yielded, c.sibling = time.Time{}, false, 0
 		}
 	}
 	lastRead, read := a.throughputLastRead[key]
