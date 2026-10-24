@@ -8,7 +8,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
+
+// The analyzer ages a replica from the Ready time the collector puts on its
+// row, so a pod back from a restart under the same name is fresh again; zero
+// stays unknown.
+func TestReadySince_TheAnalyzerReadsTheCollectorsReadyTime(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	since := time.Date(2026, 10, 23, 10, 1, 55, 0, time.UTC)
+	assert.Equal(t, since, a.readySince(domain.ReplicaMetrics{PodName: "p1", Ready: true, ReadySince: since}))
+	assert.True(t, a.readySince(domain.ReplicaMetrics{PodName: "p1", Ready: true}).IsZero())
+}
 
 // Review probe (round 2, a rejoining pod taken as established). p1's engine
 // restarts -- a container restart, or an LWS group restart with stable pod
@@ -17,10 +28,9 @@ import (
 // seconds ago, and it is as fresh as a new pod: its filling reading (174 327
 // tokens, 1.0 req/s, against 340 000 and 6.3 served) is neither k2 nor mu.
 //
-// The collector does not report the Ready time on this branch
-// (replicaReadySince, TODO(#283)); the spec stands in for it with what the
-// Pod's Ready condition would say, so it checks the rule, and the
-// collector's half lands with #283's ReadySince.
+// The spec sets the Ready times through readySince, standing in for the
+// collector; TestReadySince_TheAnalyzerReadsTheCollectorsReadyTime checks
+// that the analyzer reads them from the row.
 func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 	day := func(clock string) time.Time {
 		c, err := time.Parse("15:04:05", clock)

@@ -244,7 +244,7 @@ type SaturationAnalyzer struct {
 	now func() time.Time
 	// readySince is when a replica's Pod last became Ready, as the
 	// collector reports it, zero when unknown (replicaReadySince); tests
-	// set it to stand in for the collector.
+	// may set it to stand in for the collector.
 	readySince func(domain.ReplicaMetrics) time.Time
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
