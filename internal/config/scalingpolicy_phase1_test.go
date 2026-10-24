@@ -375,6 +375,17 @@ var _ = Describe("Config.EffectiveLimiterTypes / EffectiveQuotaEntries", func() 
 			Expect(p.LimiterWarnings()).To(ConsistOf(ContainSubstring("[ns-x] have no GPU limit")))
 		})
 
+		// The controller status key limiterWarnings reads this for the
+		// limiters in force: a reserved quota name no longer reaches it (it is
+		// rejected), so without this it would always be empty.
+		It("is what Config reports for the limiters in force", func() {
+			c := &Config{}
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+				"default": {Limiters: []QuotaLimiterConfig{tenants}},
+			})
+			Expect(c.EffectiveLimiterWarnings()).To(ConsistOf(ContainSubstring("[ns-x] have no GPU limit")))
+		})
+
 		// The physical limiter is built beside the quota and bounds every
 		// namespace, the excluded ones included.
 		It("does not call an excluded namespace unbounded beside a physical limiter", func() {

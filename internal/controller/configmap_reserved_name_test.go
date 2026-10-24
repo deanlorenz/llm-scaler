@@ -16,11 +16,13 @@ const reservedNameDefault = `limiters:
     quotas: { H100: 8 }
 `
 
-// Review 183-3: a reserved quota entry name failed Validate, which dropped the
-// whole default entry, and a controller starting on it refused to start
-// unbounded, stalling the upgrade. For this release the entry loads, with a
-// warning, from the controller's own ConfigMap and from a policy namespace.
-func TestReservedLimiterNameAtStartupStillLoads(t *testing.T) {
+// #216: the release that reserved the names only warned, so an upgrade would
+// not stall. From v0.10.0 a quota entry with a reserved name is a validation
+// error: the "default" entry holding it is rejected, and a controller starting
+// on it refuses to start rather than start unbounded -- from the controller's
+// own ConfigMap and from a policy namespace alike. The error names the entry
+// and says to rename it, because that is the only fix.
+func TestReservedLimiterNameAtStartupRefusesToStart(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		policyNS bool
@@ -35,16 +37,15 @@ func TestReservedLimiterNameAtStartupStillLoads(t *testing.T) {
 				f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
 				ns = rejectsPolicyNS
 			}
-			if err := f.bootstrapWith(policyCM(ns, reservedNameDefault)); err != nil {
-				t.Fatalf("startup with a quota entry named gpu-limiter: %v", err)
+			err := f.bootstrapWith(policyCM(ns, reservedNameDefault))
+			if err == nil {
+				t.Fatalf("startup with a quota entry named gpu-limiter succeeded with limiters %q, want a refusal",
+					f.cfg.EffectiveLimiterSummary())
 			}
-			if got := f.cfg.EffectiveLimiterSummary(); got != "quota/gpu-limiter" {
-				t.Errorf("limiters in force %q, want quota/gpu-limiter", got)
-			}
-			warnings := f.cfg.EffectiveLimiterWarnings()
-			if len(warnings) != 1 || !strings.Contains(warnings[0], `"gpu-limiter" is reserved`) ||
-				!strings.Contains(warnings[0], "rejected in a later") {
-				t.Errorf("limiter warnings %q, want one naming the reserved name and the later rejection", warnings)
+			for _, want := range []string{"refusing to start unbounded", `quota entry name "gpu-limiter" is reserved`, "rename the entry"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("startup error %q does not say %q", err, want)
+				}
 			}
 		})
 	}

@@ -870,14 +870,14 @@ func (c *Config) EffectiveLimiterSummary() string {
 	return types.String() + "/" + strings.Join(names, ",")
 }
 
-// EffectiveLimiterWarnings returns the warnings about the limiters in force
-// that still apply as written: a quota entry named one of
-// ReservedLimiterNames (ReservedLimiterNameWarnings). Empty when none.
+// EffectiveLimiterWarnings returns the non-fatal findings about the limiters
+// in force, which still apply as written (ScalingPolicy.LimiterWarnings): for
+// example a namespace a quota excludes that no limit bounds. Empty when none.
 // Thread-safe.
 func (c *Config) EffectiveLimiterWarnings() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return ReservedLimiterNameWarnings(c.effectiveLimitersLocked())
+	return ScalingPolicy{Limiters: c.effectiveLimitersLocked()}.LimiterWarnings()
 }
 
 // EffectiveQuotaEntries returns the quota entries the quota limiter should

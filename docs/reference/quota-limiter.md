@@ -847,6 +847,7 @@ The nominal cap is unaffected by all of them.
 The policy entry is rejected for any of:
 
 - Empty or duplicate `name`.
+- A [reserved](#reserved-names) `name` on a `quota` entry.
 - `type` other than `"quota"`.
 - `scope` outside `{cluster, namespace}`.
 - `namespaceQuotas` or `exclude` set on a cluster-scoped entry.
@@ -860,13 +861,17 @@ The policy entry is rejected for any of:
   `borrowCooldown` or `lenderDebounce` that is not a positive duration.
 - A `kueue:` block on a `gpu-inventory` entry.
 
-Reserved names: `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and
-`lender-cannot-reclaim` are what a held-back decision is reported under when
-no quota entry held it. A quota entry with one of them is still accepted in
-this release, with a warning: the log line `WARNING: Quota limiter entry has a
-reserved name`, a count in `wva_errors_total` under that `error_type`, and the
-`limiterWarnings` key of the controller status. A later release rejects it.
-Rename the entry ([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
+#### Reserved names
+
+`gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` and `lender-cannot-reclaim`
+are what a held-back decision is reported under when no quota entry held it, so
+a `quota` entry may not use one: it could not be told apart from them in
+metrics and Events. The entry is rejected with
+`quota entry name "<name>" is reserved ... rename the entry`, and the rest of
+the `default` entry with it, so a controller starting on it does not start.
+v0.10.0-rc1 to rc4 accepted such an entry with a warning; v0.10.0 rejects it. A
+`gpu-inventory` entry may keep any name. Rename the entry
+([upgrade](upgrade-and-uninstall.md#other-changes-that-need-an-action)).
 
 A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
 **warning**: `exclude` wins, and the ConfigMap is still accepted.
