@@ -478,6 +478,53 @@ wva_any_pod_ready() {
     printf '%s\n' "$out" | grep -qx 'True'
 }
 
+# wva_controller_rollout_ready waits up to $3 for Deployment $1 (a kubectl
+# name, deployment.apps/<name>) in namespace $2 to finish its rollout, and then
+# requires a Ready replica. `kubectl rollout status` alone says "successfully
+# rolled out" at once for a Deployment scaled to 0: every one of its zero
+# replicas is updated and available. A re-run of make deploy-wva over a
+# controller someone had scaled to 0 then reported it running and ready.
+#
+# Returns 0 when the rollout finished and at least one replica is Ready, 1
+# otherwise. On 1, WVA_CONTROLLER_NOT_READY says why: "scaled-to-zero" when
+# spec.replicas is 0, "no-ready-replica" when the rollout passed with none
+# Ready, "unreadable" when the Deployment could not be read after the rollout,
+# and "rollout" when the rollout itself failed or timed out. Rollout output
+# goes to stdout, as kubectl prints it; callers that want it quiet redirect.
+wva_controller_rollout_ready() {
+    local deploy="$1" ns="$2" timeout="$3" counts spec ready
+    WVA_CONTROLLER_NOT_READY=""
+    if ! kubectl rollout status "$deploy" -n "$ns" --timeout="$timeout"; then
+        WVA_CONTROLLER_NOT_READY=rollout
+        return 1
+    fi
+    counts=$(kubectl get "$deploy" -n "$ns" \
+        -o jsonpath='{.spec.replicas}{"/"}{.status.readyReplicas}' 2>/dev/null) || {
+        WVA_CONTROLLER_NOT_READY=unreadable
+        return 1
+    }
+    # Split on "/", not whitespace: either side may be empty, and `read` would
+    # move a lone readyReplicas into the replicas field.
+    spec="${counts%%/*}"
+    ready="${counts#*/}"
+    [ "$ready" != "$counts" ] || ready=""
+    # An absent spec.replicas is the API default of 1; an absent readyReplicas
+    # is 0 (the status omits zero counts).
+    spec="${spec:-1}"
+    ready="${ready:-0}"
+    if [ "$spec" = "0" ]; then
+        WVA_CONTROLLER_NOT_READY=scaled-to-zero
+        return 1
+    fi
+    case "$ready" in
+        ''|*[!0-9]*|0)
+            WVA_CONTROLLER_NOT_READY=no-ready-replica
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # wva_pods_exist reports whether any pod matches selector $2 in namespace $1
 # (-A for cluster-wide), regardless of readiness.
 #

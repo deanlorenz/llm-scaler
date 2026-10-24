@@ -79,6 +79,9 @@ doc-comment owners) run from their own targets.
   split (registry ports, digests), the pull policy for a reference, the
   floating-tag and unverified-Prometheus-TLS warnings, and which Prometheus
   ServiceAccount may read the controller's `/metrics`.
+- `check-controller-ready.sh` runs the controller readiness check against a
+  stub `kubectl`. A Deployment at 0 replicas passes `rollout status`, so the
+  check must also find a Ready replica.
 
 A new fixture check follows the same convention (see AGENTS.md): a
 `hack/check-*.sh` script, called from `lint-deploy-scripts`. A check behind a

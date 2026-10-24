@@ -35,7 +35,9 @@ verify_deployment() {
     # "WVA controller is running and ready".
     #
     # `rollout status` is the check that means what this claims: it waits for the
-    # UPDATED replicas to be available, and fails when they never are.
+    # UPDATED replicas to be available, and fails when they never are. Except at
+    # 0 replicas, where it passes at once with nothing running, so
+    # wva_controller_rollout_ready also requires a Ready replica.
     local wva_deploy
     wva_deploy=$(kubectl get deployment -n "$WVA_NS" -l "$WVA_CONTROLLER_LABEL_SELECTOR" \
         -o name 2>/dev/null | head -1)
@@ -67,9 +69,14 @@ verify_deployment() {
         fi
     fi
 
-    if [ -n "$wva_deploy" ] && kubectl rollout status "$wva_deploy" -n "$WVA_NS" \
-        --timeout="${WVA_VERIFY_TIMEOUT:-180s}" >/dev/null 2>&1; then
+    WVA_CONTROLLER_NOT_READY=""
+    if [ -n "$wva_deploy" ] && wva_controller_rollout_ready "$wva_deploy" "$WVA_NS" \
+        "${WVA_VERIFY_TIMEOUT:-180s}" >/dev/null 2>&1; then
         log_success "WVA controller is running and ready in $WVA_NS"
+    elif [ "$WVA_CONTROLLER_NOT_READY" = "scaled-to-zero" ]; then
+        all_good=false
+        log_warning "WVA controller is NOT running: $wva_deploy in $WVA_NS is scaled to 0 replicas, so nothing makes scaling decisions."
+        log_warning "  Re-run the install (it sets the controller to WVA_REPLICAS, default 1), or: kubectl -n $WVA_NS scale $wva_deploy --replicas=1"
     else
         all_good=false
         log_warning "WVA controller did NOT become ready within ${WVA_VERIFY_TIMEOUT:-180s}."

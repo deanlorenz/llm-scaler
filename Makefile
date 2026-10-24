@@ -2916,6 +2916,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
+	@bash -n hack/check-controller-ready.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2942,6 +2943,12 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# borrowNamespaces turns a pilot into borrowing everywhere, and the
 	@# document it writes is perfectly valid.
 	@bash hack/check-kueue-borrow-keep.sh
+	@echo "Checking the controller readiness check..."
+	@# Executes it against a stub kubectl. `rollout status` passes at once for
+	@# a Deployment at 0 replicas, so an install over a controller at 0/0
+	@# reported it running and ready: it parses, and it is green on every
+	@# cluster whose controller is up.
+	@bash hack/check-controller-ready.sh
 	@echo "Checking workload readiness detection..."
 	@# Executes the real functions against fixture pod specs. `bash -n` above
 	@# cannot see any of what this covers: choosing the wrong container, counting

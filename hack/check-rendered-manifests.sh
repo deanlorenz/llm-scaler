@@ -50,14 +50,14 @@ source "$WORK/prereqs.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch wva_kueue_source_configured \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
           wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read pl_grant_kueue_borrow_read \
-          wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs; do
+          wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs wva_append_replicas_patch; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=55
+EXPECT_CASES=58
 RAN=0
 FAILED=0
 
@@ -104,6 +104,27 @@ check 'metrics-reader: no Prometheus known -> no binding at all' \
 check 'metrics-reader: the other bindings survive the delete' \
     '3' \
     "$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "ClusterRoleBinding") | .metadata.name' | grep -c '^wva-')"
+
+# ----------------------------------------------------------------------------
+# The install sets the controller's replicas, at the default 1 too
+# ----------------------------------------------------------------------------
+# The manifest has no replicas field, so `kubectl apply` kept whatever count
+# the live Deployment had: a re-install over a controller scaled to 0 left it
+# at 0. The patch used to be written only for WVA_REPLICAS other than 1.
+render_replicas() {
+    local dir
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/cluster-scoped/kubernetes" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    WVA_REPLICAS="$1" wva_append_replicas_patch "$dir/kustomization.yaml" 2>/dev/null
+    "${KBUILD[@]}" "$dir" \
+        | yq -N -r 'select(.kind == "Deployment" and .metadata.name == "wva-controller-manager") | .spec.replicas'
+}
+check 'replicas: the default WVA_REPLICAS=1 is written, not left to the live object' \
+    '1' "$(render_replicas 1)"
+check 'replicas: WVA_REPLICAS=2 is written' '2' "$(render_replicas 2)"
+check 'replicas: WVA_REPLICAS unset writes nothing (the manifest has no replicas)' \
+    'null' "$(render_replicas '')"
 
 # ----------------------------------------------------------------------------
 # The expected set of admin-owned objects makes the install's own decision
