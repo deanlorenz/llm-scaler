@@ -49,9 +49,9 @@ func (f RescaleFlags) enabledForScope(namespace string, namespaceScoped bool) bo
 type rescaleInput struct {
 	ID        string
 	Priority  float64 // model priority multiplier (>= 0)
-	Demand    float64 // model demand for the weight (any unit; ratio only)
+	Demand    float64 // model demand for the weight (any unit; ratio only), raised as the cap's is
 	FloorGPUs int     // reserved: sum over variants of minReplicas x gpusPerReplica
-	CapGPUs   int     // upper bound: min(demand-in-GPUs, maxReplicas x gpusPerReplica); >= FloorGPUs
+	CapGPUs   int     // upper bound: sum over roles of min(demand-in-GPUs, the role's maxReplicas GPUs); >= FloorGPUs
 }
 
 // computeRescaleTargets distributes `budget` GPUs across models by priority-weighted
@@ -781,7 +781,18 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		floorGPUs = max(floorGPUs, heldFloor)
 
 		demandGPUs := modelDemandGPUs(satNamed, records, stateMap, accType)
-		capGPUs := demandGPUs
+		// Each role is capped at its own ceiling before the sum: a P/D role at
+		// its maxReplicas cannot take GPUs for the demand beyond it, and since
+		// the role split no longer reclaims the other role to pay for it, the
+		// GPUs sized on that demand sat free while another model was short.
+		capGPUs := 0
+		for _, role := range modelRolesOnType(records, accType) {
+			d := roleDemandGPUs(satNamed, records, stateMap, accType, role)
+			if c := roleCeilingGPUs(variantsForRole(variantsOnType(records, accType), role), stateMap); c > 0 {
+				d = min(d, c)
+			}
+			capGPUs += d
+		}
 		if maxBounded {
 			capGPUs = min(capGPUs, maxGPUs)
 		} else {
@@ -803,7 +814,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		inputs = append(inputs, rescaleInput{
 			ID:        modelKey(req),
 			Priority:  req.Priority,
-			Demand:    satNamed.Result.TotalDemand,
+			Demand:    modelWeightDemand(satNamed, records, accType),
 			FloorGPUs: floorGPUs,
 			CapGPUs:   capGPUs,
 		})
@@ -823,6 +834,26 @@ func pinnedModel(nr NamedAnalyzerResult) bool {
 	return false
 }
 
+// modelWeightDemand is the demand a model weighs in the water-fill: each
+// role's demand on accType raised to what another analyzer keeps there at
+// full utilization (rescaleRoleDemand), summed. The cap is sized on the same raised
+// demand (roleDemandGPUs); weighed on its own TotalDemand alone, a model whose
+// other frame kept 800 against its own 400 was given 3 of 12 GPUs, and 4 when
+// saturation alone read the 800.
+func modelWeightDemand(nr NamedAnalyzerResult, records []variantRecord, accType string) float64 {
+	total := 0.0
+	for _, role := range modelRolesOnType(records, accType) {
+		total += rescaleRoleDemand(nr, role)
+	}
+	return total
+}
+
+// rescaleRoleDemand is role's demand raised to what another analyzer keeps at full
+// utilization, rescale's sizing point.
+func rescaleRoleDemand(nr NamedAnalyzerResult, role string) float64 {
+	return max(demandForRoleOrModel(nr, role), nr.OtherFrameDemand(role, 1))
+}
+
 // modelDemandGPUs is the model's demand-in-GPUs summed across its roles on accType
 // (a P/D model needs GPUs for both prefill and decode).
 func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType string) int {
@@ -840,7 +871,7 @@ func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stat
 func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
 	// Rescale sizes at full utilization (whole replicas of the demand), so
 	// another analyzer keeps what it needs there.
-	demand := max(demandForRoleOrModel(satNamed, role), satNamed.OtherFrameDemand(role, 1))
+	demand := rescaleRoleDemand(satNamed, role)
 	best, bestGPUs, ok := bestVariantForRole(records, stateMap, accType, role)
 	if !ok {
 		return 0

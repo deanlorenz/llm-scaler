@@ -416,7 +416,16 @@ it, the PRC of each variant another analyzer decided, and the holds:
   such a model exactly its current GPUs in the water-fill, so the rest of the
   budget goes to the others; no role is reclaimed or filled in a direction it
   is held against. A role held against scale-down keeps its GPUs both in
-  the water-fill and in the model's split across its roles. A growing role's share is lowered to what `fillRole` can
+  the water-fill and in the model's split across its roles. A model's
+  water-fill cap is each role's demand in GPUs capped at that role's
+  `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
+  GPUs sized the cap on 560, and the GPUs that share left free stayed free
+  while another model was short. The water-fill weight is priority times the
+  same raised demand the cap reads (`modelWeightDemand`: each role's demand,
+  or what another frame keeps at full utilization when that is more), not the
+  model's own `TotalDemand`. Rescale moves only the variants on the group's
+  accelerator type: a variant with no accelerator name keeps its replicas,
+  since the budget, the floors and the demand count none of its GPUs. A growing role's share is lowered to what `fillRole` can
   place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
   variant's own pod size), and what that leaves goes to the roles cut most
   (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
