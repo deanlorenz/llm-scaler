@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-logr/stdr"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/internal/deadaddr"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/proxy"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -34,14 +35,11 @@ const testNamespace = "pool-ns"
 // lentUpstream is where a lent Pod's proxy points: the pool's first engine port.
 const lentUpstream = "127.0.0.1:9001"
 
-// deadAddr is an address proven to have nothing behind it: bound and closed, so
-// the kernel confirmed it was free rather than the test guessing a port.
-var deadAddr = func() string {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	addr := strings.TrimPrefix(server.URL, "http://")
-	server.Close()
-	return addr
-}()
+// deadAddr is where a broken Pod's supervisor is: an address that resets
+// every connection for the life of the test binary, and that no other listener
+// can take (deadaddr). A port bound and then closed could be, and a broken Pod
+// then answered as healthy (#217).
+var deadAddr = deadaddr.Addr()
 
 // journal records what happened, in order, across all three protocols and the
 // Kubernetes client. The orderings are the thing worth asserting: sleeping
@@ -189,7 +187,7 @@ func newHarness(t *testing.T, pods ...client.Object) *harness {
 	a.DrainWait = 5 * time.Millisecond
 	a.newSupervisor = func(podIP string) *Supervisor {
 		if h.brokenPods[podIP] {
-			// A supervisor that is not there at all: the address refuses.
+			// A supervisor that is not there at all: the address resets every connection.
 			return &Supervisor{client: supervisor.Client(), baseURL: "http://" + deadAddr}
 		}
 		return &Supervisor{client: supervisor.Client(), baseURL: supervisor.URL}
@@ -1092,6 +1090,14 @@ func TestEveryPodUnreadableIsDiagnosedAsItsOwnFault(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("nothing is readable, so nothing is observed: %+v", got)
+	}
+	// Name the Pod that was read when it should not have been: the diagnosis
+	// below is only logged when every Pod is unreadable, so one Pod that
+	// answered is the whole failure, and the log alone does not say which.
+	for _, pod := range []string{"pod-a", "pod-b"} {
+		if !strings.Contains(buf.String(), `"pod"="`+pod+`"`) {
+			t.Errorf("%s was read, but its supervisor is unreachable (deadAddr %s): %q", pod, deadAddr, buf.String())
+		}
 	}
 	if !strings.Contains(buf.String(), "NetworkPolicy") {
 		t.Errorf("the likely cause must be named: %q", buf.String())

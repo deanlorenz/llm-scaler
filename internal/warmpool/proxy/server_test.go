@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/internal/deadaddr"
 )
 
 const loopbackHost = "127.0.0.1"
@@ -489,17 +491,14 @@ func TestAnUpstreamMustBeAnEngineAndNotJustLoopback(t *testing.T) {
 	}
 }
 
-// deadEngine returns an address in the engine range that is proven to have
-// nothing behind it: a server is bound and then closed, so the kernel has told
-// us the port was free rather than us guessing one. Guessing found a port this
+// deadEngine returns an address with nothing that answers behind it, held for
+// the life of the test binary (deadaddr). Guessing a port found one this
 // developer's machine was already using, and the test failed with a 404 from
-// something else entirely.
+// something else entirely; a port bound and then closed is the same mistake
+// later, once the kernel hands it to another listener.
 func deadEngine(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	addr := strings.TrimPrefix(server.URL, "http://")
-	server.Close()
-	return addr
+	return deadaddr.Addr()
 }
 
 // portOfURL extracts the port an httptest server bound.
