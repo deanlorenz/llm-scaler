@@ -150,6 +150,14 @@ role, and it under-orders at a load step until the variant has fitted its own
 line. Under EPP flow control, where replicas rarely queue, that is the normal
 state of a new variant for its first minutes.
 
+The line is learned from replicas between 0.15 and 0.80 of their KV cache.
+Above 0.80 an engine short of memory preempts, and its latency stops following
+the line. One replica above 0.80 still counts: one whose running batch is at
+`max_num_seqs`, with no preemption in the last minute. That replica is limited
+by its sequence cap, not by memory. Without it, a fleet whose router sends
+everything to one replica would never learn a line: that replica sits above
+the band and its idle siblings below it.
+
 Three rules keep it honest. Each was learned from a measured mistake; the runs
 are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 

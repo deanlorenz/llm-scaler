@@ -315,7 +315,7 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
-	variantName string, now time.Time, logger logr.Logger) itl.Model {
+	variantName string, maxNumSeqs int64, now time.Time, logger logr.Logger) itl.Model {
 	// Stamped here as well as in noteReplicaStart, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
 	// on a full fit) and the sweep's rule is that an unstamped key counts as
@@ -337,7 +337,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// Which rows are readings, the window's confidence gate (Ready: enough
 	// samples, far enough apart in k), and the two tiers below are the
 	// tracker's: the slo analyzer fits with the same rules.
-	r := a.itlTracker.Observe(key, variantName, replicas, now)
+	r := a.itlTracker.Observe(key, variantName, replicas, maxNumSeqs, now)
 
 	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
 	// never prints and a diagnostic nobody can read is the problem it was
@@ -357,6 +357,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
 		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK,
 		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
+		// Of the offered, the readings above the band taken because their
+		// replica was at its sequence cap (itl.atSequenceCap).
+		"capped", r.Capped, "maxNumSeqs", maxNumSeqs,
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,

@@ -436,7 +436,13 @@ func (c *cycle) fitLines() {
 		// logs two identical "variant" values, and their fits could not be
 		// told apart in the log (issue #271).
 		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
-		own := c.a.noteITL(variantKey, rows, variant, c.a.now(), itlLogger)
+		// The sequence cap, so a replica at it may teach the line from above
+		// the band (itl.Tracker).
+		var maxNumSeqs int64
+		if params != nil {
+			maxNumSeqs = params.MaxNumSeqs
+		}
+		own := c.a.noteITL(variantKey, rows, variant, maxNumSeqs, c.a.now(), itlLogger)
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.

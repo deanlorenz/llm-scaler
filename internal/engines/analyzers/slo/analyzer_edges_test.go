@@ -135,7 +135,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 
 	It("treats a line no cycle ever stamped as stale", func() {
 		a := newAt(nil)
-		a.lines.Observe("ns|m|stray|H100|1", "agg", cycleRows("agg", 0), clock)
+		a.lines.Observe("ns|m|stray|H100|1", "agg", cycleRows("agg", 0), 0, clock)
 		Expect(a.EvictStale(clock).Lines).To(Equal(1), "a key with no stamp is not one anything still uses")
 	})
 
@@ -227,7 +227,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			_, src, _ = a.fitLine(key, rows, "agg", clock)
+			_, src, _ = a.fitLine(key, rows, "agg", 0, clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourceOwn))
@@ -243,7 +243,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			m, src, _ = a.fitLine(key, rows, "agg", clock)
+			m, src, _ = a.fitLine(key, rows, "agg", 0, clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourcePinned))

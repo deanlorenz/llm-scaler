@@ -268,7 +268,12 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if !isGenerating(vs.Role) {
 		return vc, nil, d
 	}
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, now)
+	params := a.engineParams(input.Namespace, input.ModelID, vs.VariantName)
+	var maxNumSeqs int64
+	if params != nil {
+		maxNumSeqs = params.MaxNumSeqs
+	}
+	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, maxNumSeqs, now)
 	d.line = r
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -290,7 +295,6 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		reading.Source = constants.SLOSourceInfeasible
 		return vc, reading, d
 	}
-	params := a.engineParams(input.Namespace, input.ModelID, vs.VariantName)
 	// max_num_seqs bounds one engine; a replica of several data-parallel
 	// ranks admits that many times it, against capacity tokens that are
 	// already the whole replica's (issue #150).
@@ -331,11 +335,11 @@ func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 // came from: a full fit, B pinned to this key's own last full fit, or B pinned
 // to the default floor; or why there is none: the window held enough readings
 // and the pinned fit refused them, or it holds too few.
-func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, now time.Time) (itl.Model, string, itl.Reading) {
+func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, maxNumSeqs int64, now time.Time) (itl.Model, string, itl.Reading) {
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
-	r := a.lines.Observe(key, variant, rows, now)
+	r := a.lines.Observe(key, variant, rows, maxNumSeqs, now)
 	switch {
 	case r.Tier == itl.TierOLS:
 		return r.Model, constants.SLOSourceOwn, r

@@ -88,6 +88,11 @@ instance and its own keys.
   as `kept`), `BelowBand` those it dropped below `k = 0.15`. A variant whose
   replicas all run above 0.80 stops filling its window, and what it holds ages
   out within 30 minutes: then `no-line`, with `aboveBand` counting why.
+  The exception is a replica at its sequence cap (`atSequenceCap`):
+  `RunningRequests` at `max_num_seqs` times its ranks, and
+  `PreemptionRateKnown` with `PreemptionRate` zero. Its reading above 0.80
+  is kept and counted in `Capped` (issue #287). `Observe` takes
+  `maxNumSeqs` per engine rank; zero admits nothing above the band.
 - **The window** (`Window`) holds at most 20 readings for at most 30 minutes.
   Nothing clears it on a change of shape.
 - **The fit.** With 10 **steady** readings spanning 0.30 of `k`, a

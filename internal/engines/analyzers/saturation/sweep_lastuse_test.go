@@ -273,7 +273,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			key := "ns|m|decode-v|NVIDIA-H200|1"
 			now := time.Now()
 
-			a.noteITL(key, nil, variant, now, logr.Discard())
+			a.noteITL(key, nil, variant, 0, now, logr.Discard())
 			Expect(a.itlWindowLens()).To(HaveKey(key), "precondition: noteITL creates the window")
 
 			a.EvictStaleHistory()

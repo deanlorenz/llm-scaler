@@ -1248,7 +1248,10 @@ The `wva_slo_source` values:
 - **`no-line`:** too few readings in the window: a new variant warming up,
   replicas that report no inter-token latency, or replicas outside the band --
   below a fill of 0.15 (an idle fleet) or above 0.80 (an overloaded one), which
-  can last. The `slo-variant` log line counts which (`belowBand`, `aboveBand`).
+  can last. A replica above 0.80 still counts when its running batch is at
+  `max_num_seqs` and it preempted nothing in the last minute (vLLM only:
+  SGLang publishes no preemption counter). The `slo-variant` log line counts
+  which (`belowBand`, `aboveBand`).
 - **`declined`:** enough readings, and the fit refused them: most often a card
   whose latency sits below the 6 ms default intercept, so the slope comes out
   negative. It lasts; the variant is not priced.
