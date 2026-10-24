@@ -106,10 +106,8 @@ func startTLSServer(ctx context.Context, ca *testCA, clientCA *testCA, allowed .
 	Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
 	c := fake.NewClientBuilder().WithScheme(s).
 		WithObjects(scaledObjectFor("chat-decode", "chat-decode-deploy")).Build()
-	addr := freePort()
-	srv := &scaler.Server{Addr: addr, Client: c, Registry: registry.New(time.Minute), TLSConfig: cfg}
-	go func() { _ = srv.Start(ctx) }()
-	Eventually(func() error { return srv.Ready(nil) }, 5*time.Second).Should(Succeed())
+	srv := &scaler.Server{Client: c, Registry: registry.New(time.Minute), TLSConfig: cfg}
+	addr, _ := startServer(ctx, srv)
 	return addr
 }
 
@@ -297,8 +295,9 @@ var _ = Describe("Server over TLS", func() {
 		cfg, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return current.Load(), nil }, "", nil)
 		Expect(err).NotTo(HaveOccurred())
 
-		ln, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
-		Expect(err).NotTo(HaveOccurred())
+		// Not 127.0.0.1:0: see startServer for why a port from the ephemeral
+		// range is not reliably bindable here.
+		ln := tls.NewListener(listenUnassigned(), cfg)
 		defer func() { _ = ln.Close() }()
 		go func() {
 			for {
