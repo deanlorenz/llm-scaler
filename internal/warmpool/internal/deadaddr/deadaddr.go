@@ -1,6 +1,7 @@
-// Package deadaddr provides a loopback address that refuses every request for
-// the life of the process, for tests of a supervisor, engine or proxy that is
-// gone.
+// Package deadaddr provides a loopback address that resets every connection
+// for the life of the process, for tests of a supervisor, engine or proxy that
+// is gone. A caller sees a reset (ECONNRESET or EOF), not a refusal
+// (ECONNREFUSED); the code under test treats every transport error alike.
 //
 // A port that is bound and then closed is not such an address. It is free
 // only until the kernel hands it to the next listener -- any httptest server

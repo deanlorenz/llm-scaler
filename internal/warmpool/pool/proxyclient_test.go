@@ -22,9 +22,18 @@ import (
 // need a real listener rather than a chosen number.
 //
 // The kernel picks the port, which is always well above the engine range floor.
+// The listener is on 127.0.0.1 because that is the only host the proxy dials:
+// an engine is Pod-local. httptest.NewServer falls back to [::1] when it cannot
+// bind 127.0.0.1 (seen with the loopback ports exhausted by many test binaries
+// side by side), and the proxy then got "connection refused" from an engine
+// that was alive. Failing to bind 127.0.0.1 now fails the test, saying so.
 func liveEngine(t *testing.T) int {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind 127.0.0.1 for a live engine: %v", err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case healthPath:
 			w.WriteHeader(http.StatusOK)
@@ -36,18 +45,11 @@ func liveEngine(t *testing.T) int {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})
+	server := &httptest.Server{Listener: l, Config: &http.Server{Handler: handler}}
+	server.Start()
 	t.Cleanup(server.Close)
-
-	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
-	if err != nil {
-		t.Fatalf("split %q: %v", server.URL, err)
-	}
-	number, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatalf("port %q: %v", port, err)
-	}
-	return number
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 // deadEnginePort returns a loopback port with nothing that answers behind it,

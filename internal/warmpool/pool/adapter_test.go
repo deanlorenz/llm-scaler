@@ -35,8 +35,8 @@ const testNamespace = "pool-ns"
 // lentUpstream is where a lent Pod's proxy points: the pool's first engine port.
 const lentUpstream = "127.0.0.1:9001"
 
-// deadAddr is where a broken Pod's supervisor is: an address that refuses
-// every request for the life of the test binary, and that no other listener
+// deadAddr is where a broken Pod's supervisor is: an address that resets
+// every connection for the life of the test binary, and that no other listener
 // can take (deadaddr). A port bound and then closed could be, and a broken Pod
 // then answered as healthy (#217).
 var deadAddr = deadaddr.Addr()
@@ -187,7 +187,7 @@ func newHarness(t *testing.T, pods ...client.Object) *harness {
 	a.DrainWait = 5 * time.Millisecond
 	a.newSupervisor = func(podIP string) *Supervisor {
 		if h.brokenPods[podIP] {
-			// A supervisor that is not there at all: the address refuses.
+			// A supervisor that is not there at all: the address resets every connection.
 			return &Supervisor{client: supervisor.Client(), baseURL: "http://" + deadAddr}
 		}
 		return &Supervisor{client: supervisor.Client(), baseURL: supervisor.URL}
