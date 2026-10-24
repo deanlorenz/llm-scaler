@@ -940,9 +940,13 @@ When no cost fits strictly between them, or a sibling's cost is the int32
 minimum (`-2147483648`) so nothing fits below it, the donor is refused
 (`donor-not-steerable`).
 
-A Deployment whose workload is changing is not asked to give: it is held for
-one release timeout, as routine -- no back-off, no Warning, no blocked reason --
-and its receiver tries another donor. Changing means:
+A Deployment whose workload is changing is not asked to give: it is held, as
+routine -- no back-off, no Warning -- and its receiver tries another donor. The
+hold ends once its workload reads stable for
+`stabilization.consecutiveCyclesBeforeMove` cycles in a row (for example, the
+pod that was starting is Ready), and after one release timeout at the latest.
+While it holds, the donor and each short model waiting on it carry the blocked
+reason `donor-changing`. Changing means:
 
 - a pod is not Ready or not yet scheduled: the ReplicaSet removes such pods
   before it reads the cost;
