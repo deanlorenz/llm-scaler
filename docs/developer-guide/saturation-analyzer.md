@@ -158,18 +158,13 @@ its queue: its one-minute gauges still hold the minute before it was routed
 to. On the E1 run (2026-10-23) one just joined read 84 waiting on 174,327
 resident, the queue no deeper than its batch, and was recorded on sight; the
 window settled at 264,265 while every replica then held 331-351k with no queue.
-The age is read from when the Pod last became Ready, where the collector
-reports it (`replicaReadySince`, read through `SaturationAnalyzer.readySince`
-so tests stand in for the collector). A pod back from an engine or LWS group
-restart under the same name has a new Ready time: in review one absent for
-75 s kept its old first-seen time and its filling reading (174,327 tokens,
-1.0 req/s) became k2 and mu (`TestReadySince_ARejoiningPodIsAsFreshAsANewOne`).
-Today `replicaReadySince` returns zero (unknown), so the restart case is not
-yet covered: PR #283 adds `ReplicaMetrics.ReadySince` and the collector that
-sets it, but merging it changes nothing here by itself. A follow-up commit
-after #283 merges switches the accessor to `rm.ReadySince` (TODO(#283)); that
-is what makes `TestReadySince_ARejoiningPodIsAsFreshAsANewOne`'s case hold in
-production.
+The age is read from when the Pod last became Ready, as the collector reports
+it in `ReplicaMetrics.ReadySince` (`replicaReadySince`, read through
+`SaturationAnalyzer.readySince` so tests stand in for the collector). A pod
+back from an engine or LWS group restart under the same name has a new Ready
+time: in review one absent for 75 s kept its old first-seen time and its
+filling reading (174,327 tokens, 1.0 req/s) became k2 and mu
+(`TestReadySince_ARejoiningPodIsAsFreshAsANewOne`).
 Where the time is unknown, `readySince` in the settle memo is when the analyzer
 first saw the replica Ready. A replica already Ready on the memo's first cycle
 then has an age the analyzer cannot know and is taken as established, so a

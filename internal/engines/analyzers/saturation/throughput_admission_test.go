@@ -92,6 +92,14 @@ func e1Metrics(r e1Row) domain.ReplicaMetrics {
 // cycle the lowest sample any throughput window holds (0 when none has one).
 func replayE1(t *testing.T, a *SaturationAnalyzer, cycles []e1Cycle) ([]e1Decision, []float64) {
 	t.Helper()
+	return replayE1Ready(t, a, cycles, nil)
+}
+
+// replayE1Ready is replayE1 with each row's ReadySince set by readySince, as
+// the collector sets it from the Pod's Ready condition; nil leaves it zero.
+func replayE1Ready(t *testing.T, a *SaturationAnalyzer, cycles []e1Cycle,
+	readySince func(pod string) time.Time) ([]e1Decision, []float64) {
+	t.Helper()
 	out := make([]e1Decision, 0, 3*len(cycles))
 	lows := make([]float64, 0, len(cycles))
 	for _, c := range cycles {
@@ -101,7 +109,11 @@ func replayE1(t *testing.T, a *SaturationAnalyzer, cycles []e1Cycle) ([]e1Decisi
 		a.now = func() time.Time { return at }
 		rows := make([]domain.ReplicaMetrics, 0, len(c.rows))
 		for _, r := range c.rows {
-			rows = append(rows, e1Metrics(r))
+			rm := e1Metrics(r)
+			if readySince != nil {
+				rm.ReadySince = readySince(r.pod)
+			}
+			rows = append(rows, rm)
 		}
 		ctx, logs := observedCtx(t)
 		_, err = a.Analyze(ctx, makeAnalyzerInput(rows, []domain.VariantReplicaState{{

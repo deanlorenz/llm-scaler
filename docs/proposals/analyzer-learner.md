@@ -754,7 +754,7 @@ a different clock and is logged, not published as an age.
 | | ITL steady trace (#273) | k2 settle and first sight (#282 `D/k2_settle.go`) | `noteReady` (#282 `D/throughput_admission.go`) | balance tracker (#283 `internal/signals/balance/tracker.go`) |
 | --- | --- | --- | --- | --- |
 | joined wait | 2 min | 1 min lookback, queue standing | 1 min | 2 min |
-| ready time | first sight | first sight | Pod Ready time, wired but stubbed to zero (`replicaReadySince`, TODO(#283)) | later of Pod Ready and first sight of that Ready time |
+| ready time | first sight | first sight | Pod Ready time (`replicaReadySince`, from `ReplicaMetrics.ReadySince`) | later of Pod Ready and first sight of that Ready time |
 | restart events | joined, load back after idle | joined | joined | joined, warm-pool lend |
 | key includes variant and bridge | no | no | no | yes: `(pod, variant, bridge)` |
 | first cycle after a controller restart | taken as settled | taken as established | taken as established | waits again |
