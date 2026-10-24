@@ -75,7 +75,12 @@ func (s e8Sample) rows(t *testing.T) []domain.ReplicaMetrics {
 // minutes later with 768 still waiting. Its queue is a backlog, so it must
 // warn once the idle replicas' grace and the sustain have run, name 69x4l,
 // hold through phase 1, and clear in phase 2.
+//
+// The replay runs at kvCacheThreshold 0.90, which every sample after the
+// first is under, so phase 1 holds on the queue rule alone: under the default
+// 0.80 the KV would carry it and the queue rule would go untested.
 func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
+	queueOnly := Thresholds{KvUsage: 0.90, Queue: policy.Queue}
 	roles := map[string]string{"qwen32b-decode": domain.RoleDecode}
 	tr := NewTracker()
 	tr.SetInterval(cycle)
@@ -87,7 +92,7 @@ func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
 		phase2 := s.at >= e8Phase2
 		for i := range int(90 * time.Second / cycle) {
 			now := s.time(t).Add(time.Duration(i) * cycle)
-			rs := tr.Observe("evgensh-sg1/qwen", tr.Measure("evgensh-sg1/qwen", rows, roles, policy, now), now)
+			rs := tr.Observe("evgensh-sg1/qwen", tr.Measure("evgensh-sg1/qwen", rows, roles, queueOnly, now), now)
 			r := only(t, rs)
 			if r.Changed && r.Sustained {
 				warnedAt = now
