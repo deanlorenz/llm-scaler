@@ -28,9 +28,8 @@ func TestReadySince_TheAnalyzerReadsTheCollectorsReadyTime(t *testing.T) {
 // seconds ago, and it is as fresh as a new pod: its filling reading (174 327
 // tokens, 1.0 req/s, against 340 000 and 6.3 served) is neither k2 nor mu.
 //
-// The spec sets the Ready times through readySince, standing in for the
-// collector; TestReadySince_TheAnalyzerReadsTheCollectorsReadyTime checks
-// that the analyzer reads them from the row.
+// The Ready times ride on the rows, as the collector sets them, and the
+// analyzer reads them through its production hook.
 func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 	day := func(clock string) time.Time {
 		c, err := time.Parse("15:04:05", clock)
@@ -39,13 +38,14 @@ func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 	}
 	// run replays the restart and returns the lowest k2 and mu any window
 	// holds afterwards (0 for none). readyKnown reports the Pods' Ready
-	// times; otherwise the analyzer has only its own first sight.
+	// times on the rows; otherwise the analyzer has only its own first sight.
 	run := func(returning string, readyKnown bool) (k2Low int64, muLow float64) {
 		t.Helper()
 		a := newE1Analyzer(t, false)
+		var readySince func(pod string) time.Time
 		if readyKnown {
-			a.readySince = func(rm domain.ReplicaMetrics) time.Time {
-				if rm.PodName == "p0" {
+			readySince = func(pod string) time.Time {
+				if pod == "p0" {
 					return day("09:00:00")
 				}
 				return day("10:01:55") // back from its restart
@@ -63,7 +63,7 @@ func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 			{"10:01:45", []e1Row{steady}},
 			{"10:02:00", []e1Row{steady, {returning, 84, 174_327, 1.0, 500}}},
 		}
-		_, lows := replayE1(t, a, cycles)
+		_, lows := replayE1Ready(t, a, cycles, readySince)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		for _, ra := range a.computeCapacityHistory {
