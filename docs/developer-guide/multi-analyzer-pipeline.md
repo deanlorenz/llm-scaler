@@ -445,6 +445,12 @@ it, the PRC of each variant another analyzer decided, and the holds:
   published from saturation's entry, its supply was in saturation's unit while
   its pressure was in the other frame's. A variant saturation has no PRC for
   keeps saturation's bridge reading: there is no ratio to convert it by.
+  The ratio is the variant's own, so for a bridge of another shape (a pool
+  Pod configured differently from the variant's replicas, read on its own as
+  `bridgePerReplica`) that the other analyzer would rate differently, the
+  converted figure is an approximation, not a measurement. Supply is not
+  published on a cycle that builds no composite, which is only one whose
+  saturation run fails; the last reading stands until the reader's `maxAge`.
 
 The composite is judged against saturation's thresholds
 (`AnalyzerThresholds(saturation)`), and recorded in the same

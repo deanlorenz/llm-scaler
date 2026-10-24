@@ -1975,6 +1975,13 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 // as it needs the number, and publishing only the non-zero ones would leave the
 // last reading standing after the Pod went back -- saying a variant is being
 // carried by a pool that has already reclaimed it.
+//
+// It is published from the composite, so a cycle that builds no composite
+// publishes none, and the last reading stands until the reader's maxAge.
+// That is only a cycle whose saturation run fails (runAnalyzers fails on
+// nothing else; another analyzer that fails leaves no entry and the
+// composite is built without it), and saturation's entry, where supply was
+// published before, did not exist on that cycle either.
 func publishWarmPoolSupply(namespace string, nr allocation.NamedAnalyzerResult) {
 	if nr.Result == nil {
 		return

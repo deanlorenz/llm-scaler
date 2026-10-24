@@ -389,7 +389,10 @@ func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []va
 		// A bridge is priced in the same frame as the replicas it stands in
 		// for, so the warm pool's supply (WarmPoolCapacity) and pressure
 		// read one unit. Without saturation's PRC there is no ratio to
-		// convert by, and the bridge keeps saturation's reading.
+		// convert by, and the bridge keeps saturation's reading. The ratio
+		// is the variant's own: for a bridge of another shape (a pool Pod
+		// configured differently) that the other analyzer would rate
+		// differently, it is an approximation, not a measurement.
 		if v.prc > 0 {
 			vc.WarmPoolPerReplicaCapacity *= target / n / v.prc
 		}
