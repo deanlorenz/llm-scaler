@@ -200,9 +200,21 @@ really got slower moves its estimate.
 
 One line per variant per cycle: which replicas the saturation analyzer priced,
 and what each was priced at. `replicas` lists them as
-`<pod>=<capacity>/<bound>/<k2 source>`, where `bound` is `k1` (the KV cache
-binds) or `k2` (compute binds) and the k2 source is one of the values below. A
-warm-pool Pod lent to the variant ends in `/bridge`.
+`<pod>=<capacity>/<bound>/<k2 source>`. `bound` is `k2` when the compute bound
+is the smaller and `k1` otherwise (a tie is `k1`, as `replica-capacity-decision`
+says). The k2 source is one of the values below. Then, when they apply:
+
+- `/P1-obs-…`: the replica read saturated but the reading was not recorded as
+  k2, and the label says why (`unsettled`, `downstream`, `unadmitted`,
+  `rollout` or `invalid`; see the table below).
+- `/mu:<why>`: a decode replica with no derived service rate. `why` is
+  `no-line` (no ITL line fitted yet), `no-shape`, `k-price`, `no-seqs`,
+  `no-itl` or `no-rate`.
+- `/bridge`: a warm-pool Pod lent to the variant.
+
+A variant with very many replicas is written over several lines, each with
+`part` and `parts`, so no line passes the container runtime's 16 KiB line
+limit; `priced` is the variant's whole count on every part.
 
 ```text
 2026-10-14T09:12:03.510Z  INFO  replica-capacity-summary  {"modelID": "my-model",
@@ -342,6 +354,22 @@ Filter by `modelID` and `namespace` to match them up.
 Both lines are INFO and appear in the default controller log. Nothing to enable.
 
 The per-replica lines (`replica-capacity-decision`, `k2-decision`,
-`derived-mu`) need `--v=3` in the controller container's `args`. So does
-`hack/benchmark/dump_k2_decisions.py`, which reads them. At `--v=3` a cycle
-writes about 1.9 KB more per replica.
+`derived-mu`) need `--v=3`. So does `hack/benchmark/dump_k2_decisions.py`,
+which reads them; `make benchmark-run` installs at that level. At `--v=3` a
+cycle writes about 1.9 KB more per replica. Install with it:
+
+```bash
+make deploy-wva WVA_VERBOSITY=3
+```
+
+or add it to a running controller (this restarts it):
+
+```bash
+kubectl -n $NS patch deploy wva-controller-manager --type json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--v=3"}]'
+```
+
+A restart starts the analyzer's in-memory learning over unless the learned-state
+snapshot is on (`LEARNED_STATE_SNAPSHOT`). The default level's
+`replica-capacity-summary` already says when a replica's k2 reading was not
+recorded and why a decode replica has no derived rate, so check it first.

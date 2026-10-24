@@ -472,6 +472,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		K2BorrowRelaxed:             k2Borrowed.relaxed,
 		K2WriteAge:                  k2Age,
 		K2WriteAgeKnown:             k2AgeKnown,
+		K2NotRecorded:               d.refused,
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
@@ -640,16 +641,17 @@ func (a *SaturationAnalyzer) computeK2(
 	borrowDisabled bool,
 	logger logr.Logger,
 ) k2Decision {
+	var refused string
 	chain, chainSrc, borrowed := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
 		avgOutput, avgInput, queueThreshold, engineParams, ranks, k1, kvCeiling, role, downstreamSaturated,
-		adm, borrowDisabled, logger)
+		adm, borrowDisabled, &refused, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
 	if src != chainSrc {
 		// Priced at the unadmitted reading, not at the chain's lower bound.
 		borrowed = k2Borrow{}
 	}
-	return k2Decision{k2: k2, src: src, recordable: recordable, borrowed: borrowed}
+	return k2Decision{k2: k2, src: src, recordable: recordable, borrowed: borrowed, refused: refused}
 }
 
 // k2Decision is what computeK2 decided for one replica: the k2 it is priced on
@@ -662,6 +664,9 @@ type k2Decision struct {
 	src        capacity.K2Source
 	recordable int64
 	borrowed   k2Borrow
+	// refused is the P1-obs-* label of a saturated reading k2Chain did not
+	// record this cycle, empty when there was none.
+	refused string
 }
 
 // unadmittedPrice returns the k2 a row is priced on this cycle, its source,
@@ -739,6 +744,9 @@ func (a *SaturationAnalyzer) k2Chain(
 	// borrowDisabled is the model's disableK2Borrow: no sibling's figure.
 	// The variant's own previous figure (P2-prior) is not a borrow and stays.
 	borrowDisabled bool,
+	// refused receives the P1-obs-* label of a saturated reading this call
+	// does not record, for replica-capacity-summary at the default level.
+	refused *string,
 	logger logr.Logger,
 ) (int64, capacity.K2Source, k2Borrow) {
 	// adm.serving() (Ready, not a bridge, not mid-rollout) is the one
@@ -845,6 +853,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	saturatedReading := queueLen >= int(queueThreshold) && tokensInUse > 0
 	switch {
 	case saturatedReading && downstreamSaturated:
+		*refused = k2ReasonObsDownstream
 		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsDownstream, "historyKey", historyKey,
@@ -852,6 +861,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			"reason", "queue saturated while the decode role is; a prefill completes only when decode admits it, so this is decode's saturation seen from prefill; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && !adm.admitted():
+		*refused = k2ReasonObsUnadmitted
 		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
@@ -859,6 +869,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			"reason", adm.why+"; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && adm.rollout:
+		*refused = k2ReasonObsRollout
 		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsRollout, "historyKey", historyKey,
@@ -866,6 +877,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			"reason", "the variant is mid-rollout and this pod may run the old engine; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && adm.unsettled != "":
+		*refused = k2ReasonObsUnsettled
 		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnsettled, "historyKey", historyKey,
@@ -875,6 +887,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	case saturatedReading:
 		k2Observed := tokensInUse
 		if kvCeiling > 0 && k2Observed > kvCeiling {
+			*refused = k2ReasonObsImplausible
 			logger.V(perReplicaLogLevel).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", k2ReasonObsImplausible, "historyKey", historyKey,
