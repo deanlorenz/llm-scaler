@@ -164,7 +164,7 @@ func warnAboutTuningFallbacks(logger logr.Logger, configs config.ScalingPolicySe
 			over = nil
 		}
 		for _, w := range config.TuningFallbacks(over, configs[key]) {
-			logger.Info("WARNING: tuning figure not used: "+w, "key", key)
+			logger.Info("WARNING: tuning figure not used: "+w, "key", key, "resolvedFor", "model with no tier")
 		}
 	}
 }
