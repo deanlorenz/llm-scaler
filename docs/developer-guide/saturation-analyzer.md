@@ -321,8 +321,8 @@ V1's 1024 on large cards), requests are waiting, and `PreemptionRate`
 was read and is at most `itlCapMaxPreemptionRate` (default 0). The band
 edges are the policy's `itlMinObservableK` and `itlMaxObservableK`
 (`ScalingPolicy.ITLBand`); `Observe` takes them, the cap and the allowance as
-one `itl.Admission`, built alike by both analyzers. `pricingK` still clamps
-to the constant band. Such a replica is not short of memory, so the reason for the band does
+one `itl.Admission`, built alike by both analyzers. `pricingK`, and the slo
+analyzer's fill, clamp to the same band. Such a replica is not short of memory, so the reason for the band does
 not apply to it. On one run a decode replica held 256 running and 768 waiting
 at `k` 0.85-0.89 for 20 minutes while three siblings sat below 0.15, and no line
 was ever fitted (issue #287). `itl-window` counts these readings as `capped`,

@@ -74,6 +74,17 @@ var _ = Describe("pricingK", func() {
 		// range it was fitted over -- what this function exists to prevent.
 		Expect(pricingK(nil)).To(Equal(itl.DefaultMaxObservableK))
 	})
+
+	It("clamps to the band the policy sets, the one the line is fitted over", func() {
+		// 0.76 is inside the default band and above one that stops at 0.70.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.95, ITLMaxObservableK: 0.70,
+		})).To(Equal(0.70))
+		// 0.25 is inside the default band and below one that starts at 0.30.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.50, ScaleUpThreshold: 0.50, ITLMinObservableK: 0.30,
+		})).To(Equal(0.30))
+	})
 })
 
 var _ = Describe("deriveMu against run P", func() {

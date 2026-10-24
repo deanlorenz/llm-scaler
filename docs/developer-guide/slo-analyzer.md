@@ -38,7 +38,8 @@ hands the optimizer `namedResults[0]`, saturation's.
      - `fitLine` calls `Tracker.Observe` and names the source: `own`,
        `pinned`, `pinned-default`, or with no line `declined` or `no-line`;
      - `priceTPOT` inverts `ITL = A·k + B` at the target, clamps to
-       `[0.15, 0.80]`, or says `infeasible` when `ITL(0.15)` already reaches it;
+       the policy's band (`fillBand`, `[0.15, 0.80]` by default), or says
+       `infeasible` when the ITL at its bottom already reaches it;
      - `reachableFill` caps the fill where the replica's batch cap binds:
        `max_num_seqs` times the data-parallel ranks the rows report
        (`fleetReading.engineRanks`),

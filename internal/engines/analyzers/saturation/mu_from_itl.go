@@ -163,8 +163,9 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 // memory-bound capacity, is KvCacheThreshold of physical KV, and the analyzer
 // scales out at ScaleUpThreshold of k1. On the defaults (0.80, 0.85) that is
 // 0.68 of physical; with ScaleUpThreshold at 0.95 it is 0.76. Both sit inside
-// the ITL window's [DefaultMinObservableK, DefaultMaxObservableK] range, so
-// the line is evaluated where it was fitted rather than beyond it.
+// the ITL window's band -- the policy's itlMinObservableK and
+// itlMaxObservableK, 0.15 and 0.80 by default -- so the line is evaluated
+// where it was fitted rather than beyond it.
 //
 // A configuration whose product falls outside that range is clamped to it: the
 // model says nothing useful outside the range it was fitted on, and a clamped
@@ -175,10 +176,14 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 		k = cfg.KvCacheThreshold * cfg.ScaleUpThreshold
 	}
 	// Clamped on every path, including the fallback. DefaultKSat is 0.85 and
-	// DefaultMaxObservableK is 0.80, so returning the fallback unclamped
+	// the default band tops out at 0.80, so returning the fallback unclamped
 	// evaluated the line 0.05 outside the range it was fitted over -- the
 	// exact thing this function exists to prevent.
-	return min(max(k, itl.DefaultMinObservableK), itl.DefaultMaxObservableK)
+	lo, hi := config.DefaultITLMinObservableK, config.DefaultITLMaxObservableK
+	if cfg != nil {
+		lo, hi = cfg.ITLBand()
+	}
+	return min(max(k, lo), hi)
 }
 
 // deriveMu prices one replica of this variant at saturation under the shape it

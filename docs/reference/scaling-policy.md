@@ -1671,7 +1671,8 @@ not readings of the fleet:
   KV-cache fill, `ITL = A × fill + B`; *fill* is the share of physical KV cache in
   use. It is the same fit, with the same rules, the saturation analyzer makes.
 - `wva_slo_fill` is the fill at which the line meets the TPOT target, clamped to
-  [0.15, 0.80]; `wva_slo_predicted_itl_seconds` the ITL the fleet would show sized
+  the ITL band (`itlMinObservableK`, `itlMaxObservableK`; [0.15, 0.80] by
+  default); `wva_slo_predicted_itl_seconds` the ITL the fleet would show sized
   for it; `wva_slo_source` where the line came from (`own`: fitted; `pinned`: its
   intercept held at an earlier fit's; `pinned-default`: held at a default for no
   particular card). After a controller restart a line is `pinned-default` until

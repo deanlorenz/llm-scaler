@@ -272,7 +272,10 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// Analyze has checked the config's type; a direct caller may pass none,
 	// which reads as the defaults.
 	cfg, _ := input.Config.(*config.ScalingPolicy)
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, admission(cfg, params), now)
+	adm := admission(cfg, params)
+	// The fill is clamped to the band the line is fitted over.
+	band := fillBand{lo: adm.MinK, hi: adm.MaxK}
+	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
 	d.line = r
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -281,7 +284,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if source == constants.SLOSourceNoLine || source == constants.SLOSourceDeclined {
 		return vc, reading, d
 	}
-	p := priceTPOT(line, tpotTarget)
+	p := priceTPOT(band, line, tpotTarget)
 	d.targetFill = p.target
 	switch {
 	case !p.ok:
@@ -304,7 +307,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	maxSeqs := d.maxSeqs
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
-	fill := reachableFill(p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
+	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	rate := replicaTokenRate(line, fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	if !(rate > 0) {
 		reading.Source = constants.SLOSourceInputInvalid
@@ -314,7 +317,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	vc.PerReplicaCapacity = rate
 	vc.Reason = "slo-" + source
 	reading.Fill = fill
-	if k := realisedFill(line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
+	if k := realisedFill(band, line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading, d
