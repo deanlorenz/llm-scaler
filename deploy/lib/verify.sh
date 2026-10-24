@@ -213,7 +213,7 @@ verify_deployment() {
         local sm_rejected
         # The MESSAGE, not just the name. A missing Secret is only one thing a
         # ServiceMonitor can fail to resolve, and assuming it was misdiagnoses every
-        # other cause while prescribing a fix that cannot work. Seen on pokprod001:
+        # other cause while prescribing a fix that cannot work. Seen on the shared GPU cluster:
         # the Secret existed and the rejection was a missing CA ConfigMap, for which
         # delete-and-re-apply runs straight back into the same missing object.
         sm_rejected=$(kubectl get events -n "$WVA_NS" \
@@ -276,7 +276,7 @@ verify_deployment() {
     # openshift-user-workload-monitoring while WVA reads the Thanos Querier in
     # openshift-monitoring. Leading with the pod check therefore reported a
     # namespace the controller never talks to, and called a platform Prometheus
-    # something this install deployed. Observed on pokprod.
+    # something this install deployed. Observed on the shared GPU cluster.
     #
     # The endpoint is also the more useful fact: it is the one an operator can
     # curl when the controller says it cannot reach Prometheus.

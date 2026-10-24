@@ -36,7 +36,7 @@
 # is the truth about what an install can reach.
 # The args are read in the SAME list call, not one call per install. This function
 # used to fetch each install's Deployment again to read its args, which is one round
-# trip per WVA on the cluster: 12 installs on pokprod001 cost ~13 SECONDS of the
+# trip per WVA on the cluster: 12 installs on the shared GPU cluster cost ~13 SECONDS of the
 # preflight, for information the first response already contained. The scope decision
 # is unchanged -- it is still --watch-namespace in the container args, because that is
 # what actually restricts the controller's cache -- it is just no longer paid for
@@ -74,7 +74,7 @@ wva_installations_raw() {
     # reconcile loop at all. Matching on the name alone found one and, because
     # its args carry no --watch-namespace, classified it cluster-scoped by the
     # rule below. The install then refused with "A cluster-scoped WVA is already
-    # installed: evgensh-wva-test/wva-warm-pool", naming a Deployment that
+    # installed: team-a/wva-warm-pool", naming a Deployment that
     # manages nothing, and there was no way to proceed except to disable a check
     # that was right in principle.
     # || rc=$?, not ; rc=$? -- see the note in install_core.sh. This one runs in

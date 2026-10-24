@@ -218,7 +218,7 @@ BENCHMARK_CAPTURE_CTX   = $(if $(BENCHMARK_KUBE_CONTEXT),--context "$(BENCHMARK_
 # For a MULTI-MODEL stack, which routes by PATH PREFIX. The smoketest's
 # model-readiness poll asks <gateway>/v1/models -- the gateway ROOT, which such a
 # stack does not route -- so it 404s and burns its whole 1800s timeout on a stack
-# where both models are already answering. Measured on CoreWeave: the root 404s
+# where both models are already answering. Measured on a multi-node H200 cluster: the root 404s
 # while /qwen3-8b/v1/models returns 200 listing the model, at the same moment.
 #
 # Single-model runs should leave this false: there the smoketest is the only
@@ -294,7 +294,7 @@ BENCHMARK_KEDA_SCALE_DOWN_PERIOD ?= 120
 # most conservative recommendation across it, so load must persist this long
 # before replicas are added. The scenario ships 120s, which dominates every
 # other latency in the loop -- KEDA polls every 5s, WVA recomputes every 15s,
-# and a decode replica measured 61s to Ready on pokprod001. Benchmarking WVA's
+# and a decode replica measured 61s to Ready on the shared GPU cluster. Benchmarking WVA's
 # reaction with a 120s window measures the window.
 #
 # 0 is a VALID value here (unlike periodSeconds), meaning "act on the current
@@ -307,7 +307,7 @@ BENCHMARK_KEDA_SCALE_DOWN_PERIOD ?= 120
 # almost nothing, which is why these two are the way round they are.
 #
 # The asymmetry is deliberate: removing a replica too eagerly costs a 61s cold
-# start (measured on pokprod001) on the next request, while keeping one too
+# start (measured on the shared GPU cluster) on the next request, while keeping one too
 # long only costs money.
 BENCHMARK_KEDA_SCALE_UP_STABILIZATION ?= 0
 BENCHMARK_KEDA_SCALE_DOWN_STABILIZATION ?= 300
@@ -1566,7 +1566,7 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.
 	@# CLONE can never bootstrap: the guard above reports prerequisites fine,
 	@# install.sh then dies on "sudo: a password is required", and the standup
 	@# fails several minutes in having said nothing useful. Observed on WSL
-	@# against pokprod.
+	@# against the shared GPU cluster.
 	@#
 	@# The CLI is just an editable install of the checkout, so a plain venv plus
 	@# `pip install -e .` produces the same thing install.sh would, in $HOME, with
@@ -1827,7 +1827,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# `fma.enabled` renders the port-NAME form, which generates no target for a
 	@# launcher (they declare no container ports). The FMA stack keeps serving and
 	@# its metrics just stop being collected, with no error anywhere. That is
-	@# exactly what happened on pokprod001 -- an FMA guide at 09:25Z, another guide
+	@# exactly what happened on the shared GPU cluster -- an FMA guide at 09:25Z, another guide
 	@# over the top at 09:26Z -- and it is why a benchmark once showed a variant
 	@# flat at one replica through a 155-deep queue.
 	@launchers=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pods -n "$(BENCHMARK_NAMESPACE)" -l app.kubernetes.io/component=launcher --no-headers 2>/dev/null | wc -l | tr -d ' '); \
@@ -2006,7 +2006,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# (ghcr.io/llm-d/...), which rejects --external-scaler-bind-address, and it
 	@# pulls kustomize resources from
 	@# github.com/llm-d/llm-d/guides/workload-autoscaling/wva-config/platform/ocp?ref=main,
-	@# a path that does not currently exist -- standup died there on pokprod.
+	@# a path that does not currently exist -- standup died there on the shared GPU cluster.
 	@# Restored with the rest of the scenario from the .bak below.
 	@yq -i '(.scenario[] | select(has("wva")) | .wva.enabled) = false' \
 		$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml && \
@@ -2020,7 +2020,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# assigns a UID from the namespace range and the copy dies with
 	@#   cp: cannot create regular file '/usr/local/bin/...': Permission denied
 	@# followed by analyze_results failing on a results.json that was never
-	@# written. Observed on pokprod001 with the v0.7.8 template.
+	@# written. Observed on the shared GPU cluster with the v0.7.8 template.
 	@#
 	@# Granting anyuid to the harness ServiceAccount does NOT fix it there:
 	@# openshift-ai-llminferenceservice-multi-node-scc has priority 11 against
@@ -2758,7 +2758,7 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 	@# time the flag is back on and the harness dies on it:
 	@#   [01] uninstall_helm: FAILED - Helm uninstall had errors
 	@#   accumulating resources from '...wva-config/platform/ocp?ref=main'
-	@# Measured tearing a guide namespace down on pokprod. The namespace deleted
+	@# Measured tearing a guide namespace down on the shared GPU cluster. The namespace deleted
 	@# cleanly and left no cluster-scoped RBAC behind, so this reads as a failed
 	@# teardown that in fact tore everything down -- the worst kind to debug.
 	@#
@@ -2926,6 +2926,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rebalances the quoting and hands jq a truncated program. Both have
 	@# happened here; the even one shipped.
 	@bash hack/check-quoted-programs.sh
+	@echo "Checking that no tracked file names an internal cluster..."
+	@bash hack/check-cluster-names.sh
 	@echo "Checking the jq marker predicates..."
 	@bash hack/check-jq-predicates.sh
 	@echo "Checking the utilization-share script..."

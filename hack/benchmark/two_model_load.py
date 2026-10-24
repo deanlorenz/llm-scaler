@@ -216,7 +216,7 @@ def connect(url, timeout, resolved=None):
     a replica that is already saturated where a new one would have been routed
     elsewhere, and this run exists to measure what the router does during a
     ramp. But a new connection also means a new DNS lookup, and a 34-minute run
-    at 14 rps makes ~28,000 of them: measured on CoreWeave, roughly HALF of all
+    at 14 rps makes ~28,000 of them: measured on a multi-node H200 cluster, roughly HALF of all
     requests came back `gaierror` -- the cluster's resolver, not the models.
     Both arms were hit about equally, so the comparison was not biased, it was
     thinned to the survivors of a DNS failure that has nothing to do with warm
@@ -416,7 +416,7 @@ def drive(args):
     # so they never cache the prefix, so they can never start winning. It is a
     # self-reinforcing lock-in.
     #
-    # Measured on CoreWeave: across a whole 34-minute arm, ONE Qwen replica did
+    # Measured on a multi-node H200 cluster: across a whole 34-minute arm, ONE Qwen replica did
     # 6,000,692 prompt tokens and every other replica the autoscaler added did
     # exactly ZERO -- including a warm-pool Pod that was awake, Ready, in the
     # EndpointSlice and in the EPP's own backend list. Adding capacity could not
@@ -451,7 +451,7 @@ def drive(args):
     #
     # A fresh Pod on a service mesh cannot resolve DNS for the first half-minute
     # or so: the sidecar starts alongside this container and nothing makes the
-    # application wait for it. Measured on CoreWeave -- two probe Pods in a row
+    # application wait for it. Measured on a multi-node H200 cluster -- two probe Pods in a row
     # failed with "Temporary failure in name resolution" and the third got a 200
     # from a model that had been serving the whole time.
     #

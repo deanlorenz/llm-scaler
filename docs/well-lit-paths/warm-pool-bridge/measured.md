@@ -7,7 +7,7 @@ the same traffic: autoscaling alone (`nopool`), autoscaling with a shared
 one-Pod warm pool (`pool`), and no pool but a floor of two replicas per model
 (`floor`). Bursts are separated by long quiet stretches, so a held floor is
 paid for mostly idle — the shape a pool exists for. One run of each arm, on
-CoreWeave H200s, 2026-09-18. The scenario and every guard that keeps the arms
+a multi-node H200 cluster, 2026-09-18. The scenario and every guard that keeps the arms
 comparable are in the
 [benchmarking guide](../../guides/benchmarking/two-model-warm-pool.md); the
 numbers below are that report's, unedited.

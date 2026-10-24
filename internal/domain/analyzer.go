@@ -302,7 +302,7 @@ type VariantCapacity struct {
 	// a number none of those replicas delivers: the pool runs its engines at a
 	// lower --gpu-memory-utilization than the workload, so less of the GPU is KV
 	// cache and a bridge's memory-bound capacity is genuinely smaller (measured on
-	// pokprod 2026-08-31: pool 0.90, workload 0.95). The error grows as the median
+	// the shared GPU cluster, 2026-08-31: pool 0.90, workload 0.95). The error grows as the median
 	// gets shorter — with one own replica and one bridge the median is their
 	// average. See WarmPoolPerReplicaCapacity for the bridge's own reading.
 	PerReplicaCapacity float64

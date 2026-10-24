@@ -92,7 +92,7 @@ func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
 		phase2 := s.at >= e8Phase2
 		for i := range int(90 * time.Second / cycle) {
 			now := s.time(t).Add(time.Duration(i) * cycle)
-			rs := tr.Observe("evgensh-sg1/qwen", tr.Measure("evgensh-sg1/qwen", rows, roles, queueOnly, now), now)
+			rs := tr.Observe("team-sg1/qwen", tr.Measure("team-sg1/qwen", rows, roles, queueOnly, now), now)
 			r := only(t, rs)
 			if r.Changed && r.Sustained {
 				warnedAt = now

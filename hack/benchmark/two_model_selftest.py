@@ -512,7 +512,7 @@ else:
     ok("driver queueing above the limit is refused")
 
 case("an arm thinned by the loader's OWN network errors is refused")
-# Measured on CoreWeave: a new connection per request meant a DNS lookup per
+# Measured on a multi-node H200 cluster: a new connection per request meant a DNS lookup per
 # request, and at ~14 rps for 34 minutes the resolver gave out -- gaierror on
 # half of all requests, in both arms. The table was produced anyway, over the
 # survivors, and read as a result.
@@ -884,7 +884,7 @@ else:
 # the harness -> report conversion
 #
 # These fixtures are the SHAPE inference-perf v0.6.1 actually writes, read off a
-# real run on CoreWeave: per-request records with no token times at all, and a
+# real run on a multi-node H200 cluster: per-request records with no token times at all, and a
 # `time_to_first_token` distribution per stage. A fixture invented from the
 # newer schema would make every case here pass against code that cannot read a
 # single real run.

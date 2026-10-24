@@ -187,7 +187,7 @@ RISE_WINDOW="${RISE_WINDOW:-240}"
 # reset at a boundary -- so the band has to clear the whole run's divergence,
 # not one stage's. A stage
 # ends when its in-flight requests drain and the BURSTING model drains slower,
-# so the two models do not cross a boundary together -- measured on CoreWeave,
+# so the two models do not cross a boundary together -- measured on a multi-node H200 cluster,
 # per-stage drains of 4-16s and a net divergence that reached 6.1s and changed
 # sign with the burst. Without a band that divergence is time when both models
 # burst at once, which a pool can only half serve, and it would be recorded as
@@ -1039,7 +1039,7 @@ verb_preflight() {
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
     # a whole 90-minute A/B.
     #
-    # Measured on CoreWeave: preflight reported "11 free, this run peaks at 6"
+    # Measured on a multi-node H200 cluster: preflight reported "11 free, this run peaks at 6"
     # and passed. The run then sat with 4 replicas Pending for thirty minutes
     # and 8 by the end, because a decode Pod asks for 16 CPU as well as its
     # accelerator, and the nodes that HAD free accelerators had 7 and 15 free
@@ -1110,7 +1110,7 @@ verb_preflight() {
     # not merge -- it fails on ownership:
     #   ServiceAccount "istio-reader-service-account" in namespace "istio-system"
     #   exists and cannot be imported into the current release
-    # Measured on CoreWeave: a shared cluster with Istio installed months
+    # Measured on a multi-node H200 cluster: a shared cluster with Istio installed months
     # earlier, not Helm-managed. The standup got as far as deploying one stack
     # before dying, and the half-built namespace then tripped the EPP-reuse
     # guard on the next attempt, so the fix was two failures away from the
@@ -1361,7 +1361,7 @@ gateway_host() {
     # one namespace means something else is deployed here, and driving the wrong
     # one produces a run of 404s that reads as a pool result.
     #
-    # The HTTP port BY NAME, never ports[0]. Measured on CoreWeave: the istio
+    # The HTTP port BY NAME, never ports[0]. Measured on a multi-node H200 cluster: the istio
     # gateway Service lists 15021 (status-port) first and 80 second, so ports[0]
     # sent every request at the readiness port -- which answers, with 404, for
     # the whole run.
@@ -1470,7 +1470,7 @@ gateway_ip() {
     # The gateway Service's ClusterIP. Resolved ONCE, here, so the load never
     # resolves anything.
     #
-    # Measured twice on CoreWeave, at only ~10 rps aggregate: 5.7% of requests
+    # Measured twice on a multi-node H200 cluster, at only ~10 rps aggregate: 5.7% of requests
     # failed with `ClientConnectorDNSError: Temporary failure in name
     # resolution`, spread across the whole run rather than bunched at startup --
     # so waiting for the endpoint to answer first does not fix it. aiohttp
@@ -3040,7 +3040,7 @@ hold_awake() {
 
 # WHICH REPLICAS ACTUALLY DID THE WORK.
 #
-# Nothing measured this, and it invalidated three runs. Measured on CoreWeave:
+# Nothing measured this, and it invalidated three runs. Measured on a multi-node H200 cluster:
 # across a whole arm ONE Qwen replica did 6,000,692 prompt tokens and every
 # other replica the autoscaler added did exactly ZERO -- including a warm-pool
 # Pod that was awake, Ready, in the EndpointSlice and in the EPP's own backend

@@ -8,8 +8,8 @@ template -- so this runs both arms against a real cluster and compares.
 The affinity under test is EXTRACTED FROM THE RENDERED TEMPLATE, not retyped, so
 what runs is the artifact patch_harness.sh actually produces.
 
-Setup mirrors pokprod in miniature: launchers occupy a strict SUBSET of the
-eligible nodes, and the requester is eligible everywhere. Measured on pokprod,
+Setup mirrors the shared GPU cluster in miniature: launchers occupy a strict SUBSET of the
+eligible nodes, and the requester is eligible everywhere. Measured on the shared GPU cluster,
 that ratio is 5 launcher nodes out of 14 GPU nodes -- so an unconstrained
 requester lands beside warm capacity about a third of the time, and worse in
 practice because default spreading pushes it away from the nodes already running

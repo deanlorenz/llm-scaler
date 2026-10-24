@@ -18,7 +18,7 @@
 #
 # `kubectl logs -f` does not survive the run: the apiserver's load balancer
 # resets long-lived streaming connections on an idle-ish timeout regardless of
-# how much log volume is flowing (measured on pokprod001: "connection reset by
+# how much log volume is flowing (measured on the shared GPU cluster: "connection reset by
 # peer" at ~15 minutes into an 83-minute run, mid-stream, pod itself never
 # restarted). A bare `-f` call that drops silently at that point undoes the
 # whole reason this script exists -- 69 minutes of the run's k1/k2 decisions

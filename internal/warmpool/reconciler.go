@@ -235,7 +235,7 @@ type Reconciler struct {
 	// keyed by pool. Same reason as lastSummary, and more pressing: that line is
 	// emitted on EVERY pass, and a pass is not the Interval. Passes are
 	// trigger-driven with only MinGap (250ms) as a floor, so a busy trigger runs
-	// the loop about four times a second -- measured at 3.2/s on pokprod, 8527
+	// the loop about four times a second -- measured at 3.2/s on the shared GPU cluster, 8527
 	// identical lines in 45 minutes. Guarded by passMu.
 	lastStay map[string]string
 
@@ -1432,7 +1432,7 @@ func (r *Reconciler) awakeIntent(
 		// DEDUPED, because "every pass" is not "every Interval". A pass runs on
 		// the 5s tick OR whenever a decision lands, floored only by MinGap
 		// (250ms) -- so a busy trigger drives this about four times a second.
-		// Measured on pokprod: 3.2/s, 8527 identical lines in 45 minutes, which
+		// Measured on the shared GPU cluster: 3.2/s, 8527 identical lines in 45 minutes, which
 		// buried the run they were supposed to explain. The decision is what is
 		// worth reading, so it is printed when it CHANGES; an unchanged decision
 		// on the next pass says nothing new.
@@ -1463,7 +1463,7 @@ func (r *Reconciler) awakeIntent(
 	// preempts MinInterval by design, and the argument for that preemption
 	// assumes there is an awake model to trade away, which there is not.
 	//
-	// Measured on pokprod 2026-08-30: 263 identical switch intents in about four
+	// Measured on the shared GPU cluster, 2026-08-30: 263 identical switch intents in about four
 	// minutes, several per second, all `from ""` to the same variant. Two real
 	// costs, beyond the noise: the intent was announced at default verbosity
 	// every pass, and lastSwitchAt was re-stamped every pass -- so the floor

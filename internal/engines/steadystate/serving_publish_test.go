@@ -31,7 +31,7 @@ func servingCountFor(t *testing.T, variant string) (int, bool) {
 // correctly, its demand is the variant's -- so counting it here answers yes one
 // replica early, and the pool hands back the Pod that was carrying the traffic.
 //
-// Measured on pokprod 2026-08-30: with one ordinary replica Ready and one bridge
+// Measured on the shared GPU cluster, 2026-08-30: with one ordinary replica Ready and one bridge
 // lent, the pool was told "ready 1, serving 2".
 func TestABridgeIsNotCountedAsAServingReplica(t *testing.T) {
 	decision.DefaultServing.Reset()
@@ -117,7 +117,7 @@ func TestAnUnattributedRowPublishesNothing(t *testing.T) {
 // not in the rotation strands the traffic just as surely as going home too
 // early.
 //
-// Measured on pokprod 2026-08-30: a variant with ONE replica reported four,
+// Measured on the shared GPU cluster, 2026-08-30: a variant with ONE replica reported four,
 // because nothing between Prometheus and this count checked the Pod at all.
 func TestAReportingButNotReadyReplicaIsNotServing(t *testing.T) {
 	decision.DefaultServing.Reset()

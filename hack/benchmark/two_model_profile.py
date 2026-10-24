@@ -49,7 +49,7 @@ llm-d's shipped scheduling profile weights prefix-cache-scorer highest (3,
 against 2 for queue depth and 2 for KV utilisation), and its hashes chain from
 the first token -- so a replica that has cached a prompt's opening wins every
 later request that shares it, regardless of its queue, and a replica that has
-cached nothing never receives one. MEASURED on CoreWeave with the shared_prefix
+cached nothing never receives one. MEASURED on a multi-node H200 cluster with the shared_prefix
 dataset at 32 groups x 64 prompts (2048 distinct prompts, cycled): per model
 the busiest engine held 99.0% and 98.7% of prompt tokens over a whole arm, and
 every replica the autoscaler added served 0.3-2.0%. With synthetic, an EMPTY
@@ -73,7 +73,7 @@ def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
     Why that band is needed at all: the two models do not cross a stage
     boundary at the same instant. A stage ends when its in-flight requests
     drain, and the model that is BURSTING drains slower -- measured on
-    CoreWeave, per-stage drains of 4-16s and a net divergence that reached
+    a multi-node H200 cluster, per-stage drains of 4-16s and a net divergence that reached
     6.1s and CHANGED SIGN as the burst moved from one model to the other.
     Without a band, that divergence is time when both models are bursting at
     once. A pool asked for two models simultaneously can serve one, so it would

@@ -50,7 +50,7 @@ func (c *ReplicaMetricsCollector) buildInstanceKey(ctx context.Context, namespac
 	// the locator resolves a Pod name to its scale target from a cache that is
 	// deliberately never invalidated -- correct, since ownerReferences cannot
 	// change, and together the reason a DELETED Pod went on contributing supply
-	// long after it was gone. Measured on pokprod: a variant with one replica
+	// long after it was gone. Measured on the shared GPU cluster: a variant with one replica
 	// reported four.
 	//
 	// Dropped HERE rather than at row assembly because this is the one point

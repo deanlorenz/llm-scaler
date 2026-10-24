@@ -94,7 +94,7 @@ deploy_fma_launcher_podmonitor() {
 # a working optimized-baseline namespace carries a `decode` PodMonitor selecting
 # llm-d.ai/role=decode on port `modelserver`. But a namespace built from the guide
 # need not have one, and the failure is silent in the worst way. Measured on
-# pokprod001: dhl-la-1708 ran four replicas for hours and produced ZERO vllm
+# the shared GPU cluster: a tenant namespace ran four replicas for hours and produced ZERO vllm
 # series, while `check-prereqs` reported "[SUCCESS] Prometheus: <url>" — true, and
 # about the endpoint, not its contents — and the controller's own startup
 # validation passed for the same reason. WVA then logged "No saturation metrics
@@ -119,7 +119,7 @@ deploy_fma_launcher_podmonitor() {
 # Markers come from so_serving_markers, never a private list. Matching the
 # serving ROLE alone missed the shape the llm-d modelservice path actually
 # renders -- a PodMonitor selecting llm-d.ai/inferenceServing=true plus
-# llm-d.ai/model, seen on pokprod as vllm-<model>-<hash> -- and llm-d attaches
+# llm-d.ai/model, seen on the shared GPU cluster as vllm-<model>-<hash> -- and llm-d attaches
 # llm-d.ai/-prefixed labels to non-serving components too (gateway, EPP,
 # requester), so the marker list is the only thing that separates the two. One
 # definition for discovery, the preflight count and this check, or they disagree.
@@ -982,7 +982,7 @@ act.
 #     featureGates:
 #       - flowControl
 #
-# Measured on pokprod001: the namespaces whose EPP config carries that list have
+# Measured on the shared GPU cluster: the namespaces whose EPP config carries that list have
 # inference_extension_flow_control_queue_size series; the one built from llm-d's
 # optimized-baseline guide has no featureGates section and no series.
 #
@@ -1150,7 +1150,7 @@ wva_epp_scrapers() {
     # with `Cannot index string with string ("spec")`. stderr is sent to /dev/null
     # here, so the function simply returned nothing, and the gate refused the
     # install of a namespace whose EPP ServiceMonitor was working. Measured on
-    # pokprod001: the selector matched the Service 2/2 by hand, `$subset` alone
+    # the shared GPU cluster: the selector matched the Service 2/2 by hand, `$subset` alone
     # returned the monitor, and the combined program returned an error.
     local unevaluated='
         .items[]?
@@ -1171,7 +1171,7 @@ wva_epp_scrapers() {
 # wva_report_epp_flowcontrol reports both EPP requirements and returns non-zero
 # when either is missing, so the caller decides whether that is fatal.
 #
-# They are SEPARATE requirements with different fixes, measured on pokprod001:
+# They are SEPARATE requirements with different fixes, measured on the shared GPU cluster:
 #
 #   inference_extension_scheduler_attempts_total   19 namespaces — published
 #     (arrival rate -> throughput analyzer)        whenever the EPP is SCRAPED.

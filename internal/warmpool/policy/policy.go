@@ -39,7 +39,7 @@ type Config struct {
 	// long as it takes to warm. Handing the bridge back at that instant swaps a
 	// warm Pod for a cold one at exactly the crossover.
 	//
-	// MEASURED on CoreWeave: bridges were returned 7s, 7s and 19s after the
+	// MEASURED on a multi-node H200 cluster: bridges were returned 7s, 7s and 19s after the
 	// replica they were covering reported Ready. The one rise where no replica
 	// ever arrived -- so the pool carried the whole burst -- was the best of the
 	// four by 5679ms at p95, which is what suggested the handover is where the

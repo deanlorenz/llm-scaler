@@ -19,7 +19,7 @@ import (
 // "staying on its awake model" was emitted every pass, and a pass is not the
 // Interval: passes run on the 5s tick OR whenever a decision lands, floored only
 // by MinGap at 250ms. A busy trigger therefore drives about four a second.
-// Measured on pokprod: 3.2/s, 8527 identical lines in 45 minutes, which buried
+// Measured on the shared GPU cluster: 3.2/s, 8527 identical lines in 45 minutes, which buried
 // the switch and lend lines they were supposed to sit alongside.
 //
 // The line's own comment claimed "every five seconds", which is where the

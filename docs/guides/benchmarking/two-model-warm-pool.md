@@ -361,7 +361,7 @@ scale-up, and 240 s of silence inside a 2040 s run. It is `0` here.
 
 That is the whole premise, and it does not hold for free. **A stage ends when
 its in-flight requests drain, and the bursting model drains slower**, so the two
-models cross a boundary at different instants. Measured on CoreWeave: per-stage
+models cross a boundary at different instants. Measured on a multi-node H200 cluster: per-stage
 drains of 4–16 s, and a cumulative divergence that reached **6.1 s and changed
 sign** as the burst moved between models. Each second of it is both models
 bursting, which a pool of one lendable Pod would record as the pool failing:
@@ -403,7 +403,7 @@ The reason is llm-d's shipped scheduling profile. It weights
 utilisation), and the scorer's hashes chain from the first token. A replica that
 cached a prompt's opening wins every later request sharing it, **regardless of
 its queue**, and a replica that cached nothing never gets a request, so it never
-starts winning. Measured on CoreWeave with the `shared_prefix` dataset (32 groups
+starts winning. Measured on a multi-node H200 cluster with the `shared_prefix` dataset (32 groups
 × 64 prompts, cycled, the suite's own shape): per model, the busiest engine did
 **99.0 % and 98.7 %** of the prompt tokens over a 36-minute arm, and every added
 replica did 0.3–2.0 %. Both arms were one-replica fleets, and the aggregate hid
@@ -424,7 +424,7 @@ re-measure both ends of the burst ([calibrating the load](#calibrating-the-load)
 
 inference-perf v0.6.1 reports `time_to_first_token` as a **per-stage
 distribution**. Its per-request records carry no token timestamps (measured on
-CoreWeave: 210 records, raw response chunks, no time on any), so nothing can be
+a multi-node H200 cluster: 210 records, raw response chunks, no time on any), so nothing can be
 re-cut into a window after the run.
 
 So **the rise window is a stage**. Every phase after the lead-in is split at
@@ -455,7 +455,7 @@ computing nothing the harness already measured.
 ### The data path resolves nothing
 
 The load addresses the gateway by **ClusterIP**, not by name. Measured twice on
-CoreWeave at only ~10 rps total: **5.7% of requests** died of
+a multi-node H200 cluster at only ~10 rps total: **5.7% of requests** died of
 `ClientConnectorDNSError: Temporary failure in name resolution`, spread across
 the run. aiohttp resolves once per connection, and the cluster default
 `ndots:5` makes a four-dot service name try every search domain first: four

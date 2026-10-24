@@ -9,7 +9,7 @@ import (
 //
 // vLLM's data-parallel RPC port is a CONSTANT default, 29550 — unlike the
 // data-parallel MASTER port, which vLLM picks from get_open_ports_list at
-// startup. Verified against the running engine on pokprod 2026-08-31:
+// startup. Verified against the running engine on the shared GPU cluster, 2026-08-31:
 //
 //	ParallelConfig.data_parallel_rpc_port  = 29550   (fixed)
 //	ParallelConfig.data_parallel_master_port = 29500 (replaced at startup)

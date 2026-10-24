@@ -32,8 +32,8 @@ def normalise(expr):
     template variable -- so the SAME panel arrives as any of
 
         namespace=~"$namespace"      (the dashboard's literal text)
-        namespace=~"evgensh-wva-test" (Grafana, after interpolation)
-        namespace="evgensh-wva-test"  (what capture rewrote it to)
+        namespace=~"team-a" (Grafana, after interpolation)
+        namespace="team-a"  (what capture rewrote it to)
 
     Matching on the exact string would miss two of the three and render an empty
     panel that looks like a quiet run. A snapshot covers ONE namespace, so

@@ -17,7 +17,7 @@ inference-perf v0.6.1 writes, per run directory:
   per_request_lifecycle_metrics.json   OPTIONAL and off by default: see below
 
 **TTFT is per STAGE, not per request.** The per-request records carry no token
-timestamps at all in this version -- measured on CoreWeave: 210 records, every
+timestamps at all in this version -- measured on a multi-node H200 cluster: 210 records, every
 one with `info.response_metrics.response_chunks` and no time on any chunk. So
 latency cannot be re-cut into windows after the fact, and the profile makes the
 windows that matter into stages instead. This converter reads the distributions

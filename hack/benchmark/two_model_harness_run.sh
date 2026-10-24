@@ -73,7 +73,7 @@ if [ "$preload_rc" -ne 0 ]; then
 fi
 
 # The endpoint has to ANSWER before the barrier, not merely exist. Measured on
-# CoreWeave: 12 of 210 requests -- 6%, three times the report's client-side loss
+# a multi-node H200 cluster: 12 of 210 requests -- 6%, three times the report's client-side loss
 # threshold -- failed with ClientConnectorDNSError, "Temporary failure in name
 # resolution", because this Pod's istio sidecar was not ready when the app
 # container started issuing. Those are the DRIVER's failures; a run thinned by
