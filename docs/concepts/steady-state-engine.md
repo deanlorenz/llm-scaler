@@ -152,9 +152,12 @@ state of a new variant for its first minutes.
 
 The line is learned from replicas between 0.15 and 0.80 of their KV cache.
 Above 0.80 an engine short of memory preempts, and its latency stops following
-the line. One replica above 0.80 still counts: one whose running batch is at
-`max_num_seqs`, with no preemption in the last minute. That replica is limited
-by its sequence cap, not by memory. Without it, a fleet whose router sends
+the line. One replica above 0.80 still counts: one whose running batch is
+exactly the `--max-num-seqs` set on the engine, with requests waiting and no
+preemption in the last minute. That replica is limited by its sequence cap,
+not by memory. The band and the preemption allowance are policy keys
+(`itlMinObservableK`, `itlMaxObservableK`, `itlCapMaxPreemptionRate`; see
+[the scaling policy](../reference/scaling-policy.md#v2-analyzer-parameters)). Without it, a fleet whose router sends
 everything to one replica would never learn a line: that replica sits above
 the band and its idle siblings below it.
 

@@ -69,10 +69,10 @@ type Reading struct {
 
 	// What the window was offered this cycle, by why a row was turned away.
 	// Offered counts the readings the window kept; BelowBand those it dropped
-	// for a k below DefaultMinObservableK (an idle replica).
+	// for a k below the band's lower edge (an idle replica).
 	Considered, NotReady, NoITL, NoK, AboveBand, BelowBand, Offered int
-	// Capped counts the Offered readings above DefaultMaxObservableK, taken
-	// because their replica was at its sequence cap (atSequenceCap).
+	// Capped counts the Offered readings above the band's upper edge, taken
+	// because their replica was at its sequence cap (Admission.atSequenceCap).
 	Capped int
 	// Unsteady counts the Offered readings kept out of the full fit because
 	// their replica's load had moved within DefaultSteadyFor.
@@ -101,11 +101,12 @@ type Reading struct {
 // fits ITL(k) = A*k + B over it.
 //
 // A row is a reading when it is the variant's, Ready and not lent by the warm
-// pool, with a finite positive ITL and a k in (0, DefaultMaxObservableK]; the window
-// itself drops a k below DefaultMinObservableK. A k above the band is a reading
-// too when the replica is at its sequence cap: maxNumSeqs is the engine's
-// max_num_seqs, per rank, and zero when unknown, which admits nothing above
-// the band (see atSequenceCap). A full fit is taken when the
+// pool, with a finite positive ITL and a k inside adm's band (by default
+// [DefaultMinObservableK, DefaultMaxObservableK]). A k above the band is a
+// reading too when the replica is at its sequence cap (Admission.atSequenceCap);
+// the zero Admission knows no cap and admits nothing above it. The band is
+// judged per call, so a key's window may hold readings from a band the policy
+// has since narrowed; they age out with the window. A full fit is taken when the
 // window is Ready, and its B is remembered when positive. Otherwise, with at
 // least DefaultMinSamples readings, A alone is fitted with B pinned to the
 // remembered intercept, or DefaultBaselineSec before there is one: a fleet the
@@ -136,21 +137,22 @@ type Reading struct {
 // inside its settle -- a joiner's, or one the load came back to -- whose ITL
 // covers its warm-up, and while fewer than DefaultMinSettledSamples remain it
 // holds the key's last A.
-func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, maxNumSeqs int64, now time.Time) Reading {
+func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm Admission, now time.Time) Reading {
 	var r Reading
+	lo, hi := adm.band()
 	t.mu.Lock()
 	w, ok := t.windows[key]
 	if !ok {
-		// The windows' ceiling is a full cache: the band's upper edge is
+		// The windows span the whole cache: the band is the Admission's,
 		// applied below, where a capped replica's reading may pass it.
 		w = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, DefaultMinObservableK, 1)
+			DefaultMinKSpread, 0, 1)
 		t.windows[key] = w
 	}
 	sw, ok := t.steady[key]
 	if !ok {
 		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, DefaultMinObservableK, 1)
+			DefaultMinKSpread, 0, 1)
 		t.steady[key] = sw
 	}
 	traces, ok := t.traces[key]
@@ -193,15 +195,19 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, max
 			r.NoITL++
 		case !(rm.KvUsageInstant > 0):
 			r.NoK++
-		case rm.KvUsageInstant > DefaultMaxObservableK && !atSequenceCap(rm, maxNumSeqs):
+		case rm.KvUsageInstant < lo:
+			r.BelowBand++
+		case rm.KvUsageInstant > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
 		default:
-			// Add reports a reading it dropped: here, only a k below the band.
+			// Add drops nothing the cases above let through but a k above a
+			// full cache, which the collector never reports; counted as
+			// above the band all the same.
 			if w.add(Observation{K: rm.KvUsageInstant, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
-				r.BelowBand++
+				r.AboveBand++
 			} else {
 				r.Offered++
-				if rm.KvUsageInstant > DefaultMaxObservableK {
+				if rm.KvUsageInstant > hi {
 					r.Capped++
 				}
 				switch {
@@ -298,33 +304,6 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, max
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
-}
-
-// atSequenceCap reports whether the replica's batch is at its sequence cap,
-// with no preemption over the last minute, so its reading above
-// DefaultMaxObservableK is a point on its line (issue #287).
-//
-// The band stops at 0.80 to keep an engine thrashing out of the fit: the
-// readings above it steepen A and push B below zero, and preemption tracks
-// them (see DefaultMaxObservableK). A replica whose batch is at max_num_seqs
-// is not short of memory. It cannot take another sequence however much cache
-// is free, and a fill above the band is its sequences' contexts, not
-// pressure. Under uneven routing that replica can be the only one with a k
-// in reach: on one run a decode replica held 256 running (its max_num_seqs)
-// and 768 waiting at k 0.85-0.89 for 20 minutes while three siblings sat
-// below 0.15, and no line was ever fitted.
-//
-// Every condition is required, and an unknown one admits nothing:
-//   - maxNumSeqs is known, and the running batch is at it on every rank
-//     (max_num_seqs bounds one engine, so the cap is it times Ranks). A
-//     batch at the cap is not growing, and an engine preempting for memory
-//     sheds running sequences, which takes it below the cap.
-//   - The preemption rate was read and is zero: the ITL is a mean over the
-//     same minute, so not one of its tokens came from a preempting engine.
-func atSequenceCap(rm domain.ReplicaMetrics, maxNumSeqs int64) bool {
-	return maxNumSeqs > 0 &&
-		int64(rm.RunningRequests) >= maxNumSeqs*int64(rm.Ranks()) &&
-		rm.PreemptionRateKnown && rm.PreemptionRate == 0
 }
 
 // DefaultMinSettledSamples is the fewest readings, from replicas past their

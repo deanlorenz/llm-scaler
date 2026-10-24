@@ -269,11 +269,10 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		return vc, nil, d
 	}
 	params := a.engineParams(input.Namespace, input.ModelID, vs.VariantName)
-	var maxNumSeqs int64
-	if params != nil {
-		maxNumSeqs = params.MaxNumSeqs
-	}
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, maxNumSeqs, now)
+	// Analyze has checked the config's type; a direct caller may pass none,
+	// which reads as the defaults.
+	cfg, _ := input.Config.(*config.ScalingPolicy)
+	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, admission(cfg, params), now)
 	d.line = r
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -321,6 +320,19 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	return vc, reading, d
 }
 
+// admission is which rows teach the variant's line: the policy's ITL band, and
+// the sequence cap only when the engine's flag stated it (itl.Admission). The
+// saturation analyzer builds the same from the same two sources, so both
+// analyzers read a variant's rows alike.
+func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Admission {
+	if cfg == nil {
+		cfg = &config.ScalingPolicy{}
+	}
+	lo, hi := cfg.ITLBand()
+	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
+		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate()}
+}
+
 // newVariantReading is a variant's reading with every figure unknown: NaN,
 // which PublishSLO does not publish. The one place readings are made, because a
 // field left at Go's zero value is published as a real 0: a fill of zero, or a
@@ -335,11 +347,11 @@ func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 // came from: a full fit, B pinned to this key's own last full fit, or B pinned
 // to the default floor; or why there is none: the window held enough readings
 // and the pinned fit refused them, or it holds too few.
-func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, maxNumSeqs int64, now time.Time) (itl.Model, string, itl.Reading) {
+func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant string, adm itl.Admission, now time.Time) (itl.Model, string, itl.Reading) {
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
-	r := a.lines.Observe(key, variant, rows, maxNumSeqs, now)
+	r := a.lines.Observe(key, variant, rows, adm, now)
 	switch {
 	case r.Tier == itl.TierOLS:
 		return r.Model, constants.SLOSourceOwn, r

@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
@@ -98,6 +99,21 @@ func TestCollectReplicaMetrics_SequenceCap(t *testing.T) {
 		}
 	})
 
+	t.Run("a negative or infinite reading is dropped", func(t *testing.T) {
+		for _, v := range []float64{-1, math.Inf(1), math.Inf(-1)} {
+			got := collect(t, map[string]*source.MetricResult{
+				registration.QueryRunningRequests: series(podLabels, v),
+				registration.QueryPreemptionRate:  series(podLabels, v),
+			})
+			if got.RunningRequests != 0 {
+				t.Errorf("running %v read as %d, want 0", v, got.RunningRequests)
+			}
+			if got.PreemptionRateKnown {
+				t.Errorf("a preemption rate of %v must not be known", v)
+			}
+		}
+	})
+
 	t.Run("another model's preemptions are not this one's", func(t *testing.T) {
 		got := collect(t, map[string]*source.MetricResult{
 			registration.QueryPreemptionRate: series(foreign, 0),
@@ -122,5 +138,32 @@ func TestMergePodInstances_SequenceCap(t *testing.T) {
 	got = collapseToPods([]domain.ReplicaMetrics{rank(256, 0, true), rank(256, 0, false)})
 	if got[0].PreemptionRateKnown {
 		t.Error("a rank with no preemption reading must leave the pod's unknown")
+	}
+}
+
+// A pod of two ranks, each at its cap, collapsed and offered to the ITL fit:
+// the cap is max_num_seqs per rank, so the pod is capped at twice it, and one
+// rank short of it is not the pod at its cap.
+func TestSequenceCapAcrossRanks(t *testing.T) {
+	const maxSeqs = 256
+	rank := func(running int) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", VariantName: "v", Ready: true,
+			TotalKvCapacityTokens: 100000, KvUsageInstant: 0.87, KvUsageInstantKnown: true,
+			AvgITL: 0.08, GenerationTokenRate: 3000, RequestRate: 3,
+			RunningRequests: running, QueueLength: 384, PreemptionRateKnown: true}
+	}
+	adm := itl.Admission{MaxNumSeqs: maxSeqs}
+	at := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+
+	pods := collapseToPods([]domain.ReplicaMetrics{rank(maxSeqs), rank(maxSeqs)})
+	if len(pods) != 1 || pods[0].Ranks() != 2 {
+		t.Fatalf("collapsed = %+v, want one pod of two ranks", pods)
+	}
+	if r := itl.NewTracker().Observe("k", "v", pods, adm, at); r.Capped != 1 || r.AboveBand != 0 {
+		t.Errorf("both ranks at the cap: capped %d aboveBand %d, want 1 and 0", r.Capped, r.AboveBand)
+	}
+	pods = collapseToPods([]domain.ReplicaMetrics{rank(maxSeqs), rank(maxSeqs-6)})
+	if r := itl.NewTracker().Observe("k", "v", pods, adm, at); r.Capped != 0 || r.AboveBand != 1 {
+		t.Errorf("one rank short of the cap: capped %d aboveBand %d, want 0 and 1", r.Capped, r.AboveBand)
 	}
 }

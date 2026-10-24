@@ -82,6 +82,12 @@ type EngineParams struct {
 	NumGpuBlocksOverride  int64   // default: 0 (not set) — vLLM only
 	MaxNumBatchedTokens   int64   // default: 0 (auto)
 	MaxNumSeqs            int64   // default: 256 (vLLM --max-num-seqs / SGLang --max-running-requests)
+	// MaxNumSeqsSet is true when MaxNumSeqs was read from the engine's flag
+	// (directly or through a resolved variable reference), false when it is
+	// the default above. The default is a guess: vLLM V1 picks 1024 on
+	// large accelerators, so a replica running 300 sequences may be far below
+	// its real cap. See ExplicitMaxNumSeqs.
+	MaxNumSeqsSet bool
 	MaxModelLen           int64   // default: 0 (auto) (vLLM --max-model-len / SGLang --context-length)
 	EnforceEager          bool    // default: false (vLLM --enforce-eager / SGLang --disable-cuda-graph)
 	IsV1Engine            bool    // VLLM_USE_V1 env detection (default: true since v0.8); always true for SGLang
@@ -282,6 +288,17 @@ func parallelSize(n int) int {
 // engines. Callers that share learned state between variants gate on this.
 func (p *EngineParams) Complete() bool {
 	return p != nil && len(p.Unresolved) == 0
+}
+
+// ExplicitMaxNumSeqs is MaxNumSeqs when it was read from the engine's flag,
+// and 0 when it is a default or p is nil. A caller that needs the engine's
+// real cap, not an estimate of it, reads this: the ITL fit admits a reading
+// above its band only for a replica at its cap (itl.Admission).
+func (p *EngineParams) ExplicitMaxNumSeqs() int64 {
+	if p == nil || !p.MaxNumSeqsSet {
+		return 0
+	}
+	return p.MaxNumSeqs
 }
 
 // defaultEngineParams returns EngineParams with vLLM defaults
@@ -871,6 +888,7 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 			return applyUnusable
 		}
 		params.MaxNumSeqs = v
+		params.MaxNumSeqsSet = true
 	case "max_model_len":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {

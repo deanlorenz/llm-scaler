@@ -20,9 +20,9 @@ const (
 	QueryRunningRequests = "running_requests"
 
 	// QueryPreemptionRate is the query name for the sequences preempted per
-	// second per pod over the last minute, summed over its engine ranks: the
-	// same window the ITL mean is taken over, so a zero says no reading in
-	// that ITL was a preempting engine's.
+	// second per pod over ITLWindow, summed over its engine ranks: the window
+	// the ITL mean is taken over, so a zero says no token in that mean came
+	// from a preempting engine.
 	//
 	// vLLM only, and so registered once under its bare name: SGLang publishes
 	// no preemption counter, and on an SGLang fleet the query returns no
@@ -51,8 +51,8 @@ func registerSequenceCapQueries(registry *source.QueryList) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryPreemptionRate,
 		Type:        source.QueryTypePromQL,
-		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:num_preemptions_total{namespace="{{.namespace}}"}[1m])))`,
+		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:num_preemptions_total{namespace="{{.namespace}}"}[` + ITLWindow + `])))`,
 		Params:      []string{source.ParamNamespace},
-		Description: "Sequences preempted per second per pod over the last minute",
+		Description: "Sequences preempted per second per pod over the ITL window",
 	})
 }
