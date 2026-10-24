@@ -291,7 +291,7 @@ key with no `A` yet gets no line. `itl-window` reports the marked readings as
 
 The last `A` also holds when the window itself runs short: fewer than
 `DefaultMinSamples` readings left after `DefaultObservationMaxAge`. A replica
-below `itlMinObservableK` offers no reading, so a fleet that learned its line at
+below `analyzerTuning.itlBand.minObservableK` offers no reading, so a fleet that learned its line at
 load and then served light load for half an hour used to lose the line, the
 derived mu and the throughput floor with it, and was sized by KV occupancy
 alone. At light load that reads far below the throughput share served: one H200
