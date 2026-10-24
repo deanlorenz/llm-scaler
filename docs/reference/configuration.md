@@ -81,7 +81,7 @@ from the release notes. See
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |
 | `CHECK_ONLY` | Run the prerequisite and permission checks, then exit without deploying. Set by `--check` / `make check-prereqs` | `false` |
-| `WVA_REPLICAS` | Controller replicas. Extra replicas are **warm standbys, not extra throughput**: only the elected leader runs the optimization loops. Two turn a node drain from "no decisions until rescheduled" into a lease timeout | `1` |
+| `WVA_REPLICAS` | Controller replicas. Extra replicas are **warm standbys, not extra throughput**: only the elected leader runs the optimization loops. Two turn a node drain from "no decisions until rescheduled" into a lease timeout. Every install writes this count, so a re-install over a controller scaled to 0 brings it back, and one over a controller scaled by hand says it is changing the count. Must be a non-negative integer. `0` installs the controller with no replica running: verification warns and does not fail | `1` |
 | `UNDEPLOY_SCALEDOBJECTS` | On uninstall, remove the ScaledObjects **this installer created** (KEDA then restores each workload's pre-autoscaling replica count). Adopted objects are never removed, but are listed, because their trigger now calls a scaler that is gone | `true` |
 | `UNDEPLOY_SHARED` | With `UNDEPLOY=true`, also remove Prometheus, the scaler backend and EPP. **Off by default**: they are shared, and removing them breaks everything else on the cluster that uses them | `false` |
 

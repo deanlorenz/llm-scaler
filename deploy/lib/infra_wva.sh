@@ -1527,6 +1527,55 @@ ${names}  target:
 EOF
 }
 
+# wva_append_replicas_patch sets the controller Deployment's replicas to
+# WVA_REPLICAS in the throw-away overlay's kustomization.yaml $1. Nothing is
+# written when WVA_REPLICAS is unset (install.sh defaults it to 1).
+#
+# More than one replica is a warm standby: the manifest sets
+# --leader-elect=true, so only the leader runs the optimization loops and the
+# standbys wait on the lease. Two replicas turn a node drain or a crash from "no
+# scaling decisions until the pod is rescheduled" into a lease timeout. It is
+# failover, not throughput.
+#
+# Written at 1 as well. The manifest carries no replicas field, and
+# `kubectl apply` leaves a field the manifest does not set alone, so a re-install
+# over a controller someone had scaled to 0 kept it at 0.
+#
+# WVA_REPLICAS must be a non-negative integer: anything else is refused here,
+# not left for the API server to reject the whole apply. With namespace $2 the
+# live Deployment's count is read first, and a re-install that changes it (a
+# controller scaled to 2 by hand, put back to 1) says so.
+wva_append_replicas_patch() {
+    local kustomization="$1" ns="${2:-}" live
+    [ -n "${WVA_REPLICAS:-}" ] || return 0
+    case "$WVA_REPLICAS" in
+        *[!0-9]*|0?*)
+            log_error "WVA_REPLICAS=$WVA_REPLICAS is not a non-negative integer (0, 1, 2, ...)" ;;
+    esac
+    if [ "$WVA_REPLICAS" = "0" ]; then
+        log_warning "WVA_REPLICAS=0: the controller is installed with no replica, so nothing makes scaling decisions until it is scaled up"
+    elif [ "$WVA_REPLICAS" != "1" ]; then
+        log_info "Controller replicas: $WVA_REPLICAS (leader-elected; standbys take over on failure, they do not share the work)"
+    fi
+    if [ -n "$ns" ]; then
+        live="$(kubectl get deployment wva-controller-manager -n "$ns" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null)" || live=""
+        if [ -n "$live" ] && [ "$live" != "$WVA_REPLICAS" ]; then
+            log_warning "Controller replicas: the live Deployment runs $live; this install sets it to WVA_REPLICAS=$WVA_REPLICAS. Pass WVA_REPLICAS=$live to keep it."
+        fi
+    fi
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    cat >> "$kustomization" <<EOF
+- patch: |-
+    - op: add
+      path: /spec/replicas
+      value: ${WVA_REPLICAS}
+  target:
+    kind: Deployment
+    name: wva-controller-manager
+EOF
+}
+
 # wva_write_prometheus_settings writes the Prometheus URL and TLS settings into
 # the live manager config, after the overlay apply, and warns about what the
 # controller will run with. Needs the WVA_LIVE_* globals that
@@ -1953,28 +2002,7 @@ EOF
     # that it handed out access nobody needed.
     wva_delete_legacy_crbs "$WVA_NS"
 
-    # WVA_REPLICAS runs the controller with a warm standby.
-    #
-    # The manifest already sets --leader-elect=true, and cmd/main.go exposes the
-    # lease/renew/retry durations, so the capability was there — the Deployment just
-    # had no replicas field (defaulting to 1) and the installer no way to set one.
-    #
-    # This is FAILOVER, not throughput: only the leader runs the optimization loops,
-    # and the standbys sit on the lease doing nothing until it lapses. Two replicas
-    # turn a node drain or a crash from "no scaling decisions until the pod is
-    # rescheduled" into a lease timeout.
-    if [ -n "${WVA_REPLICAS:-}" ] && [ "${WVA_REPLICAS}" != "1" ]; then
-        log_info "Controller replicas: $WVA_REPLICAS (leader-elected; standbys take over on failure, they do not share the work)"
-        cat >> "$tmp_overlay/kustomization.yaml" <<EOF
-- patch: |-
-    - op: add
-      path: /spec/replicas
-      value: ${WVA_REPLICAS}
-  target:
-    kind: Deployment
-    name: wva-controller-manager
-EOF
-    fi
+    wva_append_replicas_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS"
 
     # WVA_WATCH_NS separates the namespace the controller MANAGES from the one it
     # RUNS IN.
@@ -2407,8 +2435,10 @@ wva_reconcile_prometheus_scheme() {
     WVA_CONTROLLER_ROLLED_OUT=false
     if [ -z "$wva_deploy" ]; then
         log_warning "No WVA Deployment found in $WVA_NS to wait for"
-    elif kubectl rollout status "$wva_deploy" -n "$WVA_NS" --timeout=60s; then
+    elif wva_controller_rollout_ready "$wva_deploy" "$WVA_NS" 60s; then
         WVA_CONTROLLER_ROLLED_OUT=true
+    elif [ "$WVA_CONTROLLER_NOT_READY" = "scaled-to-zero" ]; then
+        log_warning "WVA controller $wva_deploy in $WVA_NS is at 0 replicas: no controller pod runs"
     else
         log_warning "WVA controller is not ready yet - check 'kubectl get pods -n $WVA_NS'"
     fi
