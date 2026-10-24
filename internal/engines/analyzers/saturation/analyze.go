@@ -544,6 +544,9 @@ func (c *cycle) explicitMaxNumSeqs() map[string]int64 {
 func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, error) {
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
 	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
+	// Why a decode replica has no derived mu, by pod, for
+	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
+	muMissing := make(map[string]string)
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
@@ -593,17 +596,21 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			kPrice := pricingK(c.cfg)
 			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
+			if !derived.ok {
+				muMissing[rm.PodName] = derived.why
+			}
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
 			// whether the fault is the output length, the sequence count, the
 			// ITL line or the pricing point -- and that ambiguity cost four
 			// discarded diagnoses in one session. maxNumSeqs is reported
-			// separately from seqs so the cap is visible when it binds.
+			// separately from seqs so the cap is visible when it binds. One
+			// line per replica, so at perReplicaLogLevel.
 			var maxSeqs int64
 			if engineParams != nil {
 				maxSeqs = engineParams.MaxNumSeqs
 			}
-			c.logger.V(logging.DEFAULT).Info("derived-mu",
+			c.logger.V(perReplicaLogLevel).Info("derived-mu",
 				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 				"ok", derived.ok,
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
@@ -655,6 +662,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			pricedRows = append(pricedRows, raw)
 		}
 	}
+	logReplicaCapacitySummary(c.logger, c.input.ModelID, c.input.Namespace, replicaCapacities, muMissing)
 	// Whether a decode replica is idle against what it can do needs its
 	// effective capacity, so every row priced first (idle_room.go).
 	c.settledIdleDecode = c.a.settledIdleDecode(c.input.Namespace, c.input.ModelID,

@@ -282,6 +282,8 @@ UNDEPLOY_SHARED=${UNDEPLOY_SHARED:-false}
 # Controller replicas. Leader-elected, so extras are warm standbys for failover,
 # not extra throughput — only the leader runs the optimization loops.
 WVA_REPLICAS=${WVA_REPLICAS:-1}
+# Controller --v. Empty keeps the shipped 2; 3 adds the per-replica capacity lines.
+WVA_VERBOSITY=${WVA_VERBOSITY:-}
 
 # Orchestration lives in deploy/lib/install_core.sh (keeps this entrypoint to variable defaults + sourcing only).
 main "$@"

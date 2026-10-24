@@ -58,6 +58,11 @@ type derivedMu struct {
 	seqs     float64
 	tokenSec float64
 	ok       bool
+	// why says, when ok is false, which term was missing: no-line (no ITL
+	// model), no-shape (no output length or KV footprint), k-price (pricing
+	// point outside (0, 1]), no-seqs (no sequence fits), no-itl (the line gives
+	// no ITL there) or no-rate.
+	why string
 }
 
 // capacityTokensFor is the replica's whole KV capacity in tokens: the LIVE
@@ -218,11 +223,14 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // about 1.5%.
 func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
-	if model.IsZero() || !(avgOutput > 0) || !(fleet.KVreq > 0) {
-		return derivedMu{}
+	if model.IsZero() {
+		return derivedMu{why: "no-line"}
+	}
+	if !(avgOutput > 0) || !(fleet.KVreq > 0) {
+		return derivedMu{why: "no-shape"}
 	}
 	if !(kPrice > 0) || kPrice > 1 {
-		return derivedMu{}
+		return derivedMu{why: "k-price"}
 	}
 	capacityTokens := capacityTokensFor(params, ranks, totalKvTokens)
 	// The SHAPE's KVreq, not one re-derived here. shape.New computes
@@ -237,19 +245,19 @@ func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	// right.)
 	seqs := itl.Sequences(kPrice, capacityTokens, fleet.KVreq)
 	if seqs <= 0 {
-		return derivedMu{}
+		return derivedMu{why: "no-seqs"}
 	}
 	if params != nil && params.MaxNumSeqs > 0 {
 		seqs = min(seqs, float64(params.MaxNumSeqs)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)
 	if !(itlSec > 0) {
-		return derivedMu{}
+		return derivedMu{why: "no-itl"}
 	}
 	tokenSec := seqs / itlSec
 	rate := tokenSec / avgOutput
 	if !(rate > 0) {
-		return derivedMu{}
+		return derivedMu{why: "no-rate"}
 	}
 	return derivedMu{rate: rate, seqs: seqs, tokenSec: tokenSec, ok: true}
 }

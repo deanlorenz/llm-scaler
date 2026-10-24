@@ -28,8 +28,13 @@ type ReplicaCapacity struct {
 	// about how old its figure is (see RollingAverage). K2WriteAgeKnown is
 	// false for P3 and P4, which come from no window. Diagnostics: published
 	// as wva_learned_state_k2_age_seconds.
-	K2WriteAge        time.Duration
-	K2WriteAgeKnown   bool
+	K2WriteAge      time.Duration
+	K2WriteAgeKnown bool
+	// K2NotRecorded is why a saturated reading this cycle was not recorded as
+	// k2 (a P1-obs-* label: unsettled, downstream, unadmitted, rollout,
+	// invalid), empty when there was none to refuse. Diagnostics: the
+	// saturation analyzer's replica-capacity-summary log line.
+	K2NotRecorded     string
 	EffectiveCapacity int64 // min(k1, k2)
 	// ReplicaDemand is the replica's resident KV tokens — TokensInUse on the main
 	// path, kvCacheUsage * effectiveCapacity on the fallback path — plus the

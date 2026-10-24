@@ -50,14 +50,15 @@ source "$WORK/prereqs.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch wva_kueue_source_configured \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
           wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read pl_grant_kueue_borrow_read \
-          wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs wva_append_replicas_patch; do
+          wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs wva_append_replicas_patch \
+          wva_append_verbosity_patch; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=58
+EXPECT_CASES=62
 RAN=0
 FAILED=0
 
@@ -125,6 +126,26 @@ check 'replicas: the default WVA_REPLICAS=1 is written, not left to the live obj
 check 'replicas: WVA_REPLICAS=2 is written' '2' "$(render_replicas 2)"
 check 'replicas: WVA_REPLICAS unset writes nothing (the manifest has no replicas)' \
     'null' "$(render_replicas '')"
+
+# ----------------------------------------------------------------------------
+# WVA_VERBOSITY reaches the manager's args, and only a level it logs at
+# ----------------------------------------------------------------------------
+# The per-replica capacity lines are at --v=3 and the shipped deployment passes
+# no --v, so a benchmark that cannot set it loses its k1/k2 report.
+render_verbosity() {
+    local dir
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/cluster-scoped/kubernetes" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    ( WVA_VERBOSITY="$1" wva_append_verbosity_patch "$dir/kustomization.yaml" 2>/dev/null ) || { echo refused; return; }
+    "${KBUILD[@]}" "$dir" \
+        | yq -N -r 'select(.kind == "Deployment" and .metadata.name == "wva-controller-manager")
+            | .spec.template.spec.containers[] | select(.name == "manager") | .args[] | select(test("^--v="))'
+}
+check 'verbosity: WVA_VERBOSITY=3 adds --v=3 to the manager' '--v=3' "$(render_verbosity 3)"
+check 'verbosity: unset adds no --v (the shipped default)' '' "$(render_verbosity '')"
+check 'verbosity: a non-integer is refused' 'refused' "$(render_verbosity abc)"
+check 'verbosity: a level above the most verbose one is refused' 'refused' "$(render_verbosity 6)"
 
 # ----------------------------------------------------------------------------
 # The expected set of admin-owned objects makes the install's own decision

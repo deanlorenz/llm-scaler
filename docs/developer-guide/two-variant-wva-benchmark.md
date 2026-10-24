@@ -317,7 +317,10 @@ automatically produces two outputs after the run completes:
 
 **Run `post_run_analyze.sh` promptly** (within a few minutes of run completion —
 The scaling manager controller pod's log buffer rotates and the window for extracting
-controller decisions closes):
+controller decisions closes). Its k1/k2 report reads lines the controller logs only at
+`--v=3`. `benchmark-run` installs the controller at that level
+(`BENCHMARK_WVA_VERBOSITY=3`); a controller installed another way needs
+`WVA_VERBOSITY=3` on its install, or the report comes back empty:
 
 ```bash
 bash hack/benchmark/post_run_analyze.sh <results-dir> $NS
