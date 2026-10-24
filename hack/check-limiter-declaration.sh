@@ -1410,11 +1410,84 @@ got="$(
     && ok "the install summary reports the kept live limiters when WVA_LIMITER is unset" \
     || fail "the install summary reported [$got] for a kept gpu-inventory,quota policy"
 
+# ---------------------------------------------------------------------------
+# #216: a quota entry with a reserved name stops the new controller at start.
+# The installer refuses it before applying anything, with the controller's own
+# message, rather than reporting a controller that never became ready. Executed
+# against the stubbed kubectl; what is asserted is the exit and what it said.
+reserved_refusal() {   # reserved_refusal <default entry> [optional] -- echoes "rc|stderr"
+    local rc=0 err
+    err="$(
+        LIM_DEFAULT="$1"
+        kubectl() { lim_stub "$@"; }
+        WVA_LIVE_LIMITERS='[{"type":"gpu-inventory"}]'
+        wva_refuse_reserved_limiter_names wva-system "${2:-}" 2>&1 >/dev/null
+        # Left as the caller had it: the install reads it again afterwards.
+        [ "$WVA_LIVE_LIMITERS" = '[{"type":"gpu-inventory"}]' ] || echo "WVA_LIVE_LIMITERS was overwritten"
+    )" || rc=$?
+    printf '%s|%s' "$rc" "$err"
+}
+RESERVED_POLICY='limiters:
+- name: gpu-limiter
+  type: quota
+  scope: cluster
+  quotas:
+    H100: 8'
+
+case_begin
+got="$(reserved_refusal "$RESERVED_POLICY")"
+if [ "${got%%|*}" = 1 ] && printf '%s' "$got" | grep -q 'quota entry name "gpu-limiter" is reserved' \
+   && printf '%s' "$got" | grep -q 'rename the entry'; then
+    ok "a quota entry named gpu-limiter is refused before the apply, with the controller's message"
+else
+    fail "a quota entry named gpu-limiter was not refused with the controller's message: [$got]"
+fi
+
+case_begin
+got="$(reserved_refusal 'limiters:
+- name: gpu-limiter
+  type: gpu-inventory
+- name: install-quota
+  type: quota
+  scope: cluster
+  quotas:
+    H100: 8')"
+[ "$got" = '0|' ] && ok "a physical entry named gpu-limiter beside a quota named otherwise passes, quietly" \
+    || fail "a physical entry named gpu-limiter was refused or warned about: [$got]"
+
+case_begin
+got="$(reserved_refusal '')"
+[ "$got" = '0|' ] && ok "no ConfigMap (a first install) passes the reserved-name check" \
+    || fail "an absent ConfigMap failed the reserved-name check: [$got]"
+
+case_begin
+got="$(reserved_refusal FORBIDDEN)"
+[ "${got%%|*}" = 0 ] && printf '%s' "$got" | grep -q 'Could not read' \
+    && ok "an unreadable policy is warned about, not passed in silence" \
+    || fail "an unreadable policy was not warned about: [$got]"
+
+case_begin
+got="$(reserved_refusal FORBIDDEN optional)"
+[ "${got%%|*}" = 0 ] && ! printf '%s' "$got" | grep -q 'WARNING\|Could not read' \
+    && ok "an unreadable optional policy namespace is an info line, not a warning on every tenant install" \
+    || fail "an unreadable optional policy namespace was [$got]"
+
+# The shell list mirrors config.ReservedLimiterNames; read the Go back.
+case_begin
+go_names="$(tr -d '\r' < "$ROOT/internal/config/quota_limiter.go" \
+    | awk '/^var ReservedLimiterNames = \[\]string\{/{f=1;next} f&&/^\}/{f=0} f' \
+    | tr -d ' \t",' | grep . | tr '\n' ' ' | sed 's/ $//')"
+if [ -n "$go_names" ] && [ "$go_names" = "$WVA_RESERVED_LIMITER_NAMES" ]; then
+    ok "WVA_RESERVED_LIMITER_NAMES matches config.ReservedLimiterNames ($go_names)"
+else
+    fail "WVA_RESERVED_LIMITER_NAMES [$WVA_RESERVED_LIMITER_NAMES] differs from config.ReservedLimiterNames [$go_names]"
+fi
+
 # How many cases ran. Without it, deleting a refuse_quota line removes a case
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=81
+CASES_EXPECTED=87
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

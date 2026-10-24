@@ -2120,6 +2120,16 @@ EOF
         # to the shipped none. Kept below when WVA_LIMITER is not given -- see
         # wva_live_limiters. Unreadable with WVA_LIMITER unset is a refusal: the
         # install cannot tell whether it is about to unbound a bounded controller.
+        # A quota entry with a reserved name stops the new controller at start
+        # (config.ReservedLimiterNames). Refused here, before the apply, with the
+        # reason: otherwise the install only reports a controller that never
+        # became ready. The controller's own policy matters only when it is
+        # kept (WVA_LIMITER unset); a policy in wva-policy applies either way.
+        wva_refuse_reserved_limiter_names wva-policy optional
+        if [ -z "${WVA_LIMITER:-}" ]; then
+            wva_refuse_reserved_limiter_names "$WVA_NS"
+        fi
+
         local live_rc=0
         wva_live_limiters "$WVA_NS" || live_rc=$?
         if [ "$live_rc" -ne 0 ] && [ -z "${WVA_LIMITER:-}" ]; then

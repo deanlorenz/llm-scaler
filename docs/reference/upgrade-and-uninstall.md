@@ -566,7 +566,14 @@ Installer:
   This release rejects a `quota` entry with one: the `default` entry holding
   it is rejected (`policyAccepted: "false"`, and `policyError` says
   `quota entry name "<name>" is reserved`), and a controller starting on it
-  refuses to start. v0.10.0-rc1 to rc4 only warned (the log line
+  refuses to start: `kubectl logs` of the new pod says
+  `quota entry name "<name>" is reserved ... rename the entry`, and the
+  rollout stalls with the old pod still serving. `make deploy-wva` checks
+  first and stops before applying anything, with the same message, when the
+  policy it keeps (`WVA_LIMITER` unset) or the one in `wva-policy` has such an
+  entry. It cannot check a policy it is not allowed to read, such as
+  `wva-policy` from a namespace-scoped install, or a policy namespace other
+  than `wva-policy`. v0.10.0-rc1 to rc4 only warned (the log line
   `WARNING: Quota limiter entry has a reserved name` and the `limiterWarnings`
   status key); an rc install showing either has such an entry. Read the
   policy itself rather than the status: the controller's own
