@@ -2006,13 +2006,13 @@ The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` fo
 
 Only saturation's pair decides what is scaled. The combined decision reads each listed analyzer's replica need, converts it to saturation's units, and judges it against saturation's band: saturation's override when it has one, the model-level pair otherwise. That holds when saturation is not listed too.
 
-On any other analyzer (`throughput`, `slo`, an external analyzer) the pair changes only that analyzer's own result in the cycle log, not the replicas. The config read logs a warning for such an entry:
+On any other analyzer (`throughput`, `slo`, an external analyzer) the pair changes only that analyzer's own result, not the replicas. For `slo` that result includes its published prediction: its `scaleUpThreshold` moves `wva_slo_predicted_itl_seconds`, so lowering it improves the prediction while nothing scales. A disabled entry sizes nothing either way. The config read logs a warning for such an entry:
 
 ```text
 WARNING: an analyzer other than saturation sets scaleUpThreshold or scaleDownBoundary; ...  {"key": "default", "analyzer": "throughput"}
 ```
 
-To scale earlier or later, set the model-level band, or saturation's override.
+To scale earlier or later, set the model-level band, or saturation's override. Judging each analyzer's need against its own band needs the combined decision built per direction and per frame, which this release does not do.
 
 ### Saturation Always Runs
 

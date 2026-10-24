@@ -439,6 +439,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 	// Parse scaling policy entries
 	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
 	r.reportIgnoredFields(ctx, cm, ignored)
+	warnInertAnalyzerThresholds(logger, configs)
 	// The surviving entries replace the live set wholesale, so a rejected
 	// key would otherwise vanish: a bad "default" took every limiter and tuned
 	// threshold with it. The entry previously in force under that key stays.

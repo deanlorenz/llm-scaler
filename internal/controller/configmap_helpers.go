@@ -121,11 +121,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 				"declare the analyzer on the \"default\" entry and reference it here",
 				"key", key, "analyzers", slices.Sorted(maps.Keys(satConfig.AnalyzerDefinitions)))
 		}
-		// A band on an analyzer other than saturation is accepted but does not
-		// move the decision (config.InertAnalyzerThresholds).
-		for _, name := range satConfig.InertAnalyzerThresholds() {
-			logger.Info(config.InertAnalyzerThresholdsMessage, "key", key, "analyzer", name)
-		}
 		configs[key] = satConfig
 		if len(fieldsIgnored) > 0 {
 			ignored[key] = fieldsIgnored
@@ -133,6 +128,20 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		count++
 	}
 	return configs, count, rejected, ignored
+}
+
+// warnInertAnalyzerThresholds logs, for each entry of configs in key order,
+// every enabled analyzer other than saturation that sets a band: it is
+// accepted but does not move the decision (config.InertAnalyzerThresholds).
+// Called only where the entries' bands are read (handleScalingPolicyConfigMap),
+// so the cluster-policy ConfigMap, of which only limiters and the optimizer
+// are read, does not warn, and a ConfigMap read by both handlers warns once.
+func warnInertAnalyzerThresholds(logger logr.Logger, configs config.ScalingPolicySet) {
+	for _, key := range slices.Sorted(maps.Keys(configs)) {
+		for _, name := range configs[key].InertAnalyzerThresholds() {
+			logger.Info(config.InertAnalyzerThresholdsMessage, "key", key, "analyzer", name)
+		}
+	}
 }
 
 // warnAboutLimiters logs the findings about the limiters of policy, the
