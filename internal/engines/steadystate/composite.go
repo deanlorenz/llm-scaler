@@ -320,8 +320,10 @@ type rolePricing struct {
 //     Each variant it sizes is priced at D / N, so it needs exactly the N it
 //     asked, and variants on different accelerators keep its view of their
 //     relative worth; a variant it does not size keeps saturation's PRC. The
-//     model's TotalDemand moves with the role, the role's variants share it in
-//     saturation's proportions, and HeldRoleDemand is dropped.
+//     bridge PRC of a variant it prices (WarmPoolPerReplicaCapacity) moves by
+//     the same ratio, so warm-pool supply stays in the unit of its pressure.
+//     The model's TotalDemand moves with the role, the role's variants share
+//     it in saturation's proportions, and HeldRoleDemand is dropped.
 //
 // Scale-up follows the chosen frame alone: when the analyzers rate a role's
 // accelerators differently, a variant the chosen frame grows may leave another
@@ -384,6 +386,13 @@ func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []va
 			continue
 		}
 		vc := &result.VariantCapacities[v.index]
+		// A bridge is priced in the same frame as the replicas it stands in
+		// for, so the warm pool's supply (WarmPoolCapacity) and pressure
+		// read one unit. Without saturation's PRC there is no ratio to
+		// convert by, and the bridge keeps saturation's reading.
+		if v.prc > 0 {
+			vc.WarmPoolPerReplicaCapacity *= target / n / v.prc
+		}
 		vc.PerReplicaCapacity = target / n
 		vc.Utilization = 0
 		if vc.ReplicaCount > 0 {
