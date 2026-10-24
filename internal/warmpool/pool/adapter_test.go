@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	stdlog "log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -34,14 +36,50 @@ const testNamespace = "pool-ns"
 // lentUpstream is where a lent Pod's proxy points: the pool's first engine port.
 const lentUpstream = "127.0.0.1:9001"
 
-// deadAddr is an address proven to have nothing behind it: bound and closed, so
-// the kernel confirmed it was free rather than the test guessing a port.
+// deadAddr is an address that refuses every request for the life of the test
+// binary.
+//
+// It holds its listener. A port that is bound and then closed is free only
+// until the kernel hands it to the next listener -- any httptest server in this
+// package, or in another package's test binary running beside it -- and from
+// then on a "broken" Pod answers. A collision with a server that returns an
+// empty list made one of two broken Pods readable, so the all-unreadable
+// diagnosis was never logged (#217). Each connection is reset as soon as it is
+// accepted, so a request fails as it does against a supervisor that is gone.
 var deadAddr = func() string {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	addr := strings.TrimPrefix(server.URL, "http://")
-	server.Close()
-	return addr
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic(fmt.Sprintf("dead address: %v", err))
+	}
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			_ = conn.Close()
+		}
+	}()
+	return l.Addr().String()
 }()
+
+func TestTheDeadAddressCannotBeTakenByAnotherServer(t *testing.T) {
+	// The broken-Pod tests are only as good as this address. If another
+	// listener can bind it, a "broken" Pod answers whatever that listener says.
+	l, err := net.Listen("tcp", deadAddr)
+	if err == nil {
+		_ = l.Close()
+		t.Fatalf("deadAddr %s could be bound by another listener, so a broken Pod can answer", deadAddr)
+	}
+	resp, err := http.Get("http://" + deadAddr + instancesPath)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("deadAddr %s answered %s, want the request to fail", deadAddr, resp.Status)
+	}
+}
 
 // journal records what happened, in order, across all three protocols and the
 // Kubernetes client. The orderings are the thing worth asserting: sleeping
@@ -1092,6 +1130,14 @@ func TestEveryPodUnreadableIsDiagnosedAsItsOwnFault(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("nothing is readable, so nothing is observed: %+v", got)
+	}
+	// Name the Pod that was read when it should not have been: the diagnosis
+	// below is only logged when every Pod is unreadable, so one Pod that
+	// answered is the whole failure, and the log alone does not say which.
+	for _, pod := range []string{"pod-a", "pod-b"} {
+		if !strings.Contains(buf.String(), `"pod"="`+pod+`"`) {
+			t.Errorf("%s was read, but its supervisor is unreachable (deadAddr %s): %q", pod, deadAddr, buf.String())
+		}
 	}
 	if !strings.Contains(buf.String(), "NetworkPolicy") {
 		t.Errorf("the likely cause must be named: %q", buf.String())
