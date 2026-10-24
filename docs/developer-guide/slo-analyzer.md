@@ -87,8 +87,17 @@ instance and its own keys.
   pool, with a finite positive ITL and `0 < k ≤ 0.80`. `Reading` counts each
   reason a row was turned away; `Offered` the readings the window kept (logged
   as `kept`), `BelowBand` those it dropped below `k = 0.15`. A variant whose
-  replicas all run above 0.80 stops filling its window, and what it holds ages
-  out within 30 minutes: then `no-line`, with `aboveBand` counting why.
+  replicas all run above 0.80 (or below 0.15) stops filling its window, and
+  what it holds ages out within 30 minutes. A key that has fitted then holds
+  its last `A` (`Reading.SlopeHeld`) and still reads `pinned` or
+  `pinned-default`; `slo-variant` logs `lineSlopeHeld` and `lineSlopeAge` to
+  tell it from a fresh fit. The hold ends when the slope is older than
+  `WithSlopeHoldFor` (the saturation analyzer's `BucketRetention`, 7 days by
+  default) or the engine's arguments (`EngineParams.ArgsFingerprint`) differ
+  from the ones it was fitted under; the window itself is not reset on an
+  arguments change in this analyzer, so readings from the old arguments still
+  age out over 30 minutes. A key that never fitted reads `no-line`, with
+  `aboveBand` or `belowBand` counting why.
   The exception is a replica at its sequence cap
   (`Admission.atSequenceCap`): `RunningRequests` exactly
   `max_num_seqs` times its ranks, with `max_num_seqs` read from the

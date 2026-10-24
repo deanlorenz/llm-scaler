@@ -152,8 +152,12 @@ state of a new variant for its first minutes. It is also the state of a new
 variant that only ever runs light: below 0.15 of its KV cache a replica
 teaches the line nothing, and occupancy at light load reads well below the
 share of throughput served. The `itl-line-none` log line says when a variant
-has no line. Once learned, a line is kept through any stretch of light load
-and replaced when the replicas next run in the band.
+has no line. Once learned, a line is kept through light load, or overload above 0.80, and
+replaced when the replicas next run in the band. It is kept for up to
+`LEARNED_STATE_BUCKET_RETENTION` (7 days by default) after it was fitted, and
+not across a controller restart or a change of the engine's arguments. A
+variant woken from zero inside that time is priced from its own kept line at
+once.
 
 The line is learned from replicas between 0.15 and 0.80 of their KV cache.
 Above 0.80 an engine short of memory preempts, and its latency stops following
