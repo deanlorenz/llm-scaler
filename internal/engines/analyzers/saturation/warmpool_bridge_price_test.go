@@ -40,7 +40,7 @@ func pricedReplica(pod string, demand, tokens int64, fromPool bool) capacity.Rep
 // The readings genuinely differ: the pool runs its engines at a lower
 // --gpu-memory-utilization than the workload does, because it fits several
 // sleepers in a Pod where a workload replica has the GPU to itself. Measured on
-// pokprod 2026-08-31: pool 0.90, workload 0.95.
+// the shared GPU cluster, 2026-08-31: pool 0.90, workload 0.95.
 //
 // One own replica and one bridge is the worst case, and the one used here: a
 // two-element median is the average of the two, so the whole gap lands in P.

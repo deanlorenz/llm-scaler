@@ -1091,7 +1091,7 @@ const dpRPCBasePort = 29550
 // unique within the Pod -- so the messaging ports inherit that uniqueness
 // instead of needing a second allocator to keep in step with the first.
 //
-// MEASURED on pokprod 2026-08-31, which is what closes this: two DP=2 models
+// MEASURED on the shared GPU cluster, 2026-08-31, which is what closes this: two DP=2 models
 // admitted into ONE 6-GPU pool Pod, both running, reported by the supervisor as
 //
 //	qwen-dp2-decode-wva    dp=2  --port 9001  --data-parallel-rpc-port 29550

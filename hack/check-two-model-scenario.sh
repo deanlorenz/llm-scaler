@@ -961,7 +961,7 @@ fi
 
 # The stack -> Deployment mapping must come from the ROUTE, never from a name.
 # The harness IGNORES model.shortName and generates a namespace-salted hash --
-# measured on CoreWeave: unsloth/Meta-Llama-3.1-8B-Instruct became
+# measured on a multi-node H200 cluster: unsloth/Meta-Llama-3.1-8B-Instruct became
 # `unsloth--244120d9-instruct`, which shares no substring with the stack name
 # `llama-31-8b`. Matching names finds nothing, silently, and verify then reports
 # a stack that is plainly serving as absent.
@@ -1058,7 +1058,7 @@ else
     ok "the harness base_url is the gateway plus the stack prefix, with no route"
 fi
 
-# The DATA PATH must not resolve anything. Measured twice on CoreWeave at only
+# The DATA PATH must not resolve anything. Measured twice on a multi-node H200 cluster at only
 # ~10 rps: 5.7% of requests died of ClientConnectorDNSError, spread across the
 # whole run rather than bunched at startup -- aiohttp resolves per connection,
 # and ndots:5 costs four lookups for each. That is the driver's own loss, three

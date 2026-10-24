@@ -15,7 +15,7 @@ import (
 // Ready is not the same as useful. A replica that has just passed its readiness
 // probe has an empty KV cache and an empty prefix cache, and llm-d's shipped
 // scheduling profile weights the prefix-cache scorer highest -- so it serves
-// slower AND is chosen less. Measured on CoreWeave, bridges went back 7s, 7s and
+// slower AND is chosen less. Measured on a multi-node H200 cluster, bridges went back 7s, 7s and
 // 19s after the replica they covered reported Ready, and the one rise where no
 // replica ever arrived (so the pool carried the burst) was the best of four by
 // 5679ms at p95.

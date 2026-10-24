@@ -107,7 +107,7 @@ spec:
       # the e2e fixtures -- and the models this pool warms run on the same nodes
       # with the same runtime.
       #
-      # A few clusters do require one to be named (pokprod installs
+      # A few clusters do require one to be named (the shared GPU cluster installs
       # `nvidia-legacy`). Naming it here would be guessing on behalf of every
       # other cluster, where a RuntimeClass that does not exist fails ADMISSION
       # and no Pod is ever created. So if yours needs one, add

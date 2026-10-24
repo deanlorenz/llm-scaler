@@ -19,7 +19,7 @@ import (
 // That preemption is argued from there being an awake model to trade away, which
 // in this case there is not.
 //
-// Measured on pokprod 2026-08-30: 263 identical intents in about four minutes,
+// Measured on the shared GPU cluster, 2026-08-30: 263 identical intents in about four minutes,
 // all `from ""` to the same variant. The noise was the least of it. The clock
 // was re-stamped every pass, so MinInterval never elapsed -- a later switch on
 // spare capacity could be deferred indefinitely by an intent that had not

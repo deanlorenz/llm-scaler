@@ -230,7 +230,7 @@ PYEOF
 # divides them across the policy's node set. Placement stays infra config,
 # warming stays a separate step, and only the size changes hands.
 #
-# WHAT THIS DOES NOT BUY -- measured on pokprod, twice, 2026-08-18
+# WHAT THIS DOES NOT BUY -- measured on the shared GPU cluster, twice, 2026-08-18
 #
 # Placement, not wakes. Both runs put 3/3 replicas on a node holding a sleeper
 # and consumed sleepers doing it, and all six replicas still REBUILT (43-79s).
@@ -328,7 +328,7 @@ PYEOF
 # profiles run via benchmark-run rather than benchmark-run-bursty -- got the
 # clone's stock 32Gi regardless.
 #
-# Measured on pokprod001: a 60-minute, 5-stage, 33120-request inference-perf
+# Measured on the shared GPU cluster: a 60-minute, 5-stage, 33120-request inference-perf
 # run (per_request logging disabled) was OOMKilled (exit 137) at 3358s of an
 # expected 3600s. The harness accumulates per-request lifecycle records for
 # summary/per_stage percentile computation for the whole run even with
@@ -387,7 +387,7 @@ echo "patch_harness: done ($REPO_DIR)"
 # 0.95 of an 80GB card leaves 4 GiB, which is less than a co-tenant holding the
 # device without requesting it -- an FMA launcher requests ZERO GPUs while
 # running the engine, so the scheduler places a model on a card it believes is
-# empty. Measured on pokprod001: 77.3 of 79.18 GiB free at startup, then
+# empty. Measured on the shared GPU cluster: 77.3 of 79.18 GiB free at startup, then
 # `torch.OutOfMemoryError: tried to allocate 594MiB, 500MiB free`. It succeeds
 # whenever the card happens to be emptier, which is why it reads as flakiness.
 #
@@ -431,7 +431,7 @@ fi
 #                                          <model>-decode-podmonitor
 #
 # One pod, two scrape jobs, so every vllm:* series exists twice distinguished
-# only by `job`. Measured on pokprod: vllm:num_requests_running returned two
+# only by `job`. Measured on the shared GPU cluster: vllm:num_requests_running returned two
 # series both peaking at 121 for a single replica, and the benchmark dashboard --
 # which plots the raw series -- drew that as two replicas. Additive queries over
 # vllm:* double-count for the same reason.

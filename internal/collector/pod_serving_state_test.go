@@ -61,7 +61,7 @@ func collectorWithPods(t *testing.T, pods ...*corev1.Pod) *ReplicaMetricsCollect
 // Prometheus keeps a Pod's series for about five minutes after it goes, and the
 // locator resolves a name to its scale target from a cache that is never
 // invalidated -- so without this the capacity of a deleted replica goes on
-// being counted long after the replica does not exist. Measured on pokprod: a
+// being counted long after the replica does not exist. Measured on the shared GPU cluster: a
 // variant with one replica reported four.
 func TestAPodMissingFromTheListingIsGone(t *testing.T) {
 	c := collectorWithPods(t, servingPod("alive", true, false))

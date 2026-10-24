@@ -36,7 +36,7 @@
 # is the truth about what an install can reach.
 # The args are read in the SAME list call, not one call per install. This function
 # used to fetch each install's Deployment again to read its args, which is one round
-# trip per WVA on the cluster: 12 installs on pokprod001 cost ~13 SECONDS of the
+# trip per WVA on the cluster: 12 installs on the shared GPU cluster cost ~13 SECONDS of the
 # preflight, for information the first response already contained. The scope decision
 # is unchanged -- it is still --watch-namespace in the container args, because that is
 # what actually restricts the controller's cache -- it is just no longer paid for

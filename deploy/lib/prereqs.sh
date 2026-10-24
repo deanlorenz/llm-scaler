@@ -504,7 +504,7 @@ wva_report_namespace() {
     if ! ns_err="$(kubectl get namespace "$managed" 2>&1 >/dev/null)"; then
         # FORBIDDEN IS NOT ABSENT, and this is the one place it matters most.
         # `namespaces` is cluster-scoped, so a namespace-scoped tenant is routinely
-        # denied a read of their OWN namespace -- measured on pokprod001:
+        # denied a read of their OWN namespace -- measured on the shared GPU cluster:
         #
         #   Error from server (Forbidden): namespaces "evgensh-wva-test" is forbidden:
         #   User "system:serviceaccount:evgensh-wva-test:builder" cannot get resource

@@ -122,7 +122,7 @@ print("SUMMARY %d %d %d" % (len(launchers), sum(requesters.values()), stranded))
 # object's own labels -- llm-d puts `llm-d.ai/role` on the template only, so
 # `kubectl get deploy -l llm-d.ai/role=requester` matches NOTHING. That is the
 # same mistake that made so_discover find zero model servers on a real cluster:
-# `-l` reads the object's labels and nothing else. Verified against pokprod,
+# `-l` reads the object's labels and nothing else. Verified against the shared GPU cluster,
 # where the requester Deployment carries only `app: fma-requester-<model>`.
 PY_HAS_AFFINITY='
 import json, sys

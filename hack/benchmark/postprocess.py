@@ -104,7 +104,7 @@ def _extract_latency_guidellm(results_dir):
     """P95 and P99 for TTFT and ITL, from guidellm's results.json.
 
     P95 as well as P99 because a tail read alone cannot tell a slow run from a
-    run with a few slow requests: on the first pokprod run P95 TTFT was 63.5s
+    run with a few slow requests: on the first shared-cluster run P95 TTFT was 63.5s
     against a P99 of 73.2s, so the bulk of the distribution sat close to the
     tail and the latency was the workload, not an outlier.
 
@@ -439,7 +439,7 @@ def _collection_failure(results_dir):
     GUESSES ("label selector may not match"), while metrics/raw/
     collection_debug.log holds what actually happened. On a real run that was
 
-        open /home/shjohn/.kube/pokprod.token: no such file or directory
+        open /home/user/.kube/cluster.token: no such file or directory
 
     -- the collector inheriting a kubeconfig whose tokenFile does not exist where
     collection runs, so every kubectl call failed. Each of those calls ends in

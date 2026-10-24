@@ -243,7 +243,7 @@ wva_resolve_prometheus_url() {
 # the patch below, recovering on the restart. The install converges, so this read
 # as cosmetic; it is not. The installer prints "You do not need to pass
 # PROMETHEUS_URL" and the guide's next step is `kubectl logs -f`, which shows a
-# stack trace and RESTARTS=1 on a healthy install. Measured on CoreWeave waldorf.
+# stack trace and RESTARTS=1 on a healthy install. Measured on a multi-node H200 cluster.
 #
 # It also closes a window on every UPGRADE: `kubectl apply -k` re-applies the
 # shipped ConfigMap, so the default was briefly live again each time, and a
@@ -1824,7 +1824,7 @@ deploy_wva_controller() {
     #
     # config/base/manager/deployment.yaml pins imagePullPolicy: IfNotPresent,
     # which is correct for a digest or a release tag and wrong for :main. A node
-    # that cached :main once keeps it forever: measured on pokprod, a controller
+    # that cached :main once keeps it forever: measured on the shared GPU cluster, a controller
     # restarted on 2026-08-19 was still running an image built 2026-08-14, six
     # days and many commits stale. Two log lines that had been added in between
     # were simply absent from the binary, which reads exactly like a metrics

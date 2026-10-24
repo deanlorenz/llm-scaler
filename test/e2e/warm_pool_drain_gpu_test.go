@@ -134,7 +134,7 @@ var _ = Describe("Warm pool - a returned Pod finishes what it was writing", Labe
 			SupervisorImage: launcherImage(),
 			// The weights. A real engine with no cache on a cluster with no route
 			// to Hugging Face sits downloading nothing until the spec times out,
-			// which is how this first failed on pokprod.
+			// which is how this first failed on the shared GPU cluster.
 			CacheClaim: cacheClaim(),
 		}
 		Expect(fixtures.CreateWarmPool(ctx, k8sClient, poolSpec)).To(Succeed())

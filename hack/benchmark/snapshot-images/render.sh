@@ -19,7 +19,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 # Overridable so the operational dashboard can be rendered too -- useful for
 # checking a layout change without a Grafana image renderer on the cluster
-# (pokprod has none: /render returns "No image renderer available/installed").
+# (the shared GPU cluster has none: /render returns "No image renderer available/installed").
 DASHBOARD="${DASHBOARD:-$REPO/deploy/grafana/benchmark-dashboard.json}"
 
 [ -f "$SNAP_DIR/panels.json" ] || { echo "no panels.json in $SNAP_DIR"; exit 1; }

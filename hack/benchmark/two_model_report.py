@@ -411,7 +411,7 @@ def routing_problem(arm):
     """Did the load actually reach the capacity each MODEL was given?
 
     PER MODEL, and that is the whole point. Pooling the two models hides the
-    failure completely: measured on CoreWeave, the busiest engine held 48.9% of
+    failure completely: measured on a multi-node H200 cluster, the busiest engine held 48.9% of
     ALL traffic -- comfortably under any threshold worth setting -- while per
     model it held 99.0% and 98.7%. Every replica either arm added during that
     run served between 0.3% and 2.0%. Both arms were one-replica-per-model
@@ -572,7 +572,7 @@ def shortfall(path, t0=None, t_end=None):
 
     A Pod that is Pending holds no accelerator and serves nothing, so an arm
     whose Deployments scaled to 3 while one replica ran is measuring a
-    one-replica fleet. Measured on CoreWeave exactly that: KEDA actuated
+    one-replica fleet. Measured on a multi-node H200 cluster exactly that: KEDA actuated
     correctly within four minutes of the first burst, four Pods went Pending and
     eight by the end, and the arm ran its whole schedule on one replica per
     model. The other arm, an hour later, got everything it asked for. Nothing
@@ -690,7 +690,7 @@ def phase_drift(arm):
     A stage ends when its in-flight requests drain, and the BURSTING model
     drains slower -- so the two ladders do not cross a boundary together, and
     the divergence changes sign as the burst moves from one model to the other.
-    Measured on CoreWeave: per-stage drains of 4-16s, peak divergence 6.1s.
+    Measured on a multi-node H200 cluster: per-stage drains of 4-16s, peak divergence 6.1s.
 
     That divergence is time when both models are bursting at once, which is the
     one thing an anti-phase run must not contain: a pool asked for two models

@@ -91,7 +91,7 @@ func TestDiscover_NvidiaOnly(t *testing.T) {
 // clusters it found NO GPU nodes at all: Discover returned an empty map about a
 // fleet of 8-GPU machines, every workload was attributed to no accelerator, and
 // the gpu-inventory limiter would bound scale-up against capacity it could not
-// see. Measured on CoreWeave, where no node carries the GFD key.
+// see. Measured on a multi-node H200 cluster, where no node carries the GFD key.
 func TestDiscover_ProviderProductLabelAlias(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))

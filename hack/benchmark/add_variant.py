@@ -528,7 +528,7 @@ def make_secondary_podmonitor(primary_pm, cfg, namespace):
     analyzer finds no capacity rows for it, falls to its no-live-replicas branch
     and reports `P0-store` -- borrowing the PRIMARY's per-replica capacity.
 
-    Measured on CoreWeave: for ten minutes both variants reported byte-identical
+    Measured on a multi-node H200 cluster: for ten minutes both variants reported byte-identical
     prc (138877, 138852, 138848, ...) while one held two GPUs and the other one.
     A comparison between two variants is the entire point of this scenario, and
     it cannot happen while one of them is a copy of the other.

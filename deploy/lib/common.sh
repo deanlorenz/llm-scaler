@@ -614,7 +614,7 @@ WVA_SHARED_CLUSTER_ROLE_BINDINGS=(
 # WVA_OWNED_CLUSTER_ROLES are the ClusterRoles this project defines, mapped to the
 # binding that references each. They are renamed per install for the same reason
 # the bindings are, and it took a shared cluster to make the reason concrete:
-# pokprod001 had ten WVA installs sharing four ClusterRoles under fixed names.
+# the shared GPU cluster had ten WVA installs sharing four ClusterRoles under fixed names.
 # Identical rules make an apply a no-op, so nothing had gone wrong yet — but an
 # install carrying different rules would have rewritten the permissions of ten
 # other controllers, cluster-wide, with no error and no restart to notice.
@@ -720,7 +720,7 @@ wva_kueue_reader_names() {
 # They need deleting BY NAME, because the uninstall works by rendering the overlay
 # and deleting what it renders -- so the moment a resource file leaves the overlay,
 # `delete -k` can no longer see it and every copy already on the cluster is
-# stranded. Measured on pokprod when the Prometheus binding was dropped: 12 of them
+# stranded. Measured on the shared GPU cluster when the Prometheus binding was dropped: 12 of them
 # were sitting there, aged 2 to 78 days, one per install, with no tooling left that
 # could remove any of them.
 WVA_LEGACY_CLUSTER_ROLE_BINDINGS=(
@@ -746,7 +746,7 @@ WVA_LEGACY_CLUSTER_ROLE_BINDINGS=(
 #
 # TWO SUFFIX GENERATIONS, both tried: the current suffix is a hash of the
 # namespace, an older one used the namespace name verbatim. A cluster upgraded
-# through both carries both, which is exactly what pokprod shows --
+# through both carries both, which is exactly what the shared GPU cluster shows --
 # `...-016f647d` beside `...-benchmark-epp-keda`. Computing only the hash would
 # have left half of them behind.
 #
@@ -935,7 +935,7 @@ wva_overlay_dir() {
 # With the Secret in the CONTROLLER phase, the two-phase install therefore created
 # the ServiceMonitor 33 minutes before the Secret it needs, and WVA's own metrics
 # were permanently uncollected -- no `up` series, no `wva_*` series -- while every
-# install step reported success. Measured on pokprod001: the install said
+# install step reported success. Measured on the shared GPU cluster: the install said
 # "All components verified successfully!" and Thanos had nothing.
 #
 # The single-command install (INSTALL_PHASE=all) was unaffected, because it applies
@@ -1120,7 +1120,7 @@ wva_require_namespace() {
         found="$(wva_namespaces_with_model_servers 2>/dev/null || true)"
         count=$(printf '%s' "$found" | grep -c . || true)
     fi
-    # Capped. On a shared cluster this list is long -- 100+ namespaces on pokprod001 --
+    # Capped. On a shared cluster this list is long -- 100+ namespaces on the shared GPU cluster --
     # and an error message that scrolls the instruction off the screen has buried the
     # one line the reader needed.
     if [ "${count:-0}" -gt 0 ]; then

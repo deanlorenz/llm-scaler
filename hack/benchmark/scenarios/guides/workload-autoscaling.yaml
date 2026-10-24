@@ -100,7 +100,7 @@ scenario:
           # and it looks like the autoscaler not working.
           #
           # llm-d-benchmark's own cluster-config for this cluster says the same
-          # (config/cluster-configs/examples/openshift-pokprod.yaml).
+          # (its OpenShift example under config/cluster-configs/examples/).
           #
           # It does NOT fail fast, and an earlier version of this comment claimed
           # it did. Measured: the API server accepts a ReadWriteMany request
@@ -636,7 +636,7 @@ scenario:
     #     make benchmark-run WARM_REPLICAS=10 ...
     # which substitutes the count below and warms the pool before the run.
     #
-    # What this buys, measured on pokprod: a scale-up that WAKES a sleeping
+    # What this buys, measured on the shared GPU cluster: a scale-up that WAKES a sleeping
     # vLLM is ready in 3s; one that rebuilds takes ~50-80s. Every benchmark we
     # ran before this was the slow path, which is why FMA lost its own
     # comparison.
@@ -679,7 +679,7 @@ scenario:
       # than by relabeling, and degrades to a cold rebuild -- not to Pending --
       # when the warm set is exhausted. Size it with warm_pool.sh.
       #
-      # It buys PLACEMENT, not wakes. Measured twice on pokprod: 3/3 replicas
+      # It buys PLACEMENT, not wakes. Measured twice on the shared GPU cluster: 3/3 replicas
       # landed beside a sleeper and all three still rebuilt (43-79s). The reuse
       # key is the GPU UUID and a pool node has 7-8 GPUs, so landing on the
       # right node leaves a ~1-in-7 chance of the right GPU. Reliable wakes
@@ -696,7 +696,7 @@ scenario:
       # pool cannot then grow past one node, the ceiling is a point-in-time
       # reading, and standup fails outright when no single node has free GPUs --
       # the common case on a shared cluster. Right for a dedicated benchmark
-      # cluster, wrong for pokprod.
+      # cluster, wrong for the shared GPU cluster.
       launcherNodeSelection:
         enabled: false
         nodeLabel: fma-hotstart

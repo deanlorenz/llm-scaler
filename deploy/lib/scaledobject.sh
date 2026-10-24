@@ -328,7 +328,7 @@ EOF
 # pairs them, stamping the serving labels onto whichever launcher is currently
 # bound (the requester grows a dual-pods.llm-d.ai/dual label naming it).
 #
-# The launchers really do serve. Measured on pokprod001 during a benchmark, one
+# The launchers really do serve. Measured on the shared GPU cluster during a benchmark, one
 # launcher ran at 143 requests running, 61 waiting, KV cache 99.9% full, while
 # the decode pod took a fraction of the traffic: at peak EPP dispatched 27.4
 # req/s across nine launchers against 5.9 req/s to the decode pod, so roughly
@@ -355,7 +355,7 @@ EOF
 # But that PodMonitor is named vllm-<model>, and a later standup of a NON-FMA
 # guide into the same namespace renders the same name with `port: metrics` and
 # overwrites it. The FMA stack keeps serving; its metrics just stop being
-# collected. That is what happened on pokprod001 -- an FMA guide at 09:25Z, a
+# collected. That is what happened on the shared GPU cluster -- an FMA guide at 09:25Z, a
 # workload-autoscaling guide over the top at 09:26Z, and from then on `up{}`
 # listed the decode pod, EPP and WVA, and no launcher.
 #
@@ -2496,7 +2496,7 @@ so_discover() {
                 #
                 # An earlier version pointed the plan at the requester, on the
                 # scenario's word that "launcher pods host vLLM and the requester
-                # is the serving path". Measured on pokprod001, retargeting is
+                # is the serving path". Measured on the shared GPU cluster, retargeting is
                 # still wrong -- the requester holds no engine and WVA said so
                 # once per cycle, "has 1 ready pod(s) but none attributed" -- but
                 # the reason recorded here used to be wrong too. It claimed the

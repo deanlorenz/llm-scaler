@@ -71,7 +71,7 @@ def pod_spec(role):
         # A WORKER runs no proxy. The proxy is the Pod's traffic gate and is
         # Ready only while a model is awake behind it; a worker holds a rank and
         # serves nobody, so its gate never opens, the Pod is never Ready, and the
-        # controller never counts the group complete. Measured on pokprod: with
+        # controller never counts the group complete. Measured on the shared GPU cluster: with
         # the proxy present the pool reported pods=0 while holding two GPUs.
         if role == "worker" and name == "proxy":
             continue

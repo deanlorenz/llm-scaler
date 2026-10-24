@@ -23,7 +23,7 @@ import (
 // every ordinary bridge pool takes the harmless path, and the switching rule's
 // own tests call chooseAwake directly and never go through a pass at all.
 //
-// Measured on pokprod 2026-08-30: the warm pool logged for twenty seconds after
+// Measured on the shared GPU cluster, 2026-08-30: the warm pool logged for twenty seconds after
 // startup and then went silent, with no error and no panic, every time
 // warmPoolRetained was set.
 //

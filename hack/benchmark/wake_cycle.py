@@ -11,7 +11,7 @@ very GPU that sleeper holds. The hit rate is therefore
     ---------------------------------------------------
     total free GPUs on that node
 
-NOT "is there a sleeper nearby". Measured on pokprod: launchers pinned to 5 nodes,
+NOT "is there a sleeper nearby". Measured on the shared GPU cluster: launchers pinned to 5 nodes,
 requesters eligible on all 14, one sleeper per node out of 7-8 GPUs -- 0 woke /
 3 rebuilt, twice, even with placement affinity putting 3/3 replicas on launcher
 nodes.
