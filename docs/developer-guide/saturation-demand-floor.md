@@ -355,8 +355,11 @@ Properties, each with a spec in `throughput_floor_test.go`:
   mislearned low, which costs money, where a prefill that cannot be
   ordered costs latency. Newer vLLM splits the waiting count by reason
   (`vllm:num_requests_waiting_by_reason`, `reason="capacity"` for the
-  scheduler's own queue); reading that for both this test and P1 itself is
-  the follow-up, once the vLLM the stack ships is known to carry it.
+  scheduler's own queue). P1 itself reads that split
+  (`decodeCapacityView`); this test keeps the full count. vLLM keeps a
+  request deferred until it is scheduled, so on a full decode a landed
+  pull that cannot get its blocks reads deferred, and the split alone
+  would clear a decode that is full and queued.
 - **Priced per row, and the rows may sit in different buckets.** The floor
   takes medians over the replicas' rows, and a fresh replica sits in the
   bucket of its own few completions for a cycle or two; on one pass a

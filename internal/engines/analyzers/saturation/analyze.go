@@ -270,9 +270,11 @@ func (a *SaturationAnalyzer) newCycle(
 	// replica is priced -- the order the rows arrive in must not matter --
 	// and remembered for the collector's row window, because prefill's row
 	// is a one-minute max that can outlive decode's
-	// (rememberDecodeSaturation). Read on the raw rows: a decode read
-	// saturated on a deferred queue only gates prefill's learning and holds
-	// its demand, the stricter side (decodeCapacityView).
+	// (rememberDecodeSaturation). Read on the raw rows: on a full decode a
+	// landed pull that cannot be scheduled reads deferred too, so the
+	// capacity part alone would clear a decode that is full and queued, and
+	// prefill would learn decode's back-pressure as its own k2
+	// (decodeCapacityView).
 	c.decodeSaturated = a.rememberDecodeSaturation(input.Namespace, input.ModelID,
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
@@ -515,6 +517,25 @@ func (c *cycle) fitLines() {
 	}
 }
 
+// explicitMaxNumSeqs is, per variant with replica rows this cycle, the
+// engine's max_num_seqs when its flag stated it
+// (capacity.EngineParams.ExplicitMaxNumSeqs), and zero for one whose cap is
+// unknown or only a default.
+func (c *cycle) explicitMaxNumSeqs() map[string]int64 {
+	out := map[string]int64{}
+	for _, rm := range c.input.ReplicaMetrics {
+		if _, seen := out[rm.VariantName]; seen {
+			continue
+		}
+		var params *capacity.EngineParams
+		if rec := c.a.capacityStore.Get(c.input.Namespace, c.input.ModelID, rm.VariantName); rec != nil {
+			params = rec.EngineParams
+		}
+		out[rm.VariantName] = params.ExplicitMaxNumSeqs()
+	}
+	return out
+}
+
 // priceReplicas computes one capacity record per replica: its bounds, and the
 // service rate the floor will divide the arrival rate by.
 func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, error) {
@@ -523,8 +544,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
-	// (decodeCapacityView). The idle tests below read the raw row.
-	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant)
+	// (decodeCapacityView), except on a replica at its sequence cap. The
+	// idle tests below read the raw row.
+	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.explicitMaxNumSeqs())
 	served := servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for i, rm := range rows {

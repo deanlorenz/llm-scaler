@@ -384,6 +384,15 @@ func (m ReplicaMetrics) Ranks() int {
 	return max(m.EngineRanks, 1)
 }
 
+// AtBatchCap reports whether the record's running batch is exactly at the
+// sequence cap: maxNumSeqs, one engine's max_num_seqs, times Ranks. Each
+// engine holds at most its cap, so the sum equals it only when every rank is
+// full; more than it means the cap is not what was read. A maxNumSeqs of zero
+// is an unknown cap, and nothing is at it.
+func (m ReplicaMetrics) AtBatchCap(maxNumSeqs int64) bool {
+	return maxNumSeqs > 0 && int64(m.RunningRequests) == maxNumSeqs*int64(m.Ranks())
+}
+
 // BusiestRankQueue is the waiting queue of the record's busiest rank (see
 // MaxRankQueueLength). With one rank it is QueueLength. With several and no
 // busiest-rank reading while requests wait, it is the queue's mean over the
