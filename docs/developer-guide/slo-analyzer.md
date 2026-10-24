@@ -93,10 +93,12 @@ instance and its own keys.
   `pinned-default`; `slo-variant` logs `lineSlopeHeld` and `lineSlopeAge` to
   tell it from a fresh fit. The hold ends when the slope is older than
   `WithSlopeHoldFor` (the saturation analyzer's `BucketRetention`, 7 days by
-  default) or the engine's arguments (`EngineParams.ArgsFingerprint`) differ
-  from the ones it was fitted under; the window itself is not reset on an
-  arguments change in this analyzer, so readings from the old arguments still
-  age out over 30 minutes. A key that never fitted reads `no-line`, with
+  default) or the engine's arguments (`EngineParams.ArgsTag`, the tag the
+  saturation analyzer compares too) differ from the ones it was fitted under.
+  An arguments change also forgets the key's window, intercept and slope
+  (`linesUnderArgs`, like the saturation analyzer's `itlUnderArgs` but with
+  no stash), so the old engine's readings are not refitted and held as the
+  new one's. A key that never fitted reads `no-line`, with
   `aboveBand` or `belowBand` counting why.
   The exception is a replica at its sequence cap
   (`Admission.atSequenceCap`): `RunningRequests` exactly

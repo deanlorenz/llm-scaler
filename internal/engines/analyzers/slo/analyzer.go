@@ -75,6 +75,10 @@ type Analyzer struct {
 	// seen is when each variant key was last analyzed or reported present:
 	// its line is evicted on it (EvictStale).
 	seen map[string]time.Time
+	// args is the engine arguments (capacity.EngineParams.ArgsTag) each
+	// variant key's line was last fitted under: a change forgets the line
+	// (linesUnderArgs).
+	args map[string]string
 	// accelerators is the last resolved accelerator per namespace/variant,
 	// so a cycle on which the pods disagree about it keys the line where it
 	// was (stableAccelerator).
@@ -101,6 +105,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		slopeHoldFor: capacity.HistoryRetention,
 		lines:        itl.NewTracker(),
 		seen:         make(map[string]time.Time),
+		args:         make(map[string]string),
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
 	}
@@ -293,8 +298,11 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	cfg, _ := input.Config.(*config.ScalingPolicy)
 	adm := admission(cfg, params)
 	// A held slope ends on the retention and on a change of engine arguments
-	// (itl.Admission): this analyzer has no window reset of its own on one.
-	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, params.ArgsFingerprint()
+	// (itl.Admission), and a change of arguments forgets the window first, so
+	// the old engine's readings are neither refitted nor held as the new one's.
+	args := params.ArgsTag()
+	a.linesUnderArgs(key, args, now)
+	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, args
 	// The fill is clamped to the band the line is fitted over.
 	band := fillBand{lo: adm.MinK, hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
@@ -467,6 +475,29 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 	return out
 }
 
+// linesUnderArgs forgets key's line -- its window, intercept and held slope --
+// when the variant now runs under other engine arguments than the ones the line
+// was learned under, as the saturation analyzer's itlUnderArgs does. Without
+// it the window kept the old engine's readings for up to
+// itl.DefaultObservationMaxAge, the pinned fit refitted A from them each cycle
+// and stamped it with the new arguments, and the old engine's slope was then
+// held as the new one's for the whole slope hold (issue #284). Unknown
+// arguments change nothing. There is no stash: a rollback relearns its line.
+func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
+	if args == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prev, ok := a.args[key]
+	a.args[key] = args
+	if !ok || prev == args {
+		return
+	}
+	// The tracker's lock is taken under a.mu, as EvictStale takes it.
+	a.lines.Sweep(now, func(k string) bool { return k == key })
+}
+
 func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.EngineParams {
 	if a.store == nil {
 		return nil
@@ -496,6 +527,11 @@ func (a *Analyzer) EvictStale(now time.Time) Evicted {
 	for key := range a.seen {
 		if stale(key) {
 			delete(a.seen, key)
+		}
+	}
+	for key := range a.args {
+		if stale(key) {
+			delete(a.args, key)
 		}
 	}
 	for key, m := range a.transients {

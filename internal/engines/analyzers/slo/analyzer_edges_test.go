@@ -213,6 +213,23 @@ var _ = Describe("Analyzer state and inputs", func() {
 				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
 			})
 
+			// Round 2: a change of arguments while the window still holds the
+			// old engine's readings must not let them be refitted, stamped with
+			// the new arguments and then held as the new engine's slope.
+			It("forgets the old engine's readings on an arguments change, so they are not held as the new one's", func() {
+				s := store(params)
+				a := newAt(s)
+				warmWith(a, noop)
+				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}})
+				reading, line := price(a)
+				Expect(line.Tier).To(BeEmpty(), "no fit from the old engine's readings")
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+				clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
+				reading, line = price(a)
+				Expect(line.SlopeHeld).To(BeFalse())
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+			})
+
 			It("does not hold it past the slope hold", func() {
 				a := newAt(store(params)).WithSlopeHoldFor(time.Hour)
 				warmWith(a, noop)

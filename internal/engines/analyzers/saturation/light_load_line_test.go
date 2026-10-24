@@ -111,6 +111,65 @@ func TestLightLoadKeepsLearnedLineAndNamesMissingOne(t *testing.T) {
 		"the shared line is stamped with the fit the slope came from, not republished by the hold")
 }
 
+// fitLines bounds the hold by the analyzer's BucketRetention
+// (itl.Admission.SlopeHoldFor): a light fleet is priced from its held line
+// inside the retention, and from nothing once the fit is older.
+func TestHeldSlopeEndsAtBucketRetention(t *testing.T) {
+	const (
+		ns        = "light"
+		variant   = "qwen32b-decode"
+		retention = time.Hour
+	)
+	states := []domain.VariantReplicaState{
+		{VariantName: variant, Role: domain.RoleDecode, AcceleratorName: "H200",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	replica := func(k, itlSec float64) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-0", variant, int64(k*16000), 16000, 0, 1000, 500)
+		rm.Namespace = ns
+		rm.KvUsageInstant = k
+		rm.AvgITL = itlSec
+		return rm
+	}
+	a, _ := NewSaturationAnalyzer(capacity.NewStore()).WithHorizons(capacity.Horizons{BucketRetention: retention})
+	clock := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	derivedOK := func(rm domain.ReplicaMetrics) bool {
+		t.Helper()
+		ctx, logs := observedCtx(t)
+		input := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, states)
+		input.Namespace = ns
+		_, err := a.Analyze(ctx, input)
+		require.NoError(t, err)
+		entries := logs.FilterMessage("derived-mu").All()
+		require.NotEmpty(t, entries)
+		ok, _ := entries[len(entries)-1].ContextMap()["ok"].(bool)
+		return ok
+	}
+
+	var learned bool
+	for range itl.DefaultMinSamples {
+		clock = clock.Add(15 * time.Second)
+		learned = derivedOK(replica(0.5, 0.05))
+	}
+	require.True(t, learned, "the line is learned at load")
+	loadEnd := clock
+	// Light from here on. The readings left in the window keep refitting the
+	// line until they age out, so the last fit is at most
+	// DefaultObservationMaxAge after loadEnd.
+	for clock.Sub(loadEnd) < itl.DefaultObservationMaxAge+2*time.Minute {
+		clock = clock.Add(time.Minute)
+		derivedOK(replica(0.06, 0.01))
+	}
+	require.True(t, derivedOK(replica(0.06, 0.01)), "inside the retention the held line prices the fleet")
+	for clock.Sub(loadEnd) <= itl.DefaultObservationMaxAge+retention+time.Minute {
+		clock = clock.Add(time.Minute)
+		derivedOK(replica(0.06, 0.01))
+	}
+	assert.False(t, derivedOK(replica(0.06, 0.01)),
+		"past BucketRetention after its last fit the slope is not held: fitLines passes the retention to the tracker")
+}
+
 // The held slope goes with an engine-arguments change: the saturation
 // analyzer puts the key's window aside (itlUnderArgs), slope included, so a
 // light fleet redeployed with other flags is not priced from the old engine.
