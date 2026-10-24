@@ -567,9 +567,9 @@ The decode test, and why it is what it is:
   (970k and 1 039k against decode k1s of 929 894 and 930 508). The same
   in-flight rows make decode's own P1 fire every cycle, which is the older
   problem and not this one; newer vLLM splits the count by reason
-  (`vllm:num_requests_waiting_by_reason`, `reason="capacity"`), and
-  reading that for both is the follow-up once the vLLM the stack ships is
-  known to carry it.
+  (`vllm:num_requests_waiting_by_reason`, `reason="capacity"`). P1
+  now reads it (#294); this test keeps the full count, because a landed
+  pull that cannot be scheduled also reads deferred.
 - The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute). The KV bound alone fails on this
   run's own rows: the Prometheus windows are not aligned, and on the fourth

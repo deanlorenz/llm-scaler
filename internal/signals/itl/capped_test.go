@@ -87,6 +87,18 @@ var _ = Describe("Tracker on a replica at its sequence cap", func() {
 		Expect(r.AboveBand).To(Equal(1), "one of two ranks at its cap is not the pod at its cap")
 	})
 
+	// On a P/D decode vLLM v0.20.0+ may report every one of the 768 as
+	// reason=deferred: at the cap the scheduler stops before it looks at a
+	// request whose KV pull has landed, so the request stays deferred though
+	// only the cap holds it. The full waiting count shows the cap.
+	It("shows the cap on a queue vLLM reports as deferred", func() {
+		r := replay(capped, func(h *domain.ReplicaMetrics) {
+			h.CapacityQueueKnown, h.CapacityQueueLength = true, 0
+		})
+		Expect(r.Capped).To(Equal(1))
+		Expect(r.Tier).To(Equal(TierPinnedB))
+	})
+
 	It("takes the preemption allowance the policy sets", func() {
 		r := replay(Admission{MaxNumSeqs: maxSeqs, CapMaxPreemptionRate: 0.1},
 			func(h *domain.ReplicaMetrics) { h.PreemptionRate = 0.05 })

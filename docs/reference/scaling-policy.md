@@ -1923,6 +1923,11 @@ the decode pod drains, so the queue there is read differently:
 
 - vLLM v0.20.0 and later: only the requests waiting for scheduling capacity
   (`vllm:num_requests_waiting_by_reason{reason="capacity"}`) count.
+  Except at the sequence cap: when the pod runs exactly `--max-num-seqs`
+  sequences on every engine, the whole queue counts. There, vLLM still
+  reports a request as deferred after its KV has arrived, although it waits
+  only for a free slot on this pod. This needs `--max-num-seqs` set on the
+  engine's command line; a cap the engine picks by default is not known.
 - Older vLLM: the whole queue counts, as before. The requests waiting for
   prefill's KV cannot be told apart, and dropping a real queue would
   under-provision. A P/D decode on older vLLM can therefore read busier than

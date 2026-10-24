@@ -18,9 +18,18 @@ import (
 //
 //   - Where vLLM says why each request waits (CapacityQueueKnown, v0.20.0
 //     and later), the queue is the part waiting for scheduling capacity
-//     (reason="capacity"). A request that cannot get blocks for its pull, or
-//     waits at the sequence cap, waits there, so a full or capped decode
-//     still reads queued.
+//     (reason="capacity"). A request that cannot get blocks for its pull
+//     waits there, so a full decode still reads queued.
+//   - Except at the sequence cap (maxNumSeqs, the engine's max_num_seqs
+//     when its flag stated it; domain.ReplicaMetrics.AtBatchCap): there the
+//     queue is the full count. vLLM keeps a request deferred from the moment
+//     its pull starts until it is scheduled, and the scheduler promotes a
+//     landed pull only when it looks at it, which it stops doing once the
+//     batch is at max_num_seqs. So at the cap every request whose pull began
+//     below it reads deferred, landed or not, and each of them waits for a
+//     batch slot on this replica. Read as the capacity part alone, a capped
+//     decode's backlog -- the one #287 measured at 256 running and 768
+//     waiting -- would record no k2 and charge no queue demand.
 //   - Where it does not, the queue is the full count, as before. Which part
 //     of it is in flight cannot be told, and reading too little of it is the
 //     direction that breaks SLOs: a decode capped by --max-num-seqs below a
@@ -43,11 +52,17 @@ import (
 //     load that keeps a replica from being given away
 //     (busiestQueueLoadByVariant), and the idle tests (replicaIdle,
 //     kvFromInstant), since a request in flight to a replica is load on it.
+//     roleSaturated also requires decode's KV full (kvFull), and on a full
+//     decode a landed pull that cannot be scheduled reads deferred too (it
+//     is promoted only when it is scheduled), so the view there would clear a
+//     decode that is genuinely full and queued and let prefill learn decode's
+//     back-pressure as its own k2.
 //
 // Aggregated replicas, prefill, and decode of a model with no prefill variant
 // serve whole requests, and their queue stays the full count.
-func decodeCapacityView(rm domain.ReplicaMetrics, role string) domain.ReplicaMetrics {
-	if domain.CanonicalRole(role) != domain.RoleDecode || !rm.CapacityQueueKnown {
+func decodeCapacityView(rm domain.ReplicaMetrics, role string, maxNumSeqs int64) domain.ReplicaMetrics {
+	if domain.CanonicalRole(role) != domain.RoleDecode || !rm.CapacityQueueKnown ||
+		rm.AtBatchCap(maxNumSeqs) {
 		return rm
 	}
 	rm.MaxRankQueueLength = rm.BusiestRankCapacityQueue()
@@ -57,13 +72,16 @@ func decodeCapacityView(rm domain.ReplicaMetrics, role string) domain.ReplicaMet
 
 // decodeCapacityViews is decodeCapacityView over rows when the model is
 // disaggregated (domain.HasPrefill), and rows as they are when it is not.
-func decodeCapacityViews(rows []domain.ReplicaMetrics, rolesByVariant map[string]string) []domain.ReplicaMetrics {
+// maxNumSeqs is each variant's explicit max_num_seqs (zero, or absent, when
+// its flag did not state one).
+func decodeCapacityViews(rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
+	maxNumSeqs map[string]int64) []domain.ReplicaMetrics {
 	if !domain.HasPrefill(rolesByVariant) {
 		return rows
 	}
 	out := make([]domain.ReplicaMetrics, len(rows))
 	for i, rm := range rows {
-		out[i] = decodeCapacityView(rm, rolesByVariant[rm.VariantName])
+		out[i] = decodeCapacityView(rm, rolesByVariant[rm.VariantName], maxNumSeqs[rm.VariantName])
 	}
 	return out
 }

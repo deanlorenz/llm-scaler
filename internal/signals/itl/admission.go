@@ -60,12 +60,14 @@ func (a Admission) band() (lo, hi float64) {
 //     one engine, so the cap is it times Ranks). More than the cap means the
 //     cap is not what was read; fewer means memory, not the cap, binds.
 //   - Requests are waiting: a batch at the cap with nothing queued is not
-//     held there by the cap.
+//     held there by the cap. The full waiting count, also on a P/D decode,
+//     where part of it is vLLM's reason="deferred": at the cap the scheduler
+//     stops before it looks at a request whose KV pull has landed, so that
+//     request stays deferred although only the cap holds it.
 //   - The preemption rate was read and is at most CapMaxPreemptionRate: an
 //     engine preempting for memory is the case the band exists for.
 func (a Admission) atSequenceCap(rm domain.ReplicaMetrics) bool {
-	return a.MaxNumSeqs > 0 &&
-		int64(rm.RunningRequests) == a.MaxNumSeqs*int64(rm.Ranks()) &&
+	return rm.AtBatchCap(a.MaxNumSeqs) &&
 		rm.QueueLength > 0 &&
 		rm.PreemptionRateKnown && !math.IsNaN(rm.PreemptionRate) &&
 		rm.PreemptionRate <= max(a.CapMaxPreemptionRate, 0)

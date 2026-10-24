@@ -71,7 +71,13 @@ var (
 // result and the analyzer.
 func analyzePD(t *testing.T, rows []domain.ReplicaMetrics, states []domain.VariantReplicaState) (*SaturationAnalyzer, *domain.AnalyzerResult) {
 	t.Helper()
-	a := NewSaturationAnalyzer(capacity.NewStore())
+	return analyzePDWith(t, capacity.NewStore(), rows, states)
+}
+
+// analyzePDWith is analyzePD over a capacity store the caller has seeded.
+func analyzePDWith(t *testing.T, store *capacity.Store, rows []domain.ReplicaMetrics, states []domain.VariantReplicaState) (*SaturationAnalyzer, *domain.AnalyzerResult) {
+	t.Helper()
+	a := NewSaturationAnalyzer(store)
 	clock := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 	a.now = func() time.Time { return clock }
 	in := makeAnalyzerInput(rows, states)
@@ -173,21 +179,82 @@ func TestDecodeCapacityView(t *testing.T) {
 		QueueLength: 800, MaxRankQueueLength: 300, EngineRanks: 8,
 		CapacityQueueKnown: true, CapacityQueueLength: 24, MaxRankCapacityQueueLength: 9,
 	}
-	v := decodeCapacityView(multi, domain.RoleDecode)
+	v := decodeCapacityView(multi, domain.RoleDecode, 0)
 	assert.Equal(t, 24, v.QueueLength)
 	assert.Equal(t, 9, v.BusiestRankQueue(), "the busiest rank's capacity queue, not the pod's")
 
 	for _, role := range []string{domain.RolePrefill, domain.RoleBoth, ""} {
-		assert.Equal(t, multi, decodeCapacityView(multi, role), "role %q keeps its row", role)
+		assert.Equal(t, multi, decodeCapacityView(multi, role, 0), "role %q keeps its row", role)
 	}
 
 	rows := []domain.ReplicaMetrics{multi}
-	assert.Equal(t, rows, decodeCapacityViews(rows, map[string]string{"d": domain.RoleDecode}),
+	assert.Equal(t, rows, decodeCapacityViews(rows, map[string]string{"d": domain.RoleDecode}, nil),
 		"decode with no prefill variant keeps its row")
 	pd := map[string]string{"d": domain.RoleDecode, "p": domain.RolePrefill}
-	assert.Equal(t, 24, decodeCapacityViews(rows, pd)[0].QueueLength)
+	assert.Equal(t, 24, decodeCapacityViews(rows, pd, nil)[0].QueueLength)
 
 	unknown := multi
 	unknown.CapacityQueueKnown = false
-	assert.Equal(t, unknown, decodeCapacityView(unknown, domain.RoleDecode), "no reason series: the full queue")
+	assert.Equal(t, unknown, decodeCapacityView(unknown, domain.RoleDecode, 0), "no reason series: the full queue")
+}
+
+// A P/D decode at its sequence cap keeps its full queue on v0.20.0+ too.
+// vLLM reports a request deferred from the moment its KV pull starts until it
+// is scheduled, and promotes a landed pull only when the scheduler looks at
+// it, which it stops doing once the batch is at max_num_seqs. So at the cap a
+// request whose pull began below it reads deferred though it waits only for a
+// batch slot here: the shape #287 measured, 256 running at their cap and 768
+// waiting, would otherwise record no k2 and charge no queue demand.
+func TestPDDecodeAtItsSequenceCapKeepsTheFullQueue(t *testing.T) {
+	const maxNumSeqs = 256
+	capped := func(running int) domain.ReplicaMetrics {
+		rm := withReason(pdDecodeRow(halfCache), 0)
+		rm.RunningRequests = running
+		return rm
+	}
+	run := func(t *testing.T, stated bool, running int) (*SaturationAnalyzer, *domain.AnalyzerResult) {
+		t.Helper()
+		params := deploymentParams()
+		params.MaxNumSeqs, params.MaxNumSeqsSet = maxNumSeqs, stated
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", decodeVariant, capacity.Record{
+			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
+		})
+		return analyzePDWith(t, store, []domain.ReplicaMetrics{capped(running), pdPrefillRow()}, pdStates)
+	}
+
+	t.Run("at the cap the flag stated", func(t *testing.T) {
+		a, res := run(t, true, maxNumSeqs)
+		assert.True(t, recordedK2(a), "768 waiting behind a full batch is over the threshold of 5: saturated")
+		assert.InDelta(t, float64(halfCache)+queueCharge, decodeDemand(t, res), 1,
+			"every request waits for a batch slot on this replica: the whole queue is charged")
+	})
+	// Below the cap a deferred request is in flight from prefill, and the
+	// capacity part is the queue, as in TestPDDecodeDeferredQueueIsNotSaturationOrDemand.
+	t.Run("below the cap", func(t *testing.T) {
+		a, res := run(t, true, maxNumSeqs-1)
+		assert.False(t, recordedK2(a))
+		assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1)
+	})
+	// A cap only the parser's default states is not the engine's: vLLM V1
+	// picks 1024 on large accelerators where the parser assumes 256.
+	t.Run("a cap the flag did not state", func(t *testing.T) {
+		a, res := run(t, false, maxNumSeqs)
+		assert.False(t, recordedK2(a))
+		assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1)
+	})
+}
+
+func TestDecodeCapacityViewAtTheCap(t *testing.T) {
+	rm := domain.ReplicaMetrics{
+		VariantName: "d", RunningRequests: 512, EngineRanks: 2,
+		QueueLength: 800, MaxRankQueueLength: 400,
+		CapacityQueueKnown: true, CapacityQueueLength: 24, MaxRankCapacityQueueLength: 12,
+	}
+	assert.Equal(t, rm, decodeCapacityView(rm, domain.RoleDecode, 256), "every rank at 256: the full queue")
+	assert.Equal(t, 24, decodeCapacityView(rm, domain.RoleDecode, 512).QueueLength,
+		"512 running is half of a 512-per-rank cap on two ranks")
+	assert.Equal(t, 24, decodeCapacityView(rm, domain.RoleDecode, 0).QueueLength, "no cap known")
+	pd := map[string]string{"d": domain.RoleDecode, "p": domain.RolePrefill}
+	assert.Equal(t, 800, decodeCapacityViews([]domain.ReplicaMetrics{rm}, pd, map[string]int64{"d": 256})[0].QueueLength)
 }
