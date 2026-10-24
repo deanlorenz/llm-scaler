@@ -162,7 +162,7 @@ func TestSequenceCapAcrossRanks(t *testing.T) {
 	if r := itl.NewTracker().Observe("k", "v", pods, adm, at); r.Capped != 1 || r.AboveBand != 0 {
 		t.Errorf("both ranks at the cap: capped %d aboveBand %d, want 1 and 0", r.Capped, r.AboveBand)
 	}
-	pods = collapseToPods([]domain.ReplicaMetrics{rank(maxSeqs), rank(maxSeqs-6)})
+	pods = collapseToPods([]domain.ReplicaMetrics{rank(maxSeqs), rank(maxSeqs - 6)})
 	if r := itl.NewTracker().Observe("k", "v", pods, adm, at); r.Capped != 0 || r.AboveBand != 1 {
 		t.Errorf("one rank short of the cap: capped %d aboveBand %d, want 0 and 1", r.Capped, r.AboveBand)
 	}
