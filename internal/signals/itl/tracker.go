@@ -167,6 +167,7 @@ func (r Reading) SlopeAge(now time.Time) time.Duration {
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm Admission, now time.Time) Reading {
 	var r Reading
 	lo, hi := adm.band()
+	s := adm.Steady.withDefaults()
 	t.mu.Lock()
 	w, ok := t.windows[key]
 	if !ok {
@@ -205,10 +206,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
 				traces.replicas[rm.PodName] = trace
 			}
-			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(rm.KvUsageInstant), now)
-			settling = trace.settling(now)
+			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(rm.KvUsageInstant), now, s)
+			settling = trace.settling(now, s)
 			if traceable(rm.KvUsageInstant) {
-				steady = trace.steady(rm.KvUsageInstant, now)
+				steady = trace.steady(rm.KvUsageInstant, now, s)
 			} else {
 				// Present, so its trace is kept; no k, so nothing is noted.
 				trace = nil
@@ -249,7 +250,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			}
 		}
 		if trace != nil {
-			trace.note(rm.KvUsageInstant, now)
+			trace.note(rm.KvUsageInstant, now, s)
 		}
 	}
 	// A replica missing from this cycle starts over when it returns: what it
@@ -267,7 +268,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	// the workload and a steady window kept for its own sake would keep
 	// fitting a line the fleet has since moved off.
 	sw.Prune(now)
-	cutoff := now.Add(-DefaultSteadyCarry)
+	cutoff := now.Add(-s.Carry)
 	if len(obs) > 0 && obs[0].Timestamp.Before(cutoff) {
 		cutoff = obs[0].Timestamp
 	}
@@ -304,7 +305,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	// fit answers from a single pair, and a line should not rest on one
 	// reading from one replica on one cycle.
 	pinned, settled := pinnedReadings(obs, steadyObs)
-	if !settled || len(pinned) < DefaultMinSettledSamples {
+	if !settled || len(pinned) < s.MinSettledSamples {
 		// Too few readings to fit, for one of two reasons, and the last A
 		// holds through both.
 		//
@@ -359,6 +360,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 // first: this floor is for what is left once the settling replicas' readings
 // are set aside, and three is one cycle of a three-replica fleet or three of a
 // lone replica -- not one reading of one replica on one cycle.
+// It is the default of analyzerTuning.steadyGate.minSettledSamples.
 const DefaultMinSettledSamples = 3
 
 // pinnedReadings is what the pinned fit reads: the steady readings the main

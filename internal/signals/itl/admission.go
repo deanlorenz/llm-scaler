@@ -27,6 +27,10 @@ type Admission struct {
 	// The policy key itlCapMaxPreemptionRate sets it; zero, the default,
 	// requires none.
 	CapMaxPreemptionRate float64
+	// Steady is the steady-state gate: which readings teach the full fit and
+	// the pinned one. The policy's analyzerTuning.steadyGate sets it; a zero
+	// field takes its default (DefaultSteadiness).
+	Steady Steadiness
 	// SlopeHoldFor is how long after it was fitted a key's last A may be
 	// held when the window cannot fit (Tracker.Observe). The analyzers pass
 	// their bucket retention, the horizon a finished fit is kept on

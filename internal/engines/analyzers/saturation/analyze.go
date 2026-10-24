@@ -144,9 +144,11 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 // order above checkable rather than conventional, so a new field should keep
 // it and a second exception should be argued for here.
 type cycle struct {
-	a      *SaturationAnalyzer
-	input  domain.AnalyzerInput
-	cfg    *config.ScalingPolicy
+	a     *SaturationAnalyzer
+	input domain.AnalyzerInput
+	cfg   *config.ScalingPolicy
+	// tune is cfg's analyzer tuning, defaults filled in (tuningOf).
+	tune   tuning
 	logger logr.Logger
 
 	// newCycle: variant-level identity, and whether decode is saturated.
@@ -223,6 +225,7 @@ func (a *SaturationAnalyzer) newCycle(
 		a:      a,
 		input:  input,
 		cfg:    cfg,
+		tune:   tuningOf(cfg),
 		logger: ctrl.LoggerFrom(ctx),
 	}
 
@@ -279,7 +282,7 @@ func (a *SaturationAnalyzer) newCycle(
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
 	// Decided over every row before any is priced, for the same reason.
-	c.busyNowRoles = rolesBusyNow(input.ReplicaMetrics, c.rolesByVariant)
+	c.busyNowRoles = c.tune.rolesBusyNow(input.ReplicaMetrics, c.rolesByVariant)
 
 	return c
 }
@@ -455,8 +458,8 @@ func (c *cycle) fitLines() {
 		// (BucketRetention, which ages the shared lines too) and by the
 		// arguments it was fitted under (issue #284).
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
-			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(),
-			SlopeHoldFor:         c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
+			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
 		own := reading.Model
 		// The variant's own window, by the same key noteITL just wrote, and
@@ -547,7 +550,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// (decodeCapacityView), except on a replica at its sequence cap. The
 	// idle tests below read the raw row.
 	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.explicitMaxNumSeqs())
-	served := servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
+	served := c.tune.servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for i, rm := range rows {
 		raw := c.input.ReplicaMetrics[i]
@@ -634,7 +637,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
-				kvFromInstant: kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
+				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
@@ -655,7 +658,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// Whether a decode replica is idle against what it can do needs its
 	// effective capacity, so every row priced first (idle_room.go).
 	c.settledIdleDecode = c.a.settledIdleDecode(c.input.Namespace, c.input.ModelID,
-		replicaCapacities, pricedRows, c.rolesByVariant)
+		replicaCapacities, pricedRows, c.rolesByVariant, c.tune)
 	return replicaCapacities, nil
 }
 
