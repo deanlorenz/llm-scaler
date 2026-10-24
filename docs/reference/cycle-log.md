@@ -260,14 +260,17 @@ A role the composite holds logs one line a cycle:
 
 ```text
 INFO  composite holds a role  {"modelID": "my-model", "namespace": "default", "role": "decode",
-  "noScaleUp": false, "noScaleDown": true}
+  "noScaleUp": false, "noScaleDown": true, "reason": ["analyzer-in-grace:throughput"]}
 ```
 
-`noScaleUp` and `noScaleDown` both true: no listed analyzer can size the role.
-`noScaleUp` alone, on a P/D model: the other role is held, so this one does not
-grow either. `noScaleDown` alone: a listed analyzer is inside its staleness
-grace (up to three cycles) with no reading, and the role waits for it before
-shrinking.
+`reason` lists every rule that holds the role:
+
+| `reason` | Holds | Meaning |
+|---|---|---|
+| `no-listed-analyzer-sizes-role` | up and down | saturation is not listed, and no listed analyzer can size the role |
+| `other-role-cannot-grow` | up | P/D only: the other role is held for `no-listed-analyzer-sizes-role`, so this one does not grow either |
+| `analyzer-in-grace:<name>` | down | the listed analyzer `<name>` is inside its staleness grace (up to three cycles) with no reading, and the role waits for it before shrinking |
+| `saturation-holds-role` | down | saturation holds the role, and another analyzer's demand replaced saturation's held figure; scale-down needs every analyzer to agree, so the role does not shrink |
 
 ---
 

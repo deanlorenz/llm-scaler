@@ -34,12 +34,17 @@ import (
 //     asking for most, and scale-down needs every one of them to agree;
 //   - none: DecisionNoSignal, and saturation's demand is kept.
 //
-// Two rules hold a role whatever the needs say (compositeHolds):
+// Four rules hold a role whatever the needs say (compositeHolds,
+// keepSaturationHolds), and each held role is logged with the rules that
+// hold it:
 //   - saturation is not listed and no variant of the role has a need: nothing
 //     the policy lists can size it, so it neither grows nor shrinks;
+//   - on P/D, another role is held that way: this one does not grow either;
 //   - a listed analyzer other than saturation is inside its staleness grace
 //     with no reading: it cannot ask for more this cycle, so the roles it
-//     covers do not shrink until its grace runs out.
+//     covers do not shrink until its grace runs out;
+//   - saturation holds the role and another analyzer's demand replaced its
+//     held figure: the role does not shrink.
 //
 // Each role is then priced in one analyzer's frame, whichever needs more
 // replicas for the fleet the role runs (priceRole; one frame per listed
@@ -140,6 +145,8 @@ func buildComposite(
 				"variant", result.VariantCapacities[i].VariantName, "totalReplicas", decisions[i].Others)
 		}
 	}
+	holds := compositeHolds(*sat, eligibleAnalyzers, roles, sized)
+	keepSaturationHolds(&holds, *sat, &result, eligibleAnalyzers)
 	composite := allocation.NamedAnalyzerResult{
 		Name:              allocation.CompositeSignalName,
 		Result:            &result,
@@ -147,16 +154,16 @@ func buildComposite(
 		ScaleUpThreshold:  scaleUp,
 		ScaleDownBoundary: scaleDown,
 		Live:              len(contributors) > 0 || sat.Live,
-		Holds:             compositeHolds(*sat, eligibleAnalyzers, roles, sized),
+		Holds:             holds.roleHolds(),
 	}
-	keepSaturationHolds(&composite, *sat, eligibleAnalyzers)
 	buildCapacities(ctx, &composite, nil, scaleUp, scaleDown)
 	boundAllSpare(&composite, pricings, scaleDown)
 	applyHolds(&composite, roles)
-	for role, h := range composite.Holds {
+	for _, role := range slices.Sorted(maps.Keys(composite.Holds)) {
+		h := composite.Holds[role]
 		logger.Info("composite holds a role",
 			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace, "role", role,
-			"noScaleUp", h.NoScaleUp, "noScaleDown", h.NoScaleDown)
+			"noScaleUp", h.NoScaleUp, "noScaleDown", h.NoScaleDown, "reason", holds.reasons[role])
 	}
 	composite.Remaining = composite.RequiredCapacity
 	composite.Spare = composite.SpareCapacity
@@ -544,7 +551,56 @@ func redistributeVariantDemand(vcs []domain.VariantCapacity, role string, demand
 	}
 }
 
-// compositeHolds returns what each role is forbidden this cycle, or nil.
+// Why the composite holds a role, logged as the reason of each
+// "composite holds a role" line. A role can be held for more than one.
+const (
+	// holdUnsized: saturation is not listed and no listed analyzer sizes
+	// the role, so it neither grows nor shrinks.
+	holdUnsized = "no-listed-analyzer-sizes-role"
+	// holdOtherRoleUnsized: on P/D, another role is held for holdUnsized,
+	// so this one does not grow either.
+	holdOtherRoleUnsized = "other-role-cannot-grow"
+	// holdAnalyzerInGrace is the prefix of the reason a listed analyzer
+	// inside its staleness grace with no reading holds a role against
+	// scale-down; the analyzer's name follows it.
+	holdAnalyzerInGrace = "analyzer-in-grace:"
+	// holdSaturationHolds: saturation holds the role (HeldRoleDemand) and
+	// another analyzer's demand replaced its held figure, so the role does
+	// not shrink.
+	holdSaturationHolds = "saturation-holds-role"
+)
+
+// roleHoldSet is what the composite forbids each role this cycle, and why.
+type roleHoldSet struct {
+	holds   map[string]allocation.RoleHold
+	reasons map[string][]string
+}
+
+// add forbids role scale-up when up, scale-down when down, for reason.
+func (s *roleHoldSet) add(role string, up, down bool, reason string) {
+	if s.holds == nil {
+		s.holds = make(map[string]allocation.RoleHold)
+		s.reasons = make(map[string][]string)
+	}
+	h := s.holds[role]
+	h.NoScaleUp = h.NoScaleUp || up
+	h.NoScaleDown = h.NoScaleDown || down
+	s.holds[role] = h
+	if !slices.Contains(s.reasons[role], reason) {
+		s.reasons[role] = append(s.reasons[role], reason)
+	}
+}
+
+// roleHolds is the set as allocation.NamedAnalyzerResult.Holds: nil when
+// nothing is held.
+func (s roleHoldSet) roleHolds() map[string]allocation.RoleHold {
+	if len(s.holds) == 0 {
+		return nil
+	}
+	return s.holds
+}
+
+// compositeHolds returns what each role is forbidden this cycle, and why.
 //
 // Saturation unlisted: a role none of whose variants a listed analyzer could
 // size is held both ways. Saturation still supplies the units and the
@@ -558,23 +614,25 @@ func redistributeVariantDemand(vcs []domain.VariantCapacity, role string, demand
 // others' smaller need shrink the fleet for a cycle. Saturation's own grace
 // is left as it was before the composite existed.
 func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.NamedAnalyzerResult,
-	roles []string, sized map[string]bool) map[string]allocation.RoleHold {
-	holds := make(map[string]allocation.RoleHold)
+	roles []string, sized map[string]bool) roleHoldSet {
+	var holds roleHoldSet
 	satListed := slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool { return e.Name == sat.Name })
 	if !satListed {
+		var unsized []string
 		for _, role := range roles {
 			if !sized[role] {
-				holds[role] = allocation.RoleHold{NoScaleUp: true, NoScaleDown: true}
+				unsized = append(unsized, role)
+				holds.add(role, true, true, holdUnsized)
 			}
 		}
 		// On P/D a role that cannot grow stops the other growing too: decode
 		// grown against a frozen prefill is capacity prefill cannot feed. The
 		// share optimizer freezes such a model whole for the same reason.
-		if len(holds) > 0 && len(roles) > 1 {
+		if len(unsized) > 0 && len(roles) > 1 {
 			for _, role := range roles {
-				h := holds[role]
-				h.NoScaleUp = true
-				holds[role] = h
+				if !slices.Contains(unsized, role) {
+					holds.add(role, true, false, holdOtherRoleUnsized)
+				}
 			}
 		}
 	}
@@ -596,14 +654,9 @@ func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.Na
 		}
 		for _, role := range roles {
 			if len(covered) == 0 || covered[role] {
-				h := holds[role]
-				h.NoScaleDown = true
-				holds[role] = h
+				holds.add(role, false, true, holdAnalyzerInGrace+e.Name)
 			}
 		}
-	}
-	if len(holds) == 0 {
-		return nil
 	}
 	return holds
 }
@@ -618,24 +671,20 @@ func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.Na
 // analyzer to agree, and saturation's hold is its refusal; growth is
 // unaffected. Saturation alone never drops its hold, so it decides as before.
 // A saturation that is listed but not eligible this cycle (stale, or no
-// reading) blocks nothing, as allocation.Eligible promises.
-func keepSaturationHolds(nr *allocation.NamedAnalyzerResult, sat allocation.NamedAnalyzerResult,
+// reading) blocks nothing, as allocation.Eligible promises. composite is the
+// composite's result after pricing.
+func keepSaturationHolds(holds *roleHoldSet, sat allocation.NamedAnalyzerResult, composite *domain.AnalyzerResult,
 	eligible []allocation.NamedAnalyzerResult) {
 	if !slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool {
 		return e.Name == sat.Name && allocation.Eligible(e)
 	}) {
 		return
 	}
-	for role := range sat.Result.HeldRoleDemand {
-		if _, kept := nr.Result.HeldRoleDemand[role]; kept {
+	for _, role := range slices.Sorted(maps.Keys(sat.Result.HeldRoleDemand)) {
+		if _, kept := composite.HeldRoleDemand[role]; kept {
 			continue
 		}
-		if nr.Holds == nil {
-			nr.Holds = make(map[string]allocation.RoleHold)
-		}
-		h := nr.Holds[role]
-		h.NoScaleDown = true
-		nr.Holds[role] = h
+		holds.add(role, false, true, holdSaturationHolds)
 	}
 }
 

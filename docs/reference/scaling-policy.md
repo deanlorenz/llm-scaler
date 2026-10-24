@@ -1860,8 +1860,8 @@ post-merge. Either way saturation alone sizes the model.
 | `name` | string | Analyzer name (must match a `RegisterAnalyzer` call) | required |
 | `enabled` | bool | `false` keeps the entry but stops the analyzer running and sizing the model; on `saturation` it makes saturation unlisted (it still runs, for units and variants, and sizes nothing) | `true` |
 | `score` | float64 | Weight in the cross-model fair share under a GPU limiter: the combined decision takes the largest score among the analyzers that sized the model this cycle (saturation's when none did). It does not change one model's replica count | `1.0` |
-| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleUpThreshold` |
-| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary; honored by the engine post-step (see Universal Threshold Post-Step below) | global `scaleDownBoundary` |
+| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleUpThreshold` |
+| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleDownBoundary` |
 
 ### Analyzer responsibilities and the universal threshold post-step
 
@@ -2019,7 +2019,17 @@ The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` fo
 
 **P/D disaggregation.** The same formula and the same `(scaleUp, scaleDown)` values are applied to every `RoleCapacity` entry. Threshold configuration is common regardless of role — there are no per-role overrides. The optimizer receives fully calibrated per-role RC/SC and uses them for P/D replica allocation.
 
-**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer. Saturation's pair also sets the band of the combined decision, whose demand is in saturation's units. An opt-out flag for analyzers with non-universal calibration math is deferred to a follow-up.
+**Per-analyzer threshold overrides.** `analyzers[].scaleUpThreshold` / `analyzers[].scaleDownBoundary` are resolved per analyzer: a per-entry override takes precedence over the model-level global. The resolved pair is applied uniformly at model level and every role for that analyzer's own result.
+
+Only saturation's pair decides what is scaled. The combined decision reads each listed analyzer's replica need, converts it to saturation's units, and judges it against saturation's band: saturation's override when it has one, the model-level pair otherwise. That holds when saturation is not listed too.
+
+On any other analyzer (`throughput`, `slo`, an external analyzer) the pair changes only that analyzer's own result, not the replicas. For `slo` that result includes its published prediction: its `scaleUpThreshold` moves `wva_slo_predicted_itl_seconds`, so lowering it improves the prediction while nothing scales. A disabled entry sizes nothing either way. The config read logs a warning for such an entry:
+
+```text
+WARNING: an analyzer other than saturation sets scaleUpThreshold or scaleDownBoundary; ...  {"key": "default", "analyzer": "throughput"}
+```
+
+To scale earlier or later, set the model-level band, or saturation's override. Judging each analyzer's need against its own band needs the combined decision built per direction and per frame, which this release does not do.
 
 ### Saturation Always Runs
 
@@ -2744,8 +2754,8 @@ type AnalyzerScoreConfig struct {
     Name              string         `yaml:"name"`
     Enabled           *bool          `yaml:"enabled,omitempty"`           // default true
     Score             float64        `yaml:"score,omitempty"`             // default 1.0
-    ScaleUpThreshold  *float64       `yaml:"scaleUpThreshold,omitempty"`  // overrides global (saturation only today)
-    ScaleDownBoundary *float64       `yaml:"scaleDownBoundary,omitempty"` // overrides global (saturation only today)
+    ScaleUpThreshold  *float64       `yaml:"scaleUpThreshold,omitempty"`  // overrides global; decides on saturation only
+    ScaleDownBoundary *float64       `yaml:"scaleDownBoundary,omitempty"` // overrides global; decides on saturation only
     Parameters        map[string]any `yaml:"parameters,omitempty"`        // plugin params; folded by Normalize
 }
 

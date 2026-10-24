@@ -151,14 +151,21 @@ func (o OtherFrames) Demand(u float64) float64 {
 	return u * max(o.Supply-rel, 0)
 }
 
-// RoleHold is what the composite forbids one role this cycle.
+// RoleHold is what the composite forbids one role this cycle. The composite
+// logs each held role with the reasons that hold it ("composite holds a
+// role").
 type RoleHold struct {
-	// NoScaleUp: no analyzer the policy lists can size the role, so nothing
-	// may grow it.
+	// NoScaleUp: nothing may grow the role. Set when saturation is not
+	// listed and no analyzer the policy lists can size the role, or, on
+	// P/D, when another role of the model is held that way: grown against a
+	// role that cannot grow, it is capacity the other cannot feed.
 	NoScaleUp bool
-	// NoScaleDown: no analyzer the policy lists can size the role, or one
-	// that sized it is inside its staleness grace with no reading, so nothing
-	// may shrink it.
+	// NoScaleDown: nothing may shrink the role. Set when saturation is not
+	// listed and no analyzer the policy lists can size the role; when a
+	// listed analyzer other than saturation that covers it is inside its
+	// staleness grace with no reading; or when saturation holds the role
+	// (HeldRoleDemand) and another analyzer's demand replaced its held
+	// figure, since scale-down needs every analyzer to agree.
 	NoScaleDown bool
 }
 
