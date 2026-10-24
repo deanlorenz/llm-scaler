@@ -121,6 +121,11 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 				"declare the analyzer on the \"default\" entry and reference it here",
 				"key", key, "analyzers", slices.Sorted(maps.Keys(satConfig.AnalyzerDefinitions)))
 		}
+		// A band on an analyzer other than saturation is accepted but does not
+		// move the decision (config.InertAnalyzerThresholds).
+		for _, name := range satConfig.InertAnalyzerThresholds() {
+			logger.Info(config.InertAnalyzerThresholdsMessage, "key", key, "analyzer", name)
+		}
 		configs[key] = satConfig
 		if len(fieldsIgnored) > 0 {
 			ignored[key] = fieldsIgnored

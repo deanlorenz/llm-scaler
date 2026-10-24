@@ -213,8 +213,15 @@ Analyzers are configured via `config.ScalingPolicy.Analyzers` (YAML key
 | `name` | string | required | Must match the name returned by `Analyzer.Name()` |
 | `enabled` | bool | true (when the entry is present) | Set false to disable without removing the analyzer |
 | `score` | float64 | 1.0 | Weight in the fair-share priority formula |
-| `scaleUpThreshold` | float64 | global | Overrides the model-level `scaleUpThreshold` for this analyzer |
-| `scaleDownBoundary` | float64 | global | Overrides the model-level `scaleDownBoundary` for this analyzer |
+| `scaleUpThreshold` | float64 | global | Overrides the model-level `scaleUpThreshold` for this analyzer's own result (`buildNamedResult`). Only saturation's decides: the composite reads other analyzers' needs, not their bands |
+| `scaleDownBoundary` | float64 | global | Overrides the model-level `scaleDownBoundary` for this analyzer's own result. Only saturation's decides, as above |
+
+A band on an entry other than saturation is accepted, and
+`parseScalingPolicyConfigRejects` logs `config.InertAnalyzerThresholdsMessage`
+for it (`ScalingPolicy.InertAnalyzerThresholds`). Honoring it in the composite
+would take more than one number: scaling the analyzer's need by
+`satUp / itsUp` moves its scale-up point, but its scale-down point then sits at
+`satDown x itsUp / satUp`, not at its own boundary.
 
 Minimal YAML example:
 
