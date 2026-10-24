@@ -560,14 +560,23 @@ Installer:
   sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
   ```
 - **Rename a quota entry named `gpu-limiter`, `node-fit`,
-  `pd-pair-borrows-whole` or `lender-cannot-reclaim`.** These names are now
-  reserved for what a held-back decision is reported under when no quota
-  entry held it. In this release such an entry still loads and applies, with
-  a warning: the log line `WARNING: Quota limiter entry has a reserved name`
-  and the `limiterWarnings` key of the controller status. A later release
-  rejects it, and a rejected `default` entry stops the controller at start.
-  Check before upgrading. `limiterWarnings` is written only by the new
-  controller, so read the policy itself: the controller's own
+  `pd-pair-borrows-whole` or `lender-cannot-reclaim`, before upgrading.**
+  These names are reserved for what a held-back decision is reported under
+  when no quota entry held it ([reserved names](quota-limiter.md#reserved-names)).
+  This release rejects a `quota` entry with one: the `default` entry holding
+  it is rejected (`policyAccepted: "false"`, and `policyError` says
+  `quota entry name "<name>" is reserved`), and a controller starting on it
+  refuses to start: `kubectl logs` of the new pod says
+  `quota entry name "<name>" is reserved ... rename the entry`, and the
+  rollout stalls with the old pod still serving. `make deploy-wva` checks
+  first and stops before applying anything, with the same message, when the
+  policy it keeps (`WVA_LIMITER` unset) or the one in `wva-policy` has such an
+  entry. It cannot check a policy it is not allowed to read, such as
+  `wva-policy` from a namespace-scoped install, or a policy namespace other
+  than `wva-policy`. v0.10.0-rc1 to rc4 only warned (the log line
+  `WARNING: Quota limiter entry has a reserved name` and the `limiterWarnings`
+  status key); an rc install showing either has such an entry. Read the
+  policy itself rather than the status: the controller's own
   `wva-scaling-policy-config`, and the one in `wva-policy` if that namespace
   governs the install. Each line prints how many entry names it read before
   the reserved ones, so a policy that was not read is not taken for a pass:

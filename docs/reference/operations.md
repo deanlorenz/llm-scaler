@@ -268,7 +268,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `policyError` | why the `default` entry was rejected; empty when accepted |
 | `policyIgnored` | values in the `default` entry that could not be used, as `<namespace>/<name>: ` (the ConfigMap) then `<field>="<value>": <reason>`, separated by `; `. Values are cut to 64 bytes; at most 10 fields, then `+<n> more`. The rest of the entry applies. Empty when none. Always the controller's own ConfigMap, even with a separate policy namespace. It describes the entry parsed in the latest read: when that `default` entry is rejected and the previous one stays, it is empty and `policyAccepted`/`policyError` say why |
 | `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
-| `limiterWarnings` | what is wrong with the limiters in force though they still apply, joined by `; `: a quota entry with a [reserved name](quota-limiter.md#validation), which a later release rejects. Empty when none |
+| `limiterWarnings` | what is wrong with the limiters in force though they still apply, joined by `; `: for example a namespace a quota excludes that no limit bounds ([validation](quota-limiter.md#validation)). Empty when none |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
 | `utilizationShareNote` | present while the settings in force differ from the block as written. Today: a namespace-scoped controller with no quota on its namespace ignores `physicalGroups`. The mode is not `invalid` |

@@ -1410,11 +1410,111 @@ got="$(
     && ok "the install summary reports the kept live limiters when WVA_LIMITER is unset" \
     || fail "the install summary reported [$got] for a kept gpu-inventory,quota policy"
 
+# ---------------------------------------------------------------------------
+# #216: a quota entry with a reserved name stops the new controller at start.
+# The installer refuses it before applying anything, with the controller's own
+# message, rather than reporting a controller that never became ready. Executed
+# against the stubbed kubectl; what is asserted is the exit and what it said.
+reserved_refusal() {   # reserved_refusal <default entry> [optional] -- echoes "rc|stderr"
+    local rc=0 err
+    err="$(
+        LIM_DEFAULT="$1"
+        kubectl() { lim_stub "$@"; }
+        WVA_LIVE_LIMITERS='[{"type":"gpu-inventory"}]'
+        wva_refuse_reserved_limiter_names wva-system "${2:-}" 2>&1 >/dev/null
+        # Left as the caller had it: the install reads it again afterwards.
+        [ "$WVA_LIVE_LIMITERS" = '[{"type":"gpu-inventory"}]' ] || echo "WVA_LIVE_LIMITERS was overwritten"
+    )" || rc=$?
+    printf '%s|%s' "$rc" "$err"
+}
+RESERVED_POLICY='limiters:
+- name: gpu-limiter
+  type: quota
+  scope: cluster
+  quotas:
+    H100: 8'
+
+case_begin
+got="$(reserved_refusal "$RESERVED_POLICY")"
+if [ "${got%%|*}" = 1 ] && printf '%s' "$got" | grep -q 'quota entry name "gpu-limiter" is reserved' \
+   && printf '%s' "$got" | grep -q 'rename the entry'; then
+    ok "a quota entry named gpu-limiter is refused before the apply, with the controller's message"
+else
+    fail "a quota entry named gpu-limiter was not refused with the controller's message: [$got]"
+fi
+
+case_begin
+got="$(reserved_refusal 'limiters:
+- name: gpu-limiter
+  type: gpu-inventory
+- name: install-quota
+  type: quota
+  scope: cluster
+  quotas:
+    H100: 8')"
+[ "$got" = '0|' ] && ok "a physical entry named gpu-limiter beside a quota named otherwise passes, quietly" \
+    || fail "a physical entry named gpu-limiter was refused or warned about: [$got]"
+
+case_begin
+got="$(reserved_refusal '')"
+[ "$got" = '0|' ] && ok "no ConfigMap (a first install) passes the reserved-name check" \
+    || fail "an absent ConfigMap failed the reserved-name check: [$got]"
+
+case_begin
+got="$(reserved_refusal FORBIDDEN)"
+[ "${got%%|*}" = 0 ] && printf '%s' "$got" | grep -q 'Could not read' \
+    && ok "an unreadable policy is warned about, not passed in silence" \
+    || fail "an unreadable policy was not warned about: [$got]"
+
+case_begin
+got="$(reserved_refusal FORBIDDEN optional)"
+[ "${got%%|*}" = 0 ] && ! printf '%s' "$got" | grep -q 'WARNING\|Could not read' \
+    && ok "an unreadable optional policy namespace is an info line, not a warning on every tenant install" \
+    || fail "an unreadable optional policy namespace was [$got]"
+
+# The preflight runs for a controller install and is skipped for a
+# prerequisites-only apply, which installs no controller.
+case_begin
+got="$(
+    LIM_DEFAULT="$RESERVED_POLICY"
+    kubectl() { lim_stub "$@"; }
+    rc=0; ( unset WVA_LIMITER; WVA_APPLY_SCOPE=all wva_preflight_reserved_limiter_names ) >/dev/null 2>&1 || rc=$?
+    prc=0; ( WVA_APPLY_SCOPE=prereqs wva_preflight_reserved_limiter_names ) >/dev/null 2>&1 || prc=$?
+    printf '%s|%s' "$rc" "$prc"
+)"
+[ "$got" = '1|0' ] && ok "the reserved-name preflight refuses a controller install and skips a prerequisites-only apply" \
+    || fail "the reserved-name preflight returned [$got] for (install|prereqs), want [1|0]"
+
+# And deploy_wva_controller calls it before its first step that writes to the
+# cluster. Testing the function alone stays green when the call is removed or
+# moved after a write, which is how the refusal message would become untrue.
+case_begin
+body="$(tr -d '\r' < "$ROOT/deploy/lib/infra_wva.sh" | awk '/^deploy_wva_controller\(\) \{/{f=1} f{print NR": "$0} f&&/^\}/{exit}')"
+code="$(printf '%s\n' "$body" | grep -vE '^[0-9]+: *(#|$)')"
+pre_at="$(printf '%s\n' "$code" | grep -m1 -E '^[0-9]+: *wva_preflight_reserved_limiter_names *$' | cut -d: -f1)"
+write_at="$(printf '%s\n' "$code" | grep -m1 -E 'kubectl |wva_(delete|sync|apply|regrant|scaler_tls|refuse_unknown|keep)_' | cut -d: -f1)"
+if [ -n "$body" ] && [ -n "$pre_at" ] && [ -n "$write_at" ] && [ "$pre_at" -lt "$write_at" ]; then
+    ok "deploy_wva_controller runs the reserved-name preflight (line $pre_at) before its first write (line $write_at)"
+else
+    fail "deploy_wva_controller does not run wva_preflight_reserved_limiter_names before its first write (preflight at [${pre_at:-none}], first write at [${write_at:-none}], body $(printf '%s\n' "$body" | grep -c .) lines)"
+fi
+
+# The shell list mirrors config.ReservedLimiterNames; read the Go back.
+case_begin
+go_names="$(tr -d '\r' < "$ROOT/internal/config/quota_limiter.go" \
+    | awk '/^var ReservedLimiterNames = \[\]string\{/{f=1;next} f&&/^\}/{f=0} f' \
+    | tr -d ' \t",' | grep . | tr '\n' ' ' | sed 's/ $//')"
+if [ -n "$go_names" ] && [ "$go_names" = "$WVA_RESERVED_LIMITER_NAMES" ]; then
+    ok "WVA_RESERVED_LIMITER_NAMES matches config.ReservedLimiterNames ($go_names)"
+else
+    fail "WVA_RESERVED_LIMITER_NAMES [$WVA_RESERVED_LIMITER_NAMES] differs from config.ReservedLimiterNames [$go_names]"
+fi
+
 # How many cases ran. Without it, deleting a refuse_quota line removes a case
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=81
+CASES_EXPECTED=89
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -577,6 +577,67 @@ wva_live_limiters() {
     WVA_LIVE_LIMITERS="$lim"
 }
 
+# WVA_RESERVED_LIMITER_NAMES mirrors config.ReservedLimiterNames: what a
+# held-back decision is reported under when no quota entry held it. A quota
+# entry with one is rejected by the controller, and a controller starting on
+# it does not start. hack/check-limiter-declaration.sh reads the Go list back.
+WVA_RESERVED_LIMITER_NAMES="gpu-limiter node-fit pd-pair-borrows-whole lender-cannot-reclaim"
+
+# wva_reserved_quota_names <limiters json> prints, one per line, each quota
+# entry name in the list that is one of WVA_RESERVED_LIMITER_NAMES.
+wva_reserved_quota_names() {
+    printf '%s' "$1" | jq -r --arg reserved "$WVA_RESERVED_LIMITER_NAMES" '
+        ($reserved | split(" ")) as $r
+        | .[]? | select(.type == "quota") | (.name // "")
+        | select(. as $n | any($r[]; . == $n))'
+}
+
+# wva_refuse_reserved_limiter_names <namespace> [optional] exits, before
+# anything is applied, when the default entry of the scaling-policy ConfigMap
+# in <namespace> has a quota entry with a reserved name: the new controller
+# would reject that entry and not start, and the install would only say it
+# never became ready. No ConfigMap, or none with such a name, passes. One that
+# cannot be read is a warning, not a pass in silence: the controller still
+# rejects it. With "optional" (a policy namespace a tenant is commonly not
+# allowed to read) it is an info line instead. WVA_LIVE_LIMITERS is left as
+# the caller had it.
+wva_refuse_reserved_limiter_names() {
+    local ns="$1" optional="${2:-}" saved="$WVA_LIVE_LIMITERS" rc=0 names
+    wva_live_limiters "$ns" || rc=$?
+    names="$(wva_reserved_quota_names "${WVA_LIVE_LIMITERS:-[]}" 2>/dev/null)" || names=""
+    WVA_LIVE_LIMITERS="$saved"
+    if [ "$rc" -ne 0 ]; then
+        if [ "$optional" = optional ]; then
+            log_info "Did not check quota entry names in $ns/wva-scaling-policy-config: ${WVA_LIVE_LIMITERS_ERR:-unreadable}"
+            return 0
+        fi
+        log_warning "Could not read wva-scaling-policy-config in $ns (${WVA_LIVE_LIMITERS_ERR:-unreadable}) to check its quota entry names. A quota entry named one of: $WVA_RESERVED_LIMITER_NAMES is rejected, and the controller does not start on it."
+        return 0
+    fi
+    [ -z "$names" ] && return 0
+    local name msg=""
+    for name in $names; do
+        msg="${msg}
+    $ns/wva-scaling-policy-config: quota entry name \"$name\" is reserved: decisions held back by something other than a quota entry are reported under it (reserved: ${WVA_RESERVED_LIMITER_NAMES// /, }); rename the entry"
+    done
+    log_error "This controller would reject its scaling policy and not start:${msg}
+  Rename the entry, update any alert or query that selects its limiter_name, and re-run. The controller install stopped before writing anything (earlier install steps, such as other components, are not undone)."
+}
+
+# wva_preflight_reserved_limiter_names is what deploy_wva_controller calls
+# first: a quota entry with a reserved name stops the new controller at start
+# (config.ReservedLimiterNames), and without this the install only reports a
+# controller that never became ready. A prerequisites-only apply installs no
+# controller and checks nothing. The controller's own policy matters only when
+# it is kept (WVA_LIMITER unset); one in wva-policy applies either way.
+wva_preflight_reserved_limiter_names() {
+    [ "${WVA_APPLY_SCOPE:-all}" = "prereqs" ] && return 0
+    wva_refuse_reserved_limiter_names wva-policy optional
+    if [ -z "${WVA_LIMITER:-}" ]; then
+        wva_refuse_reserved_limiter_names "$WVA_NS"
+    fi
+}
+
 # wva_live_limiter_set <namespace> echoes the limiter set the live policy in
 # <namespace> declares, in limiter_types_of's form (gpu-inventory first, then
 # quota; none for no limiter). What an install with WVA_LIMITER unset keeps,

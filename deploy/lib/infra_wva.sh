@@ -1839,6 +1839,12 @@ deploy_wva_controller() {
         log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
     fi
 
+    # First, before this function changes anything on the cluster: a policy the
+    # new controller would reject stops the install here, with the reason
+    # (wva_preflight_reserved_limiter_names). hack/check-limiter-declaration.sh
+    # pins that this call stays ahead of every step that writes.
+    wva_preflight_reserved_limiter_names
+
     # Select the Kustomize overlay by install SCOPE (WVA_SCOPE=cluster|namespace)
     # and platform. Both scopes work on both platforms; the default preserves the
     # historical inference. See wva_overlay_dir.

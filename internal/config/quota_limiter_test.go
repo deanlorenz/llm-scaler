@@ -310,22 +310,19 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		})
 	})
 
-	// SR-M5 and review 183-3: a quota entry named like the physical limiter,
-	// node fit or a borrowing rule would be reported under a name that means
-	// something else. Rejecting it would drop the default entry and stall an
-	// upgrade, so in this release it is a warning naming the later rejection.
-	DescribeTable("reserved names warn, not reject",
+	// SR-M5 and #216: a quota entry named like the physical limiter, node fit
+	// or a borrowing rule would be reported under a name that means something
+	// else. v0.10.0 rejects it; the release before only warned.
+	DescribeTable("reserved names are rejected",
 		func(name string) {
 			entries := &QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{
 				{Name: name, Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
 			}}
 			warnings, err := entries.Validate()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(warnings).To(ConsistOf(And(
-				ContainSubstring(`quota entry name %q is reserved`, name),
-				ContainSubstring("rejected in a later"))))
-			Expect(ReservedLimiterNameWarnings(entries.Limiters)).To(ConsistOf(
-				ContainSubstring(`limiters[0]: quota entry name %q is reserved`, name)))
+			Expect(err).To(MatchError(And(
+				ContainSubstring(`entry[0]: quota entry name %q is reserved`, name),
+				ContainSubstring("rename the entry"))))
+			Expect(warnings).To(BeEmpty())
 		},
 		Entry("the physical limiter's reported name", "gpu-limiter"),
 		Entry("node-fit", "node-fit"),
@@ -333,11 +330,14 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		Entry("lender-cannot-reclaim", "lender-cannot-reclaim"),
 	)
 
-	It("does not warn about a physical entry named gpu-limiter, nor a quota entry named otherwise", func() {
-		Expect(ReservedLimiterNameWarnings([]QuotaLimiterConfig{
+	It("accepts a physical entry named gpu-limiter beside a quota entry named otherwise", func() {
+		// Only a quota entry is reported under its own name; a physical entry
+		// is always reported as gpu-limiter, whatever it is named.
+		policy := ScalingPolicy{Limiters: []QuotaLimiterConfig{
 			{Name: "gpu-limiter", Type: "gpu-inventory"},
-			{Name: "install-quota", Type: "quota"},
-		})).To(BeEmpty())
+			{Name: "install-quota", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
+		}}
+		Expect(policy.validateLimiters()).To(Succeed())
 	})
 
 	It("accumulates multiple errors instead of failing fast", func() {

@@ -50,10 +50,9 @@
 //	                       example "quota/install-quota",
 //	                       "inventory/gpu-inventory", or "none".
 //	limiterWarnings        what is wrong with the limiters in force though
-//	                       they still apply as written, joined by "; ": a
-//	                       quota entry named one of the reserved limiter
-//	                       names, which a later release rejects. Empty when
-//	                       none.
+//	                       they still apply as written, joined by "; ": for
+//	                       example a namespace a quota excludes that no limit
+//	                       bounds. Empty when none.
 //	utilizationShare       the optimizer's mode: off, invalid, shadow or
 //	                       active.
 //	utilizationShareError  the optimizer block's configuration error when the

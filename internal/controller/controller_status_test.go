@@ -129,24 +129,26 @@ optimizer:
 			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyIgnored, ""))
 		})
 
-		// Review 183-3: a quota entry with a reserved name still applies in
-		// this release; the status says so until it is renamed.
-		It("accepts a quota entry with a reserved name, noting it in limiterWarnings until renamed", func() {
+		// #216: a quota entry with a reserved name is rejected from v0.10.0;
+		// the status says why until it is renamed, and nothing of it applies.
+		It("rejects a quota entry with a reserved name, and accepts it once renamed", func() {
 			reserved := strings.Replace(quotaShadowPolicy, "name: install-quota", "name: gpu-limiter", 1)
 			r := newReconciler(policyConfigMap(systemNS, "", reserved))
 			reconcile(r, systemNS)
 
 			d := status.Data()
-			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "true"))
-			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "quota/gpu-limiter"))
-			Expect(d[controllerstatus.KeyLimiterWarnings]).To(ContainSubstring(`limiters[0]: quota entry name "gpu-limiter" is reserved`))
+			Expect(d).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "false"))
+			Expect(d[controllerstatus.KeyPolicyError]).To(ContainSubstring(`quota entry name "gpu-limiter" is reserved`))
+			Expect(d[controllerstatus.KeyLimiter]).NotTo(ContainSubstring("gpu-limiter"))
 
 			var cm corev1.ConfigMap
 			Expect(r.Get(ctx, client.ObjectKey{Namespace: systemNS, Name: config.ScalingPolicyConfigMapName()}, &cm)).To(Succeed())
 			cm.Data[config.GlobalDefaultsKey] = quotaShadowPolicy
 			Expect(r.Reader.(client.Client).Update(ctx, &cm)).To(Succeed())
 			reconcile(r, systemNS)
-			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyLimiterWarnings, ""))
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyAccepted, "true"))
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyLimiter, "quota/install-quota"))
+			Expect(status.Data()).To(HaveKeyWithValue(controllerstatus.KeyPolicyError, ""))
 		})
 	})
 
