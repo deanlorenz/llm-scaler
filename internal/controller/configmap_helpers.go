@@ -144,6 +144,31 @@ func warnInertAnalyzerThresholds(logger logr.Logger, configs config.ScalingPolic
 	}
 }
 
+// warnAboutTuningFallbacks logs one WARNING per tuning figure a kept entry
+// sets that the analyzer will not run with (config.TuningFallbacks): a pair
+// the entry crosses with a key the default entry sets or leaves at its
+// default, which the resolved policy puts back to both defaults, or an
+// idleKvUsage held under kvCacheThreshold. Each entry is resolved over the
+// "default" entry, as a model with no tier is. Logged once per ConfigMap
+// read, not per cycle: the entry is accepted, so nothing else says the
+// setting is ignored. Called only where tuning is read
+// (handleScalingPolicyConfigMap), like warnInertAnalyzerThresholds.
+func warnAboutTuningFallbacks(logger logr.Logger, configs config.ScalingPolicySet) {
+	var base *config.ScalingPolicy
+	if d, ok := configs[config.GlobalDefaultsKey]; ok {
+		base = &d
+	}
+	for _, key := range slices.Sorted(maps.Keys(configs)) {
+		over := base
+		if key == config.GlobalDefaultsKey {
+			over = nil
+		}
+		for _, w := range config.TuningFallbacks(over, configs[key]) {
+			logger.Info("WARNING: tuning figure not used: "+w, "key", key, "resolvedFor", "model with no tier")
+		}
+	}
+}
+
 // warnAboutLimiters logs the findings about the limiters of policy, the
 // "default" entry the cluster's limiters are read from. The caller calls it
 // only for that entry: limiters anywhere else are ignored whole, and a
