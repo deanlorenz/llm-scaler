@@ -1592,8 +1592,8 @@ Work down the list in order.
      pod not yet created, scheduled or Ready, or an LWS group missing or being
      replaced. Logged as `Utilization share: donor's workload is changing;
      transfer not started`, then `donor held while its workload is changing`
-     every cycle, with the cause. The donor and each short model waiting on it
-     show blocked reason `donor-changing`. The hold ends once the workload
+     every cycle, with the cause. The donor and the model whose transfer it
+     refused show blocked reason `donor-changing`. The hold ends once the workload
      reads stable for `stabilization.consecutiveCyclesBeforeMove` cycles, and
      after one release timeout at the latest. A paused Deployment or a held LWS
      canary rollout stays "changing", and does not give, until resumed or

@@ -1607,6 +1607,9 @@ type ShareChangingHold struct {
 	// Donor is the held role, and Variant the donor variant whose workload
 	// was changing.
 	Donor, Variant string
+	// Receivers are the roles whose transfers from it were refused while it
+	// holds (a spare return has none).
+	Receivers []string
 	// Reason is why its pods could not be steered, as the refusal said.
 	Reason string
 	// Since is when the hold began, and Until when it ends at the latest.
@@ -1620,10 +1623,11 @@ type ShareChangingHold struct {
 // (ObserveChanging), or for at most one release timeout: its workload is
 // changing -- a rollout, a pod not yet created, scheduled or Ready -- and which
 // pod a lower count removes cannot be steered until it settles. variant is the
-// donor variant that was refused, and reason why. Routine, not a fault: no
+// donor variant that was refused, receiver the role the refused transfer was
+// for (empty for a spare return), and reason why. Routine, not a fault: no
 // abort, no back-off, not unsteerable, so a rollout cannot ratchet the
 // back-off the next real abort starts from.
-func (l *ShareLedger) HoldChanging(donor, variant, reason string, now time.Time, tm ShareTimings) {
+func (l *ShareLedger) HoldChanging(donor, variant, receiver, reason string, now time.Time, tm ShareTimings) {
 	if donor == "" {
 		return
 	}
@@ -1632,6 +1636,9 @@ func (l *ShareLedger) HoldChanging(donor, variant, reason string, now time.Time,
 		h = ShareChangingHold{Donor: donor, Since: now}
 	}
 	h.Variant, h.Reason, h.SteadyCycles = variant, reason, 0
+	if receiver != "" && !slices.Contains(h.Receivers, receiver) {
+		h.Receivers = append(slices.Clone(h.Receivers), receiver)
+	}
 	if until := now.Add(tm.ReleaseTimeout); until.After(h.Until) {
 		h.Until = until
 	}
@@ -1642,6 +1649,17 @@ func (l *ShareLedger) HoldChanging(donor, variant, reason string, now time.Time,
 func (l *ShareLedger) Changing(role string, now time.Time) bool {
 	h, ok := l.changing[role]
 	return ok && now.Before(h.Until)
+}
+
+// ChangingBlocks reports whether a donor HoldChanging holds now refused a
+// transfer to receiver.
+func (l *ShareLedger) ChangingBlocks(receiver string, now time.Time) bool {
+	for d, h := range l.changing {
+		if d != receiver && now.Before(h.Until) && slices.Contains(h.Receivers, receiver) {
+			return true
+		}
+	}
+	return false
 }
 
 // ChangingHolds lists the donors HoldChanging holds now, by donor.

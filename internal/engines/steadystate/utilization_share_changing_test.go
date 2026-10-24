@@ -14,11 +14,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
-// setPodReady sets a fleet pod's Ready condition.
-func setPodReady(t *testing.T, c client.Client, name string, ready bool) {
+// setA4Ready sets the Ready condition of the fleet's pod A-v-4.
+func setA4Ready(t *testing.T, c client.Client, ready bool) {
 	t.Helper()
 	var p corev1.Pod
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: name}, &p); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "A-v-4"}, &p); err != nil {
 		t.Fatal(err)
 	}
 	status := corev1.ConditionFalse
@@ -44,7 +44,7 @@ func TestUtilizationShareChangingDonorIsReleasedOnceStable(t *testing.T) {
 			reg := freshMetrics(t)
 			f := newShareFleet()
 			c := sharePods(t, f)
-			setPodReady(t, c, "A-v-4", false)
+			setA4Ready(t, c, false)
 			se := newShareEngine(t, f, c, time.Unix(0, 0))
 			ctx, logs := observe(t)
 			se.ctx = ctx
@@ -105,9 +105,25 @@ func TestUtilizationShareChangingDonorIsReleasedOnceStable(t *testing.T) {
 				}
 			}
 
+			// Ready for one cycle, then not Ready again: the stable count
+			// starts over, and A is still held.
+			setA4Ready(t, c, true)
+			if a := targetOf(t, cycle(), "ns/A-v"); a != 9 {
+				t.Fatalf("A lowered to %d after one stable cycle of two", a)
+			}
+			setA4Ready(t, c, false)
+			for range 2 {
+				if a := targetOf(t, cycle(), "ns/A-v"); a != 9 {
+					t.Fatalf("A lowered to %d with its pod not Ready again", a)
+				}
+				if h := ledger().ChangingHolds(se.clock); len(h) != 1 || h[0].SteadyCycles != 0 {
+					t.Fatalf("after the pod went not Ready again: holds %+v, want A held with the count reset", h)
+				}
+			}
+
 			// Ready: released after the confirm cycles, far inside the
 			// release timeout, and A gives.
-			setPodReady(t, c, "A-v-4", true)
+			setA4Ready(t, c, true)
 			ready := se.clock
 			gave := false
 			for range 6 {
@@ -117,8 +133,16 @@ func TestUtilizationShareChangingDonorIsReleasedOnceStable(t *testing.T) {
 				}
 			}
 			if !gave {
-				t.Fatalf("A still not giving %s after its pod became Ready (held since %s ago)",
-					se.clock.Sub(ready), se.clock.Sub(since))
+				// Say when it does give, if ever: at the release timeout is
+				// the fixed hold this test guards against.
+				waited := se.clock.Sub(ready)
+				for range 40 {
+					if targetOf(t, cycle(), "ns/A-v") < 9 {
+						t.Fatalf("A still not giving %s after its pod became Ready; it gave %s after, %s after the hold began",
+							waited, se.clock.Sub(ready), se.clock.Sub(since))
+					}
+				}
+				t.Fatalf("A still not giving %s after its pod became Ready, nor 20 minutes later", waited)
 			}
 			if got := se.clock.Sub(ready); got > 2*time.Minute {
 				t.Fatalf("A gave %s after its pod became Ready, want within the confirm cycles", got)

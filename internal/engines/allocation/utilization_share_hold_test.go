@@ -60,7 +60,7 @@ func TestShareLedgerHoldChangingIsRoutine(t *testing.T) {
 	now := time.Unix(1000, 0)
 	tm := ShareTimings{ReleaseTimeout: 10 * time.Minute, ReversalHold: time.Minute}
 	for range 5 {
-		l.HoldChanging("a", "a-v", "a pod is not ready", now, tm)
+		l.HoldChanging("a", "a-v", "r", "a pod is not ready", now, tm)
 	}
 	if !l.GivingBusy("a", now.Add(time.Minute)) || !l.GivingHeld("a", now.Add(time.Minute), tm) {
 		t.Fatal("a changing donor was offered again within the release timeout")
@@ -86,11 +86,14 @@ func TestShareLedgerChangingHoldEndsWhenStable(t *testing.T) {
 	tm := ShareTimings{ReleaseTimeout: 10 * time.Minute, ReversalHold: time.Minute}
 	now := time.Unix(1000, 0)
 	l := NewShareLedger()
-	l.HoldChanging("a", "a-v", "a pod is not ready", now, tm)
+	l.HoldChanging("a", "a-v", "r", "a pod is not ready", now, tm)
 	holds := l.ChangingHolds(now)
 	if len(holds) != 1 || holds[0].Donor != "a" || holds[0].Variant != "a-v" || holds[0].Reason != "a pod is not ready" ||
 		!holds[0].Since.Equal(now) || !holds[0].Until.Equal(now.Add(tm.ReleaseTimeout)) {
 		t.Fatalf("holds = %+v, want a's, naming its variant, reason and window", holds)
+	}
+	if !l.ChangingBlocks("r", now) || l.ChangingBlocks("x", now) || l.ChangingBlocks("a", now) {
+		t.Fatal("the hold blocks a role other than the receiver it refused, or not that one")
 	}
 	if _, released := l.ObserveChanging("a", true, "", 2); released {
 		t.Fatal("released after one stable cycle of two")
@@ -108,11 +111,14 @@ func TestShareLedgerChangingHoldEndsWhenStable(t *testing.T) {
 	if l.GivingBusy("a", now.Add(time.Minute)) || l.Changing("a", now.Add(time.Minute)) || len(l.ChangingHolds(now)) != 0 {
 		t.Fatal("still held after its workload read stable")
 	}
+	if l.ChangingBlocks("r", now.Add(time.Minute)) {
+		t.Fatal("the receiver is still blocked after the hold ended")
+	}
 	if _, released := l.ObserveChanging("a", true, "", 2); released {
 		t.Fatal("a donor no longer held reported released again")
 	}
 
-	l.HoldChanging("b", "b-v", "mid-rollout", now, tm)
+	l.HoldChanging("b", "b-v", "", "mid-rollout", now, tm)
 	for range 30 {
 		l.ObserveChanging("b", false, "", 2)
 	}
@@ -121,7 +127,7 @@ func TestShareLedgerChangingHoldEndsWhenStable(t *testing.T) {
 	}
 	// Refused again later, a fresh hold starts: its Since is the new refusal.
 	later := now.Add(tm.ReleaseTimeout + time.Minute)
-	l.HoldChanging("b", "b-v", "mid-rollout", later, tm)
+	l.HoldChanging("b", "b-v", "", "mid-rollout", later, tm)
 	if h := l.ChangingHolds(later); len(h) != 1 || !h[0].Since.Equal(later) {
 		t.Fatalf("hold after an expired one = %+v, want it to start at %v", h, later)
 	}
