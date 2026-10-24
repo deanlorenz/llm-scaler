@@ -7,8 +7,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// engineRequiredCapacity is RequiredCapacity as the engine post-step fills it
+// at the default scale-up threshold: demand / scaleUp - supply, never below
+// zero. The additive path grows on it; a fixture without it leaves that path
+// nothing to act on, so a spec routed there would assert nothing.
+func engineRequiredCapacity(demand, supply float64) float64 {
+	return max(demand/config.DefaultScaleUpThreshold-supply, 0)
+}
 
 // rescaleReq builds a single-variant, non-disaggregated model request on the
 // A100 accelerator (1 GPU/replica) for the rescale integration tests. Cost and
@@ -17,9 +26,10 @@ import (
 func rescaleReq(id, ns string, priority, demand float64, current int) ModelScalingRequest {
 	v := id + "-v"
 	r := &satEntryFixture{
-		ModelID:     id,
-		Namespace:   ns,
-		TotalDemand: demand,
+		ModelID:          id,
+		Namespace:        ns,
+		TotalDemand:      demand,
+		RequiredCapacity: engineRequiredCapacity(demand, float64(current)*1000),
 		VariantCapacities: []vcFixture{
 			{VariantName: v, AcceleratorName: "A100", Cost: 5, ReplicaCount: current, PerReplicaCapacity: 1000},
 		},
@@ -326,7 +336,7 @@ var _ = Describe("GreedyByScoreOptimizer rescale", func() {
 
 		max2 := 2
 		bAnalyzer := &satEntryFixture{
-			ModelID: "B", Namespace: "default", TotalDemand: 8000,
+			ModelID: "B", Namespace: "default", TotalDemand: 8000, RequiredCapacity: engineRequiredCapacity(8000, 0),
 			VariantCapacities: []vcFixture{
 				{VariantName: "B-v", AcceleratorName: "A100", Cost: 5, PerReplicaCapacity: 1000, ReplicaCount: 0},
 			},
@@ -337,14 +347,48 @@ var _ = Describe("GreedyByScoreOptimizer rescale", func() {
 				{VariantName: "B-v", CurrentReplicas: 0, GPUsPerReplica: 1, MaxReplicas: &max2},
 			},
 		})
-		// Holds 4 and wants 12, so the group is contended: A at 8 and B at
-		// its cap of 2 would fit the 10 GPUs, and leave rescale out.
+		// Holds 4 and wants 12 GPUs, so with B's cap of 2 the group wants 14
+		// of 10 and is contended: rescale decides. (At a demand worth 8 the
+		// group fits and the additive path decides; the next spec.)
 		reqA := rescaleReq("A", "default", 1, 12000, 4)
 
 		cons := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 10, Used: 4}}}} // free = 6
 		dm := decisionMap(o.Optimize(context.Background(), []ModelScalingRequest{reqA, reqB}, cons))
 
 		Expect(dm["B-v"].TargetReplicas).To(Equal(2), "capped at MaxReplicas despite 6 free GPUs and high priority")
+	})
+
+	// A group whose models can all have what they take is left to the additive
+	// path, which grows each to its need: A to the 8 its demand asks, B to its
+	// MaxReplicas of 2, the 6 free GPUs exactly. Rescale stays out.
+	It("leaves an uncontended group to the additive path, which fills it", func() {
+		o := NewGreedyByScoreOptimizer()
+		o.Rescale = RescaleFlags{Cluster: true}
+
+		max2 := 2
+		bAnalyzer := &satEntryFixture{
+			ModelID: "B", Namespace: "default", TotalDemand: 8000, RequiredCapacity: engineRequiredCapacity(8000, 0),
+			VariantCapacities: []vcFixture{
+				{VariantName: "B-v", AcceleratorName: "A100", Cost: 5, PerReplicaCapacity: 1000, ReplicaCount: 0},
+			},
+		}
+		reqB := withSatEntry(bAnalyzer, ModelScalingRequest{
+			ModelID: "B", Namespace: "default", Priority: 3,
+			VariantStates: []domain.VariantReplicaState{
+				{VariantName: "B-v", CurrentReplicas: 0, GPUsPerReplica: 1, MaxReplicas: &max2},
+			},
+		})
+		reqA := rescaleReq("A", "default", 1, 8000, 4)
+
+		cons := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 10, Used: 4}}}} // free = 6
+		dm := decisionMap(o.Optimize(context.Background(), []ModelScalingRequest{reqA, reqB}, cons))
+
+		Expect(dm["A-v"].TargetReplicas).To(Equal(8), "A grows to its need")
+		Expect(dm["B-v"].TargetReplicas).To(Equal(2), "B grows to its MaxReplicas")
+		a := dm["A-v"]
+		Expect(a.Reason()).NotTo(ContainSubstring("rescale"))
+		b := dm["B-v"]
+		Expect(b.Reason()).NotTo(ContainSubstring("rescale"))
 	})
 
 	// Two models in one contended group both want to fill, but only 1 GPU is free this

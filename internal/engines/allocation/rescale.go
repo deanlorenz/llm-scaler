@@ -44,8 +44,11 @@ func (f RescaleFlags) enabledForScope(namespace string, namespaceScoped bool) bo
 }
 
 // rescaleInput is one model's contribution to the priority-weighted water-filling.
-// All GPU quantities are whole GPUs; Demand is in the analyzer's own unit and is
-// used only inside the weight ratio (priority x demand), so its unit cancels.
+// All GPU quantities are whole GPUs; Demand is in saturation's unit for the
+// model and is used only inside the weight ratio (priority x demand). Within
+// one model that unit cancels; across models it does not: each model's demand
+// is work in its own units (its own tokens, its own capacity), so two models'
+// weights compare figures that are not the same work.
 type rescaleInput struct {
 	ID        string
 	Priority  float64 // model priority multiplier (>= 0)
