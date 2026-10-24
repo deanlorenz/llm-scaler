@@ -18,6 +18,11 @@
 #
 # To add a name, append "<length>:<first 16 hex digits of the digest>" to
 # DIGESTS, from: printf %s <name> | wc -c; printf %s <name> | sha256sum
+# A name that is also how ordinary text starts (one is a common project word
+# plus a letter, so that word followed by any word starting with the letter
+# would match) is listed as "x<length>:<digest>": it
+# matches only as whole words, joined or split (one to three words), never as
+# the start of a longer word.
 # Lowercase, alphanumerics only. A maintainer keeps the names themselves in an
 # untracked local note; re-derive the list from it rather than from grep hits.
 #
@@ -34,7 +39,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$(command -v python3 || command -v python)" || { echo "FAIL: python3 not found"; exit 1; }
 
-DIGESTS="7:550139a3a4338ebe 7:556c7df75b76c6cc 6:a3d92ef00ea150eb 5:7700a7306a4966d9 5:523959063745fcda 18:0fd6540147c8a2a2"
+DIGESTS="7:550139a3a4338ebe 7:556c7df75b76c6cc 6:a3d92ef00ea150eb 5:7700a7306a4966d9 x5:523959063745fcda 7:cb13384f3ea6eb0a x5:8bca72418b5ee480"
 EXEMPT=".github/workflows/ci-e2e-openshift.yaml deploy/ci-e2e-openshift/verify-correct-cluster.sh"
 
 # scan <git-dir> prints "<path>:<line>" for every hit and exits 1 if any.
@@ -43,12 +48,23 @@ scan() {
 import hashlib, os, re, sys
 root = sys.argv[1]
 pairs = [p.split(":") for p in os.environ["DIGESTS"].split()]
-digests = {d for _, d in pairs}
-lengths = sorted({int(n) for n, _ in pairs})
+digests = {d for n, d in pairs if not n.startswith("x")}
+lengths = sorted({int(n) for n, _ in pairs if not n.startswith("x")})
+exact = {d for n, d in pairs if n.startswith("x")}
+exact_lengths = {int(n[1:]) for n, _ in pairs if n.startswith("x")}
+longest_exact = max(exact_lengths, default=0)
 exempt = set(os.environ["EXEMPT"].split())
 word = re.compile(r"[A-Za-z0-9]+")
 camel = re.compile(r"(?<=[a-z])[A-Z]")
-seen = {}
+exact_seen, window_seen = (set(), set()), (set(), set())
+
+def matches(candidates, listed, seen):
+    """Whether any candidate hashes to a listed digest; each is hashed once per run."""
+    clean, dirty = seen
+    for w in candidates - clean - dirty:
+        (dirty if hashlib.sha256(w.encode()).hexdigest()[:16] in listed else clean).add(w)
+    return not candidates.isdisjoint(dirty)
+
 hits = 0
 for rel in sys.stdin.read().split("\0"):
     if not rel or rel in exempt:
@@ -70,22 +86,19 @@ for rel in sys.stdin.read().split("\0"):
             starts.append(at)
             starts.extend(at + m.start() for m in camel.finditer(tok))
             at += len(tok)
-        found = False
-        for s in starts:
-            for size in lengths:
-                window = norm[s:s + size]
-                if len(window) < size:
+        # Whole words: each run of one to three consecutive words, joined.
+        spans = set()
+        for i in range(len(tokens)):
+            span = ""
+            for tok in tokens[i:i + 3]:
+                span += tok
+                if len(span) > longest_exact:
                     break
-                hit = seen.get(window)
-                if hit is None:
-                    hit = hashlib.sha256(window.encode()).hexdigest()[:16] in digests
-                    seen[window] = hit
-                if hit:
-                    found = True
-                    break
-            if found:
-                break
-        if found:
+                if len(span) in exact_lengths:
+                    spans.add(span.lower())
+        end = len(norm)
+        windows = {norm[s:s + size] for s in starts for size in lengths if s + size <= end}
+        if matches(spans, exact, exact_seen) or matches(windows, digests, window_seen):
             print(f"{rel}:{n}")
             hits += 1
 sys.exit(1 if hits else 0)
@@ -95,23 +108,27 @@ sys.exit(1 if hits else 0)
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 
-# Self-test: the fixture word is built at runtime so this file never holds it,
-# one line per form the scan claims to find.
+# Self-test: one line per form the scan claims to find. The fixture words are
+# assembled from octal escapes at runtime, because this file is scanned too and
+# the scan would find them written out in any of the forms it is testing.
 git -C "$T" init -q
+q="$(printf '\172\172')"
+Q="$(printf '\132\132')"
 {
-    printf 'measured on %s%s%s today\n' zz clusterfixture zz
-    printf 'MEASURED ON %s%s%s\n' ZZ CLUSTERFIXTURE ZZ
-    printf 'kind: %s-%s-%s\n' zz clusterfixture zz
-    printf 'a %s %s %s run\n' zz clusterfixture zz
-    printf 'measuredOn%s%s%sCluster\n' Zz clusterfixture zz
-    printf 'host %s%s%s042.example\n' zz clusterfixture zz
-    printf 'the %s%s%scluster\n' zz clusterfixture zz
-    printf 'nothing to see here\n'
+    printf 'measured on %sfix%s today\n' "$q" "$q"
+    printf 'MEASURED ON %sFIX%s\n' "$Q" "$Q"
+    printf 'kind: %s-fix-%s\n' "$q" "$q"
+    printf 'a %s fix %s run\n' "$q" "$q"
+    printf 'measuredOn%sfix%sCluster\n' "$Q" "$q"
+    printf 'host %sfix%s042.example\n' "$q" "$q"
+    printf 'the %sfix%scluster\n' "$q" "$q"
+    printf 'only %s-ex-z here\n' "$q"
+    printf 'nothing to see here, not even %sexztail\n' "$q"
 } > "$T/fixture.md"
 git -C "$T" add fixture.md
-want="$(printf 'fixture.md:%s\n' 1 2 3 4 5 6 7)"
+want="$(printf 'fixture.md:%s\n' 1 2 3 4 5 6 7 8)"
 if out="$(scan "$T")" || [ "$out" != "$want" ]; then
-    echo "FAIL: the scan did not report exactly the fixture lines 1-7 (got: ${out:-nothing})"
+    echo "FAIL: the scan did not report exactly the fixture lines 1-8 (got: ${out:-nothing})"
     exit 1
 fi
 
