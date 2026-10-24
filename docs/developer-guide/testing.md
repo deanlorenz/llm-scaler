@@ -150,6 +150,17 @@ Good unit tests:
 - run in milliseconds;
 - have names that say what they check.
 
+A test that runs a real server on loopback must not take its port from the
+kernel's ephemeral range: do not bind `127.0.0.1:0`, close it, and hand the
+number to the server. `make test` runs envtest suites in parallel, and their
+etcd and kube-apiserver traffic fills that range with `TIME_WAIT` sockets,
+most of all under WSL (a 4096-port range). The few free ports are then taken
+by the next outgoing connection before the server binds, and the server fails
+with `address already in use`. Pick a port below the range and retry on
+`EADDRINUSE`, as `startServer` in `internal/scaler/server_test.go` does, and
+fail the spec with the server's own error rather than dialling until a
+timeout.
+
 ## Integration Tests
 
 Integration tests use controller-runtime's envtest: a real Kubernetes API

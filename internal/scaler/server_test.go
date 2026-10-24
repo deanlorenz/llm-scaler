@@ -2,7 +2,13 @@ package scaler_test
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"net"
+	"os"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,15 +31,122 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
 )
 
-// freePort asks the kernel for an unused loopback port and gives it back, so
-// the Server under test can bind it by address the way the manager does.
-func freePort() string {
+// startServer runs srv.Start on a free loopback port and waits until it is
+// listening, returning the address and the channel Start reports on.
+//
+// The port comes from below the kernel's ephemeral range, never from it.
+// These specs used to bind 127.0.0.1:0, close the listener and hand the port
+// to Addr. Port 0 draws from ip_local_port_range, which is also where every
+// outgoing connection takes its source port and where those connections
+// leave their TIME_WAIT sockets. Beside an envtest suite -- etcd and
+// kube-apiserver churn loopback connections -- that range fills: measured on
+// a WSL box (4096-port range) with 3950 of its ports in TIME_WAIT. The few
+// ports left free are the ones the next connect() is likely to pick, so the
+// port was taken between the close and Start's bind, Start failed with EADDRINUSE,
+// and the spec dialled a port nobody listened on for five seconds and
+// reported only "connection refused". At that fill even binding port 0 fails.
+// A port below the range is never handed out by the kernel, so only another
+// explicit bind can hold it; one that does is retried on another port.
+func startServer(ctx context.Context, srv *scaler.Server) (string, <-chan error) {
 	GinkgoHelper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	Expect(err).NotTo(HaveOccurred())
-	addr := l.Addr().String()
-	Expect(l.Close()).To(Succeed())
-	return addr
+	var lastErr error
+	for range portAttempts {
+		// The probe is a plain bind, without SO_REUSEPORT, so it fails on any
+		// socket holding the port -- including a listener that does set
+		// SO_REUSEPORT, which the scaler's own bind would silently share the
+		// port with.
+		probe := listenUnassigned()
+		addr := probe.Addr().String()
+		Expect(probe.Close()).To(Succeed())
+
+		srv.Addr = addr
+		done := make(chan error, 1)
+		go func() { done <- srv.Start(ctx) }()
+		startErr := listening(srv, done)
+		if startErr == nil {
+			return addr, done
+		}
+		Expect(startErr).To(MatchError(syscall.EADDRINUSE), "the server's Start returned before it was listening")
+		lastErr = startErr
+	}
+	Fail(fmt.Sprintf("the server's Start found its port taken %d times in a row: %v", portAttempts, lastErr))
+	return "", nil
+}
+
+// listenUnassigned listens on a loopback port below the ephemeral range,
+// trying up to portAttempts ports.
+func listenUnassigned() net.Listener {
+	GinkgoHelper()
+	var lastErr error
+	for range portAttempts {
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(unassignedPort())))
+		if err == nil {
+			return l
+		}
+		lastErr = err
+	}
+	Fail(fmt.Sprintf("no free loopback port below the ephemeral range after %d attempts: %v", portAttempts, lastErr))
+	return nil
+}
+
+// listening waits until srv reports Ready and returns nil, or returns the
+// error Start returned first. Start returns only on a failure or on ctx, and
+// ctx is not cancelled yet, so a return here is always a failure.
+func listening(srv *scaler.Server, done <-chan error) error {
+	GinkgoHelper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			Expect(err).To(HaveOccurred(), "the server's Start returned nil before it was listening")
+			return err
+		default:
+		}
+		if srv.Ready(nil) == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			Fail("the server neither listened nor returned from Start within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// portAttempts bounds how many ports startServer tries. A port below the
+// ephemeral range is held only by something that bound it by number, so one
+// collision is rare and several in a row mean the band itself is in use.
+const portAttempts = 10
+
+// unassignedPort picks a port in the band below the kernel's ephemeral range
+// (the lower half of [0, first ephemeral port)), which no autobind -- port 0
+// or a connect() -- ever hands out. Where the range cannot be read (not
+// Linux) it assumes Linux's default first port, 32768, which also sits below
+// the BSD/macOS and Windows ranges (49152 and up).
+func unassignedPort() int {
+	first := 32768
+	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		if f := strings.Fields(string(b)); len(f) == 2 {
+			if n, err := strconv.Atoi(f[0]); err == nil {
+				first = n
+			}
+		}
+	}
+	return first/2 + rand.IntN(first-first/2)
+}
+
+// whileServing wraps a polled call so that a server whose Start has returned
+// ends the poll with Start's error instead of being dialled until the poll
+// times out. Start returns only on a failure or on ctx, and a spec that
+// polls has not cancelled ctx yet, so either way nothing is listening.
+func whileServing(done <-chan error, call func() error) func() error {
+	return func() error {
+		select {
+		case err := <-done:
+			return StopTrying("the server's Start returned while the spec was still calling it").Wrap(err)
+		default:
+		}
+		return call()
+	}
 }
 
 // A panic in one call must cost that call, not the process: the server is in
@@ -46,22 +159,20 @@ var _ = Describe("Server panic recovery", func() {
 		promReg := prometheus.NewRegistry()
 		Expect(metrics.InitMetrics(promReg)).To(Succeed())
 
-		addr := freePort()
 		// No client: resolving the scale target dereferences it, which panics in
 		// the handler goroutine -- the stand-in for any bug in a handler.
-		srv := &scaler.Server{Addr: addr, Registry: registry.New(time.Minute)}
-		done := make(chan error, 1)
-		go func() { done <- srv.Start(ctx) }()
+		srv := &scaler.Server{Registry: registry.New(time.Minute)}
+		addr, done := startServer(ctx, srv)
 
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		Expect(err).NotTo(HaveOccurred())
 		defer func() { Expect(conn.Close()).To(Succeed()) }()
 		cli := pb.NewExternalScalerClient(conn)
 
-		Eventually(func() error {
+		Eventually(whileServing(done, func() error {
 			_, err := cli.GetMetricSpec(ctx, ref("chat-decode", nil))
 			return err
-		}, 5*time.Second).Should(Succeed())
+		}), 5*time.Second).Should(Succeed())
 
 		By("unary: GetMetrics panics and is answered Internal")
 		_, err = cli.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
@@ -127,11 +238,9 @@ var _ = Describe("Server before and after the leader lease", func() {
 		decision.Default.Set(testNamespace, "chat-decode-deploy", 3)
 
 		elected := make(chan struct{})
-		addr := freePort()
-		srv := &scaler.Server{Addr: addr, Client: c, Registry: registry.New(time.Minute), Elected: elected}
+		srv := &scaler.Server{Client: c, Registry: registry.New(time.Minute), Elected: elected}
 		Expect(srv.Ready(nil)).To(HaveOccurred(), "not listening yet, so not Ready")
-		done := make(chan error, 1)
-		go func() { done <- srv.Start(ctx) }()
+		addr, done := startServer(ctx, srv)
 
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		Expect(err).NotTo(HaveOccurred())
@@ -139,10 +248,10 @@ var _ = Describe("Server before and after the leader lease", func() {
 		cli := pb.NewExternalScalerClient(conn)
 
 		By("standby: GetMetricSpec is answered, and the pod reads Ready")
-		Eventually(func() error {
+		Eventually(whileServing(done, func() error {
 			_, err := cli.GetMetricSpec(ctx, ref("chat-decode", nil))
 			return err
-		}, 5*time.Second).Should(Succeed())
+		}), 5*time.Second).Should(Succeed())
 		Expect(srv.Ready(nil)).To(Succeed())
 
 		By("standby: GetMetrics and IsActive are refused with Unavailable")
@@ -156,13 +265,16 @@ var _ = Describe("Server before and after the leader lease", func() {
 		// The standby server stops and the full one binds the port again; the
 		// client's connection is closed by the hand-off and re-dialled by its
 		// next call, so the first attempts may see the gap.
-		Eventually(func() (int64, error) {
+		var value int64
+		Eventually(whileServing(done, func() error {
 			m, err := cli.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
 			if err != nil {
-				return 0, err
+				return err
 			}
-			return m.MetricValues[0].MetricValue, nil
-		}, 5*time.Second).Should(Equal(int64(3)))
+			value = m.MetricValues[0].MetricValue
+			return nil
+		}), 5*time.Second).Should(Succeed())
+		Expect(value).To(Equal(int64(3)))
 
 		Expect(srv.Ready(nil)).To(Succeed(), "still Ready across the hand-off")
 
