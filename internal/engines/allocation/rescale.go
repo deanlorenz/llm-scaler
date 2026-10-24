@@ -364,10 +364,16 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	if satNamed.Result == nil {
 		return nil
 	}
-	records := buildVariantRecords(req, satNamed.Result)
+	all := buildVariantRecords(req, satNamed.Result)
 	stateMap := buildStateMap(req.VariantStates)
-	vcMap := buildCapacityMap(records)
+	vcMap := buildCapacityMap(all)
 	targets := initTargets(req.VariantStates)
+	// Rescale moves only the variants on accType: the budget, the floors and
+	// the demand count no other GPUs. A variant with no accelerator name
+	// passed singleAccType but was filled and reclaimed beside them, so the
+	// GPUs it gained were charged to no budget; it keeps its replicas, as
+	// the additive path, whose budget for no accelerator is none, keeps them.
+	records := variantsOnType(all, accType)
 
 	// Split the model's GPU target across its roles by role demand (a P/D model
 	// must keep both roles served), then reclaim/fill each role toward its share.
@@ -695,7 +701,9 @@ func markRoleGPULimited(
 // singleAccType returns the accelerator type shared by all variants, or false if
 // they span more than one (multi-accelerator, deferred) or none is set. Variants
 // that spell one accelerator differently share it (accelerator.SameName); the
-// first spelling is returned, and callers resolve it against their budget.
+// first spelling is returned, and callers resolve it against their budget. A
+// variant with no accelerator name is skipped here, and rescale leaves it at
+// its replicas (rescaleModelDecisions).
 func singleAccType(vcs []variantRecord) (string, bool) {
 	accType := ""
 	for _, vc := range vcs {
