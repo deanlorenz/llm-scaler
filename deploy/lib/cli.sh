@@ -49,6 +49,7 @@ Environment Variables:
                                (team-a,team-b) or auto (every namespace with llm-d) manages
                                several from WVA_NS, with a Role in each and nothing cluster-wide
   WVA_REPLICAS                 Controller replicas. >1 is leader-election failover, NOT more throughput (default: 1)
+  WVA_VERBOSITY                Controller --v, 0 to 5. 3 adds the per-replica capacity lines (default: unset, the shipped 2)
   DEPLOY_WVA                   Deploy WVA controller (default: true)
   SKIP_CHECKS                  Skip the prerequisite and permission checks (default: false)
   WVA_KUBE_CONTEXT             Pin every kubectl/helm call to this context, without

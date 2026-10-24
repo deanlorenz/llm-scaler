@@ -317,6 +317,11 @@ BENCHMARK_KEDA_SCALE_DOWN_STABILIZATION ?= 300
 # and a chart this repo no longer has. BENCHMARK_WVA_DEPLOY=false runs the
 # scenario with no autoscaler; direct-KEDA mode skips it on its own.
 BENCHMARK_WVA_DEPLOY ?= true
+# The controller's --v for a benchmark install. 3, one above the shipped 2: the
+# per-replica capacity lines post_run_analyze.sh reads (k2-decision,
+# replica-capacity-decision, derived-mu) are logged there and nowhere lower,
+# and a run cannot be re-captured. Empty keeps the shipped verbosity.
+BENCHMARK_WVA_VERBOSITY ?= 3
 # Never install prometheus-adapter: it and KEDA both register the
 # external.metrics.k8s.io APIService, of which a cluster has exactly one, so it
 # would take that group away from the metrics server every ScaledObject's HPA
@@ -2277,6 +2282,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 		NAMESPACE=$(BENCHMARK_NAMESPACE) \
 		WVA_SCOPE=namespace \
 		IMG=$(IMG) \
+		$(if $(BENCHMARK_WVA_VERBOSITY),WVA_VERBOSITY=$(BENCHMARK_WVA_VERBOSITY),) \
 		$(if $(BENCHMARK_PROMETHEUS_URL),PROMETHEUS_URL=$(BENCHMARK_PROMETHEUS_URL),)
 	@# The ScaledObject is the registration: WVA has no watch and no listing, so
 	@# without one it is never called and scales nothing. Applied as a second step

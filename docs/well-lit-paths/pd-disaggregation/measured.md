@@ -69,7 +69,10 @@ cp test/benchmark/scenarios/shape_6k1000_1k4000_rps6_20m.jsonl llm-d-benchmark/w
 make benchmark-run BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=Qwen/Qwen3-0.6B \
      BENCHMARK_HARNESS=guidellm BENCHMARK_WORKLOAD=shape_swap_replay_6k1000_1k4000_rps6_20m
 
-# Graphs, the k1/k2 decision report and the comparison table:
+# Graphs, the k1/k2 decision report and the comparison table. The k1/k2 report
+# reads lines the controller logs at --v=3; benchmark-run installs it at that
+# level (BENCHMARK_WVA_VERBOSITY=3). Over a controller you installed yourself,
+# install it with WVA_VERBOSITY=3 first.
 bash hack/benchmark/post_run_analyze.sh <results dir> $BENCHMARK_NAMESPACE
 
 make benchmark-teardown

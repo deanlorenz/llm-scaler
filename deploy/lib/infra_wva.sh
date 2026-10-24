@@ -2004,6 +2004,9 @@ EOF
 
     wva_append_replicas_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS"
 
+    # WVA_VERBOSITY sets the controller's --v; unset keeps the shipped default.
+    wva_append_verbosity_patch "$tmp_overlay/kustomization.yaml"
+
     # WVA_WATCH_NS separates the namespace the controller MANAGES from the one it
     # RUNS IN.
     #
@@ -2690,3 +2693,38 @@ extract_openshift_prometheus_ca() {
     fi
 }
 
+
+# WVA_VERBOSITY_MAX is the most verbose level the controller logs at:
+# logging.TRACE in internal/logging/logger.go. Above it --v changes nothing.
+WVA_VERBOSITY_MAX=5
+
+# wva_append_verbosity_patch adds --v=WVA_VERBOSITY to the manager container's
+# args in the throw-away overlay's kustomization.yaml $1. Unset writes nothing,
+# and the controller runs at its shipped --v=2. The per-replica capacity lines
+# (k2-decision, replica-capacity-decision, derived-mu) need 3, which the
+# benchmark install passes. WVA_VERBOSITY must be an integer from 0 to
+# WVA_VERBOSITY_MAX; anything else is refused.
+wva_append_verbosity_patch() {
+    local kustomization="$1"
+    [ -n "${WVA_VERBOSITY:-}" ] || return 0
+    case "$WVA_VERBOSITY" in
+        *[!0-9]*|0?*)
+            log_error "WVA_VERBOSITY=$WVA_VERBOSITY is not an integer from 0 to $WVA_VERBOSITY_MAX" ;;
+    esac
+    [ "$WVA_VERBOSITY" -le "$WVA_VERBOSITY_MAX" ] \
+        || log_error "WVA_VERBOSITY=$WVA_VERBOSITY is above $WVA_VERBOSITY_MAX, the most verbose level the controller logs at"
+    log_info "Controller verbosity: --v=$WVA_VERBOSITY"
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    cat >> "$kustomization" <<PATCH
+- patch: |-
+    - op: test
+      path: /spec/template/spec/containers/0/name
+      value: manager
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --v=${WVA_VERBOSITY}
+  target:
+    kind: Deployment
+    name: wva-controller-manager
+PATCH
+}
