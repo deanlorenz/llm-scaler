@@ -34,11 +34,15 @@ import (
 //     new one. In review such a pod, absent for 75 s, kept its old
 //     first-seen time, and its filling reading (174 327 tokens, 1.0 req/s,
 //     against 340 000 and 6.3 served) was written as k2 and mu.
-//     Where the time is unknown the analyzer's own first sight stands in. A
-//     replica already Ready on the analyzer's first cycle for the model then
-//     has an age the analyzer cannot know and is taken as established:
-//     refusing it would hold every reading back for a window after each
-//     restart, and the next two gates still apply to it.
+//     The Ready time is the node's clock, so the age runs from the later of
+//     it and the analyzer's first sight of that Ready time: a node clock
+//     behind the controller's would otherwise date a replica that has just
+//     joined into the past and skip the window. Where the time is unknown
+//     the first sight alone stands in. A replica already Ready on the
+//     analyzer's first cycle for the model has no first sight to go by, and
+//     is aged from its Ready time alone, or, where that is unknown too, is
+//     taken as established: refusing it would hold every reading back for a
+//     window after each restart, and the next two gates still apply to it.
 //   - completed requests over the window (RequestRate > 0). A replica that
 //     has completed nothing has every sequence still growing: its token rate
 //     is the rate of a batch being admitted, not of one being served.
@@ -172,28 +176,29 @@ func replicaReadySince(rm domain.ReplicaMetrics) time.Time {
 }
 
 // noteReady records whether pod is Ready this cycle and reports whether it
-// joined the fleet under JoinedReplicaWindow ago: readyAt, when its Pod last
-// became Ready, where known; otherwise when the analyzer first saw it Ready.
-// Callers hold a.mu.
+// joined the fleet under JoinedReplicaWindow ago, counted from the later of
+// readyAt, when its Pod last became Ready (zero when unknown), and when the
+// analyzer first saw that readyAt on it. A new readyAt is a new sighting: the
+// pod is back from a restart under the same name. Callers hold a.mu.
 func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) bool {
 	if m.readySince == nil {
-		m.readySince = make(map[string]time.Time)
+		m.readySince = make(map[string]readySighting)
 	}
 	if !ready {
 		delete(m.readySince, pod)
 		return false
 	}
-	if !readyAt.IsZero() {
-		m.readySince[pod] = readyAt
-		return now.Sub(readyAt) < JoinedReplicaWindow
-	}
-	since, seen := m.readySince[pod]
-	if !seen {
-		since = now
+	s, seen := m.readySince[pod]
+	if !seen || !s.readyAt.Equal(readyAt) {
+		s = readySighting{readyAt: readyAt, firstSeen: now}
 		if !m.pastFirstCycle {
-			since = time.Time{} // already serving when the memo began
+			s.firstSeen = time.Time{} // already serving when the memo began
 		}
-		m.readySince[pod] = since
+		m.readySince[pod] = s
+	}
+	since := s.firstSeen
+	if readyAt.After(since) {
+		since = readyAt
 	}
 	return !since.IsZero() && now.Sub(since) < JoinedReplicaWindow
 }

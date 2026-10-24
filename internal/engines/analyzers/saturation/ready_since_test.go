@@ -86,14 +86,28 @@ func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 	assert.Zero(t, backMu, "and its 1.0 req/s (against 6.3 served) became the bucket's mu")
 }
 
-// A Ready time a window old is an established replica, whatever the
-// analyzer saw: one first seen on a later cycle is not held back for a
-// window when its Pod has been Ready for longer.
+// A Ready time a window old is an established replica when the memo has seen
+// it that long, or when it was already Ready on the memo's first cycle. A
+// Ready time first seen now is held for a window from now, however old it
+// reads: the Ready time is the node's clock, and a node behind the
+// controller's dates a replica that has just joined into the past (review:
+// one 60 s behind skipped the window, and its filling reading became k2).
 func TestReadySince_AKnownOldReadyTimeIsEstablished(t *testing.T) {
+	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * JoinedReplicaWindow)
+
+	first := newSettleMemo()
+	assert.False(t, first.noteReady("v/p", true, old, now), "Ready two windows ago, on the memo's first cycle")
+	assert.True(t, first.noteReady("v/q", true, now.Add(-time.Second), now), "Ready a second ago, on the memo's first cycle")
+	assert.False(t, first.noteReady("v/u", true, time.Time{}, now), "unknown on the memo's first cycle: taken as established")
+
 	m := newSettleMemo()
 	m.pastFirstCycle = true
-	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
-	assert.False(t, m.noteReady("v/p", true, now.Add(-2*JoinedReplicaWindow), now), "Ready two windows ago")
-	assert.True(t, m.noteReady("v/q", true, now.Add(-time.Second), now), "Ready a second ago")
+	assert.True(t, m.noteReady("v/p", true, old, now), "a Ready time two windows old, first seen now: a node clock behind")
+	assert.True(t, m.noteReady("v/p", true, old, now.Add(JoinedReplicaWindow/2)), "the same Ready time half a window later")
+	assert.False(t, m.noteReady("v/p", true, old, now.Add(JoinedReplicaWindow)), "the same Ready time a window after it was first seen")
+	assert.True(t, m.noteReady("v/p", true, now.Add(JoinedReplicaWindow), now.Add(JoinedReplicaWindow)), "a new Ready time: back from a restart")
+	assert.True(t, m.noteReady("v/f", true, now.Add(time.Minute), now), "a Ready time in the future: a node clock ahead")
+	assert.True(t, m.noteReady("v/f", true, now.Add(time.Minute), now.Add(JoinedReplicaWindow)), "held a window from that Ready time, not from first sight")
 	assert.True(t, m.noteReady("v/r", true, time.Time{}, now), "unknown: first seen now, after the memo's first cycle")
 }

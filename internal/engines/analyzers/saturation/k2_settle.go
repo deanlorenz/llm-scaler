@@ -120,11 +120,10 @@ type settleMemo struct {
 	// prefill hold's settled-idle test (settledIdleDecode). Here because it is
 	// the same per-model, per-replica memory and is swept with it.
 	idle map[string]idleRun
-	// readySince is when each replica was first seen Ready, for the joined
-	// test (noteReady); the zero time for one already Ready on the memo's
-	// first cycle, whose age the analyzer cannot know. Dropped with the
-	// replica's readings, and on any cycle the replica is not Ready.
-	readySince map[string]time.Time
+	// readySince is each replica's Pod Ready time and when it was first
+	// seen, for the joined test (noteReady). Dropped with the replica's
+	// readings, and on any cycle the replica is not Ready.
+	readySince map[string]readySighting
 	// pastFirstCycle is set once the memo's first cycle has ended
 	// (noteIdleRuns, which runs once at the end of every cycle's pricing).
 	pastFirstCycle bool
@@ -135,11 +134,17 @@ type settleMemo struct {
 	seen     time.Time
 }
 
+// readySighting is one replica's Pod Ready time (zero when unknown) and the
+// cycle the memo first saw it, zero on the memo's first cycle.
+type readySighting struct {
+	readyAt, firstSeen time.Time
+}
+
 // newSettleMemo is an empty memo in its first cycle.
 func newSettleMemo() *settleMemo {
 	return &settleMemo{
 		pods:       make(map[string][]settleReading),
-		readySince: make(map[string]time.Time),
+		readySince: make(map[string]readySighting),
 	}
 }
 
@@ -199,7 +204,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	maps.DeleteFunc(memo.pods, func(_ string, rs []settleReading) bool {
 		return len(rs) == 0 || now.Sub(rs[len(rs)-1].at) > K2SettleMaxGap
 	})
-	maps.DeleteFunc(memo.readySince, func(p string, _ time.Time) bool {
+	maps.DeleteFunc(memo.readySince, func(p string, _ readySighting) bool {
 		_, live := memo.pods[p]
 		return !live
 	})
