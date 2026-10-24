@@ -36,7 +36,7 @@ kind: Kustomization
 # the stack serves fine unmonitored — and wrong for WVA, which cannot size anything
 # without these series. So a reader who followed the llm-d guide correctly, and
 # skipped an optional step, arrives with a working llm-d and a WVA that can never
-# work. Measured on the shared GPU cluster: dhl-la-1708 ran four replicas for hours and
+# work. Measured on the shared GPU cluster: a tenant namespace ran four replicas for hours and
 # produced ZERO vllm series while every install check passed.
 #
 # Do not apply this on top of llm-d's. Two scrape configs on one pod give it two

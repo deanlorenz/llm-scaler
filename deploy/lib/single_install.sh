@@ -74,7 +74,7 @@ wva_installations_raw() {
     # reconcile loop at all. Matching on the name alone found one and, because
     # its args carry no --watch-namespace, classified it cluster-scoped by the
     # rule below. The install then refused with "A cluster-scoped WVA is already
-    # installed: evgensh-wva-test/wva-warm-pool", naming a Deployment that
+    # installed: team-a/wva-warm-pool", naming a Deployment that
     # manages nothing, and there was no way to proceed except to disable a check
     # that was right in principle.
     # || rc=$?, not ; rc=$? -- see the note in install_core.sh. This one runs in

@@ -94,7 +94,7 @@ deploy_fma_launcher_podmonitor() {
 # a working optimized-baseline namespace carries a `decode` PodMonitor selecting
 # llm-d.ai/role=decode on port `modelserver`. But a namespace built from the guide
 # need not have one, and the failure is silent in the worst way. Measured on
-# the shared GPU cluster: dhl-la-1708 ran four replicas for hours and produced ZERO vllm
+# the shared GPU cluster: a tenant namespace ran four replicas for hours and produced ZERO vllm
 # series, while `check-prereqs` reported "[SUCCESS] Prometheus: <url>" — true, and
 # about the endpoint, not its contents — and the controller's own startup
 # validation passed for the same reason. WVA then logged "No saturation metrics

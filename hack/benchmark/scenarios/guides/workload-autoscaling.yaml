@@ -329,7 +329,7 @@ scenario:
                 grep -c apt-get "$f" | sed 's/^/preprocess: apt-get lines left in llmdbench_env.sh: /'
                 # The engine sources this script before it starts, so the guard below runs
                 # where the cache mount is. A cache dir that is not writable (a CSI
-                # publish that came back read-only after a retry, seen once on kermit)
+                # publish that came back read-only after a retry, seen once on a Kubernetes cluster)
                 # must cost a compile, not the replica: vLLM fails hard on os.makedirs.
                 echo >> "$f"  # the generator leaves no trailing newline
                 cat >> "$f" <<'EOF'

@@ -21,7 +21,7 @@
 #
 #   model.shortName: set on both stacks, and IGNORED -- the harness generates
 #       `{first8}-{sha256(namespace/model)[:8]}-{last8}` regardless. Measured on
-#       a multi-node H200 cluster: unsloth/Meta-Llama-3.1-8B-Instruct in evgensh-twomodel became
+#       a multi-node H200 cluster: unsloth/Meta-Llama-3.1-8B-Instruct in team-twomodel became
 #       `unsloth--244120d9-instruct`, which shares no substring with the stack
 #       name. It is kept here only as documentation of the intent; nothing may
 #       depend on it. The driver resolves each stack through the shared

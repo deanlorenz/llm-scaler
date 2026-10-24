@@ -40,7 +40,7 @@ func TestITLLinesNameTheirNamespace(t *testing.T) {
 
 	logsByNs := map[string]*observer.ObservedLogs{}
 	for cycle := 0; cycle < itl.DefaultMinSamples; cycle++ {
-		for _, ns := range []string{"evgensh-sg1", "evgensh-sg2"} {
+		for _, ns := range []string{"team-sg1", "team-sg2"} {
 			ctx, logs := observedCtx(t)
 			input := makeAnalyzerInput([]domain.ReplicaMetrics{serving(ns, ns+"-pod")}, states)
 			input.Namespace = ns
