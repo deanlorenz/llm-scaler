@@ -38,8 +38,18 @@ type Tracker struct {
 	steady map[string]*Window
 	traces map[string]*keyTraces
 	// slopes holds, per key, the A of its last line, which the pinned fit
-	// holds while too few readings are past their settle to fit a new one.
-	slopes map[string]float64
+	// holds while too few readings are past their settle to fit a new one,
+	// or the window too few readings at all; with when it was fitted and
+	// under which engine arguments, which bound the hold (Admission).
+	slopes map[string]heldSlope
+}
+
+// heldSlope is a key's last fitted A, when it was fitted, and the engine
+// arguments (Admission.Args) its readings were taken under.
+type heldSlope struct {
+	a        float64
+	fittedAt time.Time
+	args     string
 }
 
 // NewTracker returns an empty Tracker.
@@ -49,7 +59,7 @@ func NewTracker() *Tracker {
 		baselines: map[string]float64{},
 		steady:    map[string]*Window{},
 		traces:    map[string]*keyTraces{},
-		slopes:    map[string]float64{},
+		slopes:    map[string]heldSlope{},
 	}
 }
 
@@ -85,6 +95,8 @@ type Reading struct {
 	// settle to fit, or the window too few readings at all, and Model's A is
 	// the key's last one.
 	SlopeHeld bool
+	// SlopeFittedAt is when the held A was fitted; zero unless SlopeHeld.
+	SlopeFittedAt time.Time
 	// Held is the window's size after pruning.
 	Held int
 	// SteadyHeld is how many steady readings the full fit may use, and Ready
@@ -96,6 +108,15 @@ type Reading struct {
 	// SteadySpread is max k - min k over the steady readings: the other half
 	// of Ready, and how far it is from DefaultMinKSpread.
 	SteadySpread float64
+}
+
+// SlopeAge is how long ago the held A was fitted, zero when none is held:
+// what tells a held line from a fit made this cycle in a log.
+func (r Reading) SlopeAge(now time.Time) time.Duration {
+	if !r.SlopeHeld || r.SlopeFittedAt.IsZero() {
+		return 0
+	}
+	return now.Sub(r.SlopeFittedAt)
 }
 
 // Observe offers one cycle's replica rows of a variant to the key's window and
@@ -140,7 +161,9 @@ type Reading struct {
 // holds the key's last A. It holds the last A too once the window has fewer
 // than DefaultMinSamples readings left -- a fleet below the band ages its
 // readings out and offers none -- so a key that has fitted keeps a line through
-// light load (SlopeHeld says so).
+// light load, or above the band (SlopeHeld says so, SlopeFittedAt when the A
+// was fitted). Both holds end once the A is older than adm.SlopeHoldFor or was
+// fitted under other engine arguments than adm.Args.
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm Admission, now time.Time) Reading {
 	var r Reading
 	lo, hi := adm.band()
@@ -271,7 +294,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			if m.B > 0 {
 				t.baselines[key] = m.B
 			}
-			t.slopes[key] = m.A
+			t.slopes[key] = heldSlope{a: m.A, fittedAt: now, args: adm.Args}
 			t.mu.Unlock()
 			r.Model, r.Tier = m, TierOLS
 			return r
@@ -301,14 +324,21 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		// there is -- the mu derived from it is still priced at the shape
 		// arriving now -- and a fresh fit replaces it as soon as the window
 		// holds DefaultMinSamples again. A key that never fitted has no A
-		// and still gets no line.
+		// and still gets no line. The same holds above the band: a replica
+		// there that is not at its sequence cap offers no reading either.
+		//
+		// Not for ever. An A fitted longer ago than adm.SlopeHoldFor, or
+		// under other engine arguments than adm.Args, is not held: the hold
+		// ends where a finished fit is no longer trusted elsewhere, and a
+		// different engine is not the one the slope was measured on.
 		t.mu.Lock()
-		a, have := t.slopes[key]
+		held, have := t.slopes[key]
 		t.mu.Unlock()
-		if !have {
+		if !have || !adm.mayHold(held, now) {
 			return r
 		}
-		r.Model, r.Tier, r.SlopeHeld = Model{A: a, B: baseline}, TierPinnedB, true
+		r.Model, r.Tier, r.SlopeHeld = Model{A: held.a, B: baseline}, TierPinnedB, true
+		r.SlopeFittedAt = held.fittedAt
 		return r
 	}
 	m, ok := FitPinnedB(pinned, baseline)
@@ -317,7 +347,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		return r
 	}
 	t.mu.Lock()
-	t.slopes[key] = m.A
+	t.slopes[key] = heldSlope{a: m.A, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r

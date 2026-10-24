@@ -321,6 +321,13 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
 	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Model {
+	return a.observeITL(key, replicas, variantName, adm, now, logger).Model
+}
+
+// observeITL is noteITL with the whole reading returned, so the caller can
+// tell a slope held for want of readings (SlopeHeld) from a fit made now.
+func (a *SaturationAnalyzer) observeITL(key string, replicas []domain.ReplicaMetrics,
+	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Reading {
 	// Stamped here as well as in noteReplicaStart, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
 	// on a full fit) and the sweep's rule is that an unstamped key counts as
@@ -407,9 +414,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// long light stretch (issue #284).
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
 			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
-			"slopeHeld", r.SlopeHeld)
+			"slopeHeld", r.SlopeHeld, "slopeAge", r.SlopeAge(now))
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}
-	return r.Model
+	return r
 }

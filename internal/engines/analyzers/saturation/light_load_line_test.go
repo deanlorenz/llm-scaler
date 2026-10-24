@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest/observer"
@@ -86,4 +87,53 @@ func TestLightLoadKeepsLearnedLineAndNamesMissingOne(t *testing.T) {
 	}
 	assert.True(t, derivedOK(logs), "a learned line outlives a light stretch (issue #284)")
 	assert.Empty(t, logs.FilterMessage("itl-line-none").All())
+	held := logs.FilterMessage("derived-mu").All()
+	assert.Equal(t, true, held[len(held)-1].ContextMap()["lineHeld"], "derived-mu says the line is held")
+
+	// A held line is not republished: the shared record keeps the time of
+	// the fit it came from, so it ages out on BucketRetention as a finished
+	// fit does, and cannot overwrite a sibling's fresh line as if new.
+	a.mu.Lock()
+	lines := make([]learnedLine, 0, len(a.itlLines))
+	for _, l := range a.itlLines {
+		lines = append(lines, l)
+	}
+	a.mu.Unlock()
+	require.Len(t, lines, 1)
+	fits := logs.FilterMessage("itl-fit").All()
+	require.NotEmpty(t, fits)
+	fit := fits[len(fits)-1].ContextMap()
+	require.Equal(t, true, fit["slopeHeld"])
+	age, ok := fit["slopeAge"].(time.Duration)
+	require.True(t, ok, "itl-fit logs how old the held slope is")
+	require.Greater(t, age, time.Duration(0))
+	assert.Equal(t, clock.Add(-age), lines[0].learnedAt,
+		"the shared line is stamped with the fit the slope came from, not republished by the hold")
+}
+
+// The held slope goes with an engine-arguments change: the saturation
+// analyzer puts the key's window aside (itlUnderArgs), slope included, so a
+// light fleet redeployed with other flags is not priced from the old engine.
+func TestHeldSlopeEndsOnArgsChange(t *testing.T) {
+	const variant = "v"
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	clock := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	key := "ns|m|" + variant + "|H200|1"
+	row := func(k, itlSec float64) []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{{PodName: "p", VariantName: variant, Ready: true,
+			KvUsageInstant: k, AvgITL: itlSec}}
+	}
+	a.itlUnderArgs(key, "args-1")
+	for range itl.DefaultMinSamples {
+		a.noteITL(key, row(0.5, 0.05), variant, itl.Admission{}, clock, logr.Discard())
+		clock = clock.Add(15 * time.Second)
+	}
+	clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
+	require.False(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).IsZero(),
+		"the premise: the slope is held under the same arguments")
+
+	a.itlUnderArgs(key, "args-2")
+	assert.True(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).IsZero(),
+		"no slope survives a change of engine arguments")
 }

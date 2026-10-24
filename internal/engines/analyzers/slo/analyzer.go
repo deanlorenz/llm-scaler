@@ -58,6 +58,9 @@ type Analyzer struct {
 	now    func() time.Time
 	// stateTimeout is how long unused learned state is kept (EvictStale).
 	stateTimeout time.Duration
+	// slopeHoldFor is how long after it was fitted a line's slope may be held
+	// while the window has too few readings to fit (itl.Admission.SlopeHoldFor).
+	slopeHoldFor time.Duration
 
 	// lines fits each generating variant's ITL(k), with the same itl.Tracker
 	// and so the same rules as the saturation analyzer. Its own instance:
@@ -95,6 +98,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		store:        store,
 		now:          time.Now,
 		stateTimeout: defaultStateTimeout,
+		slopeHoldFor: capacity.HistoryRetention,
 		lines:        itl.NewTracker(),
 		seen:         make(map[string]time.Time),
 		accelerators: make(map[string]acceleratorMemo),
@@ -109,6 +113,18 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 func (a *Analyzer) WithStateTimeout(d time.Duration) *Analyzer {
 	if d > 0 {
 		a.stateTimeout = d
+	}
+	return a
+}
+
+// WithSlopeHoldFor sets how long after it was fitted a line's slope may be held
+// while the window has too few readings to fit: the engine passes the
+// saturation analyzer's bucket retention, so LEARNED_STATE_BUCKET_RETENTION
+// bounds the hold in both. A non-positive d keeps the default. Call it before
+// the analyzer is used.
+func (a *Analyzer) WithSlopeHoldFor(d time.Duration) *Analyzer {
+	if d > 0 {
+		a.slopeHoldFor = d
 	}
 	return a
 }
@@ -187,6 +203,9 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// Which line, and what it was fitted from: the window's key,
 				// the coefficients, and what the window was offered and held.
 				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
+				// A held slope reads pinned or pinned-default on the metric
+				// like a fit made this cycle; these say it is an old one.
+				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
 				"considered", d.line.Considered, "held", d.line.Held, "kept", d.line.Offered,
 				"belowBand", d.line.BelowBand,
 				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,
@@ -273,6 +292,9 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// which reads as the defaults.
 	cfg, _ := input.Config.(*config.ScalingPolicy)
 	adm := admission(cfg, params)
+	// A held slope ends on the retention and on a change of engine arguments
+	// (itl.Admission): this analyzer has no window reset of its own on one.
+	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, params.ArgsFingerprint()
 	// The fill is clamped to the band the line is fitted over.
 	band := fillBand{lo: adm.MinK, hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
