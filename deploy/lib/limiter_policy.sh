@@ -621,7 +621,21 @@ wva_refuse_reserved_limiter_names() {
     $ns/wva-scaling-policy-config: quota entry name \"$name\" is reserved: decisions held back by something other than a quota entry are reported under it (reserved: ${WVA_RESERVED_LIMITER_NAMES// /, }); rename the entry"
     done
     log_error "This controller would reject its scaling policy and not start:${msg}
-  Rename the entry, update any alert or query that selects its limiter_name, and re-run. Nothing was applied."
+  Rename the entry, update any alert or query that selects its limiter_name, and re-run. The controller install stopped before writing anything (earlier install steps, such as other components, are not undone)."
+}
+
+# wva_preflight_reserved_limiter_names is what deploy_wva_controller calls
+# first: a quota entry with a reserved name stops the new controller at start
+# (config.ReservedLimiterNames), and without this the install only reports a
+# controller that never became ready. A prerequisites-only apply installs no
+# controller and checks nothing. The controller's own policy matters only when
+# it is kept (WVA_LIMITER unset); one in wva-policy applies either way.
+wva_preflight_reserved_limiter_names() {
+    [ "${WVA_APPLY_SCOPE:-all}" = "prereqs" ] && return 0
+    wva_refuse_reserved_limiter_names wva-policy optional
+    if [ -z "${WVA_LIMITER:-}" ]; then
+        wva_refuse_reserved_limiter_names "$WVA_NS"
+    fi
 }
 
 # wva_live_limiter_set <namespace> echoes the limiter set the live policy in
