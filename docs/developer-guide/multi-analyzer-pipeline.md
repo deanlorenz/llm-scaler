@@ -457,9 +457,20 @@ it, the PRC of each variant another analyzer decided, and the holds:
   alone shed nothing.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
-  held against growth never reports `NeedsScaleUp`. Warm-pool supply is still
-  published from saturation's entry: the composite keeps saturation's PRC, so
-  the two are the same.
+  held against growth never reports `NeedsScaleUp`. Warm-pool supply
+  (`publishWarmPoolSupply`) is published from the composite too, so the two
+  read one unit. A multi-variant role priced in another analyzer's frame has
+  each variant it sizes priced at `D / N` there (`priceRole`), and the
+  variant's bridge PRC (`WarmPoolPerReplicaCapacity`) moves by the same ratio;
+  published from saturation's entry, its supply was in saturation's unit while
+  its pressure was in the other frame's. A variant saturation has no PRC for
+  keeps saturation's bridge reading: there is no ratio to convert it by.
+  The ratio is the variant's own, so for a bridge of another shape (a pool
+  Pod configured differently from the variant's replicas, read on its own as
+  `bridgePerReplica`) that the other analyzer would rate differently, the
+  converted figure is an approximation, not a measurement. Supply is not
+  published on a cycle that builds no composite, which is only one whose
+  saturation run fails; the last reading stands until the reader's `maxAge`.
 
 The composite is judged against saturation's thresholds
 (`AnalyzerThresholds(saturation)`), and recorded in the same

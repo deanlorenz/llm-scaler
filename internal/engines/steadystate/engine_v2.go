@@ -184,11 +184,6 @@ func (e *Engine) runAnalyzers(
 	namedResults := []allocation.NamedAnalyzerResult{
 		buildNamedResult(ctx, domain.SaturationAnalyzerName, baseResult, config, metaByVariant, satUp, satDown),
 	}
-	// What each variant is getting from the pool, for the retained-pool switching
-	// decision. Published from saturation's result because that is the analyzer
-	// that measures per-replica capacity; it is deliberately absent from every
-	// supply total above.
-	publishWarmPoolSupply(namespace, namedResults[0])
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
 			continue
@@ -1418,6 +1413,12 @@ func (e *Engine) collectV2ModelRequest(
 	// variant the optimizer considers comfortable, nor sits still for one it is
 	// already growing.
 	publishVariantPressure(namespace, composite, satUp)
+	// What each variant is getting from the pool, from the same result as its
+	// pressure: a role priced in another analyzer's frame has its PRCs, and its
+	// bridges', in that frame (priceRole), so supply read from saturation's
+	// entry was in a different unit. It is deliberately absent from every
+	// supply total the optimizer reads.
+	publishWarmPoolSupply(namespace, composite)
 
 	// One record per cycle, the composite included: two calls each evicted
 	// what the other had published, and each variant's engine configuration
@@ -1974,6 +1975,13 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 // as it needs the number, and publishing only the non-zero ones would leave the
 // last reading standing after the Pod went back -- saying a variant is being
 // carried by a pool that has already reclaimed it.
+//
+// It is published from the composite, so a cycle that builds no composite
+// publishes none, and the last reading stands until the reader's maxAge.
+// That is only a cycle whose saturation run fails (runAnalyzers fails on
+// nothing else; another analyzer that fails leaves no entry and the
+// composite is built without it), and saturation's entry, where supply was
+// published before, did not exist on that cycle either.
 func publishWarmPoolSupply(namespace string, nr allocation.NamedAnalyzerResult) {
 	if nr.Result == nil {
 		return
