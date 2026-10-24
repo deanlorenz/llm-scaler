@@ -94,10 +94,12 @@ dashboard's *Models blocked from scaling* panel counts it.
 2. Run the controller at `--v=3` and read the `composite-contributors` line: per
    variant, which analyzers sized it (`contributors`) and the replicas they
    needed (`totalReplicas`).
-3. Look for `composite holds a role` in the log: a role no listed analyzer can
-   size, or one waiting out a listed analyzer's missed reading (up to three
-   cycles). It is logged for a single held role too, which sets no blocked
-   reason.
+3. Look for `composite holds a role` in the log. Its `reason` says why the
+   role is held: no listed analyzer can size it, the other P/D role cannot
+   grow, a listed analyzer's missed reading (up to three cycles), or a
+   saturation hold another analyzer's demand replaced
+   ([cycle log](cycle-log.md)). It is logged for a single held role too,
+   which sets no blocked reason.
 4. Look for the line that names the cause:
    - `listed analyzer reports no per-role demand, so it cannot size this P/D
      model`: the analyzer reports model-level demand only, so on P/D it sizes
