@@ -235,6 +235,14 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		if !ok {
 			continue // multi-accelerator (incl. P/D spanning types): deferred
 		}
+		// A variant with no accelerator name has GPUs no budget counts, so a
+		// model with one is left to the additive path whole, which may shrink
+		// it but finds no budget to grow it. Moved by rescale, it was filled
+		// with uncounted GPUs; frozen there, it never shrank, and its role's
+		// other variants were sized for the demand it already served.
+		if slices.ContainsFunc(records, func(vc variantRecord) bool { return vc.AcceleratorName == "" }) {
+			continue
+		}
 		// A namespace present in availableByNS is a closed quota allowlist → namespace scope.
 		_, nsScoped := availableByNS[req.Namespace]
 		if !o.Rescale.enabledForScope(req.Namespace, nsScoped) {
@@ -278,8 +286,12 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		}
 		budget := free + currentUsage
 
-		inputs, sumDemandGPUs := rescaleInputsForGroup(reqs, k.accType, budget)
-		if sumDemandGPUs <= budget {
+		// Contended when the models can take more than the budget: their caps,
+		// not their demand. A role at its maxReplicas cannot take the demand
+		// beyond it, and read uncapped it set off rescale in a group that fit,
+		// which cut a model inside its band while GPUs stayed free.
+		inputs, sumWantGPUs := rescaleInputsForGroup(reqs, k.accType, budget)
+		if sumWantGPUs <= budget {
 			continue // uncontended: leave to the additive path
 		}
 
@@ -369,10 +381,8 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	vcMap := buildCapacityMap(all)
 	targets := initTargets(req.VariantStates)
 	// Rescale moves only the variants on accType: the budget, the floors and
-	// the demand count no other GPUs. A variant with no accelerator name
-	// passed singleAccType but was filled and reclaimed beside them, so the
-	// GPUs it gained were charged to no budget; it keeps its replicas, as
-	// the additive path, whose budget for no accelerator is none, keeps them.
+	// the demand count no other GPUs. applyRescale admits only models whose
+	// variants all name accType; the filter keeps that true for any caller.
 	records := variantsOnType(all, accType)
 
 	// Split the model's GPU target across its roles by role demand (a P/D model
@@ -702,8 +712,8 @@ func markRoleGPULimited(
 // they span more than one (multi-accelerator, deferred) or none is set. Variants
 // that spell one accelerator differently share it (accelerator.SameName); the
 // first spelling is returned, and callers resolve it against their budget. A
-// variant with no accelerator name is skipped here, and rescale leaves it at
-// its replicas (rescaleModelDecisions).
+// variant with no accelerator name is skipped here; applyRescale leaves a
+// model with one to the additive path.
 func singleAccType(vcs []variantRecord) (string, bool) {
 	accType := ""
 	for _, vc := range vcs {
@@ -738,10 +748,11 @@ func modelCurrentGPUs(req ModelScalingRequest, accType string) int {
 }
 
 // rescaleInputsForGroup builds the water-filling inputs for a group's models and
-// returns them with the summed demand-in-GPUs (for the contention check).
+// returns them with the GPUs the models can take, their caps before the budget
+// bounds them, for the contention check.
 func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget int) ([]rescaleInput, int) {
 	inputs := make([]rescaleInput, 0, len(reqs))
-	sumDemandGPUs := 0
+	sumWantGPUs := 0
 	for _, req := range reqs {
 		satNamed := req.CompositeSignal
 		if satNamed.Result == nil {
@@ -780,7 +791,6 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		}
 		floorGPUs = max(floorGPUs, heldFloor)
 
-		demandGPUs := modelDemandGPUs(satNamed, records, stateMap, accType)
 		// Each role is capped at its own ceiling before the sum: a P/D role at
 		// its maxReplicas cannot take GPUs for the demand beyond it, and since
 		// the role split no longer reclaims the other role to pay for it, the
@@ -795,7 +805,12 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		}
 		if maxBounded {
 			capGPUs = min(capGPUs, maxGPUs)
-		} else {
+		}
+		// What the model can take, for the contention check: its cap before
+		// the group budget bounds it, so one model wanting more than the
+		// budget still contends for it.
+		wantGPUs := max(capGPUs, floorGPUs)
+		if !maxBounded {
 			capGPUs = min(capGPUs, budget) // unbounded max: cap at the group budget
 		}
 		capGPUs = max(capGPUs, floorGPUs)
@@ -808,7 +823,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			for _, role := range modelRolesOnType(records, accType) {
 				cur += roleCurrentGPUs(records, stateMap, accType, role)
 			}
-			floorGPUs, capGPUs, demandGPUs = cur, cur, cur
+			floorGPUs, capGPUs, wantGPUs = cur, cur, cur
 		}
 
 		inputs = append(inputs, rescaleInput{
@@ -818,9 +833,9 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			FloorGPUs: floorGPUs,
 			CapGPUs:   capGPUs,
 		})
-		sumDemandGPUs += demandGPUs
+		sumWantGPUs += wantGPUs
 	}
-	return inputs, sumDemandGPUs
+	return inputs, sumWantGPUs
 }
 
 // pinnedModel reports whether the composite holds any of the model's roles
@@ -852,16 +867,6 @@ func modelWeightDemand(nr NamedAnalyzerResult, records []variantRecord, accType 
 // utilization, rescale's sizing point.
 func rescaleRoleDemand(nr NamedAnalyzerResult, role string) float64 {
 	return max(demandForRoleOrModel(nr, role), nr.OtherFrameDemand(role, 1))
-}
-
-// modelDemandGPUs is the model's demand-in-GPUs summed across its roles on accType
-// (a P/D model needs GPUs for both prefill and decode).
-func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType string) int {
-	total := 0
-	for _, role := range modelRolesOnType(records, accType) {
-		total += roleDemandGPUs(satNamed, records, stateMap, accType, role)
-	}
-	return total
 }
 
 // roleDemandGPUs converts a role's token demand to a GPU count via the role's most

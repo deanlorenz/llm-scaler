@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,26 +47,30 @@ func withUnnamedVariant(req ModelScalingRequest) ModelScalingRequest {
 	return req
 }
 
-// TestRescaleLeavesAVariantWithNoAcceleratorAlone (#223): rescale counts only
-// the GPUs on the model's accelerator type, so it moves only those variants.
-// The cheaper variant with no accelerator name was filled first, with GPUs
-// no budget counted, and was reclaimed to pay a cut it was never part of.
-func TestRescaleLeavesAVariantWithNoAcceleratorAlone(t *testing.T) {
-	req := withUnnamedVariant(aggRescaleRequest("m", 1000))
-	_, ok := singleAccType(buildVariantRecords(req, req.CompositeSignal.Result))
-	require.True(t, ok, "setup: the model passes the single-type gate")
+// TestRescaleLeavesAModelWithAnUnnamedVariantToTheAdditivePath (#223): a
+// variant with no accelerator name holds GPUs no budget counts, so rescale
+// does not take its model; the additive path may shrink it and has no budget
+// to grow it. Taken, the cheaper unnamed variant was filled first with GPUs
+// no budget counted; frozen instead, it never shrank, and the named variant
+// was sized for demand it already served.
+func TestRescaleLeavesAModelWithAnUnnamedVariantToTheAdditivePath(t *testing.T) {
+	run := func(m ModelScalingRequest) (map[string]bool, []domain.VariantDecision) {
+		t.Helper()
+		o := NewGreedyByScoreOptimizer()
+		o.Rescale = RescaleFlags{Cluster: true}
+		reqs := []ModelScalingRequest{m, aggRescaleRequest("o", 1000)}
+		decisions, handled := o.applyRescale(context.Background(), reqs, nil, map[string]int{"A100": 2}, nil)
+		return handled, decisions
+	}
+	named := aggRescaleRequest("m", 1000)
+	handled, _ := run(named)
+	require.True(t, handled[modelKey(named)], "setup: the group is contended and rescale takes m")
 
-	grow := rescaleTargets(req, 5, 3)
-	assert.Equal(t, 2, grow["x"], "x is not filled")
-	assert.Equal(t, 5, grow["m-a"], "the fill goes to the variant the budget counts")
-
-	shrink := rescaleTargets(aggCut(req), 1, 0)
-	assert.Equal(t, 2, shrink["x"], "x is not reclaimed")
-	assert.Equal(t, 1, shrink["m-a"])
-}
-
-// aggCut is req with no demand, so rescale reclaims toward its target.
-func aggCut(req ModelScalingRequest) ModelScalingRequest {
-	req.CompositeSignal.Result.TotalDemand = 0
-	return req
+	m := withUnnamedVariant(aggRescaleRequest("m", 1000))
+	handled, decisions := run(m)
+	assert.False(t, handled[modelKey(m)], "m goes to the additive path")
+	for _, d := range decisions {
+		assert.NotEqual(t, "x", d.VariantName)
+		assert.NotEqual(t, "m-a", d.VariantName)
+	}
 }

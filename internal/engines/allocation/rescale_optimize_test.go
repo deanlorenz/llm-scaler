@@ -337,7 +337,9 @@ var _ = Describe("GreedyByScoreOptimizer rescale", func() {
 				{VariantName: "B-v", CurrentReplicas: 0, GPUsPerReplica: 1, MaxReplicas: &max2},
 			},
 		})
-		reqA := rescaleReq("A", "default", 1, 8000, 4) // holds 4, absorbs the rest
+		// Holds 4 and wants 12, so the group is contended: A at 8 and B at
+		// its cap of 2 would fit the 10 GPUs, and leave rescale out.
+		reqA := rescaleReq("A", "default", 1, 12000, 4)
 
 		cons := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 10, Used: 4}}}} // free = 6
 		dm := decisionMap(o.Optimize(context.Background(), []ModelScalingRequest{reqA, reqB}, cons))
