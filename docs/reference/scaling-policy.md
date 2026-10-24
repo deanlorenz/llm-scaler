@@ -2424,11 +2424,11 @@ The controller validates all configuration entries on load. Invalid entries are 
 6. **Priority:** Must be ≥ 0
 7. **V2 thresholds** (when set): `scaleUpThreshold` and `scaleDownBoundary` must be in (0, 1],
    and `scaleUpThreshold` must be > `scaleDownBoundary`. Per-analyzer overrides are range-checked too.
-9. **ITL band** (when set): `itlMinObservableK` and `itlMaxObservableK` must be in (0, 1), with
-   the minimum below the maximum. `itlCapMaxPreemptionRate` must be >= 0.
 8. **Limiters:** each `type` must be `gpu-inventory`/`inventory` or `quota`; a `gpu-inventory` entry
    must carry no quota fields; `quota` entries are validated end-to-end against the `QuotaLimiterConfig`
    schema (name uniqueness, scope, per-type ranges).
+9. **ITL band** (when set): `itlMinObservableK` and `itlMaxObservableK` must be in (0, 1), with
+   the minimum below the maximum. `itlCapMaxPreemptionRate` must be >= 0.
 
 > Analyzer `type`/`name` values are **not** restricted to a fixed set — an unrecognized analyzer is
 > simply ignored at runtime, so externally-registered analyzers and newer built-ins do not fail validation.

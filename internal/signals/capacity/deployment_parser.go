@@ -292,15 +292,29 @@ func (p *EngineParams) Complete() bool {
 }
 
 // ExplicitMaxNumSeqs is MaxNumSeqs when it was read from the engine's flag,
-// and 0 when it is a default or p is nil. A caller that needs the engine's
-// real cap, not an estimate of it, reads this: the ITL fit admits a reading
-// above its band only for a replica at its cap (itl.Admission).
+// and 0 when it is a default, when any of the flag's spellings could not be
+// read, or when p is nil. A caller that needs the engine's real cap, not an
+// estimate of it, reads this: the ITL fit admits a reading above its band
+// only for a replica at its cap (itl.Admission).
+//
+// An unreadable spelling voids a readable one: `--max-num-seqs 512
+// --max-num-seqs ` sets 512, and which of the two the engine takes
+// depends on a value nothing here could see.
 func (p *EngineParams) ExplicitMaxNumSeqs() int64 {
 	if p == nil || !p.MaxNumSeqsSet {
 		return 0
 	}
+	for _, key := range maxNumSeqsKeys {
+		if slices.Contains(p.Unresolved, key) {
+			return 0
+		}
+	}
 	return p.MaxNumSeqs
 }
+
+// maxNumSeqsKeys are the normalised flags either parser reads into
+// MaxNumSeqs.
+var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}
 
 // defaultEngineParams returns EngineParams with vLLM defaults
 // as of vLLM v0.8+. If vLLM changes its defaults in a future version,

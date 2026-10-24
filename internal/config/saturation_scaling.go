@@ -774,8 +774,12 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 // ITLBand is the KV band the ITL fit reads inside, with the defaults for an
 // edge left unset. A resolved policy holds a valid pair
 // (ResolveScalingPolicyForTier); for any other, an inverted or out-of-range
-// pair reads as the defaults, never as a band that admits nothing.
-func (c ScalingPolicy) ITLBand() (lo, hi float64) {
+// pair reads as the defaults, never as a band that admits nothing. A nil
+// policy reads as the defaults.
+func (c *ScalingPolicy) ITLBand() (lo, hi float64) {
+	if c == nil {
+		return DefaultITLMinObservableK, DefaultITLMaxObservableK
+	}
 	lo, hi = c.ITLMinObservableK, c.ITLMaxObservableK
 	if lo == 0 {
 		lo = DefaultITLMinObservableK
@@ -789,9 +793,10 @@ func (c ScalingPolicy) ITLBand() (lo, hi float64) {
 	return lo, hi
 }
 
-// ITLCapPreemptionRate is ITLCapMaxPreemptionRate, or its default when unset.
-func (c ScalingPolicy) ITLCapPreemptionRate() float64 {
-	if c.ITLCapMaxPreemptionRate == nil || !(*c.ITLCapMaxPreemptionRate >= 0) {
+// ITLCapPreemptionRate is ITLCapMaxPreemptionRate, or its default when unset
+// or the policy is nil.
+func (c *ScalingPolicy) ITLCapPreemptionRate() float64 {
+	if c == nil || c.ITLCapMaxPreemptionRate == nil || !(*c.ITLCapMaxPreemptionRate >= 0) {
 		return DefaultITLCapMaxPreemptionRate
 	}
 	return *c.ITLCapMaxPreemptionRate

@@ -22,6 +22,10 @@ func TestITLBandDefaultsMatchTheTracker(t *testing.T) {
 	if got := p.ITLCapPreemptionRate(); got != DefaultITLCapMaxPreemptionRate {
 		t.Errorf("unset itlCapMaxPreemptionRate = %g, want %g", got, DefaultITLCapMaxPreemptionRate)
 	}
+	var none *ScalingPolicy
+	if lo, hi := none.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK || none.ITLCapPreemptionRate() != 0 {
+		t.Errorf("a nil policy reads band [%g, %g], want the defaults", lo, hi)
+	}
 }
 
 func TestITLKeysValidate(t *testing.T) {
@@ -70,7 +74,8 @@ func TestITLKeysMerge(t *testing.T) {
 	if got := tier.ITLCapPreemptionRate(); got != some {
 		t.Errorf("inherited itlCapMaxPreemptionRate = %g, want %g", got, some)
 	}
-	if got := ResolveScalingPolicyForTier(set, "m", "ns", "wide").ITLCapPreemptionRate(); got != 0 {
+	model := ResolveScalingPolicyForTier(set, "m", "ns", "wide")
+	if got := model.ITLCapPreemptionRate(); got != 0 {
 		t.Errorf("an override's explicit 0 = %g, want 0 over the default's %g", got, some)
 	}
 	inverted := ResolveScalingPolicyForTier(set, "other", "ns", "low-top")
@@ -95,7 +100,8 @@ func TestITLKeysNonFinite(t *testing.T) {
 	if p.ITLMinObservableK != 0 || p.ITLMaxObservableK != 0 || p.ITLCapMaxPreemptionRate != nil {
 		t.Errorf("after reset: %+v", p)
 	}
-	if lo, hi := (ScalingPolicy{ITLMinObservableK: nan, ITLMaxObservableK: nan}).ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK {
+	nanBand := ScalingPolicy{ITLMinObservableK: nan, ITLMaxObservableK: nan}
+	if lo, hi := nanBand.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK {
 		t.Errorf("ITLBand of NaN edges = [%g, %g], want the defaults", lo, hi)
 	}
 }

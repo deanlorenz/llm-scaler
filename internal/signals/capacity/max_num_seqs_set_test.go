@@ -20,6 +20,8 @@ func TestExplicitMaxNumSeqs(t *testing.T) {
 		"vLLM flag":       {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=128"))), 128},
 		"singular flag":   {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seq", "64"))), 64},
 		"unreadable flag": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs", "$UNSET_SEQS"))), 0},
+		"a readable and an unreadable flag": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment(
+			"--max-num-seqs", "512", "--max-num-seqs", "$UNSET_SEQS"))), 0},
 		"through the env": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeDeploymentWithEnvAndArgs(
 			[]corev1.EnvVar{{Name: "SEQS", Value: "96"}}, "--max-num-seqs", "$SEQS"))), 96},
 	} {
