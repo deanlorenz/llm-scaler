@@ -50,6 +50,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pod_writer.sh"
 # make enable-physical-limiter reads it.
 # shellcheck source=lib/physical_limiter.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/physical_limiter.sh"
+# For wva_controller_rollout_ready: a restart waits for a Ready controller, and
+# `rollout status` alone passes at once for one scaled to 0.
+# shellcheck source=lib/common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-30s}"
 CONTROLLER_DEPLOY="${CONTROLLER_DEPLOY:-wva-controller-manager}"
@@ -70,6 +74,16 @@ fail() { printf '[FAIL] %s\n' "$*" >&2; }
 die()  { fail "$*"; exit 1; }
 
 k() { kubectl --request-timeout="$KUBECTL_TIMEOUT" "$@"; }
+
+# wait_controller_back waits for the restarted controller to roll out with a
+# Ready replica, and dies saying why when it does not.
+wait_controller_back() {
+    wva_controller_rollout_ready "deploy/$CONTROLLER_DEPLOY" "$CONTROLLER_NS" 300s >/dev/null 2>&1 && return 0
+    case "$WVA_CONTROLLER_NOT_READY" in
+        scaled-to-zero) die "the controller Deployment $CONTROLLER_NS/$CONTROLLER_DEPLOY is at 0 replicas, so nothing reads the policy: scale it up (kubectl -n $CONTROLLER_NS scale deploy/$CONTROLLER_DEPLOY --replicas=1)" ;;
+        *) die "the controller did not come back within 300 s" ;;
+    esac
+}
 
 # ---------------------------------------------------------------------------
 # Policy transforms: a policy on stdin, a word or a policy on stdout.
@@ -348,8 +362,7 @@ confirm_by_status() {
             if [ "$RESTART" -eq 1 ] && [ "$restarted" -eq 0 ]; then
                 info "the controller has not applied version $WRITTEN_RV; restarting it"
                 kread err rollout restart "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" || die "could not restart the controller: $err"
-                kubectl rollout status "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" --timeout=300s >/dev/null \
-                    || die "the controller did not come back within 300 s"
+                wait_controller_back
                 restarted=1
                 deadline=$(( $(date +%s) + RELOAD_WAIT ))
                 continue
@@ -511,8 +524,7 @@ confirm_reload() {
         [ "$RESTART" -eq 1 ] || die "the controller logged no reload of $POLICY_NS/$POLICY_CM within ${RELOAD_WAIT}s. The policy WAS written. Rerun with --restart (RESTART=1) to restart the controller and require the reload."
         info "no reload logged; restarting the controller"
         kread bad rollout restart "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" || die "could not restart the controller: $bad"
-        kubectl rollout status "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" --timeout=300s >/dev/null \
-            || die "the controller did not come back within 300 s"
+        wait_controller_back
         start="$(date +%s)"
         wait_reload "$start" || die "the restarted controller logged no read of $POLICY_NS/$POLICY_CM either: check --policy-namespace"
     fi

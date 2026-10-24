@@ -1540,11 +1540,30 @@ EOF
 # Written at 1 as well. The manifest carries no replicas field, and
 # `kubectl apply` leaves a field the manifest does not set alone, so a re-install
 # over a controller someone had scaled to 0 kept it at 0.
+#
+# WVA_REPLICAS must be a non-negative integer: anything else is refused here,
+# not left for the API server to reject the whole apply. With namespace $2 the
+# live Deployment's count is read first, and a re-install that changes it (a
+# controller scaled to 2 by hand, put back to 1) says so.
 wva_append_replicas_patch() {
-    local kustomization="$1"
+    local kustomization="$1" ns="${2:-}" live
     [ -n "${WVA_REPLICAS:-}" ] || return 0
-    [ "$WVA_REPLICAS" = "1" ] \
-        || log_info "Controller replicas: $WVA_REPLICAS (leader-elected; standbys take over on failure, they do not share the work)"
+    case "$WVA_REPLICAS" in
+        *[!0-9]*|0?*)
+            log_error "WVA_REPLICAS=$WVA_REPLICAS is not a non-negative integer (0, 1, 2, ...)" ;;
+    esac
+    if [ "$WVA_REPLICAS" = "0" ]; then
+        log_warning "WVA_REPLICAS=0: the controller is installed with no replica, so nothing makes scaling decisions until it is scaled up"
+    elif [ "$WVA_REPLICAS" != "1" ]; then
+        log_info "Controller replicas: $WVA_REPLICAS (leader-elected; standbys take over on failure, they do not share the work)"
+    fi
+    if [ -n "$ns" ]; then
+        live="$(kubectl get deployment wva-controller-manager -n "$ns" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null)" || live=""
+        if [ -n "$live" ] && [ "$live" != "$WVA_REPLICAS" ]; then
+            log_warning "Controller replicas: the live Deployment runs $live; this install sets it to WVA_REPLICAS=$WVA_REPLICAS. Pass WVA_REPLICAS=$live to keep it."
+        fi
+    fi
     grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
     cat >> "$kustomization" <<EOF
 - patch: |-
@@ -1983,7 +2002,7 @@ EOF
     # that it handed out access nobody needed.
     wva_delete_legacy_crbs "$WVA_NS"
 
-    wva_append_replicas_patch "$tmp_overlay/kustomization.yaml"
+    wva_append_replicas_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS"
 
     # WVA_WATCH_NS separates the namespace the controller MANAGES from the one it
     # RUNS IN.

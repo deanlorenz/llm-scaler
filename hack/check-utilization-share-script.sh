@@ -28,6 +28,10 @@ fi
 if [ -f "$ROOT/deploy/lib/physical_limiter.sh" ]; then
     tr -d '\r' < "$ROOT/deploy/lib/physical_limiter.sh" > "$WORK/lib/physical_limiter.sh"
 fi
+# And lib/common.sh, for the restart's readiness wait.
+if [ -f "$ROOT/deploy/lib/common.sh" ]; then
+    tr -d '\r' < "$ROOT/deploy/lib/common.sh" > "$WORK/lib/common.sh"
+fi
 
 # shellcheck disable=SC1090
 . "$WORK/us.sh"
@@ -295,6 +299,11 @@ case "$args" in
   *" rollout "*)
     [ -e "$S/restart.noreload" ] || echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
     exit 0 ;;
+  # The controller's spec.replicas/readyReplicas, read after a restart's
+  # rollout; replicas holds them, else one Ready replica.
+  *" get deploy/"*)
+    cat "$S/replicas" 2>/dev/null || printf '1/1'
+    exit 0 ;;
   # May the controller already patch pods in a namespace? cani.<ns> holds yes,
   # no or denied (impersonation not allowed); no file is no.
   *" auth can-i "*)
@@ -537,6 +546,12 @@ vcase "activate: no reload is a failure that names --restart" eval '[ $RC -ne 0 
 fresh "$TUNED_POLICY"; touch "$STATE/noreload"; run activate --restart
 vcase "activate --restart: restarts and confirms" eval '[ $RC -eq 0 ] && says "restarting"'
 
+# `rollout status` passes at once for a Deployment at 0 replicas, so a restart
+# of a controller scaled to 0 read as "came back" and waited on nothing.
+fresh "$TUNED_POLICY"; touch "$STATE/noreload"; printf '0/' > "$STATE/replicas"; run activate --restart
+vcase "activate --restart: a controller at 0 replicas fails and says so" \
+    eval '[ $RC -ne 0 ] && says "at 0 replicas"'
+
 fresh "$(printf '%s\n' "$TUNED_POLICY" | us_policy_with_mode active)"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; run off
 vcase "off: through shadow, marks cleared, block removed" \
     eval '[ $RC -eq 0 ] && [ "$(pol .optimizer)" = null ] && [ "$(pol .limiters[0].type)" = quota ] && [ "$(patches)" = 2 ]'
@@ -735,7 +750,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=122
+CASES_EXPECTED=123
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

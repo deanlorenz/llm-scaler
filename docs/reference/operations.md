@@ -30,7 +30,8 @@ pick yours from the list.
 
 "Ready" means the rollout finished and at least one controller pod is Ready. A
 controller Deployment scaled to 0 fails the check with "scaled to 0 replicas".
-Re-running the install sets it back to `WVA_REPLICAS` (default `1`).
+Re-running the install sets it back to `WVA_REPLICAS` (default `1`). An
+install with `WVA_REPLICAS=0` asked for that, so there it is a warning.
 
 Set `NS` to the controller's namespace. To find it by the Deployment label:
 

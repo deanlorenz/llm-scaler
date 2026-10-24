@@ -73,6 +73,10 @@ verify_deployment() {
     if [ -n "$wva_deploy" ] && wva_controller_rollout_ready "$wva_deploy" "$WVA_NS" \
         "${WVA_VERIFY_TIMEOUT:-180s}" >/dev/null 2>&1; then
         log_success "WVA controller is running and ready in $WVA_NS"
+    elif [ "$WVA_CONTROLLER_NOT_READY" = "scaled-to-zero" ] && [ "${WVA_REPLICAS:-}" = "0" ]; then
+        # Asked for: a staged install, or one a later step scales up. Said,
+        # not failed.
+        log_warning "WVA controller is scaled to 0 replicas in $WVA_NS, as WVA_REPLICAS=0 asked: nothing makes scaling decisions until it is scaled up (kubectl -n $WVA_NS scale $wva_deploy --replicas=1)."
     elif [ "$WVA_CONTROLLER_NOT_READY" = "scaled-to-zero" ]; then
         all_good=false
         log_warning "WVA controller is NOT running: $wva_deploy in $WVA_NS is scaled to 0 replicas, so nothing makes scaling decisions."
