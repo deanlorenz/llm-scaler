@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/internal/deadaddr"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -145,9 +147,7 @@ func TestARollbackThatCannotReachOneRankStillClearsTheOthers(t *testing.T) {
 
 	// Nothing is listening here. Rank 2 is created first and rolled back first,
 	// so it is the one that goes away between the two.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
+	deadURL := "http://" + deadaddr.Addr()
 
 	a := &Adapter{client: fakeClientWith(pods...), namespace: "ns"}
 	rec.supervisorsFrom(a)

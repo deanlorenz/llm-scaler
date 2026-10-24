@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/internal/deadaddr"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/proxy"
 )
 
@@ -49,21 +50,12 @@ func liveEngine(t *testing.T) int {
 	return number
 }
 
-// deadEnginePort returns a port in the engine range with nothing behind it,
-// proven free by binding and closing rather than guessed.
+// deadEnginePort returns a loopback port with nothing that answers behind it,
+// held for the life of the test binary so no other listener can take it
+// (deadaddr).
 func deadEnginePort(t *testing.T) int {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
-	if err != nil {
-		t.Fatalf("split %q: %v", server.URL, err)
-	}
-	server.Close()
-	number, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatalf("port %q: %v", port, err)
-	}
-	return number
+	return deadaddr.Port()
 }
 
 func realProxy(t *testing.T) (*Proxy, *proxy.Server) {

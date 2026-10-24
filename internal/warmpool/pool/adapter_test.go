@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	stdlog "log"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -19,6 +17,7 @@ import (
 
 	"github.com/go-logr/stdr"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/internal/deadaddr"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool/proxy"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,50 +35,11 @@ const testNamespace = "pool-ns"
 // lentUpstream is where a lent Pod's proxy points: the pool's first engine port.
 const lentUpstream = "127.0.0.1:9001"
 
-// deadAddr is an address that refuses every request for the life of the test
-// binary.
-//
-// It holds its listener. A port that is bound and then closed is free only
-// until the kernel hands it to the next listener -- any httptest server in this
-// package, or in another package's test binary running beside it -- and from
-// then on a "broken" Pod answers. A collision with a server that returns an
-// empty list made one of two broken Pods readable, so the all-unreadable
-// diagnosis was never logged (#217). Each connection is reset as soon as it is
-// accepted, so a request fails as it does against a supervisor that is gone.
-var deadAddr = func() string {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		panic(fmt.Sprintf("dead address: %v", err))
-	}
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			if tcp, ok := conn.(*net.TCPConn); ok {
-				_ = tcp.SetLinger(0)
-			}
-			_ = conn.Close()
-		}
-	}()
-	return l.Addr().String()
-}()
-
-func TestTheDeadAddressCannotBeTakenByAnotherServer(t *testing.T) {
-	// The broken-Pod tests are only as good as this address. If another
-	// listener can bind it, a "broken" Pod answers whatever that listener says.
-	l, err := net.Listen("tcp", deadAddr)
-	if err == nil {
-		_ = l.Close()
-		t.Fatalf("deadAddr %s could be bound by another listener, so a broken Pod can answer", deadAddr)
-	}
-	resp, err := http.Get("http://" + deadAddr + instancesPath)
-	if err == nil {
-		_ = resp.Body.Close()
-		t.Fatalf("deadAddr %s answered %s, want the request to fail", deadAddr, resp.Status)
-	}
-}
+// deadAddr is where a broken Pod's supervisor is: an address that refuses
+// every request for the life of the test binary, and that no other listener
+// can take (deadaddr). A port bound and then closed could be, and a broken Pod
+// then answered as healthy (#217).
+var deadAddr = deadaddr.Addr()
 
 // journal records what happened, in order, across all three protocols and the
 // Kubernetes client. The orderings are the thing worth asserting: sleeping
