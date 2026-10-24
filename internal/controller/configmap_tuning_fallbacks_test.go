@@ -7,13 +7,14 @@ import (
 	"github.com/go-logr/logr/funcr"
 )
 
-// tuningWarnings parses data and returns, by entry key, the "tuning figure
+// tuningWarnings parses data, warns as the handler does, and returns, by entry key, the "tuning figure
 // not used" warnings it logged.
 func tuningWarnings(t *testing.T, data map[string]string) map[string][]string {
 	t.Helper()
 	var lines []string
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{})
 	configs, count, rejected, _ := parseScalingPolicyConfigRejects(data, logger)
+	warnAboutTuningFallbacks(logger, configs)
 	if count != len(data) || len(configs) != len(data) || len(rejected) != 0 {
 		t.Fatalf("kept %d of %d, rejected %v: every entry is valid alone", count, len(data), rejected)
 	}

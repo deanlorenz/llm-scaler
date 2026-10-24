@@ -127,7 +127,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		}
 		count++
 	}
-	warnAboutTuningFallbacks(logger, configs)
 	return configs, count, rejected, ignored
 }
 
@@ -152,7 +151,8 @@ func warnInertAnalyzerThresholds(logger logr.Logger, configs config.ScalingPolic
 // idleKvUsage held under kvCacheThreshold. Each entry is resolved over the
 // "default" entry, as a model with no tier is. Logged once per ConfigMap
 // read, not per cycle: the entry is accepted, so nothing else says the
-// setting is ignored.
+// setting is ignored. Called only where tuning is read
+// (handleScalingPolicyConfigMap), like warnInertAnalyzerThresholds.
 func warnAboutTuningFallbacks(logger logr.Logger, configs config.ScalingPolicySet) {
 	var base *config.ScalingPolicy
 	if d, ok := configs[config.GlobalDefaultsKey]; ok {
