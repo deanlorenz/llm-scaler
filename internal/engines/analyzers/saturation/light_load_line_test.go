@@ -130,10 +130,10 @@ func TestHeldSlopeEndsOnArgsChange(t *testing.T) {
 		clock = clock.Add(15 * time.Second)
 	}
 	clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
-	require.False(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).IsZero(),
+	require.False(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).Model.IsZero(),
 		"the premise: the slope is held under the same arguments")
 
 	a.itlUnderArgs(key, "args-2")
-	assert.True(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).IsZero(),
+	assert.True(t, a.noteITL(key, row(0.06, 0.01), variant, itl.Admission{}, clock, logr.Discard()).Model.IsZero(),
 		"no slope survives a change of engine arguments")
 }

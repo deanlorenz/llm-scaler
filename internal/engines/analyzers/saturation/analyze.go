@@ -450,7 +450,7 @@ func (c *cycle) fitLines() {
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(),
 			SlopeHoldFor:         c.a.Horizons().BucketRetention, Args: windowArgs(params)}
-		reading := c.a.observeITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
+		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
 		own := reading.Model
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how

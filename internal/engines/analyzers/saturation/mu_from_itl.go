@@ -285,7 +285,9 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 }
 
 // noteITL adds this cycle's (k, ITL) readings for one variant to its rolling
-// window and returns the model fitted over what the window holds.
+// window and returns the reading: the model fitted over what the window holds,
+// and whether it is a slope held for want of readings (SlopeHeld) rather than
+// a fit made now.
 //
 // Ready replicas of the variant itself only, and only where both halves of the
 // pair are present: a pod still failing its readiness probe, or one lent by the
@@ -320,13 +322,6 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
-	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Model {
-	return a.observeITL(key, replicas, variantName, adm, now, logger).Model
-}
-
-// observeITL is noteITL with the whole reading returned, so the caller can
-// tell a slope held for want of readings (SlopeHeld) from a fit made now.
-func (a *SaturationAnalyzer) observeITL(key string, replicas []domain.ReplicaMetrics,
 	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Reading {
 	// Stamped here as well as in noteReplicaStart, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
