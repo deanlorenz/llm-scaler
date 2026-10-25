@@ -1,6 +1,6 @@
 # LLM Autoscaling Landscape — Dynamo · Fireworks · Together
 
-> One-page summary · verified **2026-08-09** · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
+> One-page summary · verified **2026-08-09**, the scaling manager's column **2026-10-25** (v0.10.0-rc4 and later fixes) · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
 
 **Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and the scaling manager's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem the scaling manager solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
 
@@ -9,19 +9,19 @@
 | | **the scaling manager** (baseline) | **NVIDIA Dynamo Planner** | **Fireworks AI** | **Together AI** |
 |---|---|---|---|---|
 | **Category** | Deployable OSS (K8s controller) | Deployable OSS | Managed SaaS | Managed SaaS |
-| **Control law** | Saturation optimizer; demand floored on measured per-replica throughput | SLA perf-model → replicas | Threshold per target; **max across targets wins** | Proportional `ceil(N × observed/target)` |
-| **Signals** | Queue depth, KV util, request rate, token supply/demand | Prometheus rate + ISL/OSL + KV-hit; event-plane ForwardPassMetrics | 5 per-replica rates: `default` (0–1), `tokens_generated_per_second`, `prompt_tokens_per_second`, `requests_per_second`, `concurrent_requests` | 8, **exactly one at a time**: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, `token_utilization` (= KV-cache), `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` |
+| **Control law** | Saturation optimizer; demand floored on measured per-replica throughput; other listed analyzers can raise the count (largest need wins) | SLA perf-model → replicas | Threshold per target; **max across targets wins** | Proportional `ceil(N × observed/target)` |
+| **Signals** | Queue depth, KV util, request rate, token supply/demand, ITL vs batch size; router TTFT/TPOT observed, not scaled on | Prometheus rate + ISL/OSL + KV-hit; event-plane ForwardPassMetrics | 5 per-replica rates: `default` (0–1), `tokens_generated_per_second`, `prompt_tokens_per_second`, `requests_per_second`, `concurrent_requests` | 8, **exactly one at a time**: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, `token_utilization` (= KV-cache), `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` |
 | **Forecasting** | **None** (reactive) | **Yes** — Constant / **ARIMA** / Kalman / Prophet, 1-interval look-ahead | None | None |
-| **SLA → capacity** | Learns online from metrics; no profiling step | Interpolated perf model, **required** for the SLA planner. **No traces needed** — you pass target ISL/OSL + TTFT/ITL. Default **AIConfigurator: 20–30 s, no GPU**; opt-in **AIPerf: 2–4 h, GPU**. Load-based mode needs no profiling but is `enable_load_scaling=False` by default | None | Latency metrics only (`p50–p99`, default `p95`) — **and they don't work, see below** |
-| **Multi-model / global** | **Yes** — multi-tenant, global fair-share | No — single DGD | No — per endpoint | No — per endpoint |
+| **SLA → capacity** | Learns online from metrics, per variant; no profiling step. Opt-in: keep it across restarts, reuse a sibling's on the same engine configuration. TTFT/TPOT targets are judged, not sized to (#141) | Interpolated perf model, **required** for the SLA planner. **No traces needed** — you pass target ISL/OSL + TTFT/ITL. Default **AIConfigurator: 20–30 s, no GPU**; opt-in **AIPerf: 2–4 h, GPU**. Load-based mode needs no profiling but is `enable_load_scaling=False` by default | None | Latency metrics only (`p50–p99`, default `p95`) — **and they don't work, see below** |
+| **Multi-model / global** | **Yes** — multi-tenant, global fair-share; experimental quota sharing moves GPUs between models | No — single DGD | No — per endpoint | No — per endpoint |
 | **Heterogeneous GPUs** | **Yes**, first-class | No — one GPU type | Not exposed (one SKU/deployment) | Not exposed (one `hardware` string) |
-| **Cost aware** | **Yes** — relative `variantCost` per variant + **GPU quota/fair-share limiter** | No — cost-blind, only `max_gpu_budget=8` | Per-GPU-second billing; `max` is the only ceiling | `max_replicas` is the only ceiling |
-| **P/D disaggregation** | Roles first-class, role-aware demand | **Independent P/D scaling** (core feature) | Not exposed | Not exposed |
-| **Scale to zero** | Reactive scale-from-zero engine | Not a focus | **Headline feature** — idle window default **1 h** (min 5 m) | **No auto-wake** — `min=max=0` is a *stopped* state; `inactive_timeout` auto-stops |
-| **Up / down windows** | HPA/KEDA stabilization | 180 s predictive · 5 s reactive (off by default) | **30 s** / **10 m** | **0 s** / **5 m** |
-| **Actuation** | Metrics → HPA/KEDA (opt-in annotation) | Own controller patches DGD CRD; **VirtualConnector** publishes decisions without managing infra | Platform-internal | Platform-internal |
-| **Scale-down drain** | Handled by HPA/KEDA + scale target | **Graceful** — prefill SIGTERM finishes current request; decode etcd-lease revoke, finishes stream | Not documented | Stabilization window only |
-| **Currency** | Active | **v1.3.1 (6 Aug 2026)** | Static since **5 Feb 2026** | **DMI launched 16 Jul 2026** — iterating weekly |
+| **Cost aware** | **Yes** — relative `variantCost` per variant + **GPU limiters** (free GPUs, quotas, Kueue with cohort borrowing) | No — cost-blind, only `max_gpu_budget=8` | Per-GPU-second billing; `max` is the only ceiling | `max_replicas` is the only ceiling |
+| **P/D disaggregation** | Roles first-class, role-aware demand, committed together (experimental) | **Independent P/D scaling** (core feature) | Not exposed | Not exposed |
+| **Scale to zero** | **Yes** — KEDA's own, with activation pushed from the router queue (polled every 100 ms); optional warm pool against the cold start | Not a focus | **Headline feature** — idle window default **1 h** (min 5 m) | **No auto-wake** — `min=max=0` is a *stopped* state; `inactive_timeout` auto-stops |
+| **Up / down windows** | HPA/KEDA stabilization; generated ScaledObjects **0 s** / **300 s**, plus sticky scale-down | 180 s predictive · 5 s reactive (off by default) | **30 s** / **10 m** | **0 s** / **5 m** |
+| **Actuation** | KEDA external scaler (gRPC, mutual TLS by default): KEDA's HPA applies the replica count | Own controller patches DGD CRD; **VirtualConnector** publishes decisions without managing infra | Platform-internal | Platform-internal |
+| **Scale-down drain** | Handled by HPA/KEDA + scale target; `make workload-patch` writes a preStop drain window (45 s by default) | **Graceful** — prefill SIGTERM finishes current request; decode etcd-lease revoke, finishes stream | Not documented | Stabilization window only |
+| **Currency** | Active; **v0.10.0-rc4 (24 Oct 2026)** | **v1.3.1 (6 Aug 2026)** | Static since **5 Feb 2026** | **DMI launched 16 Jul 2026** — iterating weekly |
 
 ## Verdicts
 

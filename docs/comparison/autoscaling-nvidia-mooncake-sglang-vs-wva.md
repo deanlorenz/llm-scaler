@@ -1,6 +1,6 @@
 # Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
-> **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-14
+> **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-25 (v0.10.0-rc4 and later fixes)
 > **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed, advanced fork of llm-d's workload-variant-autoscaler
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
@@ -11,7 +11,7 @@
 
 | System | Is it an autoscaler? | One-line posture |
 |---|---|---|
-| **the scaling manager** (baseline) | **Yes** | Global, cost-aware, **heterogeneous, multi-model** controller; SLOs only through named threshold tiers (no SLA-target scaling); answers KEDA's external scaler with desired replicas. |
+| **the scaling manager** (baseline) | **Yes** | Global, cost-aware, **heterogeneous, multi-model** controller; sizes to capacity through named threshold tiers, and judges TTFT/TPOT targets without sizing to them yet (observe-only SLO analyzer); answers KEDA's external scaler with desired replicas. |
 | **NVIDIA Dynamo Planner** | **Yes** | SLA-driven controller with **traffic forecasting** + **pre-deployment profiling**; scales prefill/decode independently; **single-model, homogeneous, cost-blind**. |
 | **Mooncake** | **No** | KVCache-aware scheduler + **early-rejection admission control** over a *fixed* pool. Sheds load; does not add capacity. Scheduling "brain" is **not open-source**. |
 | **SGLang** | **No (native)** | Engine + **router/gateway** (membership + cache-aware LB). Scaling delegated entirely to **external K8s** (HPA/KEDA, OME/Knative/LWS). |
@@ -32,16 +32,16 @@
 
 | Dimension | **the scaling manager** | **Dynamo Planner** | **Mooncake** | **SGLang** |
 |---|---|---|---|---|
-| **Type** | Global, cost-aware capacity autoscaler (SLOs only through threshold tiers) | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
+| **Type** | Global, cost-aware capacity autoscaler (SLOs through threshold tiers; TTFT/TPOT targets observed, not sized to) | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
 | **What it scales** | Replicas per model×variant | Prefill/decode replicas (independent) | Nothing (P:D ratio **preset**) | Nothing native (external scales replicas) |
-| **Scope** | **Multi-model, multi-tenant, global** | **Single DGD** (GlobalPlanner = same model only) | Single cluster, fixed | Per-deployment (external) |
-| **Signals** | Prometheus: queue depth, KV util, request rate, token supply/demand | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
+| **Scope** | **Multi-model, multi-tenant, global**; one controller can cover one namespace, a list of them, or the cluster | **Single DGD** (GlobalPlanner = same model only) | Single cluster, fixed | Per-deployment (external) |
+| **Signals** | Prometheus: queue depth (engine and router), KV util, request rate, token supply/demand, ITL vs batch size, prefix-cache hits; router TTFT/TPOT for the SLO analyzer | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
 | **Forecasting** | **None** (reactive; EWMA/rate-anchored smoothing only) | **Yes** — Constant/ARIMA(default)/Kalman/Prophet, 1-interval look-ahead | For **admission** only (predict decode load to reject early), not capacity | None |
-| **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online, **no profiling needed** | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
-| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variantCost` in the ScaledObject trigger); **GPU quota/fair-share limiter** | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
-| **Actuation** | **KEDA external scaler (gRPC)**: KEDA's HPA reads the desired replicas; registration is the ScaledObject; it never writes replica counts itself, scale-from-zero included | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
-| **P/D disaggregation** | Roles first-class (`llm-d.ai/role`), role-aware demand | **Independent prefill/decode scaling** (core feature) | Separate P/D pools, **preset ratio** | Separate pools, **manual** scaling |
-| **Maturity** | Active; Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)); upstream WVA paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
+| **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online per variant, **no profiling needed**; opt-in: carry what it learned across restarts, and start a new variant from a sibling on the same engine configuration. No SLA-target sizing yet (#141) | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
+| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variantCost` in the ScaledObject trigger); **GPU limiters that compose**: free GPUs, quotas per namespace or cluster, or Kueue's quotas with cohort borrowing; experimental utilization-share optimizer moves GPUs between models | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
+| **Actuation** | **KEDA external scaler (gRPC)**: KEDA's HPA reads the desired replicas; registration is the ScaledObject; it never writes replica counts itself, scale-from-zero included; mutual TLS to KEDA by default | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
+| **P/D disaggregation** | Roles first-class (`llm-d.ai/role`), role-aware demand, both roles committed together; decode does not count KV-transfer waits as backlog; opt-in prefill sizing from the arrival rate. Experimental | **Independent prefill/decode scaling** (core feature) | Separate P/D pools, **preset ratio** | Separate pools, **manual** scaling |
+| **Maturity** | Active; first tagged release candidates v0.10.0-rc1 to rc4 (Oct 2026); Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)); upstream WVA paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
 | **Openness** | Open (Apache-2.0); independent of the llm-d project | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
 
 ---
@@ -61,7 +61,7 @@ Dynamo offers three ways to scale a `DynamoGraphDeployment`: generic **HPA**, **
 
 **Actuation:** its own controller patches the DGD replica counts (`update_graph_replicas`) via the Kubernetes operator — **not** HPA. A **VirtualConnector** can publish scaling decisions without managing the deployment infrastructure (suggest-only).
 
-**Where the scaling manager leads:** multi-model/global scope (Dynamo is **single-DGD**; even GlobalPlanner requires all pools serve the *same* model), **heterogeneous GPU types** (Dynamo assumes one `system` e.g. `h200_sxm`), **cost-awareness + GPU fair-share/quota** (Dynamo is cost-blind with only a GPU-count cap), and **no mandatory pre-deployment profiling** (the scaling manager learns online from metrics + deployment args).
+**Where the scaling manager leads:** multi-model/global scope (Dynamo is **single-DGD**; even GlobalPlanner requires all pools serve the *same* model), **heterogeneous GPU types** (Dynamo assumes one `system` e.g. `h200_sxm`), **cost-awareness + GPU fair-share/quota**, including Kueue quotas and an experimental optimizer that moves GPUs between models as their load shifts (Dynamo is cost-blind with only a GPU-count cap), and **no mandatory pre-deployment profiling** (the scaling manager learns online from metrics + deployment args).
 
 **Where Dynamo leads:** **traffic forecasting** (the scaling manager is reactive — this is the scaling manager's biggest gap), a **quantitative SLA→capacity perf model** with profiling, **productized independent prefill/decode scaling**, and a **self-contained operator** (vs the scaling manager's dependence on HPA/KEDA plumbing).
 
@@ -95,18 +95,18 @@ Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set
 
 | Dimension | **Fireworks AI** | **Together AI** | **the scaling manager** (for reference) |
 |---|---|---|---|
-| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer, demand floored on the throughput one replica sustained; other analyzers report metrics only |
+| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer, demand floored on the throughput one replica sustained; every analyzer a policy lists sizes the model and the largest need wins; the SLO analyzer only observes |
 | **Signals** | `default` (0–1 load fraction), `tokens_generated_per_second`, `prompt_tokens_per_second` (added Feb 2026, prefill-heavy), `requests_per_second`, `concurrent_requests` — all **per replica** | Exactly 8: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, **`token_utilization` (= KV-cache utilization, 0–100)**, `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` (prompt-cache, 0–100). No custom/Prometheus metric support | Queue depth, KV utilization, request rate; token supply/demand |
-| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — KV cache, queues and token throughput, inside one saturation analyzer |
-| **Latency/SLO scaling** | **None** | `ttft` / `e2e_latency` with `p50/p90/p95/p99` (default `p95`) — **but see below** | Saturation-derived, not latency-triggered |
+| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — KV cache, queues and token throughput inside the saturation analyzer, plus any other listed analyzer (largest need wins) |
+| **Latency/SLO scaling** | **None** | `ttft` / `e2e_latency` with `p50/p90/p95/p99` (default `p95`) — **but see below** | Saturation-derived, not latency-triggered; an observe-only SLO analyzer reports TTFT percentile and TPOT mean attainment and can alert |
 | **Forecasting** | None | None | None |
-| **Scale-up window** | `--scale-up-window`, default **30 s** | `--scale-up-window`, default **0 s** (blog recommends 60 s) | HPA/KEDA stabilization |
-| **Scale-down window** | `--scale-down-window`, default **10 m** | `--scale-down-window`, default **5 m** | HPA/KEDA stabilization |
-| **Scale to zero** | **Yes, headline feature** — `--scale-to-zero-window` default **1 h** (min 5 m), `--min-replica-count` default **0** | **No auto-wake.** `min=max=0` is an explicit *stopped* state; `inactive_timeout` (minutes) auto-stops | Reactive scale-from-zero engine |
-| **Cold-start UX** | **503 `DEPLOYMENT_SCALING_UP`, not queued** — client must retry with backoff | Requests to a stopped endpoint error; restart is manual (1–2 min) | — |
+| **Scale-up window** | `--scale-up-window`, default **30 s** | `--scale-up-window`, default **0 s** (blog recommends 60 s) | HPA/KEDA stabilization; generated ScaledObjects use **0 s** |
+| **Scale-down window** | `--scale-down-window`, default **10 m** | `--scale-down-window`, default **5 m** | HPA/KEDA stabilization (generated: **300 s**), plus the controller's sticky scale-down and shape-change holds |
+| **Scale to zero** | **Yes, headline feature** — `--scale-to-zero-window` default **1 h** (min 5 m), `--min-replica-count` default **0** | **No auto-wake.** `min=max=0` is an explicit *stopped* state; `inactive_timeout` (minutes) auto-stops | **Yes, per tier** — KEDA's `minReplicaCount: 0`; the controller reads the router queue every 100 ms and pushes the 0 → 1 activation |
+| **Cold-start UX** | **503 `DEPLOYMENT_SCALING_UP`, not queued** — client must retry with backoff | Requests to a stopped endpoint error; restart is manual (1–2 min) | Queued in the router (lost if the router restarts). A cold wake took about 41 s on an H100 test cluster; an optional warm pool serves while a replica loads (model switch about 437 ms) |
 | **Heterogeneous GPUs** | Not exposed (pick one SKU per deployment; base quota 8×A100 / 8×H100) | Not exposed (one `hardware` string per endpoint) | **First-class** |
 | **P/D disaggregation** | Not exposed | Not exposed | Roles first-class |
-| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variantCost` per variant + GPU limiters (free GPUs, quotas, Kueue) |
+| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variantCost` per variant + GPU limiters (free GPUs, quotas, Kueue); quota sharing between models costs GPU-seconds (24–81 % more in measured runs) |
 
 ### The finding worth stealing: Together's own data says both TTFT *and* GPU utilization are bad scaling signals
 
@@ -154,11 +154,11 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 |---|---|---|
 | Scope | Multi-model, multi-tenant, global fair-share | — |
 | Hardware | Heterogeneous accelerators, cost-aware | — |
-| Governance | GPU **quota/limiter** across namespaces | — |
+| Governance | GPU **quota/limiter** across namespaces, Kueue quotas with cohort borrowing, quota sharing between models (experimental) | — |
 | Deployment | No pre-deployment profiling; composes with existing HPA/KEDA | Self-contained operator |
 | Prediction | — | **Traffic forecasting** (ARIMA/Kalman/Prophet) |
-| SLA model | — | Quantitative perf model + profiling |
-| P/D | Role-aware demand | **Productized independent P/D scaling** |
+| SLA model | — (TTFT/TPOT attainment is observed, not sized to) | Quantitative perf model + profiling |
+| P/D | Role-aware demand, both roles committed together (experimental) | **Productized independent P/D scaling** |
 | Both weak on | — | **Distribution awareness** (avg ISL/OSL); real-$ cost is relative/absent |
 
 **Takeaways for the scaling manager's roadmap:**
@@ -171,7 +171,9 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 ## Sources
 
 **the scaling manager (baseline)**
-- Repo: https://github.com/llm-d/llm-d-workload-variant-autoscaler
+- Repo: https://github.com/ev-shindin/llm-scaling-manager · releases (v0.10.0-rc1 to rc4): https://github.com/ev-shindin/llm-scaling-manager/releases
+- What it does and how mature each part is: [why.md](../why.md); measured runs and known limits: [KEDA alone](keda-alone.md#what-was-measured-and-what-failed)
+- Upstream it forked from: https://github.com/llm-d/llm-d-workload-variant-autoscaler
 - KEDA integration: [docs/proposals/wva-external-scaler-proposal.md](../proposals/wva-external-scaler-proposal.md)
 - Component doc: https://llm-d.ai/docs/architecture/Components/workload-variant-autoscaler
 - Paper (the scaling manager global optimization control plane): https://arxiv.org/abs/2603.09730
