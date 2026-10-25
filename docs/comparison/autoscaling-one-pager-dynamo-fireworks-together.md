@@ -1,6 +1,6 @@
 # LLM Autoscaling Landscape — Dynamo · Fireworks · Together
 
-> One-page summary · verified **2026-08-09**, the scaling manager's column **2026-10-25** (v0.10.0-rc4 and later fixes) · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
+> One-page summary · verified **2026-08-09**, the scaling manager's column **2026-10-25** (v0.10.0) · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
 
 **Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and the scaling manager's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem the scaling manager solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
 
@@ -21,7 +21,7 @@
 | **Up / down windows** | HPA/KEDA stabilization; generated ScaledObjects **0 s** / **300 s**, plus sticky scale-down | 180 s predictive · 5 s reactive (off by default) | **30 s** / **10 m** | **0 s** / **5 m** |
 | **Actuation** | KEDA external scaler (gRPC, mutual TLS by default): KEDA's HPA applies the replica count | Own controller patches DGD CRD; **VirtualConnector** publishes decisions without managing infra | Platform-internal | Platform-internal |
 | **Scale-down drain** | Handled by HPA/KEDA + scale target; `make workload-patch` writes a preStop drain window (45 s by default) | **Graceful** — prefill SIGTERM finishes current request; decode etcd-lease revoke, finishes stream | Not documented | Stabilization window only |
-| **Currency** | Active; **v0.10.0-rc4 (24 Oct 2026)** | **v1.3.1 (6 Aug 2026)** | Static since **5 Feb 2026** | **DMI launched 16 Jul 2026** — iterating weekly |
+| **Currency** | Active; **v0.10.0 (25 Oct 2026)** | **v1.3.1 (6 Aug 2026)** | Static since **5 Feb 2026** | **DMI launched 16 Jul 2026** — iterating weekly |
 
 ## Verdicts
 

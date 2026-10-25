@@ -5,8 +5,8 @@ be checkable: each claim is about a named mechanism, not a marketing position,
 and where a competitor's decision logic is closed the comparison says so rather
 than guessing.
 
-Our side was last checked on 2026-10-25, against v0.10.0-rc4 and the fixes
-merged after it. The competitor sections keep the dates they give.
+Our side was last checked on 2026-10-25, against v0.10.0 (rc4 and the fixes
+merged after it). The competitor sections keep the dates they give.
 
 - **[KEDA alone](keda-alone.md)** — the one most operators weigh first: llm-d's
   own KEDA recipes against llm-scaling-manager, need by need, with one July 2026

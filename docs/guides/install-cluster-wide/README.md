@@ -124,6 +124,14 @@ make scaledobjects-repoint
 ```
 <!-- guide:troubleshoot.repoint end -->
 
+`READY True` but `TARGETS` showing only `cpu` means KEDA's first call for the
+metric failed and it does not retry. Re-wire it (`DRY_RUN=true` only lists
+them):
+
+```bash
+make scaledobjects-rewire SCOPE=cluster
+```
+
 ## Cleanup
 
 <!-- guide:cleanup.uninstall start -->

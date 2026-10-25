@@ -20,7 +20,7 @@ Pin a release tag or a digest, and deploy with the manifests from the **same**
 release. An image older than the manifests crash-loops on flags it does not
 know. Releases are listed on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
-the first is `v0.10.0-rc1` and the latest `v0.10.0`. A checked-out release deploys its own tag, so
+the first full release is `v0.10.0`, after release candidates `-rc1` to `-rc4`. A checked-out release deploys its own tag, so
 `IMG_TAG` below only makes that explicit. Each release's notes list its image
 digest; a digest names one build, and a tag could in principle be re-pushed.
 
@@ -92,6 +92,36 @@ only to change it. Limiters an admin published in a policy namespace
    # out-of-reach shape: the controller runs in wva-<namespace>
    NAMESPACE=<namespace> WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> make verify-deployment
    ```
+   If a ScaledObject reads Ready but its HPA carries only `cpu`, KEDA left it
+   unwired. Re-wire it (`DRY_RUN=true` only lists them):
+   ```bash
+   NAMESPACE=<namespace> make scaledobjects-rewire
+   ```
+
+### Upgrading from v0.10.0-rc4 to v0.10.0
+
+1. **Rename reserved quota entries first.** A `quota` entry named
+   `gpu-limiter`, `node-fit`, `pd-pair-borrows-whole` or
+   `lender-cannot-reclaim` is now an error, not a warning: the `default` policy
+   entry holding it is rejected and a controller starting on it does not start.
+   `make deploy-wva` checks before it applies anything. How to find and rename
+   them: [below](#other-changes-that-need-an-action).
+2. **Check out `v0.10.0` and re-run the same `make deploy-wva` command.** If you
+   set up the utilization-share optimizer, re-run its steps afterwards: the
+   install drops the optimizer block.
+3. **Pass what changed.** `WVA_VERBOSITY=3` if you read the per-replica log
+   lines or use `hack/benchmark/dump_k2_decisions.py`. `WVA_REPLICAS=<count>`
+   if you scaled the controller by hand: a re-install now sets it to
+   `WVA_REPLICAS` (default 1).
+4. **GitOps.** `make scaledobjects-rewire`, and `make scaledobjects-apply`
+   after it applies, set the trigger key `wvaRewire` on a ScaledObject KEDA
+   left unwired. A GitOps tool shows it as drift; leave it, or add it to the
+   source. The scaler ignores the key.
+5. **Alerts.** An alert on `wva_model_scaling_blocked` reasons may want the new
+   `donor-changing`.
+
+The full list is in the
+[v0.10.0 release notes](https://github.com/ev-shindin/llm-scaling-manager/releases/tag/v0.10.0).
 
 ### Upgrading to this release
 
@@ -976,6 +1006,10 @@ A new controller pod starts with no decision in memory. Until it has one:
   runs for one fill timeout, about three minutes with default timings, and
   shows the blocked reason `quiet-period`. Expect it on every upgrade and leader
   change.
+- **A ScaledObject KEDA created or changed during the outage can stay
+  unwired**: Ready, but its HPA carries only `cpu`. Run
+  `NAMESPACE=<namespace> make scaledobjects-rewire`
+  ([#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)).
 - **What it learned is held in memory by default.** Learned capacity and
   throughput are re-learned after every restart or leader change, so a request
   shape it had already priced is sized from occupancy again until it saturates

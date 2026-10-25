@@ -235,6 +235,14 @@ namespace it cannot check is left alone; ask your admin to run the repoint, or
 re-apply that plan entry with `WVA_NS=wva-${NAMESPACE}`. Other causes: [First-line
 troubleshooting](../../reference/operations.md#first-line-troubleshooting).
 
+**`READY True` but `TARGETS` shows only `cpu`**: KEDA's first call for the
+metric failed and it does not retry, so the workload is unwired. Re-wire it
+(`DRY_RUN=true` only lists them):
+
+```bash
+make scaledobjects-rewire
+```
+
 ### 2. Read the decisions
 
 **Wait a few minutes first.** The scaling manager decides on a timer, so a new

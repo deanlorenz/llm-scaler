@@ -242,8 +242,8 @@ on single-variant workloads, with KEDA actuating both arms: the
 
 ## What changed since the July study
 
-The first tagged release candidates, v0.10.0-rc1 to rc4 (2026-10-19 to
-2026-10-24), and the fixes merged after them, changed our column above. In
+The first release, v0.10.0 (2026-10-25, after release candidates from
+2026-10-19), changed our column above. In
 short:
 
 - **Sizing.** Analyzers listed beside saturation now size the model, to the
