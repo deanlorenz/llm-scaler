@@ -33,7 +33,7 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## Resilience
 
-- **Learned capacity survives a restart by default.** By default what the
+- **Make surviving a restart the default.** By default what the
   controller learns about a model's capacity lives in memory, so a restart or a
   leader hand-off re-learns it, and a request shape it had already priced is
   sized from occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the

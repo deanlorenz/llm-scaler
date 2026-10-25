@@ -307,9 +307,10 @@ The full list is in the
 These check the capacity model on real GPUs. Setup: an H200 cluster,
 `Qwen/Qwen3-32B-FP8` on 1 GPU per replica, decode only (no P/D), load sent at
 a fixed request rate whatever the fleet does. All ran on 2026-10-24, one run
-each unless it says otherwise. The first two below ran on one build (main plus
-the fixes for #290, #287 and #278); the rest on a later one (main plus the
-P/D decode fix, `analyzerTuning`, the light-load fix and the smaller log).
+each unless it says otherwise. The quota-trading run and the first router run
+used one build (main plus the fixes for #290, #287 and #278); the second router
+run and the rest used a later one (main plus the P/D decode fix,
+`analyzerTuning`, the light-load fix and the smaller log).
 
 **Two models trading one 4-GPU quota across namespaces.** One model gets the
 heavy load, then the load moves to the other, moves back, and swaps four more
@@ -340,7 +341,8 @@ problem.
   6.17 against 6.24 in the second).
 - The replica count stayed at 4: no scale-up while three replicas had room.
   The overloaded replica still held about 767 queued requests, so latency
-  suffered; the usual fix is the router's scorer weights, not more replicas.
+  suffered. More replicas would not have helped; the imbalance is the
+  router's to fix (these runs did not test a fix).
 - `wva_load_imbalanced` went to 1 about a minute after the warning line, and
   back to 0 about three minutes after routing was restored. It stayed at 1
   for about 20 minutes, longer than the alert's 10, so `WVALoadImbalanced`
