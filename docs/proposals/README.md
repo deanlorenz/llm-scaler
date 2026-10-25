@@ -95,6 +95,11 @@ Read the review first; the implementation design says what was built.
 
 ## Engine and analyzers
 
+- **[Replicas that change P/D role in place](pd-role-switch/)** —
+  experimental; needs a patched vLLM that is not shipped. Why a stock llm-d
+  deployment cannot re-role a replica (the role label is in an immutable
+  selector), a deployment shape that can, and an
+  [evaluation plan](pd-role-switch/evaluation.md) for what switchability costs.
 - **[Analyzer metric interface](analyzer-metric-interface.md)**
 - **[SGLang backend](sglang-backend.md)**
 - **[Sizing a backlog](backlog-sizing.md)** — what the shape-swap P/D run
