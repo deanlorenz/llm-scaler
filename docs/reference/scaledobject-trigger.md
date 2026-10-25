@@ -129,11 +129,14 @@ Sizing these is covered in [the warm-pool guide](../guides/warm-pool/sizing.md).
 `make scaledobjects-plan` writes an editable plan, one entry per model server,
 and `make scaledobjects-apply` turns each `apply: yes` entry into a ScaledObject
 (`deploy/lib/scaledobject.sh`). After applying, it checks that KEDA put the
-scaler's metric on each HPA. If KEDA left one on the CPU default, it re-wires
-it the way `make scaledobjects-rewire` does, and names any that stay unwired.
+scaler's metric on the HPA of every ScaledObject naming this scaler, including
+hand-written and GitOps-owned ones. Any that KEDA left on the CPU default it
+re-wires the way `make scaledobjects-rewire` does, and it names any that stay
+unwired. The re-wire sets the trigger key `wvaRewire`, which a GitOps tool
+shows as drift.
 
-The plan carries `modelID`, `minReplicas`,
-`maxReplicas`, `variantCost` and `scalingPolicy` (commented out unless set);
+The plan carries `modelID`, `minReplicas`, `maxReplicas`, `variantCost` and
+`scalingPolicy` (commented out unless set);
 the generated trigger has `scalerAddress`, `modelID`, `variantCost` and, when
 set, `scalingPolicy`. The other keys are not in the plan. Set them in one of
 two ways:

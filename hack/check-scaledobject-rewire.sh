@@ -14,10 +14,13 @@
 #   unwired      patched on the trigger indices naming this scaler, and only
 #                those; a ScaledObject naming another scaler is never touched
 #   paused       skipped, not patched
-#   unreadable   reported as unknown, never as wired
-#   DRY_RUN      nothing patched, the commands printed, non-zero exit
+#   unreadable   reported as unknown, never as wired, exit 3
+#   DRY_RUN      nothing patched, the commands printed, non-zero exit;
+#                a value other than true or false is refused, exit 2
 #   still unwired after the retries: non-zero exit, named in the report
-#   stale KEDA connection: the KEDA operator restart, not a re-wire
+#   stale KEDA connection: the KEDA operator restart, not a re-wire, also
+#                when every ScaledObject is wired (KEDA_RESTART=true does it,
+#                except in a dry run); a copy from another CA: setup-prereqs
 #   unlistable   exit 2, not "nothing to do"
 #
 # Every case asserts something that a missing function also fails, so a run
@@ -31,7 +34,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=10
+EXPECTED_CASES=15
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -194,13 +197,13 @@ so app-p paused "$ADDR"
 run WVA_SCALER_REWIRE_TRIES=3
 ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && report_has paused app-p && grep -q "skipped" "$WORK/stdout"' "paused: exit $RC (want 0), patches '$(cat "$WORK/patches")', report $(cat "$WORK/stdout")"
 
-begin "unreadable ScaledObject or HPA: reported unknown, never wired"
+begin "unreadable ScaledObject or HPA: reported unknown, never wired, exit 3"
 reset
 so app-x so-forbidden "$ADDR"
 so app-y hpa-forbidden "$ADDR"
 so app-z wired "$ADDR"
 run WVA_SCALER_REWIRE_TRIES=3
-ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && report_has unknown app-x && report_has unknown app-y && ! report_has wired app-x && ! report_has wired app-y && report_has wired app-z' "unreadable: exit $RC, patches '$(cat "$WORK/patches")', report $(cat "$WORK/stdout")"
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && report_has unknown app-x && report_has unknown app-y && ! report_has wired app-x && ! report_has wired app-y && report_has wired app-z' "unreadable: exit $RC, patches '$(cat "$WORK/patches")', report $(cat "$WORK/stdout")"
 
 begin "DRY_RUN=true: lists, prints the commands, patches nothing, exits non-zero"
 reset
@@ -232,6 +235,39 @@ reset
 so app-s unwired "$ADDR"
 run DRY_RUN=true "$STALE"
 ok '[ "$RC" = 1 ] && [ ! -s "$WORK/patches" ] && grep -q "kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && ! grep -q "kubectl patch scaledobject" "$WORK/stdout"' "stale dry run: exit $RC (want 1), warnings $(cat "$WORK/warnings"), stdout $(cat "$WORK/stdout")"
+
+# A KEDA wired before the reinstall is refused the same way: every HPA reads
+# wired, and nothing scales. wva_verify_scaler_wiring names the restart then.
+begin "stale KEDA connection, every ScaledObject wired: names the restart, exit 1"
+reset
+so app-a wired "$ADDR"
+run "$STALE"
+ok '[ "$RC" = 1 ] && [ ! -s "$WORK/patches" ] && grep -q "kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings" && grep -q "Not restarted" "$WORK/warnings" && ! grep -q "^rollout restart" "$WORK/kubectl.log" && report_has wired app-a' "wired + stale: exit $RC (want 1), patches '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+
+begin "stale KEDA connection, every ScaledObject wired, KEDA_RESTART=true: restarts KEDA"
+reset
+so app-a wired "$ADDR"
+run KEDA_RESTART=true "$STALE"
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && grep -q "^rollout restart deployment/keda-operator -n keda" "$WORK/kubectl.log" && grep -q "KEDA_RESTART=true: restarted" "$WORK/info"' "wired + stale + KEDA_RESTART: exit $RC (want 0), kubectl $(grep rollout "$WORK/kubectl.log"), info $(cat "$WORK/info")"
+
+begin "stale KEDA connection, every ScaledObject wired, DRY_RUN=true KEDA_RESTART=true: names it, restarts nothing"
+reset
+so app-a wired "$ADDR"
+run DRY_RUN=true KEDA_RESTART=true "$STALE"
+ok '[ "$RC" = 1 ] && ! grep -q "^rollout restart" "$WORK/kubectl.log" && grep -q "kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "wired + stale dry run: exit $RC (want 1), kubectl $(grep rollout "$WORK/kubectl.log"), warnings $(cat "$WORK/warnings")"
+
+COPY='wva_scaler_keda_conn_state() { WVA_SCALER_KEDA_CONN=copy; WVA_SCALER_KEDA_CONN_PODS=keda-operator-7f9c; WVA_SCALER_KEDA_RUN_NS=keda; }'
+begin "KEDA given a certificate from another CA, every ScaledObject wired: setup-prereqs and the restart, exit 1"
+reset
+so app-a wired "$ADDR"
+run "$COPY"
+ok '[ "$RC" = 1 ] && [ ! -s "$WORK/patches" ] && grep -q "setup-prereqs" "$WORK/warnings" && grep -q "kubectl rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "wired + copy: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
+
+begin "DRY_RUN=1: refused before anything is read or patched, exit 2"
+reset
+so app-b until-rewire "$ADDR"
+run DRY_RUN=1
+ok '[ "$RC" = 2 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/kubectl.log" ] && grep -q "DRY_RUN must be true or false" "$WORK/warnings"' "DRY_RUN=1: exit $RC (want 2), patches '$(cat "$WORK/patches")', kubectl $(tr '\n' ';' <"$WORK/kubectl.log"), warnings $(cat "$WORK/warnings")"
 
 begin "ScaledObjects cannot be listed: exit 2, not nothing to do"
 reset

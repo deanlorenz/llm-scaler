@@ -963,8 +963,11 @@ scaledobjects-apply: ## Apply a ScaledObject plan (this is what makes WVA scale 
 ## when a ScaledObject's spec changes, and does not retry a failed call. This
 ## changes trigger metadata wvaRewire, which the scaler ignores, so KEDA asks
 ## again. It never deletes or recreates a ScaledObject, and skips paused ones.
-## Exits non-zero while one is still unwired. Same WVA_NS, NAMESPACE and SCOPE
-## as verify-deployment.
+## With every one wired it still names a KEDA operator restart when KEDA's
+## calls are refused (KEDA_RESTART=true restarts it). Exits 1 while one is
+## unwired or KEDA is refused, 2 when they cannot be listed or DRY_RUN is not
+## true or false, 3 when one could not be read. Same WVA_NS, NAMESPACE and
+## SCOPE as verify-deployment.
 .PHONY: scaledobjects-rewire
 scaledobjects-rewire: ## Re-wire ScaledObjects whose HPA KEDA left on the CPU default. DRY_RUN=true lists them and prints the commands. WVA_NS=<ns>, NAMESPACE=<ns>.
 	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(DRY_RUN),DRY_RUN=$(DRY_RUN),) \

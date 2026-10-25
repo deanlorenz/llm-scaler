@@ -655,6 +655,33 @@ wva_rewire_classify() {
     done <<< "$1"
 }
 
+# wva_rewire_keda_conn_check checks KEDA's connection to the scaler when every
+# ScaledObject in $1 is wired (wva_scaler_keda_conn_state). A stale one is
+# handled as wva_verify_scaler_wiring does (wva_scaler_keda_stale_act, which
+# restarts KEDA's operator with KEDA_RESTART=true), except with $2 = true (a
+# dry run), which only names the restart. Returns 1 while KEDA's calls are
+# refused, 0 otherwise.
+wva_rewire_keda_conn_check() {
+    wva_scaler_keda_conn_state
+    case "$WVA_SCALER_KEDA_CONN" in
+        stale)
+            if [ "$2" = true ]; then
+                log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it, wired or not:"
+                printf '%s\n' "$1" | sed '/^$/d; s/^/    /' >&2
+                wva_scaler_keda_conn_report || true
+                log_info "DRY_RUN=true: KEDA's operator was not restarted."
+                return 1
+            fi
+            wva_scaler_keda_stale_act "$1" ;;
+        copy)
+            log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it, wired or not:"
+            printf '%s\n' "$1" | sed '/^$/d; s/^/    /' >&2
+            wva_scaler_keda_conn_report || true
+            return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # wva_rewire_scaledobjects re-wires this install's ScaledObjects that KEDA left
 # on the CPU default. It is make scaledobjects-rewire, and the last step of
 # make scaledobjects-apply.
@@ -665,11 +692,29 @@ wva_rewire_classify() {
 # re-wires the unwired ones (wva_scaler_ensure_wired: it changes trigger
 # metadata $WVA_SCALER_REWIRE_KEY, never deletes or recreates one), and reports
 # each as wired, paused, still unwired, or unreadable. A paused one is skipped.
-# With DRY_RUN=true it changes nothing and prints the commands instead.
-# Returns 1 while one is unwired, 2 when they cannot be listed.
+# It re-wires every ScaledObject naming this scaler in the namespaces this
+# install watches, not only the ones scaledobjects-apply wrote.
+#
+# With every one wired, it still checks KEDA's connection, as
+# wva_verify_scaler_wiring does: a KEDA presenting an old client certificate
+# is refused on every call, wired or not, and only its operator restart helps
+# (wva_scaler_keda_stale_act, which restarts it with KEDA_RESTART=true).
+#
+# DRY_RUN=true changes nothing and prints the commands instead; any value
+# other than true or false is refused before anything is read. The first wait
+# is WVA_SCALER_REWIRE_WAIT seconds, else WVA_VERIFY_WIRE_WAIT, else 30.
+# Returns 1 while one is unwired or KEDA's connection is refused, 2 when they
+# cannot be listed or DRY_RUN is not true or false, 3 when one could not be
+# read.
 wva_rewire_scaledobjects() {
     declare -F wva_scaler_ensure_wired >/dev/null || return 2
     local rows row rc=0 dry="${DRY_RUN:-false}"
+    case "$dry" in
+        true|false) ;;
+        *) log_warning "DRY_RUN must be true or false, got $dry: nothing was read or changed."
+           return 2 ;;
+    esac
+    local WVA_SCALER_REWIRE_WAIT="${WVA_SCALER_REWIRE_WAIT:-${WVA_VERIFY_WIRE_WAIT:-30}}"
     rows="$(wva_summary_scaledobjects)" || rc=$?
     if [ "$rc" != 0 ]; then
         log_warning "Could not list the ScaledObjects naming this scaler (wva-external-scaler.$WVA_NS), so none was checked or re-wired."
@@ -689,7 +734,11 @@ wva_rewire_scaledobjects() {
     printf '%s' "$WVA_REWIRE_PAUSED" | sed 's/^/    paused     /; s/$/  (skipped)/'
     printf '%s' "$WVA_REWIRE_UNWIRED" | sed 's/ .*//; s/^/    unwired    /'
     printf '%s' "$WVA_REWIRE_UNKNOWN" | sed 's/^/    unknown    /; s/$/  (it or its HPA could not be read)/'
-    [ -n "$WVA_REWIRE_UNWIRED" ] || return 0
+    if [ -z "$WVA_REWIRE_UNWIRED" ]; then
+        wva_rewire_keda_conn_check "$rows" "$dry" || return 1
+        [ -z "$WVA_REWIRE_UNKNOWN" ] || return 3
+        return 0
+    fi
     if [ "$dry" = true ]; then
         log_info "DRY_RUN=true: nothing was changed."
         # A KEDA presenting an old client certificate: a re-wire does not
