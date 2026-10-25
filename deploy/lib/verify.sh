@@ -632,6 +632,130 @@ wva_summary_scaledobjects() {
     wva_scaler_plaintext_scaledobjects any
 }
 
+# wva_rewire_classify reads how KEDA wired each <namespace>/<name> row in $1
+# (wva_scaler_so_wiring) and sorts them into WVA_REWIRE_WIRED,
+# WVA_REWIRE_PAUSED, WVA_REWIRE_UNKNOWN (one row per line) and
+# WVA_REWIRE_UNWIRED ("<namespace>/<name> <index>..." per line, the trigger
+# indices KEDA left without the metric).
+wva_rewire_classify() {
+    local row st
+    WVA_REWIRE_WIRED=""
+    WVA_REWIRE_PAUSED=""
+    WVA_REWIRE_UNWIRED=""
+    WVA_REWIRE_UNKNOWN=""
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        st="$(wva_scaler_so_wiring "${row%%/*}" "${row#*/}")"
+        case "$st" in
+            wired) WVA_REWIRE_WIRED="${WVA_REWIRE_WIRED}${row}"$'\n' ;;
+            paused) WVA_REWIRE_PAUSED="${WVA_REWIRE_PAUSED}${row}"$'\n' ;;
+            unwired*) WVA_REWIRE_UNWIRED="${WVA_REWIRE_UNWIRED}${row} ${st#unwired }"$'\n' ;;
+            *) WVA_REWIRE_UNKNOWN="${WVA_REWIRE_UNKNOWN}${row}"$'\n' ;;
+        esac
+    done <<< "$1"
+}
+
+# wva_rewire_keda_conn_check checks KEDA's connection to the scaler when every
+# ScaledObject in $1 is wired (wva_scaler_keda_conn_state). A stale one is
+# handled as wva_verify_scaler_wiring does (wva_scaler_keda_stale_act, which
+# restarts KEDA's operator with KEDA_RESTART=true), except with $2 = true (a
+# dry run), which only names the restart. Returns 1 while KEDA's calls are
+# refused, 0 otherwise.
+wva_rewire_keda_conn_check() {
+    wva_scaler_keda_conn_state
+    case "$WVA_SCALER_KEDA_CONN" in
+        stale)
+            if [ "$2" = true ]; then
+                log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it, wired or not:"
+                printf '%s\n' "$1" | sed '/^$/d; s/^/    /' >&2
+                wva_scaler_keda_conn_report || true
+                log_info "DRY_RUN=true: KEDA's operator was not restarted."
+                return 1
+            fi
+            wva_scaler_keda_stale_act "$1" ;;
+        copy)
+            log_warning "KEDA's calls to the external scaler are refused, so these ScaledObjects get no metric from it, wired or not:"
+            printf '%s\n' "$1" | sed '/^$/d; s/^/    /' >&2
+            wva_scaler_keda_conn_report || true
+            return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# wva_rewire_scaledobjects re-wires this install's ScaledObjects that KEDA left
+# on the CPU default. It is make scaledobjects-rewire, and the last step of
+# make scaledobjects-apply.
+#
+# KEDA asks the scaler for a ScaledObject's metric spec only when its spec
+# changes. When that one call fails, the HPA stays on the CPU default for good.
+# This lists the ScaledObjects naming this scaler (wva_summary_scaledobjects),
+# re-wires the unwired ones (wva_scaler_ensure_wired: it changes trigger
+# metadata $WVA_SCALER_REWIRE_KEY, never deletes or recreates one), and reports
+# each as wired, paused, still unwired, or unreadable. A paused one is skipped.
+# It re-wires every ScaledObject naming this scaler in the namespaces this
+# install watches, not only the ones scaledobjects-apply wrote.
+#
+# With every one wired, it still checks KEDA's connection, as
+# wva_verify_scaler_wiring does: a KEDA presenting an old client certificate
+# is refused on every call, wired or not, and only its operator restart helps
+# (wva_scaler_keda_stale_act, which restarts it with KEDA_RESTART=true).
+#
+# DRY_RUN=true changes nothing and prints the commands instead; any value
+# other than true or false is refused before anything is read. The first wait
+# is WVA_SCALER_REWIRE_WAIT seconds, else WVA_VERIFY_WIRE_WAIT, else 30.
+# Returns 1 while one is unwired or KEDA's connection is refused, 2 when they
+# cannot be listed or DRY_RUN is not true or false, 3 when one could not be
+# read.
+wva_rewire_scaledobjects() {
+    declare -F wva_scaler_ensure_wired >/dev/null || return 2
+    local rows row rc=0 dry="${DRY_RUN:-false}"
+    case "$dry" in
+        true|false) ;;
+        *) log_warning "DRY_RUN must be true or false, got $dry: nothing was read or changed."
+           return 2 ;;
+    esac
+    local WVA_SCALER_REWIRE_WAIT="${WVA_SCALER_REWIRE_WAIT:-${WVA_VERIFY_WIRE_WAIT:-30}}"
+    rows="$(wva_summary_scaledobjects)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        log_warning "Could not list the ScaledObjects naming this scaler (wva-external-scaler.$WVA_NS), so none was checked or re-wired."
+        return 2
+    fi
+    if [ -z "$rows" ]; then
+        log_info "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS): nothing to re-wire."
+        return 0
+    fi
+    wva_rewire_classify "$rows"
+    if [ -n "$WVA_REWIRE_UNWIRED" ] && [ "$dry" != true ]; then
+        wva_scaler_ensure_wired "$(printf '%s' "$WVA_REWIRE_UNWIRED" | sed 's/ .*//')" || true
+        wva_rewire_classify "$rows"
+    fi
+    echo "ScaledObjects naming this scaler:"
+    printf '%s' "$WVA_REWIRE_WIRED" | sed 's/^/    wired      /'
+    printf '%s' "$WVA_REWIRE_PAUSED" | sed 's/^/    paused     /; s/$/  (skipped)/'
+    printf '%s' "$WVA_REWIRE_UNWIRED" | sed 's/ .*//; s/^/    unwired    /'
+    printf '%s' "$WVA_REWIRE_UNKNOWN" | sed 's/^/    unknown    /; s/$/  (it or its HPA could not be read)/'
+    if [ -z "$WVA_REWIRE_UNWIRED" ]; then
+        wva_rewire_keda_conn_check "$rows" "$dry" || return 1
+        [ -z "$WVA_REWIRE_UNKNOWN" ] || return 3
+        return 0
+    fi
+    if [ "$dry" = true ]; then
+        log_info "DRY_RUN=true: nothing was changed."
+        # A KEDA presenting an old client certificate: a re-wire does not
+        # help, its operator restart does (wva_scaler_keda_conn_report).
+        wva_scaler_keda_conn_state
+        if ! wva_scaler_keda_conn_report; then
+            log_info "To re-wire, run  $(wva_make_cmd scaledobjects-rewire)  or:"
+            printf '%s' "$WVA_REWIRE_UNWIRED" | while IFS= read -r row; do
+                [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")"
+            done
+        fi
+        return 1
+    fi
+    log_warning "$(printf '%s' "$WVA_REWIRE_UNWIRED" | grep -c .) ScaledObject(s) still unwired: their HPAs scale on the CPU default and WVA's decisions do not reach them. The warning above says why."
+    return 1
+}
+
 # print_summary is the most-read text this install produces: it is what someone
 # looks at to find out whether it worked and what to do next. So it says the one
 # thing that is true and easy to miss — an installed WVA scales nothing until a

@@ -948,14 +948,32 @@ workload-patch: ## Write a patch for model servers that do not drain on scale-do
 
 ## Apply a ScaledObject plan. With WVA_DEFAULT_SO_PLAN=<file> it applies exactly
 ## that file, edits included, and needs no terminal. Without one it re-discovers
-## and applies everything found. Then it checks KEDA wired each HPA, as
-## verify-deployment does: after a reinstall, KEDA's operator may still hold
-## its old connection, and only this step, the first to dial, can see it.
+## and applies everything found. Then it re-wires any ScaledObject KEDA left
+## on the CPU default, as scaledobjects-rewire does, and reports what is still
+## unwired: after a reinstall, KEDA's operator may still hold its old
+## connection, and only this step, the first to dial, can see it.
 .PHONY: scaledobjects-apply
 scaledobjects-apply: ## Apply a ScaledObject plan (this is what makes WVA scale anything). Per entry: apply: yes|no|adopt. WVA_DEFAULT_SO_PLAN=<edited file>, WVA_DEFAULT_SO_TEMPLATE=<file>.
 	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) 		WVA_DEFAULT_SO=true $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) 		$(if $(WVA_DEFAULT_SO_PLAN),WVA_DEFAULT_SO_PLAN=$(WVA_DEFAULT_SO_PLAN),) 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/scaledobject.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
-			wva_bootstrap_env; install_default_scaledobjects; rc=$$?; wva_verify_scaler_wiring || true; exit $$rc'
+			wva_bootstrap_env; install_default_scaledobjects; rc=$$?; DRY_RUN=false wva_rewire_scaledobjects || true; exit $$rc'
+
+## Re-wire ScaledObjects whose HPA KEDA left on the CPU default ("got empty
+## metric spec" in KEDA's log). KEDA asks the scaler for the metric spec only
+## when a ScaledObject's spec changes, and does not retry a failed call. This
+## changes trigger metadata wvaRewire, which the scaler ignores, so KEDA asks
+## again. It never deletes or recreates a ScaledObject, and skips paused ones.
+## With every one wired it still names a KEDA operator restart when KEDA's
+## calls are refused (KEDA_RESTART=true restarts it). Exits 1 while one is
+## unwired or KEDA is refused, 2 when they cannot be listed or DRY_RUN is not
+## true or false, 3 when one could not be read. Same WVA_NS, NAMESPACE and
+## SCOPE as verify-deployment.
+.PHONY: scaledobjects-rewire
+scaledobjects-rewire: ## Re-wire ScaledObjects whose HPA KEDA left on the CPU default. DRY_RUN=true lists them and prints the commands. WVA_NS=<ns>, NAMESPACE=<ns>.
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(DRY_RUN),DRY_RUN=$(DRY_RUN),) \
+		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
+			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
+			wva_bootstrap_env; wva_rewire_scaledobjects'
 
 ## Review the list in $EDITOR, then apply what you confirm. Needs a terminal;
 ## use scaledobjects-plan + scaledobjects-apply where there is none.
@@ -2989,6 +3007,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# a certificate naming the wrong host, a re-install that drops TLS, or a
 	@# foreign Secret overwritten all install cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-scaler-tls.sh
+	@echo "Checking the ScaledObject re-wire..."
+	@# Runs scaledobjects-rewire against a stubbed kubectl. A re-wire that
+	@# patches a paused ScaledObject, another scaler's trigger, or reads an
+	@# unreadable HPA as wired all parse, and all exit 0.
+	@bash hack/check-scaledobject-rewire.sh
 	@echo "Checking which Prometheus address the installer picks, and that it verifies it..."
 	@# Runs the detection, the CA copy and the TLS check against a stubbed
 	@# kubectl and real certificates. prometheus-operated, which a

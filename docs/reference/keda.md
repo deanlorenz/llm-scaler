@@ -127,6 +127,10 @@ Sometimes the installer writes KEDA's side for the first time while KEDA is
 already running. It then prints a warning and the command to restart KEDA's
 operator. On a reinstall, KEDA keeps its old connection to the scaler until its operator restarts, and every call is refused. The installer never restarts KEDA's operator on its own, because other workloads share it. `make scaledobjects-apply`, `make deploy-wva` and `make verify-deployment` detect the stale connection, list the ScaledObjects that stay unwired, and print the restart command. With `KEDA_RESTART=true` they restart KEDA, and so does `make undeploy-wva` once its ScaledObjects are gone.
 
+KEDA asks the scaler for a ScaledObject's metric spec only when the ScaledObject changes, and does not retry a failed call. The HPA then stays on the CPU default. `make scaledobjects-apply` re-wires such ScaledObjects after it applies them, and `make scaledobjects-rewire` does it at any time: it changes the trigger key `wvaRewire`, which the scaler ignores, so KEDA asks again. `DRY_RUN=true` only lists them.
+
+Both cover every ScaledObject naming this scaler in the namespaces the install watches, including hand-written and GitOps-owned ones. A GitOps tool shows the `wvaRewire` key as drift; leave it, or add it to the source. Both also name the KEDA operator restart when every HPA is wired but KEDA's calls are refused. `make scaledobjects-rewire` exits 1 while one is unwired or KEDA is refused, 2 when the ScaledObjects cannot be listed or `DRY_RUN` is not `true` or `false`, and 3 when one could not be read. The first wait before a re-wire is `WVA_VERIFY_WIRE_WAIT` seconds (default 30).
+
 ## Uninstall
 
 `make undeploy-wva` never removes KEDA. It removes only the
