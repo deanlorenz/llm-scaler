@@ -11,8 +11,10 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   `effectiveQuotas`. Planned: read Kueue per ClusterQueue
   ([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213)), a
   claims ledger ([#212](https://github.com/ev-shindin/llm-scaling-manager/issues/212)),
-  and closing the known limits of borrowing and hand-back
-  ([#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
+  closing the known limits of borrowing and hand-back
+  ([#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)), and
+  rescale with mixed replica sizes, which rounds per role and fills greedily
+  ([#219](https://github.com/ev-shindin/llm-scaling-manager/issues/219)).
   · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/), [the guide](guides/kueue-borrowing/)
 
 ## Scaling
@@ -25,11 +27,14 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   variants, P/D pairing and the GPU budget.
   [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
 - **Judge each analyzer on its own band.** Today every analyzer's need is
-  judged against saturation's thresholds.
-  [#305](https://github.com/ev-shindin/llm-scaling-manager/issues/305)
+  judged against saturation's thresholds
+  ([#305](https://github.com/ev-shindin/llm-scaling-manager/issues/305)).
+  Open: whether one analyzer's score should weigh a model across models
+  ([#226](https://github.com/ev-shindin/llm-scaling-manager/issues/226)).
 - **Size prefill when only decode saturates.** v0.10.0 ships an opt-in lower
   bound for prefill
-  ([`enablePrefillThroughputBound`](reference/scaling-policy.md#enableprefillthroughputbound), #263).
+  ([`enablePrefillThroughputBound`](reference/scaling-policy.md#enableprefillthroughputbound),
+  [#263](https://github.com/ev-shindin/llm-scaling-manager/pull/263)).
   Planned: cluster evidence for it, and for a decode at its sequence cap,
   before either is relied on.
   [#320](https://github.com/ev-shindin/llm-scaling-manager/issues/320)
@@ -63,7 +68,11 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   up mu without `enableLearnedStateReuse`
   ([#317](https://github.com/ev-shindin/llm-scaling-manager/issues/317)), and run
   the cases not yet run on GPUs
-  ([#228](https://github.com/ev-shindin/llm-scaling-manager/issues/228)).
+  ([#228](https://github.com/ev-shindin/llm-scaling-manager/issues/228)), test
+  the rules no test reaches
+  ([#229](https://github.com/ev-shindin/llm-scaling-manager/issues/229)), and
+  measure the ITL window and `wva_engine_config` on a real fleet
+  ([#230](https://github.com/ev-shindin/llm-scaling-manager/issues/230)).
   [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)
 
 ## Evidence
@@ -78,7 +87,7 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   regressions (metrics, sleep and wake, drain, P/D transfer).
   [#143](https://github.com/ev-shindin/llm-scaling-manager/issues/143)
 
-Known issues in v0.10.0 that are not planned features, such as the router
-scrape that returns HTTP 500
+Other open issues and known issues in v0.10.0, such as the router scrape that
+returns HTTP 500
 ([#318](https://github.com/ev-shindin/llm-scaling-manager/issues/318)), are in
 the [release notes](https://github.com/ev-shindin/llm-scaling-manager/releases/tag/v0.10.0).

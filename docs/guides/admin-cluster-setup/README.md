@@ -47,7 +47,7 @@ make setup-prereqs
 <!-- guide:deploy.prereqs end -->
 
 Run it once per namespace, and again when a release adds a prerequisite
-([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-from-before-v0100-rc1)).
 Pass the same variables as the first run. Add `KEDA_NAMESPACE=<ns>` or
 `PROMETHEUS_SA=<ns>/<sa>` when the command says it cannot find KEDA or your
 Prometheus.

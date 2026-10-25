@@ -243,13 +243,13 @@ on single-variant workloads, with KEDA actuating both arms: the
 ## What changed since the July study
 
 The first release, v0.10.0 (2026-10-25, after release candidates from
-2026-10-19), changed our column above. In
-short:
+2026-10-19), changed our column above. In short:
 
 - **Sizing.** Analyzers listed beside saturation now size the model, to the
   largest need. An observe-only `slo` analyzer judges each model against a
   TTFT and TPOT target. Prefix-cache hits and data-parallel ranks are now
-  priced. Advanced knobs for the capacity model sit in one
+  priced, though a hit still occupies KV
+  ([#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)). Advanced knobs for the capacity model sit in one
   [`analyzerTuning`](../reference/scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance)
   block; leave them alone unless a measurement says otherwise.
 - **P/D.** Decode no longer counts requests waiting for prefill's KV as a

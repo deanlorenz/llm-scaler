@@ -7,10 +7,11 @@ Three things decide whether a scale-up helps:
 - the Deployment says enough about itself for the scaling manager to act on.
 
 None are scaling-manager settings; they are properties of the model server.
-`make workload-patch` writes the first two. It does not set up the engine
-compile caches (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`,
-`TRITON_CACHE_DIR`): `make engine-cache` does, and `workload-patch` mounts them
-only once that is done and you opt in
+`make workload-patch` writes the first two. It also writes the engine compile
+cache mount and variables (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`,
+`TRITON_CACHE_DIR`), but the storage behind them must exist first: a node
+directory from `make engine-cache`, or a claim you already have
+(`WVA_ENGINE_CACHE_CLAIM`). Applying that half is its own opt-in
 ([Engine caches on the node's disk](#engine-caches-on-the-nodes-disk)). The
 rest of the start path is a checklist, below.
 

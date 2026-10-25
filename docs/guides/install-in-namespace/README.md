@@ -56,7 +56,7 @@ make setup-prereqs
 <!-- guide:deploy.prereqs end -->
 
 Run it once per namespace, and again when a release adds a prerequisite
-([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-from-before-v0100-rc1)).
 Your namespace must already exist. Two optional settings:
 
 - `KEDA_NAMESPACE=<ns>` when the command says it cannot find KEDA. Without it no
@@ -237,10 +237,14 @@ troubleshooting](../../reference/operations.md#first-line-troubleshooting).
 
 **`READY True` but `TARGETS` shows only `cpu`**: KEDA's first call for the
 metric failed and it does not retry, so the workload is unwired. Re-wire it
-(`DRY_RUN=true` only lists them):
+(`DRY_RUN=true` only lists them). In the out-of-reach shape add
+`WVA_NS=wva-${NAMESPACE}`; without it the command finds no ScaledObject and
+exits 0 with "nothing to re-wire":
 
 ```bash
 make scaledobjects-rewire
+# out-of-reach shape: the controller runs in wva-${NAMESPACE}
+make scaledobjects-rewire WVA_NS=wva-${NAMESPACE}
 ```
 
 ### 2. Read the decisions
