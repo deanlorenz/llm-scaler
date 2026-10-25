@@ -277,6 +277,10 @@ All on H200 nodes. One run per arm unless it says otherwise.
 | Sharing one quota, two plain models | six runs, each once: 24–81 % more GPU-seconds where measured. Five of them, on other burst shapes, found failures the first could not show. In the latest, the model that burst first had a median TTFT of 0.07 s against 25.6 s with the same fleet planned but not moved, and the second was no worse (GPU cost not measured) | [utilization share, measured](../well-lit-paths/utilization-share/measured.md) |
 | Sharing one quota, two P/D models | see the table row above; run twice; 39–43 % more GPU-seconds | [utilization share, P/D](../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota) |
 | Two-namespace swap, regression run (failed) | the first swap's timing was missed: a donor was held about ten minutes after its pod was Ready, with no reason logged. Fixed after the run ([#290](https://github.com/ev-shindin/llm-scaling-manager/issues/290)). A one-replica move that is not called off when the donor's demand returns is still open ([#285](https://github.com/ev-shindin/llm-scaling-manager/issues/285)) | the issues |
+| E1, two-namespace swap, with the fix | passed every check except the timing of the first two phases (about 16 and 15 minutes against a 12-minute target) | [below](#analyzer-experiments-october-2026) |
+| E8, one replica overloaded by the router, run twice | passed both times: capacity and learning unchanged, no scale-up, imbalance reported and cleared | [below](#analyzer-experiments-october-2026) |
+| Light load after a line was learned | utilization 0.22 against a throughput share of 0.26 | [below](#analyzer-experiments-october-2026) |
+| Controller log volume | 3922 down to 1547 bytes per replica per cycle at the default level | [below](#analyzer-experiments-october-2026) |
 
 Known limits on this release that bear on the comparison: no sizing to an SLO
 ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)); no
@@ -292,6 +296,72 @@ variable output length and prefix-cache residency
 ([#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)–[#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)).
 The full list is in the
 [release notes](https://github.com/ev-shindin/llm-scaling-manager/releases).
+
+### Analyzer experiments, October 2026
+
+These check the capacity model itself on real GPUs, one run each unless it
+says otherwise. Setup: an H200 cluster, `Qwen/Qwen3-32B-FP8` on 1 GPU per
+replica, decode only (no P/D), open-loop load at a fixed request rate. Runs
+on 2026-10-24, controllers deployed by digest: E1 and the first E8 on main
+plus the fixes for #290, #287 and #278; the second E8 and the light-load run
+on main plus the P/D decode fix, `analyzerTuning`, the light-load fix and the
+log-volume fix.
+
+**E1: two models in two namespaces trade one 4-GPU quota.** One model gets
+the heavy load, then the load swaps to the other, swaps back, and swaps four
+more times in quick succession. It checks that the share follows the load,
+does not chase fast swaps, and learns the same throughput in both namespaces.
+
+- The throughput each namespace learned (5.7 to 6.2 req/s per replica,
+  median per phase) was within 10 % of what vLLM served at saturation (5.8
+  to 6.4).
+- The fast swaps were planned on the average need, not chased.
+- **Missed: timing.** The first two phases reached 3:1 and 1:3 about 16 and 15
+  minutes after the load moved, against a 12-minute target; the third took
+  12. The move itself waits: the donor gives its replica only after its
+  scale-down window (about 5 minutes), and the receiver's new replica then
+  takes about 4 minutes to start. In the first phase the donor was also held
+  for about 4 minutes while its own new pod started; with the #290 fix, the
+  hold ended once that pod was stable and logged why.
+
+**E8: the router sends all load to one of four replicas.** One phase routes
+every request to one replica while three idle, then the router's scorers are
+restored. It checks that an uneven router does not distort what the
+controller learns or orders, and that the imbalance is reported. Run twice.
+
+- Per-replica throughput and capacity in the imbalanced phase matched the
+  balanced phase within 10 % (6.12 against 6.10 req/s in the first run, 6.17
+  against 6.24 in the second).
+- The replica count stayed at 4: no scale-up while three replicas had room.
+- `wva_load_imbalanced` went to 1 within about a minute of the warning line
+  and back to 0 about three minutes after the router was restored. It stayed
+  at 1 for about 20 minutes, longer than the alert's 10 minutes, so
+  `WVALoadImbalanced` would have fired; the alert itself was not observed.
+
+**Light load: a model drops to a quarter of its throughput.** One replica
+serves 5.5 req/s until it has learned its latency line, then 1.5 req/s for 40
+minutes, which is below the band the line is learned from. It checks that
+utilization keeps tracking the work served once the learning window is empty
+(#284).
+
+- After 30 minutes the window was empty and the controller kept the learned
+  line: derived throughput 5.87 req/s per replica (5.66 while learning).
+- Utilization read 0.22 (median) against a throughput share of 0.26, while
+  KV use was 0.04. Before the fix, a fresh model at the same rate read 0.064
+  ([#284](https://github.com/ev-shindin/llm-scaling-manager/issues/284)).
+
+**Log volume.** At the default log level, the controller wrote 3922 bytes per
+replica per cycle on the first E8 run and 1547 on the second, same scenario.
+
+Not covered by these runs: the P/D path (the model was decode-only), restarts,
+fleet growth, and repeats.
+
+### Final pre-release run
+
+_Not run yet; results go here._ Planned: E2 (utilization across load levels),
+E4 (a controller restart with the learned-state snapshot off and on), E5 (the
+fleet learning while it grows), E6 (P/D prefill before its queue builds, with
+the prefill bound on and off), and re-runs of E1 and E8.
 
 ### Re-run against llm-d's current recipe
 
