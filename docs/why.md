@@ -102,14 +102,15 @@ intervals.
 - **What it learned is held in memory** by default, so a restart or leader
   change learns it again. `LEARNED_STATE_SNAPSHOT=true` carries it across
   ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart);
-  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
-- **One more port.** The scaler port is plaintext and unauthenticated by
-  default. `make setup-prereqs` writes a NetworkPolicy admitting only KEDA's
-  namespace when it knows that namespace, and warns when it does not; mutual
-  TLS is opt-in and manual
-  ([network exposure](reference/security-model.md#network-exposure);
-  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
-  it the default).
+  [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227) decides
+  whether it becomes the default).
+- **One more port.** KEDA calls the scaler on `:9090`. A new install serves
+  it over mutual TLS when it can, and says why when it stays on plaintext; an
+  upgrade with existing ScaledObjects stays on plaintext until you move them
+  ([external scaler mutual TLS](reference/configuration.md#external-scaler-mutual-tls)).
+  `make setup-prereqs` also writes a NetworkPolicy admitting only KEDA's
+  namespace when it knows that namespace, and warns when it does not
+  ([network exposure](reference/security-model.md#network-exposure)).
 
 ## How mature each part is
 
@@ -169,11 +170,12 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 - Learned capacity is re-learned after a restart unless the opt-in
   `LEARNED_STATE_SNAPSHOT` is on
-  ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
-- The scaler port is plaintext by default; a NetworkPolicy is shipped and
-  mutual TLS is opt-in and manual
-  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
-  it the default).
+  ([#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
+- The scaler port stays on plaintext where the installer cannot turn mutual
+  TLS on, for example when KEDA is absent or not found, when the cluster
+  admin has not yet written KEDA's side, or when existing ScaledObjects have
+  not yet been moved; the installer says which
+  ([every case](reference/configuration.md#external-scaler-mutual-tls)).
 - The Kueue quota source counts cohort borrowing only on a flat cohort
   without Fair Sharing or `effectiveQuotas`, and only from lenders Kueue would
   reclaim for; elsewhere it counts none and caps at nominal

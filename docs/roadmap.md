@@ -33,25 +33,15 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## Resilience
 
-- **Learned capacity survives a restart.** By default what the controller
-  learns about a model's capacity lives in memory, so a restart or a leader
-  hand-off re-learns it, and a request shape it had already priced is sized from
-  occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the ConfigMap
-  `wva-learned-state` and restores only figures learned under the same engine
-  configuration; it is off by default
+- **Make surviving a restart the default.** By default what the
+  controller learns about a model's capacity lives in memory, so a restart or a
+  leader hand-off re-learns it, and a request shape it had already priced is
+  sized from occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the
+  ConfigMap `wva-learned-state` and restores only figures learned under the
+  same engine configuration; it is off by default
   ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart)).
-  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)
-
-## Security
-
-- **Mutual TLS on the scaler port by default.** The scaler port is plaintext
-  by default; a NetworkPolicy admitting only KEDA's namespace is shipped, and
-  mutual TLS (`--external-scaler-cert-path`, `--external-scaler-client-ca`,
-  `--external-scaler-client-san`) is opt-in and manual
-  ([network exposure](reference/security-model.md#network-exposure)). Planned: the installer provisions the certificates
-  (cert-manager when present, otherwise its own CA), wires every ScaledObject it
-  generates or adopts, and pins KEDA's client identity.
-  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)
+  Planned: decide whether it becomes the default, and what has to land first.
+  [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)
 
 ## Evidence
 
