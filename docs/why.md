@@ -169,17 +169,25 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ScaledObject with a floor of 0 gets none
   ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 - Learned capacity is re-learned after a restart unless the opt-in
-  `LEARNED_STATE_SNAPSHOT` is on
-  ([#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
+  `LEARNED_STATE_SNAPSHOT` is on, and even then a held ITL line is not
+  restored ([#316](https://github.com/ev-shindin/llm-scaling-manager/issues/316);
+  the default is [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
 - The scaler port stays on plaintext where the installer cannot turn mutual
   TLS on, for example when KEDA is absent or not found, when the cluster
   admin has not yet written KEDA's side, or when existing ScaledObjects have
   not yet been moved; the installer says which
   ([every case](reference/configuration.md#external-scaler-mutual-tls)).
 - The Kueue quota source counts cohort borrowing only on a flat cohort
-  without Fair Sharing or `effectiveQuotas`, and only from lenders Kueue would
-  reclaim for; elsewhere it counts none and caps at nominal
-  ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
+  without Fair Sharing or `effectiveQuotas`, and, unless the experimental
+  [hand-back](reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for)
+  is on, only from lenders Kueue would reclaim for; elsewhere it counts none
+  and caps at nominal
+  ([cohort borrowing](reference/quota-limiter.md#cohort-borrowing);
+  [#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
+- A new ScaledObject can stay unwired when KEDA's first call for its metric
+  spec fails: its HPA keeps only the CPU default and never scales. Run
+  `make scaledobjects-rewire`
+  ([#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).
 

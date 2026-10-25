@@ -116,7 +116,7 @@ Before you start:
 A cluster admin runs `setup-prereqs` once per namespace; the namespace owner
 runs the rest, and every later upgrade. If you are both, `make deploy-wva` does
 the two in one command. An upgrade that adds a prerequisite needs the admin's
-step again first ([upgrading](docs/reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+step again first ([upgrading](docs/reference/upgrade-and-uninstall.md#upgrading-from-before-v0100-rc1)).
 
 The last two steps are not optional: a **KEDA ScaledObject** is how a workload
 registers. Until one exists, the controller runs and scales nothing.

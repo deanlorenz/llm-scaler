@@ -7,8 +7,13 @@ Three things decide whether a scale-up helps:
 - the Deployment says enough about itself for the scaling manager to act on.
 
 None are scaling-manager settings; they are properties of the model server.
-`make workload-patch` writes the first two. The rest of the start path is a
-checklist, below.
+`make workload-patch` writes the first two. It also writes the engine compile
+cache mount and variables (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`,
+`TRITON_CACHE_DIR`), but the storage behind them must exist first: a node
+directory from `make engine-cache`, or a claim you already have
+(`WVA_ENGINE_CACHE_CLAIM`). Applying that half is its own opt-in
+([Engine caches on the node's disk](#engine-caches-on-the-nodes-disk)). The
+rest of the start path is a checklist, below.
 
 > Part of the [deployment guide](../../deploy/). For what to watch once it is
 > running, see [Watching what the scaling manager decides](monitoring.md).
@@ -31,8 +36,9 @@ Deployment has `.spec.template`.
 | 6 | The EPP's `flowControl` feature gate, parsed by the running EPP | no router-queue demand signal; a model at zero never wakes | PromQL `count(llm_d_epp_flow_control_queue_size) or count(inference_extension_flow_control_queue_size)` is non-empty |
 | 7 | `preStop` hook on the engine container and `terminationGracePeriodSeconds` above it | every scale-down cuts in-flight streams | `make workload-patch NAMESPACE=<ns>` names workloads without a drain ([below](#draining-before-scale-down)) |
 | 8 | Weights read from a mounted model cache | every scale-up is a download | `make workload-patch NAMESPACE=<ns>` reports `RE-DOWNLOADS ITS WEIGHTS` ([below](#weights-and-the-model-cache)) |
-| 9 | Fast start: image held on the GPU nodes, engine cache on a volume, short probe period | each scale-up pays the pull and the compile | `make prepull-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` ([below](#the-rest-of-the-start-path)) |
-| 10 | A ScaledObject whose trigger is `external-push` with this `modelID` | nothing scales it — the controller has no watch of its own | `kubectl get scaledobject -n <ns> -o custom-columns='NAME:.metadata.name,MODEL:.spec.triggers[0].metadata.modelID,READY:.status.conditions[0].status'` |
+| 9 | Fast start: image held on the GPU nodes, short probe period | each scale-up pays the pull | `make prepull-status NAMESPACE=<ns>` ([below](#the-rest-of-the-start-path)) |
+| 10 | Engine compile caches (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`, `TRITON_CACHE_DIR`) on a path that outlives the pod | every replica recompiles: about 14 s of torch.compile against about 3 s cached | `make engine-cache-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` ([below](#engine-caches-on-the-nodes-disk)) |
+| 11 | A ScaledObject whose trigger is `external-push` with this `modelID` | nothing scales it — the controller has no watch of its own | `kubectl get scaledobject -n <ns> -o custom-columns='NAME:.metadata.name,MODEL:.spec.triggers[0].metadata.modelID,READY:.status.conditions[0].status'` |
 
 ## Weights and the model cache
 

@@ -1,17 +1,20 @@
 # Roadmap
 
-Planned work that changes what an operator can rely on. Each item links the
-GitHub issue or PR that tracks it, with the detail and the current state. The
-gaps themselves are summarized in [known gaps](why.md#known-gaps).
+Planned work that changes what an operator can rely on, after v0.10.0. Each
+item links the GitHub issue that tracks it, with the detail and the current
+state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## GPU budgets
 
-- **Kueue borrowing follow-ups.** Borrowing is counted today, on a flat
-  cohort, from lenders Kueue would reclaim for. Planned: nested cohorts, Kueue
-  Fair Sharing, `effectiveQuotas`, new borrowing under the utilization-share
-  optimizer, and an opt-in to count and hand back the capacity of lenders that
-  do not reclaim.
-  [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)
+- **Model Kueue more closely.** Kueue is read per namespace today, and cohort
+  borrowing is counted only on a flat cohort without Fair Sharing or
+  `effectiveQuotas`. Planned: read Kueue per ClusterQueue
+  ([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213)), a
+  claims ledger ([#212](https://github.com/ev-shindin/llm-scaling-manager/issues/212)),
+  closing the known limits of borrowing and hand-back
+  ([#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)), and
+  rescale with mixed replica sizes, which rounds per role and fills greedily
+  ([#219](https://github.com/ev-shindin/llm-scaling-manager/issues/219)).
   · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/), [the guide](guides/kueue-borrowing/)
 
 ## Scaling
@@ -23,24 +26,53 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
   controller derives the fill that meets it from measured latency, keeping
   variants, P/D pairing and the GPU budget.
   [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
-
-- **Price prefill from the router's prompt tokens.** The router knows the
-  prompt tokens in flight before an engine sees them; today that signal feeds
-  only shape-change holds. Planned: use it as a prefill demand input, priced by
-  the throughput the controller already learns, so prefill capacity is ordered
-  before engine queues fill.
-  [#144](https://github.com/ev-shindin/llm-scaling-manager/issues/144)
+- **Judge each analyzer on its own band.** Today every analyzer's need is
+  judged against saturation's thresholds
+  ([#305](https://github.com/ev-shindin/llm-scaling-manager/issues/305)).
+  Open: whether one analyzer's score should weigh a model across models
+  ([#226](https://github.com/ev-shindin/llm-scaling-manager/issues/226)).
+- **Size prefill when only decode saturates.** v0.10.0 ships an opt-in lower
+  bound for prefill
+  ([`enablePrefillThroughputBound`](reference/scaling-policy.md#enableprefillthroughputbound),
+  [#263](https://github.com/ev-shindin/llm-scaling-manager/pull/263)).
+  Planned: cluster evidence for it, and for a decode at its sequence cap,
+  before either is relied on.
+  [#320](https://github.com/ev-shindin/llm-scaling-manager/issues/320)
+- **Price a replica more exactly.** Speculative decoding
+  ([#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)), mixed
+  prefill and decode pods ([#275](https://github.com/ev-shindin/llm-scaling-manager/issues/275)),
+  output length ([#276](https://github.com/ev-shindin/llm-scaling-manager/issues/276)),
+  prefix-cache hits ([#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)),
+  KV-landed P/D requests ([#307](https://github.com/ev-shindin/llm-scaling-manager/issues/307))
+  and `--max-num-active-seqs` ([#308](https://github.com/ev-shindin/llm-scaling-manager/issues/308)).
+- **Utilization share.** Call off a one-replica move when the donor's demand
+  comes back ([#285](https://github.com/ev-shindin/llm-scaling-manager/issues/285)),
+  and close the known limits of in-flight holds
+  ([#215](https://github.com/ev-shindin/llm-scaling-manager/issues/215)).
 
 ## Resilience
 
-- **Make surviving a restart the default.** By default what the
-  controller learns about a model's capacity lives in memory, so a restart or a
-  leader hand-off re-learns it, and a request shape it had already priced is
-  sized from occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the
-  ConfigMap `wva-learned-state` and restores only figures learned under the
-  same engine configuration; it is off by default
+- **Re-wire an unwired ScaledObject without an operator.** When KEDA's first
+  call for a new ScaledObject's metric spec fails, its HPA stays on the CPU
+  default and never scales. Today `make scaledobjects-rewire` fixes it
+  ([KEDA](reference/keda.md#the-scalers-tls-in-kedas-namespace)). Planned: the
+  controller detects and re-wires it on its own.
+  [#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)
+- **Make surviving a restart the default.** By default what the controller
+  learns about a model's capacity lives in memory, so a restart or a leader
+  hand-off re-learns it. `LEARNED_STATE_SNAPSHOT=true` keeps it in the
+  ConfigMap `wva-learned-state`; it is off by default
   ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart)).
-  Planned: decide whether it becomes the default, and what has to land first.
+  Before it can be the default: restore a held ITL line
+  ([#316](https://github.com/ev-shindin/llm-scaling-manager/issues/316)), speed
+  up mu without `enableLearnedStateReuse`
+  ([#317](https://github.com/ev-shindin/llm-scaling-manager/issues/317)), and run
+  the cases not yet run on GPUs
+  ([#228](https://github.com/ev-shindin/llm-scaling-manager/issues/228)), test
+  the rules no test reaches
+  ([#229](https://github.com/ev-shindin/llm-scaling-manager/issues/229)), and
+  measure the ITL window and `wva_engine_config` on a real fleet
+  ([#230](https://github.com/ev-shindin/llm-scaling-manager/issues/230)).
   [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)
 
 ## Evidence
@@ -54,3 +86,8 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
   simulator; a scheduled run on a GPU cluster would catch real-engine
   regressions (metrics, sleep and wake, drain, P/D transfer).
   [#143](https://github.com/ev-shindin/llm-scaling-manager/issues/143)
+
+Other open issues and known issues in v0.10.0, such as the router scrape that
+returns HTTP 500
+([#318](https://github.com/ev-shindin/llm-scaling-manager/issues/318)), are in
+the [release notes](https://github.com/ev-shindin/llm-scaling-manager/releases/tag/v0.10.0).

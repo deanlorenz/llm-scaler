@@ -161,6 +161,6 @@ admin published policy` or `Could not read the managed Namespace` in its log,
 `wva_policy_namespace_unverified` = 1, and alert
 `WVAPolicyNamespaceUnverified`. A cluster admin re-runs
 `NAMESPACE=<ns> make setup-prereqs`, or `make enable-physical-limiter`, which
-also restarts it ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release);
+also restarts it ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-from-before-v0100-rc1);
 [grant it by hand](../../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)
 only where neither can run).
