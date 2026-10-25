@@ -632,6 +632,81 @@ wva_summary_scaledobjects() {
     wva_scaler_plaintext_scaledobjects any
 }
 
+# wva_rewire_classify reads how KEDA wired each <namespace>/<name> row in $1
+# (wva_scaler_so_wiring) and sorts them into WVA_REWIRE_WIRED,
+# WVA_REWIRE_PAUSED, WVA_REWIRE_UNKNOWN (one row per line) and
+# WVA_REWIRE_UNWIRED ("<namespace>/<name> <index>..." per line, the trigger
+# indices KEDA left without the metric).
+wva_rewire_classify() {
+    local row st
+    WVA_REWIRE_WIRED=""
+    WVA_REWIRE_PAUSED=""
+    WVA_REWIRE_UNWIRED=""
+    WVA_REWIRE_UNKNOWN=""
+    while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        st="$(wva_scaler_so_wiring "${row%%/*}" "${row#*/}")"
+        case "$st" in
+            wired) WVA_REWIRE_WIRED="${WVA_REWIRE_WIRED}${row}"$'\n' ;;
+            paused) WVA_REWIRE_PAUSED="${WVA_REWIRE_PAUSED}${row}"$'\n' ;;
+            unwired*) WVA_REWIRE_UNWIRED="${WVA_REWIRE_UNWIRED}${row} ${st#unwired }"$'\n' ;;
+            *) WVA_REWIRE_UNKNOWN="${WVA_REWIRE_UNKNOWN}${row}"$'\n' ;;
+        esac
+    done <<< "$1"
+}
+
+# wva_rewire_scaledobjects re-wires this install's ScaledObjects that KEDA left
+# on the CPU default. It is make scaledobjects-rewire, and the last step of
+# make scaledobjects-apply.
+#
+# KEDA asks the scaler for a ScaledObject's metric spec only when its spec
+# changes. When that one call fails, the HPA stays on the CPU default for good.
+# This lists the ScaledObjects naming this scaler (wva_summary_scaledobjects),
+# re-wires the unwired ones (wva_scaler_ensure_wired: it changes trigger
+# metadata $WVA_SCALER_REWIRE_KEY, never deletes or recreates one), and reports
+# each as wired, paused, still unwired, or unreadable. A paused one is skipped.
+# With DRY_RUN=true it changes nothing and prints the commands instead.
+# Returns 1 while one is unwired, 2 when they cannot be listed.
+wva_rewire_scaledobjects() {
+    declare -F wva_scaler_ensure_wired >/dev/null || return 2
+    local rows row rc=0 dry="${DRY_RUN:-false}"
+    rows="$(wva_summary_scaledobjects)" || rc=$?
+    if [ "$rc" != 0 ]; then
+        log_warning "Could not list the ScaledObjects naming this scaler (wva-external-scaler.$WVA_NS), so none was checked or re-wired."
+        return 2
+    fi
+    if [ -z "$rows" ]; then
+        log_info "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS): nothing to re-wire."
+        return 0
+    fi
+    wva_rewire_classify "$rows"
+    if [ -n "$WVA_REWIRE_UNWIRED" ] && [ "$dry" != true ]; then
+        wva_scaler_ensure_wired "$(printf '%s' "$WVA_REWIRE_UNWIRED" | sed 's/ .*//')" || true
+        wva_rewire_classify "$rows"
+    fi
+    echo "ScaledObjects naming this scaler:"
+    printf '%s' "$WVA_REWIRE_WIRED" | sed 's/^/    wired      /'
+    printf '%s' "$WVA_REWIRE_PAUSED" | sed 's/^/    paused     /; s/$/  (skipped)/'
+    printf '%s' "$WVA_REWIRE_UNWIRED" | sed 's/ .*//; s/^/    unwired    /'
+    printf '%s' "$WVA_REWIRE_UNKNOWN" | sed 's/^/    unknown    /; s/$/  (it or its HPA could not be read)/'
+    [ -n "$WVA_REWIRE_UNWIRED" ] || return 0
+    if [ "$dry" = true ]; then
+        log_info "DRY_RUN=true: nothing was changed."
+        # A KEDA presenting an old client certificate: a re-wire does not
+        # help, its operator restart does (wva_scaler_keda_conn_report).
+        wva_scaler_keda_conn_state
+        if ! wva_scaler_keda_conn_report; then
+            log_info "To re-wire, run  $(wva_make_cmd scaledobjects-rewire)  or:"
+            printf '%s' "$WVA_REWIRE_UNWIRED" | while IFS= read -r row; do
+                [ -n "$row" ] && printf '    %s\n' "$(wva_scaler_rewire_cmd "$row")"
+            done
+        fi
+        return 1
+    fi
+    log_warning "$(printf '%s' "$WVA_REWIRE_UNWIRED" | grep -c .) ScaledObject(s) still unwired: their HPAs scale on the CPU default and WVA's decisions do not reach them. The warning above says why."
+    return 1
+}
+
 # print_summary is the most-read text this install produces: it is what someone
 # looks at to find out whether it worked and what to do next. So it says the one
 # thing that is true and easy to miss — an installed WVA scales nothing until a
