@@ -231,10 +231,10 @@ is in its notes on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases):
 
 ```bash
-git checkout v0.10.0-rc4
-export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0-rc4
+git checkout v0.10.0
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0
 # or the exact build
-export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:f8589027fce12bacc92570208a49ade85cc83c3adb5c863e96e7c32212b8a8b2
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:39de69a24a19680895a9bbe7ab6282a93aac9abc8301c834dc441be8f2009424
 ```
 
 `:main` is rebuilt on every push to `main`, so two runs against it a day apart
