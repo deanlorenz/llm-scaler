@@ -172,9 +172,10 @@ runs per arm on one cluster type (the P/D pair repeated once).
   `LEARNED_STATE_SNAPSHOT` is on
   ([#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
 - The scaler port stays on plaintext where the installer cannot turn mutual
-  TLS on: KEDA absent or not found, KEDA's side not yet written by the
-  cluster admin, or existing ScaledObjects not yet moved
-  ([when](reference/configuration.md#external-scaler-mutual-tls)).
+  TLS on, for example when KEDA is absent or not found, when the cluster
+  admin has not yet written KEDA's side, or when existing ScaledObjects have
+  not yet been moved; the installer says which
+  ([every case](reference/configuration.md#external-scaler-mutual-tls)).
 - The Kueue quota source counts cohort borrowing only on a flat cohort
   without Fair Sharing or `effectiveQuotas`, and only from lenders Kueue would
   reclaim for; elsewhere it counts none and caps at nominal
