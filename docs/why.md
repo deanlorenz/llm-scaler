@@ -144,9 +144,8 @@ cover.
   [KEDA alone](comparison/keda-alone.md) compares them need by need; the only
   head-to-head is one July 2026 study of five scenarios, one run each, on an
   older controller and recipe.
-- **llm-d's workload-variant-autoscaler**: the project this one forked from,
-  deprecated upstream (`v0.9.0` is final; llm-d advises staying on it where
-  cost-aware placement across variants is needed). Upstream already had GPU
+- **llm-d's workload-variant-autoscaler**: the project this one forked from.
+  Upstream already had GPU
   budgets and scale-from-zero. This fork adds the KEDA external scaler with
   pushed activation, Kueue quotas, the utilization-share optimizer, the warm
   pool, the install tooling, and throughput-priced demand.

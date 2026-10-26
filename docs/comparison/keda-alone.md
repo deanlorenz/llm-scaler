@@ -1,21 +1,11 @@
 # llm-scaling-manager and KEDA alone
 
-llm-d says its KEDA recipes do not cover everything WVA did. Its architecture
-page says KEDA + EPP *"does not replace WVA feature for feature. Cost-aware
-placement across variants has no current equivalent; the rest is covered,
-though in some cases by a different layer than the autoscaler"*: a shared
-accelerator budget by Kueue, pending-Pod awareness by kube-state-metrics. It
-advises *"If a deployment depends on cost-aware placement across variants or on
-fair sharing of a scarce accelerator pool, stay on WVA for now"*
-([architecture](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/docs/architecture/autoscaling/README.md#what-changed-with-the-deprecation)).
-At the same time, *"The WVA path is no longer developed and receives no further
-releases; `v0.9.0` is the final version"*, and existing WVA deployments are told
-to migrate to KEDA + EPP
-([llm-d](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/README.md)).
-llm-scaling-manager is one way to stay on that path: an independently
-developed, advanced fork of WVA, still maintained, not affiliated with or
-endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
-scaler).
+llm-d autoscales with KEDA on the router's (EPP) metrics, one ScaledObject per
+Deployment, and leaves a shared GPU budget to Kueue
+([autoscaling workflow](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/docs/developer-guide/autoscaling-workflow.md)).
+llm-scaling-manager is an independently developed, advanced fork of llm-d's
+workload-variant-autoscaler, not affiliated with or endorsed by llm-d. Its
+actuation is a KEDA external scaler.
 
 **KEDA scales your pods in both setups.** This page covers the one thing that
 differs: what computes the replica count KEDA applies.
@@ -52,8 +42,7 @@ Beyond the default, llm-d publishes these recipes:
 
 - A router
   [pool-saturation overlay](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp/optimized-baseline/overlays/k8s/saturation/scaledobject.yaml)
-  (experimental). It is upstream's migration target for WVA users, *"the
-  closest replacement for WVA's saturation signal"*. llm-d credits it with
+  (experimental). llm-d credits it with
   *"more portable thresholds"*, and notes that it *"can potentially
   over-provision"* and *"has no nightly end-to-end coverage yet"*.
 - [Token-aware sizing](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp-token-aware/README.md)
@@ -68,9 +57,9 @@ Beyond the default, llm-d publishes these recipes:
   which points the queue trigger at llm-d's fast model actuation to cut the cold
   start.
 
-llm-d's renamed WVA repository,
-[llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/README.md),
-now holds KEDA manifest blueprints. They include a recommended
+llm-d's
+[llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/README.md)
+repository holds KEDA manifest blueprints. They include a recommended
 [P/D blueprint](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/benchmark/config/scenarios/guides/pd-disaggregation.yaml)
 on vLLM's own metrics. The table below names each recipe where it answers a need
 the default does not.
