@@ -521,8 +521,8 @@ func (c *cycle) fitLines() {
 }
 
 // explicitMaxNumSeqs is, per variant with replica rows this cycle, the
-// engine's max_num_seqs when its flag stated it
-// (capacity.EngineParams.ExplicitMaxNumSeqs), and zero for one whose cap is
+// engine's batch cap when its flags stated it -- max_num_seqs, lowered by
+// --max-num-active-seqs (capacity.EngineParams.ExplicitMaxNumSeqs) -- and zero for one whose cap is
 // unknown or only a default.
 func (c *cycle) explicitMaxNumSeqs() map[string]int64 {
 	out := map[string]int64{}

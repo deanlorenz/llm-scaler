@@ -162,7 +162,8 @@ once.
 The line is learned from replicas between 0.15 and 0.80 of their KV cache.
 Above 0.80 an engine short of memory preempts, and its latency stops following
 the line. One replica above 0.80 still counts: one whose running batch is
-exactly the `--max-num-seqs` set on the engine, with requests waiting and no
+exactly the `--max-num-seqs` set on the engine (or `--max-num-active-seqs`, if
+lower), with requests waiting and no
 preemption in the last minute. That replica is limited by its sequence cap,
 not by memory. The band and the preemption allowance are policy keys
 (`analyzerTuning.itlBand.minObservableK`, `analyzerTuning.itlBand.maxObservableK`, `analyzerTuning.itlBand.capMaxPreemptionRate`; see

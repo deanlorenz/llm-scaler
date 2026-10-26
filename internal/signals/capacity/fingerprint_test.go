@@ -70,6 +70,10 @@ var fingerprintExcluded = []string{
 	"IsV1Engine",
 	"ChunkedPrefillEnabled",
 	"MaxNumSeqsSet",
+	// Not hashed: hashing it bumps FingerprintVersion and adds a label to the
+	// published engine-config metric, which moves every stored digest. Read
+	// for the batch cap (ExplicitMaxNumSeqs) and compared for capacity.
+	"MaxNumActiveSeqs",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -208,6 +212,8 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.ChunkedPrefillEnabled = !p.ChunkedPrefillEnabled
 		case "MaxNumSeqsSet":
 			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
+		case "MaxNumActiveSeqs":
+			p.MaxNumActiveSeqs = 64
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}

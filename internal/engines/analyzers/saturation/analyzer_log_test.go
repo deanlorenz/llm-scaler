@@ -83,7 +83,7 @@ var logContract = map[string][]string{
 		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
 		"notReady", "noITL", "noK", "belowBand", "aboveBand", // and why the rest were not
-		"capped", "maxNumSeqs", // and which of those taken were above the band, at the sequence cap
+		"capped", "batchCap", // and which of those taken were above the band, at the sequence cap
 		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
 		"steadySpread", "minKSpread", "ready", "minSamples", // and whether that is enough to fit on
 	},
@@ -315,7 +315,7 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 		params := deploymentParams()
 		params.MaxNumSeqsSet = true
 		fields := run(t, params, 256)
-		assert.EqualValues(t, 256, fields["maxNumSeqs"])
+		assert.EqualValues(t, 256, fields["batchCap"])
 		assert.EqualValues(t, 0, fields["aboveBand"], "the replica is at its cap: its reading is not above the band")
 		assert.EqualValues(t, 1, fields["capped"])
 		assert.EqualValues(t, 1, fields["offered"])
@@ -326,7 +326,7 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 	t.Run("a cap only the parser's default states", func(t *testing.T) {
 		for _, running := range []int{256, 300} {
 			fields := run(t, deploymentParams(), running)
-			assert.EqualValues(t, 0, fields["maxNumSeqs"], "a default is not the engine's cap")
+			assert.EqualValues(t, 0, fields["batchCap"], "a default is not the engine's cap")
 			assert.EqualValues(t, 1, fields["aboveBand"], "running %d against a default of 256", running)
 			assert.EqualValues(t, 0, fields["capped"])
 		}

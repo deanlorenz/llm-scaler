@@ -1254,7 +1254,8 @@ The `wva_slo_source` values:
   (7 days by default) after that fit and only while its engine arguments are
   unchanged; the `slo-variant` log line says so (`lineSlopeHeld`,
   `lineSlopeAge`). After a controller restart the slope is gone. A replica above 0.80 still counts when its running batch is exactly
-  the `--max-num-seqs` set on the engine, requests are waiting, and it
+  the `--max-num-seqs` set on the engine (or `--max-num-active-seqs`, if
+  lower), requests are waiting, and it
   preempted nothing in the last minute (vLLM only: SGLang publishes no
   preemption counter). The band is `analyzerTuning.itlBand.minObservableK` and
   `analyzerTuning.itlBand.maxObservableK` in the scaling policy. The `slo-variant` log line counts

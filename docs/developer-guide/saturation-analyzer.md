@@ -353,7 +353,8 @@ analyzer's fill, clamp to the same band. Such a replica is not short of memory, 
 not apply to it. On one run a decode replica held 256 running and 768 waiting
 at `k` 0.85-0.89 for 20 minutes while three siblings sat below 0.15, and no line
 was ever fitted (issue #287). `itl-window` counts these readings as `capped`,
-a part of `offered`, and logs the `maxNumSeqs` it judged them by. An unknown
+a part of `offered`, and logs the `batchCap` it judged them by (`--max-num-seqs`,
+lowered by `--max-num-active-seqs`). An unknown
 cap or preemption rate (SGLang publishes no preemption counter) keeps the band
 closed.
 

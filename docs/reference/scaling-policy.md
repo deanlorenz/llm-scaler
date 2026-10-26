@@ -1488,7 +1488,7 @@ long-context:
 |-----|---------|-------|--------------|
 | `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. |
 | `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
-| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
+| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
 `itlCapMaxPreemptionRate`) before any release shipped them; the top-level
@@ -2077,6 +2077,8 @@ the decode pod drains, so the queue there is read differently:
   reports a request as deferred after its KV has arrived, although it waits
   only for a free slot on this pod. This needs `--max-num-seqs` set on the
   engine's command line; a cap the engine picks by default is not known.
+  `--max-num-active-seqs` (vLLM v0.31+) also sets the cap, alone or with
+  `--max-num-seqs`; with both, the lower one counts.
 - Older vLLM: the whole queue counts, as before. The requests waiting for
   prefill's KV cannot be told apart, and dropping a real queue would
   under-provision. A P/D decode on older vLLM can therefore read busier than

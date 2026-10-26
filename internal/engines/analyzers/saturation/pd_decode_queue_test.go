@@ -245,6 +245,44 @@ func TestPDDecodeAtItsSequenceCapKeepsTheFullQueue(t *testing.T) {
 	})
 }
 
+// --max-num-active-seqs stops the running batch below max_num_seqs (vLLM
+// v0.31+), so a decode running at it is at its cap and keeps its full queue
+// (issue #308). Compared with max_num_seqs alone the batch never reached the
+// cap, and the charge never fired.
+func TestPDDecodeAtItsActiveSequenceCapKeepsTheFullQueue(t *testing.T) {
+	const active = 64
+	run := func(t *testing.T, maxStated bool, running int) (*SaturationAnalyzer, *domain.AnalyzerResult) {
+		t.Helper()
+		params := deploymentParams()
+		params.MaxNumSeqs, params.MaxNumSeqsSet = 256, maxStated
+		params.MaxNumActiveSeqs = active
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", decodeVariant, capacity.Record{
+			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
+		})
+		rm := withReason(pdDecodeRow(halfCache), 0)
+		rm.RunningRequests = running
+		return analyzePDWith(t, store, []domain.ReplicaMetrics{rm, pdPrefillRow()}, pdStates)
+	}
+
+	for name, maxStated := range map[string]bool{
+		"below an explicit max_num_seqs": true,
+		"with max_num_seqs a default":    false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, res := run(t, maxStated, active)
+			assert.True(t, recordedK2(a), "the batch is full at the active cap: saturated")
+			assert.InDelta(t, float64(halfCache)+queueCharge, decodeDemand(t, res), 1,
+				"at the active cap the whole queue waits for a batch slot")
+		})
+	}
+	t.Run("below the active cap", func(t *testing.T) {
+		a, res := run(t, true, active-1)
+		assert.False(t, recordedK2(a))
+		assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1)
+	})
+}
+
 func TestDecodeCapacityViewAtTheCap(t *testing.T) {
 	rm := domain.ReplicaMetrics{
 		VariantName: "d", RunningRequests: 512, EngineRanks: 2,
