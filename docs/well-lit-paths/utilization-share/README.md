@@ -110,6 +110,9 @@ even when the quota has room for both. The worst case is a swap: one model's
 load falls while the other's rises, and the rising model is refused for the
 falling model's whole scale-down window.
 
+llm-d itself leaves sharing a GPU budget to Kueue; how the two compare is in
+[Sharing a GPU budget between models](../../comparison/gpu-sharing.md).
+
 ### More cases where it does not fit
 
 - **There is no limiter.** Without a `limiters:` list the optimizer has no

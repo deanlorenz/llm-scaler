@@ -182,7 +182,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 
 - **[proposals/](proposals/)** — work not built yet, or built and still moving. The warm pool's argument and implementation design live here, as does the [FMA post-mortem](proposals/fma-post-mortem.md) explaining what the pool inherited.
 - **[roadmap.md](roadmap.md)** — planned work that changes what an operator can rely on, each item linked to its GitHub issue.
-- **[comparison/](comparison/)** — how the scaling manager's autoscaling compares with [KEDA alone (llm-d's recipes)](comparison/keda-alone.md), Dynamo, Mooncake, SGLang and the hosted platforms.
+- **[comparison/](comparison/)** — how the scaling manager's autoscaling compares with [KEDA alone (llm-d's recipes)](comparison/keda-alone.md), Dynamo, Mooncake, SGLang and the hosted platforms, and how [sharing a GPU budget between models](comparison/gpu-sharing.md) compares with llm-d's Kueue rebalancing.
 - **[plans/](plans/)** — agent plans and the specs behind them.
 
 ## Elsewhere in the repo
