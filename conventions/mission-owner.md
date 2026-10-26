@@ -25,7 +25,8 @@
 - Do not edit or maintain another mission's branch, worktree, state, plan, or ledger.
 - Do not treat delegated sessions as mission owners. They report conclusions and requested
   state changes back to the owner.
-- Do not expand an approved plan or delegated task without user approval.
+- An approved plan's listed steps are the only authorized actions. If something adjacent comes up, stop and ask. Do not do it first.
+- The same applies to a delegated task: its listed steps are the boundary.
 - Do not wind down or hand off merely because a task reached a checkpoint. Wind-down is an
   explicit preparation for ending the session or transferring ownership.
 

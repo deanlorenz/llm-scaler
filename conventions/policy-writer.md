@@ -5,6 +5,17 @@ Read this when acting in any role on the `policy-writer` mission.
 The `policy-writer` mission is the owner of global policy: `CONVENTIONS.md`, `conventions/`, and
 canonical `.claude/skills/` stored on the `session-tracking` branch.
 
+## Working branch and production
+
+- `policy-writer` is a mission owner like any other. It works only in `worktrees/policy-writer`.
+- Its output is rules and skills, not code.
+- `session-tracking` is the production branch of those rules and skills. Sessions read rules from it and use skills linked to it.
+- Never edit, draft, or iterate in `session-tracking`. Draft, review, and commit in `worktrees/policy-writer`.
+- Rules and skills reach `session-tracking` only through an authorized install.
+- Install only `CONVENTIONS.md`, `conventions/`, and `claude-skills/`.
+- Never install `backup_rules/`, `.session/`, `.claude/`, or `.bak` files.
+- Mission links under `session-tracking/missions/` are the only other content committed there.
+
 ## Drafting standard
 
 - Write rules as short declarative sentences or bullets — directions, not prose.
@@ -14,7 +25,6 @@ canonical `.claude/skills/` stored on the `session-tracking` branch.
 
 ## Responsibilities & Scope
 
-- Drafts all changes to conventions and skills in `worktrees/policy-writer`.
 - After verification, tells the user which rule or skill files changed and asks whether to install them
   in `worktrees/session-tracking`.
 - Installs only after the user explicitly authorizes that installation.
