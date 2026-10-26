@@ -852,20 +852,25 @@ What is restored, and what is not:
   too. The ITL slope a variant holds through light load comes back with the
   ITL baseline, on the same terms, and is still held only for the bucket
   retention after it was fitted;
-- with that baseline and slope back, a variant has its **own ITL line**, and
-  so a derived service rate (mu), from its first cycle after the restart. The
-  restored slope is held until fresh readings fit a new line. This does not
-  need `enableLearnedStateReuse`. The readings in the ITL window are not
-  saved, so when the baseline and slope are not restored -- a new engine
-  image, a slope fitted longer ago than the bucket retention, or a snapshot
-  written by v0.10.0 or earlier, which has no slope -- the variant fits its
-  line from fresh readings, as it would with the snapshot off, and the
-  snapshot does not shorten the time to a usable mu;
-- the ITL lines a variant publishes for its siblings are restored too, but
-  only a sibling with
-  [`enableLearnedStateReuse`](scaling-policy.md#enablelearnedstatereuse) on
-  reads one, and a variant never borrows the line it published itself. With
-  reuse off they do nothing until it is turned on;
+- with that slope back, a variant has its **own ITL line**, and so a derived
+  service rate (mu), from its first cycle after the restart. The restored
+  slope is held until fresh readings fit a new line. This does not need
+  `enableLearnedStateReuse`. The readings in the ITL window are not saved, so
+  whenever the slope is not restored, the variant fits its line from fresh
+  readings and, with reuse off, the snapshot does not shorten the time to a
+  usable mu. The slope is not restored when the variant's engine image,
+  arguments or any other part of its configuration changed while the
+  controller was down; when that configuration could not be read completely
+  (a flag set from a variable the controller cannot resolve); when the
+  variant was last seen longer ago than the variant timeout; when the slope
+  was fitted longer ago than the bucket retention; and from a snapshot
+  written by v0.10.0 or earlier, which has no slope;
+- the ITL lines shared between siblings are restored too. A variant shares
+  its line only while
+  [`enableLearnedStateReuse`](scaling-policy.md#enablelearnedstatereuse) is on
+  for it, only a sibling with it on reads one, and a variant never borrows
+  the line it published itself. A line fitted while reuse was off is filed
+  under the variant alone, and turning reuse on later does not share it;
 - a variant whose arguments changed while the controller was down restores
   its old measured capacity only as a **lower-only, expiring figure**, and
   its old saturated throughput only as a hold-only floor (below). The
