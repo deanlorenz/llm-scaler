@@ -94,6 +94,14 @@ type EngineParams struct {
 	// real cap. See ExplicitMaxNumSeqs.
 	MaxNumSeqsSet bool
 
+	// MaxNumActiveSeqs is vLLM's --max-num-active-seqs: how many requests the
+	// scheduler admits into the running batch. It lowers the batch cap below
+	// MaxNumSeqs without shrinking what MaxNumSeqs sizes (the model runner's
+	// buffers and CUDA graphs), and vLLM refuses a value above max_num_seqs.
+	// 0 is unset, in which case MaxNumSeqs alone caps the batch. See
+	// ExplicitMaxNumSeqs, which folds it into the cap.
+	MaxNumActiveSeqs int64
+
 	// TotalKvTokensOverride is the explicit total KV-cache token capacity, when the
 	// engine exposes it as a deployment flag (SGLang --max-total-tokens). 0 = unset.
 	// vLLM has no equivalent flag and uses NumGpuBlocksOverride instead.
@@ -291,17 +299,43 @@ func (p *EngineParams) Complete() bool {
 	return p != nil && len(p.Unresolved) == 0
 }
 
-// ExplicitMaxNumSeqs is MaxNumSeqs when it was read from the engine's flag,
-// and 0 when it is a default, when any of the flag's spellings could not be
-// read, or when p is nil. A caller that needs the engine's real cap, not an
+// ExplicitMaxNumSeqs is one engine's batch cap as its flags state it: the
+// explicit max_num_seqs, lowered by --max-num-active-seqs when that is set,
+// and 0 when neither flag stated a cap, when a flag that bears on it could not
+// be read, or when p is nil. A caller that needs the engine's real cap, not an
 // estimate of it, reads this: the ITL fit admits a reading above its band
-// only for a replica at its cap (itl.Admission).
+// only for a replica at its cap (itl.Admission), and a P/D decode at its cap
+// keeps its full queue (ReplicaMetrics.AtBatchCap).
+//
+// --max-num-active-seqs alone is enough: vLLM refuses one above
+// max_num_seqs, so it is the cap whatever max_num_seqs is, stated or not.
+// With both, the lower one is the cap.
 //
 // An unreadable spelling voids a readable one: `--max-num-seqs 512
 // --max-num-seqs ` sets 512, and which of the two the engine takes
-// depends on a value nothing here could see.
+// depends on a value nothing here could see. An unreadable
+// --max-num-active-seqs voids the cap altogether, because it may be lower
+// than any max_num_seqs that was read.
 func (p *EngineParams) ExplicitMaxNumSeqs() int64 {
-	if p == nil || !p.MaxNumSeqsSet {
+	if p == nil || slices.Contains(p.Unresolved, maxNumActiveSeqsKey) {
+		return 0
+	}
+	maxSeqs := p.explicitMaxNumSeqsFlag()
+	switch active := p.MaxNumActiveSeqs; {
+	case active > 0 && maxSeqs > 0:
+		return min(active, maxSeqs)
+	case active > 0:
+		return active
+	default:
+		return maxSeqs
+	}
+}
+
+// explicitMaxNumSeqsFlag is MaxNumSeqs when it was read from the engine's
+// flag, and 0 when it is a default or any of the flag's spellings could not be
+// read.
+func (p *EngineParams) explicitMaxNumSeqsFlag() int64 {
+	if !p.MaxNumSeqsSet {
 		return 0
 	}
 	for _, key := range maxNumSeqsKeys {
@@ -315,6 +349,9 @@ func (p *EngineParams) ExplicitMaxNumSeqs() int64 {
 // maxNumSeqsKeys are the normalised flags either parser reads into
 // MaxNumSeqs.
 var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}
+
+// maxNumActiveSeqsKey is the normalised vLLM flag read into MaxNumActiveSeqs.
+const maxNumActiveSeqsKey = "max_num_active_seqs"
 
 // defaultEngineParams returns EngineParams with vLLM defaults
 // as of vLLM v0.8+. If vLLM changes its defaults in a future version,
@@ -518,6 +555,7 @@ var mappedValueKeys = map[string]struct{}{
 	"max_num_batched_tokens":  {},
 	"max_num_seq":             {},
 	"max_num_seqs":            {},
+	maxNumActiveSeqsKey:       {},
 	"max_model_len":           {},
 	"data_parallel_size":      {},
 	"pipeline_parallel_size":  {},
@@ -904,6 +942,14 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 		}
 		params.MaxNumSeqs = v
 		params.MaxNumSeqsSet = true
+	case maxNumActiveSeqsKey:
+		// vLLM v0.31+: caps the running batch below max_num_seqs. vLLM
+		// requires at least 1, so anything less is not a value it runs.
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || v < 1 {
+			return applyUnusable
+		}
+		params.MaxNumActiveSeqs = v
 	case "max_model_len":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
@@ -1267,6 +1313,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.TotalKvTokensOverride == other.TotalKvTokensOverride &&
 		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
 		p.MaxNumSeqs == other.MaxNumSeqs &&
+		p.MaxNumActiveSeqs == other.MaxNumActiveSeqs &&
 		p.MaxModelLen == other.MaxModelLen &&
 		p.WeightDtype == other.WeightDtype &&
 		p.Quantization == other.Quantization &&

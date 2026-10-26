@@ -33,3 +33,52 @@ func TestExplicitMaxNumSeqs(t *testing.T) {
 		t.Errorf("nil params: %d, want 0", got)
 	}
 }
+
+// --max-num-active-seqs (vLLM v0.31+) stops the running batch below
+// max_num_seqs, so the batch cap is the lower of the two (issue #308). Read in
+// every form max_num_seqs is.
+func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
+	parse := func(args ...string) EngineParams {
+		return ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment(args...)))
+	}
+	shell := makeTestDeployment()
+	shell.Spec.Template.Spec.Containers[0].Command = []string{
+		"/bin/sh", "-c", "vllm serve m --max-num-seqs 512 --max-num-active-seqs 128"}
+	for name, tc := range map[string]struct {
+		params     EngineParams
+		wantActive int64
+		wantCap    int64
+	}{
+		"--x=v alone":                {parse("--max-num-active-seqs=64"), 64, 64},
+		"--x v alone":                {parse("--max-num-active-seqs", "64"), 64, 64},
+		"underscore spelling":        {parse("--max_num_active_seqs=48"), 48, 48},
+		"below max_num_seqs":         {parse("--max-num-seqs=256", "--max-num-active-seqs=64"), 64, 64},
+		"flag order does not matter": {parse("--max-num-active-seqs", "64", "--max-num-seqs", "256"), 64, 64},
+		"the lower of the two":       {parse("--max-num-seqs=32", "--max-num-active-seqs=64"), 64, 32},
+		"through the env": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeDeploymentWithEnvAndArgs(
+			[]corev1.EnvVar{{Name: "ACTIVE", Value: "40"}}, "--max-num-active-seqs", "$ACTIVE"))), 40, 40},
+		"in a shell command": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(shell)), 128, 128},
+		// An active cap nothing could read may be below any max_num_seqs that
+		// was: the cap is unknown.
+		"unreadable":                    {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 0},
+		"zero is not a value vLLM runs": {parse("--max-num-seqs=256", "--max-num-active-seqs=0"), 0, 0},
+		"not a number":                  {parse("--max-num-active-seqs=many"), 0, 0},
+		"absent: max_num_seqs alone":    {parse("--max-num-seqs=256"), 0, 256},
+	} {
+		if got := tc.params.MaxNumActiveSeqs; got != tc.wantActive {
+			t.Errorf("%s: MaxNumActiveSeqs = %d, want %d", name, got, tc.wantActive)
+		}
+		if got := tc.params.ExplicitMaxNumSeqs(); got != tc.wantCap {
+			t.Errorf("%s: ExplicitMaxNumSeqs = %d, want %d", name, got, tc.wantCap)
+		}
+	}
+
+	// An unreadable value is recorded, as one for max_num_seqs is, so the read
+	// is not reported complete.
+	if p := parse("--max-num-active-seqs", "$UNSET_ACTIVE"); p.Complete() {
+		t.Errorf("an unreadable --max-num-active-seqs reads as complete: Unresolved=%v", p.Unresolved)
+	}
+	if p := parse("--max-num-active-seqs=64"); !p.Complete() {
+		t.Errorf("a readable --max-num-active-seqs reads as incomplete: Unresolved=%v", p.Unresolved)
+	}
+}
