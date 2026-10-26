@@ -856,21 +856,24 @@ What is restored, and what is not:
   service rate (mu), from its first cycle after the restart. The restored
   slope is held until fresh readings fit a new line. This does not need
   `enableLearnedStateReuse`. The readings in the ITL window are not saved, so
-  whenever the slope is not restored, the variant fits its line from fresh
-  readings and, with reuse off, the snapshot does not shorten the time to a
-  usable mu. The slope is not restored when the variant's engine image,
-  arguments or any other part of its configuration changed while the
-  controller was down; when that configuration could not be read completely
-  (a flag set from a variable the controller cannot resolve); when the
-  variant was last seen longer ago than the variant timeout; when the slope
-  was fitted longer ago than the bucket retention; and from a snapshot
-  written by v0.10.0 or earlier, which has no slope;
-- the ITL lines shared between siblings are restored too. A variant shares
-  its line only while
-  [`enableLearnedStateReuse`](scaling-policy.md#enablelearnedstatereuse) is on
-  for it, only a sibling with it on reads one, and a variant never borrows
-  the line it published itself. A line fitted while reuse was off is filed
-  under the variant alone, and turning reuse on later does not share it;
+  when the slope is not restored the variant fits its line from fresh
+  readings, and with reuse off the snapshot does not shorten the time to a
+  usable mu. The slope is not restored when:
+  - the variant's engine image, arguments or any other part of its
+    configuration changed while the controller was down;
+  - that configuration could not be read completely (a flag set from a
+    variable the controller cannot resolve);
+  - the variant was last seen longer ago than the variant timeout;
+  - the slope was fitted longer ago than the bucket retention;
+  - the snapshot was written by v0.10.0 or earlier, which has no slope;
+- the ITL lines shared between siblings are restored too. A variant
+  publishes each fresh fit of its line under its engine configuration only
+  while [`enableLearnedStateReuse`](scaling-policy.md#enablelearnedstatereuse)
+  is on for it, only a sibling with it on reads one, and a variant never
+  borrows the line it published itself. A line published while reuse was off
+  is filed under the variant alone. Once reuse is on, the variant's next
+  fresh fit is shared; a slope it is only holding, through light load or
+  from a restore, is not published again until it fits afresh;
 - a variant whose arguments changed while the controller was down restores
   its old measured capacity only as a **lower-only, expiring figure**, and
   its old saturated throughput only as a hold-only floor (below). The
