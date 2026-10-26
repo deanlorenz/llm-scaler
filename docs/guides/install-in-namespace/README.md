@@ -238,8 +238,8 @@ troubleshooting](../../reference/operations.md#first-line-troubleshooting).
 **`READY True` but `TARGETS` shows only `cpu`**: KEDA's first call for the
 metric failed and it does not retry, so the workload is unwired. Re-wire it
 (`DRY_RUN=true` only lists them). In the out-of-reach shape add
-`WVA_NS=wva-${NAMESPACE}`; without it the command finds no ScaledObject and
-exits 0 with "nothing to re-wire":
+`WVA_NS=wva-${NAMESPACE}`; without it the command finds no ScaledObject
+naming that scaler, warns with the namespace they do name, and exits 3:
 
 ```bash
 make scaledobjects-rewire

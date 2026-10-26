@@ -625,11 +625,12 @@ wva_verify_scaler_wiring() {
 
 # wva_summary_scaledobjects echoes <namespace>/<name> of every ScaledObject,
 # in the namespaces this install watches, with a trigger naming this install's
-# scaler on either address. Exits 2 when they cannot be listed, or the lister
-# is not loaded: unknown, not none.
+# scaler on either address. $1, when given, is the list
+# wva_scaler_scaledobjects_json already read. Exits 2 when they cannot be
+# listed, or the lister is not loaded: unknown, not none.
 wva_summary_scaledobjects() {
     declare -F wva_scaler_plaintext_scaledobjects >/dev/null || return 2
-    wva_scaler_plaintext_scaledobjects any
+    wva_scaler_plaintext_scaledobjects any "${1:-}"
 }
 
 # wva_rewire_classify reads how KEDA wired each <namespace>/<name> row in $1
@@ -705,7 +706,8 @@ wva_rewire_keda_conn_check() {
 # is WVA_SCALER_REWIRE_WAIT seconds, else WVA_VERIFY_WIRE_WAIT, else 30.
 # Returns 1 while one is unwired or KEDA's connection is refused, 2 when they
 # cannot be listed or DRY_RUN is not true or false, 3 when one could not be
-# read.
+# read or when none names this scaler but some name another WVA namespace
+# and no scaler Service runs in $WVA_NS (WVA_NS points at the wrong install).
 wva_rewire_scaledobjects() {
     declare -F wva_scaler_ensure_wired >/dev/null || return 2
     local rows row rc=0 dry="${DRY_RUN:-false}"
@@ -715,12 +717,42 @@ wva_rewire_scaledobjects() {
            return 2 ;;
     esac
     local WVA_SCALER_REWIRE_WAIT="${WVA_SCALER_REWIRE_WAIT:-${WVA_VERIFY_WIRE_WAIT:-30}}"
-    rows="$(wva_summary_scaledobjects)" || rc=$?
+    # Read once: both the rows naming this scaler and, when there are none,
+    # the namespaces the others name come from the same list.
+    local listed
+    listed="$(wva_scaler_scaledobjects_json)" || rc=$?
+    [ "$rc" != 0 ] || rows="$(wva_summary_scaledobjects "$listed")" || rc=$?
     if [ "$rc" != 0 ]; then
         log_warning "Could not list the ScaledObjects naming this scaler (wva-external-scaler.$WVA_NS), so none was checked or re-wired."
         return 2
     fi
     if [ -z "$rows" ]; then
+        # None naming this scaler, while some name another WVA's: WVA_NS is
+        # wrong unless a scaler runs in it, in which case those belong to a
+        # second install.
+        local others
+        others="$(wva_scaler_other_namespaces "$listed")" || rc=$?
+        if [ "$rc" != 0 ]; then
+            log_warning "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS), and whether they name another could not be read, so none was checked."
+            return 3
+        fi
+        local svc=""
+        if [ -n "$others" ]; then
+            svc=0
+            wva_scaler_svc_state "$WVA_NS" || svc=$?
+        fi
+        if [ -n "$others" ] && [ "$svc" = 0 ]; then
+            log_info "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS): nothing to re-wire. Some name the scaler of another install in $(printf '%s' "$others" | paste -sd' ' -); run this there to re-wire those."
+            return 0
+        fi
+        if [ -n "$others" ] && [ "$svc" = 2 ]; then
+            log_warning "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS), but some name wva-external-scaler.<namespace> with WVA_NS $(printf '%s' "$others" | paste -sd' ' -), and whether a scaler runs in $WVA_NS could not be read (${WVA_SCALER_SVC_ERR:-no error text}). None was checked."
+            return 3
+        fi
+        if [ -n "$others" ]; then
+            log_warning "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS), but some name wva-external-scaler.<namespace> with WVA_NS $(printf '%s' "$others" | paste -sd' ' -), and no scaler Service runs in $WVA_NS. None was checked. Run it again with WVA_NS set to the namespace WVA runs in, e.g.  $(WVA_WATCH_NS="${WVA_WATCH_NS:-$WVA_NS}"; WVA_NS="$(printf '%s\n' "$others" | head -n1)"; wva_make_cmd scaledobjects-rewire)"
+            return 3
+        fi
         log_info "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS): nothing to re-wire."
         return 0
     fi
