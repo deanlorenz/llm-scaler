@@ -19,15 +19,10 @@ decides the replica count; KEDA and the HPA actuate it. It is an advanced fork
 of llm-d's Workload Variant Autoscaler, developed independently, and has diverged
 substantially since.
 
-llm-d has deprecated WVA upstream: `v0.9.0` is its final release, and existing
-users are told to migrate to KEDA + EPP. llm-d says KEDA + EPP covers WVA's
-capabilities except cost-aware placement across variants, some of them through
-a different layer (Kueue, kube-state-metrics), and advises deployments that
-depend on cost-aware placement or on fair sharing of a scarce accelerator pool
-to *"stay on WVA for now"*. This project is one way to stay on that path: an
-independently developed, advanced fork of WVA, still maintained, not affiliated
-with or endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
-scaler) ([KEDA alone, compared](../comparison/keda-alone.md)).
+llm-d itself autoscales with KEDA on the router's (EPP) metrics, one
+ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
+project is not affiliated with or endorsed by llm-d, and its actuation is a
+KEDA external scaler ([KEDA alone, compared](../comparison/keda-alone.md)).
 
 ## Why a scale-up is slow, and not for the reason people assume
 
