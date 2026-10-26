@@ -200,7 +200,7 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 			v.GetString("LEARNED_STATE_VARIANT_TIMEOUT"), v.GetDuration("LEARNED_STATE_VARIANT_TIMEOUT")),
 		learnedBucketRetention: learnedHorizon(ctrl.Log, "LEARNED_STATE_BUCKET_RETENTION",
 			v.GetString("LEARNED_STATE_BUCKET_RETENTION"), v.GetDuration("LEARNED_STATE_BUCKET_RETENTION")),
-		learnedStateSnapshot:   v.GetBool("LEARNED_STATE_SNAPSHOT"),
+		learnedStateSnapshot: v.GetBool("LEARNED_STATE_SNAPSHOT"),
 	}
 
 	cfg.tls = tlsConfig{
