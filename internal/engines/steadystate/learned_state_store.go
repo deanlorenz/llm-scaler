@@ -452,9 +452,11 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	for k, b := range s.ITLBaseline {
 		s.ITLBaseline[k] = sig3(b)
 	}
-	// A slope is refitted, and restamped, every cycle a variant fits one:
-	// left out of the digest like a line's, its clock is written with the
-	// refresh.
+	// A slope is refitted, and restamped, every cycle a variant fits one. As
+	// for a line, its fit time is left out of the digest and its A rounded,
+	// so a refit that moves neither is written with the refresh: after a
+	// crash the restored fit time can be up to one refresh early, which ends
+	// the hold that much sooner, never later.
 	for k, sl := range s.ITLSlopes {
 		sl.FittedAt, sl.A = time.Time{}, sig3(sl.A)
 		s.ITLSlopes[k] = sl
