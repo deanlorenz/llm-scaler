@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=120
+EXPECT_CASES=122
 RAN=0
 FAILED=0
 
@@ -743,6 +743,18 @@ check 'repoint: an address in a namespace that cannot be read is left alone' \
 check 'repoint: an explicit WVA_NS the tenant may not read is accepted, and a dead address repointed' \
     'OK WARN|wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
     "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden' "STUB_SOS='$REPOINT_SOS'")|$(written_addr)"
+
+# --- repoint: which scaler an address names. The short address
+# wva-external-scaler.<ns>:<port> names <ns>, so it is this install and not a
+# candidate; wva-ctl-other is another namespace, not wva-ctl.
+REPOINT_SOS='{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.wva-ctl:9090","modelID":"m"}}]}}]}'
+check 'repoint: the short address of this install is not taken for another' \
+    '0|0' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=forbidden' "STUB_SOS='$REPOINT_SOS'" >/dev/null; grep -c . "$SOW/patched")|$(grep -c 'points at' "$SOW/warned")"
+REPOINT_SOS='{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"spec":{"triggers":[{"type":"external-push","metadata":{"scalerAddress":"wva-external-scaler.wva-ctl-other.svc.cluster.local:9090","modelID":"m"}}]}}]}'
+check 'repoint: a dead namespace that starts with this one is repointed here' \
+    'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
+    "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=present' "STUB_SOS='$REPOINT_SOS'" >/dev/null; written_addr)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d model-identification assertion(s) failed.\n' "$FAILED" >&2

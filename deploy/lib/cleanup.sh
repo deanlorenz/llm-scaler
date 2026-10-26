@@ -20,7 +20,11 @@ wva_scaledobjects_calling_us() {
     if ! out=$(kubectl get scaledobject -A "$@" -o go-template="$tmpl" 2>/dev/null); then
         out=$(kubectl get scaledobject -n "$WVA_NS" "$@" -o go-template="$tmpl" 2>/dev/null) || return 0
     fi
-    printf '%s\n' "$out" | grep -F "wva-external-scaler.${WVA_NS}." | awk '{print $1}' | sort -u || true
+    # wva_names_scaler (common.sh) says which addresses name this scaler.
+    local obj addr
+    printf '%s\n' "$out" | while read -r obj addr _; do
+        [ -n "$addr" ] && wva_names_scaler "$WVA_NS" "$addr" && printf '%s\n' "$obj"
+    done | sort -u || true
 }
 
 undeploy_keda() {
