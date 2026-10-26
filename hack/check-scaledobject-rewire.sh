@@ -33,6 +33,9 @@
 #                the uninstall and pod-writer listers take the same forms;
 #                an outside host (<ns>.attacker.example) is not this scaler,
 #                upper case is; the jq and shell rules agree over one table
+#   no address   a cpu trigger, which has no scalerAddress, names no scaler:
+#                alone it is nothing to re-wire, exit 0; beside a trigger
+#                naming another namespace or this scaler it changes nothing
 #
 # Every case asserts something that a missing function also fails, so a run
 # against code without this feature fails rather than passes empty.
@@ -45,7 +48,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=27
+EXPECTED_CASES=30
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -78,7 +81,8 @@ forbidden() { echo "Error from server (Forbidden): $1 is forbidden: User \"tenan
 notfound() { echo 'Error from server (NotFound): not found' >&2; }
 
 # so <name> <state> <address>...: one ScaledObject in namespace apps, one
-# trigger per address, into $WORK/so.json. <state> is how KEDA wired it:
+# trigger per address, into $WORK/so.json. An address "-" is a cpu trigger,
+# which has no scalerAddress at all. <state> is how KEDA wired it:
 #   wired         every trigger has its metric on the HPA and in the status
 #   unwired       none has, whatever is patched
 #   until-rewire  none has until a wvaRewire patch reaches this ScaledObject
@@ -91,7 +95,8 @@ so() {
     [ -f "$WORK/so.json" ] || echo '{"items":[]}' >"$WORK/so.json"
     printf '%s\n' "$@" | jq -R . | jq -s --arg n "$name" --arg st "$state" '
         {metadata: {namespace: "apps", name: $n},
-         spec: {triggers: [.[] | {type: "external", metadata: {scalerAddress: ., modelID: "m"}}]},
+         spec: {triggers: [.[] | if . == "-" then {type: "cpu", metadata: {value: "80"}}
+                                 else {type: "external", metadata: {scalerAddress: ., modelID: "m"}} end]},
          status: {conditions: (if $st == "paused" then [{type: "Paused", status: "True"}] else [] end)}}' >"$WORK/one.json"
     jq --slurpfile o "$WORK/one.json" '.items += $o' "$WORK/so.json" >"$WORK/so.tmp" && mv "$WORK/so.tmp" "$WORK/so.json"
     echo "$state" >"$WORK/state.$name"
@@ -425,6 +430,9 @@ no wva-external-scaler.$NS-other:9090
 no wva-external-scaler.$NS-other.svc:9090
 no wva-external-scaler:9090
 no wva-external-scaler
+no wva-external-scaler.
+no wva-external-scaler.:9090
+no
 no $OTHER
 no 10.0.0.1:9090"
 RULE_OUT="$(
@@ -445,6 +453,40 @@ RULE_OUT="$(
     done
 )"
 ok '[ -z "$RULE_OUT" ]' "rules disagree: $RULE_OUT"
+NULL_OUT="$(
+    # shellcheck disable=SC1091
+    . "$WORK/common.sh"
+    jq -nc --arg ns "$NS" "${WVA_SCALER_ADDRESS_JQ:-}"'[null | wva_names_scaler($ns), wva_scaler_ns]' 2>&1
+)"
+ok '[ "$NULL_OUT" = "[false,null]" ]' "a null address: jq gave '$NULL_OUT' (want [false,null])"
+
+# A trigger with no scalerAddress -- cpu, prometheus, cron -- is the ordinary
+# case. It names no scaler, and must not make the list unreadable.
+begin "only triggers with no scalerAddress: nothing to re-wire, exit 0"
+reset
+so cpu-a unwired "-"
+so cpu-b unwired "-" "-"
+run
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/warnings" ] && grep -q "nothing to re-wire" "$WORK/info"' "no address: exit $RC (want 0), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+begin "a trigger with no scalerAddress beside one naming another namespace: that namespace, exit 3"
+reset
+so mix-o unwired "-" "wva-external-scaler.wva-elsewhere.svc:9090"
+run
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && grep -q "WVA_NS=wva-elsewhere" "$WORK/warnings" && ! grep -q "could not be read" "$WORK/warnings"' "mix, other namespace: exit $RC (want 3), warnings $(cat "$WORK/warnings")"
+OTHERS="$(
+    # shellcheck disable=SC1091
+    . "$WORK/constants.sh"; . "$WORK/common.sh"; . "$WORK/verify.sh"; . "$WORK/scaler_tls.sh"
+    WVA_NS=$NS
+    wva_scaler_other_namespaces "$(cat "$WORK/so.json")"; echo "rc=$?"
+)"
+ok '[ "$(printf "%s" "$OTHERS" | tr "\n" " ")" = "wva-elsewhere rc=0" ]' "wva_scaler_other_namespaces with a cpu trigger: '$OTHERS' (want wva-elsewhere, rc=0)"
+
+begin "a trigger with no scalerAddress beside one naming this scaler: re-wired on that trigger"
+reset
+so mix-t until-rewire "-" "$ADDR"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 0 ] && grep -q "/spec/triggers/1/metadata/wvaRewire" "$WORK/patches" && ! grep -q "/spec/triggers/0/" "$WORK/patches" && report_has wired mix-t' "mix, this scaler: exit $RC (want 0), patches '$(cat "$WORK/patches")' (want trigger 1 only), report $(cat "$WORK/stdout")"
 
 begin "the make targets: scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"

@@ -197,17 +197,20 @@ wva_pod_writer_namespaces() {
         printf '%s\n' "$out" >&2
         return 1
     fi
-    local ns addr pool model
+    # The namespace each address names is read once per row (wva_scaler_ns),
+    # and compared with the controller one, lower-cased once.
+    local ns addr pool model named ctl
+    ctl="$(printf '%s' "$controller_ns" | tr '[:upper:]' '[:lower:]')"
     printf '%s\n' "$out" | while read -r ns addr pool model _; do
         [ -n "$pool" ] || continue
         model="${model:--}"
-        if wva_names_scaler "$controller_ns" "$addr"; then
+        named="$(wva_scaler_ns "$addr")" || named=""
+        if [ -n "$named" ] && [ "$named" = "$ctl" ]; then
             [ "$kind" = pools ] && [ "$pool" != - ] && printf '%s\n' "$ns"
             [ "$kind" = models ] && [ "$pool" = - ] && printf '%s\n' "$ns"
             continue
         fi
-        if [ "$kind" = unattributed ] && { [ "$pool" != - ] || [ "$model" != - ]; } \
-            && ! wva_scaler_ns "$addr" >/dev/null; then
+        if [ "$kind" = unattributed ] && [ -z "$named" ] && { [ "$pool" != - ] || [ "$model" != - ]; }; then
             printf '%s %s\n' "$ns" "$addr"
         fi
     done | sort -u

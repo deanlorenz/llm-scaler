@@ -448,7 +448,12 @@ wva_scaler_namespaces() {
 #
 # In jq, `ADDRESS | wva_names_scaler($ns)` is the test, and `wva_scaler_ns` is
 # the namespace an address names, or null when it names none.
-WVA_SCALER_ADDRESS_JQ='def wva_names_scaler($ns): ascii_downcase as $a | ("wva-external-scaler." + ($ns | ascii_downcase)) as $p | any($p, $p + ".svc", $p + ".svc.cluster.local"; . as $h | $a == $h or ($a | startswith($h + ":"))); def wva_scaler_ns: . as $a | (ascii_downcase | ltrimstr("wva-external-scaler.") | split(".")[0] | split(":")[0]) as $ns | if ($ns != "") and ($a | wva_names_scaler($ns)) then $ns else null end;'
+#
+# Both are total: an empty or null address -- a cpu or prometheus trigger has
+# no scalerAddress -- names no scaler, and is not an error. An error there
+# aborted the whole program, so one ordinary trigger made every ScaledObject
+# unreadable.
+WVA_SCALER_ADDRESS_JQ='def wva_names_scaler($ns): ((. // "") | ascii_downcase) as $a | ("wva-external-scaler." + (($ns // "") | ascii_downcase)) as $p | any($p, $p + ".svc", $p + ".svc.cluster.local"; . as $h | $a == $h or ($a | startswith($h + ":"))); def wva_scaler_ns: ((. // "") | ascii_downcase) as $a | if ($a | startswith("wva-external-scaler.")) then (($a | ltrimstr("wva-external-scaler.") | split(".")[0] // "") | split(":")[0] // "") as $ns | (if ($ns != "") and ($a | wva_names_scaler($ns)) then $ns else null end) else null end;'
 
 # wva_names_scaler succeeds when address $2 names the scaler in namespace $1,
 # by the rule above.
