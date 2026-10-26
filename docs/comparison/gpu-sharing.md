@@ -32,7 +32,17 @@ llm-scaling-manager does this with the experimental
 
 ## What llm-d offers today
 
-As of 2026-10-26:
+As of 2026-10-26, llm-d has no counterpart for this use case: using every GPU
+in the budget and moving GPUs between models by their load. Its Kueue guide
+lets a model borrow GPUs another model is not using, but GPUs go back only
+when Kueue preempts a borrowed pod for a model returning to its own floor.
+Nothing moves GPUs by load: a lightly loaded model keeps what it holds until
+its own HPA scales it down, and a busy model above its floor cannot take GPUs
+from a quieter one. The guide's rule is *"you may preempt to reach your own
+floor, never to go beyond it. Above your floor you can only take what is
+idle."* Each model's HPA scales on its own and does not see the others' load.
+
+In detail:
 
 - **Each Deployment scales on its own.** llm-d scales with KEDA on the
   router's (EPP) metrics, one ScaledObject per Deployment. Its strategies are
@@ -56,6 +66,7 @@ As of 2026-10-26:
 
 | | Kueue rebalancing (llm-d) | Utilization share (llm-scaling-manager) |
 | --- | --- | --- |
+| Use every GPU and follow the load | No. Idle GPUs can be borrowed, but nothing moves GPUs from a quieter model to a busier one above its floor. | Yes. Each model gets its need, the spare is shared by weight (capped while the budget is contended), and GPUs move as demand shifts. |
 | Who decides a model shrinks | Nobody. An idle model keeps its GPUs until its own HPA scales it down; a borrowed replica is preempted when its lender wants its floor back. | The optimizer picks the donor and how many GPUs it gives. |
 | How GPUs move | The HPA deletes pods, or Kueue preempts a borrowed one; a waiting pod is then admitted. | A planned move: the donor gives first, and the receiver grows once those GPUs are free. The donor drains through scale-down. |
 | Placement | GPUs counted against each ClusterQueue's quota. | Node-aware on a cluster-scoped install: the receiver's replica must fit in the holes the donors open, node by node; multi-pod replicas are funded whole. |
