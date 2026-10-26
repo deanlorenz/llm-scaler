@@ -211,5 +211,5 @@ from upstream, which is the only naming to change in dashboards.
 
 An independently developed, advanced fork of
 [llm-d/llm-d-workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
-not affiliated with or endorsed by the llm-d project. Apache 2.0. Questions and
+not affiliated with or endorsed by llm-d. Apache 2.0. Questions and
 bugs: [GitHub issues](https://github.com/ev-shindin/llm-scaling-manager/issues).

@@ -14,12 +14,13 @@ of phase), for 12 % less GPU than a spare-replica floor and 17 % more than
 none.** (One run per arm, two 8B models on H200, a one-Pod warm pool:
 [measured](docs/well-lit-paths/warm-pool-bridge/measured.md).)
 
-llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
-ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
-project is an independently developed, advanced fork of llm-d's
-workload-variant-autoscaler (WVA). It plugs into the same KEDA, as an external
-scaler. It is not affiliated with or endorsed by llm-d. Kubernetes objects,
-make targets and metrics keep their `wva-` / `wva_` names. ([KEDA alone, compared](docs/comparison/keda-alone.md);
+This project is an independently developed, advanced fork of llm-d's
+workload-variant-autoscaler (WVA). It is not affiliated with or endorsed by
+llm-d. llm-d itself autoscales with KEDA, mainly on the router's (EPP)
+metrics, one ScaledObject per Deployment, and leaves a shared GPU budget to
+Kueue; this project plugs into the same KEDA, as an external scaler.
+Kubernetes objects, make targets and metrics keep their `wva-` / `wva_` names.
+([KEDA alone, compared](docs/comparison/keda-alone.md);
 [what is different from upstream](#what-is-different-from-upstream).)
 
 **Choose it** for several models or variants under one GPU budget. **Use
@@ -223,7 +224,7 @@ Apache 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Related Projects
 
-- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from; it now holds llm-d's KEDA autoscaling blueprints
+- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from; it holds llm-d's KEDA autoscaling blueprints
 - [llm-d infrastructure](https://github.com/llm-d/llm-d-infra)
 - [llm-d main repository](https://github.com/llm-d/llm-d)
 
