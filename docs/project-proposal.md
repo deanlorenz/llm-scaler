@@ -17,10 +17,10 @@ declare one (opt-in; off by default). Alongside
 that it ships a shared warm pool to cover the minutes a new replica spends
 loading, scale-to-zero, and separate handling for prefill and decode.
 
-llm-d itself autoscales with KEDA on the router's (EPP) metrics, one
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
 ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
-project is not affiliated with or endorsed by llm-d, and its actuation is a
-KEDA external scaler ([KEDA alone, compared](comparison/keda-alone.md)).
+project plugs into the same KEDA, as an external scaler. It is not affiliated
+with or endorsed by llm-d ([KEDA alone, compared](comparison/keda-alone.md)).
 
 We built it because the signals a general-purpose autoscaler can act on do not
 tell you what you need to know. We have a benchmark where the request rate

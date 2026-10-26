@@ -19,10 +19,10 @@ decides the replica count; KEDA and the HPA actuate it. It is an advanced fork
 of llm-d's Workload Variant Autoscaler, developed independently, and has diverged
 substantially since.
 
-llm-d itself autoscales with KEDA on the router's (EPP) metrics, one
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
 ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
-project is not affiliated with or endorsed by llm-d, and its actuation is a
-KEDA external scaler ([KEDA alone, compared](../comparison/keda-alone.md)).
+project plugs into the same KEDA, as an external scaler. It is not affiliated
+with or endorsed by llm-d ([KEDA alone, compared](../comparison/keda-alone.md)).
 
 ## Why a scale-up is slow, and not for the reason people assume
 

@@ -14,18 +14,15 @@ of phase), for 12 % less GPU than a spare-replica floor and 17 % more than
 none.** (One run per arm, two 8B models on H200, a one-Pod warm pool:
 [measured](docs/well-lit-paths/warm-pool-bridge/measured.md).)
 
-llm-d has deprecated its workload-variant-autoscaler (WVA): `v0.9.0` is the
-final release, and users are told to migrate to KEDA + EPP. llm-d says that
-path covers WVA except cost-aware placement across variants, and that
-deployments needing that, or fair sharing of a scarce accelerator pool, should
-*"stay on WVA for now"*. This project is one way to do that: an independently
-developed, advanced fork of WVA, still maintained, not affiliated with or
-endorsed by llm-d. It is not upstream WVA: its actuation is a KEDA external
-scaler. Kubernetes objects, make targets and metrics keep their `wva-` /
-`wva_` names. ([KEDA alone, compared](docs/comparison/keda-alone.md);
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
+ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
+project is an independently developed, advanced fork of llm-d's
+workload-variant-autoscaler (WVA). It plugs into the same KEDA, as an external
+scaler. It is not affiliated with or endorsed by llm-d. Kubernetes objects,
+make targets and metrics keep their `wva-` / `wva_` names. ([KEDA alone, compared](docs/comparison/keda-alone.md);
 [what is different from upstream](#what-is-different-from-upstream).)
 
-**Choose it** for several models or variants under one GPU budget. **Stay on
+**Choose it** for several models or variants under one GPU budget. **Use
 llm-d's KEDA recipes** for one model, one GPU type, or a latency-SLO target
 ([where KEDA alone is enough](docs/comparison/keda-alone.md#where-keda-alone-is-enough)).
 Kueue quotas, P/D and quota sharing are experimental. Variant choice is
@@ -226,7 +223,7 @@ Apache 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Related Projects
 
-- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from, renamed from llm-d-workload-variant-autoscaler; WVA is deprecated there in favour of KEDA recipes
+- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from; it now holds llm-d's KEDA autoscaling blueprints
 - [llm-d infrastructure](https://github.com/llm-d/llm-d-infra)
 - [llm-d main repository](https://github.com/llm-d/llm-d)
 
