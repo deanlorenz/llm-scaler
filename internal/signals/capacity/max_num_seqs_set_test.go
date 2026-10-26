@@ -64,12 +64,12 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		"unreadable, max_num_seqs stated": {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 256},
 		"unreadable alone":                {parse("--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 0},
 		// vLLM: Field(default=None, ge=1).
-		"zero is not a value vLLM runs":  {parse("--max-num-seqs=256", "--max-num-active-seqs=0"), 0, 256},
-		"not a number":                   {parse("--max-num-active-seqs=many"), 0, 0},
-		"no value token":                 {parse("--max-num-seqs=256", "--max-num-active-seqs"), 0, 256},
-		"a later unreadable occurrence":  {parse("--max-num-seqs=256", "--max-num-active-seqs=64", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 256},
-		"a later readable occurrence":    {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE", "--max-num-active-seqs=64"), 64, 64},
-		"absent: max_num_seqs alone":     {parse("--max-num-seqs=256"), 0, 256},
+		"zero is not a value vLLM runs": {parse("--max-num-seqs=256", "--max-num-active-seqs=0"), 0, 256},
+		"not a number":                  {parse("--max-num-active-seqs=many"), 0, 0},
+		"no value token":                {parse("--max-num-seqs=256", "--max-num-active-seqs"), 0, 256},
+		"a later unreadable occurrence": {parse("--max-num-seqs=256", "--max-num-active-seqs=64", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 256},
+		"a later readable occurrence":   {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE", "--max-num-active-seqs=64"), 64, 64},
+		"absent: max_num_seqs alone":    {parse("--max-num-seqs=256"), 0, 256},
 	} {
 		if got := tc.params.MaxNumActiveSeqs; got != tc.wantActive {
 			t.Errorf("%s: MaxNumActiveSeqs = %d, want %d", name, got, tc.wantActive)
