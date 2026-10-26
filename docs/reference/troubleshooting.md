@@ -203,8 +203,10 @@ EPP metrics scrape failing on every pod; logged once until a scrape succeeds
 The error quotes the first 200 bytes of the EPP's answer. A `500` with body
 `Authentication failed` or `Authorization for user ... failed` comes from the
 EPP's own TokenReview or SubjectAccessReview call: check its tokenreview RBAC
-(step 2 below). While every pod keeps failing, the scaling manager logs nothing
-more at the default level; it does not repeat the failure as `Optimization error`.
+(step 2 below). While every pod keeps failing, the scaling manager does not
+repeat the failure as `Optimization error` on every retry. It still does when
+the Prometheus fallback below fails too, and when another model fails in the
+same cycle.
 
 `EPP metrics scrape recovered` follows once a scrape succeeds again. The
 per-pod line, `Failed to scrape pod` with `namespace`, `pod` and `error`, is

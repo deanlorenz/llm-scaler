@@ -407,30 +407,53 @@ modelLoop:
 		return err
 	}
 
-	if len(aggregatedErrors) > 0 {
-		joined := errors.Join(aggregatedErrors...)
-		// An EPP that fails every scrape is logged by its source once per change
-		// of state. Returned plainly, the executor also logged it as an
-		// optimization error on every retry, over a thousand lines a run for one
-		// unchanged 500. The error is still returned, so the retry and the
-		// Prometheus fallback count are what they were.
-		if allEPPScrapeFailures(aggregatedErrors) {
-			return executor.Reported(joined)
-		}
-		return joined
+	return joinModelErrors(aggregatedErrors)
+}
+
+// errFallbackFailed marks a model whose EPP scrape failed while the Prometheus
+// fallback was engaged and failed too: nothing observes its queue, and the
+// fallback logs that only when it engages.
+var errFallbackFailed = errors.New("the Prometheus queue fallback failed too")
+
+// joinModelErrors joins the errors of one tick's models. An EPP that fails
+// every scrape is logged by its source once per change of state; returned
+// plainly, the executor also logged it as an optimization error on every retry,
+// over a thousand lines a run for one unchanged 500. So a join made only of
+// such failures is returned as already reported. It is still returned, so the
+// retry and the Prometheus fallback count are what they were.
+func joinModelErrors(errs []error) error {
+	if len(errs) == 0 {
+		return nil
 	}
-	return nil
+	joined := errors.Join(errs...)
+	if allEPPScrapeFailures(errs) {
+		return executor.Reported(joined)
+	}
+	return joined
 }
 
 // allEPPScrapeFailures reports whether every error is an EPP scrape that failed
-// on every Ready pod, the one failure the pod source logs itself.
+// on every Ready pod, the one failure the pod source logs itself, with the
+// Prometheus fallback not failing behind it.
 func allEPPScrapeFailures(errs []error) bool {
 	for _, err := range errs {
-		if !errors.Is(err, pod.ErrScrapeFailed) {
+		if !errors.Is(err, pod.ErrScrapeFailed) || errors.Is(err, errFallbackFailed) {
 			return false
 		}
 	}
 	return len(errs) > 0
+}
+
+// scrapeErrorReason is the reason label of a failed EPP scrape. A non-200
+// answer is categorized on its status alone: the body is the EPP's own text,
+// kept in the error message, and words in it ("timeout", "execution") would
+// otherwise pick the label.
+func scrapeErrorReason(err error) string {
+	var se *pod.StatusError
+	if errors.As(err, &se) {
+		return prometheus.CategorizePrometheusError(errors.New(se.StatusText()))
+	}
+	return prometheus.CategorizePrometheusError(err)
 }
 
 // resolveScaleTarget returns the VA's scale target from the pre-populated map,
@@ -502,13 +525,18 @@ func (e *Engine) processInactiveModel(
 	var fallbackPending source.MetricValue
 	var fallbackHasPending, onFallback bool
 	if err != nil {
-		reason := prometheus.CategorizePrometheusError(err)
-		metrics.IncMetricsCollectionErrors(constants.QueryTypeQueueLength, reason)
+		metrics.IncMetricsCollectionErrors(constants.QueryTypeQueueLength, scrapeErrorReason(err))
 		fallbackPending, fallbackHasPending, onFallback = e.QueueFallback.PendingAfterScrapeFailure(
 			ctx, namespacedPoolName, pool.Namespace, group.modelID, err)
 		if !onFallback {
 			// No second transport, not yet past the failure threshold, or
-			// Prometheus is down too. Surface the scrape error, as before.
+			// Prometheus is down too. Surface the scrape error, as before; with
+			// the Prometheus error when the fallback failed, which keeps it an
+			// optimization error on every retry -- the fallback says so only
+			// when it engages.
+			if promErr := e.QueueFallback.PrometheusFailed(namespacedPoolName); promErr != nil {
+				return errors.Join(err, fmt.Errorf("%w: %w", errFallbackFailed, promErr))
+			}
 			return err
 		}
 	} else {

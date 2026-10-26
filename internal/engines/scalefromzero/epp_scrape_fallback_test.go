@@ -27,8 +27,15 @@ import (
 // metrics endpoint answers 500, as the EPP did in the run that found this.
 func failingEPPSource(t *testing.T, ctx context.Context, ns string) *pod.PodScrapingSource {
 	t.Helper()
+	return failingEPPSourceWithBody(t, ctx, ns, "")
+}
+
+// failingEPPSourceWithBody is failingEPPSource with the 500's body set.
+func failingEPPSourceWithBody(t *testing.T, ctx context.Context, ns, body string) *pod.PodScrapingSource {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	t.Cleanup(server.Close)
 	var port int32

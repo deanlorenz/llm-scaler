@@ -385,12 +385,30 @@ func (p *PodScrapingSource) scrapePodMetrics(ctx context.Context, pod *corev1.Po
 		// when its own TokenReview or SubjectAccessReview call fails, as well as
 		// when its handler does. The start of the body names the reason.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
-		return nil, fmt.Errorf("pod %s returned status %d, body %s",
-			pod.Name, resp.StatusCode, errorBodySnippet(body))
+		return nil, &StatusError{Pod: pod.Name, StatusCode: resp.StatusCode, Body: errorBodySnippet(body)}
 	}
 
 	// Parse Prometheus text format
 	return p.parsePrometheusMetrics(resp.Body, pod.Name)
+}
+
+// StatusError is a scrape a pod answered with a status other than 200.
+type StatusError struct {
+	Pod        string
+	StatusCode int
+	// Body is the start of the response body, quoted (errorBodySnippet).
+	Body string
+}
+
+// Error is the status and the start of the body.
+func (e *StatusError) Error() string {
+	return e.StatusText() + ", body " + e.Body
+}
+
+// StatusText is the error without the body: what a caller that classifies the
+// failure reads, since the body is the pod's own text.
+func (e *StatusError) StatusText() string {
+	return fmt.Sprintf("pod %s returned status %d", e.Pod, e.StatusCode)
 }
 
 // errorBodySnippet quotes at most maxErrorBodyBytes of a response body for an

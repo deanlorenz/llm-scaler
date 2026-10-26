@@ -236,6 +236,21 @@ func (f *QueueFallback) PendingAfterScrapeFailure(
 	return pending, hasPending, true
 }
 
+// PrometheusFailed returns the error of the Prometheus read the fallback last
+// answered from, when the fallback is engaged for pool and that read failed;
+// nil otherwise, and on a nil fallback.
+func (f *QueueFallback) PrometheusFailed(pool string) error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.engaged[pool] {
+		return nil
+	}
+	return f.lastErr
+}
+
 // valuesLocked returns the flow-control queue series, refreshing from Prometheus
 // at most once per MinInterval. Must be called with f.mu held.
 func (f *QueueFallback) valuesLocked(ctx context.Context) ([]source.MetricValue, error) {
