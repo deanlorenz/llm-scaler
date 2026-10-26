@@ -434,6 +434,48 @@ wva_scaler_namespaces() {
     return 0
 }
 
+# Which ScaledObject trigger addresses name the scaler of the install in a
+# namespace <ns>: wva-external-scaler.<ns>, wva-external-scaler.<ns>.svc or
+# wva-external-scaler.<ns>.svc.cluster.local, each alone or followed by
+# :<port>, compared without regard to case (DNS does not regard it). Nothing
+# else: not wva-external-scaler.<ns>-other, another install, and not
+# wva-external-scaler.<ns>.example.com, a host outside the cluster.
+#
+# One rule, written twice: WVA_SCALER_ADDRESS_JQ for the jq programs, which
+# put it in front of their own (jq -r "$WVA_SCALER_ADDRESS_JQ"'...'), and
+# wva_names_scaler for shell callers. hack/check-scaledobject-rewire.sh runs
+# both over one table of addresses and fails when they disagree.
+#
+# In jq, `ADDRESS | wva_names_scaler($ns)` is the test, and `wva_scaler_ns` is
+# the namespace an address names, or null when it names none.
+WVA_SCALER_ADDRESS_JQ='def wva_names_scaler($ns): ascii_downcase as $a | ("wva-external-scaler." + ($ns | ascii_downcase)) as $p | any($p, $p + ".svc", $p + ".svc.cluster.local"; . as $h | $a == $h or ($a | startswith($h + ":"))); def wva_scaler_ns: . as $a | (ascii_downcase | ltrimstr("wva-external-scaler.") | split(".")[0] | split(":")[0]) as $ns | if ($ns != "") and ($a | wva_names_scaler($ns)) then $ns else null end;'
+
+# wva_names_scaler succeeds when address $2 names the scaler in namespace $1,
+# by the rule above.
+wva_names_scaler() {
+    # tr, not ${2,,}: macOS still ships bash 3.2.
+    local a p h
+    a="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    p="wva-external-scaler.$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    for h in "$p" "$p.svc" "$p.svc.cluster.local"; do
+        [ "$a" = "$h" ] && return 0
+        case "$a" in "$h":*) return 0 ;; esac
+    done
+    return 1
+}
+
+# wva_scaler_ns echoes the namespace address $1 names a scaler in, by the rule
+# above; nothing, and a non-zero exit, when it names none.
+wva_scaler_ns() {
+    local a ns
+    a="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$a" in wva-external-scaler.*) ;; *) return 1 ;; esac
+    ns="${a#wva-external-scaler.}"
+    ns="${ns%%[.:]*}"
+    [ -n "$ns" ] && wva_names_scaler "$ns" "$a" || return 1
+    printf '%s\n' "$ns"
+}
+
 # wva_scaler_svc_state reports on the wva-external-scaler Service in namespace $1:
 # 0 it is there, 1 the API server says it is not, 2 could not look -- Forbidden,
 # or any other error. On 2, WVA_SCALER_SVC_ERR holds kubectl's first error line.

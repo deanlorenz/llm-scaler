@@ -175,14 +175,14 @@ wva_ensure_pod_writes() {
 # wva_pod_writer_namespaces echoes, one per line and sorted, the namespaces
 # holding ScaledObjects that call the controller in $1: with $2 = pools, those
 # declaring a warm pool (trigger metadata warmPoolName); with $2 = models, the
-# others. A trigger calls it when its scalerAddress starts with
-# wva-external-scaler.<$1>. or wva-external-scaler.<$1>: -- the long and the
-# short Service name -- or is that bare host.
+# others. A trigger calls it when its scalerAddress names the scaler in $1
+# (wva_names_scaler in common.sh says which addresses do).
 #
 # With $2 = unattributed it echoes "<namespace> <address>" instead, for each
-# trigger that carries warmPoolName or modelID but whose address names no
-# wva-external-scaler.<namespace> at all (an IP, another host, the bare
-# Service name): which controller it calls cannot be told from the address.
+# trigger that carries warmPoolName or modelID but whose address names the
+# scaler of no namespace (an IP, another host, the Service name with no
+# namespace such as wva-external-scaler:9090): which controller it calls
+# cannot be told from the address.
 #
 # A cluster without the ScaledObject kind (SCALER_BACKEND=none, no KEDA) has
 # none, and echoes nothing. Fails, with kubectl's message on stderr, when they
@@ -197,19 +197,20 @@ wva_pod_writer_namespaces() {
         printf '%s\n' "$out" >&2
         return 1
     fi
-    printf '%s\n' "$out" | awk -v bare="wva-external-scaler.${controller_ns}" \
-        -v dot="wva-external-scaler.${controller_ns}." \
-        -v colon="wva-external-scaler.${controller_ns}:" -v kind="$kind" '
-        NF >= 3 {
-            model = (NF >= 4) ? $4 : "-"
-            if ($2 == bare || index($2, dot) == 1 || index($2, colon) == 1) {
-                if (kind == "pools" && $3 != "-") print $1
-                if (kind == "models" && $3 == "-") print $1
-                next
-            }
-            if (kind == "unattributed" && ($3 != "-" || model != "-") && $2 !~ /^wva-external-scaler\.[^.:]+([.:]|$)/)
-                print $1 " " $2
-        }' | sort -u
+    local ns addr pool model
+    printf '%s\n' "$out" | while read -r ns addr pool model _; do
+        [ -n "$pool" ] || continue
+        model="${model:--}"
+        if wva_names_scaler "$controller_ns" "$addr"; then
+            [ "$kind" = pools ] && [ "$pool" != - ] && printf '%s\n' "$ns"
+            [ "$kind" = models ] && [ "$pool" = - ] && printf '%s\n' "$ns"
+            continue
+        fi
+        if [ "$kind" = unattributed ] && { [ "$pool" != - ] || [ "$model" != - ]; } \
+            && ! wva_scaler_ns "$addr" >/dev/null; then
+            printf '%s %s\n' "$ns" "$addr"
+        fi
+    done | sort -u
 }
 
 # wva_pod_writer_marked_namespaces echoes the namespaces holding a pod with the

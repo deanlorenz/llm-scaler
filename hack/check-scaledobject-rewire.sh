@@ -30,7 +30,9 @@
 #   address forms  this scaler by its short address (<host>:<port>), its
 #                fully-qualified one or its bare host is re-wired; a
 #                namespace that only starts with WVA_NS is another install;
-#                the uninstall and pod-writer listers take the same forms
+#                the uninstall and pod-writer listers take the same forms;
+#                an outside host (<ns>.attacker.example) is not this scaler,
+#                upper case is; the jq and shell rules agree over one table
 #
 # Every case asserts something that a missing function also fails, so a run
 # against code without this feature fails rather than passes empty.
@@ -43,7 +45,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=25
+EXPECTED_CASES=27
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -360,6 +362,8 @@ lister() {
     shift 2
     (
         # shellcheck disable=SC1091
+        . "$WORK/common.sh"
+        # shellcheck disable=SC1091
         . "$WORK/cleanup.sh"
         # shellcheck disable=SC1091
         . "$WORK/pod_writer.sh"
@@ -375,21 +379,72 @@ ROWS="apps/long wva-external-scaler.$NS.svc:9090
 apps/fq wva-external-scaler.$NS.svc.cluster.local:9090
 apps/short wva-external-scaler.$NS:9090
 apps/bare wva-external-scaler.$NS
+apps/upper WVA-External-Scaler.$NS.SVC:9090
 apps/px wva-external-scaler.$NS-other:9090
+apps/evil wva-external-scaler.$NS.attacker.example:9090
 apps/other $OTHER"
 GOT="$(lister wva_scaledobjects_calling_us "$ROWS")"
-ok '[ "$GOT" = "apps/bare apps/fq apps/long apps/short " ]' "uninstall lister: got '$GOT' (want apps/bare apps/fq apps/long apps/short)"
+ok '[ "$GOT" = "apps/bare apps/fq apps/long apps/short apps/upper " ]' "uninstall lister: got '$GOT' (want apps/bare apps/fq apps/long apps/short apps/upper)"
 
 begin "pod-writer lister: every address form of this scaler, and the bare host is not unattributed"
 ROWS="t-long wva-external-scaler.$NS.svc:9090 - m
 t-short wva-external-scaler.$NS:9090 - m
 t-bare wva-external-scaler.$NS - m
+t-up WVA-EXTERNAL-SCALER.$NS.SVC.CLUSTER.LOCAL:9090 - m
 t-px wva-external-scaler.$NS-other:9090 - m
+t-evil wva-external-scaler.$NS.attacker.example:9090 - m
 t-ip 10.0.0.1:9090 - m"
 GOT="$(lister wva_pod_writer_namespaces "$ROWS" "$NS" models)"
-ok '[ "$GOT" = "t-bare t-long t-short " ]' "pod-writer lister, models: got '$GOT' (want t-bare t-long t-short)"
+ok '[ "$GOT" = "t-bare t-long t-short t-up " ]' "pod-writer lister, models: got '$GOT' (want t-bare t-long t-short t-up)"
 GOT="$(lister wva_pod_writer_namespaces "$ROWS" "$NS" unattributed)"
-ok '[ "$GOT" = "t-ip 10.0.0.1:9090 " ]' "pod-writer lister, unattributed: got '$GOT' (want only t-ip)"
+ok '[ "$GOT" = "t-evil wva-external-scaler.$NS.attacker.example:9090 t-ip 10.0.0.1:9090 " ]' "pod-writer lister, unattributed: got '$GOT' (want t-evil and t-ip)"
+
+# A host outside the cluster that only starts with this scaler name is not
+# this scaler, and case does not matter: DNS does not regard it.
+begin "re-wire: an outside host is not this scaler; an upper-case address is"
+reset
+so app-ci until-rewire "WVA-External-Scaler.$NS.SVC:9090" "wva-external-scaler.$NS.attacker.example:9090"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 0 ] && grep -q "/spec/triggers/0/metadata/wvaRewire" "$WORK/patches" && ! grep -q "/spec/triggers/1/" "$WORK/patches" && report_has wired app-ci' "case and outside host: exit $RC (want 0), patches '$(cat "$WORK/patches")' (want trigger 0 only), report $(cat "$WORK/stdout")"
+
+# common.sh writes the rule twice, once for jq and once for the shell. Both
+# run over one table, each against the expected answer, so they cannot drift.
+begin "the jq and shell address rules agree, address by address"
+RULE_TABLE="yes wva-external-scaler.$NS
+yes wva-external-scaler.$NS:9090
+yes wva-external-scaler.$NS.svc
+yes wva-external-scaler.$NS.svc:9090
+yes wva-external-scaler.$NS.svc.cluster.local
+yes wva-external-scaler.$NS.svc.cluster.local:9090
+yes WVA-EXTERNAL-SCALER.$NS.SVC:9090
+no wva-external-scaler.$NS.attacker.example:9090
+no wva-external-scaler.$NS.svc.attacker:9090
+no wva-external-scaler.$NS.svc.cluster.local.evil:9090
+no wva-external-scaler.$NS.other.svc:9090
+no wva-external-scaler.$NS-other:9090
+no wva-external-scaler.$NS-other.svc:9090
+no wva-external-scaler:9090
+no wva-external-scaler
+no $OTHER
+no 10.0.0.1:9090"
+RULE_OUT="$(
+    # shellcheck disable=SC1091
+    . "$WORK/common.sh"
+    declare -F wva_names_scaler >/dev/null || { echo "wva_names_scaler is not defined"; exit 0; }
+    [ -n "${WVA_SCALER_ADDRESS_JQ:-}" ] || { echo "WVA_SCALER_ADDRESS_JQ is not set"; exit 0; }
+    printf '%s\n' "$RULE_TABLE" | while read -r want addr; do
+        if wva_names_scaler "$NS" "$addr"; then sh=yes; else sh=no; fi
+        jq=$(jq -nr --arg a "$addr" --arg ns "$NS" "$WVA_SCALER_ADDRESS_JQ"'$a | if wva_names_scaler($ns) then "yes" else "no" end' 2>&1)
+        [ "$sh" = "$want" ] && [ "$jq" = "$want" ] || echo "$addr: want $want, shell $sh, jq $jq"
+        # The namespace an address names: this one for a yes, none for these no.
+        shns=$(wva_scaler_ns "$addr" || true)
+        jqns=$(jq -nr --arg a "$addr" "$WVA_SCALER_ADDRESS_JQ"'$a | wva_scaler_ns // ""' 2>&1)
+        if [ "$want" = yes ]; then wantns=$NS; else wantns=""; fi
+        case "$addr" in *"$NS-other"*) wantns="$NS-other" ;; esac
+        [ "$shns" = "$wantns" ] && [ "$jqns" = "$wantns" ] || echo "$addr: namespace want '$wantns', shell '$shns', jq '$jqns'"
+    done
+)"
+ok '[ -z "$RULE_OUT" ]' "rules disagree: $RULE_OUT"
 
 begin "the make targets: scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"

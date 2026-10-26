@@ -3343,7 +3343,7 @@ so_repoint_stale() {
     want="$(so_scaler_addr "$dest")"
     auth="$(so_trigger_auth "$want")"
     [ -n "$auth" ] || auth=null
-    self="wva-external-scaler.${dest}"
+    self="$dest"
 
     local rows
     rows=$(so_repoint_candidates "$self") || return 1
@@ -3477,11 +3477,9 @@ so_repoint_destination() {
 }
 
 # so_repoint_candidates echoes `namespace name address` for every ScaledObject
-# whose WVA trigger names something other than $1, the scaler host
-# wva-external-scaler.<namespace>. An address names $1 when $1 is followed by
-# ".", ":" or nothing: the long form, the short form <host>:<port>, or the bare
-# host. A plain prefix test would miss the short form and take
-# wva-external-scaler.<namespace>-other for <namespace>.
+# whose WVA trigger does not name the scaler in namespace $1 (wva_names_scaler
+# in common.sh says which addresses do). A plain prefix test missed the short
+# form <host>:<port>.
 #
 # Cluster-wide first, then the install's own namespace: the objects needing
 # repair are in the WORKLOAD namespaces, which for a cluster-scoped install are
@@ -3493,8 +3491,7 @@ so_repoint_candidates() {
         .items[]
         | .metadata.namespace as $ns | .metadata.name as $n
         | [ .spec.triggers[]?.metadata.scalerAddress // ""
-            | select(startswith("wva-external-scaler.")
-                and ((. == $self or startswith($self + ".") or startswith($self + ":")) | not)) ]
+            | select((ascii_downcase | startswith("wva-external-scaler.")) and (wva_names_scaler($self) | not)) ]
         | select(length > 0)
         | $ns + " " + $n + " " + .[0]'
 
@@ -3503,18 +3500,18 @@ so_repoint_candidates() {
         for ns in $(so_target_namespaces); do
             [ -n "$ns" ] || continue
             kubectl get scaledobject -n "$ns" -o json 2>/dev/null \
-                | jq -r --arg self "$self" "$filter" 2>/dev/null || true
+                | jq -r --arg self "$self" "$WVA_SCALER_ADDRESS_JQ$filter" 2>/dev/null || true
         done
         return 0
     fi
 
     if out=$(kubectl get scaledobject -A -o json 2>/dev/null); then
-        printf '%s' "$out" | jq -r --arg self "$self" "$filter" 2>/dev/null || true
+        printf '%s' "$out" | jq -r --arg self "$self" "$WVA_SCALER_ADDRESS_JQ$filter" 2>/dev/null || true
         return 0
     fi
     log_info "Cannot list ScaledObjects cluster-wide — scanning $WVA_NS only. Pass WVA_DEFAULT_SO_NS=<namespace> to scan somewhere else."
     kubectl get scaledobject -n "$WVA_NS" -o json 2>/dev/null \
-        | jq -r --arg self "$self" "$filter" 2>/dev/null || true
+        | jq -r --arg self "$self" "$WVA_SCALER_ADDRESS_JQ$filter" 2>/dev/null || true
 }
 
 # --- KEDA fallback ---------------------------------------------------------------
