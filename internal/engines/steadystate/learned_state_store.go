@@ -452,6 +452,13 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	for k, b := range s.ITLBaseline {
 		s.ITLBaseline[k] = sig3(b)
 	}
+	// A slope is refitted, and restamped, every cycle a variant fits one:
+	// left out of the digest like a line's, its clock is written with the
+	// refresh.
+	for k, sl := range s.ITLSlopes {
+		sl.FittedAt, sl.A = time.Time{}, sig3(sl.A)
+		s.ITLSlopes[k] = sl
+	}
 	for k, m := range s.Forgotten {
 		m.Seen = time.Time{}
 		s.Forgotten[k] = m
@@ -598,6 +605,7 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		out = append(out, learnedStateEntry{at: seen, key: "seen|" + k, drop: func() {
 			delete(s.VariantSeenAt, k)
 			delete(s.ITLBaseline, k)
+			delete(s.ITLSlopes, k)
 			delete(s.StartSeconds, k)
 			maps.DeleteFunc(s.ITLBaselineStash, func(sk string, _ float64) bool { return strings.HasPrefix(sk, k+"#") })
 		}})
@@ -607,6 +615,13 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	for k := range s.ITLBaselineStash {
 		if base, _, _ := strings.Cut(k, "#"); s.VariantSeenAt[base].IsZero() {
 			out = append(out, learnedStateEntry{spare: true, key: "itlstash|" + k, drop: func() { delete(s.ITLBaselineStash, k) }})
+		}
+	}
+	// A held ITL slope goes with its variant's liveness, as its baseline
+	// does; one whose variant left none goes first.
+	for k := range s.ITLSlopes {
+		if s.VariantSeenAt[k].IsZero() {
+			out = append(out, learnedStateEntry{spare: true, key: "itlslope|" + k, drop: func() { delete(s.ITLSlopes, k) }})
 		}
 	}
 	for k, l := range s.ITLLines {

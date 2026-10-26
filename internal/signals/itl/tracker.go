@@ -480,6 +480,46 @@ func (t *Tracker) RestoreBaseline(key string, b float64) {
 	}
 }
 
+// Slope is a key's last fitted A, with when and under which engine arguments
+// (Admission.Args) it was fitted: what Observe holds through light load, in a
+// form a snapshot can carry across a restart.
+type Slope struct {
+	A        float64
+	FittedAt time.Time
+	Args     string
+}
+
+// Slopes returns a copy of every key's last fitted A.
+func (t *Tracker) Slopes() map[string]Slope {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]Slope, len(t.slopes))
+	for key, s := range t.slopes {
+		out[key] = Slope{A: s.a, FittedAt: s.fittedAt, Args: s.args}
+	}
+	return out
+}
+
+// ForgetSlopes drops every key's last A, fitted or restored, and keeps the
+// windows, which fit a new one.
+func (t *Tracker) ForgetSlopes() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	clear(t.slopes)
+}
+
+// RestoreSlope sets the key's last A unless it already holds one: what was
+// fitted since the process started wins over what a snapshot carried. The
+// hold it allows is bounded as a live one is, from FittedAt and by Args
+// (Admission).
+func (t *Tracker) RestoreSlope(key string, s Slope) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, have := t.slopes[key]; !have {
+		t.slopes[key] = heldSlope{a: s.A, fittedAt: s.FittedAt, args: s.Args}
+	}
+}
+
 // SetBaseline sets the key's intercept.
 func (t *Tracker) SetBaseline(key string, b float64) {
 	t.mu.Lock()
