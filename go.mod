@@ -5,12 +5,12 @@ go 1.26.0
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kedacore/keda/v2 v2.21.0
-	github.com/onsi/ginkgo/v2 v2.33.0
-	github.com/onsi/gomega v1.43.1
+	github.com/onsi/ginkgo/v2 v2.33.1
+	github.com/onsi/gomega v1.44.0
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.89.0
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 	k8s.io/apimachinery v0.36.5
 	k8s.io/client-go v0.36.5
 	sigs.k8s.io/controller-runtime v0.24.1
