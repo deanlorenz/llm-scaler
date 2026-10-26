@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -807,6 +808,42 @@ vllm_num_requests_waiting{namespace="test-ns"} 3
 			Expect(err.Error()).To(ContainSubstring("401"))
 			Expect(results).To(BeNil())
 		})
+
+		// A bare status said nothing about which side was wrong: an EPP answers
+		// 500 when its own TokenReview fails as well as when its handler does.
+		DescribeTable("should quote the start of a non-200 body in the error",
+			func(body, want, notWant string) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = fmt.Fprint(w, body)
+				}))
+				defer server.Close()
+				var port int32
+				_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+				Expect(err).NotTo(HaveOccurred())
+
+				source, err := NewPodScrapingSource(ctx, fakeClient.WithObjects(service, readyPod1).Build(),
+					PodScrapingSourceConfig{
+						ServiceName:      "test-pool-epp",
+						ServiceNamespace: "test-ns",
+						MetricsPort:      port,
+					})
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+				Expect(err).To(MatchError(ErrScrapeFailed))
+				Expect(err.Error()).To(ContainSubstring("pod epp-pod-1 returned status 500, body " + want))
+				if notWant != "" {
+					Expect(err.Error()).NotTo(ContainSubstring(notWant))
+				}
+			},
+			Entry("the reason the EPP gives", "Authentication failed\n", `"Authentication failed"`, ""),
+			Entry("an empty body", "", "(empty)", ""),
+			Entry("a long body, cut at 200 bytes",
+				strings.Repeat("x", 1000),
+				`"`+strings.Repeat("x", maxErrorBodyBytes)+`" (truncated)`,
+				strings.Repeat("x", maxErrorBodyBytes+1)),
+		)
 
 		It("should return the pods that answered, and no error, when only some fail", func() {
 			var port int32
