@@ -59,8 +59,11 @@ var _ = Describe("learned-state horizons", func() {
 				}
 			}
 		},
-		Entry("all zero, i.e. nothing configured", capacity.Horizons{},
-			[]string{"episodeGap", "variantTimeout", "bucketRetention"}),
+		Entry("all zero, i.e. nothing configured: defaults, nothing reported", capacity.Horizons{},
+			[]string{}),
+		Entry("one unset, one unusable: only the unusable one is reported",
+			capacity.Horizons{EpisodeGap: 0, VariantTimeout: time.Second, BucketRetention: time.Hour},
+			[]string{"variantTimeout"}),
 		Entry("negative", capacity.Horizons{EpisodeGap: -time.Hour, VariantTimeout: time.Hour, BucketRetention: time.Hour},
 			[]string{"episodeGap"}),
 		Entry("a unit-less value, which viper parses as nanoseconds",
@@ -160,10 +163,15 @@ var _ = Describe("learned-state horizons", func() {
 			Expect(h.BucketRetention).To(Equal(240 * time.Hour))
 		})
 
-		It("names all three when nothing is configured", func() {
-			_, replaced := NewSaturationAnalyzer(capacity.NewStore()).
+		// Issue #319: config reads an unset LEARNED_STATE_* variable as 0, and
+		// naming those made every controller started with default settings log
+		// "Unusable learned-state horizon" at ERROR.
+		It("names nothing and uses the defaults when nothing is configured", func() {
+			a, replaced := NewSaturationAnalyzer(capacity.NewStore()).
 				WithHorizons(capacity.Horizons{})
-			Expect(replaced).To(ConsistOf("episodeGap", "variantTimeout", "bucketRetention"))
+			Expect(replaced).To(BeEmpty(),
+				"unset is not unusable: an empty config must not produce the startup error")
+			Expect(a.Horizons()).To(Equal(capacity.DefaultHorizons()))
 		})
 	})
 

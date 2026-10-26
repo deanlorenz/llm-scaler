@@ -901,7 +901,11 @@ The first three are **defaults, not the values in force**. They are assembled in
 fills from `Config.LearnedStateHorizons()` — `LEARNED_STATE_EPISODE_GAP`,
 `LEARNED_STATE_VARIANT_TIMEOUT`, `LEARNED_STATE_BUCKET_RETENTION`. `Horizons.Sanitized` floors each
 field at `MinHorizon` (1m) independently and names the ones it replaced, so a single
-unusable value does not discard the other two. Read the pair in force off
+unusable value does not discard the other two. A zero field takes its default without
+being named, so an unconfigured controller logs no error. Zero is also what viper
+returns for a value that was set and does not parse (`7d`) or was set to `0`; the
+loader reports those itself (`learnedHorizon` in `internal/config/loader.go`), where
+the value as written is still known. Read the pair in force off
 `a.horizons`; `EvictStaleHistory()` takes no arguments, because a horizon passed per
 sweep is a horizon no operator can reach.
 
