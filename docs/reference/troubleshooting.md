@@ -197,8 +197,14 @@ The scrape failure itself is logged once, when every EPP pod starts failing:
 
 ```text
 EPP metrics scrape failing on every pod; logged once until a scrape succeeds
-  {"namespace": "<ns>", "service": "<epp-service>", "pods": 2, "error": "pod <epp-pod> returned status 401"}
+  {"namespace": "<ns>", "service": "<epp-service>", "pods": 2, "error": "pod <epp-pod> returned status 401, body \"Unauthorized\""}
 ```
+
+The error quotes the first 200 bytes of the EPP's answer. A `500` with body
+`Authentication failed` or `Authorization for user ... failed` comes from the
+EPP's own TokenReview or SubjectAccessReview call: check its tokenreview RBAC
+(step 2 below). While every pod keeps failing, the scaling manager logs nothing
+more at the default level; it does not repeat the failure as `Optimization error`.
 
 `EPP metrics scrape recovered` follows once a scrape succeeds again. The
 per-pod line, `Failed to scrape pod` with `namespace`, `pod` and `error`, is

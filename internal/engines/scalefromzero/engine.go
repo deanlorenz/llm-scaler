@@ -33,6 +33,7 @@ import (
 
 	accel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/pod"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
@@ -407,9 +408,29 @@ modelLoop:
 	}
 
 	if len(aggregatedErrors) > 0 {
-		return errors.Join(aggregatedErrors...)
+		joined := errors.Join(aggregatedErrors...)
+		// An EPP that fails every scrape is logged by its source once per change
+		// of state. Returned plainly, the executor also logged it as an
+		// optimization error on every retry, over a thousand lines a run for one
+		// unchanged 500. The error is still returned, so the retry and the
+		// Prometheus fallback count are what they were.
+		if allEPPScrapeFailures(aggregatedErrors) {
+			return executor.Reported(joined)
+		}
+		return joined
 	}
 	return nil
+}
+
+// allEPPScrapeFailures reports whether every error is an EPP scrape that failed
+// on every Ready pod, the one failure the pod source logs itself.
+func allEPPScrapeFailures(errs []error) bool {
+	for _, err := range errs {
+		if !errors.Is(err, pod.ErrScrapeFailed) {
+			return false
+		}
+	}
+	return len(errs) > 0
 }
 
 // resolveScaleTarget returns the VA's scale target from the pre-populated map,

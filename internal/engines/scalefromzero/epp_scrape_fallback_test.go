@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/pod"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
@@ -85,8 +86,13 @@ func TestEveryEPPScrapeFailingWakesThroughThePrometheusFallback(t *testing.T) {
 	f.engine.QueueFallback = NewQueueFallback(prom)
 
 	for i := 1; i < f.engine.QueueFallback.Threshold; i++ {
-		require.Error(t, f.engine.optimize(ctx),
-			"scrape %d of every EPP pod failed; below the threshold that must surface", i)
+		err := f.engine.optimize(ctx)
+		require.Error(t, err, "scrape %d of every EPP pod failed; below the threshold that must surface", i)
+		// The pod source logs the failing state once per change, so the
+		// executor must not log it again as an optimization error every tick.
+		assert.True(t, executor.IsReported(err), "scrape %d: an EPP scrape failure is already reported: %v", i, err)
+		assert.ErrorIs(t, err, pod.ErrScrapeFailed)
+		assert.Contains(t, err.Error(), "returned status 500", "the status reaches the error")
 		_, published, _ := f.woken()
 		require.False(t, published, "woken below the fallback threshold")
 	}
@@ -168,8 +174,11 @@ func TestNoReadyEPPPodWakesThroughThePrometheusFallback(t *testing.T) {
 			f.engine.QueueFallback = NewQueueFallback(prom)
 
 			for i := 1; i < f.engine.QueueFallback.Threshold; i++ {
-				require.Error(t, f.engine.optimize(ctx),
-					"tick %d found no Ready EPP pod; below the threshold that must surface", i)
+				err := f.engine.optimize(ctx)
+				require.Error(t, err, "tick %d found no Ready EPP pod; below the threshold that must surface", i)
+				// The source logs no Ready pod at debug only, so this one is not
+				// reported and must stay an optimization error.
+				assert.False(t, executor.IsReported(err), "tick %d: no Ready EPP pod is not reported by the source", i)
 			}
 			require.NoError(t, f.engine.optimize(ctx), "at the threshold the fallback answers")
 

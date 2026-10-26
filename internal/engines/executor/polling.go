@@ -22,7 +22,34 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
+
+// Reported marks err as one its source has already logged, once per change of
+// state. The executor still retries it exactly as any other error, but logs it
+// at debug level instead of as an optimization error on every attempt. Only an
+// error returned as Reported itself is quieted, never one that merely wraps or
+// joins a Reported error, so a new failure joined to a known one stays loud.
+func Reported(err error) error {
+	if err == nil {
+		return nil
+	}
+	return reportedError{err: err}
+}
+
+// reportedError is the error Reported returns.
+type reportedError struct{ err error }
+
+func (r reportedError) Error() string { return r.err.Error() }
+func (r reportedError) Unwrap() error { return r.err }
+
+// IsReported reports whether err was returned by Reported. It looks at err
+// itself only, not at the errors it wraps.
+func IsReported(err error) bool {
+	_, ok := err.(reportedError)
+	return ok
+}
 
 // PollingExecutor executes the optimization function at fixed intervals.
 type PollingExecutor struct {
@@ -69,7 +96,11 @@ func (e *PollingExecutor) executeWithRetry(ctx context.Context) {
 			return
 		}
 
-		logger.Error(err, "Optimization error")
+		if IsReported(err) {
+			logger.V(logging.DEBUG).Info("Optimization error already reported by its source", "error", err.Error())
+		} else {
+			logger.Error(err, "Optimization error")
+		}
 
 		select {
 		case <-ctx.Done():

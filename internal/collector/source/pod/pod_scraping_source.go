@@ -37,6 +37,17 @@ import (
 // answer is unknown rather than empty.
 var ErrNoReadyPods = errors.New("no Ready pods to scrape")
 
+// ErrScrapeFailed is returned, wrapped together with the first pod's error, by
+// Refresh when every Ready pod was scraped and none answered. Refresh logs the
+// change into and out of that state itself, so a caller can tell this failure
+// apart from one nobody has reported yet.
+var ErrScrapeFailed = errors.New("scrape of every Ready pod failed")
+
+// maxErrorBodyBytes bounds how much of a non-200 response body is quoted in the
+// scrape error: enough for the reason an EPP gives ("Authentication failed",
+// "Authorization for user ... failed"), not enough to flood a log line.
+const maxErrorBodyBytes = 200
+
 // PodScrapingSource implements MetricsSource for direct pod scraping.
 type PodScrapingSource struct {
 	config     PodScrapingSourceConfig
@@ -166,8 +177,8 @@ func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec
 	// no-wake-signal for an EPP that was answering 401 or 500. The cache keeps
 	// its last good answer rather than being overwritten with nothing.
 	if len(results) == 0 {
-		err := fmt.Errorf("scrape of every Ready pod (%d) of service %s/%s failed: %w",
-			len(pods), p.config.ServiceNamespace, p.config.ServiceName, firstErr)
+		err := fmt.Errorf("service %s/%s: %w (%d pods): %w",
+			p.config.ServiceNamespace, p.config.ServiceName, ErrScrapeFailed, len(pods), firstErr)
 		// A cancelled or expired context fails every scrape too, at shutdown or
 		// when the caller gave up. That is not an EPP outage: no line, and the
 		// state is left as it was.
@@ -370,11 +381,33 @@ func (p *PodScrapingSource) scrapePodMetrics(ctx context.Context, pod *corev1.Po
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pod %s returned status %d", pod.Name, resp.StatusCode)
+		// The status alone does not say which side is wrong: an EPP answers 500
+		// when its own TokenReview or SubjectAccessReview call fails, as well as
+		// when its handler does. The start of the body names the reason.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		return nil, fmt.Errorf("pod %s returned status %d, body %s",
+			pod.Name, resp.StatusCode, errorBodySnippet(body))
 	}
 
 	// Parse Prometheus text format
 	return p.parsePrometheusMetrics(resp.Body, pod.Name)
+}
+
+// errorBodySnippet quotes at most maxErrorBodyBytes of a response body for an
+// error message, marking a body that was cut and one that was empty.
+func errorBodySnippet(body []byte) string {
+	truncated := len(body) > maxErrorBodyBytes
+	if truncated {
+		body = body[:maxErrorBodyBytes]
+	}
+	text := strings.TrimSpace(strings.ToValidUTF8(string(body), ""))
+	if text == "" {
+		return "(empty)"
+	}
+	if truncated {
+		return fmt.Sprintf("%q (truncated)", text)
+	}
+	return fmt.Sprintf("%q", text)
 }
 
 // getAuthToken returns the bearer token and whether authentication should be used.
