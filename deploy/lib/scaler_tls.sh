@@ -1170,15 +1170,11 @@ wva_scaler_keda_marker_state() {
     fi
 }
 
-# wva_scaler_plaintext_scaledobjects echoes <namespace>/<name> of every
-# ScaledObject, in the namespaces this install watches, with a trigger naming
-# this install's scaler that would NOT reach it over this installer's TLS: the
-# plaintext address, or no authenticationRef to the ClusterTriggerAuthentication.
-# With $1 = plaintext, the reverse: triggers still on the TLS address or
-# reference. With $1 = any, every one naming this scaler. Exits 2 when the
-# ScaledObjects cannot be read: unknown, not none.
-wva_scaler_plaintext_scaledobjects() {
-    local want="${1:-tls}" out rc=0 err
+# wva_scaler_scaledobjects_json echoes the ScaledObjects in the namespaces this
+# install watches as one {"items": [...]} list. Without KEDA installed there
+# can be none, so the list is empty. Exits 2 when they cannot be read.
+wva_scaler_scaledobjects_json() {
+    local out rc=0 err
     err="$(mktemp)"
     if [ "$(wva_install_scope)" = "namespace" ] && declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
         # Each managed namespace, merged into one list.
@@ -1195,11 +1191,38 @@ wva_scaler_plaintext_scaledobjects() {
     fi
     if [ "$rc" != 0 ]; then
         # KEDA not installed yet: there can be no ScaledObjects.
-        if grep -qi "doesn.t have a resource type" "$err"; then rm -f "$err"; return 0; fi
+        if grep -qi "doesn.t have a resource type" "$err"; then rm -f "$err"; echo '{"items":[]}'; return 0; fi
         rm -f "$err"
         return 2
     fi
     rm -f "$err"
+    printf '%s' "$out"
+}
+
+# wva_scaler_other_namespaces echoes, one per line, each namespace other than
+# $WVA_NS that a trigger in the watched namespaces names as
+# wva-external-scaler.<namespace>.: the WVA_NS those ScaledObjects point at.
+# Exits 2 when the ScaledObjects cannot be read.
+wva_scaler_other_namespaces() {
+    local out
+    out="$(wva_scaler_scaledobjects_json)" || return 2
+    printf '%s' "$out" | jq -r --arg ns "$WVA_NS" '
+        [.items[]? | (.spec.triggers // [])[] | (.metadata.scalerAddress // "")
+         | select(startswith("wva-external-scaler."))
+         | ltrimstr("wva-external-scaler.") | split(".")[0]
+         | select(. != "" and . != $ns)] | unique | .[]' 2>/dev/null || return 2
+}
+
+# wva_scaler_plaintext_scaledobjects echoes <namespace>/<name> of every
+# ScaledObject, in the namespaces this install watches, with a trigger naming
+# this install's scaler that would NOT reach it over this installer's TLS: the
+# plaintext address, or no authenticationRef to the ClusterTriggerAuthentication.
+# With $1 = plaintext, the reverse: triggers still on the TLS address or
+# reference. With $1 = any, every one naming this scaler. Exits 2 when the
+# ScaledObjects cannot be read: unknown, not none.
+wva_scaler_plaintext_scaledobjects() {
+    local want="${1:-tls}" out
+    out="$(wva_scaler_scaledobjects_json)" || return 2
     printf '%s' "$out" | jq -r --arg p "wva-external-scaler.${WVA_NS}." \
         --arg a "$(wva_scaler_address "$WVA_NS" tls)" --arg n "$(wva_scaler_keda_auth_name)" --arg w "$want" '
         [.items[]? | . as $so | (.spec.triggers // [])[]

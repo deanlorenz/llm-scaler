@@ -22,6 +22,9 @@
 #                when every ScaledObject is wired (KEDA_RESTART=true does it,
 #                except in a dry run); a copy from another CA: setup-prereqs
 #   unlistable   exit 2, not "nothing to do"
+#   wrong WVA_NS none names this scaler but some name another
+#                wva-external-scaler.<namespace>: a warning naming it, exit 3,
+#                not "nothing to re-wire"
 #
 # Every case asserts something that a missing function also fails, so a run
 # against code without this feature fails rather than passes empty.
@@ -34,7 +37,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=15
+EXPECTED_CASES=17
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -275,7 +278,23 @@ so app-s unwired "$ADDR"
 run STUB_SO_LIST=FORBIDDEN
 ok '[ "$RC" = 2 ] && [ ! -s "$WORK/patches" ] && grep -q "Could not list" "$WORK/warnings"' "unlistable: exit $RC (want 2), warnings $(cat "$WORK/warnings")"
 
-begin "the make targets: scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
+# WVA_NS defaults to NAMESPACE, so a re-wire run from the workload namespace
+# looks for wva-external-scaler.<that namespace> and finds nothing. That must
+# not read as "nothing to re-wire".
+begin "none names this scaler, some name another WVA namespace: warns naming it, exit 3"
+reset
+so app-o unwired "wva-external-scaler.wva-elsewhere.svc:9090"
+so other-d unwired "$OTHER"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && grep -q "wva-elsewhere" "$WORK/warnings" && grep -q "WVA_NS=wva-elsewhere" "$WORK/warnings" && ! grep -q "nothing to re-wire" "$WORK/info"' "other WVA namespace: exit $RC (want 3), patches '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+begin "none names any WVA scaler: nothing to re-wire, exit 0"
+reset
+so other-d unwired "$OTHER"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/warnings" ] && grep -q "nothing to re-wire" "$WORK/info"' "no WVA scaler: exit $RC (want 0), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+begin "the make targets:scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"
 APPLY="$(printf '%s\n' "$MK" | awk '/^scaledobjects-apply:/ { on = 1; next } on && /^[^\t]/ { exit } on')"
 REWIRE="$(printf '%s\n' "$MK" | awk '/^scaledobjects-rewire:/ { on = 1; next } on && /^[^\t]/ { exit } on')"

@@ -705,7 +705,8 @@ wva_rewire_keda_conn_check() {
 # is WVA_SCALER_REWIRE_WAIT seconds, else WVA_VERIFY_WIRE_WAIT, else 30.
 # Returns 1 while one is unwired or KEDA's connection is refused, 2 when they
 # cannot be listed or DRY_RUN is not true or false, 3 when one could not be
-# read.
+# read or when none names this scaler but some name another WVA namespace
+# (WVA_NS points at the wrong install).
 wva_rewire_scaledobjects() {
     declare -F wva_scaler_ensure_wired >/dev/null || return 2
     local rows row rc=0 dry="${DRY_RUN:-false}"
@@ -721,6 +722,19 @@ wva_rewire_scaledobjects() {
         return 2
     fi
     if [ -z "$rows" ]; then
+        # None naming this scaler is a pass only when none names another
+        # WVA either: ScaledObjects pointing at wva-external-scaler.<other>
+        # mean WVA_NS is not the namespace they were written for.
+        local others
+        others="$(wva_scaler_other_namespaces)" || rc=$?
+        if [ "$rc" != 0 ]; then
+            log_warning "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS), and whether they name another could not be read, so none was checked."
+            return 3
+        fi
+        if [ -n "$others" ]; then
+            log_warning "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS), but some name wva-external-scaler.<namespace> with WVA_NS $(printf '%s' "$others" | paste -sd' ' -). None was checked. Run it again with WVA_NS set to the namespace WVA runs in, e.g.  $(WVA_WATCH_NS="${WVA_WATCH_NS:-$WVA_NS}"; WVA_NS="$(printf '%s\n' "$others" | head -n1)"; wva_make_cmd scaledobjects-rewire)"
+            return 3
+        fi
         log_info "No ScaledObject names this scaler (wva-external-scaler.$WVA_NS): nothing to re-wire."
         return 0
     fi
