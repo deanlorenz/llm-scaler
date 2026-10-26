@@ -99,9 +99,15 @@ type LearnedState struct {
 	// ITLBaselineStash is itlBaselineStash: a variant's ITL baseline put
 	// aside under the arguments it was learned under, for a rollback to
 	// them. Keyed like the ITL baseline plus "#" and the arguments.
-	ITLBaselineStash map[string]float64   `json:"itlBaselineStash,omitempty"`
-	StartSeconds     map[string]float64   `json:"startSeconds,omitempty"`
-	VariantSeenAt    map[string]time.Time `json:"variantSeenAt,omitempty"`
+	ITLBaselineStash map[string]float64 `json:"itlBaselineStash,omitempty"`
+	// ITLSlopes is each ITL window key's last fitted slope, which the light
+	// load hold keeps a line on (itl.Tracker.Observe). Keyed like the ITL
+	// baseline and restored with it. Without it a restart under light load
+	// had a baseline and no slope, so no line, and the variant was sized by
+	// KV occupancy alone (issue #316).
+	ITLSlopes     map[string]SlopeSnapshot `json:"itlSlopes,omitempty"`
+	StartSeconds  map[string]float64       `json:"startSeconds,omitempty"`
+	VariantSeenAt map[string]time.Time     `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
 	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
@@ -159,6 +165,15 @@ type ThroughputSnapshot struct {
 	// HeldSeconds is, for a window put aside, how long the floor has held a
 	// fleet on it in serving time (stashedThroughput.heldFor).
 	HeldSeconds float64 `json:"heldSeconds,omitempty"`
+}
+
+// SlopeSnapshot is an itl.Slope as exported: the slope, when it was fitted,
+// which bounds how long it may be held, and the engine arguments it was fitted
+// under.
+type SlopeSnapshot struct {
+	A        float64   `json:"a"`
+	FittedAt time.Time `json:"fittedAt"`
+	Args     string    `json:"args,omitempty"`
 }
 
 // AcceleratorSnapshot is the last accelerator that resolved for a variant.
@@ -507,6 +522,12 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 			HeldSeconds:            st.heldFor.Seconds(),
 		}
 	}
+	for k, sl := range a.itlTracker.Slopes() {
+		if s.ITLSlopes == nil {
+			s.ITLSlopes = map[string]SlopeSnapshot{}
+		}
+		s.ITLSlopes[k] = SlopeSnapshot{A: sl.A, FittedAt: sl.FittedAt, Args: sl.Args}
+	}
 	for k, v := range a.startSeconds {
 		s.StartSeconds[k] = v
 	}
@@ -595,6 +616,12 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 				s.ITLBaselineStash = map[string]float64{}
 			}
 			mergeAbsent(s.ITLBaselineStash, p.state.ITLBaselineStash)
+		}
+		if len(p.state.ITLSlopes) > 0 {
+			if s.ITLSlopes == nil {
+				s.ITLSlopes = map[string]SlopeSnapshot{}
+			}
+			mergeAbsent(s.ITLSlopes, p.state.ITLSlopes)
 		}
 		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
 		mergeAbsent(s.K2Args, p.state.K2Args)
@@ -712,6 +739,7 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.VariantSeenAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaselineStash, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.ITLSlopes, func(k string, _ SlopeSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.K2Args, func(k, _ string) bool { return of(k) })
 	maps.DeleteFunc(s.ThroughputArgs, func(k, _ string) bool { return of(k) })
@@ -869,6 +897,12 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		p.state.VariantSeenAt[k] = seen
 		if b, ok := s.ITLBaseline[k]; ok {
 			p.state.ITLBaseline[k] = b
+		}
+		if sl, ok := s.ITLSlopes[k]; ok {
+			if p.state.ITLSlopes == nil {
+				p.state.ITLSlopes = map[string]SlopeSnapshot{}
+			}
+			p.state.ITLSlopes[k] = sl
 		}
 		if t, ok := s.StartSeconds[k]; ok {
 			p.state.StartSeconds[k] = t
@@ -1241,6 +1275,17 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		if b, ok := s.ITLBaseline[k]; ok && latency && finitePositive(b) {
 			a.itlTracker.RestoreBaseline(k, b)
 		}
+		// The slope is a latency figure like the baseline, and installed on
+		// the same terms. Its hold is then bounded as a live one is, from
+		// when it was fitted and by the arguments it was fitted under
+		// (itl.Admission); one fitted in the future or past the retention is
+		// not installed at all.
+		if sl, ok := s.ITLSlopes[k]; ok && latency && finitePositive(sl.A) {
+			if fittedAt, inTime := notFuture(sl.FittedAt, now); inTime && !fittedAt.IsZero() &&
+				now.Sub(fittedAt) <= h.BucketRetention {
+				a.itlTracker.RestoreSlope(k, itl.Slope{A: sl.A, FittedAt: fittedAt, Args: sl.Args})
+			}
+		}
 		if t, ok := s.StartSeconds[k]; ok && finitePositive(t) {
 			if _, have := a.startSeconds[k]; !have {
 				a.startSeconds[k] = t
@@ -1424,4 +1469,7 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	// The baselines may have been restored; the ITL windows are this
 	// process's own readings, a working memory like the ones above.
 	a.itlTracker.ForgetBaselines()
+	// The held slopes too: they are exported, so one kept here would be
+	// written back and undo the deletion.
+	a.itlTracker.ForgetSlopes()
 }

@@ -846,7 +846,9 @@ What is restored, and what is not:
   throughput (see below): a changed value would look identical, so its start
   estimate and ITL baseline are not restored. A new engine image with the same arguments
   keeps them; only the ITL baseline, a latency figure, needs the same image
-  too;
+  too. The ITL slope a variant holds through light load comes back with the
+  ITL baseline, on the same terms, and is still held only for the bucket
+  retention after it was fitted;
 - a variant whose arguments changed while the controller was down restores
   its old measured capacity only as a **lower-only, expiring figure**, and
   its old saturated throughput only as a hold-only floor (below). The
