@@ -999,7 +999,8 @@ failed reads and writes, and the log says why (logger `learned-state`):
   - `learned state restored`;
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the
-    controller was down. Capacity, throughput and start time are kept;
+    controller was down. Capacity, throughput and start time are kept; the
+    ITL line, and so the derived mu, is fitted again from fresh readings;
   - `learned state restored as lower-only figures: the variant's engine
     arguments changed, so its k2 windows become previous figures (P2-prior)
     for the buckets they were measured in` -- its flags changed while the
