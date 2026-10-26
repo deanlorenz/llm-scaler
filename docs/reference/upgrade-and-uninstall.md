@@ -1027,6 +1027,10 @@ A new controller pod starts with no decision in memory. Until it has one:
   shape it had already priced is sized from occupancy again until it saturates
   once more. `LEARNED_STATE_SNAPSHOT=true` carries it across instead
   ([learned state across a restart](configuration.md#learned-state-across-a-restart)).
+  A snapshot written by v0.10.0 or earlier has no ITL slope, so on the first
+  restart after upgrading from it each decode variant fits its ITL line, and
+  so mu, from fresh readings; from the next restart on the line can come
+  back ([on these terms](configuration.md#learned-state-across-a-restart)).
 
 Do not judge an upgrade by the first few minutes of decisions.
 

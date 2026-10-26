@@ -63,10 +63,7 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   hand-off re-learns it. `LEARNED_STATE_SNAPSHOT=true` keeps it in the
   ConfigMap `wva-learned-state`; it is off by default
   ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart)).
-  Before it can be the default: restore a held ITL line
-  ([#316](https://github.com/ev-shindin/llm-scaling-manager/issues/316)), speed
-  up mu without `enableLearnedStateReuse`
-  ([#317](https://github.com/ev-shindin/llm-scaling-manager/issues/317)), and run
+  Before it can be the default: run
   the cases not yet run on GPUs
   ([#228](https://github.com/ev-shindin/llm-scaling-manager/issues/228)), test
   the rules no test reaches

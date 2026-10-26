@@ -169,8 +169,9 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ScaledObject with a floor of 0 gets none
   ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 - Learned capacity is re-learned after a restart unless the opt-in
-  `LEARNED_STATE_SNAPSHOT` is on, and even then a held ITL line is not
-  restored ([#316](https://github.com/ev-shindin/llm-scaling-manager/issues/316);
+  `LEARNED_STATE_SNAPSHOT` is on, and even then a new engine image rolled out
+  while the controller was down re-fits the ITL line, and so mu, from fresh
+  readings ([what is restored](reference/configuration.md#learned-state-across-a-restart);
   the default is [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
 - The scaler port stays on plaintext where the installer cannot turn mutual
   TLS on, for example when KEDA is absent or not found, when the cluster

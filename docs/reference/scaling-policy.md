@@ -1257,7 +1257,10 @@ governs **both**:
 | the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
 
 It does not control learning: a variant learns from its own readings either
-way, and changing the key clears nothing stored.
+way, and changing the key clears nothing stored. Nor does it decide what a
+restart keeps: a variant's own ITL line comes back with the learned-state
+snapshot whether this key is on or off
+([learned state across a restart](configuration.md#learned-state-across-a-restart)).
 
 #### What it does not govern
 
