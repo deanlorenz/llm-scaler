@@ -744,15 +744,20 @@ if render "$WORK/render" "$WORK/rendered.yaml" 2>"$WORK/err"; then
 else
     fail "verify: the TLS overlay does not render: $(head -3 "$WORK/err")"
 fi
-jq -n --arg p "wva-external-scaler.$NS.svc.cluster.local:9090" --arg t "wva-external-scaler.$NS.svc:9090" --arg c "wva-external-scaler-$NS" '{items: [
+jq -n --arg p "wva-external-scaler.$NS.svc.cluster.local:9090" --arg t "wva-external-scaler.$NS.svc:9090" --arg c "wva-external-scaler-$NS" --arg ns "$NS" '{items: [
     {metadata: {namespace: "wva-check", name: "plain"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $p}}]}},
     {metadata: {namespace: "wva-check", name: "wrongref"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $t}, authenticationRef: {name: "x"}}]}},
     {metadata: {namespace: "wva-check", name: "authed"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $t}, authenticationRef: {name: $c, kind: "ClusterTriggerAuthentication"}}]}},
+    {metadata: {namespace: "wva-check", name: "short"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: ("wva-external-scaler." + $ns + ":9090")}}]}},
+    {metadata: {namespace: "wva-check", name: "prefixed"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: ("wva-external-scaler." + $ns + "-other:9090")}}]}},
     {metadata: {namespace: "wva-check", name: "other"}, spec: {triggers: [{type: "external-push", metadata: {scalerAddress: "some-other-scaler:9090"}}]}}]}' >"$WORK/so.json"
 run wva_verify_scaler_tls
 ok '[ "$RC" = 0 ] && grep -q "mutual TLS, client identity wva-keda-client" "$WORK/info"' "verify mTLS: mode not reported: $(head -3 "$WORK/info")"
 ok 'grep -q "expires" "$WORK/info" && grep -q "wva-external-scaler.$NS.svc.cluster.local" "$WORK/info"' "verify mTLS: expiry or names not reported: $(grep serving "$WORK/info")"
 ok 'grep -q "on the plaintext address or without authenticationRef" "$WORK/warnings" && grep -q "wva-check/plain" "$WORK/stderr" && grep -q "wva-check/wrongref" "$WORK/stderr" && ! grep -q "wva-check/authed\|wva-check/other" "$WORK/stderr"' "verify mTLS: plain and wrongref, and only they, should be named: $(cat "$WORK/warnings" "$WORK/stderr" | head -4)"
+# The short address names this scaler; a namespace that only starts with
+# this one is another install.
+ok 'grep -q "wva-check/short" "$WORK/stderr" && ! grep -q "wva-check/prefixed" "$WORK/stderr"' "verify mTLS: the short address should be named and the prefixed namespace not: $(cat "$WORK/stderr" | head -6)"
 # On a real cluster such a ScaledObject was Ready and scaled, riding the
 # connection an authenticated one opened: "not-Ready" was wrong. The warning
 # says it depends on order, what a KEDA restart can do, and the fix.
@@ -761,7 +766,7 @@ ok 'grep -q "add that authenticationRef and the address wva-external-scaler.$NS.
 ok 'grep -q "KEDA.s client certificate: ClusterTriggerAuthentication wva-external-scaler-$NS" "$WORK/info"' "verify mTLS: KEDA's side not reported: $(grep -i keda "$WORK/info" | head -2)"
 
 echo "== verify: every ScaledObject authenticated is quiet; unreadable ones are unknown"
-jq '.items |= map(select(.metadata.name != "plain" and .metadata.name != "wrongref"))' "$WORK/so.json" >"$WORK/so2.json" && mv "$WORK/so2.json" "$WORK/so.json"
+jq '.items |= map(select(.metadata.name != "plain" and .metadata.name != "wrongref" and .metadata.name != "short"))' "$WORK/so.json" >"$WORK/so2.json" && mv "$WORK/so2.json" "$WORK/so.json"
 run wva_verify_scaler_tls
 ok '[ ! -s "$WORK/warnings" ] && grep -q "Every ScaledObject naming this scaler uses wva-external-scaler.$NS.svc:9090" "$WORK/info"' "verify, all authenticated: $(head -2 "$WORK/warnings")"
 run wva_verify_scaler_tls STUB_SO=FORBIDDEN
@@ -892,6 +897,12 @@ ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = true ] && [ "$WVA_SCALER_TLS_MIGRA
 run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls
 PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
 ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_TLS_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].authenticationRef | .name + \"/\" + .kind")" = "$CTA/ClusterTriggerAuthentication" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.modelID")" = m ]' "migrate: patch '$PATCHED'"
+
+echo "== WVA_SCALER_TLS_MIGRATE=true moves a ScaledObject on the short address too"
+so_fixture app-so "wva-external-scaler.$NS:9090"
+run wva_scaler_tls_finish WVA_SCALER_TLS_MIGRATE_ROWS=apps/app-so WVA_SCALER_TLS_MIGRATE_MODE=tls
+PATCHED="$(sed -n 's/^patch scaledobject app-so -n apps --type merge -p //p' "$WORK/patches")"
+ok '[ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].metadata.scalerAddress")" = "$SO_TLS_ADDR" ] && [ "$(printf "%s" "$PATCHED" | jq -r ".spec.triggers[0].authenticationRef.name")" = "$CTA" ]' "migrate, short address: patch '$PATCHED'"
 
 echo "== explicit false on a TLS install moves the TLS ScaledObjects back, or refuses"
 reset_store

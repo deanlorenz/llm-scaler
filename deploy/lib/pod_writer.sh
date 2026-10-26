@@ -177,7 +177,7 @@ wva_ensure_pod_writes() {
 # declaring a warm pool (trigger metadata warmPoolName); with $2 = models, the
 # others. A trigger calls it when its scalerAddress starts with
 # wva-external-scaler.<$1>. or wva-external-scaler.<$1>: -- the long and the
-# short Service name.
+# short Service name -- or is that bare host.
 #
 # With $2 = unattributed it echoes "<namespace> <address>" instead, for each
 # trigger that carries warmPoolName or modelID but whose address names no
@@ -197,16 +197,17 @@ wva_pod_writer_namespaces() {
         printf '%s\n' "$out" >&2
         return 1
     fi
-    printf '%s\n' "$out" | awk -v dot="wva-external-scaler.${controller_ns}." \
+    printf '%s\n' "$out" | awk -v bare="wva-external-scaler.${controller_ns}" \
+        -v dot="wva-external-scaler.${controller_ns}." \
         -v colon="wva-external-scaler.${controller_ns}:" -v kind="$kind" '
         NF >= 3 {
             model = (NF >= 4) ? $4 : "-"
-            if (index($2, dot) == 1 || index($2, colon) == 1) {
+            if ($2 == bare || index($2, dot) == 1 || index($2, colon) == 1) {
                 if (kind == "pools" && $3 != "-") print $1
                 if (kind == "models" && $3 == "-") print $1
                 next
             }
-            if (kind == "unattributed" && ($3 != "-" || model != "-") && $2 !~ /^wva-external-scaler\.[^.:]+[.:]/)
+            if (kind == "unattributed" && ($3 != "-" || model != "-") && $2 !~ /^wva-external-scaler\.[^.:]+([.:]|$)/)
                 print $1 " " $2
         }' | sort -u
 }

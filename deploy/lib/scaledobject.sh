@@ -3343,7 +3343,7 @@ so_repoint_stale() {
     want="$(so_scaler_addr "$dest")"
     auth="$(so_trigger_auth "$want")"
     [ -n "$auth" ] || auth=null
-    self="wva-external-scaler.${dest}."
+    self="wva-external-scaler.${dest}"
 
     local rows
     rows=$(so_repoint_candidates "$self") || return 1
@@ -3477,7 +3477,11 @@ so_repoint_destination() {
 }
 
 # so_repoint_candidates echoes `namespace name address` for every ScaledObject
-# whose WVA trigger names something other than $1.
+# whose WVA trigger names something other than $1, the scaler host
+# wva-external-scaler.<namespace>. An address names $1 when $1 is followed by
+# ".", ":" or nothing: the long form, the short form <host>:<port>, or the bare
+# host. A plain prefix test would miss the short form and take
+# wva-external-scaler.<namespace>-other for <namespace>.
 #
 # Cluster-wide first, then the install's own namespace: the objects needing
 # repair are in the WORKLOAD namespaces, which for a cluster-scoped install are
@@ -3489,7 +3493,8 @@ so_repoint_candidates() {
         .items[]
         | .metadata.namespace as $ns | .metadata.name as $n
         | [ .spec.triggers[]?.metadata.scalerAddress // ""
-            | select(startswith("wva-external-scaler.") and (startswith($self) | not)) ]
+            | select(startswith("wva-external-scaler.")
+                and ((. == $self or startswith($self + ".") or startswith($self + ":")) | not)) ]
         | select(length > 0)
         | $ns + " " + $n + " " + .[0]'
 

@@ -27,6 +27,10 @@
 #                WVA_NS: a warning naming it (without a port), exit 3, not
 #                "nothing to re-wire"; with the Service there, a second
 #                install: exit 0; the Service unreadable: exit 3
+#   address forms  this scaler by its short address (<host>:<port>), its
+#                fully-qualified one or its bare host is re-wired; a
+#                namespace that only starts with WVA_NS is another install;
+#                the uninstall and pod-writer listers take the same forms
 #
 # Every case asserts something that a missing function also fails, so a run
 # against code without this feature fails rather than passes empty.
@@ -39,7 +43,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=20
+EXPECTED_CASES=25
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -56,7 +60,7 @@ fi
 # Sourced through CR-stripped copies: a Windows checkout can write these as
 # CRLF. A file that does not exist becomes an empty one, so every case fails on
 # its missing function instead of the run aborting.
-for f in constants common verify scaler_tls; do
+for f in constants common verify scaler_tls cleanup pod_writer; do
     if [ -f "$ROOT/deploy/lib/$f.sh" ]; then
         tr -d '\r' <"$ROOT/deploy/lib/$f.sh" >"$WORK/$f.sh"
     else
@@ -324,6 +328,68 @@ reset
 so other-d unwired "$OTHER"
 run
 ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/warnings" ] && grep -q "nothing to re-wire" "$WORK/info"' "no WVA scaler: exit $RC (want 0), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+# This scaler named by its short address: KEDA resolves it through its DNS
+# search path, so it is as live as the long one, and must be re-wired, not
+# read as "nothing to re-wire".
+begin "one names this scaler by its short address: re-wired, not nothing to re-wire"
+reset
+so app-sh until-rewire "wva-external-scaler.$NS:9090"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 0 ] && grep -q "\"path\":\"/spec/triggers/0/metadata/wvaRewire\"" "$WORK/patches" && report_has wired app-sh && ! grep -q "nothing to re-wire" "$WORK/info" && [ ! -s "$WORK/warnings" ]' "short address: exit $RC (want 0), patches '$(cat "$WORK/patches")', report $(cat "$WORK/stdout"), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+begin "the fully-qualified address and the bare host name this scaler too"
+reset
+so app-fq until-rewire "wva-external-scaler.$NS.svc.cluster.local:9090" "$OTHER" "wva-external-scaler.$NS"
+run WVA_SCALER_REWIRE_TRIES=3
+ok '[ "$RC" = 0 ] && grep -q "/spec/triggers/0/metadata/wvaRewire" "$WORK/patches" && grep -q "/spec/triggers/2/metadata/wvaRewire" "$WORK/patches" && ! grep -q "/spec/triggers/1/" "$WORK/patches" && report_has wired app-fq' "long and bare: exit $RC (want 0), patches '$(cat "$WORK/patches")' (want triggers 0 and 2), report $(cat "$WORK/stdout")"
+
+# A namespace that only starts with this one is another install's.
+begin "a namespace that starts with this one is another: not re-wired, named as another"
+reset
+so app-px unwired "wva-external-scaler.$NS-other.svc:9090" "wva-external-scaler.$NS-other:9090"
+run
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && grep -q "WVA_NS=$NS-other" "$WORK/warnings" && ! grep -q "nothing to re-wire" "$WORK/info"' "prefixed namespace: exit $RC (want 3), patches '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings")"
+
+# The other two listers of this scaler's ScaledObjects: the uninstall one
+# (wva_scaledobjects_calling_us, cleanup.sh) and the pod-writer grant one
+# (wva_pod_writer_namespaces, pod_writer.sh). kubectl hands back the rows its
+# go-template renders.
+lister() {
+    local fn="$1" rows="$2"
+    shift 2
+    (
+        # shellcheck disable=SC1091
+        . "$WORK/cleanup.sh"
+        # shellcheck disable=SC1091
+        . "$WORK/pod_writer.sh"
+        kubectl() { case "$*" in "get scaledobject -A "*) printf '%s\n' "$rows" ;; *) return 1 ;; esac; }
+        WVA_NS=$NS
+        declare -F "$fn" >/dev/null || { echo "$fn is not defined"; exit 3; }
+        "$fn" "$@" | tr '\n' ' '
+    )
+}
+
+begin "uninstall lister: every address form of this scaler, not a namespace that starts with it"
+ROWS="apps/long wva-external-scaler.$NS.svc:9090
+apps/fq wva-external-scaler.$NS.svc.cluster.local:9090
+apps/short wva-external-scaler.$NS:9090
+apps/bare wva-external-scaler.$NS
+apps/px wva-external-scaler.$NS-other:9090
+apps/other $OTHER"
+GOT="$(lister wva_scaledobjects_calling_us "$ROWS")"
+ok '[ "$GOT" = "apps/bare apps/fq apps/long apps/short " ]' "uninstall lister: got '$GOT' (want apps/bare apps/fq apps/long apps/short)"
+
+begin "pod-writer lister: every address form of this scaler, and the bare host is not unattributed"
+ROWS="t-long wva-external-scaler.$NS.svc:9090 - m
+t-short wva-external-scaler.$NS:9090 - m
+t-bare wva-external-scaler.$NS - m
+t-px wva-external-scaler.$NS-other:9090 - m
+t-ip 10.0.0.1:9090 - m"
+GOT="$(lister wva_pod_writer_namespaces "$ROWS" "$NS" models)"
+ok '[ "$GOT" = "t-bare t-long t-short " ]' "pod-writer lister, models: got '$GOT' (want t-bare t-long t-short)"
+GOT="$(lister wva_pod_writer_namespaces "$ROWS" "$NS" unattributed)"
+ok '[ "$GOT" = "t-ip 10.0.0.1:9090 " ]' "pod-writer lister, unattributed: got '$GOT' (want only t-ip)"
 
 begin "the make targets: scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"

@@ -1219,16 +1219,21 @@ wva_scaler_other_namespaces() {
 # this install's scaler that would NOT reach it over this installer's TLS: the
 # plaintext address, or no authenticationRef to the ClusterTriggerAuthentication.
 # With $1 = plaintext, the reverse: triggers still on the TLS address or
-# reference. With $1 = any, every one naming this scaler. $2, when given, is
+# reference. With $1 = any, every one naming this scaler. A trigger names it
+# when its address is wva-external-scaler.$WVA_NS followed by ".", ":" or
+# nothing: the long form, the short form <host>:<port> KEDA resolves through
+# its DNS search path, or the bare host; never wva-external-scaler.$WVA_NS-other.
+# wva_scaler_migrate_scaledobjects and wva_scaler_so_wiring use the same
+# test. $2, when given, is
 # the list wva_scaler_scaledobjects_json already read. Exits 2 when the
 # ScaledObjects cannot be read: unknown, not none.
 wva_scaler_plaintext_scaledobjects() {
     local want="${1:-tls}" out="${2:-}"
     [ -n "$out" ] || out="$(wva_scaler_scaledobjects_json)" || return 2
-    printf '%s' "$out" | jq -r --arg p "wva-external-scaler.${WVA_NS}." \
+    printf '%s' "$out" | jq -r --arg p "wva-external-scaler.${WVA_NS}" \
         --arg a "$(wva_scaler_address "$WVA_NS" tls)" --arg n "$(wva_scaler_keda_auth_name)" --arg w "$want" '
         [.items[]? | . as $so | (.spec.triggers // [])[]
-         | select((.metadata.scalerAddress // "") | startswith($p))
+         | select((.metadata.scalerAddress // "") | . == $p or startswith($p + ".") or startswith($p + ":"))
          | ((.metadata.scalerAddress == $a)
             and ((.authenticationRef.name // "") == $n)
             and ((.authenticationRef.kind // "") == "ClusterTriggerAuthentication")) as $tls
@@ -1243,14 +1248,14 @@ wva_scaler_plaintext_scaledobjects() {
 # lists the ones that could not be patched.
 wva_scaler_migrate_scaledobjects() {
     local rows="$1" mode="$2" ns name triggers ok=0 failed=""
-    local p="wva-external-scaler.${WVA_NS}." a ref
+    local p="wva-external-scaler.${WVA_NS}" a ref
     a="$(wva_scaler_address "$WVA_NS" "$mode")"
     ref="$(wva_scaler_trigger_auth_json "$WVA_NS")"
     while IFS=/ read -r ns name; do
         [ -n "$name" ] || continue
         triggers="$(kubectl get scaledobject "$name" -n "$ns" -o json 2>/dev/null \
             | jq -c --arg p "$p" --arg a "$a" --argjson r "$ref" --arg m "$mode" '[ .spec.triggers[]?
-                | if ((.metadata.scalerAddress // "") | startswith($p))
+                | if ((.metadata.scalerAddress // "") | . == $p or startswith($p + ".") or startswith($p + ":"))
                   then (.metadata.scalerAddress = $a)
                        | (if $m == "tls" then .authenticationRef = $r else del(.authenticationRef) end)
                   else . end ]' 2>/dev/null)" || triggers=""
@@ -1831,10 +1836,11 @@ wva_scaler_so_wiring() {
     if [ "$rc" != 0 ]; then
         if wva_scaler_not_found "$hpa"; then hpa='{}'; else echo unknown; return 0; fi
     fi
-    printf '%s' "$so" | jq -r --arg p "wva-external-scaler.${WVA_NS}." --argjson h "$hpa" '
+    printf '%s' "$so" | jq -r --arg p "wva-external-scaler.${WVA_NS}" --argjson h "$hpa" '
         if ([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length) > 0 then "paused"
         else
-          ([.spec.triggers // [] | to_entries[] | select((.value.metadata.scalerAddress // "") | startswith($p)) | .key]) as $idx
+          ([.spec.triggers // [] | to_entries[]
+            | select((.value.metadata.scalerAddress // "") | . == $p or startswith($p + ".") or startswith($p + ":")) | .key]) as $idx
           | ([$h.spec.metrics[]? | select(.type == "External") | .external.metric.name // ""]) as $hm
           | (.status.externalMetricNames // []) as $em
           | [$idx[] | . as $i | ("s" + ($i | tostring) + "-") as $pre
