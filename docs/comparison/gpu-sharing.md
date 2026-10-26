@@ -52,15 +52,13 @@ which acts on the pods each HPA requests:
   are not using. Borrowed GPUs come back when the borrower's HPA scales down,
   or when Kueue preempts a borrowed pod for a model returning to its floor. A
   lightly loaded model keeps what it holds until its own HPA scales it down,
-  and a busy model that needs more than its floor cannot take GPUs from a
-  quieter one. The guide's rule is *"you may preempt to reach your own floor,
+  and a busy model at or above its floor cannot take GPUs from a quieter one,
+  however lightly loaded. The guide's rule is *"you may preempt to reach your own floor,
   never to go beyond it. Above your floor you can only take what is idle."*
 - **With Kueue fair sharing,** which the guide's Tuning section offers instead
-  of floors, a model with pods waiting can preempt pods of the model whose
-  weighted share of borrowed GPUs is highest. That follows the pods each HPA
-  requests and the weights, not each model's load: a model gets GPUs only when
-  its own HPA asks for more pods, and a model's pods can be preempted by share
-  whatever their load.
+  of floors, a model whose HPA asks for more pods can preempt pods of another
+  model. The donor is the model furthest over its weighted share, whatever its
+  own load.
 
 In detail:
 
@@ -92,24 +90,50 @@ In detail:
 | | Kueue rebalancing (llm-d) | Utilization share (llm-scaling-manager) |
 | --- | --- | --- |
 | Idle GPUs used | Yes: borrowed when a model's HPA asks for more pods. | Yes: spread ahead of need as headroom, by weight. |
-| GPUs moved from a quieter model to a busier one when the budget is full | No with the guide's floors. With fair sharing, by weighted share of the pods requested, not by load. | Yes, by each model's demand against its share. |
+| GPUs moved from a quieter model to a busier one when the budget is full | No with the guide's floors. With fair sharing, from the model furthest over its weighted share, not by load. | Yes, by each model's demand against its share. |
 | Who decides a model shrinks | Its own HPA, on its own load. Kueue preempts a borrowed pod when a lender reclaims its floor (or, with fair sharing, by share). | The optimizer picks the donor and how many GPUs it gives. |
 | How GPUs move | The HPA deletes pods, or Kueue preempts one; a waiting pod is then admitted. | A planned move: the donor gives first, and the receiver grows once those GPUs are free. The donor drains through scale-down. |
 | Placement | GPUs counted against each ClusterQueue's quota, as the guide configures it. | Node-aware on a cluster-scoped install: the receiver's replica must fit in the holes the donors open, node by node; multi-pod replicas are funded whole (kind only so far). |
 | Signal | The pods each HPA requests. | Each model's demand against its share, with confirmation cycles, a tolerance band and a reversal hold. |
-| Cost and maturity | Experimental. Admission and preemption act within seconds; a preempted pod drains only for its `terminationGracePeriodSeconds`. | Experimental. Minutes per move, and headroom held ahead of need (36% to 43% more GPU-seconds in the P/D runs). One or two runs per configuration. |
+| Cost and maturity | Experimental. Admission and preemption act within seconds, but GPUs an HPA releases wait for its scale-down window; a preempted pod drains only for its `terminationGracePeriodSeconds`. | Experimental. Minutes per move, and headroom held ahead of need (36% to 43% more GPU-seconds in the P/D runs). One or two runs per configuration. |
 
 ## With Kueue
 
-The scaling manager can read its budget from Kueue, with the cohort borrowing
-it counts as safe, and then decide which model holds the shared GPUs
-([Kueue-bounded quotas](../well-lit-paths/kueue-bounded-quotas/)). That works
-when each model's namespace has one LocalQueue on a GPU ClusterQueue, and
-Kueue Fair Sharing is off.
+The optimizer can take its budget from Kueue. To share GPUs between the models
+on a set of ClusterQueues, read Kueue at cluster scope: a quota entry with
+`scope: cluster` and `kueue.enabled`. The budget is then the sum of every
+ClusterQueue's `nominalQuota`, one budget for every namespace, and Kueue still
+admits each pod. This also works for the guide's own layout, both models in
+one namespace on two ClusterQueues: 10 GPUs shared by two models.
 
-The guide's own layout is not one of them today. It puts both models in one
-namespace, with a LocalQueue on each of two GPU ClusterQueues. The scaling
-manager does not read which queue each model uses, so it caps that namespace
-at the smallest single queue's figure and counts no borrowing
-([what is read](../reference/quota-limiter.md#what-is-read)). Under Fair
-Sharing it also counts no borrowing.
+The guide's flavor has no product label, so the entry names the accelerator
+type and `-1` lets Kueue give the number
+([merge rules](../reference/quota-limiter.md#merge-rules)):
+
+```yaml
+limiters:
+  - name: cluster-quota
+    type: quota
+    scope: cluster
+    kueue: { enabled: true }
+    quotas:
+      H100: -1        # Kueue's ClusterQueues give the number
+```
+
+[Share GPUs between models in different namespaces](../guides/utilization-share-cluster-wide/)
+sets this up (its option C). Its preflight warns about a namespace with
+LocalQueues on several ClusterQueues; that rule is for namespace-scope
+entries, and a cluster-scope budget is the sum either way.
+
+What does not work, or is not shown yet:
+
+- **A namespace-scope entry** gives each namespace its own budget, so with one
+  model per namespace there is nothing to share.
+- **The guide's fair-sharing layout** sets every `nominalQuota` to 0 and keeps
+  the budget on a Cohort object, which the scaling manager does not read, so
+  it sees a budget of zero.
+- **Queues that also run other GPU work** (training, batch) need a
+  `gpu-inventory` limiter beside the entry
+  ([Kueue-bounded quotas](../well-lit-paths/kueue-bounded-quotas/README.md#when-not-to-take-it)).
+- **Borrowing.** The optimizer starts no new cohort borrowing.
+- **Measurement.** A cluster-wide quota has not been measured yet.
