@@ -29,6 +29,7 @@ canonical `.claude/skills/` stored on the `session-tracking` branch.
   in `worktrees/session-tracking`.
 - Installs only after the user explicitly authorizes that installation.
 - Approval to draft, review, commit, or push does not authorize installation.
+- Edits to `SKILL.md` and to settings files prompt the user through an `ask` rule. If an edit goes through with no prompt, stop and tell the user.
 - Processes suggestions from `session-tracking/suggestion-box/`.
 - Commits convenience symlinks and other explicitly reported mission-tracking artifacts created by
   other missions under `session-tracking/missions/`.
