@@ -53,8 +53,9 @@ which acts on the pods each HPA requests:
   or when Kueue preempts a borrowed pod for a model returning to its floor. A
   lightly loaded model keeps what it holds until its own HPA scales it down,
   and a busy model at or above its floor cannot take GPUs from a quieter one,
-  however lightly loaded. The guide's rule is *"you may preempt to reach your own floor,
-  never to go beyond it. Above your floor you can only take what is idle."*
+  however lightly loaded. The guide's rule is *"you may preempt to reach your
+  own floor, never to go beyond it. Above your floor you can only take what is
+  idle."*
 - **With Kueue fair sharing,** which the guide's Tuning section offers instead
   of floors, a model whose HPA asks for more pods can preempt pods of another
   model. The donor is the model furthest over its weighted share, whatever its
@@ -108,7 +109,13 @@ one namespace on two ClusterQueues: 10 GPUs shared by two models.
 
 The guide's flavor has no product label, so the entry names the accelerator
 type and `-1` lets Kueue give the number
-([merge rules](../reference/quota-limiter.md#merge-rules)):
+([merge rules](../reference/quota-limiter.md#merge-rules)). Name your nodes'
+GPU product in `quotas`, and make sure the models' type resolves to it: the
+guide's model servers set no GPU nodeSelector, so the type comes from the
+nodes' `nvidia.com/gpu.product` label (or set a GPU nodeSelector). A model whose type stays unknown is
+left out of sharing. The entry goes in the scaling policy's `default` entry,
+beside `optimizer:`
+([scaling policy](../reference/scaling-policy.md#optimizer-cluster-default-only-live)):
 
 ```yaml
 limiters:
@@ -120,8 +127,8 @@ limiters:
       H100: -1        # Kueue's ClusterQueues give the number
 ```
 
-[Share GPUs between models in different namespaces](../guides/utilization-share-cluster-wide/)
-sets this up (its option C). Its preflight warns about a namespace with
+The [cluster-wide utilization-share guide](../guides/utilization-share-cluster-wide/)
+sets this up (its option C), including the product label check. Its preflight warns about a namespace with
 LocalQueues on several ClusterQueues; that rule is for namespace-scope
 entries, and a cluster-scope budget is the sum either way.
 
@@ -135,5 +142,8 @@ What does not work, or is not shown yet:
 - **Queues that also run other GPU work** (training, batch) need a
   `gpu-inventory` limiter beside the entry
   ([Kueue-bounded quotas](../well-lit-paths/kueue-bounded-quotas/README.md#when-not-to-take-it)).
-- **Borrowing.** The optimizer starts no new cohort borrowing.
+- **Borrowing.** The budget is the nominal quota. Moves between two queues
+  rely on Kueue lending a donor's idle floor through the cohort, so
+  `lendingLimit: 0` (offered in the guide's Tuning section) stops them. The
+  optimizer itself starts no borrowing beyond the budget.
 - **Measurement.** A cluster-wide quota has not been measured yet.
