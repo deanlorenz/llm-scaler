@@ -90,14 +90,28 @@ All resolved paths must be under `worktrees/session-tracking/claude-skills/`. Re
 
 ### 5. Create session-tracking convenience symlinks
 
+This is the one case where a new session writes directly into `session-tracking`. Create only these two links. Never commit them — only `policy-writer` commits them.
+
+Build each link target as a relative path computed from the link's own directory. Never write `MISSION_WT` or any absolute path into a link.
+
 ```bash
-REPO_ROOT=$(git -C MISSION_WT rev-parse --show-toplevel)
-mkdir -p "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME"
-ln -sf "MISSION_WT/.session/STATE.md" "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME/STATE.md"
-ln -sf "MISSION_WT/.session" "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME/ledgers"
+TRACKING=$(git -C MISSION_WT worktree list --porcelain | awk '/^worktree /{p=$2} /^branch refs\/heads\/session-tracking$/{print p}')
+LINKDIR="$TRACKING/missions/MISSION_NAME"
+mkdir -p "$LINKDIR"
+for pair in "STATE.md:.session/STATE.md" "ledgers:.session"; do
+  name=${pair%%:*}; target=${pair#*:}
+  rel=$(realpath --relative-to="$LINKDIR" "MISSION_WT/$target")
+  if [ -L "$LINKDIR/$name" ] && [ "$(readlink -f "$LINKDIR/$name")" != "$(readlink -f "MISSION_WT/$target")" ]; then
+    echo "MISMATCH: $LINKDIR/$name already exists with a different target"; exit 1
+  fi
+  ln -sfn "$rel" "$LINKDIR/$name"
+  test "$(readlink -f "$LINKDIR/$name")" = "$(readlink -f "MISSION_WT/$target")" || { echo "BROKEN: $name"; exit 1; }
+done
 ```
 
-Then publish on agentbus so policy-writer commits these on its next resume:
+If a link already exists with a different target, stop and report it. Do not replace it.
+
+Then publish on agentbus so policy-writer knows the links are waiting to be committed:
 
 ```
 agentbus_publish(topic="session-tracking.pending-commits", kind="note",
@@ -110,6 +124,6 @@ Return a summary:
 - `.session/` layout: created / already existed
 - `.claude/skills` dir-symlink: created / already existed / blocked (pr-review tracked)
 - Skills verified: list of skills, resolved paths
-- session-tracking symlinks: created / already existed
+- session-tracking symlinks: created / already existed (same target) / mismatch (stopped, not replaced)
 - agentbus note: published / skipped (if agentbus unavailable)
 - Any failures encountered

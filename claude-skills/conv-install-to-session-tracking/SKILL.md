@@ -5,19 +5,27 @@ description: Use when installing conventions, skills, or CONVENTIONS.md from pol
 
 # conv-install-to-session-tracking
 
+`session-tracking` is the production branch of rules and skills. `worktrees/policy-writer` is the working branch. An install moves reviewed, committed policy-writer commits into production. Nothing else goes.
+
 **This skill runs as a subagent.** Installation is mechanical and self-contained — spawn a subagent to run the procedure. The subagent needs explicit authorization confirmation from you first.
+
+## What is installed
+
+- Production paths: `CONVENTIONS.md`, `conventions/`, `claude-skills/`. Nothing else is installed.
+- Never installed: `backup_rules/`, `.session/`, `.claude/`, `*.bak`, or any other path.
+- Ignore `claude-skills/pr-review` in every check below. It is an upstream skill, left untracked on `session-tracking`. Do not stage, move, or delete it.
 
 ## Caller instructions
 
 1. Confirm you have explicit user authorization to install to `session-tracking`.
-2. Note the current `policy-writer` HEAD SHA:
+2. Record the current `policy-writer` HEAD SHA (run in the policy-writer worktree):
    ```bash
-   git rev-parse HEAD   # run in policy-writer worktree
+   git rev-parse HEAD
    ```
 3. Spawn a subagent:
    ```
    spawn_subagent(
-     description: "<paste the Subagent instructions block below>",
+     description: "<paste the Subagent instructions block below, filling in HEAD_SHA>",
      name: "general"
    )
    ```
@@ -29,92 +37,109 @@ description: Use when installing conventions, skills, or CONVENTIONS.md from pol
 
 ## Subagent instructions
 
-You are installing the current `policy-writer` conventions and skills onto `session-tracking`. Follow every step. Stop and report any failure immediately — do not improvise.
+You are installing reviewed `policy-writer` commits onto the production branch `session-tracking`. Follow every step. Stop and report any failure immediately — do not improvise, resolve, or work around.
 
-### Step 1: Verify both worktrees are clean
-
-```bash
-# In policy-writer worktree:
-git status --short
-# In session-tracking worktree:
-git status --short
-```
-
-Stop if either is dirty.
-
-### Step 2: Check for divergence — content diff first
-
-From inside `session-tracking`:
+Set these once (full paths; `HEAD_SHA` is the SHA the caller recorded):
 
 ```bash
-diff -r --exclude="*.bak" conventions ../policy-writer/conventions
-diff CONVENTIONS.md ../policy-writer/CONVENTIONS.md
-diff -r claude-skills ../policy-writer/claude-skills
+PW=<full path to worktrees/policy-writer>
+ST=<full path to worktrees/session-tracking>
+PATHS="CONVENTIONS.md conventions claude-skills"
 ```
 
-**If the diff is non-empty:** `session-tracking` has content that `policy-writer` does not. STOP. Report every differing file to the caller. Do not proceed until the caller resolves the divergence on `policy-writer` and re-runs this skill.
+Entering `$ST` with `cd` is permitted for this authorized operation. Use `$HEAD_SHA`, not the branch name, for the whole procedure.
 
-**Commit-log check** (after content diff is clean):
+### Step 1: Verify nothing uncommitted would be overwritten
+
+In `$PW`: the production paths must have no uncommitted changes.
 
 ```bash
-git log --oneline HEAD..policy-writer -- CONVENTIONS.md conventions/ claude-skills/
+git status --short -- $PATHS
 ```
 
-Review every listed commit — these are what the cherry-pick will apply.
-
-### Step 3: Find the last install SHA
+In `$ST`: the production paths must have no uncommitted or untracked changes, apart from `claude-skills/pr-review`.
 
 ```bash
-git log --oneline | grep "install:"
+git status --short -- $PATHS ':!claude-skills/pr-review'
 ```
 
-The most recent install commit contains `from policy-writer@<sha>`. Use that SHA as the range start.
+Stop if either prints anything. Untracked files elsewhere in `$ST` (mission links, suggestion-box files) do not block the install and must not be touched.
 
-### Step 4: Cherry-pick the range
+### Step 2: Find the last install and check for divergence
 
 ```bash
-git cherry-pick <last-policy-writer-sha>..policy-writer
+git log --oneline --grep='^install:' -1
 ```
 
-**`.session/` conflicts:** any commit that also touches `.session/` files will conflict because `.session/` is absent on `session-tracking`. For each such conflict:
+The install commit message contains `from policy-writer@<sha>`. Call that `LAST_SHA`. Stop if there is none.
+
+`session-tracking` must still match what was last installed. From `$ST`:
+
 ```bash
-git rm --cached .session/<file> 2>/dev/null; rm -f .session/<file>
-git cherry-pick --continue --no-edit
-```
-Skip any commit whose only change is `.session/` files:
-```bash
-git cherry-pick --skip
+git diff $LAST_SHA HEAD --stat -- $PATHS ':!claude-skills/pr-review'
 ```
 
-Remove any `.bak` files:
+(`$LAST_SHA` is a `policy-writer` commit; the diff compares its tree to the current `session-tracking` HEAD.)
+
+**If the diff is non-empty:** `session-tracking` has content that was not installed from `policy-writer`. STOP. Report every differing file. Do not proceed until the caller resolves it on `policy-writer`.
+
+### Step 3: Classify the commits to install
+
 ```bash
-git rm --cached conventions/*.bak 2>/dev/null || true
-rm -f conventions/*.bak
+git log --reverse --no-merges --format=%h $LAST_SHA..$HEAD_SHA
 ```
+
+For each commit, list its files:
+
+```bash
+git show --name-only --format= <sha>
+```
+
+Classify every commit:
+
+- **All files are in the production paths:** install it.
+- **No file is in the production paths** (for example, only `.session/` or `backup_rules/`): do not install it. List it as skipped.
+- **Mixed:** STOP and report the commit and the files on each side. Do not split, edit, or drop files from it. The caller decides.
+
+Report the install list and the skip list to the caller before continuing.
+
+### Step 4: Cherry-pick, one commit at a time
+
+Only the commits classified "install", in order, from `$ST`:
+
+```bash
+git cherry-pick <sha>
+```
+
+If any pick conflicts or fails: run `git cherry-pick --abort`, stop, and report the commit and the conflicting files. Do not resolve conflicts. Do not `git checkout <branch> -- <path>`, hand-copy files, or delete files to make a pick apply.
 
 ### Step 5: Verify
 
+From `$ST`:
+
 ```bash
-diff -r --exclude="*.bak" ../policy-writer/conventions conventions
-diff ../policy-writer/CONVENTIONS.md CONVENTIONS.md
-diff -r ../policy-writer/claude-skills claude-skills
+diff -r -x pr-review $PW/claude-skills claude-skills
+diff -r $PW/conventions conventions
+diff $PW/CONVENTIONS.md CONVENTIONS.md
+git diff --name-only <ST HEAD before step 4> HEAD
+git ls-files | grep -E '(^backup_rules/|^\.session/|^\.claude/|\.bak$)' || echo none
 ```
 
-Output must be empty. If anything appears, stop and report.
+The three `diff` commands must print nothing. Every name from `git diff --name-only` must be inside the production paths. The last command must print `none`. If anything else appears, stop and report.
 
 ### Step 6: Install commit
 
 ```bash
-git commit --allow-empty -m "install: CONVENTIONS.md + conventions/ + claude-skills/ from policy-writer@<policy-writer-HEAD-sha>"
+git commit --allow-empty -m "install: CONVENTIONS.md + conventions/ + claude-skills/ from policy-writer@$HEAD_SHA"
 ```
 
-Always record the exact `policy-writer` HEAD SHA.
+Always record the exact `policy-writer` SHA used.
 
 ### Step 7: Report back
 
 Return:
-- List of commits cherry-picked
-- Any `.session/` conflicts encountered and how resolved
+- Commits installed and commits skipped (with the reason)
+- Any mixed commit, conflict, or divergence stopped on
 - Diff result (clean / any unexpected differences)
 - Install commit SHA on `session-tracking`
 - Push: this skill does NOT push — the caller handles push authorization separately.

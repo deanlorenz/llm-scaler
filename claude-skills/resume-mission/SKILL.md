@@ -4,9 +4,6 @@ description: Set up, recover, or onboard into a mission worktree. Resolves targe
 disable-model-invocation: true
 ---
 
-<!-- user-approved-settings-change -->
-<!-- user-approved-settings-change: adding Step 3a mission-rule gate, this same edit -->
-
 # Resume mission
 
 > **Direction:** this skill is a candidate for replacement by a custom-agent (own context,
@@ -101,8 +98,6 @@ Call it `$MISSION_WT`. Tracking files live at `$MISSION_WT/.session/`. Verify th
 `$MISSION_WT/.session/STATE.md` exists before treating this as an existing mission. If it exists,
 read its Orientation fields and perform the Case 2 confirmation. If the selected index entry points
 to a missing STATE, stop and report the mismatch; do not silently create or use a STATE elsewhere.
-
-<!-- user-approved-settings-change: Step 3a gate added this edit -->
 
 ### Step 3a: Mission-specific rule gate — MANDATORY, do not skip
 
@@ -209,8 +204,6 @@ Read, in this order — from inside the entered worktree:
 2. `.session/STATE.md` — current status, task checklist, last completed, next step,
    open questions, and the Session log (see Step 6).
 
-<!-- user-approved-settings-change: removing the soft CONVENTIONS-index rule reference -->
-
 The mission-specific rule gate already happened at Step 3a — do not re-derive it from
 `CONVENTIONS.md`'s index here or anywhere else. Role-specific situational rules other than
 the mission-specific one (e.g. `mission-owner.md`, `coder.md`) are still read when their own
@@ -286,5 +279,3 @@ rename needed. (See `conventions/wip-editing.md` §"Who needs this protocol".)
 4. Create a new active ledger file at `.session/<slug>.md`. Open it with:
    `Continues: <path to previous ledger, if any>`
    Append to it as you work throughout this session.
-
-<!-- user-approved-settings-change: marker retained per prior edit's convention -->

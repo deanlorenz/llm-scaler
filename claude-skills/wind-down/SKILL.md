@@ -3,8 +3,6 @@ name: wind-down
 description: Wind down work on a mission — safe checkpoint or full retirement. Supports explicit user invocation and agent invocation. Can run entirely in the background. Follows conventions/resume-and-handoff.md.
 ---
 
-<!-- user-approved-settings-change -->
-
 # Wind down
 
 Rules:
