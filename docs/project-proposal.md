@@ -17,15 +17,10 @@ declare one (opt-in; off by default). Alongside
 that it ships a shared warm pool to cover the minutes a new replica spends
 loading, scale-to-zero, and separate handling for prefill and decode.
 
-llm-d has deprecated WVA upstream: `v0.9.0` is its final release, and existing
-users are told to migrate to KEDA + EPP. llm-d says KEDA + EPP covers WVA's
-capabilities except cost-aware placement across variants, some of them through
-a different layer (Kueue, kube-state-metrics), and advises deployments that
-depend on cost-aware placement or on fair sharing of a scarce accelerator pool
-to *"stay on WVA for now"*. This project is one way to stay on that path: an
-independently developed, advanced fork of WVA, still maintained, not affiliated
-with or endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
-scaler) ([KEDA alone, compared](comparison/keda-alone.md)).
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
+ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This
+project plugs into the same KEDA, as an external scaler. It is not affiliated
+with or endorsed by llm-d ([KEDA alone, compared](comparison/keda-alone.md)).
 
 We built it because the signals a general-purpose autoscaler can act on do not
 tell you what you need to know. We have a benchmark where the request rate

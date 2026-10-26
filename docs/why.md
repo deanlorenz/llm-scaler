@@ -144,12 +144,11 @@ cover.
   [KEDA alone](comparison/keda-alone.md) compares them need by need; the only
   head-to-head is one July 2026 study of five scenarios, one run each, on an
   older controller and recipe.
-- **llm-d's workload-variant-autoscaler**: the project this one forked from,
-  deprecated upstream (`v0.9.0` is final; llm-d advises staying on it where
-  cost-aware placement across variants is needed). Upstream already had GPU
-  budgets and scale-from-zero. This fork adds the KEDA external scaler with
-  pushed activation, Kueue quotas, the utilization-share optimizer, the warm
-  pool, the install tooling, and throughput-priced demand.
+- **llm-d's workload-variant-autoscaler**: the project this one forked from.
+  Upstream already had GPU budgets and scale-from-zero. This fork adds the
+  KEDA external scaler with pushed activation, Kueue quotas, the
+  utilization-share optimizer, the warm pool, the install tooling, and
+  throughput-priced demand.
 - **NVIDIA Dynamo Planner**: SLA-driven: it forecasts load and profiles before
   deployment, for one model on one GPU type. SLA-target scaling is on this
   project's roadmap ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)).
@@ -213,5 +212,5 @@ from upstream, which is the only naming to change in dashboards.
 
 An independently developed, advanced fork of
 [llm-d/llm-d-workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
-not affiliated with or endorsed by the llm-d project. Apache 2.0. Questions and
+not affiliated with or endorsed by llm-d. Apache 2.0. Questions and
 bugs: [GitHub issues](https://github.com/ev-shindin/llm-scaling-manager/issues).
