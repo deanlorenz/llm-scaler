@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -62,6 +64,31 @@ func sanitizeOptimizationInterval(interval time.Duration, raw string) time.Durat
 		"default", DefaultOptimizationInterval,
 	)
 	return DefaultOptimizationInterval
+}
+
+// learnedHorizon returns the learned-state horizon key was set to, or 0 when
+// it is unset or reads as zero. raw is the value as written and parsed what
+// viper made of it.
+//
+// Zero means "use the default" downstream (capacity.Horizons.Sanitized), and
+// says so silently, because an unset key is the ordinary case. But viper also
+// returns 0 for a value it cannot parse -- `30d` and `7d` (Go has no day
+// unit), `abc`, ` 24h` with a leading space -- and for a deliberate `0`. Those
+// were set, so they are reported here, where the value as written is still
+// known; Sanitized only ever sees the 0. A set value that parses to something
+// non-zero is passed through as written, and Sanitized names it if it is below
+// the floor.
+func learnedHorizon(log logr.Logger, key, raw string, parsed time.Duration) time.Duration {
+	if strings.TrimSpace(raw) == "" || parsed != 0 {
+		return parsed
+	}
+	log.Error(
+		fmt.Errorf("%s=%q is not a usable duration", key, raw),
+		"Unusable learned-state horizon, using default",
+		"key", key,
+		"value", raw,
+		"note", "write a Go duration with a unit, e.g. 168h for 7 days; there is no d unit, and 0 does not disable eviction")
+	return 0
 }
 
 // Load loads and validates the unified configuration.
@@ -159,19 +186,20 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		loggerVerbosity:      v.GetInt("V"),
 		optimizationInterval: sanitizeOptimizationInterval(
 			v.GetDuration("GLOBAL_OPT_INTERVAL"), v.GetString("GLOBAL_OPT_INTERVAL")),
-		// Left exactly as written, including unusable values: the analyzer
-		// sanitizes them field by field (capacity.Horizons.Sanitized) and the
-		// engine logs which ones it replaced, so the floor lives with the thing
-		// that owns the horizons rather than being enforced twice. Unset reads
-		// 0, which it takes as "use the default".
-		//
-		// Unlike GLOBAL_OPT_INTERVAL above, the raw string is not captured, so
-		// the diagnostic names the PARSED value (a unit-less "24" shows as
-		// 24ns). That is enough to identify the mistake and avoids three more
-		// fields on Config; if it ever is not, pass v.GetString too.
-		learnedEpisodeGap:      v.GetDuration("LEARNED_STATE_EPISODE_GAP"),
-		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_VARIANT_TIMEOUT"),
-		learnedBucketRetention: v.GetDuration("LEARNED_STATE_BUCKET_RETENTION"),
+		// Left as written when they parse, including below-floor values: the
+		// analyzer sanitizes them field by field (capacity.Horizons.Sanitized)
+		// and the engine logs which ones it replaced, so the floor lives with
+		// the thing that owns the horizons rather than being enforced twice.
+		// Unset reads 0, which it takes as "use the default" without a word.
+		// A value that was set and reads as 0 -- unparseable, or a deliberate
+		// 0 -- is reported here instead, with the value as written
+		// (learnedHorizon): past this point it is indistinguishable from unset.
+		learnedEpisodeGap: learnedHorizon(ctrl.Log, "LEARNED_STATE_EPISODE_GAP",
+			v.GetString("LEARNED_STATE_EPISODE_GAP"), v.GetDuration("LEARNED_STATE_EPISODE_GAP")),
+		learnedVariantTimeout: learnedHorizon(ctrl.Log, "LEARNED_STATE_VARIANT_TIMEOUT",
+			v.GetString("LEARNED_STATE_VARIANT_TIMEOUT"), v.GetDuration("LEARNED_STATE_VARIANT_TIMEOUT")),
+		learnedBucketRetention: learnedHorizon(ctrl.Log, "LEARNED_STATE_BUCKET_RETENTION",
+			v.GetString("LEARNED_STATE_BUCKET_RETENTION"), v.GetDuration("LEARNED_STATE_BUCKET_RETENTION")),
 		learnedStateSnapshot:   v.GetBool("LEARNED_STATE_SNAPSHOT"),
 	}
 

@@ -109,7 +109,9 @@ const MinHorizon = time.Minute
 // 0 -- so it takes its default and is NOT named: naming it made every
 // controller started with default settings log an error about settings
 // nobody had made. Only a value someone actually set and that is unusable
-// (negative, or positive but below MinHorizon) is named.
+// (negative, or positive but below MinHorizon) is named. A value that was set
+// and reads as 0 (unparseable, or a literal 0) arrives here as 0 too; the
+// config loader reports that one, where the value as written is still known.
 //
 // The names are the point, not a convenience: after flooring, the surviving
 // value IS the default, so no amount of logging the result can distinguish a

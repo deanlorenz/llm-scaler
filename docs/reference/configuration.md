@@ -508,9 +508,11 @@ namespace-scoped installs side by side each have their own budget.
 
 The three `LEARNED_STATE_*` horizons are how long the saturation analyzer keeps
 what it has learned. Each is checked on its own. An unset value takes its
-default silently. A value that is negative, below one minute, or has no unit
-(`24` parses as 24 **nanoseconds**) also goes back to its default, and the
-controller logs an error naming which it replaced. The horizons in force
+default silently. A value that is set but unusable also goes back to its
+default, and the controller logs an `Unusable learned-state horizon` error
+naming it: one that is not a Go duration (`7d` or `30d`, since there is no day
+unit, so write `168h`), `0`, a negative value, a value below one minute, or one
+with no unit (`24` parses as 24 **nanoseconds**). The horizons in force
 are logged once at startup as `learned-state horizons`. Shorten them to exercise
 this inside a test run instead of over a week.
 
