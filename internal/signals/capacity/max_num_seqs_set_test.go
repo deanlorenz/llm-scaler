@@ -58,12 +58,18 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		"through the env": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeDeploymentWithEnvAndArgs(
 			[]corev1.EnvVar{{Name: "ACTIVE", Value: "40"}}, "--max-num-active-seqs", "$ACTIVE"))), 40, 40},
 		"in a shell command": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(shell)), 128, 128},
-		// An active cap nothing could read may be below any max_num_seqs that
-		// was: the cap is unknown.
-		"unreadable":                    {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 0},
-		"zero is not a value vLLM runs": {parse("--max-num-seqs=256", "--max-num-active-seqs=0"), 0, 0},
-		"not a number":                  {parse("--max-num-active-seqs=many"), 0, 0},
-		"absent: max_num_seqs alone":    {parse("--max-num-seqs=256"), 0, 256},
+		// An active cap nothing could read falls back to an explicit
+		// max_num_seqs, which vLLM guarantees is at or above it: still a true
+		// upper bound on the batch.
+		"unreadable, max_num_seqs stated": {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 256},
+		"unreadable alone":                {parse("--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 0},
+		// vLLM: Field(default=None, ge=1).
+		"zero is not a value vLLM runs":  {parse("--max-num-seqs=256", "--max-num-active-seqs=0"), 0, 256},
+		"not a number":                   {parse("--max-num-active-seqs=many"), 0, 0},
+		"no value token":                 {parse("--max-num-seqs=256", "--max-num-active-seqs"), 0, 256},
+		"a later unreadable occurrence":  {parse("--max-num-seqs=256", "--max-num-active-seqs=64", "--max-num-active-seqs", "$UNSET_ACTIVE"), 0, 256},
+		"a later readable occurrence":    {parse("--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE", "--max-num-active-seqs=64"), 64, 64},
+		"absent: max_num_seqs alone":     {parse("--max-num-seqs=256"), 0, 256},
 	} {
 		if got := tc.params.MaxNumActiveSeqs; got != tc.wantActive {
 			t.Errorf("%s: MaxNumActiveSeqs = %d, want %d", name, got, tc.wantActive)
@@ -73,12 +79,23 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		}
 	}
 
-	// An unreadable value is recorded, as one for max_num_seqs is, so the read
-	// is not reported complete.
-	if p := parse("--max-num-active-seqs", "$UNSET_ACTIVE"); p.Complete() {
-		t.Errorf("an unreadable --max-num-active-seqs reads as complete: Unresolved=%v", p.Unresolved)
-	}
-	if p := parse("--max-num-active-seqs=64"); !p.Complete() {
-		t.Errorf("a readable --max-num-active-seqs reads as incomplete: Unresolved=%v", p.Unresolved)
+	// An unreadable value is NOT recorded: marking the read incomplete would
+	// change the fingerprint and withhold learned-state sharing and restore
+	// for a deployment whose only change is that this flag is now read. The
+	// read stays complete and hashes exactly as it would without the flag.
+	without := parse("--max-num-seqs=256")
+	for _, args := range [][]string{
+		{"--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"},
+		{"--max-num-seqs=256", "--max-num-active-seqs=0"},
+		{"--max-num-seqs=256", "--max-num-active-seqs=many"},
+		{"--max-num-seqs=256", "--max-num-active-seqs=64"},
+	} {
+		p := parse(args...)
+		if !p.Complete() {
+			t.Errorf("%v reads as incomplete: Unresolved=%v", args, p.Unresolved)
+		}
+		if p.Fingerprint() != without.Fingerprint() {
+			t.Errorf("%v changed the fingerprint against the same flags without it", args)
+		}
 	}
 }

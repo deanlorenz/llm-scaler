@@ -65,8 +65,11 @@ const fingerprintLength = 16
 // be done in one place; a fingerprint on its own identifies a configuration,
 // never a thing being served.
 //
-// Relative to IsCapacityCompatible this adds exactly one field, EnforceEager,
-// and the asymmetry is deliberate. No CUDA graphs does not change how much KV
+// Relative to IsCapacityCompatible this adds one field, EnforceEager, and
+// drops one, MaxNumActiveSeqs; both asymmetries are deliberate. The active cap
+// bounds how far along the ITL line a replica runs, not the line, and hashing
+// it would need a FingerprintVersion bump that re-keys every stored digest.
+// The EnforceEager half: No CUDA graphs does not change how much KV
 // fits or how many sequences run, so a capacity record survives it -- but it
 // does change the inter-token latency, and this digest also keys a latency
 // model. Including it costs only that two engines differing in --enforce-eager

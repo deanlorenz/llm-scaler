@@ -18,9 +18,10 @@ type Admission struct {
 	// analyzerTuning.itlBand.maxObservableK set them (config.ScalingPolicy.ITLBand), which
 	// validates 0 < MinK < MaxK < 1.
 	MinK, MaxK float64
-	// MaxNumSeqs is the engine's max_num_seqs, per rank, when it was read
-	// from the engine's flag: capacity.EngineParams.ExplicitMaxNumSeqs. Zero
-	// when it is unknown or only a default, which admits nothing above MaxK.
+	// MaxNumSeqs is the engine's batch cap, per rank, as its flags state it:
+	// max_num_seqs, lowered by --max-num-active-seqs when that is set
+	// (capacity.EngineParams.ExplicitMaxNumSeqs). Zero when it is unknown or
+	// only a default, which admits nothing above MaxK.
 	MaxNumSeqs int64
 	// CapMaxPreemptionRate is the most preemptions per second a capped
 	// replica may show over the ITL's window and still be read above MaxK.
