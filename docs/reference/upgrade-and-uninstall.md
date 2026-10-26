@@ -96,8 +96,8 @@ only to change it. Limiters an admin published in a policy namespace
    ```
    If a ScaledObject reads Ready but its HPA carries only `cpu`, KEDA left it
    unwired. Re-wire it (`DRY_RUN=true` only lists them). In the out-of-reach
-   shape pass `WVA_NS` too; without it the command finds no ScaledObject and
-   exits 0 with "nothing to re-wire":
+   shape pass `WVA_NS` too; without it the command finds no ScaledObject
+   naming that scaler, warns with the namespace they do name, and exits 3:
    ```bash
    NAMESPACE=<namespace> make scaledobjects-rewire
    # out-of-reach shape: the controller runs in wva-<namespace>

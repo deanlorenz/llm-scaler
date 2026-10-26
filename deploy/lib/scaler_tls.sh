@@ -1201,15 +1201,16 @@ wva_scaler_scaledobjects_json() {
 
 # wva_scaler_other_namespaces echoes, one per line, each namespace other than
 # $WVA_NS that a trigger in the watched namespaces names as
-# wva-external-scaler.<namespace>.: the WVA_NS those ScaledObjects point at.
+# wva-external-scaler.<namespace>: the WVA_NS those ScaledObjects point at.
+# $1, when given, is the list wva_scaler_scaledobjects_json already read.
 # Exits 2 when the ScaledObjects cannot be read.
 wva_scaler_other_namespaces() {
-    local out
-    out="$(wva_scaler_scaledobjects_json)" || return 2
+    local out="${1:-}"
+    [ -n "$out" ] || out="$(wva_scaler_scaledobjects_json)" || return 2
     printf '%s' "$out" | jq -r --arg ns "$WVA_NS" '
         [.items[]? | (.spec.triggers // [])[] | (.metadata.scalerAddress // "")
          | select(startswith("wva-external-scaler."))
-         | ltrimstr("wva-external-scaler.") | split(".")[0]
+         | ltrimstr("wva-external-scaler.") | split(".")[0] | split(":")[0]
          | select(. != "" and . != $ns)] | unique | .[]' 2>/dev/null || return 2
 }
 
@@ -1218,11 +1219,12 @@ wva_scaler_other_namespaces() {
 # this install's scaler that would NOT reach it over this installer's TLS: the
 # plaintext address, or no authenticationRef to the ClusterTriggerAuthentication.
 # With $1 = plaintext, the reverse: triggers still on the TLS address or
-# reference. With $1 = any, every one naming this scaler. Exits 2 when the
+# reference. With $1 = any, every one naming this scaler. $2, when given, is
+# the list wva_scaler_scaledobjects_json already read. Exits 2 when the
 # ScaledObjects cannot be read: unknown, not none.
 wva_scaler_plaintext_scaledobjects() {
-    local want="${1:-tls}" out
-    out="$(wva_scaler_scaledobjects_json)" || return 2
+    local want="${1:-tls}" out="${2:-}"
+    [ -n "$out" ] || out="$(wva_scaler_scaledobjects_json)" || return 2
     printf '%s' "$out" | jq -r --arg p "wva-external-scaler.${WVA_NS}." \
         --arg a "$(wva_scaler_address "$WVA_NS" tls)" --arg n "$(wva_scaler_keda_auth_name)" --arg w "$want" '
         [.items[]? | . as $so | (.spec.triggers // [])[]

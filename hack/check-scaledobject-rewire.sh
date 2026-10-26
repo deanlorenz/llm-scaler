@@ -23,8 +23,10 @@
 #                except in a dry run); a copy from another CA: setup-prereqs
 #   unlistable   exit 2, not "nothing to do"
 #   wrong WVA_NS none names this scaler but some name another
-#                wva-external-scaler.<namespace>: a warning naming it, exit 3,
-#                not "nothing to re-wire"
+#                wva-external-scaler.<namespace> and no scaler Service runs in
+#                WVA_NS: a warning naming it (without a port), exit 3, not
+#                "nothing to re-wire"; with the Service there, a second
+#                install: exit 0; the Service unreadable: exit 3
 #
 # Every case asserts something that a missing function also fails, so a run
 # against code without this feature fails rather than passes empty.
@@ -37,7 +39,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=17
+EXPECTED_CASES=20
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -128,6 +130,13 @@ stub_kubectl() {
             fi
             ;;
         "patch scaledobject "*) printf '%s\n' "$a" >>"$WORK/patches" ;;
+        "get svc wva-external-scaler -n $NS -o name")
+            case "${STUB_SVC:-absent}" in
+                present) echo "service/wva-external-scaler" ;;
+                forbidden) forbidden services; return 1 ;;
+                *) echo 'Error from server (NotFound): services "wva-external-scaler" not found' >&2; return 1 ;;
+            esac
+            ;;
         "logs -n $NS -l "*) : ;;
         "rollout restart "*) : ;;
         *) return 0 ;;
@@ -285,16 +294,38 @@ begin "none names this scaler, some name another WVA namespace: warns naming it,
 reset
 so app-o unwired "wva-external-scaler.wva-elsewhere.svc:9090"
 so other-d unwired "$OTHER"
-run WVA_SCALER_REWIRE_TRIES=3
+run
 ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && grep -q "wva-elsewhere" "$WORK/warnings" && grep -q "WVA_NS=wva-elsewhere" "$WORK/warnings" && ! grep -q "nothing to re-wire" "$WORK/info"' "other WVA namespace: exit $RC (want 3), patches '$(cat "$WORK/patches")', warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+# A short address resolves through KEDA's DNS search path; the namespace is
+# the part before the port.
+begin "none names this scaler, one names another by its short address: the namespace without the port"
+reset
+so app-o unwired "wva-external-scaler.wva-elsewhere:9090"
+run
+ok '[ "$RC" = 3 ] && grep -q "WVA_NS=wva-elsewhere " "$WORK/warnings" && ! grep -q "wva-elsewhere:9090" "$WORK/warnings"' "short address: exit $RC (want 3), warnings $(cat "$WORK/warnings")"
+
+# A correct WVA_NS whose install has no ScaledObject yet, beside a second
+# install whose ScaledObjects are visible: not a wrong WVA_NS.
+begin "none names this scaler, another install's do, and the scaler runs in WVA_NS: exit 0"
+reset
+so app-o unwired "wva-external-scaler.wva-elsewhere.svc:9090"
+run STUB_SVC=present
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/warnings" ] && grep -q "wva-elsewhere" "$WORK/info"' "second install: exit $RC (want 0), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
+
+begin "none names this scaler, another install's do, and the scaler Service cannot be read: exit 3"
+reset
+so app-o unwired "wva-external-scaler.wva-elsewhere.svc:9090"
+run STUB_SVC=forbidden
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/patches" ] && grep -q "could not be read" "$WORK/warnings"' "svc unreadable: exit $RC (want 3), warnings $(cat "$WORK/warnings")"
 
 begin "none names any WVA scaler: nothing to re-wire, exit 0"
 reset
 so other-d unwired "$OTHER"
-run WVA_SCALER_REWIRE_TRIES=3
+run
 ok '[ "$RC" = 0 ] && [ ! -s "$WORK/patches" ] && [ ! -s "$WORK/warnings" ] && grep -q "nothing to re-wire" "$WORK/info"' "no WVA scaler: exit $RC (want 0), warnings $(cat "$WORK/warnings"), info $(cat "$WORK/info")"
 
-begin "the make targets:scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
+begin "the make targets: scaledobjects-apply re-wires, scaledobjects-rewire exists with help"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"
 APPLY="$(printf '%s\n' "$MK" | awk '/^scaledobjects-apply:/ { on = 1; next } on && /^[^\t]/ { exit } on')"
 REWIRE="$(printf '%s\n' "$MK" | awk '/^scaledobjects-rewire:/ { on = 1; next } on && /^[^\t]/ { exit } on')"
