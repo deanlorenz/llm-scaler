@@ -15,8 +15,8 @@ merged after it). The competitor sections keep the dates they give.
   and the runs measured since.
 - **[Sharing a GPU budget between models](gpu-sharing.md)** — moving GPUs from
   a model whose load fell to one whose load rose: what llm-d offers today
-  (Kueue floors, borrowing and preemption) and what the utilization-share
-  optimizer adds on top.
+  (its experimental Kueue guide: floors, borrowing and preemption) and what
+  the utilization-share optimizer adds, and when the two work together.
 - **[NVIDIA Dynamo, Mooncake and SGLang](autoscaling-nvidia-mooncake-sglang-vs-wva.md)**
   — the detailed comparison. Dynamo's Planner is the only true peer autoscaler
   of the three, and the only one with forecasting; Mooncake is a load-shedding
