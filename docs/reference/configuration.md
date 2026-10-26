@@ -507,9 +507,10 @@ namespace-scoped installs side by side each have their own budget.
 | `LWS_CHART_VERSION` | LeaderWorkerSet Helm chart version | `0.8.0` |
 
 The three `LEARNED_STATE_*` horizons are how long the saturation analyzer keeps
-what it has learned. Each is checked on its own: a value that is unset, negative,
-below one minute, or has no unit (`24` parses as 24 **nanoseconds**) goes back
-to its default, and the controller logs which it replaced. The horizons in force
+what it has learned. Each is checked on its own. An unset value takes its
+default silently. A value that is negative, below one minute, or has no unit
+(`24` parses as 24 **nanoseconds**) also goes back to its default, and the
+controller logs an error naming which it replaced. The horizons in force
 are logged once at startup as `learned-state horizons`. Shorten them to exercise
 this inside a test run instead of over a week.
 

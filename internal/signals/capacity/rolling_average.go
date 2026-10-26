@@ -102,8 +102,14 @@ func DefaultHorizons() Horizons {
 // the slowest shipped cadence without pretending to validate against it.
 const MinHorizon = time.Minute
 
-// Sanitized returns h with every non-positive or below-floor field replaced by
-// its default, and the names of the fields it changed.
+// Sanitized returns h with every zero, negative or below-floor field replaced
+// by its default, and the names of the fields it rejected.
+//
+// A zero field is unset -- config reads an absent LEARNED_STATE_* variable as
+// 0 -- so it takes its default and is NOT named: naming it made every
+// controller started with default settings log an error about settings
+// nobody had made. Only a value someone actually set and that is unusable
+// (negative, or positive but below MinHorizon) is named.
 //
 // The names are the point, not a convenience: after flooring, the surviving
 // value IS the default, so no amount of logging the result can distinguish a
@@ -119,19 +125,24 @@ const MinHorizon = time.Minute
 func (h Horizons) Sanitized() (Horizons, []string) {
 	var fixed []string
 	d := DefaultHorizons()
-	if h.EpisodeGap < MinHorizon {
-		fixed = append(fixed, "episodeGap")
-		h.EpisodeGap = d.EpisodeGap
-	}
-	if h.VariantTimeout < MinHorizon {
-		fixed = append(fixed, "variantTimeout")
-		h.VariantTimeout = d.VariantTimeout
-	}
-	if h.BucketRetention < MinHorizon {
-		fixed = append(fixed, "bucketRetention")
-		h.BucketRetention = d.BucketRetention
-	}
+	h.EpisodeGap = sanitizeHorizon(h.EpisodeGap, d.EpisodeGap, "episodeGap", &fixed)
+	h.VariantTimeout = sanitizeHorizon(h.VariantTimeout, d.VariantTimeout, "variantTimeout", &fixed)
+	h.BucketRetention = sanitizeHorizon(h.BucketRetention, d.BucketRetention, "bucketRetention", &fixed)
 	return h, fixed
+}
+
+// sanitizeHorizon returns v when it is usable and def otherwise, appending name
+// to fixed only when v was set (non-zero) and rejected.
+func sanitizeHorizon(v, def time.Duration, name string, fixed *[]string) time.Duration {
+	switch {
+	case v == 0:
+		return def
+	case v < MinHorizon:
+		*fixed = append(*fixed, name)
+		return def
+	default:
+		return v
+	}
 }
 
 // RollingAverage maintains a fixed-size sliding window of float64 values.

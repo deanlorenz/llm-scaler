@@ -901,7 +901,8 @@ The first three are **defaults, not the values in force**. They are assembled in
 fills from `Config.LearnedStateHorizons()` — `LEARNED_STATE_EPISODE_GAP`,
 `LEARNED_STATE_VARIANT_TIMEOUT`, `LEARNED_STATE_BUCKET_RETENTION`. `Horizons.Sanitized` floors each
 field at `MinHorizon` (1m) independently and names the ones it replaced, so a single
-unusable value does not discard the other two. Read the pair in force off
+unusable value does not discard the other two. A zero field is unset and takes its
+default without being named, so an unconfigured controller logs no error. Read the pair in force off
 `a.horizons`; `EvictStaleHistory()` takes no arguments, because a horizon passed per
 sweep is a horizon no operator can reach.
 
