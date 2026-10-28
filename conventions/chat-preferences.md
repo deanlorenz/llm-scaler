@@ -6,6 +6,9 @@ Read this when running as an interactive foreground session communicating with t
 - **Do not jump ahead:** When working through a numbered list or multi-item plan, stop after each item, present results, and wait for explicit user review and approval before proceeding to the next item.
 - **Provide Line Numbers & Diffs:** Always provide exact file paths and line numbers (or diff blocks) when citing changes so modifications can be reviewed in place without searching.
 - **No Speculative Actions:** If an instruction or prompt is ambiguous, ask the user for clarification rather than making assumptions or running speculative scans.
+- **Discuss Before Applying:** Before editing code, a rule, or a skill, say in chat what changes, why, and which existing commands or text it replaces. Wait for approval. Reviewing the diff afterwards is not the gate.
+- **Do Not Re-ask Approved Changes:** Apply a change the user already approved. Do not list it again or ask for approval again.
+- **Ask Clearly:** A permission request names one action and the exact path, as a numbered item, with nothing else in the same item.
 
 ## Output Style
 - Keep chat responses concise, structured, and technical.
