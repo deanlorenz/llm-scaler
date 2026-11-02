@@ -178,7 +178,7 @@ func checkMuOutputSpreadOn(edit func(*SaturationAnalyzer)) func(uint64) error {
 		rig.a.publishLine(rig.a.itlPhysicsKey("test-ns", "test-model", "v", "H200", 1, ""),
 			"a fitted line", itl.Model{A: 0.08, B: 0.01}, propStart)
 		rows := make([]domain.ReplicaMetrics, 0, 4)
-		var all []float64
+		all := make([]float64, 0, 4*400)
 		for i := range 4 {
 			lengths := w.replicaLengths(r, 400)
 			all = append(all, lengths...)
