@@ -93,16 +93,18 @@ var earlierSeams = map[string][]string{
 var heldBy = map[string][]heldTest{
 	saturation.SwitchBatchCapITLAdmission: {
 		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},
-		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsLearnedCap"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotAnITLCap"},
 		{"../saturation", "TestBatchCapReaders_TheITLAdmissionSwitchPicksTheSource"},
 	},
 	saturation.SwitchBatchCapDecodeView: {
 		{"../saturation", "TestBatchCapReaders_APDDecodeAtItsDeclaredCapKeepsTheFullQueue"},
 		{"../saturation", "TestBatchCapReaders_TheDecodeViewSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotADecodeViewCap"},
 	},
 	saturation.SwitchBatchCapDerivedMu: {
 		{"../saturation", "TestBatchCapReaders_TheDerivedMuIsCappedAtTheDeclaredCap"},
 		{"../saturation", "TestBatchCapReaders_TheDerivedMuSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapLowersTheDerivedMu"},
 	},
 	slo.SwitchBatchCapAdmission: {
 		{"../slo", "TestBatchCap_TheLineTakesAReplicaAtItsDeclaredCap"},
@@ -111,6 +113,7 @@ var heldBy = map[string][]heldTest{
 	slo.SwitchBatchCapPerRank: {
 		{"../slo", "TestBatchCap_AReplicaIsPricedAtItsDeclaredCap"},
 		{"../slo", "TestBatchCap_ThePerRankSwitchPicksTheSource"},
+		{"../slo", "TestBatchCap_TheLogNamesThePricedCap"},
 	},
 	saturation.SwitchIdleBand: {
 		{"../saturation", "TestIdleBand_ARunStartsUnderTheLineAndEndsAtTheTop"},

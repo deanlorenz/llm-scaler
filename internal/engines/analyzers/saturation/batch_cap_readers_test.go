@@ -14,10 +14,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
-// Issue #420: the batch cap's readers besides P3 read the cap #399 added --
-// the llm-d.ai/max-num-seqs annotation, and the learned cap -- where the
-// engine's flags state none. Each reader is driven through Analyze, with the
-// flags unread (MaxNumSeqs the parser's default of 256, not stated).
+// Issue #420: the batch cap's readers besides P3 read the caps #399 added
+// where the engine's flags state none. Every reader reads the
+// llm-d.ai/max-num-seqs annotation; the learned cap reaches the derived mu
+// only, never a reader that asks whether a replica is AT its cap. Each
+// reader is driven through Analyze, with the flags unread (MaxNumSeqs the
+// parser's default of 256, not stated).
 
 // declaredParams is an engine whose flags state no cap, and whose scale
 // target declares perRank.
@@ -64,6 +66,7 @@ func cappedITLWindow(t *testing.T, params *capacity.EngineParams, running int, l
 func TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap(t *testing.T) {
 	fields := cappedITLWindow(t, declaredParams(128), 128, false, nil)
 	assert.EqualValues(t, 128, fields["batchCap"])
+	assert.Equal(t, batchCapDeclared, fields["batchCapSource"])
 	assert.EqualValues(t, 1, fields["capped"])
 	assert.EqualValues(t, 0, fields["aboveBand"])
 
@@ -73,20 +76,42 @@ func TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap(t *testing.T)
 	assert.EqualValues(t, 1, fields["aboveBand"])
 }
 
-// A learned cap is a cap something states, for the window as for P3, and
-// only while the policy learns.
-func TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsLearnedCap(t *testing.T) {
-	params := deploymentParams()
-	learned := func(a *SaturationAnalyzer) {
-		a.batchCaps[batchCapKey("test-ns", "test-model", "variant-d")] = &learnedBatchCap{perRank: 128, args: windowArgs(params)}
+// learnedCapOf is the analyzer edit that files a learned cap of perRank for
+// variant under params, last confirmed at the time given and never used.
+func learnedCapOf(variant string, perRank int64, params *capacity.EngineParams, at time.Time) func(*SaturationAnalyzer) {
+	return func(a *SaturationAnalyzer) {
+		a.batchCaps[batchCapKey("test-ns", "test-model", variant)] = &learnedBatchCap{
+			perRank: perRank, args: windowArgs(params), at: at}
 	}
-	fields := cappedITLWindow(t, params, 128, true, learned)
-	assert.EqualValues(t, 128, fields["batchCap"])
-	assert.EqualValues(t, 1, fields["capped"])
+}
 
-	fields = cappedITLWindow(t, params, 128, false, learned)
-	assert.EqualValues(t, 0, fields["batchCap"], "learning off: no learned cap is read")
+// learnedCapEntry is variant's learned cap in a.
+func learnedCapEntry(t *testing.T, a *SaturationAnalyzer, variant string) learnedBatchCap {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	lc := a.batchCaps[batchCapKey("test-ns", "test-model", variant)]
+	require.NotNil(t, lc, "the learned cap is still filed")
+	return *lc
+}
+
+// A learned cap is not a cap the ITL fit reads a replica as AT. It is the
+// highest plateau seen, so it may sit below the true cap, and a replica
+// held there by memory would be admitted above the band as capped. Nor is
+// it stamped as used: an at-cap test does not price a replica.
+func TestBatchCapReaders_ALearnedCapIsNotAnITLCap(t *testing.T) {
+	params := deploymentParams()
+	var a *SaturationAnalyzer
+	keep := func(an *SaturationAnalyzer) { a = an }
+	confirmed := time.Date(2026, 10, 24, 11, 0, 0, 0, time.UTC)
+	learned := learnedCapOf("variant-d", 128, params, confirmed)
+	fields := cappedITLWindow(t, params, 128, true, func(an *SaturationAnalyzer) { learned(an); keep(an) })
+	assert.EqualValues(t, 0, fields["batchCap"])
+	assert.Equal(t, batchCapNone, fields["batchCapSource"])
 	assert.EqualValues(t, 0, fields["capped"])
+	assert.EqualValues(t, 1, fields["aboveBand"])
+	lc := learnedCapEntry(t, a, "variant-d")
+	assert.Equal(t, confirmed, lc.at, "the reading confirms nothing")
 }
 
 // The switch off reads the flags' cap alone, as before #420.
@@ -109,6 +134,16 @@ func TestBatchCapReaders_TheITLAdmissionSwitchPicksTheSource(t *testing.T) {
 func pdDecodeAtCap(t *testing.T, params *capacity.EngineParams, running int,
 	edit func(*SaturationAnalyzer)) (*SaturationAnalyzer, *domain.AnalyzerResult) {
 	t.Helper()
+	return pdDecodeAtCapLearning(t, params, running, false, edit)
+}
+
+// pdDecodeAtCapLearning is pdDecodeAtCap under a policy whose
+// enableBatchCapLearning is learning. Learning, the row reads its running
+// count and a preemption rate of 0, so a view that kept its queue would
+// pass every learned-cap admission rule (batchCapRules).
+func pdDecodeAtCapLearning(t *testing.T, params *capacity.EngineParams, running int, learning bool,
+	edit func(*SaturationAnalyzer)) (*SaturationAnalyzer, *domain.AnalyzerResult) {
+	t.Helper()
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", decodeVariant, capacity.Record{
 		GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
@@ -121,7 +156,11 @@ func pdDecodeAtCap(t *testing.T, params *capacity.EngineParams, running int,
 	a.now = func() time.Time { return clock }
 	rm := withReason(pdDecodeRow(halfCache), 0)
 	rm.RunningRequests = running
+	if learning {
+		rm.RunningRequestsKnown, rm.PreemptionRateKnown = true, true
+	}
 	in := makeAnalyzerInput([]domain.ReplicaMetrics{rm, pdPrefillRow()}, pdStates)
+	in.Config.(*config.ScalingPolicy).EnableBatchCapLearning = learning
 	var res *domain.AnalyzerResult
 	for range 4 {
 		var err error
@@ -148,6 +187,22 @@ func TestBatchCapReaders_APDDecodeAtItsDeclaredCapKeepsTheFullQueue(t *testing.T
 	assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1)
 }
 
+// A learned cap is not a cap the P/D decode view reads a decode as AT. It
+// may sit below the true cap, where vLLM still promotes landed pulls: the
+// deferred requests are in flight, not a backlog. Read as one, a decode at
+// a learned 128 recorded k2 at half its cache, was charged 10x its demand,
+// and -- observeBatchCap reads the view -- confirmed the cap that caused it.
+func TestBatchCapReaders_ALearnedCapIsNotADecodeViewCap(t *testing.T) {
+	params := deploymentParams()
+	var an *SaturationAnalyzer
+	confirmed := time.Date(2026, 10, 24, 11, 0, 0, 0, time.UTC)
+	learned := learnedCapOf(decodeVariant, 128, params, confirmed)
+	a, res := pdDecodeAtCapLearning(t, params, 128, true, func(x *SaturationAnalyzer) { learned(x); an = x })
+	assert.False(t, recordedK2(a), "the deferred requests are in flight: not saturated")
+	assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1, "only the capacity queue is charged")
+	assert.Equal(t, confirmed, learnedCapEntry(t, an, decodeVariant).at, "the in-flight queue confirms nothing")
+}
+
 // The switch off reads the flags' cap alone, as before #420.
 func TestBatchCapReaders_TheDecodeViewSwitchPicksTheSource(t *testing.T) {
 	a, res := pdDecodeAtCap(t, declaredParams(128), 128, func(a *SaturationAnalyzer) { a.batchCapDecodeView = false })
@@ -159,6 +214,14 @@ func TestBatchCapReaders_TheDecodeViewSwitchPicksTheSource(t *testing.T) {
 // cache holds far more sequences than declared, under params with an ITL
 // line published, edit applied, and returns the derived-mu line.
 func derivedMuSeqs(t *testing.T, params *capacity.EngineParams, edit func(*SaturationAnalyzer)) map[string]any {
+	t.Helper()
+	return derivedMuSeqsLearning(t, params, false, edit)
+}
+
+// derivedMuSeqsLearning is derivedMuSeqs under a policy whose
+// enableBatchCapLearning is learning.
+func derivedMuSeqsLearning(t *testing.T, params *capacity.EngineParams, learning bool,
+	edit func(*SaturationAnalyzer)) map[string]any {
 	t.Helper()
 	ctx, logs := observedCtx(t)
 	store := capacity.NewStore()
@@ -176,6 +239,7 @@ func derivedMuSeqs(t *testing.T, params *capacity.EngineParams, edit func(*Satur
 		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H200",
 			CurrentReplicas: 1, GPUsPerReplica: 1},
 	})
+	in.Config.(*config.ScalingPolicy).EnableBatchCapLearning = learning
 	_, err := a.Analyze(ctx, in)
 	require.NoError(t, err)
 	fields := requireLogged(t, logs, "derived-mu")
@@ -207,17 +271,36 @@ func TestBatchCapReaders_TheDerivedMuSwitchPicksTheSource(t *testing.T) {
 	assert.InDelta(t, 256, off["seqs"], 1e-9)
 }
 
-// statedBatchCap is the pricing cap where something states it, and 0 where
-// only the default stands in.
-func TestBatchCapReaders_StatedBatchCap(t *testing.T) {
+// A learned cap lowers the derived mu, as it lowers P3, where the policy
+// learns: mu is a price, and a cap below the true one only orders more
+// replicas. The cap is stamped as used.
+func TestBatchCapReaders_ALearnedCapLowersTheDerivedMu(t *testing.T) {
+	params := deploymentParams()
+	var a *SaturationAnalyzer
+	learned := learnedCapOf("variant-d", 32, params, time.Date(2026, 10, 24, 11, 0, 0, 0, time.UTC))
+	fields := derivedMuSeqsLearning(t, params, true, func(x *SaturationAnalyzer) { learned(x); a = x })
+	assert.InDelta(t, 32, fields["seqs"], 1e-9)
+	assert.Equal(t, batchCapLearned, fields["batchCapSource"])
+	assert.False(t, learnedCapEntry(t, a, "variant-d").usedAt.IsZero(), "pricing mu is a use")
+
+	// Learning off: the default binds.
+	fields = derivedMuSeqsLearning(t, params, false, learnedCapOf("variant-d", 32, params, time.Time{}))
+	assert.InDelta(t, 256, fields["seqs"], 1e-9)
+}
+
+// atCapBatchCap is the flags' cap, else -- with its reader's switch, and the
+// declared cap's -- the declared one, and never the default or a learned
+// cap. It takes no variant, so it reads no learned state and stamps none.
+func TestBatchCapReaders_AtCapBatchCap(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())
-	stated := deploymentParams()
+	stated := declaredParams(96)
 	stated.MaxNumSeqs, stated.MaxNumSeqsSet = 64, true
-	assert.EqualValues(t, 64, a.statedBatchCap("ns", "m", "v", stated, false))
-	assert.EqualValues(t, 96, a.statedBatchCap("ns", "m", "v", declaredParams(96), false))
-	assert.EqualValues(t, 0, a.statedBatchCap("ns", "m", "v", deploymentParams(), true), "the default is no stated cap")
-	assert.EqualValues(t, 0, a.statedBatchCap("ns", "m", "v", nil, true))
-	a.batchCaps[batchCapKey("ns", "m", "v")] = &learnedBatchCap{perRank: 120, args: windowArgs(deploymentParams())}
-	assert.EqualValues(t, 120, a.statedBatchCap("ns", "m", "v", deploymentParams(), true))
-	assert.EqualValues(t, 0, a.statedBatchCap("ns", "m", "v", deploymentParams(), false))
+	assert.Equal(t, pricedBatchCap{64, batchCapFromFlags}, a.atCapBatchCap(stated, true))
+	assert.Equal(t, pricedBatchCap{64, batchCapFromFlags}, a.atCapBatchCap(stated, false), "the flags either way")
+	assert.Equal(t, pricedBatchCap{96, batchCapDeclared}, a.atCapBatchCap(declaredParams(96), true))
+	assert.Equal(t, pricedBatchCap{0, batchCapNone}, a.atCapBatchCap(declaredParams(96), false), "the reader's switch off")
+	assert.Equal(t, pricedBatchCap{0, batchCapNone}, a.atCapBatchCap(deploymentParams(), true), "the default is no cap")
+	assert.Equal(t, pricedBatchCap{0, batchCapNone}, a.atCapBatchCap(nil, true))
+	a.batchCapDeclared = false
+	assert.Equal(t, pricedBatchCap{0, batchCapNone}, a.atCapBatchCap(declaredParams(96), true), "the declared cap's switch off")
 }

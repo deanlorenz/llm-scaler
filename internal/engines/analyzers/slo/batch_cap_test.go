@@ -107,3 +107,41 @@ func TestBatchCap_ThePerRankSwitchPicksTheSource(t *testing.T) {
 	assert.InDelta(t, 64/line.ITLAt(0.32), pricedAt(t, stated, off), 1e-6)
 	assert.InDelta(t, 64/line.ITLAt(0.32), pricedAt(t, stated, nil), 1e-6, "the flags win over the annotation")
 }
+
+// pricedDetail warms agg's line as pricedAt does, then prices it once more
+// and returns what the replica was priced from.
+func pricedDetail(t *testing.T, params capacity.EngineParams, edit func(*Analyzer)) pricingDetail {
+	t.Helper()
+	clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	a := batchCapAnalyzer(params, &clock, edit)
+	var in domain.AnalyzerInput
+	for i := range 5 {
+		in = domain.AnalyzerInput{
+			ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 0), ArrivalRate: 2,
+			VariantStates: []domain.VariantReplicaState{batchCapAgg}, ReplicaMetrics: cycleRows("agg", i),
+		}
+		_, err := a.Analyze(context.Background(), in)
+		require.NoError(t, err)
+		clock = clock.Add(15 * time.Second)
+	}
+	_, _, d := a.priceVariant(in, batchCapAgg, windowKey("ns", "m", batchCapAgg), readFleet(in), 0.044, 0.85, clock)
+	return d
+}
+
+// The slo-variant line names the cap per rank a replica was priced at and
+// where it came from. maxNumSeqs is max_num_seqs alone, the parser's 256
+// where the flags are unread, so it cannot say a declared cap priced it.
+func TestBatchCap_TheLogNamesThePricedCap(t *testing.T) {
+	d := pricedDetail(t, declared(), nil)
+	assert.EqualValues(t, 64, d.batchCap)
+	assert.Equal(t, batchCapDeclared, d.batchCapSource)
+	assert.EqualValues(t, 256, d.maxSeqs, "max_num_seqs is still the default")
+
+	d = pricedDetail(t, capacity.EngineParams{MaxNumSeqs: 32, MaxNumSeqsSet: true, DeclaredBatchCap: 64}, nil)
+	assert.EqualValues(t, 32, d.batchCap)
+	assert.Equal(t, batchCapFlags, d.batchCapSource)
+
+	d = pricedDetail(t, declared(), func(a *Analyzer) { a.batchCapPerRank = false })
+	assert.EqualValues(t, 256, d.batchCap)
+	assert.Equal(t, batchCapDefault, d.batchCapSource)
+}

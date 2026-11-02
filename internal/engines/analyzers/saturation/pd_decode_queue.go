@@ -21,7 +21,9 @@ import (
 //     (reason="capacity"). A request that cannot get blocks for its pull
 //     waits there, so a full decode still reads queued.
 //   - Except at the sequence cap (maxNumSeqs, the engine's max_num_seqs
-//     when its flag stated it; domain.ReplicaMetrics.AtBatchCap): there the
+//     when its flag or the llm-d.ai/max-num-seqs annotation states it, never
+//     a default or a learned cap -- atCapBatchCap;
+//     domain.ReplicaMetrics.AtBatchCap): there the
 //     queue is the full count. vLLM keeps a request deferred from the moment
 //     its pull starts until it is scheduled, and the scheduler promotes a
 //     landed pull only when it looks at it, which it stops doing once the
@@ -72,8 +74,8 @@ func decodeCapacityView(rm domain.ReplicaMetrics, role string, maxNumSeqs int64)
 
 // decodeCapacityViews is decodeCapacityView over rows when the model is
 // disaggregated (domain.HasPrefill), and rows as they are when it is not.
-// maxNumSeqs is each variant's explicit max_num_seqs (zero, or absent, when
-// its flag did not state one).
+// maxNumSeqs is each variant's stated max_num_seqs (atCapBatchCap: zero, or
+// absent, when neither its flag nor its annotation states one).
 func decodeCapacityViews(rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
 	maxNumSeqs map[string]int64) []domain.ReplicaMetrics {
 	if !domain.HasPrefill(rolesByVariant) {

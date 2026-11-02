@@ -479,15 +479,16 @@ func (c *cycle) fitLines() {
 		// logs two identical "variant" values, and their fits could not be
 		// told apart in the log (issue #271).
 		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
-		// The policy's band, and the sequence cap only when something states
-		// it -- the flags, the declared or the learned cap (atCapBatchCap) --
-		// so a replica at it may teach the line from above the band
+		// The policy's band, and the sequence cap only when the flags or the
+		// llm-d.ai/max-num-seqs annotation state it (atCapBatchCap), so a
+		// replica at it may teach the line from above the band
 		// (itl.Admission).
 		lo, hi := c.cfg.ITLBand()
+		atCap := c.a.atCapBatchCap(params, c.a.batchCapITLAdmission)
 		// A held slope is bounded by the horizon a finished fit is kept on
 		// (BucketRetention, which ages the shared lines too) and by the
 		// arguments it was fitted under (issue #284).
-		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: c.atCapBatchCap(variant, params, c.a.batchCapITLAdmission),
+		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
 			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
@@ -550,23 +551,9 @@ func (c *cycle) fitLines() {
 	}
 }
 
-// atCapBatchCap is the batch cap a reader that asks whether a replica of
-// variant is AT its cap reads: with stated (that reader's switch, issue
-// #420) the cap the flags, the declared cap or the learned one state
-// (statedBatchCap), and without it the flags' cap alone -- max_num_seqs,
-// lowered by --max-num-active-seqs (capacity.EngineParams.ExplicitMaxNumSeqs).
-// Zero for a variant whose cap is unknown or only a default.
-func (c *cycle) atCapBatchCap(variant string, params *capacity.EngineParams, stated bool) int64 {
-	if !stated {
-		return params.ExplicitMaxNumSeqs()
-	}
-	return c.a.statedBatchCap(c.input.Namespace, c.input.ModelID, variant, params, c.cfg.EnableBatchCapLearning)
-}
-
 // atCapBatchCaps is atCapBatchCap for the P/D decode view
 // (SwitchBatchCapDecodeView), per variant with replica rows this cycle; nil
-// for a model the view leaves as it is (no prefill variant), so no learned
-// cap is stamped as used by a view that reads none.
+// for a model the view leaves as it is (no prefill variant).
 func (c *cycle) atCapBatchCaps() map[string]int64 {
 	if !domain.HasPrefill(c.rolesByVariant) {
 		return nil
@@ -577,7 +564,7 @@ func (c *cycle) atCapBatchCaps() map[string]int64 {
 			continue
 		}
 		params := engineParamsFor(c.a, c.input.Namespace, c.input.ModelID, rm.VariantName)
-		out[rm.VariantName] = c.atCapBatchCap(rm.VariantName, params, c.a.batchCapDecodeView)
+		out[rm.VariantName] = c.a.atCapBatchCap(params, c.a.batchCapDecodeView).perRank
 	}
 	return out
 }
@@ -647,10 +634,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// The cap the derived k2 is priced at (pricingBatchCap), so a
 			// declared or learned cap reaches mu as it reaches P3
 			// (SwitchBatchCapDerivedMu, issue #420).
-			batchCap := pricedBatchCap{perRank: engineParams.BatchCap(), source: batchCapDefault}
-			if engineParams.ExplicitMaxNumSeqs() > 0 {
-				batchCap.source = batchCapFromFlags
-			}
+			batchCap := flagsOrDefaultBatchCap(engineParams)
 			if c.a.batchCapDerivedMu {
 				batchCap = c.a.pricingBatchCap(c.input.Namespace, c.input.ModelID, rm.VariantName, engineParams,
 					c.cfg.EnableBatchCapLearning)

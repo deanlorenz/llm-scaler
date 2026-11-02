@@ -132,20 +132,34 @@ and the `k2-decision` line names its source (`batchCapSource`):
 | `learned` | `batchCaps[namespace\|variant\|model\|].perRank` | the flags state none, none is declared, the policy sets `enableBatchCapLearning`, and it is lower than the default (`SwitchBatchCapLearned`) |
 | `default` | `EngineParams.MaxNumSeqs`, the parser's 256 | otherwise |
 
-The same chain feeds the cap's other readers (issue #420), each behind its
-own replay switch:
+The cap's other readers (issue #420) each sit behind their own replay
+switch. The ones that price read the declared cap, and saturation's also
+the learned one. The ones that ask whether a replica is AT its cap read the
+declared cap and never the learned one (`atCapBatchCap`):
 
 | reader | reads | switch |
 |---|---|---|
-| ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `statedBatchCap`: the chain, and 0 where only the default stands | `SwitchBatchCapITLAdmission` |
-| P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `statedBatchCap` | `SwitchBatchCapDecodeView` |
-| derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`, default included; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
+| ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `atCapBatchCap`: flags, else declared, else 0; `itl-window` logs `batchCap` and `batchCapSource` | `SwitchBatchCapITLAdmission` |
+| P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `atCapBatchCap` | `SwitchBatchCapDecodeView` |
+| derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`: flags, declared, learned, default; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
 | `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared | `slo.SwitchBatchCapAdmission` |
-| `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap` | `slo.SwitchBatchCapPerRank` |
+| `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap`; `slo-variant` logs `batchCap` and `batchCapSource` | `slo.SwitchBatchCapPerRank` |
+
+Why the at-cap readers do not read the learned cap: it is the highest
+plateau seen, so it may sit below the true cap. Below the true cap vLLM
+still promotes a P/D decode's landed pulls, so the decode view would charge
+in-flight pulls as backlog. `observeBatchCap` reads the view, so the
+charged queue would then confirm the very cap that caused it. And the ITL
+fit would admit a memory-bound reading above the band as capped. In mu and
+P3 a learned cap only lowers the price, so it only errs toward more
+replicas.
 
 The `slo` analyzer does not read the learned cap: it lives in the saturation
 analyzer's memory. The zero-replica estimate (`estimateCapacityFromParams`)
-still prices at `BatchCap`.
+still prices at `BatchCap`. A capped mu is still priced at `ITL(kPrice)`,
+although a replica held by its cap runs below `kPrice` and so faster: mu
+reads low, toward more replicas (the `slo` analyzer's `reachableFill`
+accounts for this; saturation does not).
 
 With no `EngineParams` at all (the scale target was never read), a learned cap
 still prices P3, with `B` taken as not binding (`estimateCapacityAtCap`);

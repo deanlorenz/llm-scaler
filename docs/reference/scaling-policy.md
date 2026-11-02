@@ -1458,8 +1458,12 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 - It is used only where the flags state no cap. A cap in the flags wins.
 - Everything that reads the cap reads it: the derived capacity, the derived
   throughput (mu), the ITL line's reading of a replica at its cap, a P/D
-  decode's queue at its cap, and the `slo` analyzer. A learned cap (below)
-  reaches the same readers, except the `slo` analyzer.
+  decode's queue at its cap, and the `slo` analyzer.
+- **It moves the price either way.** A declared cap below 256 lowers the
+  derived capacity, mu and the `slo` price, so more replicas. A declared cap
+  above 256 (vLLM V1's own default is 1024 on large accelerators) raises
+  them, so fewer replicas than with the cap unread. Declare the cap the
+  engine really runs.
 - It takes effect on the next cycle and keeps everything the variant has
   learned.
 - A value that is not a positive whole number is ignored.
@@ -1482,7 +1486,11 @@ all of these hold for three cycles in a row, at the same count:
   fleet does not learn).
 
 The cap is the highest such count, per engine rank. It is used only where it
-is lower than the 256 it replaces.
+is lower than the 256 it replaces, and only to price: the derived capacity
+and the derived throughput (mu). It is not read where the question is
+whether a replica is *at* its cap (the ITL line's reading above the band, a
+P/D decode's queue at its cap), because the highest count seen may sit below
+the true cap. The `slo` analyzer does not read it.
 
 ```yaml
 default:

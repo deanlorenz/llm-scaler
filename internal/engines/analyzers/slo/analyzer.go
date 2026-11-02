@@ -260,7 +260,8 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
-				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks, "scaleUpThreshold", scaleUp)
+				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks,
+				"batchCap", d.batchCap, "batchCapSource", d.batchCapSource, "scaleUpThreshold", scaleUp)
 		}
 	}
 
@@ -316,7 +317,25 @@ type pricingDetail struct {
 	maxSeqs    int64
 	activeSeqs int64
 	ranks      int64
+	// batchCap is the cap per rank the replica was priced at, and
+	// batchCapSource where it came from: batchCapFlags, batchCapDeclared
+	// (the llm-d.ai/max-num-seqs annotation) or batchCapDefault (the
+	// parser's, the flags unread). maxSeqs is max_num_seqs alone, the
+	// default where the flags are unread, so it is not what priced a
+	// replica whose cap is declared (issue #420).
+	batchCap       int64
+	batchCapSource string
 }
+
+// Where the batch cap a replica is priced at came from (pricingDetail), as
+// the saturation analyzer names it on its k2-decision line.
+const (
+	batchCapFlags    = "flags"
+	batchCapDeclared = "declared"
+	batchCapDefault  = "default"
+	// batchCapNone is no cap the line's admission at the cap may read.
+	batchCapNone = "none"
+)
 
 // priceVariant fits the variant's line and prices one replica of it at the
 // TPOT target. The reading is nil for a variant the TPOT objective does not
@@ -384,11 +403,13 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		d.maxSeqs = params.MaxNumSeqs * d.ranks
 		d.activeSeqs = params.MaxNumActiveSeqs * d.ranks
 	}
-	perRank := params.BatchCap()
-	if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
-		perRank = stated
+	d.batchCap, d.batchCapSource = params.BatchCap(), batchCapDefault
+	if params.ExplicitMaxNumSeqs() > 0 {
+		d.batchCapSource = batchCapFlags
+	} else if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
+		d.batchCap, d.batchCapSource = stated, batchCapDeclared
 	}
-	maxSeqs := perRank * d.ranks
+	maxSeqs := d.batchCap * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
 	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
@@ -418,11 +439,14 @@ func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams, stated 
 		cfg = &config.ScalingPolicy{}
 	}
 	lo, hi := cfg.ITLBand()
-	batchCap := params.ExplicitMaxNumSeqs()
-	if stated {
-		batchCap = params.StatedBatchCap()
+	batchCap, source := params.ExplicitMaxNumSeqs(), batchCapFlags
+	if batchCap == 0 && stated {
+		batchCap, source = params.StatedBatchCap(), batchCapDeclared
 	}
-	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: batchCap,
+	if batchCap == 0 {
+		source = batchCapNone
+	}
+	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: batchCap, MaxNumSeqsSource: source,
 		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate(), Steady: cfg.ITLSteadiness()}
 }
 

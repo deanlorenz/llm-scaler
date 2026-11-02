@@ -397,9 +397,12 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
 		// Of the offered, the readings above the band taken because their
 		// replica was at its sequence cap (itl.Admission); batchCap is that
-		// cap -- max_num_seqs, lowered by --max-num-active-seqs -- and 0
-		// when the engine flags did not state it, which admits none.
-		"capped", r.Capped, "batchCap", adm.MaxNumSeqs,
+		// cap per rank -- the flags' max_num_seqs, lowered by
+		// --max-num-active-seqs, or where they state none the
+		// llm-d.ai/max-num-seqs annotation -- and 0 when neither states it,
+		// which admits none. batchCapSource says which (flags, declared,
+		// none).
+		"capped", r.Capped, "batchCap", adm.MaxNumSeqs, "batchCapSource", adm.MaxNumSeqsSource,
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
