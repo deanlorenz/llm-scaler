@@ -488,17 +488,22 @@ analyzer's `itl-fit` lines and the slo analyzer's `slo-variant` lines):
 | `ols-sweep-slo` | 15 | 33 | 79 of 83 | 55 / 55 |
 | `ols-sweep-slo-restart` | 57 | 66 | 143 of 143 | 115 / 113 |
 
-A judged objective has a finite observed figure and is not excluded. The
-rest came in the first minutes after each controller start: no router
-requests yet, or excluded as a transient (`unobserved`), and at the end of
-the restart file two TTFT windows with too few requests. The slo analyzer's fits
-count as `slo-itl-ols` and `slo-itl-pinned` in a replay's paths, and the
-golden check requires both, as it does saturation's.
-`TestGoldens_OLSSweepSLOReplayFitsBothLines` requires, in each golden, a
-floor of full fits of each line, of `Analyze` calls with router latency
-(an input of the recording), and of objectives the replay judged (its
-output). Before each golden's first fit it requires no fit of either
-tier: there the pinned fit declines, and the head must reach that.
+A judged objective has a finite observed figure and is not excluded. Most
+of the rest came in the first minutes after each controller start, with no
+router requests yet or excluded as a transient (`unobserved`). At the end
+of the restart file, two TTFT windows had too few requests.
+
+The slo analyzer's fits count as `slo-itl-ols` and `slo-itl-pinned` in a
+replay's paths, and the golden check requires both, as it does
+saturation's. `TestGoldens_OLSSweepSLOReplayFitsBothLines` requires, in
+each golden, a floor of full and of pinned fits of each line, of `Analyze`
+calls with router latency (an input of the recording), and of objectives
+the replay judged (its output). Its head replay ends with the cycle just
+before the first fit and must hold no fit of either tier, so a change that
+admits a fit even one cycle earlier fails it. Up to that cycle the pinned
+fit declines, and the head must reach that verdict.
+`TestGoldens_OLSSweepSLORestartRestoresNothing` requires the restart file
+to start with an empty store and to restore no learned state.
 
 To take them again at a new commit, follow the `ols-sweep` steps with
 these changes:
@@ -539,12 +544,35 @@ these changes:
    `llm_d_epp_request_ttft_seconds_count` and
    `llm_d_epp_request_streaming_tpot_seconds_count` above zero for the
    model. Neither exists before the first streamed request.
-3. **A controller restart under load.** 90 seconds into the fifth level
-   (56 in flight, 1000 tokens in and 500 out), copy the recordings out,
-   then delete the controller Pod that holds the leader lease, with the
-   learned-state snapshot off (the default). The new Pod's recorder opens
-   a second file. Copy both out at the end.
-4. Add each file under its own name, at that commit:
+3. **A controller restart under load.** Keep the learned-state snapshot
+   off (the default). 90 seconds into the fifth level (56 in flight, 1000
+   tokens in and 500 out), find the Pod that holds the leader lease, copy
+   its recordings out, then delete it:
+
+   ```bash
+   kubectl -n "$NS" get lease -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity
+   POD=<the holder, up to the first underscore>
+   kubectl -n "$NS" cp -c recordings "$POD:/var/lib/wva/learner-recordings" ./learner-recordings
+   kubectl -n "$NS" delete pod "$POD"
+   ```
+
+   The new Pod's recorder opens a second file. At the end, copy the new
+   Pod's recordings out the same way. Keep both files: the first is the
+   one copied before the delete, the second the one the new Pod wrote.
+4. **Cross-check the counts** against the controller's own log, taken with
+   `kubectl logs --timestamps` from both Pods. Keep each line once, and
+   only lines whose timestamp is inside that file's window: from its start
+   line to its last event. Count:
+   - `itl-fit` lines by their `tier` (`ols`, `pinned-B`), for saturation;
+   - `slo-variant` lines by their `lineTier`, for the slo analyzer;
+   - `slo-model` lines with a number in `observed` and no `excluded`, per
+     `objective`, for the judged windows.
+
+   Each replay must give the same counts. Also check that the second
+   file's first line carries `"StoreRecords":0` and that neither file
+   holds a `saturation.RestoreLearnedState` or
+   `saturation.TakeRestoreOutcomes` event: the restart restored nothing.
+5. Add each file under its own name, at that commit:
 
    ```bash
    SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, stream load sweeps of concurrency and shape, policy tier with saturation and slo targets on tpot and ttft, default analyzerTuning"
@@ -552,8 +580,17 @@ these changes:
    make learner-golden-add RECORDING=learnrec-<second start>.jsonl NAME=ols-sweep-slo-restart REPLACE=1 SOURCE="$SRC; after a controller restart under load, snapshot off"
    ```
 
-   Then move each golden's cut time in `olsSLOFloors`, and the counts and
-   times in its comments, to the new run's.
+6. **Move the test to the new run.** In `olsSLOFloors`, for each golden:
+   - Set each floor to about four fifths of the new count: full and
+     pinned fits of each line, `Analyze` calls with router latency, and
+     judged TPOT and TTFT.
+   - Set the cut. The first fit is the time of the first row of the
+     golden's `lines.csv`. The cut is any moment between the cycle before
+     it and the fit itself. The cycles are the `slo.BeginCycle` events of
+     the recording, about 15 seconds apart. The dates are that
+     recording's wall clock.
+   - Write the new counts and times in the comments. The test's own log
+     line prints the replay's counts.
 
 #### The engine layer
 

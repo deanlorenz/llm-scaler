@@ -37,13 +37,15 @@ const (
 // their counts agree. A floor sits about a fifth under its count: a learner
 // change may move fits and judgements (make learner-goldens rewrites
 // lines.csv and slo-published.csv and does not touch these), but must not
-// lose the full fits and the judged windows these recordings exist for. A PR
-// that drops a replay below a floor says why and lowers it here, keeping the
-// counts as the recording-time reference.
+// lose the fits and the judged windows these recordings exist for. A PR that
+// drops a replay below a floor says why and lowers it here, keeping the
+// counts as the recording-time reference. A re-take moves every number and
+// time below to the new run's (testing.md).
 type olsSLOFloor struct {
 	fixture string
-	// satOLS and sloOLS are the fewest full fits of each analyzer's line.
-	satOLS, sloOLS int64
+	// satOLS and sloOLS are the fewest full fits of each analyzer's line,
+	// and satPinned and sloPinned the fewest pinned ones.
+	satOLS, sloOLS, satPinned, sloPinned int64
 	// routerServed is the fewest slo Analyze calls of the recording the
 	// router served latency to: TPOT requests and a TTFT histogram both
 	// present. An input: only a new recording moves it.
@@ -52,34 +54,41 @@ type olsSLOFloor struct {
 	// replay's own slo Analyze calls judged: a finite observed figure, and
 	// not excluded. An output: an analyzer change moves it.
 	judgedTPOT, judgedTTFT int
-	// cut is a time before either analyzer's first fit of any tier. What
-	// keeps the head fit-free is the pinned fit declining, not the sample
-	// gate: both lines report declined from the time beside each floor until
-	// the first full fit, so the head must reach that verdict.
+	// cut is the last moment before either analyzer's first fit of any
+	// tier: the head replay ends with the cycle just before that fit, so a
+	// change that admits a fit even one cycle earlier (the sample gate, the
+	// steadiness gate, the pinned fit's decline) leaves a fit in the head.
+	// The replay is deterministic, so the head is the same on every run.
+	// The time is this recording's wall clock.
 	cut time.Time
 }
 
 var olsSLOFloors = []olsSLOFloor{
 	// Recorded 13:40:07Z to 14:00:43Z: 15 full and 33 pinned fits for each
-	// analyzer, the first full one at 13:48:55Z, declined from 13:43:38Z; 79
-	// of 83 slo Analyze calls served router latency, and 55 of them judged
-	// TPOT and TTFT (the 24 before 13:47:10Z were excluded as a transient).
-	{fixture: olsSLOFixture, satOLS: 12, sloOLS: 12, routerServed: 63, judgedTPOT: 44, judgedTTFT: 44,
-		cut: time.Date(2026, 11, 2, 13, 48, 0, 0, time.UTC)},
+	// analyzer, the first a full one on the cycle at 13:48:55.69Z, after a
+	// cycle at 13:48:40.62Z; declined from 13:43:38Z. 79 of 83 slo Analyze
+	// calls served router latency, and 55 of them judged TPOT and TTFT (the
+	// 24 before 13:47:10Z were excluded as a transient).
+	{fixture: olsSLOFixture, satOLS: 12, sloOLS: 12, satPinned: 26, sloPinned: 26,
+		routerServed: 63, judgedTPOT: 44, judgedTTFT: 44,
+		cut: time.Date(2026, 11, 2, 13, 48, 50, 0, time.UTC)},
 	// Recorded 14:01:02Z to 14:36:35Z, after the restart: 57 full and 66
-	// pinned fits for each analyzer, the first full one at 14:06:02Z,
-	// declined from 14:03:17Z; all 143 slo Analyze calls served router
-	// latency, and 115 judged TPOT and 113 TTFT.
-	{fixture: olsSLORestartFixture, satOLS: 45, sloOLS: 45, routerServed: 114, judgedTPOT: 92, judgedTTFT: 90,
-		cut: time.Date(2026, 11, 2, 14, 5, 0, 0, time.UTC)},
+	// pinned fits for each analyzer, the first a full one on the cycle at
+	// 14:06:02.55Z, after a cycle at 14:05:47.53Z; declined from 14:03:17Z.
+	// All 143 slo Analyze calls served router latency, and 115 judged TPOT
+	// and 113 TTFT.
+	{fixture: olsSLORestartFixture, satOLS: 45, sloOLS: 45, satPinned: 52, sloPinned: 52,
+		routerServed: 114, judgedTPOT: 92, judgedTTFT: 90,
+		cut: time.Date(2026, 11, 2, 14, 6, 0, 0, time.UTC)},
 }
 
-// Each ols-sweep-slo recording's own replay takes full fits of both lines,
-// the saturation analyzer's and the slo analyzer's, and judges TPOT and TTFT
-// from router latency: a cluster golden of the slo analyzer that lost them
-// would pass the summed path check and the row comparison, which make
-// learner-goldens rewrites to whatever the replay gives. The head before the
-// first fit is the negative control: the same recording, cut, reaches none.
+// Each ols-sweep-slo recording's own replay takes full and pinned fits of
+// both lines, the saturation analyzer's and the slo analyzer's, and judges
+// TPOT and TTFT from router latency: a cluster golden of the slo analyzer
+// that lost them would pass the summed path check and the row comparison,
+// which make learner-goldens rewrites to whatever the replay gives. The head
+// before the first fit is the negative control: the same recording, cut,
+// reaches none.
 func TestGoldens_OLSSweepSLOReplayFitsBothLines(t *testing.T) {
 	for _, f := range olsSLOFloors {
 		t.Run(f.fixture, func(t *testing.T) {
@@ -88,16 +97,18 @@ func TestGoldens_OLSSweepSLOReplayFitsBothLines(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, rep.Failed())
 			judged := sloJudged(t, rep.Recording)
+			served := sloAnalyzesWithRouterLatency(t, rec)
 			t.Logf("%s: saturation ols %d pinned %d; slo ols %d pinned %d; slo Analyze with router latency %d; judged tpot %d ttft %d",
 				f.fixture, rep.Paths[saturation.PathITLOLS], rep.Paths[saturation.PathITLPinned],
-				rep.Paths[slo.PathITLOLS], rep.Paths[slo.PathITLPinned], sloAnalyzesWithRouterLatency(t, rec),
+				rep.Paths[slo.PathITLOLS], rep.Paths[slo.PathITLPinned], served,
 				judged[constants.SLOObjectiveTPOT], judged[constants.SLOObjectiveTTFT])
 
 			assert.GreaterOrEqual(t, rep.Paths[saturation.PathITLOLS], f.satOLS, "saturation's line still comes from full fits")
 			assert.GreaterOrEqual(t, rep.Paths[slo.PathITLOLS], f.sloOLS, "the slo analyzer's line still comes from full fits")
-			assert.Positive(t, rep.Paths[saturation.PathITLPinned], "pinned saturation fits too: the load holds still between steps")
-			assert.Positive(t, rep.Paths[slo.PathITLPinned], "pinned slo fits too")
-			assert.GreaterOrEqual(t, sloAnalyzesWithRouterLatency(t, rec), f.routerServed,
+			assert.GreaterOrEqual(t, rep.Paths[saturation.PathITLPinned], f.satPinned,
+				"pinned saturation fits too: the load holds still between steps")
+			assert.GreaterOrEqual(t, rep.Paths[slo.PathITLPinned], f.sloPinned, "pinned slo fits too")
+			assert.GreaterOrEqual(t, served, f.routerServed,
 				"the router served TPOT and TTFT to the slo analyzer: the load streamed")
 			assert.GreaterOrEqual(t, judged[constants.SLOObjectiveTPOT], f.judgedTPOT, "the replay still judges TPOT from the router's latency")
 			assert.GreaterOrEqual(t, judged[constants.SLOObjectiveTTFT], f.judgedTTFT, "the replay still judges TTFT from the router's latency")
@@ -109,9 +120,44 @@ func TestGoldens_OLSSweepSLOReplayFitsBothLines(t *testing.T) {
 			assert.Zero(t, head.Paths[slo.PathITLPinned], "no slo pinned fit before the cut")
 			assert.Positive(t, head.Paths[saturation.PathRowsInstantKV], "precondition: the head offers readings to the window")
 			assert.Positive(t, sloDeclined(t, head.Recording),
-				"precondition: the head reaches the pinned fit's decline, which is what keeps it fit-free")
+				"precondition: the head reaches the pinned fit's decline, the verdict just before the first fit")
 		})
 	}
+}
+
+// The restart golden starts from nothing: the controller came back with the
+// learned-state snapshot off, so its recording starts with an empty store and
+// restores no learned state. A replay refuses a non-empty start; a restore
+// would replay, and could pass every floor above. The acceptance golden,
+// whose run restores a snapshot, is the negative control: the same reading
+// finds its restore.
+func TestGoldens_OLSSweepSLORestartRestoresNothing(t *testing.T) {
+	start, restores := startAndRestores(t, readGoldenRecording(t, olsSLORestartFixture))
+	assert.Zero(t, start.StoreRecords, "the restart recording starts with an empty store")
+	assert.Empty(t, restores, "the restart recording restores no learned state: the snapshot was off")
+
+	_, restores = startAndRestores(t, readGoldenRecording(t, "acceptance"))
+	assert.Positive(t, restores[saturation.KindRestoreLearnedState],
+		"negative control: the acceptance run's restore is read as one")
+}
+
+// startAndRestores is rec's start line, and its count of each learned-state
+// restore event.
+func startAndRestores(t *testing.T, rec []byte) (learnrec.Start, map[string]int) {
+	t.Helper()
+	read, err := learnrec.Read(rec)
+	require.NoError(t, err)
+	require.NotEmpty(t, read.Events)
+	require.Equal(t, learnrec.KindStart, read.Events[0].Kind, "precondition: the recording opens with its start")
+	var start learnrec.Start
+	require.NoError(t, read.Events[0].DecodeData(&start))
+	restores := map[string]int{}
+	for _, ev := range read.Events {
+		if ev.Kind == saturation.KindRestoreLearnedState || ev.Kind == saturation.KindTakeRestoreOutcomes {
+			restores[ev.Kind]++
+		}
+	}
+	return start, restores
 }
 
 // readGoldenRecording is the named golden's recording, unzipped.
