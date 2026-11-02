@@ -357,9 +357,15 @@ and none Absent; Empty needs every rank Empty and none that generated tokens.
 The Pod's mean is generation-weighted over its Finite ranks only (#341 4a's
 named change, made in the collector ahead of 4a): an Empty rank that generated
 tokens (max_tokens=1) has no interval, so it neither dilutes the mean nor
-blocks Finite. Each Finite rank weighs by its inter-token intervals
-(generated tokens less one per request), the count the per-pod query divides
-by, so the merged value matches the one-API-server layout. The k paired with
+blocks Finite. The per-pod query divides by inter-token intervals instead
+(generated tokens less one per request). The merge does not weigh by
+intervals: that would need tokens less the request rate, which counts finished
+requests and bursts on a drain, so a busy rank would drop out of the mean for a
+cycle, and a slow rank dropping out reads ITL low. Token weights are smooth.
+Where they differ from the per-interval mean they favour the rank serving
+short requests, usually the slower one, so the Pod reads higher: the safe side,
+though not a guarantee (a hot rank of long requests reads slightly low). The k
+paired with
 that ITL is still capacity-weighted over every rank, Empty ones included, so a
 pod with a busy Empty rank pairs the Finite ranks' ITL with a lower k. That
 fits ITL(k) high and mu low, the side that over-orders; it is left as is and

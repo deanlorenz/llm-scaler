@@ -53,12 +53,12 @@ import (
 //     empty only if every rank is and none generated tokens.
 //   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
-//     instance serving more of them should dominate. ITL is a mean per
-//     inter-token interval, taken over the ranks that measured one, and
-//     weighs by each rank's intervals, GenerationTokenRate - RequestRate
-//     (see the merge for its fallbacks); the prefix hit rate is a fraction
-//     of prompt tokens and weighs by the prompt-token rate. Each weight is
-//     the count the matching PromQL mean divides by, so ranks merged here and
+//     instance serving more of them should dominate. ITL is taken over the
+//     ranks that measured one and weighs by GenerationTokenRate, which is
+//     close to, but not, the per-interval count its PromQL mean divides by
+//     (see the merge for why); the prefix hit rate is a fraction of prompt
+//     tokens and weighs by the prompt-token rate. Every other weight is the
+//     count the matching PromQL mean divides by, so ranks merged here and
 //     ranks folded by the per-pod queries give the same value. With no
 //     traffic anywhere on the pod they fall back to the plain mean.
 //   - Metadata takes the worst freshness and the oldest age across the
@@ -234,21 +234,30 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// instance that served more requests counts for more.
 	pod.AvgOutputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensRecent })
 	pod.AvgInputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokensRecent })
-	// ITL is a mean per inter-token INTERVAL over the Finite ranks. The
-	// per-pod ITL query computes it that way for ranks behind one API server
-	// (sum of the ITL sums over sum of the counts, one count per interval),
-	// so each Finite rank weighs by its intervals: its generated tokens less
-	// one first token per request, GenerationTokenRate - RequestRate. Then
-	// both layouts give the same value. Weighing by tokens alone over-weighs
-	// a rank serving short requests: 1 req/s of 100 tokens at 20ms beside
-	// 50 req/s of 2 tokens at 60ms is 33.4ms per interval, 40ms per token.
-	// An Empty rank has no interval at all, so it is left out.
+	// ITL is the mean over the Finite ranks, each weighted by the tokens it
+	// generated. An Empty rank has no interval at all, so it is left out.
+	// Falls back to the request rate when no Finite rank reports a
+	// generation rate.
 	//
-	// If any Finite rank's request rate is unknown, the whole pod weighs by
-	// generated tokens instead: a missing rate would read as 0 and give that
-	// rank every token as an interval, mixing the two units. The token weight
-	// is also the fallback when no Finite rank has an interval (every request
-	// one token long); weightedBy then falls back to the request rate.
+	// The per-pod ITL query, for ranks behind one API server, divides by the
+	// ITL count instead: one per inter-token interval, so a rank's tokens
+	// less one first token per request (and, under speculative decoding, one
+	// count per step, not per token). The two weights differ only by that
+	// first token, so they agree unless requests are a few tokens long:
+	// 1 req/s of 100 tokens at 20ms beside 50 req/s of 2 tokens at 60ms reads
+	// 40ms here and 33.4ms per interval.
+	//
+	// Weighing by intervals here would need GenerationTokenRate -
+	// RequestRate, and that is not a steady-state count: RequestRate counts
+	// FINISHED requests, so it is zero through a long generation and bursts
+	// when a batch drains. A busy rank would clamp to weight 0 for a cycle
+	// and drop out of the mean, and dropping a slow rank reads the pod's ITL
+	// low, the unsafe side. Token weights are smooth. Where they differ from
+	// the per-interval mean they weigh a rank serving short requests more,
+	// and short requests carry more prefill per decoded token, which usually
+	// makes that rank the slower one: the pod then reads higher, the safe
+	// side. That is usual, not certain; a hot rank of long requests reads a
+	// little low instead (the dp8-0 fixture: 0.042411 against 0.042428).
 	//
 	// The value is computed even when an Absent rank makes the state Absent:
 	// readers that gate on the value rather than the state get the Finite
@@ -258,7 +267,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.AvgITL = 0
 	if len(itlFinite) > 0 {
 		pod.AvgITL = weightedBy(itlFinite, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
-			itlRankWeight(itlFinite))
+			func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
 	}
 	// Per step, so weighted by each rank's steps: the tokens it generated
 	// over the tokens a step emits, G / (1 + E). Weighting by the tokens
@@ -303,28 +312,6 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 
 	pod.Metadata = mergeMetadata(group)
 	return pod
-}
-
-// itlRankWeight is the weight each of the Finite ranks gets in the pod's ITL
-// mean: its inter-token intervals, GenerationTokenRate - RequestRate, when
-// every rank's request rate is known and at least one rank has an interval;
-// its generated tokens otherwise. See mergePodInstances.
-func itlRankWeight(finite []domain.ReplicaMetrics) func(domain.ReplicaMetrics) float64 {
-	tokens := func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate }
-	intervals := func(m domain.ReplicaMetrics) float64 {
-		return max(m.GenerationTokenRate-m.RequestRate, 0)
-	}
-	anyInterval := false
-	for _, m := range finite {
-		if !m.RequestRateKnown {
-			return tokens
-		}
-		anyInterval = anyInterval || intervals(m) > 0
-	}
-	if !anyInterval {
-		return tokens
-	}
-	return intervals
 }
 
 // weightedByRequestRate averages field across the group weighted by each

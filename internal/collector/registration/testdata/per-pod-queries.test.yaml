@@ -542,7 +542,7 @@ tests:
             value: 0.35714285714285715
           - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
             value: 0.5
-      # avg_itl: weighted by each rank's inter-token intervals, (tokens - 1) per request (not the slowest rank, 0.0625); a second scrape doubles both sides and leaves the mean (dup-2)
+      # avg_itl: weighted by each rank's inter-token intervals (not the slowest rank, 0.0625); a second scrape doubles both sides and leaves the mean (dup-2). dp8-0 counts (tokens - 1) per request, as vLLM records ITL without speculative decoding (with it, one count per request per step, #274); solo-0 and dup-2 count one per token, which leaves their single-ITL means unchanged
       - expr: 'sum by (model_name, instance, pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:inter_token_latency_seconds_count{namespace="llm"}[1m]))'
         eval_time: 10m
         exp_samples:

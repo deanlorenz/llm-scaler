@@ -175,7 +175,7 @@ func TestCollectReplicaMetrics_SingleFrontendDPPod(t *testing.T) {
 	assert.InDelta(t, 0.203125, pod.KvCacheUsage, 1e-12, "the mean over the ranks, not the busiest rank's 0.875")
 	assert.Equal(t, int64(1040000), pod.TokensInUse, "used tokens summed over the ranks")
 	assert.Equal(t, 8, pod.QueueLength, "every rank's waiting requests")
-	assert.InDelta(t, 0.04242754888268156, pod.AvgITL, 1e-15, "the per-interval mean, not the slowest rank's 0.0625")
+	assert.InDelta(t, 0.04242754888268156, pod.AvgITL, 1e-15, "the per-interval mean PromQL folds, not the slowest rank's 0.0625")
 	// Beside the sum and the mean, the busiest rank: what the saturation
 	// guards judge.
 	assert.Equal(t, 6, pod.MaxRankQueueLength, "rank 7's queue, of the pod's 8")
@@ -216,12 +216,21 @@ func TestCollectReplicaMetrics_DPLayoutsAgree(t *testing.T) {
 		{"AvgInputTokens", func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokens }},
 		{"AvgInputTokensRecent", func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokensRecent }},
 		{"PrefixCacheHitRate", func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate }},
-		{"AvgITL", func(m domain.ReplicaMetrics) float64 { return m.AvgITL }},
 		{"AvgTTFT", func(m domain.ReplicaMetrics) float64 { return m.AvgTTFT }},
 		{"AvgServiceTime", func(m domain.ReplicaMetrics) float64 { return m.AvgServiceTime }},
 	} {
 		assert.InDelta(t, f.get(a), f.get(b), 1e-12, "%s: one API server %v, one per rank %v", f.name, f.get(a), f.get(b))
 	}
+	// ITL is the one mean the layouts do not compute alike: PromQL divides
+	// by inter-token intervals, (tokens - 1) per request, and the merge
+	// weighs each rank by its tokens (pod_collapse.go says why). Here the
+	// slow rank 7 serves the long requests, so its token share is the
+	// smaller one and the merge reads a little low: (6 x 512 / 64 + 4096 /
+	// 16) / 7168. The gap is bounded by the shortest requests' first token,
+	// 1 in 512.
+	assert.InDelta(t, 0.04242754888268156, a.AvgITL, 1e-15, "one API server: the per-interval mean")
+	assert.InDelta(t, 0.04241071428571429, b.AvgITL, 1e-15, "one per rank: the per-token mean")
+	assert.InEpsilon(t, a.AvgITL, b.AvgITL, 1.0/512, "the layouts' ITL differ by more than the first token")
 }
 
 // An ordinary pod reads exactly as it did: one rank, and every field the value

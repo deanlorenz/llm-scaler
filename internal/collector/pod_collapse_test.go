@@ -70,8 +70,8 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 	// Request shape is weighted by traffic: rank B serves 3 of every 4 requests.
 	assert.InDelta(t, 175.0, pod.AvgInputTokens, 1e-9)
 	assert.InDelta(t, 35.0, pod.AvgOutputTokens, 1e-9)
-	// Weighted by inter-token intervals (100 - 1 and 300 - 3 per second, the
-	// same 1:3 as the requests here).
+	// Weighted by generated tokens (100 and 300 tok/s, the same 1:3 as the
+	// requests here).
 	assert.InDelta(t, 0.05, pod.AvgITL, 1e-9)
 	// Weighted by request rate, and asymmetric on purpose: a plain
 	// mean would give 20, so 25 is what distinguishes the weighting from an
@@ -355,35 +355,34 @@ func TestCollapseToPods_SpecAcceptedCoversTheFiniteRanks(t *testing.T) {
 	assert.Zero(t, pods[2].SpecAcceptedPerStep)
 }
 
-func TestCollapseToPods_ITLMeanWeighsByInterval(t *testing.T) {
-	// The per-pod ITL query divides by inter-token intervals, one fewer than
-	// the tokens of each request, so the merge weighs each Finite rank by
-	// GenerationTokenRate - RequestRate. pod-a: 1 req/s of 100 tokens at 20ms
-	// (99 intervals/s) and 50 req/s of 2 tokens at 60ms (50 intervals/s) is
-	// (99 x 0.02 + 50 x 0.06) / 149 = 33.4ms; by tokens it read 40ms.
-	// pod-b: one rank's request rate unknown, so the pod weighs by tokens.
-	// pod-c: every request one token long, no interval anywhere, so the pod
-	// weighs by tokens (here 1:3).
-	rank := func(pod string, itl, gen, req float64, reqKnown bool) domain.ReplicaMetrics {
+func TestCollapseToPods_ITLMeanWeighsByTokens(t *testing.T) {
+	// Each Finite rank weighs by the tokens it generated, not by its
+	// inter-token intervals (GenerationTokenRate - RequestRate), because
+	// RequestRate counts finished requests and bursts when a batch drains.
+	// pod-a: 1 req/s of 100 tokens at 20ms beside 50 req/s of 2 tokens at
+	// 60ms reads 40ms by tokens. The per-pod PromQL mean divides by intervals
+	// and reads (99 x 0.02 + 50 x 0.06) / 149 = 33.4ms; the token weight
+	// gives the short-request rank more, here the slower one, so it reads
+	// higher, the safe side. pod-b: the slow rank's batch just drained, so
+	// its finished requests (150/s) outrun its tokens (100/s). By intervals
+	// it would clamp to weight 0 and the pod would read the fast rank's 20ms;
+	// by tokens it keeps its share and the pod reads 40ms.
+	rank := func(pod string, itl, gen, req float64) domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: pod, AvgITL: itl, AvgITLKnown: true,
-			GenerationTokenRate: gen, RequestRate: req, RequestRateKnown: reqKnown}
+			GenerationTokenRate: gen, RequestRate: req, RequestRateKnown: true}
 	}
 	instances := []domain.ReplicaMetrics{
-		rank("pod-a", 0.02, 100, 1, true),
-		rank("pod-a", 0.06, 100, 50, true),
-		rank("pod-b", 0.02, 100, 1, true),
-		rank("pod-b", 0.06, 100, 50, false),
-		rank("pod-c", 0.02, 10, 10, true),
-		rank("pod-c", 0.06, 30, 30, true),
+		rank("pod-a", 0.02, 100, 1),
+		rank("pod-a", 0.06, 100, 50),
+		rank("pod-b", 0.02, 100, 1),
+		rank("pod-b", 0.06, 100, 150),
 	}
 
 	pods := collapseToPods(instances)
 
-	require.Len(t, pods, 3)
-	assert.InDelta(t, (99*0.02+50*0.06)/149, pods[0].AvgITL, 1e-12, "pod-a: weighed by tokens, not intervals")
-	assert.InDelta(t, 0.0334, pods[0].AvgITL, 1e-4)
-	assert.InDelta(t, 0.04, pods[1].AvgITL, 1e-12, "pod-b: an unknown request rate must fall back to tokens")
-	assert.InDelta(t, 0.05, pods[2].AvgITL, 1e-12, "pod-c: no interval anywhere must fall back to tokens")
+	require.Len(t, pods, 2)
+	assert.InDelta(t, 0.04, pods[0].AvgITL, 1e-12, "pod-a: weighed by intervals, not tokens (33.4ms)")
+	assert.InDelta(t, 0.04, pods[1].AvgITL, 1e-12, "pod-b: the draining slow rank dropped out of the mean")
 }
 
 func TestCollapseToPods_NoFiniteRankReadsNoITL(t *testing.T) {
