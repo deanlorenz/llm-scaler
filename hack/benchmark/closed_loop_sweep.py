@@ -107,6 +107,9 @@ class Sweep:
         ended with data: [DONE] and no event carried an "error"; otherwise the
         error, or what the stream ended with."""
         last, error = "", ""
+        # aiohttp reads lines of at most 64 KiB; a longer one raises ValueError,
+        # which the worker's except counts as a failed request. SSE events here
+        # are small, and vLLM sends errors as a data line, never as "event: error".
         async for raw in r.content:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
