@@ -1456,6 +1456,17 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 ```
 
 - It is used only where the flags state no cap. A cap in the flags wins.
+- The derived capacity, the derived throughput (mu), the ITL line's reading
+  of a replica at its cap, a P/D decode's queue at its cap, and the `slo`
+  analyzer all read it. The estimate for a variant at **zero replicas** does
+  not: it still prices at the flags' cap or 256, so a variant that declares
+  a lower cap is under-priced on its way up from zero until its first replica
+  is priced ([#427](https://github.com/ev-shindin/llm-scaling-manager/issues/427)).
+- **It moves the price either way.** A declared cap below 256 lowers the
+  derived capacity, mu and the `slo` price, so more replicas. A declared cap
+  above 256 (vLLM V1's own default is 1024 on large accelerators) raises
+  them, so fewer replicas than with the cap unread. Declare the cap the
+  engine really runs.
 - It takes effect on the next cycle and keeps everything the variant has
   learned.
 - A value that is not a positive whole number is ignored.
@@ -1478,7 +1489,11 @@ all of these hold for three cycles in a row, at the same count:
   fleet does not learn).
 
 The cap is the highest such count, per engine rank. It is used only where it
-is lower than the 256 it replaces.
+is lower than the 256 it replaces, and only to price: the derived capacity
+and the derived throughput (mu). It is not read where the question is
+whether a replica is *at* its cap (the ITL line's reading above the band, a
+P/D decode's queue at its cap), because the highest count seen may sit below
+the true cap. The `slo` analyzer does not read it.
 
 ```yaml
 default:
@@ -1504,9 +1519,19 @@ more replicas than needed until a higher count is seen. These limits apply:
   priced a replica nor was seen again.
 - One direction only, like `enableLearnedStateReuse`.
 
-To see which cap priced a replica, read `batchCapSource` (`flags`, `declared`,
-`learned` or `default`) and `batchCap` on the `k2-decision` line for
-[`P3-k2`](cycle-log.md#reason-values-reason-field).
+To see which cap a reader used, read `batchCap` (per engine rank) and
+`batchCapSource` on its log line:
+
+| line | the cap of | `batchCapSource` |
+|---|---|---|
+| `k2-decision` ([`P3-k2`](cycle-log.md#reason-values-reason-field)) | the derived capacity | `flags`, `declared`, `learned` or `default` |
+| `derived-mu` | the derived throughput (mu) | `flags`, `declared`, `learned`, `default`, or `none` (the scale target unread) |
+| `itl-window` | the ITL line's reading of a replica at its cap | `flags`, `declared`, or `none`: no cap is stated, so no reading above the band is taken as capped |
+| `slo-variant` | the `slo` analyzer's price | `flags`, `declared`, `default` or `none`; `lineBatchCap` and `lineBatchCapSource` are the cap its line's admission read |
+
+On `slo-variant`, `maxNumSeqs` is `--max-num-seqs` alone, so it reads 256
+where the flags are unread even when a declared cap priced the replica:
+`batchCap` is the one that priced it.
 
 ### Advanced tuning: `analyzerTuning` and `loadImbalance`
 
@@ -1571,7 +1596,7 @@ long-context:
 |-----|---------|-------|--------------|
 | `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill. |
 | `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill, so a replica that bursts above it for part of a minute can still teach the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
-| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
+| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine or declared with the `llm-d.ai/max-num-seqs` annotation, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
 `itlCapMaxPreemptionRate`) before any release shipped them; the top-level
@@ -2231,8 +2256,10 @@ the decode pod drains, so the queue there is read differently:
   Except at the sequence cap: when the pod runs exactly `--max-num-seqs`
   sequences on every engine, the whole queue counts. There, vLLM still
   reports a request as deferred after its KV has arrived, although it waits
-  only for a free slot on this pod. This needs `--max-num-seqs` set on the
-  engine's command line; a cap the engine picks by default is not known.
+  only for a free slot on this pod. This needs the cap stated: `--max-num-seqs`
+  on the engine's command line, or, where the flags cannot be read, the
+  [`llm-d.ai/max-num-seqs` annotation](#the-batch-cap-llm-daimax-num-seqs-and-enablebatchcaplearning).
+  A cap the engine picks by default is not known.
   `--max-num-active-seqs` (vLLM v0.31+) also sets the cap, alone or with
   `--max-num-seqs`; with both, the lower one counts.
 - Older vLLM: the whole queue counts, as before. The requests waiting for

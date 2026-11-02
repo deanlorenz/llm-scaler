@@ -882,3 +882,12 @@ var _ = Describe("the one-parameter fallback's own floor", func() {
 			"and pins the bootstrap, because no OLS fit ever succeeded for this key")
 	})
 })
+
+// deriveMu is deriveMuAtCap at the cap the analyzer reads with
+// SwitchBatchCapDerivedMu off: the flags' cap, else the parser's default
+// (capacity.EngineParams.BatchCap). The tests that price a replica from its
+// params alone call it, and so run the production deriveMuAtCap.
+func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
+	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
+	return deriveMuAtCap(model, params, params.BatchCap(), ranks, totalKvTokens, fleet, kPrice, avgOutput)
+}

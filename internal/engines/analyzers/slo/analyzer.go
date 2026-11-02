@@ -92,7 +92,32 @@ type Analyzer struct {
 	// rec records every call the engine makes, with what it returned
 	// (recording.go); nil when recording is off.
 	rec *learnrec.Recorder
+
+	// batchCapAdmission is SwitchBatchCapAdmission and batchCapPerRank
+	// SwitchBatchCapPerRank (issue #420): on from the constructor; a replay
+	// turns them off (SetSwitchesForReplay).
+	batchCapAdmission bool
+	batchCapPerRank   bool
 }
+
+// The batch cap's readers in this analyzer (issue #420). Each took the cap
+// from the engine's flags alone, so where the flags are unread the
+// llm-d.ai/max-num-seqs annotation reached the saturation analyzer's P3 and
+// not this one. Each now reads capacity.EngineParams.StatedBatchCap, behind
+// its own switch. The saturation analyzer's learned cap is not read here:
+// it is that analyzer's memory, which this one cannot see.
+
+// SwitchBatchCapAdmission is the replay switch for the line's sequence-cap
+// admission (issue #420). On, a replica is at its cap (itl.Admission) at the
+// cap the flags or the annotation state (StatedBatchCap). Off, as before, at
+// the flags' cap alone.
+const SwitchBatchCapAdmission = "slo-batch-cap-admission"
+
+// SwitchBatchCapPerRank is the replay switch for the batch cap a replica is
+// priced at (issue #420). On, at the cap the flags or the annotation state,
+// and the parser's default where neither does. Off, as before, at the
+// flags' cap or the default (capacity.EngineParams.BatchCap).
+const SwitchBatchCapPerRank = "slo-batch-cap-per-rank"
 
 type acceleratorMemo struct {
 	name     string
@@ -114,6 +139,9 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		args:         make(map[string]string),
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
+
+		batchCapAdmission: true,
+		batchCapPerRank:   true,
 	}
 }
 
@@ -232,7 +260,10 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
-				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks, "scaleUpThreshold", scaleUp)
+				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks,
+				"batchCap", d.batchCap, "batchCapSource", d.batchCapSource,
+				// The cap the line admits a replica at, above the band (itl.Admission).
+				"lineBatchCap", d.lineBatchCap, "lineBatchCapSource", d.lineBatchCapSource, "scaleUpThreshold", scaleUp)
 		}
 	}
 
@@ -288,7 +319,35 @@ type pricingDetail struct {
 	maxSeqs    int64
 	activeSeqs int64
 	ranks      int64
+	// batchCap is the cap per rank the replica was priced at, and
+	// batchCapSource where it came from: batchCapFlags, batchCapDeclared
+	// (the llm-d.ai/max-num-seqs annotation) or batchCapDefault (the
+	// parser's, the flags unread), or batchCapNone with no params at all.
+	// maxSeqs is max_num_seqs alone, the default where the flags are
+	// unread, so it is not what priced a replica whose cap is declared
+	// (issue #420).
+	batchCap       int64
+	batchCapSource string
+	// lineBatchCap is the cap per rank the line admits a replica at above
+	// its band (itl.Admission.MaxNumSeqs), and lineBatchCapSource where it
+	// came from: batchCapFlags, batchCapDeclared or batchCapNone. Never a
+	// default, so it differs from batchCap where the flags are unread and
+	// nothing is declared.
+	lineBatchCap       int64
+	lineBatchCapSource string
 }
+
+// Where the batch cap a replica is priced at came from (pricingDetail), as
+// the saturation analyzer names it on its k2-decision line.
+const (
+	batchCapFlags    = "flags"
+	batchCapDeclared = "declared"
+	batchCapDefault  = "default"
+	// batchCapNone is no cap to read: for the line's admission, none the
+	// flags or the annotation state; for the price, none at all (the scale
+	// target unread). Nothing is at it, and nothing is capped by it.
+	batchCapNone = "none"
+)
 
 // priceVariant fits the variant's line and prices one replica of it at the
 // TPOT target. The reading is nil for a variant the TPOT objective does not
@@ -316,7 +375,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// Analyze has checked the config's type; a direct caller may pass none,
 	// which reads as the defaults.
 	cfg, _ := input.Config.(*config.ScalingPolicy)
-	adm := admission(cfg, params)
+	adm := admission(cfg, params, a.batchCapAdmission)
+	d.lineBatchCap, d.lineBatchCapSource = adm.MaxNumSeqs, adm.MaxNumSeqsSource
 	// A held slope ends on the retention and on a change of engine arguments
 	// (itl.Admission), and a change of arguments forgets the window first, so
 	// the old engine's readings are neither refitted nor held as the new one's.
@@ -356,7 +416,16 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		d.maxSeqs = params.MaxNumSeqs * d.ranks
 		d.activeSeqs = params.MaxNumActiveSeqs * d.ranks
 	}
-	maxSeqs := params.BatchCap() * d.ranks
+	d.batchCap, d.batchCapSource = params.BatchCap(), batchCapDefault
+	if params.ExplicitMaxNumSeqs() > 0 {
+		d.batchCapSource = batchCapFlags
+	} else if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
+		d.batchCap, d.batchCapSource = stated, batchCapDeclared
+	}
+	if d.batchCap <= 0 {
+		d.batchCapSource = batchCapNone
+	}
+	maxSeqs := d.batchCap * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
 	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
@@ -376,15 +445,25 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 }
 
 // admission is which rows teach the variant's line: the policy's ITL band, and
-// the sequence cap only when the engine's flag stated it (itl.Admission). The
-// saturation analyzer builds the same from the same two sources, so both
-// analyzers read a variant's rows alike.
-func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Admission {
+// the sequence cap only when something states it (itl.Admission): with
+// readsDeclared (SwitchBatchCapAdmission) the flags or the
+// llm-d.ai/max-num-seqs annotation (StatedBatchCap), without it the flags
+// alone. The saturation analyzer builds the same from the same two sources
+// (atCapBatchCap) and never from its learned cap, so both analyzers read a
+// variant's rows alike.
+func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams, readsDeclared bool) itl.Admission {
 	if cfg == nil {
 		cfg = &config.ScalingPolicy{}
 	}
 	lo, hi := cfg.ITLBand()
-	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
+	batchCap, source := params.ExplicitMaxNumSeqs(), batchCapFlags
+	if batchCap == 0 && readsDeclared {
+		batchCap, source = params.StatedBatchCap(), batchCapDeclared
+	}
+	if batchCap == 0 {
+		source = batchCapNone
+	}
+	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: batchCap, MaxNumSeqsSource: source,
 		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate(), Steady: cfg.ITLSteadiness()}
 }
 

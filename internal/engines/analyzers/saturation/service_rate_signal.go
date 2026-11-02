@@ -62,9 +62,9 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 }
 
 // lineUsableAt reports whether a line can derive a service rate at k: the
-// condition deriveMu applies. A fit that passes itl.ValidModel, which checks
+// condition deriveMuAtCap applies. A fit that passes itl.ValidModel, which checks
 // the line at k_sat (0.85), can still be zero or negative at the pricing k
-// (0.68 with the shipped defaults), and deriveMu refuses it; publishing it
+// (0.68 with the shipped defaults), and deriveMuAtCap refuses it; publishing it
 // would show a negative inter-token latency as the one a rate is priced at.
 func lineUsableAt(line itl.Model, k float64) bool {
 	return !line.IsZero() && line.ITLAt(k) > 0

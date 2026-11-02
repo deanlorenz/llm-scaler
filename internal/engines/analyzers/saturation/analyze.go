@@ -369,7 +369,7 @@ func (c *cycle) observeFleetShape() {
 // window the backlog projection exists for. A measurement always wins, so a
 // warm fleet is unaffected.
 //
-// BOTH HALVES OR NEITHER. deriveMu reads the output length twice: as the
+// BOTH HALVES OR NEITHER. deriveMuAtCap reads the output length twice: as the
 // divisor, and inside the shape, where KVreq = ILeff + OL/2 sets how many
 // sequences fit. Moving only the divisor leaves the two halves of one division
 // on different timescales, and a swap that raises the generation while dropping
@@ -433,7 +433,7 @@ func (c *cycle) fitLines() {
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
-		// deriveMu divides a token rate by an output length; prefill emits
+		// deriveMuAtCap divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
 		// same arithmetic would read three orders of magnitude low, which is
 		// why saturatedCompletionRate special-cases it on the measured path
@@ -479,14 +479,16 @@ func (c *cycle) fitLines() {
 		// logs two identical "variant" values, and their fits could not be
 		// told apart in the log (issue #271).
 		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
-		// The policy's band, and the sequence cap only when the engine's flag
-		// stated it, so a replica at it may teach the line from above the
-		// band (itl.Admission).
+		// The policy's band, and the sequence cap only when the flags or the
+		// llm-d.ai/max-num-seqs annotation state it (atCapBatchCap), so a
+		// replica at it may teach the line from above the band
+		// (itl.Admission).
 		lo, hi := c.cfg.ITLBand()
+		atCap := c.a.atCapBatchCap(params, c.a.batchCapITLAdmission)
 		// A held slope is bounded by the horizon a finished fit is kept on
 		// (BucketRetention, which ages the shared lines too) and by the
 		// arguments it was fitted under (issue #284).
-		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
+		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
 			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
@@ -549,21 +551,20 @@ func (c *cycle) fitLines() {
 	}
 }
 
-// explicitMaxNumSeqs is, per variant with replica rows this cycle, the
-// engine's batch cap when its flags stated it -- max_num_seqs, lowered by
-// --max-num-active-seqs (capacity.EngineParams.ExplicitMaxNumSeqs) -- and zero for one whose cap is
-// unknown or only a default.
-func (c *cycle) explicitMaxNumSeqs() map[string]int64 {
+// atCapBatchCaps is atCapBatchCap for the P/D decode view
+// (SwitchBatchCapDecodeView), per variant with replica rows this cycle; nil
+// for a model the view leaves as it is (no prefill variant).
+func (c *cycle) atCapBatchCaps() map[string]int64 {
+	if !domain.HasPrefill(c.rolesByVariant) {
+		return nil
+	}
 	out := map[string]int64{}
 	for _, rm := range c.input.ReplicaMetrics {
 		if _, seen := out[rm.VariantName]; seen {
 			continue
 		}
-		var params *capacity.EngineParams
-		if rec := c.a.capacityStore.Get(c.input.Namespace, c.input.ModelID, rm.VariantName); rec != nil {
-			params = rec.EngineParams
-		}
-		out[rm.VariantName] = params.ExplicitMaxNumSeqs()
+		params := engineParamsFor(c.a, c.input.Namespace, c.input.ModelID, rm.VariantName)
+		out[rm.VariantName] = c.a.atCapBatchCap(params, c.a.batchCapDecodeView).perRank
 	}
 	return out
 }
@@ -581,7 +582,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// requests waiting for their KV from prefill are not one
 	// (decodeCapacityView), except on a replica at its sequence cap. The
 	// idle tests below read the raw row.
-	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.explicitMaxNumSeqs())
+	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.atCapBatchCaps())
 	served := c.tune.servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for i, rm := range rows {
@@ -622,7 +623,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		//
 		// This has always held, but only by accident: fitLines populates
 		// itlModels for RoleDecode alone, so a prefill lookup returned the
-		// zero Model and deriveMu declined on IsZero() in another file, keyed
+		// zero Model and deriveMuAtCap declined on IsZero() in another file, keyed
 		// on the opposite condition. A role-classification slip, or anyone
 		// legitimately extending that population to RoleBoth, would have
 		// started pricing prefill from decode's physics with nothing to say
@@ -630,7 +631,19 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		var derived derivedMu
 		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
-			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
+			// The cap the derived k2 is priced at (pricingBatchCap), so a
+			// declared or learned cap reaches mu as it reaches P3
+			// (SwitchBatchCapDerivedMu, issue #420).
+			batchCap := flagsOrDefaultBatchCap(engineParams)
+			if c.a.batchCapDerivedMu {
+				batchCap = c.a.pricingBatchCap(c.input.Namespace, c.input.ModelID, rm.VariantName, engineParams,
+					c.cfg.EnableBatchCapLearning)
+			}
+			if batchCap.perRank <= 0 {
+				// No cap at all (the scale target unread): say so, not "".
+				batchCap.source = batchCapNone
+			}
+			derived = deriveMuAtCap(itlModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
 			if !derived.ok {
 				muMissing[rm.PodName] = derived.why
@@ -673,7 +686,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).
-				"maxNumSeqs", maxSeqs, "maxNumActiveSeqs", activeSeqs, "engineRanks", rm.Ranks())
+				"maxNumSeqs", maxSeqs, "maxNumActiveSeqs", activeSeqs, "engineRanks", rm.Ranks(),
+				// The cap per rank the sequences were capped at, and where it
+				// came from (pricingBatchCap).
+				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source)
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
