@@ -110,15 +110,20 @@ type Analyzer struct {
 	settle     settle.View
 	ownSettle  *settle.Tracker
 	ownSettled map[string]time.Time
-	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle and
-	// itlFiniteOnly are the line's settle switches (settle.go): on from the
-	// constructor; a replay turns them off (SetSwitchesForReplay).
+	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle, itlFiniteOnly,
+	// itlRestartUnderName and itlIdleOnEvidence are the line's six settle
+	// switches (settle.go): on from the constructor; a replay turns them off
+	// (SetSwitchesForReplay).
 	itlReadsSettle       bool
 	itlWaitsAfterRestart bool
 	itlKeepsSettle       bool
 	itlFiniteOnly        bool
 	itlRestartUnderName  bool
 	itlIdleOnEvidence    bool
+	// settleInterval is the controller's optimize interval
+	// (WithOptimizationInterval), zero until set: what the line's own trace
+	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
+	settleInterval time.Duration
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap

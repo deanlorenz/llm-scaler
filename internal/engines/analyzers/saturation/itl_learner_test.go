@@ -2,14 +2,17 @@ package saturation
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
@@ -137,4 +140,26 @@ func btoi(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// Review r2: a key whose line drops to none logs that once, with an empty
+// source and the line it had as previous; a key that never had a line logs
+// nothing, and a line coming back logs again.
+func TestITLLearner_LearnerWriteLogsALineThatDrops(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	ctx, logs := observedCtx(t)
+	logger := logr.FromContextOrDiscard(ctx)
+	line := itl.Reading{Model: itl.Model{A: 0.04, B: 0.008}, Tier: itl.TierOLS}
+	var none itl.Reading
+	for i, r := range []itl.Reading{line, none, none, line} {
+		a.noteITLLearner("ns", "m", "v", "ns|m|v|H200|1", r, itlSettleT0.Add(time.Duration(i)*restartCycle), logger)
+	}
+	a.noteITLLearner("ns", "m", "w", "ns|m|w|H200|1", none, itlSettleT0, logger)
+	writes := learnerWrites(logs, learn.ITL)
+	require.Len(t, writes, 3, "the first line, its drop once, and its return")
+	drop := writes[1].ContextMap()
+	assert.Equal(t, "", fmt.Sprint(drop["source"]))
+	assert.Equal(t, "ols", fmt.Sprint(drop["previousSource"]))
+	assert.Equal(t, false, drop["firstWrite"])
+	assert.Equal(t, "ols", fmt.Sprint(writes[2].ContextMap()["source"]))
 }

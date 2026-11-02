@@ -19,8 +19,9 @@ import (
 // tracker instead, and the key keeps only each replica's recent k, which the
 // drift test reads (DefaultMaxKDrift).
 //
-// Three more changes ride on their own fields, each a replay switch of the
-// analyzers that set them: WaitsAfterRestart, KeepsThroughMissingRow and
+// Five more changes ride on their own fields, each a replay switch of the
+// analyzers that set them: RestartUnderName and IdleOnEvidence (rules of the
+// tracker's), WaitsAfterRestart, KeepsThroughMissingRow and
 // FiniteOnly (Admission).
 
 // Settle is the settle tracker Observe reads a replica's settle from, and the
@@ -95,7 +96,7 @@ func (rt *replicaTrace) countIdle(hasITL, hasK bool, now time.Time, s Steadiness
 // Absent (domain.ReplicaMetrics.AvgITLKnown).
 func (a Admission) hasITL(rm domain.ReplicaMetrics) bool {
 	if a.FiniteOnly {
-		return rm.ITLState() == domain.ITLFinite
+		return rm.ITLState() == domain.ITLFinite && rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1)
 	}
 	return rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1)
 }

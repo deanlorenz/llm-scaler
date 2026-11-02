@@ -86,8 +86,9 @@ var reviewed = map[reflect.Type]buckets{
 		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
 		// WithSettleView hands the slo line the engine's settle tracker; the
 		// replay hands it its own, as it does k2's (settle.go).
-		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder", "WithSettleView"},
-		seams:    []string{"SetSwitchesForReplay"},
+		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder", "WithSettleView",
+			"WithOptimizationInterval"},
+		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
 		recorded: []string{"Analyze", "Observe"},

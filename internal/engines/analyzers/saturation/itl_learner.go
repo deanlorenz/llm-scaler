@@ -88,9 +88,9 @@ func (a *SaturationAnalyzer) beginITLCycle(namespace, modelID string) {
 
 // noteITLLearner files the ITL line's report of one variant for the cycle,
 // and logs a learner-write line when the key's line is set for the first
-// time, changed source, moved ITLWriteBand from what was last logged, or has
-// not logged for LearnerHeartbeat. At V(3), at most one line per key per
-// cycle.
+// time, changed source (dropping to no line included), moved ITLWriteBand
+// from what was last logged, or has not logged for LearnerHeartbeat. At
+// V(3), at most one line per key per cycle.
 func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key string, r itl.Reading,
 	now time.Time, logger logr.Logger) {
 	model := namespace + "|" + modelID
@@ -109,11 +109,15 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key str
 	report.Forgotten = a.itlForgotten[model][variant]
 	delete(a.itlForgotten[model], variant)
 	a.itlCycles[model] = append(a.itlCycles[model], report)
-	if source == itlSourceNoLine {
+	last, logged := a.itlLogged[key]
+	// A key whose line drops to none logs that once, with an empty source:
+	// after a controller restart with the snapshot off, or once a held slope
+	// ages out, the line being gone is the event worth a line. A key that
+	// never had one logs nothing.
+	if source == itlSourceNoLine && (!logged || last.source == itlSourceNoLine) {
 		a.mu.Unlock()
 		return
 	}
-	last, logged := a.itlLogged[key]
 	// A value that is not a number moves when the other is one, or the
 	// comparison below never says so (NaN compares false).
 	moved := func(now, was float64) bool {

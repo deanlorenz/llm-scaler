@@ -11,7 +11,7 @@ import (
 )
 
 // The SLO line on the settle tracker (analyzer-learner.md, section 7, PR
-// 4a): the same four changes as the saturation analyzer's ITL line, each
+// 4a): the same six changes as the saturation analyzer's ITL line, each
 // behind a switch of this package, since this analyzer fits its own line
 // with its own itl.Tracker. The engine writes the tracker once per model per
 // cycle, before any analyzer runs, and hands this analyzer a read-only view
@@ -63,6 +63,15 @@ func (a *Analyzer) WithSettleView(v settle.View) *Analyzer {
 	return a
 }
 
+// WithOptimizationInterval sets the controller's optimize interval, which
+// sets how long a replica may go without a row and keep its settle on the
+// line's own trace (settle.Tolerance), as the saturation analyzer's. Call it
+// before the analyzer is used. Unset, the least tolerance, settle.Period.
+func (a *Analyzer) WithOptimizationInterval(d time.Duration) *Analyzer {
+	a.settleInterval = d
+	return a
+}
+
 // ownSettleBackdate is how far before its first Analyze of a model the
 // analyzer's own tracker first observes the model's rows: the line's settle,
 // so a replica on the first cycle has settled (settlerow.ObserveOwn). The
@@ -110,12 +119,16 @@ func (a *Analyzer) evictOwnSettleLocked(now time.Time) {
 }
 
 // settleAdmission sets on adm how the line reads its replicas' settle for a
-// model, by the four switches.
+// model, by the six switches.
 func (a *Analyzer) settleAdmission(adm *itl.Admission, namespace, modelID string) {
 	a.mu.Lock()
 	reads, waits, keeps, finite := a.itlReadsSettle, a.itlWaitsAfterRestart, a.itlKeepsSettle, a.itlFiniteOnly
 	restartUnderName, idleOnEvidence := a.itlRestartUnderName, a.itlIdleOnEvidence
+	interval := a.settleInterval
 	a.mu.Unlock()
+	if interval > 0 {
+		adm.AbsenceTolerance = settle.Tolerance(interval)
+	}
 	if reads {
 		adm.Settle = &itl.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(namespace, modelID)}
 	}

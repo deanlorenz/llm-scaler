@@ -406,6 +406,7 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	sloAnalyzer := slo.New(replicaCollector, capacityStore).
 		WithClock(cycleClock).
 		WithSettleView(settleTracker).
+		WithOptimizationInterval(cfg.OptimizationInterval()).
 		WithStateTimeout(satV2.Horizons().VariantTimeout).
 		WithSlopeHoldFor(satV2.Horizons().BucketRetention)
 
