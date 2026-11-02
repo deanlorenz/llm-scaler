@@ -849,6 +849,31 @@ strength and none is started or moved, so none started in that time
 replaces the stored one. After 10 minutes bounds start as usual, and a read
 that succeeds later keeps those over the stored ones.
 
+**Every replica waits its settle after a restart.** A restarted controller
+has not watched the replicas it finds, so it treats each as just started:
+k2 and measured mu wait 1 minute, and the ITL line (the saturation analyzer's
+and the slo analyzer's) does not refit for
+[`steadyGate.steadyFor`](scaling-policy.md#analyzertuningsteadygate-which-itl-readings-teach-the-line)
+(2 minutes by default). What that costs depends on the snapshot:
+
+- **Snapshot off (the default).** The saturation analyzer has no line until
+  the wait ends and fresh readings refit one, so no derived mu either, and
+  the throughput floor is silent for about 2.75 minutes: the fleet is held
+  by KV occupancy alone. On one recorded restart under load the first line
+  came 75 s later than before the wait, and the floor-held decode demand was
+  32 to 37 % lower for those five cycles. The default scale-down
+  stabilization (`WVA_SO_SCALE_DOWN_STABILIZATION`, 300 s) masks it: the HPA
+  keeps its own recommendations across a controller restart, and the dip is
+  shorter than the window. **Set that stabilization to at least about 90 s**
+  (the dip's length plus a cycle); under it, each controller restart under
+  load can scale the decode role down by up to a third, and the load then
+  has to order it back.
+- **Snapshot on.** The saturation analyzer's held ITL slope is restored
+  (below), so it keeps a line, and the derived mu, through the wait.
+- **The slo analyzer** has no learned-state restore. Its line waits after
+  every restart, with the snapshot on or off; its figures are published as
+  no line until it refits. It does not size the fleet.
+
 What is restored, and what is not:
 
 - a variant's measured capacity, saturated throughput and replica start

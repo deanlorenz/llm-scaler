@@ -122,34 +122,41 @@
   throughput lines. The mu counters are re-measured on the flow-control-off
   P/D recording when it lands.
 - **PR 4a's decisions.** The ITL line (rows 1 and 13: saturation's and the
-  slo analyzer's) reads a replica's settle from the tracker, behind four
+  slo analyzer's) reads a replica's settle from the tracker, behind six
   switches each (`itl-…`, and `slo-itl-…` in the slo analyzer):
-  `reads-the-settle-tracker` (the move), `waits-after-controller-restart`,
+  `reads-the-settle-tracker` (the move), `restart-under-its-name-settles`
+  (a new Ready time under the same Pod name is a restart, `settle.Restarted`,
+  with or without a not-Ready row between), `idle-needs-evidence` (a scrape
+  that read nothing is not idle), `waits-after-controller-restart`,
   `keeps-the-settle-through-a-missing-row` and `reads-the-finite-pod-mean`
   (a Pod with an Absent rank is no reading). A settle starts at the latest
   of the tracker's `Since`, the last return of load after `idleRows` idle
   rows (`ReturnedAfter`), and the first Ready row after one that was not
-  (`ReadyAgain`, now in `settlerow` and shared with k2); the key stamps the
+  (`ReadyAgain`, now in `settlerow` and shared with k2). The key stamps the
   cycle it first read a start, so a joiner waits from the analyzer's clock
-  as before. A start first read on the key's own first cycle (a controller
-  restart, or a key made anew by a forget or new engine arguments) is a
-  settle only with the wait, and then runs from the tracker's start, so a
-  key made anew does not make long-settled replicas wait. An analyzer with
-  no engine tracker never waits. Two named changes were not on this list
-  and came with the move, so the move is not neutral on the in-process
-  goldens: a new Ready time under the same Pod name is a restart
-  (`settle.Restarted`) whether or not a row that was not Ready came between,
-  and the acceptance and engine generators stamped a Ready time 30 min
-  before each cycle, a new one every cycle; and a scrape that read nothing
-  is not idle (positive evidence). The cluster recordings are held. The
-  generator now keeps a Ready time for the day. The wait after a restart
+  as before, and takes a start only when it is later than the one it holds:
+  the tracker keeps rows for 5 min and its last eight returns, and a start
+  that falls back when one ages out is no event (review round 1 found the
+  line settling again 5 min after a readiness blip). A start first read on
+  the key's own first cycle (a controller restart, or a key made anew by a
+  forget or new engine arguments) is a settle only with the wait, and then
+  runs from the tracker's start, so a key made anew does not make
+  long-settled replicas wait; on the key's own trace (the move off) the
+  wait reads as "every replica on the key's first cycle waits", which only
+  a replay runs. An analyzer with no engine tracker never waits. The
+  acceptance and engine goldens were taken again: their generator stamped
+  a Ready time 30 min before each cycle, a restart on every cycle to the
+  tracker, and no line of theirs settled; it now keeps a Ready time for the
+  day. The move then moves only those two goldens' lines on the cycles
+  after a day-long clock jump: 25 hours without a cycle is an absence past
+  the tolerance (`settle.Rejoined`), where the line's own trace counted
+  absences only by cycles that missed a replica. The wait after a restart
   moves the in-process goldens and `ols-sweep-slo-restart`, where the first
   saturation line comes 75 s later (14:07:17 against 14:06:02) and the
   floor-held decode demand is 32 to 37 % lower for those five cycles. The
-  absence rule and the Finite-only reading move no golden (no recording
-  misses a row; every recorded Pod is one rank) and are held by their unit
-  tests. `learn.ITL` joins `learn.Learners` (forget neutral: the same
-  windows and intercepts, counted once); mu stays off it for 4b. The ITL
+  other four switches move no golden and are held by their unit tests.
+  `learn.ITL` joins `learn.Learners` (forget neutral: the same windows and
+  intercepts, counted once); mu stays off it for 4b. The ITL
   `learner-write` band is 5 % on A or B, and a change of tier always logs.
   The closed-loop probe through a restart, on a decode fleet stepping from
   2.5 to 12 requests/s 15 s after the restart: snapshot off, under need
@@ -159,7 +166,9 @@
   stabilization changes nothing in the probe: its fleet orders at need on
   occupancy once nothing queues, so the restart's gap shows on the way up,
   where stabilization does not enter. The probe does not reproduce the
-  unmasked case 4.4 names, so no known-failing row was added for it.
+  unmasked case 4.4 names, so no known-failing row was added for it; on
+  the recorded restart the dip is 75 s, so a scale-down stabilization
+  under about 90 s would let it through (configuration.md says so).
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
@@ -1135,7 +1144,7 @@ a different clock and is logged, not published as an age.
 | restart events | joined, load back after idle (`steadyGate.idleRows` rows with no latency and no KV fill) | joined, a new Ready time under the same name | joined, a new Ready time under the same name | joined, warm-pool lend, any absence |
 | key includes variant and bridge | no | no | no | yes: `(pod, variant, bridge)` |
 | a missing row | restarts the settle (before PR 4a; kept up to the tracker's tolerance after it) | kept up to `K2SettleMaxGap` | kept with k2's trace; a row that is not Ready forgets it | forgotten (`tracker.go:117-141`) |
-| first cycle after a controller restart | taken as settled | taken as established, unless the Pod's Ready time is under 1 min old | taken as established, unless the Pod's Ready time is under 1 min old | waits again |
+| first cycle after a controller restart | taken as settled (before PR 4a; waits `steadyFor` from first sight after it) | taken as established, unless the Pod's Ready time is under 1 min old | taken as established, unless the Pod's Ready time is under 1 min old | waits again |
 
 ### 4.2 One owner
 

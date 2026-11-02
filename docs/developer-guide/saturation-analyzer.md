@@ -574,26 +574,36 @@ or rolled out), the last return of load after at least `idleRows` idle rows
 (`ReturnedAfter`; idle on positive evidence, `settle.Row.Activity`), and its
 first Ready row after one that was not (`settlerow.ReadyAgain`). The key
 stamps the cycle it first read a start (`replicaTrace.settleSeen`) and the
-settle runs `steadyFor` from there, on the analyzer's clock.
+settle runs `steadyFor` from there, on the analyzer's clock. It takes a start
+only when it is later than the one it holds: the tracker keeps rows for 5 min
+and its last eight returns, and a start that falls back when one of them ages
+out is no event.
 
 A start the key first read on its own first `Observe` is a controller restart
 or a key made anew (a forget, new engine arguments). With
 `Admission.WaitsAfterRestart` it is a settle that runs from the tracker's
 start, so after a controller restart every replica waits `steadyFor` and a key
 made anew does not make long-settled replicas wait. Without it, as before 4a,
-such a replica is settled. An analyzer with no engine tracker (a unit test)
+such a replica is settled. With the key's own trace (the move off) it reads as
+"every replica on the key's first cycle waits", a key made anew included; only
+a replay runs that. An analyzer with no engine tracker (a unit test)
 never waits: it stands for a controller that has watched the fleet.
 
 `Admission.KeepsThroughMissingRow` keeps a replica's trace through a cycle it
 is missing from; the tracker's absence tolerance decides when it is back as a
 new sighting. `Admission.FiniteOnly` reads a reading's ITL from the presence
 bits (`ITLState() == ITLFinite`), so a Pod with an Absent rank is refused.
+`Admission.RestartUnderName` reads a new Ready time under the same name as a
+restart, and `Admission.IdleOnEvidence` reads load returning from the
+tracker's idle runs (idle on evidence); off, each falls back to the key's
+own rule.
 
-Each of the four is a replay switch, in both analyzers:
-`itl-reads-the-settle-tracker`, `itl-waits-after-controller-restart`,
+Each of the six is a replay switch, in both analyzers:
+`itl-reads-the-settle-tracker`, `itl-restart-under-its-name-settles`,
+`itl-idle-needs-evidence`, `itl-waits-after-controller-restart`,
 `itl-keeps-the-settle-through-a-missing-row` and
 `itl-reads-the-finite-pod-mean`, with an `slo-` prefix in the slo analyzer.
-Off, the key keeps its own trace of each replica, as before. The line is a
+Off, each does what the line did before 4a. The line is a
 learner on the shared rules too: a `learn.Report` per decode variant
 (`itl_learner.go`), `learner-write` at `--v=3` when A or B moves more than
 `ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
