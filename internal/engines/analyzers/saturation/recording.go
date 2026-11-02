@@ -145,6 +145,7 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchMuSwapFreeze:        &a.muSwapFreeze,
 		SwitchMuMarginClamp:       &a.muMarginClamp,
 		SwitchK2FirstReadingWaits: &a.k2FirstReadingWaits,
+		SwitchITLPerToken:         &a.itlPerToken,
 	}
 }
 

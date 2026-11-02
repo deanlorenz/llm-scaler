@@ -87,7 +87,11 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 		a.mu.Unlock()
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "outcome", r.Outcome,
 			"entries", r.Entries, "priors", r.Priors, "throughput", r.Throughput, "stored", r.Stored,
-			"boundPriors", r.BoundPriors)
+			"boundPriors", r.BoundPriors,
+			// A speculating vLLM variant's ITL baseline and slopes, learned
+			// in the other ITL unit (per step or per token), left out
+			// (itl_per_token.go).
+			"itlOtherUnit", r.ITLOtherUnit)
 	}
 
 	// One learner-start line per model, at its first cycle (k2_learner.go).
@@ -470,7 +474,7 @@ func (c *cycle) fitLines() {
 			params = rec.EngineParams
 		}
 		c.a.itlUnderArgs(variantKey, windowArgs(params))
-		rows := c.input.ReplicaMetrics
+		rows := c.a.itlRows(c.input.ReplicaMetrics, variant, params)
 		if rec.InRollout() || mixed[variant] {
 			rows = nil
 		}
@@ -511,7 +515,7 @@ func (c *cycle) fitLines() {
 			// same configuration. What was published when it was fitted stays
 			// published, and ages from then.
 			if !reading.SlopeHeld {
-				c.a.publishLine(physicsKey, variantKey, own, c.a.now())
+				c.a.publishLineFor(physicsKey, variantKey, own, c.a.now(), params.SpeculatesPerStep())
 			}
 			c.itlModels[variant] = own
 			c.itlHeld[variant] = reading.SlopeHeld
@@ -525,7 +529,7 @@ func (c *cycle) fitLines() {
 		// instead of paying the ~28 cycles a fit takes -- measured from load
 		// start on run QT, which is the figure a controller-boot anchor had
 		// inflated to ~60.
-		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey)
+		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey, params.SpeculatesPerStep())
 		if !ok {
 			// No line at all: none of its own -- a fresh variant whose
 			// replicas sit below the band offers the window nothing to fit

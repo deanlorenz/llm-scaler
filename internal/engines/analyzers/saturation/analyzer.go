@@ -329,6 +329,9 @@ type SaturationAnalyzer struct {
 	// k2FirstReadingWaits is SwitchK2FirstReadingWaits (#392): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	k2FirstReadingWaits bool
+	// itlPerToken is SwitchITLPerToken (#274): on from the constructor; a
+	// replay turns it off (SetSwitchesForReplay).
+	itlPerToken bool
 	// k2Pending is the readings held for each k2 key whose window they would
 	// start, until a later cycle confirms them (k2_confirm.go), and
 	// analyzeSeq numbers the Analyze calls, the cycles a confirmation is
@@ -422,6 +425,11 @@ type learnedLine struct {
 	model       itl.Model
 	fromVariant string
 	learnedAt   time.Time
+	// perToken says the line was fitted from ITL read per token on a vLLM
+	// engine that speculates (itl_per_token.go), and false that it was fitted
+	// from the step time or on any other engine. Read only for such an
+	// engine: on any other, one step is one token and the two units agree.
+	perToken bool
 }
 
 // acceleratorMemo is the last accelerator that resolved for a variant, with the
@@ -495,6 +503,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muSwapFreeze:           true,
 		muMarginClamp:          true,
 		k2FirstReadingWaits:    true,
+		itlPerToken:            true,
 		k2Pending:              make(map[string]*k2PendingReadings),
 	}
 }
@@ -1053,6 +1062,15 @@ func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accel
 func (a *SaturationAnalyzer) publishLine(
 	physicsKey, variantKey string, model itl.Model, now time.Time,
 ) {
+	a.publishLineFor(physicsKey, variantKey, model, now, false)
+}
+
+// publishLineFor is publishLine for a line fitted on an engine that
+// speculates per step (capacity.EngineParams.SpeculatesPerStep), whose unit
+// it records (learnedLine.perToken).
+func (a *SaturationAnalyzer) publishLineFor(
+	physicsKey, variantKey string, model itl.Model, now time.Time, speculates bool,
+) {
 	if physicsKey == "" || model.IsZero() {
 		return
 	}
@@ -1062,6 +1080,7 @@ func (a *SaturationAnalyzer) publishLine(
 		model:       model,
 		fromVariant: variantKey,
 		learnedAt:   now,
+		perToken:    speculates && a.itlPerToken,
 	}
 	if a.rec.Active() {
 		a.rec.Record(KindPublishLine, now, LineEvent{PhysicsKey: physicsKey, Variant: variantKey, A: model.A, B: model.B})
@@ -1076,14 +1095,21 @@ func (a *SaturationAnalyzer) publishLine(
 // as such. A line this variant measured itself is not a borrow and is not
 // returned -- the caller already has it, and calling it borrowed would
 // wrongly deny it the right to order.
-func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Model, string, bool) {
+//
+// speculates says the borrower's engine is vLLM with speculative decoding
+// (capacity.EngineParams.SpeculatesPerStep): a line in the other ITL unit
+// (itl_per_token.go) is then not lent, since it is off by the tokens a step
+// emits. Only such an engine's lines are found under its key, because the key
+// hashes the speculative configuration.
+func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string, speculates bool) (itl.Model, string, bool) {
 	if physicsKey == "" {
 		return itl.Model{}, "", false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	line, ok := a.itlLines[physicsKey]
-	if !ok || line.model.IsZero() || line.fromVariant == variantKey {
+	if !ok || line.model.IsZero() || line.fromVariant == variantKey ||
+		(speculates && line.perToken != a.itlPerToken) {
 		return itl.Model{}, "", false
 	}
 	if a.rec.Active() {

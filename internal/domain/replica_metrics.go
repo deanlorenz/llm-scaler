@@ -322,6 +322,22 @@ type ReplicaMetrics struct {
 	AvgITLKnown bool
 	AvgITLEmpty bool
 
+	// SpecAcceptedPerStep is the draft tokens vLLM's speculative decoding
+	// (or MTP) accepted per decode step on this replica, over AvgITL's window:
+	// rate(vllm:spec_decode_num_accepted_tokens_total) over
+	// rate(vllm:inter_token_latency_seconds_count). vLLM observes ITL once per
+	// request per step, however many tokens the step emitted, so with
+	// speculation AvgITL is the step time and a step emits
+	// 1 + SpecAcceptedPerStep tokens (issue #274). SGLang's ITL is already per
+	// token, and it is never collected for SGLang.
+	SpecAcceptedPerStep float64
+	// SpecAcceptedPerStepKnown is set when SpecAcceptedPerStep was read from a
+	// present, finite, non-negative series. vLLM publishes the counter only
+	// with a speculative configuration, so an absent series is either no
+	// speculation or a missing reading; the engine's flags tell the two apart
+	// (ITLPerToken). A pod whose ranks did not all report one is not known.
+	SpecAcceptedPerStepKnown bool
+
 	// AvgTTFT is the average time to first token on this replica in seconds.
 	// Derived from rate(vllm:time_to_first_token_seconds_sum[1m]) / rate(..._count[1m]),
 	// and the SGLang histogram of the same name.
@@ -479,6 +495,35 @@ func (m ReplicaMetrics) ITLState() ITLState {
 	default:
 		return ITLAbsent
 	}
+}
+
+// ITLPerToken is the record with AvgITL read per generated token rather
+// than per engine step (issue #274). speculates says the engine's flags
+// configure vLLM speculative decoding (capacity.EngineParams.SpeculatesPerStep).
+//
+//   - A known SpecAcceptedPerStep divides a finite AvgITL by the tokens a
+//     step emits, 1 + SpecAcceptedPerStep, flags or not: the counter exists
+//     only when the engine speculates.
+//   - Without it, a replica whose flags speculate has its finite AvgITL
+//     withheld (absent): a step time of unknown length is not a per-token
+//     reading, and a missing counter is not "no speculation".
+//   - Otherwise the record is returned as it is: one token per step.
+//
+// A withheld reading is zeroed as well as marked absent: the ITL window reads
+// AvgITL > 0, and the value too must say there is no reading. A record with
+// no positive finite AvgITL is returned as it is: an idle replica is idle in
+// either unit.
+func (m ReplicaMetrics) ITLPerToken(speculates bool) ReplicaMetrics {
+	if !(m.AvgITL > 0) || math.IsInf(m.AvgITL, 1) {
+		return m
+	}
+	switch {
+	case m.SpecAcceptedPerStepKnown && m.SpecAcceptedPerStep >= 0 && !math.IsInf(m.SpecAcceptedPerStep, 0):
+		m.AvgITL /= 1 + m.SpecAcceptedPerStep
+	case speculates:
+		m.AvgITL, m.AvgITLKnown = 0, false
+	}
+	return m
 }
 
 // Ranks is the number of data-parallel engine ranks the record covers, never

@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // A record of one rank is its own busiest rank, whatever the busiest-rank
 // fields hold: the guards read exactly what they read before ranks existed.
@@ -61,5 +64,33 @@ func TestBusiestRankWithoutAReading(t *testing.T) {
 	m.MaxRankKvCacheUsage = 1.5
 	if got := m.BusiestRankTokens(); got != 8000 {
 		t.Errorf("BusiestRankTokens = %d, want the capacity 8000", got)
+	}
+}
+
+// ITLPerToken reads a speculating replica's step time per token, withholds
+// it when the counter is missing under speculative flags, and leaves every
+// other reading alone (#274).
+func TestITLPerToken(t *testing.T) {
+	finite := ReplicaMetrics{AvgITL: 0.03, AvgITLKnown: true}
+	withCounter := finite
+	withCounter.SpecAcceptedPerStep, withCounter.SpecAcceptedPerStepKnown = 2, true
+	for _, tc := range []struct {
+		name       string
+		m          ReplicaMetrics
+		speculates bool
+		itl        float64
+		state      ITLState
+	}{
+		{"counter read", withCounter, true, 0.01, ITLFinite},
+		{"counter read, flags silent", withCounter, false, 0.01, ITLFinite},
+		{"counter missing under speculative flags", finite, true, 0, ITLAbsent},
+		{"no speculation", finite, false, 0.03, ITLFinite},
+		{"idle", ReplicaMetrics{AvgITLEmpty: true}, true, 0, ITLEmpty},
+		{"absent", ReplicaMetrics{}, true, 0, ITLAbsent},
+	} {
+		got := tc.m.ITLPerToken(tc.speculates)
+		if math.Abs(got.AvgITL-tc.itl) > 1e-12 || got.ITLState() != tc.state {
+			t.Errorf("%s: AvgITL %v (%s), want %v (%s)", tc.name, got.AvgITL, got.ITLState(), tc.itl, tc.state)
+		}
 	}
 }

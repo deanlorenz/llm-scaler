@@ -422,6 +422,14 @@ func (p *EngineParams) BatchCap() int64 {
 	return p.MaxNumSeqs
 }
 
+// SpeculatesPerStep reports whether the flags configure speculative decoding
+// (or MTP) on vLLM, whose inter-token latency is then the engine step time
+// rather than the time per token (issue #274). SGLang's latency is already
+// per token, so its speculative flags do not count.
+func (p *EngineParams) SpeculatesPerStep() bool {
+	return p != nil && p.Engine == inferenceengine.EngineVLLM && p.SpeculativeConfig != ""
+}
+
 // maxNumSeqsKeys are the normalised flags either parser reads into
 // MaxNumSeqs.
 var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}

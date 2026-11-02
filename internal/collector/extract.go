@@ -73,6 +73,10 @@ type podMetricData struct {
 	runningRequests  int
 	preemptionRate   float64
 	preemptionRateOK bool
+	// Speculative decoding (spec_decode.go in registration): the draft
+	// tokens accepted per decode step, and whether that was read.
+	specAcceptedPerStep      float64
+	specAcceptedPerStepKnown bool
 	// Presence bits: each is set when its series was present and finite (and
 	// in the range its block accepts), so a zero above can be told from a
 	// missing reading (domain.ReplicaMetrics.KvCacheUsageKnown and its

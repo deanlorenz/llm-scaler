@@ -1020,6 +1020,7 @@ itl-line
 itl-line-borrowed
 itl-line-none
 itl-ols
+itl-per-accepted-token
 itl-pinned
 itl-window
 itlA
@@ -1034,6 +1035,7 @@ itlBaselineStash
 itlBaselines
 itlLines
 itlModel
+itlOtherUnit
 itlResidualPct
 itlWindows
 itlZero

@@ -326,6 +326,60 @@ A fit is refused unless it is usable (`ValidModel`): `A` and `B` finite,
 `A > 1e-12` (a flat or falling line is not this physics), and
 `A x 0.85 + B > 0`.
 
+### ITL per accepted token (speculative decoding)
+
+vLLM observes `inter_token_latency` once per request per engine step, however
+many tokens the step emitted. With speculative decoding or MTP a step emits
+`1 + E` tokens, `E` the accepted draft tokens, so `AvgITL` is the step time and
+a line fitted from it prices the token rate `1 + E` times low (1.5-3x on
+typical acceptance; issue #274). SGLang divides each step's interval by the
+tokens it emitted, so its ITL is already per token.
+
+The collector reads `E` over the ITL's own window, per pod
+(`registration.QuerySpecAcceptedPerStep`):
+
+```
+E = rate(vllm:spec_decode_num_accepted_tokens_total[1m])
+  / rate(vllm:inter_token_latency_seconds_count[1m])
+```
+
+into `ReplicaMetrics.SpecAcceptedPerStep`, with `SpecAcceptedPerStepKnown`
+set only for a present, finite, non-negative value. The denominator is the ITL
+count, not `vllm:spec_decode_num_drafts_total`: a step that proposed no draft
+(an n-gram drafter with no match) is an ITL observation and no draft.
+
+Before the window takes a row, `fitLines` reads the variant's rows through
+`domain.ReplicaMetrics.ITLPerToken` (`itl_per_token.go`), with
+`capacity.EngineParams.SpeculatesPerStep()` (vLLM with `--speculative-config`):
+
+| counter | flags speculate | the row the window reads |
+| --- | --- | --- |
+| known | either | `AvgITL / (1 + E)` |
+| missing | yes | withheld: `AvgITL` 0, absent (a missing counter is not "no speculation") |
+| missing | no | as read: one token a step |
+
+SGLang's flags never speculate per step. The window, the baseline, the held
+slope and the shared line are then per token. Their unit differs from a step
+time only on a vLLM engine that speculates, so only there is it recorded: the
+learned-state snapshot names such a variant in `itlPerToken` and such a line in
+`itlLinesPerToken`. A speculating variant's entries in the other unit are not
+installed (`RestoredVariant.ITLOtherUnit`, logged `itlOtherUnit`), and a line
+in the other unit is not lent to a speculating borrower (`borrowLine`). A
+snapshot from before the field marks nothing, so it reads as step time: on
+the first restart after the upgrade a speculating variant fits its ITL line
+again. Other engines and other fields restore as before.
+
+The switch is `SwitchITLPerToken` (`itl-per-accepted-token`), on in
+production. Off, the line is fitted from the step time, as before. No
+committed golden speculates, so it moves none; `heldBy` in
+`learnreplay/switch_runs_test.go` names the unit tests that fail with it off,
+and the property case `known-truth/itl/speculative-accepted-tokens` fails on
+its stub mutant on 20 of 20 seeds.
+
+The throughput and slo analyzers keep the step time: each fits its own line
+from `AvgITL`, so on a speculating fleet their figures are still low by
+`1 + E`.
+
 The window and the fit's rules live in `itl.Tracker`, which the slo analyzer
 uses too ([the slo analyzer](slo-analyzer.md#itltracker)). A full fit needs
 evidence:

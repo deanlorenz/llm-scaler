@@ -1938,9 +1938,10 @@ not readings of the fleet:
     / on (exported_namespace, model_name)
   (0.85 * max by (exported_namespace, model_name) (wva_analyzer_target{analyzer_name="slo"} > 0))
   ```
-- **Known to be off** in two cases: speculative decoding (the engine's ITL is
-  per step, not per token) and a high prefix-cache hit rate (the per-request KV
-  footprint is under-counted). A pod running several data-parallel ranks, the
+- **Known to be off** in two cases: speculative decoding on vLLM (the engine's
+  ITL is per step, not per token; the saturation analyzer corrects its own
+  line for it, this figure does not yet) and a high prefix-cache hit rate (the
+  per-request KV footprint is under-counted). A pod running several data-parallel ranks, the
   normal wide-EP decode layout, is priced as all of its ranks: its batch cap is
   the ranks times `max_num_seqs`, or times `--max-num-active-seqs` when that
   is set and lower, or set with `max_num_seqs` not stated. The
