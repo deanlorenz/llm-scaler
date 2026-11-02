@@ -250,6 +250,29 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	}
 	pod.AvgITL = weightedBy(itlRanks, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
 		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
+	// Per step, so weighted by each rank's steps: the tokens it generated
+	// over the tokens a step emits, G / (1 + E). Weighting by the tokens
+	// alone gave a high-acceptance rank more than its share and over-stated
+	// E, the direction that under-orders. It covers the ranks AvgITL covers,
+	// the Finite ones, since 1 + E divides that mean: an Empty rank ran no
+	// decode step to count, and an Absent rank's ITL is not in the mean.
+	// Known only when every Finite rank was read, so a rank that speculates
+	// and was not read keeps the pod unknown. The pod's AvgITL above is
+	// token-weighted, so dividing it by 1 + this E is exact only when its
+	// ranks run alike (equal ITL and E), the normal homogeneous data-parallel
+	// layout; ranks behind one API server are summed exactly in PromQL and
+	// never reach this merge.
+	pod.SpecAcceptedPerStepKnown = len(itlFinite) > 0
+	for _, m := range itlFinite {
+		pod.SpecAcceptedPerStepKnown = pod.SpecAcceptedPerStepKnown && m.SpecAcceptedPerStepKnown
+	}
+	pod.SpecAcceptedPerStep = 0
+	if pod.SpecAcceptedPerStepKnown {
+		pod.SpecAcceptedPerStep = weightedBy(itlFinite, func(m domain.ReplicaMetrics) float64 { return m.SpecAcceptedPerStep },
+			func(m domain.ReplicaMetrics) float64 {
+				return m.GenerationTokenRate / (1 + max(m.SpecAcceptedPerStep, 0))
+			})
+	}
 	// Weighted like AvgITL: both are per-request costs, so the engine instance
 	// that served more requests should count for more when merging a pod's
 	// instances into one replica.

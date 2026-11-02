@@ -36,18 +36,14 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #420's readers of the batch cap: saturation's ITL admission, P/D decode
-// view and derived mu, and slo's admission and per-rank cap. Earlier PRs'
+// #274's ITL per accepted token: no recording runs speculative decoding, so
+// it names no output and is held by its unit tests (heldBy). Earlier PRs'
 // switches (learner PRs 2 and 3, #396's bands, #399's batch cap, #415's mu
-// key, #392's first k2 reading) are not here: "all off" is this PR's
-// switches, and an earlier PR's stay at their constructor default, on, as
-// the base goldens were written (analyzer-learner.md, 2.5).
+// key, #392's k2 first reading, #420's batch-cap readers) are not here: "all
+// off" is this PR's switches, and an earlier PR's stay at their constructor
+// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchBatchCapITLAdmission: nil,
-	saturation.SwitchBatchCapDecodeView:   nil,
-	saturation.SwitchBatchCapDerivedMu:    nil,
-	slo.SwitchBatchCapAdmission:           nil,
-	slo.SwitchBatchCapPerRank:             nil,
+	saturation.SwitchITLPerToken: nil,
 }
 
 // switchPackage is the package whose hook accepts the switch name.
@@ -77,13 +73,18 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
-	saturation.SwitchMuRepeatIsUse:       nil,
-	saturation.SwitchMuUnknownAgeSafe:    nil,
-	saturation.SwitchMuLatchRestoresSafe: nil,
-	saturation.SwitchIdleBand:            nil,
-	saturation.SwitchK2KeyBucketHeld:     nil,
-	saturation.SwitchBatchCapDeclared:    nil,
-	saturation.SwitchBatchCapLearned:     nil,
+	saturation.SwitchMuRepeatIsUse:        nil,
+	saturation.SwitchMuUnknownAgeSafe:     nil,
+	saturation.SwitchMuLatchRestoresSafe:  nil,
+	saturation.SwitchIdleBand:             nil,
+	saturation.SwitchK2KeyBucketHeld:      nil,
+	saturation.SwitchBatchCapDeclared:     nil,
+	saturation.SwitchBatchCapLearned:      nil,
+	saturation.SwitchBatchCapITLAdmission: nil,
+	saturation.SwitchBatchCapDecodeView:   nil,
+	saturation.SwitchBatchCapDerivedMu:    nil,
+	slo.SwitchBatchCapAdmission:           nil,
+	slo.SwitchBatchCapPerRank:             nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -91,6 +92,14 @@ var earlierSeams = map[string][]string{
 // and a switch whose off path were dead would pass them. Each test named
 // must exist (by its func declaration, in the package directory given).
 var heldBy = map[string][]heldTest{
+	saturation.SwitchITLPerToken: {
+		{"../saturation", "TestITLPerToken_TheLineIsFittedPerAcceptedToken"},
+		{"../saturation", "TestITLPerToken_AMissingCounterUnderSpeculativeFlagsWithholdsTheReading"},
+		{"../saturation", "TestITLPerToken_AStepTimeLineIsNotLentToASpeculatingVariant"},
+		{"../saturation", "TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant"},
+		{"../saturation", "TestITLPerToken_AnAcceptedCountAboveTheDraftLengthIsWithheld"},
+		{"../saturation", "TestITLPerToken_AWithheldReadingIsLoggedOncePerChange"},
+	},
 	saturation.SwitchBatchCapITLAdmission: {
 		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},
 		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotAnITLCap"},
@@ -225,8 +234,8 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (01b40048a, main after #426). No switch of this
-// PR names one.
+// commit's goldens hold it (01b40048a, main after #426). This PR's switch
+// names none.
 var switchBase = map[string]string{}
 
 func TestGoldens_TheSwitchRuns(t *testing.T) {

@@ -274,3 +274,81 @@ func TestCollapseToPods_ITLMeanCoversFiniteRanksOnly(t *testing.T) {
 	assert.Equal(t, domain.ITLFinite, pods[2].ITLState())
 	assert.InDelta(t, 0.05, pods[2].AvgITL, 1e-12, "pod-c: the request-rate fallback counted the Empty rank")
 }
+
+func TestCollapseToPods_SpecAcceptedKnownOnlyIfEveryRankReportedIt(t *testing.T) {
+	// The tokens a speculative step emits, per rank: weighted by the steps
+	// each ran, its tokens over 1 + E, and known only when every Finite rank
+	// was read (#274). pod-b: 300/2 = 150 steps at 1 and 100/3 at 2.
+	finite := func(pod string, gen float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, GenerationTokenRate: gen, AvgITL: 0.03, AvgITLKnown: true}
+	}
+	counted := func(m domain.ReplicaMetrics, e float64) domain.ReplicaMetrics {
+		m.SpecAcceptedPerStep, m.SpecAcceptedPerStepKnown = e, true
+		return m
+	}
+	instances := []domain.ReplicaMetrics{
+		counted(finite("pod-a", 100), 1.5),
+		finite("pod-a", 100),
+		counted(finite("pod-b", 300), 1),
+		counted(finite("pod-b", 100), 2),
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.False(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: one rank had no series")
+	assert.Zero(t, pods[0].SpecAcceptedPerStep, "an unknown pod carries no figure")
+	assert.True(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: both ranks reported one")
+	assert.InDelta(t, (150*1+100.0/3*2)/(150+100.0/3), pods[1].SpecAcceptedPerStep, 1e-9)
+}
+
+func TestCollapseToPods_AnIdleRankDoesNotHideTheSpecAcceptedCount(t *testing.T) {
+	// A rank with no decode step in the window reads its count as 0/0 and its
+	// ITL as empty: it adds nothing, as it adds nothing to the ITL mean, and
+	// must not make the busy rank's count unknown, which would withhold the
+	// pod's ITL under speculative flags (#274). A pod of idle ranks only has
+	// no count.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 2, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-a", AvgITLEmpty: true},
+		{PodName: "pod-b", AvgITLEmpty: true},
+		{PodName: "pod-b", AvgITLEmpty: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.True(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: the idle rank hid the busy rank's count")
+	assert.InDelta(t, 2, pods[0].SpecAcceptedPerStep, 1e-9)
+	assert.False(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: no rank read a count")
+}
+
+func TestCollapseToPods_SpecAcceptedCoversTheFiniteRanks(t *testing.T) {
+	// The count covers the ranks the ITL mean covers, since 1 + E divides
+	// that mean. pod-a: an Empty rank that generated tokens (max_tokens=1)
+	// ran no decode step; its missing count does not hide the Finite rank's,
+	// as it does not block the pod's ITL. pod-b: an Absent rank is not in the
+	// mean, so its count, read or not, is not in E: E is the Finite rank's 1,
+	// not a blend with the Absent rank's 3. pod-c: no Finite rank, no count.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 2, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-a", GenerationTokenRate: 50, AvgITLEmpty: true},
+		{PodName: "pod-b", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 1, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-b", GenerationTokenRate: 300, SpecAcceptedPerStep: 3, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-c", GenerationTokenRate: 300, SpecAcceptedPerStep: 1, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-c", GenerationTokenRate: 50, AvgITLEmpty: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 3)
+	assert.True(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: the Empty rank that generated hid the count")
+	assert.InDelta(t, 2, pods[0].SpecAcceptedPerStep, 1e-9)
+	assert.True(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: the Absent rank's count is not the mean's")
+	assert.InDelta(t, 1, pods[1].SpecAcceptedPerStep, 1e-9, "pod-b: the Absent rank's count was blended in")
+	assert.False(t, pods[2].SpecAcceptedPerStepKnown, "pod-c: no Finite rank, so no count")
+	assert.Zero(t, pods[2].SpecAcceptedPerStep)
+}

@@ -149,6 +149,7 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchBatchCapITLAdmission: &a.batchCapITLAdmission,
 		SwitchBatchCapDecodeView:   &a.batchCapDecodeView,
 		SwitchBatchCapDerivedMu:    &a.batchCapDerivedMu,
+		SwitchITLPerToken:          &a.itlPerToken,
 	}
 }
 

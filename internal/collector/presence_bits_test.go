@@ -171,6 +171,8 @@ var presenceBits = []struct {
 		func(m domain.ReplicaMetrics) bool { return m.RequestRateKnown }},
 	{"RunningRequestsKnown", registration.QueryRunningRequests, 8, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.RunningRequestsKnown }},
+	{"SpecAcceptedPerStepKnown", registration.QuerySpecAcceptedPerStep, 1.4, true, true,
+		func(m domain.ReplicaMetrics) bool { return m.SpecAcceptedPerStepKnown }},
 	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false, true,
 		func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
 }
@@ -274,7 +276,7 @@ func TestNonFiniteValuesUnchanged(t *testing.T) {
 	clearBits := func(m domain.ReplicaMetrics) domain.ReplicaMetrics {
 		m.KvCacheUsageKnown, m.KvUsageInstantKnown, m.KvUsageMeanKnown, m.CapacityQueueKnown, m.PreemptionRateKnown = false, false, false, false, false
 		m.PrefillComputedTokenRateKnown, m.GenerationTokenRateKnown, m.RequestRateKnown, m.RunningRequestsKnown = false, false, false, false
-		m.AvgITLKnown, m.AvgITLEmpty = false, false
+		m.AvgITLKnown, m.AvgITLEmpty, m.SpecAcceptedPerStepKnown = false, false, false
 		m.Metadata = nil
 		return m
 	}

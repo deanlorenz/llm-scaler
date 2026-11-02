@@ -104,6 +104,9 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 		Description: "Average inter-token latency per instance (seconds), " +
 			"used by queueing model tuner for parameter learning",
 	})
+	// The tokens a step emits beside it, over the same window: with
+	// speculative decoding the ITL above is the step time (issue #274).
+	registerSpecDecodeQueries(registry)
 
 	// Average per-request service time (seconds), queue wait excluded.
 	// vLLM publishes this directly; SGLang has no equivalent and reconstructs it

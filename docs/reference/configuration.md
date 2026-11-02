@@ -977,7 +977,25 @@ What is restored, and what is not:
   again. Only a rollback to a release that did not record engine arguments
   starts every variant cold once. The document keeps one key across releases
   on purpose: under a new key, the older release would read the document it
-  wrote before the upgrade and install figures days stale as its own;
+  wrote before the upgrade and install figures days stale as its own.
+  **Speculative decoding:** a vLLM variant with `--speculative-config` (MTP)
+  has its ITL latency line learned per generated token by this release, and
+  per engine step by a release before the correction. A rollback to such a
+  release with the same `fingerprint_version` reads the per-token line as a
+  step time: it over-rates the variant's service rate by the tokens a step
+  emits (typically 1.5-3x) and **under**-provisions it until the line refits,
+  which a held slope can put off for up to `LEARNED_STATE_BUCKET_RETENTION`.
+  Where the snapshot is on and a variant speculates, delete the snapshot
+  before rolling back:
+
+  ```bash
+  kubectl delete configmap wva-learned-state -n <controller-namespace>
+  ```
+
+  or roll back to a Deployment that sets `LEARNED_STATE_SNAPSHOT=false`
+  itself: `kubectl rollout undo` brings back the older Deployment with its
+  own environment, so setting the variable on this release does nothing for
+  it;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
 - a figure the new controller has already measured is never replaced;
