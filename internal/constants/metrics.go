@@ -72,8 +72,9 @@ const (
 
 	// VLLMRequestPrefillTimeSeconds is the time a request spent in the PREFILL
 	// phase, queue wait excluded (vLLM counts waiting separately, as
-	// request_queue_time_seconds). Collected as a diagnostic beside the token
-	// rate, not as a capacity: with batching, concurrent requests each report
+	// request_queue_time_seconds). Not queried by the collector today; named
+	// here for the what-if proposal (docs/proposals/slo-capacity-planner.md).
+	// It is not a capacity: with batching, concurrent requests each report
 	// their own prefill duration, so the sum over-counts wall-clock and a
 	// per-request figure understates what the replica does.
 	VLLMRequestPrefillTimeSeconds = "vllm:request_prefill_time_seconds"

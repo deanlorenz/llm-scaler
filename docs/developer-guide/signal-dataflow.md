@@ -642,10 +642,12 @@ ordered 1 -> 1 in every cycle while prefill held a queue of 1119 and its own
 floor asked for five.
 
 **What is collected and not used:** `AvgTTFT`. Prefill has no fitted
-throughput ceiling today. [A TTFT model is
-proposed](../proposals/prefill-ttft-model.md) — fit `TTFT(T) = A·T + B` so
-`1/A` is the replica's prefill token ceiling, obtainable without driving it
-into saturation, which is exactly the limitation above.
+throughput ceiling today. The earlier [TTFT model](../proposals/prefill-ttft-model.md)
+(fit `TTFT(T) = A·T + B`, take `1/A` as the ceiling) was built and removed:
+queue wait landed in the intercept. [What-if capacity](../proposals/slo-capacity-planner-ttft.md#prefill-capacity)
+supersedes it with a prefill throughput `V_P` read from busy minutes, or a
+lower bound when there are none, which
+the floor could later use for the limitation above.
 
 ## What crosses each boundary
 
