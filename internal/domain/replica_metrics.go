@@ -310,11 +310,10 @@ type ReplicaMetrics struct {
 	// discarded. The two are never both set.
 	//
 	// Trust the bits, not AvgITL > 0. A pod whose ranks were merged with one
-	// rank absent carries the known ranks' mean in AvgITL while AvgITLKnown
-	// is false: the absent rank's tokens are missing from that mean. The same
-	// holds for a merge with an empty rank that generated tokens: that rank
-	// weighs in with an ITL of 0, so the pod reads absent (collector
-	// mergePodInstances).
+	// rank absent carries its Finite ranks' mean in AvgITL while AvgITLKnown
+	// is false: the absent rank's own mean is missing from it. An empty rank,
+	// even one that generated tokens, has no interval and stays out of the
+	// mean without blocking Known (collector mergePodInstances).
 	//
 	// A prefill-role pod emits one token per request and hands decode on, so
 	// its ITL window stays empty: it reads Empty permanently, and that is not
@@ -335,7 +334,8 @@ type ReplicaMetrics struct {
 	// present, finite, non-negative series. vLLM publishes the counter only
 	// with a speculative configuration, so an absent series is either no
 	// speculation or a missing reading; the engine's flags tell the two apart
-	// (ITLPerToken). A pod whose ranks did not all report one is not known.
+	// (ITLPerToken). A merged pod's count covers the ranks its AvgITL covers,
+	// the Finite ones, and is known only when each of them reported one.
 	SpecAcceptedPerStepKnown bool
 
 	// AvgTTFT is the average time to first token on this replica in seconds.

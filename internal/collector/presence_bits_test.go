@@ -480,9 +480,12 @@ func TestITLStateTwoRanksFullPath(t *testing.T) {
 	}
 }
 
-// An empty rank that generated tokens weighs into the pod's ITL mean with an
-// ITL of 0, so the pod reads absent; the mean itself is left as main computes
-// it (#341 4a owns that change). An empty rank with no tokens keeps the rule.
+// An Empty rank that generated tokens (max_tokens=1) measured no interval, so
+// it stays out of the pod's ITL mean and does not block Finite: the mean is
+// the Finite ranks' alone. Before #341 4a it weighed in at an ITL of 0 and
+// made the pod Absent: {Finite 20ms at 100 tok/s, Empty at 50} read 13.3ms. An
+// Absent rank still makes the pod Absent, and a pod of Empty ranks one of
+// which generated tokens is still Absent.
 func TestMergePodInstances_ITLEmptyRankThatGenerated(t *testing.T) {
 	rank := func(state domain.ITLState, itl, gen float64) domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", AvgITL: itl, GenerationTokenRate: gen,
@@ -494,9 +497,17 @@ func TestMergePodInstances_ITLEmptyRankThatGenerated(t *testing.T) {
 		want    domain.ITLState
 		wantITL float64
 	}{
-		// 0.02 x 100 / (100 + 50): the generation-weighted mean main computes.
+		// The Finite rank's 20ms, not 0.02 x 100 / (100 + 50) = 13.3ms.
 		{"finite + empty that generated", []domain.ReplicaMetrics{
-			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 50)}, domain.ITLAbsent, 0.02 * 100 / 150},
+			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 50)}, domain.ITLFinite, 0.02},
+		// (0.02 x 100 + 0.06 x 300) / 400: weighted over the Finite ranks.
+		{"two finite + empty that generated", []domain.ReplicaMetrics{
+			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLFinite, 0.06, 300), rank(domain.ITLEmpty, 0, 50)},
+			domain.ITLFinite, 0.05},
+		// Absent wins, and the value is still the Finite ranks' mean.
+		{"finite + empty that generated + absent", []domain.ReplicaMetrics{
+			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 50), rank(domain.ITLAbsent, 0, 200)},
+			domain.ITLAbsent, 0.02},
 		{"finite + empty with no tokens", []domain.ReplicaMetrics{
 			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 0)}, domain.ITLFinite, 0.02},
 		{"empty that generated + empty", []domain.ReplicaMetrics{
@@ -513,7 +524,7 @@ func TestMergePodInstances_ITLEmptyRankThatGenerated(t *testing.T) {
 			t.Errorf("%s: ITLState = %v, want %v", tc.name, s, tc.want)
 		}
 		if math.Abs(got[0].AvgITL-tc.wantITL) > 1e-12 {
-			t.Errorf("%s: AvgITL = %v, want %v (unchanged from main)", tc.name, got[0].AvgITL, tc.wantITL)
+			t.Errorf("%s: AvgITL = %v, want %v", tc.name, got[0].AvgITL, tc.wantITL)
 		}
 	}
 }
