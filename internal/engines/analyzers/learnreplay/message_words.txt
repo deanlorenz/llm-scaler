@@ -318,6 +318,7 @@ accelerator_type
 accelerators
 accel|
 accepted
+acceptedPerStep
 account
 across
 acting
@@ -1417,6 +1418,7 @@ note
 nothing
 now
 null
+numSpeculativeTokens
 num_gpu_blocks_override
 num_redundant_experts
 num_speculative_tokens

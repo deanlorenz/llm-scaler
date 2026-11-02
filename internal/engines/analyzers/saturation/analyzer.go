@@ -794,6 +794,12 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.itlArgs, key)
 		}
 	}
+	// The withheld-reading log state (itl_per_token.go) goes with them.
+	for key := range a.itlWithheldLogged {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlWithheldLogged, key)
+		}
+	}
 	for key := range a.itlBaselineStash {
 		if base, _, _ := strings.Cut(key, "#"); a.variantIsStale(base, now, variantTimeout) {
 			delete(a.itlBaselineStash, key)

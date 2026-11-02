@@ -259,3 +259,25 @@ func TestCollapseToPods_SpecAcceptedKnownOnlyIfEveryRankReportedIt(t *testing.T)
 	assert.True(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: both ranks reported one")
 	assert.InDelta(t, (150*1+100.0/3*2)/(150+100.0/3), pods[1].SpecAcceptedPerStep, 1e-9)
 }
+
+func TestCollapseToPods_AnIdleRankDoesNotHideTheSpecAcceptedCount(t *testing.T) {
+	// A rank with no decode step in the window reads its count as 0/0 and its
+	// ITL as empty: it adds nothing, as it adds nothing to the ITL mean, and
+	// must not make the busy rank's count unknown, which would withhold the
+	// pod's ITL under speculative flags (#274). A pod of idle ranks only has
+	// no count.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 2, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-a", AvgITLEmpty: true},
+		{PodName: "pod-b", AvgITLEmpty: true},
+		{PodName: "pod-b", AvgITLEmpty: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.True(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: the idle rank hid the busy rank's count")
+	assert.InDelta(t, 2, pods[0].SpecAcceptedPerStep, 1e-9)
+	assert.False(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: no rank read a count")
+}

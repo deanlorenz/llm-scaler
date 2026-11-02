@@ -46,6 +46,7 @@ func TestITLPerToken_AMissingCounterUnderSpeculativeFlagsWithholdsTheReading(t *
 		{"no configuration read, counter read: per token", nil, true, 0.01, true},
 		{"no configuration read, no counter: as read", nil, false, 0.03, true},
 		{"SGLang speculating, no counter: already per token", specParamsSGLang(), false, 0.03, true},
+		{"SGLang speculating, counter read: left as read", specParamsSGLang(), true, 0.03, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := []domain.ReplicaMetrics{row(tc.counter)}
@@ -98,6 +99,8 @@ func TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant(t *tes
 			VariantSeenAt: map[string]time.Time{key: now},
 			ITLBaseline:   map[string]float64{key: 0.012},
 			ITLSlopes:     map[string]SlopeSnapshot{key: {A: 0.05, FittedAt: now.Add(-time.Hour), Args: params.ArgsFingerprint()}},
+			// A baseline put aside under arguments the variant ran before.
+			ITLBaselineStash: map[string]float64{stashKey(key, "older-args"): 0.02},
 		}
 		if perToken {
 			doc.ITLPerToken = map[string]bool{"test-ns/variant-a": true}
@@ -112,6 +115,7 @@ func TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant(t *tes
 	a, r, key := restore(specParams(), false)
 	_, ok := a.itlTracker.Baseline(key)
 	assert.False(t, ok, "a step-time baseline restored for a speculating variant")
+	assert.NotContains(t, a.itlBaselineStash, stashKey(key, "older-args"), "a step-time put-aside baseline restored for a speculating variant")
 	_, ok = a.itlTracker.Slopes()[key]
 	assert.False(t, ok, "a step-time slope restored for a speculating variant")
 	assert.True(t, r.ITLOtherUnit)
@@ -119,6 +123,7 @@ func TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant(t *tes
 	a, r, key = restore(specParams(), true)
 	b, ok := a.itlTracker.Baseline(key)
 	assert.True(t, ok && b == 0.012, "a baseline marked per token is restored")
+	assert.Contains(t, a.itlBaselineStash, stashKey(key, "older-args"), "a put-aside baseline marked per token is restored")
 	assert.False(t, r.ITLOtherUnit)
 
 	a, r, key = restore(keyParams(256), false)
@@ -235,10 +240,13 @@ func TestITLPerToken_AWithheldReadingIsLoggedOncePerChange(t *testing.T) {
 		_, w := a.itlRows(rows, "v", specParams())
 		a.noteITLWithheld("k", "v", w, logger)
 	}
+	idle := domain.ReplicaMetrics{PodName: "p", VariantName: "v", Ready: true, AvgITLEmpty: true}
 	for range 3 {
 		cycle([]domain.ReplicaMetrics{row})
+		cycle([]domain.ReplicaMetrics{idle})
+		cycle(nil)
 	}
-	require.Len(t, lines, 1, "logged once over three cycles: %v", lines)
+	require.Len(t, lines, 1, "logged once over three busy cycles, with idle cycles between them: %v", lines)
 	assert.Contains(t, lines[0], `"itl-withheld"`)
 	assert.Contains(t, lines[0], "no vllm:spec_decode_num_accepted_tokens_total")
 	row.SpecAcceptedPerStep, row.SpecAcceptedPerStepKnown = 1, true

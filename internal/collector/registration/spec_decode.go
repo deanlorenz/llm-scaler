@@ -5,9 +5,11 @@ import (
 )
 
 // QuerySpecAcceptedPerStep is the query name for the draft tokens vLLM's
-// speculative decoding (or MTP) accepted per decode step, per pod, over
-// ITLWindow: the accepted-token rate over the rate of ITL observations, summed
-// over the pod's engine ranks like the ITL mean (QueryAvgITL) it corrects.
+// speculative decoding (or MTP) accepted per decode step, per instance (the
+// model_name, instance and pod labels), over ITLWindow: the accepted-token
+// rate over the rate of ITL observations, summed over the engine ranks behind
+// that instance, like the ITL mean (QueryAvgITL) it corrects. A pod of
+// several instances is merged afterwards (mergePodInstances).
 //
 // vLLM observes inter_token_latency once per request per engine step, however
 // many tokens the step emitted, so with speculation the ITL mean is the step

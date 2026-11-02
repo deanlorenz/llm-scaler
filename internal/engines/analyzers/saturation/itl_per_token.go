@@ -41,10 +41,15 @@ import (
 const SwitchITLPerToken = "itl-per-accepted-token"
 
 // itlWithheldReasons counts, for one cycle of one variant, the readings
-// ITLPerToken withheld, by reason.
+// ITLPerToken withheld, by reason, and the positive readings it kept: the
+// evidence that withholding has ended. maxAccepted and maxSeen are the bound
+// and the largest accepted count read, for the over-bound line.
 type itlWithheldReasons struct {
-	noCounter int
-	overMax   int
+	noCounter   int
+	overMax     int
+	kept        int
+	maxAccepted int
+	maxSeen     float64
 }
 
 // itlStepOf is how the engine params runs reports its ITL (domain.ITLStep).
@@ -80,6 +85,12 @@ func (a *SaturationAnalyzer) itlRows(rows []domain.ReplicaMetrics, variant strin
 			withheld.noCounter++
 		case domain.ITLOverMax:
 			withheld.overMax++
+			withheld.maxAccepted = step.MaxAccepted
+			withheld.maxSeen = max(withheld.maxSeen, rm.SpecAcceptedPerStep)
+		default:
+			if read.AvgITL > 0 {
+				withheld.kept++
+			}
 		}
 		if read.AvgITL == rm.AvgITL && read.AvgITLKnown == rm.AvgITLKnown {
 			continue
@@ -96,21 +107,30 @@ func (a *SaturationAnalyzer) itlRows(rows []domain.ReplicaMetrics, variant strin
 	return out, withheld
 }
 
-// noteITLWithheld logs, once per change of reason, that variant's ITL
-// readings are withheld (itlRows), and once when they no longer are. A
+// noteITLWithheld logs that variant's ITL readings are withheld (itlRows),
+// once per change of the reasons, and once when they no longer are. A
 // withheld reading counts as noITL in itl-window, which an idle replica reads
 // too, so without this line a speculating variant with no ITL line could not
 // be told from an idle one. Logged at DEFAULT, once per change rather than per
 // cycle, within the default-verbosity budget (#303).
+//
+// Withholding has ended only on evidence: a cycle that withheld nothing and
+// kept a positive reading. A cycle with neither -- the variant idle, scaled to
+// zero, or its rows not read during a rollout -- leaves the state as it is,
+// so a load that comes and goes does not log an end and a start each time.
 func (a *SaturationAnalyzer) noteITLWithheld(key, variant string, w itlWithheldReasons, logger logr.Logger) {
 	on := itlWithheldReasons{noCounter: min(w.noCounter, 1), overMax: min(w.overMax, 1)}
+	none := on == (itlWithheldReasons{})
+	if none && w.kept == 0 {
+		return
+	}
 	a.mu.Lock()
-	last := a.itlWithheldLogged[key]
-	if on == last {
+	last, logged := a.itlWithheldLogged[key]
+	if on == last && (logged || none) {
 		a.mu.Unlock()
 		return
 	}
-	if on == (itlWithheldReasons{}) {
+	if none {
 		delete(a.itlWithheldLogged, key)
 	} else {
 		a.itlWithheldLogged[key] = on
@@ -125,7 +145,8 @@ func (a *SaturationAnalyzer) noteITLWithheld(key, variant string, w itlWithheldR
 	case on.overMax > 0:
 		logger.V(logging.DEFAULT).Info("itl-withheld",
 			"variant", variant, "key", key, "withheld", w.overMax,
-			"reason", "accepted tokens per step above num_speculative_tokens")
+			"reason", "accepted tokens per step above num_speculative_tokens",
+			"acceptedPerStep", w.maxSeen, "numSpeculativeTokens", w.maxAccepted)
 	default:
 		logger.V(logging.DEFAULT).Info("itl-withheld-ended", "variant", variant, "key", key)
 	}

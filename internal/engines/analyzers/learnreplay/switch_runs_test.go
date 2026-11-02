@@ -83,6 +83,8 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestITLPerToken_AMissingCounterUnderSpeculativeFlagsWithholdsTheReading"},
 		{"../saturation", "TestITLPerToken_AStepTimeLineIsNotLentToASpeculatingVariant"},
 		{"../saturation", "TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant"},
+		{"../saturation", "TestITLPerToken_AnAcceptedCountAboveTheDraftLengthIsWithheld"},
+		{"../saturation", "TestITLPerToken_AWithheldReadingIsLoggedOncePerChange"},
 	},
 	saturation.SwitchIdleBand: {
 		{"../saturation", "TestIdleBand_ARunStartsUnderTheLineAndEndsAtTheTop"},

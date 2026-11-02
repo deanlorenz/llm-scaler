@@ -368,9 +368,17 @@ engine (`domain.ITLStep.PerToken`) every row is read as it is.
 
 A withheld reading counts as `noITL` in `itl-window`, which an idle replica
 reads too, so `noteITLWithheld` logs `itl-withheld` with the reason once when
-a variant's readings start being withheld, and `itl-withheld-ended` once when
-they stop (`itlWithheldLogged`, per window key): once per change, within the
-default-verbosity budget (#303).
+a variant's readings start being withheld or the reasons change (the
+over-bound line carries the count read and `num_speculative_tokens`), and
+`itl-withheld-ended` once a cycle keeps a positive reading and withholds none
+(`itlWithheldLogged`, per window key, aged with the variant). A cycle with no
+evidence either way -- idle, scaled to zero, or its rows not read during a
+rollout -- changes nothing, so a load that comes and goes logs nothing new.
+Once per change, within the default-verbosity budget (#303).
+
+A bound a rounding error under the count read (1e-6 relative) is not a count
+over it. An idle data-parallel rank (empty ITL, 0/0 count) does not make its
+pod's count unknown.
 
 A pod of several engine instances (external data-parallel load balancing)
 merges `E` weighted by each instance's steps, `GenerationTokenRate / (1 + E)`;

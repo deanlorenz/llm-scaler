@@ -483,7 +483,9 @@ func (c *cycle) fitLines() {
 		// logs two identical "variant" values, and their fits could not be
 		// told apart in the log (issue #271).
 		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
-		c.a.noteITLWithheld(variantKey, variant, withheld, itlLogger)
+		if rows != nil {
+			c.a.noteITLWithheld(variantKey, variant, withheld, itlLogger)
+		}
 		// The policy's band, and the sequence cap only when the engine's flag
 		// stated it, so a replica at it may teach the line from above the
 		// band (itl.Admission).

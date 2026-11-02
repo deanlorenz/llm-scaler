@@ -37,49 +37,10 @@ func specParams() *capacity.EngineParams {
 // token rate that much low. edit puts a defect back.
 func checkITLSpeculativeOn(edit func(*SaturationAnalyzer)) func(uint64) error {
 	return func(seed uint64) error {
-		r := propRand(seed)
-		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "spec", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
-			EngineParams: specParams()}, propStart)
-		a := NewSaturationAnalyzer(store)
-		clock := propStart
-		a.now = func() time.Time { return clock }
-		if edit != nil {
-			edit(a)
+		line, found, err := specFleetLine(seed, edit)
+		if err != nil {
+			return err
 		}
-		const n = 10
-		accepted := make([]float64, n)
-		for i := range accepted {
-			accepted[i] = 0.5 + 1.5*r.Float64()
-		}
-		states := []domain.VariantReplicaState{
-			{VariantName: "spec", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: n, GPUsPerReplica: 1},
-		}
-		for range 13 {
-			rows := make([]domain.ReplicaMetrics, 0, n)
-			for i := range n {
-				k := 0.20 + 0.05*float64(i)
-				rm := makeReplicaMetrics(fmt.Sprintf("spec-%d", i), "spec", 5000, 16000, 0, 6000, 1000)
-				rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-				rm.AvgITL = propITL(k) * (1 + 0.005*r.NormFloat64()) * (1 + accepted[i])
-				rm.AvgITLKnown = true
-				rm.SpecAcceptedPerStep, rm.SpecAcceptedPerStepKnown = accepted[i], true
-				rows = append(rows, rm)
-			}
-			if _, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states)); err != nil {
-				return err
-			}
-			clock = clock.Add(propCycle)
-		}
-		var line learnedLine
-		found := false
-		a.mu.Lock()
-		for _, l := range a.itlLines {
-			if strings.HasPrefix(l.fromVariant, "test-ns|test-model|spec|") {
-				line, found = l, true
-			}
-		}
-		a.mu.Unlock()
 		if !found {
 			return violation(kindNotLearned, "no line of its own after 3 min of ten replicas")
 		}
@@ -88,6 +49,55 @@ func checkITLSpeculativeOn(edit func(*SaturationAnalyzer)) func(uint64) error {
 			"ITL(%.2f) %.5f per token against %.5f: the step time prices %.2fx the replica's token rate",
 			propKPrice, got, want, want/got)
 	}
+}
+
+// specFleetLine runs checkITLSpeculativeOn's fleet through Analyze for 3 min
+// and returns the line the variant published, and whether it published one.
+func specFleetLine(seed uint64, edit func(*SaturationAnalyzer)) (learnedLine, bool, error) {
+	r := propRand(seed)
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "spec", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
+		EngineParams: specParams()}, propStart)
+	a := NewSaturationAnalyzer(store)
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	if edit != nil {
+		edit(a)
+	}
+	const n = 10
+	accepted := make([]float64, n)
+	for i := range accepted {
+		accepted[i] = 0.5 + 1.5*r.Float64()
+	}
+	states := []domain.VariantReplicaState{
+		{VariantName: "spec", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: n, GPUsPerReplica: 1},
+	}
+	for range 13 {
+		rows := make([]domain.ReplicaMetrics, 0, n)
+		for i := range n {
+			k := 0.20 + 0.05*float64(i)
+			rm := makeReplicaMetrics(fmt.Sprintf("spec-%d", i), "spec", 5000, 16000, 0, 6000, 1000)
+			rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
+			rm.AvgITL = propITL(k) * (1 + 0.005*r.NormFloat64()) * (1 + accepted[i])
+			rm.AvgITLKnown = true
+			rm.SpecAcceptedPerStep, rm.SpecAcceptedPerStepKnown = accepted[i], true
+			rows = append(rows, rm)
+		}
+		if _, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states)); err != nil {
+			return learnedLine{}, false, err
+		}
+		clock = clock.Add(propCycle)
+	}
+	var line learnedLine
+	found := false
+	a.mu.Lock()
+	for _, l := range a.itlLines {
+		if strings.HasPrefix(l.fromVariant, "test-ns|test-model|spec|") {
+			line, found = l, true
+		}
+	}
+	a.mu.Unlock()
+	return line, found, nil
 }
 
 // specParamsSGLang is an SGLang engine with speculative flags: its ITL is per

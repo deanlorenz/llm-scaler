@@ -555,7 +555,9 @@ func (m ReplicaMetrics) ITLPerToken(step ITLStep) (ReplicaMetrics, ITLWithheld) 
 	}
 	switch {
 	case m.SpecAcceptedPerStepKnown && m.SpecAcceptedPerStep >= 0 && !math.IsInf(m.SpecAcceptedPerStep, 0):
-		if step.MaxAccepted > 0 && m.SpecAcceptedPerStep > float64(step.MaxAccepted) {
+		// A ratio of two rates at full acceptance can land a rounding error
+		// over the bound; that is not a count over it.
+		if step.MaxAccepted > 0 && m.SpecAcceptedPerStep > float64(step.MaxAccepted)*(1+1e-6) {
 			m.AvgITL, m.AvgITLKnown = 0, false
 			return m, ITLOverMax
 		}

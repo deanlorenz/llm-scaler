@@ -75,6 +75,10 @@ func TestITLPerToken(t *testing.T) {
 	withCounter := finite
 	withCounter.SpecAcceptedPerStep, withCounter.SpecAcceptedPerStepKnown = 2, true
 	spec := ITLStep{Speculates: true}
+	withRounding := withCounter
+	withRounding.SpecAcceptedPerStep = 2 + 1e-9
+	negative := withCounter
+	negative.SpecAcceptedPerStep = -0.5
 	for _, tc := range []struct {
 		name  string
 		m     ReplicaMetrics
@@ -87,6 +91,8 @@ func TestITLPerToken(t *testing.T) {
 		{"counter read, flags silent", withCounter, ITLStep{}, 0.01, ITLFinite, ITLKept},
 		{"counter at the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 2}, 0.01, ITLFinite, ITLKept},
 		{"counter above the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 1}, 0, ITLAbsent, ITLOverMax},
+		{"counter a rounding error over the draft length", withRounding, ITLStep{Speculates: true, MaxAccepted: 2}, 0.03 / (3 + 1e-9), ITLFinite, ITLKept},
+		{"a negative counter is not a count", negative, spec, 0, ITLAbsent, ITLNoCounter},
 		{"counter missing under speculative flags", finite, spec, 0, ITLAbsent, ITLNoCounter},
 		{"no speculation", finite, ITLStep{}, 0.03, ITLFinite, ITLKept},
 		{"an engine whose ITL is per token already", withCounter, ITLStep{PerToken: true, Speculates: true}, 0.03, ITLFinite, ITLKept},
