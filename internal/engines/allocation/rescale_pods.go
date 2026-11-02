@@ -23,11 +23,7 @@ import (
 // one joint search over two roles at the bound at 0.35-0.47 ms. roundExact
 // runs the pair again at most once per distinct split below the target, and
 // only while that split's room still exceeds the best plan so far, which in
-// practice is about the largest pod's size in units. On the mixed-size test
-// grids 98% of roundings run no lower plan and none runs more than 14; on a
-// fleet built to make it scan (32-GPU growth pods, unit 1), a model takes
-// 70-90 us on average against 33-41 us before, and 0.6-0.9 ms at worst
-// against 0.3-0.6 ms.
+// practice is about the largest pod's size in units.
 const podSearchMaxUnits = 4096
 
 // podBits is a set of small non-negative integers: GPU sums, in units.
@@ -390,10 +386,14 @@ func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[strin
 // of a pod into a cut no pod meets, and the pair that shed the pod is gone.
 // So the model takes the best plan of this target and every lower one, the
 // one that leaves it the most GPUs, the plan of the highest such target among
-// equals. No lower target's room exceeds this one's, so the model still ends
-// at or below its target. The scan stops at the first lower target whose
-// room, or this target's largest fill, cannot beat the best so far, since
-// neither rises as the target falls.
+// equals, the one whose shares are nearest this target's: a lower target's
+// plan may shed a pod this target's cut does not meet
+// (TestRescaleMixedEqualPlansTakeTheHighestTarget). No lower target's room
+// exceeds this one's, so the model still ends at or below its target, or at
+// the shares when floors put them above it. The scan stops at the first
+// lower target whose room cannot beat the best so far, or once the best plan
+// adds as much as its own fill can, since no lower target's room or fill is
+// larger.
 //
 // A lower target's plan keeps the last replica of every role this target
 // gives a share, since the rescale may not empty it. That is the one case in
@@ -424,8 +424,8 @@ func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[str
 			best = p
 		}
 	}
-	// A role the plan does not fill is held where it is: one growing at this
-	// target may be cut at the plan's.
+	// A role the plan does not fill is capped at what it holds, so the fill
+	// does not grow it: one growing at this target may be cut at the plan's.
 	for _, role := range roles {
 		if v, ok := best.tgt[role]; ok {
 			tgt[role] = v
@@ -455,8 +455,8 @@ func planRoom(roles []string, target int, tgt, cur map[string]int) int {
 
 // exactPlan is a rounding of a model's role shares to whole pods: the GPUs
 // each growing role ends at (tgt) and the pods shed per variant (shed). net
-// is what the plan adds to the model, in units, and fillMax the most its fill
-// can add.
+// is what the plan adds to the model, in units, and fillMax the most the
+// plan's fill could add, which bounds the net of every plan of a lower target.
 type exactPlan struct {
 	tgt     map[string]int
 	shed    map[string]int

@@ -637,17 +637,14 @@ where a role's share rises from zero to a GPU or two, the plan that emptied
 it is gone, and the best plan that keeps it may hold fewer GPUs. Prefill on
 one 2-GPU pod and decode on 4-GPU pods end at 12 at a target of 12, with
 prefill emptied, and at 10 at 13, with prefill kept: 14 would pass the
-target (`TestRescaleMixedKeepingARoleCanCostGPUs`). It needs pods smaller
-than a node. On a grid built to provoke it, one point in 254,703 broke; on
-the same grid with 8- to 24-GPU pods, and on the general mixed-size grids,
-none did.
+target (`TestRescaleMixedKeepingARoleCanCostGPUs`). It is rare and needs
+pods smaller than a node.
 
 The scan of lower targets runs at most one plan per distinct split below the
-target, and stops at the first whose room cannot beat the best so far. Over
-the mixed-size test grids 98% of roundings run no lower plan and none runs
-more than 14; over a wider grid with held roles, 97.5% and 28. On a fleet
-built to make it scan, a model takes 70-90 µs on average against 33-41 µs
-before, and 0.6-0.9 ms at worst against 0.3-0.6 ms.
+target, and stops at the first whose room cannot beat the best so far, which
+in practice is within about the largest pod's size of the target. Among
+lower plans of equal GPUs the highest target's is taken: a lower target's
+plan may shed a pod this target's cut does not meet.
 
 The search takes the most GPUs first and cost order only among equal sums, a
 change from the greedy pass: on a cheap 6-GPU variant and a dearer 4-GPU

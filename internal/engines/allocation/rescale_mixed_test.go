@@ -497,17 +497,99 @@ func TestRescaleMixedKeepingARoleCanCostGPUs(t *testing.T) {
 	assert.Equal(t, map[string]int{"pa": 1, "pb": 0, "da": 2, "db": 0}, rescaleTargets(req, 13, 1<<20))
 }
 
+// TestRescaleMixedGrowsToFloorsAboveTheTarget: prefill must keep two 8-GPU
+// pods (minReplicas) and holds one, beside an empty 4-GPU variant; decode
+// holds one 4-GPU pod it may not give up (the cheapest-at-one rule). Given 8
+// GPUs, less than prefill's floor of 16, the shares are the floors and sum
+// above the target. The room is what the shares add, so prefill grows a
+// 4-GPU pod toward its floor; bounded by the target alone it stayed short.
+func TestRescaleMixedGrowsToFloorsAboveTheTarget(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 800, domain.RoleDecode: 800}, []podVariant{
+		{name: "p8", role: domain.RolePrefill, gpus: 8, cur: 1, minR: 2, cost: 8, perGPU: 100},
+		{name: "p4", role: domain.RolePrefill, gpus: 4, cost: 4.4, perGPU: 100},
+		{name: "d4", role: domain.RoleDecode, gpus: 4, cur: 1, cost: 4, perGPU: 100},
+	})
+	require.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 0}, podRoleShares(req, 8))
+	assert.Equal(t, map[string]int{"p8": 1, "p4": 1, "d4": 1}, rescaleTargets(req, 8, 1<<20))
+}
+
+// heldDecodeModel is prefill on two 8-GPU pods beside an empty 4-GPU variant,
+// and decode, held against scale-up, on an empty 8-GPU variant, with most of
+// the demand on decode.
+func heldDecodeModel() ModelScalingRequest {
+	req := podRequest(map[string]float64{domain.RolePrefill: 300, domain.RoleDecode: 1500}, []podVariant{
+		{name: "p4", role: domain.RolePrefill, gpus: 4, cost: 5.5, perGPU: 77},
+		{name: "p8", role: domain.RolePrefill, gpus: 8, cur: 2, cost: 11, perGPU: 52.5},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cost: 8.3, perGPU: 83.7},
+	})
+	req.CompositeSignal.Holds = map[string]RoleHold{domain.RoleDecode: {NoScaleUp: true}}
+	return req
+}
+
+// TestRescaleMixedShedsNothingForAHeldFill: at a target of 16, what the model
+// holds, decode's share is 14 and prefill's 2. Decode may not grow, so the
+// fill leaves it out. Searched with it, a prefill pod was shed to pay for a
+// decode pod the fill then skipped, and the model fell to 8 at its target.
+func TestRescaleMixedShedsNothingForAHeldFill(t *testing.T) {
+	req := heldDecodeModel()
+	require.Equal(t, map[string]int{domain.RolePrefill: 2, domain.RoleDecode: 14}, podRoleShares(req, 16))
+	assert.Equal(t, map[string]int{"p4": 0, "p8": 2, "d8": 0}, rescaleTargets(req, 16, 1<<20))
+}
+
+// TestRescaleMixedRoundsANegativeRoomDown: at a target of 13 the model, at 16,
+// has a room of -3 GPUs, part of a 4-GPU unit. Rounded down it is a whole
+// unit below zero, so prefill sheds a pod and the model ends at 8, at or
+// below its target; rounded toward zero the room was 0 and the model stayed
+// at 16, above it.
+func TestRescaleMixedRoundsANegativeRoomDown(t *testing.T) {
+	req := heldDecodeModel()
+	require.Equal(t, map[string]int{domain.RolePrefill: 2, domain.RoleDecode: 11}, podRoleShares(req, 13))
+	assert.Equal(t, map[string]int{"p4": 0, "p8": 1, "d8": 0}, rescaleTargets(req, 13, 1<<20))
+}
+
+// TestRescaleMixedEqualPlansTakeTheHighestTarget: prefill holds two 8-GPU pods
+// and one 16-GPU pod, 32 GPUs, decode 20 on 2-, 4- and 8-GPU pods. At a target
+// of 58 prefill's share is 25, a cut of 7 no pod meets, and the model grows a
+// decode 2-GPU pod to 54. The plan of 57, where prefill is cut by 8, also
+// reaches 54 by moving a prefill 8-GPU pod to decode. Among equal plans the
+// highest target's is taken, so a pod this target's cut does not meet is
+// kept.
+func TestRescaleMixedEqualPlansTakeTheHighestTarget(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 1200, domain.RoleDecode: 2500}, []podVariant{
+		{name: "p8", role: domain.RolePrefill, gpus: 8, cur: 2, minR: 1, cost: 11.3, perGPU: 72.2},
+		{name: "p16", role: domain.RolePrefill, gpus: 16, cur: 1, cost: 22, perGPU: 102.2},
+		{name: "d2", role: domain.RoleDecode, gpus: 2, cur: 2, maxR: 3, cost: 2.15, perGPU: 89.6},
+		{name: "d4", role: domain.RoleDecode, gpus: 4, cur: 2, minR: 1, cost: 5.2, perGPU: 100, noCapacityRdg: true},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 1, cost: 11.15, perGPU: 84.2},
+	})
+	require.Equal(t, map[string]int{domain.RolePrefill: 25, domain.RoleDecode: 33}, podRoleShares(req, 58))
+	require.Equal(t, map[string]int{domain.RolePrefill: 24, domain.RoleDecode: 33}, podRoleShares(req, 57))
+	assert.Equal(t, map[string]int{"p8": 2, "p16": 1, "d2": 3, "d4": 2, "d8": 1}, rescaleTargets(req, 58, 1<<20))
+}
+
 // TestRescaleMixedRerunNeverPassesItsTarget: over a grid of mixed-size
-// models and targets within 16 GPUs of what each holds, no cycle ends above
-// both its target and what the model held when it began, the first or the
-// second at the same target. Before #421 was fixed, 4924 first cycles and
-// 827 second ones did.
+// models, a third of them with a role held against scale-up or scale-down,
+// and targets within 16 GPUs of what each holds, no cycle ends above both
+// its target and what the model held when it began, the first or the second
+// at the same target. Before #421 was fixed, 4355 first cycles and 1575
+// second ones did.
 func TestRescaleMixedRerunNeverPassesItsTarget(t *testing.T) {
 	r := rand.New(rand.NewPCG(421, 1))
-	points, wholeNode, firstPast, secondPast := 0, 0, 0, 0
+	// Holds come from their own source, so the models are the same with or
+	// without them.
+	hr := rand.New(rand.NewPCG(421, 2))
+	points, wholeNode, held, firstPast, secondPast := 0, 0, 0, 0, 0
 	example := ""
 	for range 1000 {
 		req := randomPodModel(r, true, false)
+		if hr.IntN(3) == 0 {
+			roles := modelRolesOnType(buildVariantRecords(req, req.CompositeSignal.Result), "A100")
+			hold := RoleHold{NoScaleDown: true}
+			if hr.IntN(2) == 0 {
+				hold = RoleHold{NoScaleUp: true}
+			}
+			req.CompositeSignal.Holds = map[string]RoleHold{roles[hr.IntN(len(roles))]: hold}
+		}
 		cur := podCurrentGPUs(req)
 		whole := slices.ContainsFunc(req.VariantStates, func(st domain.VariantReplicaState) bool { return st.GPUsPerReplica == 8 })
 		for target := max(cur-16, 0); target <= cur+16; target++ {
@@ -517,6 +599,9 @@ func TestRescaleMixedRerunNeverPassesItsTarget(t *testing.T) {
 			points++
 			if whole {
 				wholeNode++
+			}
+			if len(req.CompositeSignal.Holds) > 0 {
+				held++
 			}
 			if first > max(target, cur) {
 				firstPast++
@@ -529,10 +614,11 @@ func TestRescaleMixedRerunNeverPassesItsTarget(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("%d points, %d on models with whole-node 8-GPU pods: %d first and %d second cycles pass their target",
-		points, wholeNode, firstPast, secondPast)
+	t.Logf("%d points, %d on models with whole-node 8-GPU pods, %d with a hold: %d first and %d second cycles pass their target",
+		points, wholeNode, held, firstPast, secondPast)
 	assert.Greater(t, points, 30000)
 	assert.Greater(t, wholeNode, 10000)
+	assert.Greater(t, held, 5000)
 	assert.Zero(t, firstPast, "a first cycle passes its target")
 	assert.Zero(t, secondPast, "a second cycle passes its target, first at %s", example)
 }
