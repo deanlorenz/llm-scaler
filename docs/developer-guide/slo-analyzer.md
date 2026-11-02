@@ -142,7 +142,13 @@ instance and its own keys.
 - *What fill did a variant price at, from which line?* The `slo-variant` line:
   `lineKey`, `lineA`, `lineB`, `lineTier`, the rows `considered`, the readings the
   window `kept` and `held`, `scaleUpThreshold`,
-  `targetFill` before the clamp, and the batch cap's inputs.
+  `targetFill` before the clamp, and the batch cap's inputs. `batchCap` and
+  `batchCapSource` (`flags`, `declared`, `default`, `none`) are the cap per
+  rank the replica was priced at; `maxNumSeqs` is `--max-num-seqs` alone,
+  so it stays the parser's 256 where the flags are unread even when a
+  declared cap priced the replica. `lineBatchCap` and `lineBatchCapSource`
+  (`flags`, `declared`, `none`) are the cap the line's admission read a
+  replica as at; `none` takes no reading above the band as capped.
 
 ## Tests
 

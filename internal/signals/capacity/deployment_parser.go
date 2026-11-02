@@ -144,9 +144,10 @@ type EngineParams struct {
 	// It exists for an engine whose flags this parser cannot read -- a
 	// launcher script, or the cap passed as a variable nothing resolves --
 	// where MaxNumSeqs is the default of 256 standing in for something
-	// unknown. Only the derived k2 (P3) reads it, and only where the flags
-	// state no cap (ExplicitMaxNumSeqs is 0): what the flags state is what
-	// the engine runs. ExplicitMaxNumSeqs and BatchCap do not read it.
+	// unknown. It is read only where the flags state no cap
+	// (ExplicitMaxNumSeqs is 0): what the flags state is what the engine
+	// runs. ExplicitMaxNumSeqs and BatchCap do not read it; StatedBatchCap
+	// does, and the analyzers read the cap through that (issue #420).
 	//
 	// Compared for capacity (IsCapacityCompatible) where it is read, so two
 	// variants that declare different caps never price each other. Not hashed into the
@@ -354,10 +355,12 @@ func (p *EngineParams) Complete() bool {
 // ExplicitMaxNumSeqs is one engine's batch cap as its flags state it: the
 // explicit max_num_seqs, lowered by --max-num-active-seqs when that is set,
 // and 0 when neither flag stated a cap, when a flag that bears on it could not
-// be read, or when p is nil. A caller that needs the engine's real cap, not an
-// estimate of it, reads this: the ITL fit admits a reading above its band
-// only for a replica at its cap (itl.Admission), and a P/D decode at its cap
-// keeps its full queue (ReplicaMetrics.AtBatchCap).
+// be read, or when p is nil. It is the flags' half of StatedBatchCap, which
+// a caller that needs the engine's real cap, not an estimate of it, reads:
+// the ITL fit admits a reading above its band only for a replica at its cap
+// (itl.Admission), and a P/D decode at its cap keeps its full queue
+// (ReplicaMetrics.AtBatchCap). The same callers read this alone with their
+// replay switch off (issue #420).
 //
 // --max-num-active-seqs alone is enough: vLLM refuses one above
 // max_num_seqs, so it is the cap whatever max_num_seqs is, stated or not.
@@ -454,6 +457,22 @@ func (p *EngineParams) SpeculativeTokens() int {
 		}
 	}
 	return 0
+}
+
+// StatedBatchCap is one engine rank's batch cap where the scale target states
+// it: ExplicitMaxNumSeqs when the flags state a cap, and DeclaredBatchCap,
+// the llm-d.ai/max-num-seqs annotation, when they do not. 0 when neither
+// does, or when p is nil: unlike BatchCap it never falls back to the
+// parser's default, so a reader that asks whether a replica is at its cap
+// reads it.
+func (p *EngineParams) StatedBatchCap() int64 {
+	if p == nil {
+		return 0
+	}
+	if stated := p.ExplicitMaxNumSeqs(); stated > 0 {
+		return stated
+	}
+	return p.DeclaredBatchCap
 }
 
 // maxNumSeqsKeys are the normalised flags either parser reads into

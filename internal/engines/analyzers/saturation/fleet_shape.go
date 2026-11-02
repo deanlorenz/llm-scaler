@@ -115,7 +115,7 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 }
 
 // fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is
-// the derived mu's divisor (deriveMu) WHILE A SHAPE CHANGE IS OUTSTANDING only.
+// the derived mu's divisor (deriveMuAtCap) WHILE A SHAPE CHANGE IS OUTSTANDING only.
 //
 // Zero when no generating replica reports the short-window figure -- an engine
 // that does not publish the counter, or a fleet that completed nothing in the

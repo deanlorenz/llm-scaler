@@ -18,11 +18,15 @@ type Admission struct {
 	// analyzerTuning.itlBand.maxObservableK set them (config.ScalingPolicy.ITLBand), which
 	// validates 0 < MinK < MaxK < 1.
 	MinK, MaxK float64
-	// MaxNumSeqs is the engine's batch cap, per rank, as its flags state it:
-	// max_num_seqs, lowered by --max-num-active-seqs when that is set
-	// (capacity.EngineParams.ExplicitMaxNumSeqs). Zero when it is unknown or
+	// MaxNumSeqs is the engine's batch cap, per rank, as something states it:
+	// its flags (max_num_seqs, lowered by --max-num-active-seqs when that is
+	// set), or where they state none the llm-d.ai/max-num-seqs annotation
+	// (capacity.EngineParams.StatedBatchCap). Zero when it is unknown or
 	// only a default, which admits nothing above MaxK.
 	MaxNumSeqs int64
+	// MaxNumSeqsSource is where MaxNumSeqs came from, for the log only
+	// (flags, declared, none): nothing here reads it.
+	MaxNumSeqsSource string
 	// CapMaxPreemptionRate is the most preemptions per second a capped
 	// replica may show over the ITL's window and still be read above MaxK.
 	// The policy key analyzerTuning.itlBand.capMaxPreemptionRate sets it; zero, the default,
@@ -82,9 +86,11 @@ func (a Admission) band() (lo, hi float64) {
 // below 0.15, and no line was ever fitted.
 //
 // Every condition is required, and an unknown one admits nothing:
-//   - MaxNumSeqs is known from the engine's flag, not a default: vLLM V1
-//     defaults to 1024 on large accelerators where the parser assumes 256,
-//     and a batch of 300 would read as capped while it is still growing.
+//   - MaxNumSeqs is stated -- by the engine's flag, or by the scale target's
+//     llm-d.ai/max-num-seqs annotation -- not a default and not learned: vLLM
+//     V1 defaults to 1024 on large accelerators where the parser assumes 256,
+//     and a batch of 300 would read as capped while it is still growing. A
+//     learned cap may sit below the true one in the same way.
 //   - The running batch is EXACTLY the cap on every rank (max_num_seqs bounds
 //     one engine, so the cap is it times Ranks). More than the cap means the
 //     cap is not what was read; fewer means memory, not the cap, binds.

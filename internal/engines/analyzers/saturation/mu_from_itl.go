@@ -193,15 +193,20 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 	return min(max(k, lo), hi)
 }
 
-// deriveMu prices one replica of this variant at saturation under the shape it
-// is serving now.
+// deriveMuAtCap prices one replica of this variant at saturation under the
+// shape it is serving now, with its resident sequences capped at batchCap per
+// engine rank.
 //
 // kvPerRequest is the time-averaged footprint IL + OL/2 (shape.Shape.KVreq):
 // sequence ages are spread over [0, OL] in steady state, so the average
 // resident sequence carries half its generation.
 //
-// The cap is the engine's max_num_seqs, lowered by --max-num-active-seqs when
-// set (capacity.EngineParams.BatchCap, issue #335), and it is not optional:
+// The cap is the one the derived k2 is priced at (pricingBatchCap): the
+// engine's max_num_seqs, lowered by --max-num-active-seqs when set (issue
+// #335), and where the flags are unread the declared or learned cap in place
+// of the parser's 256, which priced a sequence-bound engine above what it can
+// run and so ordered too few replicas (issue #420). A batchCap of 0 caps
+// nothing. The cap is not optional:
 // short requests imply more resident sequences than the engine will admit, and the trace's
 // second phase ran at exactly 256, the configured ceiling. itl.TokenRate does
 // not apply it -- it prices a cache, not an engine -- so the sequence count is
@@ -224,7 +229,7 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // and the divisor is where that error reaches mu undamped. KVreq, by contrast,
 // is ILeff + OL/2 and barely moves: at a 20k prompt the same error shifts it
 // about 1.5%.
-func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
+func deriveMuAtCap(model itl.Model, params *capacity.EngineParams, batchCap int64, ranks int,
 	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
 	if model.IsZero() {
 		return derivedMu{why: "no-line"}
@@ -250,7 +255,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	if seqs <= 0 {
 		return derivedMu{why: "no-seqs"}
 	}
-	if batchCap := params.BatchCap(); batchCap > 0 {
+	if batchCap > 0 {
 		seqs = min(seqs, float64(batchCap)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)
@@ -385,9 +390,12 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
 		// Of the offered, the readings above the band taken because their
 		// replica was at its sequence cap (itl.Admission); batchCap is that
-		// cap -- max_num_seqs, lowered by --max-num-active-seqs -- and 0
-		// when the engine flags did not state it, which admits none.
-		"capped", r.Capped, "batchCap", adm.MaxNumSeqs,
+		// cap per rank -- the flags' max_num_seqs, lowered by
+		// --max-num-active-seqs, or where they state none the
+		// llm-d.ai/max-num-seqs annotation -- and 0 when neither states it,
+		// which admits none. batchCapSource says which (flags, declared,
+		// none).
+		"capped", r.Capped, "batchCap", adm.MaxNumSeqs, "batchCapSource", adm.MaxNumSeqsSource,
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,

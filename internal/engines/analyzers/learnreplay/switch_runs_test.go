@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 )
 
 // The switch runs of the golden rule (analyzer-learner.md 2.5), over every
@@ -32,17 +33,25 @@ import (
 // that deletes a seam deletes its row. Every name SetSwitchesForReplay
 // accepts has a row in one of the two.
 
-// replaySwitches is each saturation replay switch, and the golden outputs
-// (fixture/file) it is named to move.
+// replaySwitches is each replay switch of this PR, saturation's or slo's
+// (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
 // #274's ITL per accepted token: no recording runs speculative decoding, so
 // it names no output and is held by its unit tests (heldBy). Earlier PRs'
 // switches (learner PRs 2 and 3, #396's bands, #399's batch cap, #415's mu
-// key, #392's k2 first reading) are not here: "all off" is this PR's
-// switches, and an earlier PR's stay at their constructor default, on, as the
-// base goldens were written (analyzer-learner.md, 2.5).
+// key, #392's k2 first reading, #420's batch-cap readers) are not here: "all
+// off" is this PR's switches, and an earlier PR's stay at their constructor
+// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchITLPerToken: nil,
+}
+
+// switchPackage is the package whose hook accepts the switch name.
+func switchPackage(name string) string {
+	if slices.Contains(slo.ReplaySwitchNames(), name) {
+		return PackageSLO
+	}
+	return PackageSaturation
 }
 
 // earlierSeams is each switch an earlier learner PR added whose seam the
@@ -51,6 +60,12 @@ var replaySwitches = map[string][]string{
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff.
 var earlierSeams = map[string][]string{
+	saturation.SwitchK2FirstReadingWaits: {
+		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
+		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
+		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
+		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
+	},
 	saturation.SwitchK2ReadsSettle:   nil,
 	saturation.SwitchMuKeyBucketHeld: nil,
 	saturation.SwitchMuMarginClamp:   nil,
@@ -58,19 +73,18 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
-	saturation.SwitchMuRepeatIsUse:       nil,
-	saturation.SwitchMuUnknownAgeSafe:    nil,
-	saturation.SwitchMuLatchRestoresSafe: nil,
-	saturation.SwitchIdleBand:            nil,
-	saturation.SwitchK2KeyBucketHeld:     nil,
-	saturation.SwitchBatchCapDeclared:    nil,
-	saturation.SwitchBatchCapLearned:     nil,
-	saturation.SwitchK2FirstReadingWaits: {
-		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
-		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
-		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
-		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
-	},
+	saturation.SwitchMuRepeatIsUse:        nil,
+	saturation.SwitchMuUnknownAgeSafe:     nil,
+	saturation.SwitchMuLatchRestoresSafe:  nil,
+	saturation.SwitchIdleBand:             nil,
+	saturation.SwitchK2KeyBucketHeld:      nil,
+	saturation.SwitchBatchCapDeclared:     nil,
+	saturation.SwitchBatchCapLearned:      nil,
+	saturation.SwitchBatchCapITLAdmission: nil,
+	saturation.SwitchBatchCapDecodeView:   nil,
+	saturation.SwitchBatchCapDerivedMu:    nil,
+	slo.SwitchBatchCapAdmission:           nil,
+	slo.SwitchBatchCapPerRank:             nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -85,6 +99,33 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant"},
 		{"../saturation", "TestITLPerToken_AnAcceptedCountAboveTheDraftLengthIsWithheld"},
 		{"../saturation", "TestITLPerToken_AWithheldReadingIsLoggedOncePerChange"},
+	},
+	saturation.SwitchBatchCapITLAdmission: {
+		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotAnITLCap"},
+		{"../saturation", "TestBatchCapReaders_TheITLAdmissionSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ADeclaredCapAbove256"},
+	},
+	saturation.SwitchBatchCapDecodeView: {
+		{"../saturation", "TestBatchCapReaders_APDDecodeAtItsDeclaredCapKeepsTheFullQueue"},
+		{"../saturation", "TestBatchCapReaders_TheDecodeViewSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotADecodeViewCap"},
+	},
+	saturation.SwitchBatchCapDerivedMu: {
+		{"../saturation", "TestBatchCapReaders_TheDerivedMuIsCappedAtTheDeclaredCap"},
+		{"../saturation", "TestBatchCapReaders_TheDerivedMuSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ALearnedCapLowersTheDerivedMu"},
+		{"../saturation", "TestBatchCapReaders_ADeclaredCapAbove256"},
+	},
+	slo.SwitchBatchCapAdmission: {
+		{"../slo", "TestBatchCap_TheLineTakesAReplicaAtItsDeclaredCap"},
+		{"../slo", "TestBatchCap_TheAdmissionSwitchPicksTheSource"},
+	},
+	slo.SwitchBatchCapPerRank: {
+		{"../slo", "TestBatchCap_AReplicaIsPricedAtItsDeclaredCap"},
+		{"../slo", "TestBatchCap_ThePerRankSwitchPicksTheSource"},
+		{"../slo", "TestBatchCap_TheLogNamesThePricedCap"},
+		{"../slo", "TestBatchCap_ADeclaredCapAbove256RaisesThePrice"},
 	},
 	saturation.SwitchIdleBand: {
 		{"../saturation", "TestIdleBand_ARunStartsUnderTheLineAndEndsAtTheTop"},
@@ -141,17 +182,18 @@ var heldBy = map[string][]heldTest{
 	},
 }
 
-// Every switch the saturation hook accepts has a row: this PR's, or an
-// earlier PR's seam still in the code. A seam with no row is a switch no
+// Every switch the saturation and slo hooks accept has a row: this PR's, or
+// an earlier PR's seam still in the code. A seam with no row is a switch no
 // run drives.
 func TestGoldens_EverySwitchHasARow(t *testing.T) {
-	for _, name := range saturation.ReplaySwitchNames() {
+	names := append(saturation.ReplaySwitchNames(), slo.ReplaySwitchNames()...)
+	for _, name := range names {
 		_, mine := replaySwitches[name]
 		_, earlier := earlierSeams[name]
 		require.True(t, mine || earlier, "%s is accepted by SetSwitchesForReplay and is in neither replaySwitches nor earlierSeams", name)
 	}
-	for name := range earlierSeams {
-		require.Contains(t, saturation.ReplaySwitchNames(), name, "%s's seam is gone: delete its row", name)
+	for name := range mergedRows() {
+		require.Contains(t, names, name, "%s's seam is gone: delete its row", name)
 	}
 }
 
@@ -215,8 +257,15 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 			require.NoError(t, err)
 			rec, err := gunzip(gz)
 			require.NoError(t, err)
-			rep, err := Replay(context.Background(), rec, Options{Mode: Normal,
-				Switches: map[string]map[string]bool{PackageSaturation: sw}})
+			byPkg := map[string]map[string]bool{}
+			for name, on := range sw {
+				pkg := switchPackage(name)
+				if byPkg[pkg] == nil {
+					byPkg[pkg] = map[string]bool{}
+				}
+				byPkg[pkg][name] = on
+			}
+			rep, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: byPkg})
 			require.NoError(t, err)
 			require.Empty(t, rep.Failed(), "%s: the replay failed", g.Name)
 			outs, err := Outputs(rep.Recording)

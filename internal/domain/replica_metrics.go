@@ -581,7 +581,8 @@ func (m ReplicaMetrics) Ranks() int {
 
 // AtBatchCap reports whether the record's running batch is exactly at the
 // sequence cap: maxNumSeqs, one engine's batch cap (max_num_seqs, lowered by
-// --max-num-active-seqs when that is set), times Ranks. Each
+// --max-num-active-seqs when that is set, or where the flags state none the
+// llm-d.ai/max-num-seqs annotation), times Ranks. Each
 // engine holds at most its cap, so the sum equals it only when every rank is
 // full; more than it means the cap is not what was read. A maxNumSeqs of zero
 // is an unknown cap, and nothing is at it.

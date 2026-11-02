@@ -50,13 +50,56 @@ const SwitchBatchCapDeclared = "batch-cap-declared"
 // before, nothing is learned or read whatever the policy says.
 const SwitchBatchCapLearned = "batch-cap-learned"
 
+// The readers of the batch cap besides P3 (issue #420). Each took the cap
+// from the engine's flags alone, so where the flags are unread a declared or
+// learned cap reached P3 and nothing else: the ITL fit admitted no reading
+// at the cap, a P/D decode at its cap dropped the part of its queue vLLM
+// calls deferred (the #287 symptom), and the derived mu priced the replica
+// at 256 sequences per rank. Each now reads the declared cap, behind its own
+// switch.
+//
+// The learned cap reaches the derived mu, as it reaches P3, and NOT the two
+// readers that ask whether a replica is AT its cap (atCapBatchCap). A
+// learned cap is the highest plateau seen, so it may sit below the true
+// cap. In mu and P3 a low cap only errs toward more replicas. At the cap it
+// is a claim about the engine: below the true cap vLLM still promotes a
+// decode's landed pulls, so the decode view would charge in-flight pulls as
+// backlog -- and observeBatchCap, which reads the view, would see that
+// queue and confirm the cap that caused it. And the ITL fit would admit a
+// memory-bound reading above the band as capped.
+
+// SwitchBatchCapITLAdmission is the replay switch for the ITL fit's
+// sequence-cap admission (issue #420). On, a replica is at its cap
+// (itl.Admission.MaxNumSeqs) at the cap the flags or the
+// llm-d.ai/max-num-seqs annotation state (atCapBatchCap). Off, as before,
+// at the flags' cap alone, so where they state none no reading above the
+// band is admitted.
+const SwitchBatchCapITLAdmission = "batch-cap-itl-admission"
+
+// SwitchBatchCapDecodeView is the replay switch for the P/D decode view's
+// at-cap exception (issue #420). On, a decode at the cap the flags or the
+// annotation state (atCapBatchCap) keeps its full queue
+// (decodeCapacityView). Off, as before, only a decode at the cap its flags
+// state does.
+const SwitchBatchCapDecodeView = "batch-cap-decode-view"
+
+// SwitchBatchCapDerivedMu is the replay switch for the derived mu's batch
+// cap (issue #420). On, deriveMuAtCap caps the resident sequences at the cap
+// the derived k2 is priced at (pricingBatchCap). Off, as before, at the
+// flags' cap or the parser's default of 256.
+const SwitchBatchCapDerivedMu = "batch-cap-derived-mu"
+
 // Where the batch cap a derived k2 was priced at came from, as the
 // k2-decision line names it (batchCapSource).
 const (
 	batchCapFromFlags = "flags"
 	batchCapDeclared  = "declared"
 	batchCapLearned   = "learned"
-	batchCapDefault   = "default"
+	// batchCapNone is no cap to read: for a reader at the cap
+	// (atCapBatchCap), the flags state none and nothing is declared; for
+	// the derived mu, no cap at all (the scale target unread).
+	batchCapNone    = "none"
+	batchCapDefault = "default"
 )
 
 // BatchCapPlateauCycles is how many cycles in a row a pod's running count
@@ -272,6 +315,42 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 	}
 	if def > 0 {
 		return pricedBatchCap{perRank: def, source: batchCapDefault}
+	}
+	return pricedBatchCap{}
+}
+
+// atCapBatchCap is the batch cap a reader that asks whether a replica is AT
+// its cap reads, and its source: the flags' cap, and with readsDeclared (that
+// reader's switch, issue #420) the cap the llm-d.ai/max-num-seqs annotation
+// declares where the flags state none (capacity.EngineParams.StatedBatchCap,
+// as the declared cap prices P3 only under SwitchBatchCapDeclared). Never
+// the parser's default -- vLLM V1 defaults to 1024 on large accelerators
+// where the parser assumes 256, so a batch of 256 read against the default
+// may still be growing -- and never the learned cap (see above). A zero
+// perRank, source batchCapNone, admits nothing as at its cap. It reads no
+// learned state, so it stamps none as used.
+func (a *SaturationAnalyzer) atCapBatchCap(params *capacity.EngineParams, readsDeclared bool) pricedBatchCap {
+	if s := params.ExplicitMaxNumSeqs(); s > 0 {
+		return pricedBatchCap{perRank: s, source: batchCapFromFlags}
+	}
+	if readsDeclared && a.batchCapDeclared {
+		if s := params.StatedBatchCap(); s > 0 {
+			return pricedBatchCap{perRank: s, source: batchCapDeclared}
+		}
+	}
+	return pricedBatchCap{source: batchCapNone}
+}
+
+// flagsOrDefaultBatchCap is the cap the derived mu was capped at before
+// issue #420 (SwitchBatchCapDerivedMu off): the flags' cap, else the
+// parser's default (capacity.EngineParams.BatchCap), named as
+// pricingBatchCap names the same two.
+func flagsOrDefaultBatchCap(params *capacity.EngineParams) pricedBatchCap {
+	if s := params.ExplicitMaxNumSeqs(); s > 0 {
+		return pricedBatchCap{perRank: s, source: batchCapFromFlags}
+	}
+	if d := params.BatchCap(); d > 0 {
+		return pricedBatchCap{perRank: d, source: batchCapDefault}
 	}
 	return pricedBatchCap{}
 }
