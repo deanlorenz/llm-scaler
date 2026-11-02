@@ -563,6 +563,42 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+#### When a replica's settle starts (learner PR 4a)
+
+The settle is read from the engine's settle tracker (`internal/signals/settle`,
+the view k2 reads), through `itl.Admission.Settle` (`itl_settle.go`;
+`internal/signals/itl/settle.go`). A replica's settle starts at the latest of:
+the tracker's settle (`settle.Replica.Since`: it joined, came back past the
+absence tolerance, its Ready time changed under the same Pod name, it was lent
+or rolled out), the last return of load after at least `idleRows` idle rows
+(`ReturnedAfter`; idle on positive evidence, `settle.Row.Activity`), and its
+first Ready row after one that was not (`settlerow.ReadyAgain`). The key
+stamps the cycle it first read a start (`replicaTrace.settleSeen`) and the
+settle runs `steadyFor` from there, on the analyzer's clock.
+
+A start the key first read on its own first `Observe` is a controller restart
+or a key made anew (a forget, new engine arguments). With
+`Admission.WaitsAfterRestart` it is a settle that runs from the tracker's
+start, so after a controller restart every replica waits `steadyFor` and a key
+made anew does not make long-settled replicas wait. Without it, as before 4a,
+such a replica is settled. An analyzer with no engine tracker (a unit test)
+never waits: it stands for a controller that has watched the fleet.
+
+`Admission.KeepsThroughMissingRow` keeps a replica's trace through a cycle it
+is missing from; the tracker's absence tolerance decides when it is back as a
+new sighting. `Admission.FiniteOnly` reads a reading's ITL from the presence
+bits (`ITLState() == ITLFinite`), so a Pod with an Absent rank is refused.
+
+Each of the four is a replay switch, in both analyzers:
+`itl-reads-the-settle-tracker`, `itl-waits-after-controller-restart`,
+`itl-keeps-the-settle-through-a-missing-row` and
+`itl-reads-the-finite-pod-mean`, with an `slo-` prefix in the slo analyzer.
+Off, the key keeps its own trace of each replica, as before. The line is a
+learner on the shared rules too: a `learn.Report` per decode variant
+(`itl_learner.go`), `learner-write` at `--v=3` when A or B moves more than
+`ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
+so the forget-learned-state annotation reaches it by name.
+
 The last `A` also holds when the window itself runs short: fewer than
 `DefaultMinSamples` readings left after `DefaultObservationMaxAge`. A replica
 below `analyzerTuning.itlBand.minObservableK` offers no reading, so a fleet that learned its line at

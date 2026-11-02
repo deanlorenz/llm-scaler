@@ -246,6 +246,16 @@ A mu reading is admitted beside a k2 reading, so each entry normally carries
 that reading's `settledForSeconds` and `passedBy`; an entry with no k2
 margin on record leaves both out.
 
+For `learner` `itl` the key is the decode variant's ITL window, and the line
+carries `a` and `b` (seconds per token, and seconds per token per unit of KV
+fill) with `previousA` and `previousB`, `source` (`ols` for a full fit,
+`pinned-B` for a fit of A with B pinned, `pinned-B-held` for the last A held
+while too few settled readings remain), `samples` (readings in the window),
+`steadyHeld` and `slopeAgeSeconds` (how old a held A is, 0 for a fit made this
+cycle). It logs when the line is set for the first time, when `source`
+changes, when A or B moves more than 5 % from the value last logged, or after
+10 minutes; there is no `pods` list.
+
 ### `replica-capacity-summary`
 
 One line per variant per cycle: which replicas the saturation analyzer priced,

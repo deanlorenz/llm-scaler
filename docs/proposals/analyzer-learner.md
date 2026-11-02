@@ -121,6 +121,45 @@
   `learn.Learners` yet: Forget waits for PRs 4a and 4b, with the SLO and
   throughput lines. The mu counters are re-measured on the flow-control-off
   P/D recording when it lands.
+- **PR 4a's decisions.** The ITL line (rows 1 and 13: saturation's and the
+  slo analyzer's) reads a replica's settle from the tracker, behind four
+  switches each (`itl-…`, and `slo-itl-…` in the slo analyzer):
+  `reads-the-settle-tracker` (the move), `waits-after-controller-restart`,
+  `keeps-the-settle-through-a-missing-row` and `reads-the-finite-pod-mean`
+  (a Pod with an Absent rank is no reading). A settle starts at the latest
+  of the tracker's `Since`, the last return of load after `idleRows` idle
+  rows (`ReturnedAfter`), and the first Ready row after one that was not
+  (`ReadyAgain`, now in `settlerow` and shared with k2); the key stamps the
+  cycle it first read a start, so a joiner waits from the analyzer's clock
+  as before. A start first read on the key's own first cycle (a controller
+  restart, or a key made anew by a forget or new engine arguments) is a
+  settle only with the wait, and then runs from the tracker's start, so a
+  key made anew does not make long-settled replicas wait. An analyzer with
+  no engine tracker never waits. Two named changes were not on this list
+  and came with the move, so the move is not neutral on the in-process
+  goldens: a new Ready time under the same Pod name is a restart
+  (`settle.Restarted`) whether or not a row that was not Ready came between,
+  and the acceptance and engine generators stamped a Ready time 30 min
+  before each cycle, a new one every cycle; and a scrape that read nothing
+  is not idle (positive evidence). The cluster recordings are held. The
+  generator now keeps a Ready time for the day. The wait after a restart
+  moves the in-process goldens and `ols-sweep-slo-restart`, where the first
+  saturation line comes 75 s later (14:07:17 against 14:06:02) and the
+  floor-held decode demand is 32 to 37 % lower for those five cycles. The
+  absence rule and the Finite-only reading move no golden (no recording
+  misses a row; every recorded Pod is one rank) and are held by their unit
+  tests. `learn.ITL` joins `learn.Learners` (forget neutral: the same
+  windows and intercepts, counted once); mu stays off it for 4b. The ITL
+  `learner-write` band is 5 % on A or B, and a change of tier always logs.
+  The closed-loop probe through a restart, on a decode fleet stepping from
+  2.5 to 12 requests/s 15 s after the restart: snapshot off, under need
+  for 3m30s against 15 s without the restart, inside the 5 min bound, and
+  settles at need; the ITL wait adds nothing to that, k2's and mu's minute
+  is what the step waits on. Snapshot on: as without the restart. A 120 s
+  stabilization changes nothing in the probe: its fleet orders at need on
+  occupancy once nothing queues, so the restart's gap shows on the way up,
+  where stabilization does not enter. The probe does not reproduce the
+  unmasked case 4.4 names, so no known-failing row was added for it.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
@@ -1095,7 +1134,7 @@ a different clock and is logged, not published as an age.
 | ready time | first sight | later of Pod Ready and first sight of that Ready time, through `noteReady` (`k2_settle.go:197`) | later of Pod Ready (`replicaReadySince`, from `ReplicaMetrics.ReadySince`) and first sight of that Ready time | later of Pod Ready and first sight of that Ready time |
 | restart events | joined, load back after idle (`steadyGate.idleRows` rows with no latency and no KV fill) | joined, a new Ready time under the same name | joined, a new Ready time under the same name | joined, warm-pool lend, any absence |
 | key includes variant and bridge | no | no | no | yes: `(pod, variant, bridge)` |
-| a missing row | not checked here; PR 4a states it | kept up to `K2SettleMaxGap` | kept with k2's trace; a row that is not Ready forgets it | forgotten (`tracker.go:117-141`) |
+| a missing row | restarts the settle (before PR 4a; kept up to the tracker's tolerance after it) | kept up to `K2SettleMaxGap` | kept with k2's trace; a row that is not Ready forgets it | forgotten (`tracker.go:117-141`) |
 | first cycle after a controller restart | taken as settled | taken as established, unless the Pod's Ready time is under 1 min old | taken as established, unless the Pod's Ready time is under 1 min old | waits again |
 
 ### 4.2 One owner
