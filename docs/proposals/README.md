@@ -204,6 +204,13 @@ last; it is the unit change that makes the other two land.
   Combined later by the composite analyzer: guard mode (max with saturation)
   or sizer mode (saturation explicitly disabled, the per-variant fallback).
   Review findings are folded in.
+- **[What-if capacity](slo-capacity-planner.md)** — proposed. Answers two
+  questions from a recording, a live Prometheus or the controller: what rate
+  a TTFT/TPOT SLO allows, and what SLO a given number of prefill and decode
+  replicas holds before it saturates, per token bucket or for the current mix.
+  Reuses the ITL line and the TPOT pricing as they are; adds the TTFT model
+  nothing has today (queue wait plus a prefill line fitted on a queue-free
+  signal plus KV transfer), with its own learner PRs.
 
 ## Product and lifecycle
 
