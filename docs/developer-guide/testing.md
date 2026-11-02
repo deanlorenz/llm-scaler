@@ -472,6 +472,126 @@ To take it again at a new commit:
    `TestGoldens_OLSSweepReplayFitsOLS`, and the times in its comment, to
    the new run's first fit.
 
+The `ols-sweep-slo` and `ols-sweep-slo-restart` goldens are one run of the
+`ols-sweep` recipe with the slo analyzer listed beside saturation. The slo
+analyzer fits its own ITL line, with its own tracker, and judges the model
+from the router's latency. Mid-run the leader controller Pod was deleted
+under load, so the run left two recordings: `ols-sweep-slo` up to the
+restart and `ols-sweep-slo-restart` after it.
+
+At the commit they were added, each replay took the same counts as the
+controller's own log of the run, for both analyzers (the saturation
+analyzer's `itl-fit` lines and the slo analyzer's `slo-variant` lines):
+
+| Golden | Full fits | Pinned fits | slo `Analyze` calls with router latency | Judged TPOT / TTFT |
+| --- | --- | --- | --- | --- |
+| `ols-sweep-slo` | 15 | 33 | 79 of 83 | 55 / 55 |
+| `ols-sweep-slo-restart` | 57 | 66 | 143 of 143 | 115 / 113 |
+
+A judged objective has a finite observed figure and is not excluded. Most
+of the rest came in the first minutes after each controller start, with no
+router requests yet or excluded as a transient (`unobserved`). At the end
+of the restart file, two TTFT windows had too few requests.
+
+The slo analyzer's fits count as `slo-itl-ols` and `slo-itl-pinned` in a
+replay's paths, and the golden check requires both, as it does
+saturation's. `TestGoldens_OLSSweepSLOReplayFitsBothLines` requires, in
+each golden, a floor of full and of pinned fits of each line, of `Analyze`
+calls with router latency (an input of the recording), and of objectives
+the replay judged (its output). Its head replay ends with the cycle just
+before the first fit and must hold no fit of either tier, so a change that
+admits a fit even one cycle earlier fails it. Up to that cycle the pinned
+fit declines, and the head must reach that verdict.
+`TestGoldens_OLSSweepSLORestartRestoresNothing` requires the restart file
+to start with an empty store and to restore no learned state.
+
+To take them again at a new commit, follow the `ols-sweep` steps with
+these changes:
+
+1. **The policy.** Add a tier `slo-watch` that lists saturation with its
+   current entry (`score: 1.0`, no `parameters:`, as the scenario's
+   `default` has it) and `slo`, with a TPOT target of 50ms and a TTFT
+   target of 2s at the 95th percentile. Name it as `scalingPolicy:
+   slo-watch` in the trigger metadata of both the decode and the prefill
+   ScaledObject. See
+   [the slo section of the scaling policy reference](../reference/scaling-policy.md#slo-observe-only).
+
+   Write the tier into the map the model actually reads. If the model's
+   namespace has its own `wva-scaling-policy-config`, that map replaces
+   the global one whole, and a tier written only into the global map
+   does not exist for the model: the controller logs
+   `Scaling policy not found` and falls back to that map's `default`
+   entry, which here has no `slo`.
+
+   Before the load, check that the model's `Effective scaling policy` line
+   shows `"scalingPolicy": "slo-watch"` and
+   `"slo": "tpot mean<=50ms, ttft p95<=2s (observe)"`. The `(observe)`
+   says the slo analyzer is listed. The first cycle after a controller
+   start can run before the ConfigMaps load and log `"slo": "off"`; wait
+   for the next line. The line does not say whether saturation is listed,
+   so also check that the recording holds both `saturation.Analyze` and
+   `slo.Analyze` events: both analyzers are listed and ran.
+2. **A streamed load.** The router measures TTFT and TPOT only on streamed
+   requests. Run the sweep with `--stream`. It sends `stream: true` with
+   `stream_options` `include_usage`, and reads each stream to its
+   `data: [DONE]`:
+
+   ```bash
+   python3 hack/benchmark/closed_loop_sweep.py --url http://ROUTER:80 --model <model> --stream
+   ```
+
+   A few minutes into the load, the router's `/metrics` must show
+   `llm_d_epp_request_ttft_seconds_count` and
+   `llm_d_epp_request_streaming_tpot_seconds_count` above zero for the
+   model. Neither exists before the first streamed request.
+3. **A controller restart under load.** Keep the learned-state snapshot
+   off (the default). 90 seconds into the fifth level (56 in flight, 1000
+   tokens in and 500 out), find the Pod that holds the leader lease, copy
+   its recordings out, then delete it:
+
+   ```bash
+   kubectl -n "$NS" get lease -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity
+   POD=<the holder, up to the first underscore>
+   kubectl -n "$NS" cp -c recordings "$POD:/var/lib/wva/learner-recordings" ./learner-recordings
+   kubectl -n "$NS" delete pod "$POD"
+   ```
+
+   The new Pod's recorder opens a second file. At the end, copy the new
+   Pod's recordings out the same way. Keep both files: the first is the
+   one copied before the delete, the second the one the new Pod wrote.
+4. **Cross-check the counts** against the controller's own log, taken with
+   `kubectl logs --timestamps` from both Pods. Keep each line once, and
+   only lines whose timestamp is inside that file's window: from its start
+   line to its last event. Count:
+   - `itl-fit` lines by their `tier` (`ols`, `pinned-B`), for saturation;
+   - `slo-variant` lines by their `lineTier`, for the slo analyzer;
+   - `slo-model` lines with a number in `observed` and no `excluded`, per
+     `objective`, for the judged windows.
+
+   Each replay must give the same counts. Also check that the second
+   file's first line carries `"StoreRecords":0` and that neither file
+   holds a `saturation.RestoreLearnedState` or
+   `saturation.TakeRestoreOutcomes` event: the restart restored nothing.
+5. Add each file under its own name, at that commit:
+
+   ```bash
+   SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, stream load sweeps of concurrency and shape, policy tier with saturation and slo targets on tpot and ttft, default analyzerTuning"
+   make learner-golden-add RECORDING=learnrec-<first start>.jsonl NAME=ols-sweep-slo REPLACE=1 SOURCE="$SRC; up to a controller restart"
+   make learner-golden-add RECORDING=learnrec-<second start>.jsonl NAME=ols-sweep-slo-restart REPLACE=1 SOURCE="$SRC; after a controller restart under load, snapshot off"
+   ```
+
+6. **Move the test to the new run.** In `olsSLOFloors`, for each golden:
+   - Set each floor to about four fifths of the new count: full and
+     pinned fits of each line, `Analyze` calls with router latency, and
+     judged TPOT and TTFT.
+   - Set the cut. The first fit is the time of the first row of the
+     golden's `lines.csv`. The cut is any moment between the cycle before
+     it and the fit itself. The cycles are the `slo.BeginCycle` events of
+     the recording, about 15 seconds apart. The dates are that
+     recording's wall clock.
+   - Write the new counts and times in the comments. The test's own log
+     line prints the replay's counts.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,

@@ -81,7 +81,9 @@ var reviewed = map[reflect.Type]buckets{
 	},
 	reflect.TypeFor[*slo.Analyzer](): {
 		recorded: []string{"Analyze", "EvictStale", "BeginCycle", "NoteVariantsPresent"},
-		readers:  []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging"},
+		// PathCounts reads the per-path counters of the slo line's fits
+		// (2.5), which only a replay reads and nothing restores.
+		readers:  []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
 		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder"},
 		seams:    []string{"SetSwitchesForReplay"},
 	},

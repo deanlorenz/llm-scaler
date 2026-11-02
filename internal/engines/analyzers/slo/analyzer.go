@@ -69,6 +69,9 @@ type Analyzer struct {
 	// saturation fits only the decode role, and an aggregated replica (role
 	// "both"), the common deployment, would never get a line there.
 	lines *itl.Tracker
+	// paths counts the tier of each line fitted, for the replay
+	// (path_counts.go).
+	paths pathCounters
 
 	mu sync.Mutex
 	// cycle counts the engine's cycles (BeginCycle), so a model can tell it
@@ -486,6 +489,7 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	a.seen[key] = now
 	a.mu.Unlock()
 	r := a.lines.Observe(key, variant, rows, adm, now)
+	a.paths.countFit(r.Tier)
 	switch {
 	case r.Tier == itl.TierOLS:
 		return r.Model, constants.SLOSourceOwn, r

@@ -383,6 +383,45 @@ var _ = Describe("Analyzer state and inputs", func() {
 		Expect(m.B).To(BeNumerically("~", 0.030, 1e-9), "the learned intercept, not itl.DefaultBaselineSec")
 	})
 
+	It("counts each cycle's line by its tier in PathCounts, as fitLine returns it", func() {
+		a := newAt(nil)
+		steep := func(k float64) float64 { return 0.040*k + 0.030 }
+		key := windowKey("ns", "m", agg)
+		want := map[string]int64{PathITLOLS: 0, PathITLPinned: 0}
+		count := func(src string) {
+			switch src {
+			case constants.SLOSourceOwn:
+				want[PathITLOLS]++
+			case constants.SLOSourcePinned, constants.SLOSourcePinnedDefault:
+				want[PathITLPinned]++
+			}
+		}
+		// Spread-out readings: full fits.
+		for i := range 5 {
+			rows := cycleRows("agg", i)
+			for j := range rows {
+				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
+			}
+			_, src, _ := a.fitLine(key, rows, "agg", itl.Admission{}, clock)
+			count(src)
+			clock = clock.Add(15 * time.Second)
+		}
+		Expect(want[PathITLOLS]).To(BeNumerically(">", 0), "precondition: the spread-out readings fit in full")
+		Expect(a.PathCounts()).To(Equal(want))
+		// Readings at nearly one fill: pinned fits.
+		for range int(itl.DefaultSteadyCarry/(15*time.Second)) + 2 {
+			rows := []domain.ReplicaMetrics{row("agg", "agg-a", 0.50), row("agg", "agg-b", 0.52)}
+			for j := range rows {
+				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
+			}
+			_, src, _ := a.fitLine(key, rows, "agg", itl.Admission{}, clock)
+			count(src)
+			clock = clock.Add(15 * time.Second)
+		}
+		Expect(want[PathITLPinned]).To(BeNumerically(">", 0), "precondition: the narrow readings fit pinned")
+		Expect(a.PathCounts()).To(Equal(want))
+	})
+
 	It("splits demand across generating variants by their ready replicas, and reports utilization", func() {
 		a := newAt(nil)
 		two := domain.VariantReplicaState{VariantName: "agg2", Role: domain.RoleBoth,

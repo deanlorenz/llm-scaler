@@ -100,6 +100,46 @@ goldens:
   source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
     sequences on one decode replica, load sweeps of concurrency and shape, default
     analyzerTuning
+- name: ols-sweep-slo
+  outputs:
+  - ols-sweep-slo/learned-state.csv
+  - ols-sweep-slo/lines.csv
+  - ols-sweep-slo/results.csv
+  - ols-sweep-slo/slo-published.csv
+  - ols-sweep-slo/store-records.csv
+  - ols-sweep-slo/variant-capacities.csv
+  - ols-sweep-slo/composite-holds.csv
+  - ols-sweep-slo/composite-release.csv
+  - ols-sweep-slo/composite-results.csv
+  - ols-sweep-slo/composite-roles.csv
+  - ols-sweep-slo/composite-variants.csv
+  - ols-sweep-slo/warm-pool-pressure.csv
+  - ols-sweep-slo/warm-pool-supply.csv
+  recording: ols-sweep-slo/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
+    sequences on one decode replica, stream load sweeps of concurrency and shape,
+    policy tier with saturation and slo targets on tpot and ttft, default analyzerTuning;
+    up to a controller restart
+- name: ols-sweep-slo-restart
+  outputs:
+  - ols-sweep-slo-restart/learned-state.csv
+  - ols-sweep-slo-restart/lines.csv
+  - ols-sweep-slo-restart/results.csv
+  - ols-sweep-slo-restart/slo-published.csv
+  - ols-sweep-slo-restart/store-records.csv
+  - ols-sweep-slo-restart/variant-capacities.csv
+  - ols-sweep-slo-restart/composite-holds.csv
+  - ols-sweep-slo-restart/composite-release.csv
+  - ols-sweep-slo-restart/composite-results.csv
+  - ols-sweep-slo-restart/composite-roles.csv
+  - ols-sweep-slo-restart/composite-variants.csv
+  - ols-sweep-slo-restart/warm-pool-pressure.csv
+  - ols-sweep-slo-restart/warm-pool-supply.csv
+  recording: ols-sweep-slo-restart/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
+    sequences on one decode replica, stream load sweeps of concurrency and shape,
+    policy tier with saturation and slo targets on tpot and ttft, default analyzerTuning;
+    after a controller restart under load, snapshot off
 - name: pd-restart
   notRun:
   - slo

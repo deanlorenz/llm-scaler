@@ -68,7 +68,9 @@ type Report struct {
 	// Mismatches is every divergence found, in sequence order.
 	Mismatches []Mismatch
 	// Paths is how often each learner path ran in the replay, by
-	// saturation.PathNames (analyzer-learner.md, 2.5).
+	// saturation.PathNames, the settle tracker's verdicts, slo.PathNames
+	// when the run built the slo analyzer, and the engine's paths
+	// (analyzer-learner.md, 2.5).
 	Paths map[string]int64
 }
 
@@ -178,6 +180,9 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 	r.rep.Recording = buf.Bytes()
 	r.rep.Paths = r.sat.PathCounts()
 	maps.Copy(r.rep.Paths, r.settle.pathCounts())
+	if r.slo != nil {
+		maps.Copy(r.rep.Paths, r.slo.PathCounts())
+	}
 	if r.engine != nil {
 		maps.Copy(r.rep.Paths, r.engine.PathCounts())
 	}
