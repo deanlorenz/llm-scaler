@@ -81,32 +81,50 @@ average resident request holds `ILeff + E[O^2]/(2 OL)` (issue #276). With `D`
 taken as 1, the resident requests were over-counted by 7% for uniform lengths,
 20% for exponential ones and 44% for a lognormal with cv 1.5, at `IL = 2 OL`.
 
-`D` is read from vLLM's `vllm:request_generation_tokens_bucket` over the same
-`[5m]` as `OL`. The buckets bound `E[O^2]` rather than give it, so the collector
-takes the least `E[O^2]` the buckets and the exact mean allow
-(`domain.SquaredMeanLowerBound`, `ReplicaMetrics.AvgOutputTokensSquared`): every
-bucket's requests at one length, a water level clamped into each bucket's
-bounds. The true `E[O^2]` is never below it, so `D` moves `KVreq` towards the
-truth and never past it, and equal lengths read `D = 1`. On vLLM's 1-2-5
-buckets it recovers about half of the spread of a smooth distribution, and all
-of it when lengths sit on bucket bounds.
+`D` is read from the engine's output-length histogram over the same `[5m]` as
+`OL`: vLLM's `vllm:request_generation_tokens_bucket`, and SGLang's
+`sglang:generation_tokens_histogram_bucket`, which SGLang publishes behind the
+`--collect-tokens-histogram` its `OL` needs too. The buckets bound `E[O^2]`
+rather than give it, so the collector takes the least `E[O^2]` the buckets and
+the exact mean allow (`domain.SquaredMeanLowerBound`,
+`ReplicaMetrics.AvgOutputTokensSquared`): every bucket's requests at one length,
+a water level clamped into each bucket's bounds. The true `E[O^2]` is never
+below it, so `D` moves `KVreq` towards the truth and never past it, and equal
+lengths read `D = 1`. On vLLM's 1-2-5 buckets it recovers about half of the
+spread of a smooth distribution, and all of it when lengths sit on the buckets'
+upper bounds (a bucket's least length is taken as its lower bound, not one
+above it). A mean up to 1% outside what the buckets allow (rate extrapolation)
+is clamped onto them, and the bound is returned against the caller's own mean,
+so the clamp does not inflate `D`.
 
 `D` is 1, and `KVreq` is `ILeff + OL/2` as before, when:
 
-- any generating replica lacks the histogram (SGLang publishes its length
-  histograms only behind `--collect-tokens-histogram`, under other names; a
-  relabelling may drop it): its lengths would otherwise count as all one
-  length beside the others' spread (`fleetOutputDispersion`);
-- the mu is priced on the short window during a shape change: the `[5m]`
-  histogram then holds both shapes, and their difference would read as a
-  spread of one workload's lengths;
+- any generating replica lacks the histogram (an engine that does not publish
+  it, a relabelling that drops it, or a histogram refused as not one reading:
+  no `+Inf` bucket, a mean outside the buckets): its lengths would otherwise
+  count as all one length beside the others' spread (`fleetOutputDispersion`).
+  This sets the fleet's `D`, which the mu and the zero-replica estimate read;
+  the derived k2 of each live replica reads that replica's own `D`, so on a
+  mixed fleet the replicas that read the histogram keep theirs in k2;
+- a shape change is outstanding (the window `shapeChangeHoldSeconds` opens),
+  on every path: the `[5m]` histogram then holds both shapes, and their
+  difference would read as a spread of one workload's lengths. At IL 2000 and
+  1000 -> 100 out, half way through, it reads `D` 1.67 and prices k2 20% high;
 - the replay switch `kv-per-request-output-dispersion`
   (`SwitchKVPerRequestOutputDispersion`) is off.
 
 The fleet's `D` is request-weighted, as `OL` is. The derived k2 of a live
-replica uses the replica's own `D`, and a zero-replica variant's uses the
-fleet's. `derived-mu` logs it as `outputDispersion`, `k2-decision` likewise,
-and `zero-replica-capacity-estimate` as `modelOutputDispersion`.
+replica uses the replica's own `D`, from however many requests it completed in
+the window: the ratio is biased low on few, so a quiet replica's k2 errs low
+(more replicas) and moves from cycle to cycle. A zero-replica variant's
+estimate multiplies the model's plain mean output length by
+`modelOutputFactor = E[O^2] / (E[O] x plain mean)`, so its generated half is
+the fleet's request-weighted `E[O^2] / (2 E[O])`; the request-weighted `D`
+times the plain mean mixed two populations and priced up to 42% too much
+capacity. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
+likewise, and `zero-replica-capacity-estimate` the factor as
+`modelOutputFactor`. The throughput and slo analyzers still price
+`ILeff + OL/2` (#433).
 
 `KVreq` is the single most load-bearing quantity in the analyzer. Everything
 that asks "how many requests fit" divides by it.

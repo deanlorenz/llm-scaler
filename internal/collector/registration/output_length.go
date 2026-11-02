@@ -2,6 +2,7 @@ package registration
 
 import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 )
 
 // QueryOutputTokensBuckets is the query name for the output-length histogram
@@ -15,14 +16,18 @@ import (
 // mean to a lower bound on E[O^2]
 // (domain.ReplicaMetrics.AvgOutputTokensSquared).
 //
-// vLLM only, and so registered once under its bare name: SGLang publishes its
-// length histograms only behind --collect-tokens-histogram, under other
-// names. On an SGLang fleet the query returns no series and
+// Engine-specific, like QueryAvgOutputTokens: vLLM's
+// request_generation_tokens histogram, and SGLang's
+// generation_tokens_histogram, which SGLang publishes behind
+// --collect-tokens-histogram, the flag its QueryAvgOutputTokens needs too. An
+// engine that publishes no buckets returns no series, and
 // AvgOutputTokensSquaredKnown stays unset.
-// Source: vllm:request_generation_tokens_bucket (histogram)
+// Source: vllm:request_generation_tokens_bucket,
+// sglang:generation_tokens_histogram_bucket (histograms)
 const QueryOutputTokensBuckets = "output_tokens_buckets"
 
-// registerOutputLengthQueries registers QueryOutputTokensBuckets for vLLM.
+// registerOutputLengthQueries registers QueryOutputTokensBuckets for vLLM and
+// SGLang.
 func registerOutputLengthQueries(registry *source.QueryList) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryOutputTokensBuckets,
@@ -30,5 +35,14 @@ func registerOutputLengthQueries(registry *source.QueryList) {
 		Template:    `sum by (model_name, instance, pod, le) (rate(vllm:request_generation_tokens_bucket{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Output-length histogram per pod (5m rate, one series per bucket), the spread of output lengths behind the KV a resident request holds",
+	})
+	// A max, as SGLang's QueryAvgOutputTokens takes it: a duplicate series
+	// must not double a bucket.
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryOutputTokensBuckets,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod, le) (rate(sglang:generation_tokens_histogram_bucket{namespace="{{.namespace}}"}[5m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Output-length histogram per pod (5m rate, one series per bucket) (SGLang)",
 	})
 }

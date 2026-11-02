@@ -77,8 +77,8 @@ type podMetricData struct {
 	// tokens accepted per decode step, and whether that was read.
 	specAcceptedPerStep      float64
 	specAcceptedPerStepKnown bool
-	// The output-length histogram (output_length.go), by bucket bound: the
-	// requests a second at or under each bound.
+	// The output-length histogram (registration.QueryOutputTokensBuckets),
+	// by bucket bound: the requests a second at or under each bound.
 	outputTokensBuckets map[float64]float64
 	// Presence bits: each is set when its series was present and finite (and
 	// in the range its block accepts), so a zero above can be told from a

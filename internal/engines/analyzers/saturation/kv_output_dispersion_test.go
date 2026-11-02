@@ -157,7 +157,7 @@ func zeroReplicaEstimate(t *testing.T, d float64, edit func(*SaturationAnalyzer)
 func TestKVOutputDispersion_AZeroReplicaVariantIsPricedWithTheSpread(t *testing.T) {
 	f := zeroReplicaEstimate(t, 2, nil)
 	assert.EqualValues(t, 384_000, f["derivedCapacity"])
-	assert.InDelta(t, 2, f["modelOutputDispersion"], 1e-12)
+	assert.InDelta(t, 2, f["modelOutputFactor"], 1e-12)
 }
 
 // Off, every reader prices ILeff + OL/2 as before #276, whatever spread was
@@ -216,4 +216,99 @@ func TestKVOutputDispersion_EstimateReadsABadSpreadAsNone(t *testing.T) {
 		assert.Equal(t, base, estimateCapacityAtCapSpread(p, 256, 1000, 500, d), "D %v", d)
 	}
 	assert.Equal(t, int64(384_000), estimateCapacityAtCapSpread(p, 256, 1000, 500, 2))
+}
+
+// The zero-replica estimate prices the fleet's own requests, request-weighted
+// on both moments (modelOutputFactor). One replica serves 9 requests a second
+// of 100 tokens and one serves 1 of 1000, both at 1000 in: E[O] 190, E[O^2]
+// 109,000, so a resident request holds 1000 + 109,000/380 = 1286.8 and 256 of
+// them 329,431. The plain mean the estimate also reads is 550, and the
+// request-weighted D (3.02) times it priced 1000 + 830: 468,557, 42% over.
+func TestKVOutputDispersion_AZeroReplicaEstimateIsRequestWeighted(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-z", capacity.Record{
+		AcceleratorName: "A100", GpuCount: 1, EngineParams: deploymentParams(),
+		EffectiveCapacity: 1, LearnedFrom: "deployment",
+	}, time.Now())
+	a := NewSaturationAnalyzer(store)
+	short := withSpread(makeReplicaMetrics("pod-1", "variant-a", 50_000, 1_000_000, 0, 1000, 100), 1)
+	short.RequestRate = 9
+	long := withSpread(makeReplicaMetrics("pod-2", "variant-a", 50_000, 1_000_000, 0, 1000, 1000), 1)
+	long.RequestRate = 1
+	in := makeAnalyzerInput([]domain.ReplicaMetrics{short, long}, []domain.VariantReplicaState{
+		{VariantName: "variant-a", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: "variant-z", Role: domain.RoleDecode, AcceleratorName: "A100", CurrentReplicas: 0, GPUsPerReplica: 1},
+	})
+	_, err := a.Analyze(ctx, in)
+	require.NoError(t, err)
+	var got any
+	for _, e := range logs.FilterMessage("zero-replica-capacity-estimate").All() {
+		if f := e.ContextMap(); f["variant"] == "variant-z" && f["source"] == "deployment-derived" {
+			got = f["derivedCapacity"]
+		}
+	}
+	require.NotNil(t, got, "no deployment-derived estimate for variant-z")
+	assert.InDelta(t, 329_431, got, 1, "256 sequences of 1000 + E[O^2]/(2 E[O]), both request-weighted")
+}
+
+// shapeSwap runs two cycles of one idle decode replica at 2000 in under the
+// parser's default engine: 1000 out, every request alike, then a cycle half
+// way through a switch to 100 out. The [5m] figures hold both shapes (a mean
+// of 550 and E[O^2] 505,000, D 1.67); the [1m] ones the new shape. It returns
+// the second cycle's derived-mu and k2-decision lines.
+func shapeSwap(t *testing.T, edit func(*SaturationAnalyzer)) (mu, k2 map[string]any) {
+	t.Helper()
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-d", capacity.Record{
+		AcceleratorName: "H100", GpuCount: 1, EngineParams: deploymentParams(),
+	}, time.Now())
+	a := NewSaturationAnalyzer(store)
+	a.publishLine(a.itlPhysicsKey("test-ns", "test-model", "variant-d", "H100", 1, ""),
+		"a fitted line", itl.Model{A: 0.08, B: 0.01}, time.Now())
+	if edit != nil {
+		edit(a)
+	}
+	states := []domain.VariantReplicaState{{VariantName: "variant-d", Role: domain.RoleDecode,
+		AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1}}
+	row := func(out5m, squared, out1m float64) []domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-1", "variant-d", 50_000, 1_000_000, 0, 2000, out5m)
+		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = squared, true
+		rm.AvgOutputTokensRecent, rm.AvgInputTokensRecent = out1m, 2000
+		return []domain.ReplicaMetrics{rm}
+	}
+	ctx1, _ := observedCtx(t)
+	_, err := a.Analyze(ctx1, makeAnalyzerInput(row(1000, 1_000_000, 1000), states))
+	require.NoError(t, err)
+	ctx2, logs := observedCtx(t)
+	_, err = a.Analyze(ctx2, makeAnalyzerInput(row(550, 505_000, 100), states))
+	require.NoError(t, err)
+	mu = requireLogged(t, logs, "derived-mu")
+	for _, e := range logs.FilterMessage("k2-decision").All() {
+		if f := e.ContextMap(); f["priority"] == capacity.K2SrcDerived.String() {
+			k2 = f
+		}
+	}
+	require.NotNil(t, k2, "no derived k2-decision line")
+	return mu, k2
+}
+
+// The short-window shape takes no spread: mid-swap the mu is priced at 2000
+// + 100/2, the shape being served, not at the [5m] D of the two shapes mixed.
+func TestKVOutputDispersion_TheShortWindowTakesNoSpread(t *testing.T) {
+	mu, _ := shapeSwap(t, nil)
+	require.Equal(t, true, mu["muShortWindow"], "the swap opened the short window")
+	assert.InDelta(t, 1, mu["outputDispersion"], 1e-12)
+	assert.InDelta(t, 2050, mu["kvReqPerSeq"], 1e-9, "2000 + 100/2")
+	assert.InDelta(t, 2275, mu["kvReqFleet"], 1e-9, "the fleet's [5m] shape takes no spread either: 2000 + 550/2")
+}
+
+// Neither does the k2 path while the change is outstanding. Priced with the
+// mixed window's D 1.67 a resident request held 2000 + 1.67 x 275 = 2459
+// against the 2050 the arriving requests hold, k2 20% high; without the
+// spread it is 2275, as before #276.
+func TestKVOutputDispersion_AShapeChangeHoldsTheK2Spread(t *testing.T) {
+	_, k2 := shapeSwap(t, nil)
+	assert.InDelta(t, 1, k2["outputDispersion"], 1e-12)
+	assert.EqualValues(t, 256*2275, k2["k2"])
 }

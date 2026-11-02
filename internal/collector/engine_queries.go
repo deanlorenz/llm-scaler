@@ -26,6 +26,7 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryCacheConfigInfo,
 	registration.QueryAvgOutputTokens,
 	registration.QueryAvgOutputTokensRecent,
+	registration.QueryOutputTokensBuckets,
 	registration.QueryAvgInputTokens,
 	registration.QueryAvgInputTokensRecent,
 	registration.QueryPrefixCacheHitRate,
@@ -60,9 +61,6 @@ var agnosticReplicaQueries = []string{
 	// vLLM's accepted speculative tokens per step; SGLang's ITL is per token
 	// already and needs none (registration.QuerySpecAcceptedPerStep).
 	registration.QuerySpecAcceptedPerStep,
-	// vLLM's output-length histogram; SGLang's is behind a flag, under other
-	// names (registration.QueryOutputTokensBuckets).
-	registration.QueryOutputTokensBuckets,
 	// vLLM's waiting count split by reason; SGLang publishes no reason.
 	registration.QueryCapacityQueueLength,
 	registration.QueryMaxRankCapacityQueueLength,

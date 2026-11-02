@@ -10,11 +10,13 @@ package saturation
 // request count was over-counted by 7% (uniform lengths), 20% (exponential)
 // and 44% (lognormal, cv 1.5) at IL = 2 OL.
 //
-// D is read from vLLM's output-length histogram as a lower bound
+// D is read from the engine's output-length histogram as a lower bound
 // (domain.SquaredMeanLowerBound, domain.ReplicaMetrics.AvgOutputTokensSquared),
 // so it moves the KV per request towards the truth and never past it. Equal
-// lengths read as D = 1, and with no histogram (SGLang, or a relabelling that
-// drops it) nothing changes.
+// lengths read as D = 1, and with no histogram (an engine that publishes none,
+// a relabelling that drops it) nothing changes. Nor does it while a shape
+// change is outstanding: the [5m] histogram then holds both shapes
+// (resolvePricing, replicaOutputDispersion).
 //
 // It moves two figures, in opposite directions, both towards the truth:
 //   - the derived k2 (P3, estimateCapacityAtCapSpread) rises: the sequences

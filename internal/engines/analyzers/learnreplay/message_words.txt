@@ -1297,7 +1297,7 @@ modelAvgInputTokens
 modelAvgOutputTokens
 modelCount
 modelID
-modelOutputDispersion
+modelOutputFactor
 modelTotalAfter
 modelTotalBefore
 model_name

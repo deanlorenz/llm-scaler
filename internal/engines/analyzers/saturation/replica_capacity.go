@@ -241,7 +241,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		modelID, namespace, rm.VariantName,
 		rm.BusiestRankQueue(), rm.BusiestRankTokens(),
 		rm.AvgOutputTokens, rm.AvgInputTokens,
-		a.replicaOutputDispersion(rm),
+		// No spread while a shape change is outstanding, as on the mu's path
+		// (resolvePricing).
+		a.replicaOutputDispersion(rm, a.shapeChangedWithin(namespace, modelID,
+			config.ShapeChangeWindow(ShapeChangeHoldMax), a.now())),
 		config.QueueLengthThreshold,
 		engineParams,
 		batchCap,
@@ -1259,10 +1262,11 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	gpuCount int,
 	kvCacheThreshold float64,
 	modelAvgInput, modelAvgOutput float64,
-	// modelDispersion is the fleet's spread of output lengths, D =
-	// E[O^2]/E[O]^2 (fleetOutputDispersion), priced into the derived
-	// figure's KV per request; 1 is none.
-	modelDispersion float64,
+	// modelFactor is the factor the derived figure multiplies modelAvgOutput
+	// by in its KV per request, I + f x O/2 (modelOutputFactor): the
+	// fleet's request-weighted E[O^2]/(2 E[O]) over the plain mean's half.
+	// 1 is none.
+	modelFactor float64,
 	logger logr.Logger,
 ) float64 {
 	if rec == nil {
@@ -1280,7 +1284,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {
-		if derived := estimateCapacityAtCapSpread(rec.EngineParams, rec.EngineParams.BatchCap(), modelAvgInput, modelAvgOutput, modelDispersion); derived > 0 {
+		if derived := estimateCapacityAtCapSpread(rec.EngineParams, rec.EngineParams.BatchCap(), modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
 			bounded := derived
 			boundedBy := "derived"
 
@@ -1338,7 +1342,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				"source", "deployment-derived", "boundedBy", boundedBy,
 				"derivedCapacity", derived, "perReplicaCapacity", bounded,
 				"modelAvgInputTokens", modelAvgInput, "modelAvgOutputTokens", modelAvgOutput,
-				"modelOutputDispersion", modelDispersion)
+				"modelOutputFactor", modelFactor)
 			return float64(bounded)
 		}
 	}

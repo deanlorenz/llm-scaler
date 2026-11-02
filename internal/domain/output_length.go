@@ -130,6 +130,14 @@ func SquaredMeanLowerBound(buckets []LengthBucket, mean float64) (float64, bool)
 		v := min(max(t, sp.lo), sp.hi)
 		sq += sp.n * v * v
 	}
+	// A mean clamped onto the buckets (within consistencyTolerance) moved the
+	// bound with it. The caller divides by its own mean, so the bound is
+	// rescaled to keep the spread the buckets and the clamped mean imply:
+	// sq/total / clamped^2 = result / mean^2. Unscaled, a mean 1% under the
+	// floor read a spread up to 2% above it.
+	if clamped := target / total; clamped != mean {
+		sq *= (mean / clamped) * (mean / clamped)
+	}
 	// Never below mean^2 (Jensen); rounding in the bisection must not make a
 	// one-length fleet read a spread under 1.
 	return max(sq/total, mean*mean), true

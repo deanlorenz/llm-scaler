@@ -135,7 +135,7 @@ KVreq   = ILeff + D x O/2
 | --- | --- | --- | --- |
 | `I` = `AvgInputTokens` | tokens/request | collector, `request_prompt_tokens_sum/count` `[5m]` | the prompt length the fleet is serving |
 | `O` = `AvgOutputTokens` | tokens/request | collector, `request_generation_tokens_sum/count` `[5m]` | the generation length |
-| `E[O^2]` = `AvgOutputTokensSquared` | tokens^2/request | collector, the least `E[O^2]` that `request_generation_tokens_bucket` `[5m]` and `O` allow (`domain.SquaredMeanLowerBound`), vLLM only; `AvgOutputTokensSquaredKnown` says it was read | the spread of output lengths, `D` (issue #276) |
+| `E[O^2]` = `AvgOutputTokensSquared` | tokens^2/request | collector, the least `E[O^2]` that the output-length histogram `[5m]` (`request_generation_tokens_bucket`, SGLang `generation_tokens_histogram_bucket`) and `O` allow (`domain.SquaredMeanLowerBound`); `AvgOutputTokensSquaredKnown` says it was read | the spread of output lengths, `D` (issue #276) |
 | `hitRate` = `PrefixCacheHitRate` | fraction 0-1 | collector, `prefix_cache_hits / queries` | share of prompt tokens served from cache |
 
 `ILeff` is the prompt the engine must actually compute — a cached prefix costs
@@ -143,9 +143,10 @@ nothing. `KVreq` is the KV footprint of **one resident request averaged over
 its life**: the prompt is held throughout, the generation grows from 0 to its
 length. With equal lengths it contributes its mean, `O/2`; with lengths that
 vary, a long request stays resident longer and the average resident request
-holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram, on
-the mu's short window during a shape change, and with the replay switch
-`kv-per-request-output-dispersion` off.
+holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram,
+while a shape change is outstanding (on every path), and with the replay
+switch `kv-per-request-output-dispersion` off. The throughput and slo
+analyzers still price `ILeff + O/2` (#433).
 
 `KVreq` is the most load-bearing quantity in the analyzer; everything that asks
 "how many requests fit" divides by it. `O` reaches the replica count through

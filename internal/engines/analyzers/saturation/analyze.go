@@ -194,9 +194,13 @@ type cycle struct {
 	stableOutput float64
 	shapeChanged bool
 	// fleetDispersion is the spread of the fleet's output lengths, D =
-	// E[O^2]/E[O]^2 (fleetOutputDispersion): 1 with no reading, or with
-	// SwitchKVPerRequestOutputDispersion off.
+	// E[O^2]/E[O]^2 (fleetOutputDispersion): 1 with no reading, while a
+	// shape change is outstanding, or with SwitchKVPerRequestOutputDispersion
+	// off.
 	fleetDispersion float64
+	// shapeChanging is a shape change outstanding (resolvePricing): the mu
+	// moves to the short window if it can, and no path prices a spread.
+	shapeChanging bool
 	// keys is the output length the k2 and throughput keys are built from:
 	// the fleet's, its bucket held across a boundary (keyLengths), and the
 	// move of its bucket this cycle, if one happened.
@@ -400,8 +404,16 @@ func (c *cycle) resolvePricing() {
 	c.muDivisor = c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	c.muInput, c.muShortWindow = c.fleetInput, false
 	// On a.now: noteFleetShape stamps lastChangedAt with it.
-	if c.a.shapeChangedWithin(c.input.Namespace, c.input.ModelID,
-		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), c.a.now()) {
+	c.shapeChanging = c.a.shapeChangedWithin(c.input.Namespace, c.input.ModelID,
+		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), c.a.now())
+	// No spread while the shape changes, on any path (issue #276): the [5m]
+	// histogram then holds both shapes, and their difference would read as a
+	// spread of one workload's lengths. The k2 path reads the same gate
+	// (replicaOutputDispersion), and so does the zero-replica estimate.
+	if c.shapeChanging {
+		c.fleetDispersion = 1
+	}
+	if c.shapeChanging {
 		if recent := fleetOutputLengthRecent(c.input.ReplicaMetrics, c.rolesByVariant); recent > 0 {
 			c.muDivisor = recent
 			if recentIn := servedPromptLengthRecent(c.input.ReplicaMetrics); recentIn > 0 {
@@ -635,7 +647,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// [5m] reading, because that is the figure noteLineMismatch compares
 		// an observed token rate against.
 		//
-		// The short-window shape takes no spread. The spread is read over
+		// The short-window shape takes no spread, as no shape does while a
+		// change is outstanding (resolvePricing): the spread is read over
 		// [5m], and across a shape change that window holds both shapes, so
 		// their difference would read as a spread of one workload's lengths
 		// and price the new shape's requests far larger than they are.
@@ -785,9 +798,18 @@ func variantsPricedFromBorrowedLine(caps []capacity.ReplicaCapacity) map[string]
 // priceDemand aggregates the per-replica records to variant and role totals,
 // and adds what the router is holding and no pod has started.
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
+	// The zero-replica estimate's factor on the model's mean output length
+	// (modelOutputFactor, issue #276): 1 while the shape changes, as on every
+	// path, and with the switch off.
+	modelFactor := 1.0
+	if c.a.kvOutputDispersion && !c.shapeChanging {
+		roles := rolesFromStates(c.input.VariantStates)
+		_, plain, _ := computeModelWorkloadAverages(c.input.ReplicaMetrics, roles)
+		modelFactor = modelOutputFactor(c.input.ReplicaMetrics, roles, plain)
+	}
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
-		!c.cfg.EnableLearnedStateReuse, c.logger)
+		!c.cfg.EnableLearnedStateReuse, modelFactor, c.logger)
 	pricedFromLine := variantsPricedFromBorrowedLine(caps)
 	for i := range variantCapacities {
 		vc := &variantCapacities[i]

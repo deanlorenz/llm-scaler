@@ -230,8 +230,9 @@ type ReplicaMetrics struct {
 
 	// AvgOutputTokensSquared is a lower bound on the mean SQUARED generation
 	// length per request on this replica, over the [5m] window
-	// AvgOutputTokens is taken over: the least E[O^2] that
-	// vllm:request_generation_tokens_bucket and AvgOutputTokens allow
+	// AvgOutputTokens is taken over: the least E[O^2] that the output-length
+	// histogram (vllm:request_generation_tokens_bucket, or SGLang's
+	// sglang:generation_tokens_histogram_bucket) and AvgOutputTokens allow
 	// (SquaredMeanLowerBound). With AvgOutputTokens it gives the
 	// spread of output lengths, D = E[O^2]/E[O]^2, which sets the KV a
 	// resident request holds: a long request stays resident longer, so
@@ -239,8 +240,8 @@ type ReplicaMetrics struct {
 	//
 	// A lower bound, so a spread priced from it moves the KV per request
 	// towards the truth and never past it; equal lengths read as D = 1.
-	// vLLM only: SGLang publishes its length histograms only behind
-	// --collect-tokens-histogram, under other names.
+	// SGLang publishes its histogram behind --collect-tokens-histogram, the
+	// flag its AvgOutputTokens needs too.
 	AvgOutputTokensSquared float64
 	// AvgOutputTokensSquaredKnown is set when AvgOutputTokensSquared was
 	// read: the histogram had a +Inf bucket, counted requests, and agreed

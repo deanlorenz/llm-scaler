@@ -123,10 +123,21 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 // it (domain.SquaredMeanLowerBound).
 //
 // 1, no spread, unless EVERY generating replica with an output length read
-// the bound. One without it (an SGLang replica, a relabelling that drops the
-// histogram) would otherwise count as a replica whose requests are all one
+// the bound. One without it (an engine that publishes no histogram, a
+// relabelling that drops it) would otherwise count as a replica whose requests are all one
 // length, and the mix of the two is neither fleet's spread.
 func fleetOutputDispersion(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	mean, squared, ok := fleetOutputMoments(replicas, rolesByVariant)
+	if !ok {
+		return 1
+	}
+	return shape.Dispersion(mean, squared)
+}
+
+// fleetOutputMoments is the fleet's E[O] and its bound on E[O^2], both
+// request-weighted over the same generating replicas (fleetOutputDispersion
+// says which), and whether every one of them read the bound.
+func fleetOutputMoments(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) (mean, squared float64, ok bool) {
 	counted := func(rm domain.ReplicaMetrics) bool {
 		return rm.AvgOutputTokens > 0 && generatesOutput(rm, rolesByVariant)
 	}
@@ -134,19 +145,52 @@ func fleetOutputDispersion(replicas []domain.ReplicaMetrics, rolesByVariant map[
 		slices.ContainsFunc(replicas, func(rm domain.ReplicaMetrics) bool {
 			return counted(rm) && !(rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0)
 		}) {
+		return 0, 0, false
+	}
+	mean = fleetOutputLength(replicas, rolesByVariant)
+	squared = fleet.Mean(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensSquared }, counted)
+	return mean, squared, mean > 0 && squared > 0
+}
+
+// modelOutputFactor is the factor the zero-replica estimate multiplies the
+// model's mean output length by in its KV per request, I + f x O/2, so that
+// the generated half is the fleet's own E[O^2] / (2 E[O]), request-weighted.
+//
+// Not the fleet's D. The estimate's O is computeModelWorkloadAverages' plain
+// mean over replicas, while D is request-weighted, and D x plain/2 mixes two
+// populations: one replica at 9 requests a second of 100 tokens beside one at
+// 1 of 1000 reads D 3.02 against a plain mean of 550, and priced I + 830 where
+// the fleet's requests hold I + 287 -- 42% too much capacity at I = 1000. So
+// f = E[O^2] / (E[O] x plain). 1, the estimate as before, with no bound read
+// (fleetOutputMoments) or no plain mean. A factor under 1 is read as 1 by
+// estimateCapacityAtCapSpread: the estimate is never priced below I + O/2.
+func modelOutputFactor(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string, plainMean float64) float64 {
+	mean, squared, ok := fleetOutputMoments(replicas, rolesByVariant)
+	if !ok || !(plainMean > 0) {
 		return 1
 	}
-	mean := fleetOutputLength(replicas, rolesByVariant)
-	squared := fleet.Mean(replicas,
-		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensSquared }, counted)
-	return shape.Dispersion(mean, squared)
+	return squared / (mean * plainMean)
 }
 
 // replicaOutputDispersion is one replica's own spread of output lengths, D =
 // E[O^2] / E[O]^2, for the k2 it is priced at (estimateCapacityAtCapSpread):
-// 1 with no bound read, or with SwitchKVPerRequestOutputDispersion off.
-func (a *SaturationAnalyzer) replicaOutputDispersion(rm domain.ReplicaMetrics) float64 {
-	if !a.kvOutputDispersion || !rm.AvgOutputTokensSquaredKnown {
+// 1 with no bound read, while a shape change is outstanding (held), or with
+// SwitchKVPerRequestOutputDispersion off.
+//
+// held is the gate the mu applies too (resolvePricing): across a shape change
+// the [5m] histogram holds both shapes, and their difference reads as a spread
+// of one workload's lengths. At IL 2000 and 1000 -> 100 out, half way through,
+// the window reads D 1.67 and priced a resident request at 2459 against the
+// 2050 the arriving requests hold: k2 20% high, where IL + O/2 is 11% high.
+//
+// A replica's D comes from its own histogram, however few requests it
+// completed in the window. The ratio is biased low on few requests (the
+// spread a handful of draws shows is less than the workload's), so a quiet
+// replica's k2 errs low, which orders more replicas, and is noisy from cycle
+// to cycle rather than wrong.
+func (a *SaturationAnalyzer) replicaOutputDispersion(rm domain.ReplicaMetrics, held bool) float64 {
+	if !a.kvOutputDispersion || held || !rm.AvgOutputTokensSquaredKnown {
 		return 1
 	}
 	return shape.Dispersion(rm.AvgOutputTokens, rm.AvgOutputTokensSquared)

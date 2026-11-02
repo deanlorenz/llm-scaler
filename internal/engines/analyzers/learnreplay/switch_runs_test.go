@@ -107,6 +107,7 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestKVOutputDispersion_TheDerivedK2HoldsTheSpread"},
 		{"../saturation", "TestKVOutputDispersion_TheDerivedMuFitsFewerSequences"},
 		{"../saturation", "TestKVOutputDispersion_AZeroReplicaVariantIsPricedWithTheSpread"},
+		{"../saturation", "TestKVOutputDispersion_AZeroReplicaEstimateIsRequestWeighted"},
 	},
 	saturation.SwitchBatchCapITLAdmission: {
 		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},

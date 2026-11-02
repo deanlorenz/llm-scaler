@@ -130,8 +130,24 @@ func TestSquaredMeanLowerBound_Edges(t *testing.T) {
 	if _, ok := SquaredMeanLowerBound([]LengthBucket{{100, 6}, {500, 4}, {inf, 10}}, 200); !ok {
 		t.Fatal("a falling rate must read as no requests in that bucket, not refuse the histogram")
 	}
-	// The ceiling is four at 100 and six at 500: a mean of 340.
-	if v, ok := SquaredMeanLowerBound(sorted, 340*1.005); !ok || math.Abs(v-(4*100.0*100+6*500.0*500)/10) > 1 {
-		t.Fatalf("a mean 0.5%% over the ceiling: %v %v", v, ok)
+	// A mean just outside the buckets is clamped onto them, and the bound is
+	// returned against the caller's own mean, so the spread it gives is the
+	// one the buckets imply, not inflated by the clamp. The ceiling is four
+	// at 100 and six at 500 (a mean of 340, E[O^2] 154,000); the floor is
+	// four at 0 and six at 100 (a mean of 60, E[O^2] 6,000).
+	for _, c := range []struct {
+		name         string
+		mean, spread float64
+	}{
+		{"0.5% over the ceiling", 340 * 1.005, 154_000.0 / (340 * 340)},
+		{"0.5% under the floor", 60 * 0.995, 6_000.0 / (60 * 60)},
+	} {
+		v, ok := SquaredMeanLowerBound(sorted, c.mean)
+		if !ok {
+			t.Fatalf("%s: no reading", c.name)
+		}
+		if got := v / (c.mean * c.mean); math.Abs(got-c.spread) > 1e-9 {
+			t.Errorf("%s: spread %.6f, want %.6f, the buckets' own", c.name, got, c.spread)
+		}
 	}
 }

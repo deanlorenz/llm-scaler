@@ -14,9 +14,10 @@ import (
 // the model-scoped queries already found, one rate per bucket bound, and skips
 // the rest, like the other supplementary series (extractSequenceCap).
 //
-// The query is agnostic, which filterResultsToModel does not narrow, so its
-// series are matched to the model here; one carrying no model_name is kept,
-// as the instance key already ties it to a seen pod. A series whose bound
+// The query is engine-specific, and filterResultsToModel has narrowed it to
+// the model already; a foreign model's series is skipped here as well, so
+// the block does not rest on that. One carrying no model_name is kept, as
+// the instance key already ties it to a seen pod. A series whose bound
 // does not parse, or whose rate is not a finite non-negative number, is
 // dropped; a histogram missing a bucket is then refused as a whole by
 // domain.SquaredMeanLowerBound, never read with a hole in it.

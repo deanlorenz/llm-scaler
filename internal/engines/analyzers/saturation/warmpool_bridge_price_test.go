@@ -51,7 +51,7 @@ func TestABridgeDoesNotSetTheVariantsPerReplicaPrice(t *testing.T) {
 	bridge := pricedReplica("pool-0", 100, 600, true)
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, 1, logr.Discard())
 
 	if len(got) != 1 {
 		t.Fatalf("variants = %+v, want one", got)
@@ -88,7 +88,7 @@ func TestTheAnalyzerLeavesTheDerivedBridgeCapacityToTheBuilder(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("variant-a-0", 100, 1000, false),
 		pricedReplica("pool-0", 100, 600, true),
-	}, nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+	}, nil, oneVariantState(1), "model", "ns", 0.9, false, 1, logr.Discard())
 
 	if got[0].WarmPoolCapacity != 0 {
 		t.Errorf("WarmPoolCapacity = %v, want 0 from the analyzer: the builder derives it "+
@@ -116,7 +116,7 @@ func TestAVariantCarriedOnlyByABridgeIsStillPriced(t *testing.T) {
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("pool-0", 400, 600, true),
-	}, nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
+	}, nil, oneVariantState(0), "model", "ns", 0.9, false, 1, logr.Discard())
 
 	if got[0].PerReplicaCapacity != 600 {
 		t.Errorf("PerReplicaCapacity = %v, want 600 (the only reading there was): "+
@@ -145,7 +145,7 @@ func TestAVariantCarriedOnlyByABridgeReportsItsBorrow(t *testing.T) {
 	bridge.K2BorrowRelaxed = 0.25
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{bridge},
-		nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
+		nil, oneVariantState(0), "model", "ns", 0.9, false, 1, logr.Discard())
 
 	want := []domain.LearnedStateBorrow{
 		{Quantity: domain.BorrowedK2, Donor: "main", DonorNamespace: "ns", Relaxed: 0.25},
@@ -159,7 +159,7 @@ func TestAVariantCarriedOnlyByABridgeReportsItsBorrow(t *testing.T) {
 	// bridge's borrow is not the variant's.
 	own := pricedReplica("variant-a-0", 100, 1000, false)
 	got = a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, 1, logr.Discard())
 	if len(got[0].Borrowed) != 0 {
 		t.Errorf("Borrowed = %+v, want none: the own replica set the price", got[0].Borrowed)
 	}
@@ -178,7 +178,7 @@ func TestAVariantCarriedOnlyByABridgeReportsItsK2Source(t *testing.T) {
 	bridge.K2WriteAge, bridge.K2WriteAgeKnown = 2*time.Hour, true
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{bridge},
-		nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
+		nil, oneVariantState(0), "model", "ns", 0.9, false, 1, logr.Discard())
 	if got[0].K2Source != "P2-borrow" || !got[0].HasK2Age || got[0].K2Age != 2*time.Hour {
 		t.Errorf("K2Source = %q, age %v (known %v), want P2-borrow, 2h: the bridge's k2 is the variant's price",
 			got[0].K2Source, got[0].K2Age, got[0].HasK2Age)
@@ -189,7 +189,7 @@ func TestAVariantCarriedOnlyByABridgeReportsItsK2Source(t *testing.T) {
 	own.K2Priority = capacity.K2SrcObserved
 	own.K2WriteAgeKnown = true
 	got = a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, 1, logr.Discard())
 	if got[0].K2Source != "P1-obs" || got[0].K2Age != 0 {
 		t.Errorf("K2Source = %q, age %v, want P1-obs, 0: the own replica set the price",
 			got[0].K2Source, got[0].K2Age)
@@ -216,7 +216,7 @@ func TestAnticipatedSupplyIsPricedAtTheOwnReading(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("variant-a-0", 100, 1000, false),
 		pricedReplica("pool-0", 100, 600, true),
-	}, nil, states, "model", "ns", 0.9, false, logr.Discard())
+	}, nil, states, "model", "ns", 0.9, false, 1, logr.Discard())
 
 	if got[0].ReplicaCount != 1 || got[0].PendingReplicas != 1 {
 		t.Fatalf("counts = %d ready / %d pending, want 1 / 1",

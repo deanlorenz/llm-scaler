@@ -46,7 +46,7 @@ type spreadWorkload struct {
 // newSpreadWorkload draws a workload for seed. The lengths sit on bucket
 // bounds, where the histogram's bound on E[O^2] is exact, so the case
 // judges the pricing and not the histogram's resolution; that the bound is
-// never above the truth is shape's unit test.
+// never above the truth is domain's unit test (TestSquaredMeanLowerBound).
 func newSpreadWorkload(r *rand.Rand) spreadWorkload {
 	shorts := []float64{50, 100, 200}
 	longs := []float64{1000, 2000, 5000}
