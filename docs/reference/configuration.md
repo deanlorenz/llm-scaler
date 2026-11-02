@@ -849,25 +849,37 @@ strength and none is started or moved, so none started in that time
 replaces the stored one. After 10 minutes bounds start as usual, and a read
 that succeeds later keeps those over the stored ones.
 
-**Every replica waits its settle after a restart.** A restarted controller
-has not watched the replicas it finds, so it treats each as just started:
-k2 and measured mu wait 1 minute, and the ITL line (the saturation analyzer's
-and the slo analyzer's) does not refit for
+**Every replica waits its settle after a restart or leader change.** A
+controller that has just started, or just taken the lease, has not watched
+the replicas it finds, so it treats each as just started: k2 and measured mu
+wait 1 minute, and the ITL line (the saturation analyzer's and the slo
+analyzer's) does not refit for
 [`steadyGate.steadyFor`](scaling-policy.md#analyzertuningsteadygate-which-itl-readings-teach-the-line)
 (2 minutes by default). What that costs depends on the snapshot:
 
 - **Snapshot off (the default).** The saturation analyzer has no line until
-  the wait ends and fresh readings refit one, so no derived mu either, and
-  the throughput floor is silent for about 2.75 minutes: the fleet is held
-  by KV occupancy alone. On one recorded restart under load the first line
-  came 75 s later than before the wait, and the floor-held decode demand was
-  32 to 37 % lower for those five cycles. The default scale-down
-  stabilization (`WVA_SO_SCALE_DOWN_STABILIZATION`, 300 s) masks it: the HPA
-  keeps its own recommendations across a controller restart, and the dip is
-  shorter than the window. **Set that stabilization to at least about 90 s**
-  (the dip's length plus a cycle); under it, each controller restart under
-  load can scale the decode role down by up to a third, and the load then
-  has to order it back.
+  the wait ends and three settled readings refit one, so no derived mu
+  either, and the throughput floor is silent for `steadyFor` plus about 3
+  cycles: 11 cycles, about 2.75 minutes, at the default 15 s interval. The
+  fleet is held by KV occupancy alone. Not all of that silence is new: a
+  restarted controller already needed a few cycles of readings before its
+  first line, and longer when its window was short of readings. What the
+  wait adds is the dip, the cycles on which the line used to be back and
+  now is not. On one recorded restart under load that was 5 cycles (75 s at
+  15 s): the first line came 75 s later than before the wait, and the
+  floor-held decode demand was 32 to 37 % lower than before the wait on
+  those cycles. The dip is in cycles, not seconds; at a 30 s interval the
+  same dip is about 150 s. It can be as long as `steadyFor` plus a cycle
+  when the line would otherwise have been back at once.
+- **The scale-down stabilization masks the dip** when it is longer:
+  the HPA keeps its own recommendations across a controller restart. The
+  default `WVA_SO_SCALE_DOWN_STABILIZATION` of 300 s covers every case at
+  the default interval. **Keep it at least about 6 cycles (90 s at the
+  15 s default)** to cover a dip like the recorded one, and at least
+  `steadyFor` plus a cycle (about 2.25 minutes at 15 s) to cover the
+  longest. Under it, each restart or leader change under load can scale the
+  decode role down by up to a third, and the load then has to order it
+  back.
 - **Snapshot on.** The saturation analyzer's held ITL slope is restored
   (below), so it keeps a line, and the derived mu, through the wait.
 - **The slo analyzer** has no learned-state restore. Its line waits after
