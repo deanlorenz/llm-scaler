@@ -43,14 +43,23 @@ import (
 //     reaches the line within its settle of the controller start: the
 //     in-process runs, and the ols-sweep-slo-restart recording, whose
 //     controller came back under load. Each line refits steadyFor later.
-//   - The move itself moves only the in-process runs. Their generator gave
-//     every replica a Ready time 30 min before each cycle, a new Ready time
-//     under the same name on every cycle, which the tracker reads as an
-//     engine restart (settle.Restarted); the line's own trace did not see
-//     it. The cluster recordings are held.
+//   - The move itself moves the in-process runs on the cycles after their
+//     clock jumps a day: 25 hours with no cycle at all is, to the tracker,
+//     an absence past its tolerance (settle.Rejoined), and the replicas
+//     settle again; the line's own trace counted an absence only by cycles
+//     that went without a replica, and saw none. In the acceptance and
+//     engine runs that is one full fit the line no longer publishes (10:32
+//     the next day), and in the slo line four cycles priced from a pinned
+//     fit, not a full one. The cluster recordings are held.
 //   - The absence rule and the Finite-only reading move nothing: no
 //     recording misses a replica's row for a cycle, and every recorded Pod
 //     is one rank. Their unit tests hold them (heldBy).
+//
+// The acceptance and engine recordings were taken again for this PR, with
+// the generator's Ready time fixed for the day: the earlier ones gave each
+// replica a new Ready time on every cycle, an engine restart each time to
+// the tracker, and no line of theirs ever settled. Their base digests below
+// are the all-off replays of the new recordings.
 //
 // Earlier PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch
 // cap, #415's mu key, #392's first k2 reading, #420's batch-cap readers,
@@ -58,11 +67,10 @@ import (
 // off" is this PR's switches, and an earlier PR's stay at their constructor
 // default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchITLReadsSettle: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "engine/learned-state.csv", "engine/lines.csv",
-	},
+	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
 	saturation.SwitchITLWaitsAfterRestart: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "engine/learned-state.csv", "engine/lines.csv",
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
 		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
 		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
@@ -293,16 +301,18 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (939af5e36, main after #437).
+// commit's goldens hold it (939af5e36, main after #437), and for the
+// acceptance and engine goldens, taken again here, their all-off replays.
 var switchBase = map[string]string{
-	"acceptance/learned-state.csv":                 "05ee3710cda50b12972a0ae9afecba4ec65e39858236b1dfb9a37cab19fa17ea",
-	"acceptance/lines.csv":                         "450511cb067160eeca207885d34ae95e00421e5dc367b7af59035d314ba7f402",
+	"acceptance/learned-state.csv":                 "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
+	"acceptance/lines.csv":                         "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
 	"acceptance/slo-published.csv":                 "2276ef61bd4b7203d9d06c26192046b2429ad12b5e5ef668c776a46a15ba36f8",
-	"acceptance/variant-capacities.csv":            "474fd9a4f3ea6163a28127ce7e62effaad8b1dfcbf3fd434e75d0ca95adea9d8",
-	"engine/learned-state.csv":                     "05ee3710cda50b12972a0ae9afecba4ec65e39858236b1dfb9a37cab19fa17ea",
-	"engine/lines.csv":                             "450511cb067160eeca207885d34ae95e00421e5dc367b7af59035d314ba7f402",
+	"acceptance/variant-capacities.csv":            "a7ad07abe1eb85bcaf3786d10d9822785a2ec073cd0dee0c02f78eea2dee9c73",
+	"engine/composite-variants.csv":                "f0d66647fc3b2d02a4c2f9d79616ebfb7123a4a31746644079f720522d68d64d",
+	"engine/learned-state.csv":                     "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
+	"engine/lines.csv":                             "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
 	"engine/slo-published.csv":                     "ed09c2bd28e3055a9b8744d87c588c2231e64906516f28d8b93b7e908e04e912",
-	"engine/variant-capacities.csv":                "27305b8ced39232f4c4b3b2d1bca3281fac24416bd0d07e711dbf47c0cca175e",
+	"engine/variant-capacities.csv":                "052ea4872813f6401a7536a2a359e2cbcbb4dcedfc12a315dba9f9c93411fd79",
 	"mu-paths/learned-state.csv":                   "4a7667542a86f5fb12a683a01eea3426c51b668ddd0e7aab18ed133608a1a8e9",
 	"mu-paths/lines.csv":                           "b293056a8e459d7d6fd05755aa8fa5e7920f4f68355a29a381fb1b789121f396",
 	"mu-paths/slo-published.csv":                   "761496fb84fd97d26bb873e52051eded6bd7ca82d36dfe59bca597f905aad6f1",

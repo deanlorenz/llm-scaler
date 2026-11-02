@@ -365,12 +365,13 @@ that is empty without one:
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
 borrow tolerance and the measured k2 and mu paths barely move in it, so a
-change to them can leave it as it is. Its committed recording, and the
-`engine` golden's, give every replica a Ready time 30 min before each cycle:
-a new Ready time on every cycle, which the settle tracker reads as an engine
-restart each time, so their ITL lines never settle. The generator
-(`recRow`) now keeps one Ready time for the day, so the runs that replay
-live, and a recording written again, settle as a real fleet does.
+change to them can leave it as it is. Its generator (`recRow`) keeps one
+Ready time per replica for the day. Until learner PR 4a it stamped a Ready
+time 30 min before each cycle, a new Ready time on every cycle, which the
+settle tracker reads as an engine restart each time, so no line ever
+settled; the `acceptance` and `engine` recordings were taken again with the
+fix. The run's controller restarts at its start, so the ITL line waits
+`steadyFor` and publishes its first fit on the run's ninth cycle.
 
 The `mu-paths` golden is a second in-process run, for those paths. Its
 replicas saturate, so k2 records readings and mu's window takes samples,
