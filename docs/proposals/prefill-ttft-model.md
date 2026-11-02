@@ -1,5 +1,13 @@
 # Prefill capacity from a fitted TTFT model
 
+**Status:** superseded for the model by
+[what-if capacity](slo-capacity-planner.md) (2026-11-02). The
+`TTFT(T) = A*T + B` fit below was built and removed: TTFT includes queue wait,
+and the intercept read 82 s. Prefill capacity is now proposed as a throughput,
+`V_P`, read from busy minutes. What survives is the consumer: the demand
+floor's derived prefill mu, taken from `V_P` once `internal/signals/prefill`
+exists. Kept for the measurements and the TokenScale comparison.
+
 ## Why
 
 Prefill is sized in the wrong units and has no way to know its own capacity

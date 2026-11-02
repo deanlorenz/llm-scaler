@@ -134,9 +134,10 @@ last; it is the unit change that makes the other two land.
   which rows are measured and which are predicted. Derives decode's mu from the
   ITL line so a shift reprices on the cycle it is observed.
 - **[Prefill capacity from a fitted TTFT model](prefill-ttft-model.md)** —
-  prefill has no throughput ceiling today. Fits `TTFT(T) = A*T + B` so `1/A` is
-  the replica's prefill token ceiling, obtainable without driving it into
-  saturation.
+  superseded for the model by [what-if capacity](slo-capacity-planner.md). Its
+  `TTFT(T) = A*T + B` fit was built and removed (queue wait landed in the
+  intercept). Still worth reading for the measurements, and for the floor's
+  derived prefill mu, which survives as a consumer of `V_P`.
 - **[A per-token economy](per-token-economy.md)** — the reference for every
   component and formula in the saturation analyzer, and the argument for making
   tokens the native unit of demand and capacity on both roles. Both documents
@@ -208,9 +209,10 @@ last; it is the unit change that makes the other two land.
   questions from a recording, a live Prometheus or the controller: what rate
   a TTFT/TPOT SLO allows, and what SLO a given number of prefill and decode
   replicas holds before it saturates, per token bucket or for the current mix.
-  Reuses the ITL line and the TPOT pricing as they are; adds the TTFT model
-  nothing has today (queue wait plus a prefill line fitted on a queue-free
-  signal plus KV transfer), with its own learner PRs.
+  Reuses the ITL line and the TPOT pricing as they are. Adds the TTFT model
+  nothing has today, mostly from series already collected: a per-pod queue
+  with the measured imbalance, prefill capacity as a busy-minute throughput,
+  and KV transfer plus decode's first step on P/D.
 
 ## Product and lifecycle
 
