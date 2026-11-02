@@ -64,9 +64,9 @@ func TestPodSearchPrimitives(t *testing.T) {
 	assert.Equal(t, []int{2, 8}, jointPods([]podBits{dec, pre}, []int{6, 16}, 10, []int{2, 8}))
 }
 
-// TestRescaleMixedTieMovesAPodBetweenRoles: when both plans leave a model the
-// same GPUs, it rounds each side alone, so a model at its target still moves
-// a pod to the role its demand has moved to. Prefill holds two 4-GPU pods
+// TestRescaleMixedTieMovesAPodBetweenRoles: of the plans that leave a model
+// the same GPUs, it takes the one that sheds most, so a model at its target
+// still moves a pod to the role its demand has moved to. Prefill holds two 4-GPU pods
 // with demand for one; decode one 8-GPU pod with demand for 12 GPUs. At a
 // target of 16 decode takes a 4-GPU pod and prefill gives one; shedding
 // nothing would leave both as they are, also at 16.

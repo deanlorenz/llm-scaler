@@ -587,28 +587,44 @@ Both roundings, fill and reclaim, are greedy, which is exact while the
 model has one replica size. A model with more than one size, in one role or
 across roles, is rounded by an exact pod search instead (`roundExact` in
 `rescale_pods.go`): a bounded knapsack, on bitsets, over each role's
-variants. It weighs two plans and takes the one that leaves the model more
-GPUs, rounding each side alone on a tie:
+variants. At one target it searches every pair of a fill and a shed:
 
-- **Round each side alone.** Fill the most GPUs within the summed growth of
-  the roles not cut, each role bounded as the greedy pass bounds it. Shed the
-  most GPUs within the summed cut, each role no further than its cut rounded
-  up to its smallest removable pod, keeping `minReplicas`, scale-down holds,
-  a role's last replica while it has a share, and the cheapest-at-one rule.
-- **Shed nothing.** Fill the most GPUs within what the shares add above what
-  the model holds; open only when they add zero or more.
+- **Fill** the roles not cut, within their summed growth, each role bounded
+  as the greedy pass bounds it.
+- **Shed** the roles cut, within their summed cut, each role no further than
+  its cut rounded up to its smallest removable pod, keeping `minReplicas`,
+  scale-down holds, a role's last replica while it has a share, and the
+  cheapest-at-one rule.
 
-Each plan's GPUs are nondecreasing in the target, so the larger is too: a
-larger target never leaves fewer GPUs. Greedy, prefill on an empty 8-GPU
-variant and decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and
-8 at 11. The second plan closes as soon as the shares add less than the
-model holds, so a cut of a pod or more is shed. The second plan is what keeps a model at its
-target still: rounded alone, a growing role short of a pod made a cut role
-shed one, and the next cycle took it back. Neither plan keeps the model at
-or below its target, though: a role rounded up to a whole pod can leave the
-next cycle a cut no pod meets while the other role still grows, so a model
-can take one more step past its target before it settles
-([#421](https://github.com/ev-shindin/llm-scaling-manager/issues/421)).
+Of those pairs the model takes the one that leaves it the most GPUs without
+passing the room, what the shares add above what the model holds, and among
+equals the one that sheds most, so a model at its target still moves a pod
+to the role its demand moved to. When no pair is within the room, the model
+sheds what it can and grows nothing. A cut of a pod or more is shed, and a
+growing role short of a pod no longer makes a cut role shed one for nothing,
+which the next cycle took back.
+
+Bounded by the room, a model never ends above both its target and what it
+holds. Rounding each side alone did: prefill on one 8-GPU pod and decode on
+four 4-GPU pods, given 40 GPUs split 20 and 20, rounded prefill up to three
+pods. On the next cycle prefill was cut by 4, which no pod meets, while
+decode still grew, and the model ended at 44
+([#421](https://github.com/ev-shindin/llm-scaling-manager/issues/421)). On
+the rerun grid of `TestRescaleMixedRerunIsStable`, the second cycles that
+move went from 1240 to 264, and none passes its target.
+
+The plan of one target alone is not monotone: one GPU more can turn a cut of
+a pod into a cut no pod meets. Prefill on a 12-GPU pod and decode on three
+8-GPU pods reach 40 at a target of 41 by shedding a decode pod; at 42 decode
+is cut by 7, and the plan of 42 alone keeps 36. So the model takes the best
+plan of its target and of every lower one, the plan of the highest target
+among equals. That best never falls as the target rises, so a larger target
+never leaves fewer GPUs (greedy, prefill on an empty 8-GPU variant and
+decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and 8 at 11),
+and no lower target's room exceeds this one's, so the model still stays
+within its target. The scan of lower targets stops at the first whose room
+cannot beat the best so far; over the mixed-size test grids 98% of
+roundings need no lower target and none needs more than 14.
 
 The search takes the most GPUs first and cost order only among equal sums, a
 change from the greedy pass: on a cheap 6-GPU variant and a dearer 4-GPU

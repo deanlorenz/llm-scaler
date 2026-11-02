@@ -380,8 +380,9 @@ func TestRescaleMixedKeepsTheScaleDownRules(t *testing.T) {
 // model goes back to where it started: that is a pod deleted and created
 // again every cycle. A regression guard: rounded alone, 31 models at their
 // target moved again and 86 went back, and the greedy rounding before #219
-// moved 2 and sent 13 back. It passes without the shed-nothing plan of
-// roundExact too; TestRescaleMixedHoldsAModelAtItsTarget pins that plan.
+// moved 2 and sent 13 back. TestRescaleMixedHoldsAModelAtItsTarget pins the
+// case that took a pod and gave it back; TestRescaleMixedRerunNeverPassesItsTarget
+// pins the second step past the target of #421.
 func TestRescaleMixedRerunIsStable(t *testing.T) {
 	r := rand.New(rand.NewPCG(219, 3))
 	points, moved, flapped, atTarget := 0, 0, 0, 0
@@ -408,6 +409,90 @@ func TestRescaleMixedRerunIsStable(t *testing.T) {
 	assert.Greater(t, points, 30000)
 	assert.Zero(t, atTarget, "a model at its target moves again")
 	assert.Zero(t, flapped, "a model goes back to where it started")
+}
+
+// TestRescaleMixedRerunStopsAtItsTarget is #421 on whole-node pods. Prefill
+// holds one 8-GPU pod (16-GPU in the second case) and decode four pods half
+// that size, with the same demand, and are given 40 GPUs (80): split evenly,
+// prefill rounds its share up to a whole pod, takes two, and the model is at
+// its target. On the next cycle at the same target prefill is cut by half a
+// pod, which no pod meets, while decode still grows: rounded alone it took a
+// pod, and the model ended at 44 GPUs (88), half a pod above its target.
+func TestRescaleMixedRerunStopsAtItsTarget(t *testing.T) {
+	for _, c := range []struct{ prefill, decode int }{{8, 4}, {16, 8}} {
+		dem := 100 * float64(c.prefill)
+		req := podRequest(map[string]float64{domain.RolePrefill: dem, domain.RoleDecode: dem}, []podVariant{
+			{name: "p", role: domain.RolePrefill, gpus: c.prefill, cur: 1, cost: float64(c.prefill), perGPU: 100},
+			{name: "d", role: domain.RoleDecode, gpus: c.decode, cur: 4, cost: float64(c.decode), perGPU: 100},
+		})
+		target := 5 * c.prefill
+		require.Equal(t, map[string]int{domain.RolePrefill: target / 2, domain.RoleDecode: target / 2}, podRoleShares(req, target))
+		first := podApplied(req, target)
+		require.Equal(t, target, podCurrentGPUs(first), "the first cycle reaches the target: %s", describePodModel(req, target))
+		require.Equal(t, 3, first.VariantStates[0].CurrentReplicas, "prefill rounds up to whole pods")
+		assert.Equal(t, target, podGPUs(first, target), "%d- and %d-GPU pods: at its target the model keeps its pods: %s",
+			c.prefill, c.decode, describePodModel(first, target))
+	}
+}
+
+// TestRescaleMixedPlansAcrossLowerTargets: prefill holds one 12-GPU pod,
+// decode three 8-GPU pods beside an empty 4-GPU variant. At a target of 41
+// prefill grows a pod and decode, cut by 8, sheds one: 40 GPUs. At 42 decode
+// is cut by 7, which no pod meets, and growing prefill alone passes the
+// target, so the plan of 42 alone keeps 36, fewer than 41 leaves. The plan of
+// 41 is still one 42 may take.
+func TestRescaleMixedPlansAcrossLowerTargets(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 2400, domain.RoleDecode: 1600}, []podVariant{
+		{name: "p12", role: domain.RolePrefill, gpus: 12, cur: 1, cost: 12, perGPU: 100},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 3, cost: 8, perGPU: 100},
+		{name: "d4", role: domain.RoleDecode, gpus: 4, cost: 4.4, perGPU: 100},
+	})
+	require.Equal(t, map[string]int{domain.RolePrefill: 25, domain.RoleDecode: 17}, podRoleShares(req, 42))
+	assert.Equal(t, 40, podGPUs(req, 41), describePodModel(req, 41))
+	assert.Equal(t, 40, podGPUs(req, 42), describePodModel(req, 42))
+	for target := 30; target < 60; target++ {
+		assert.LessOrEqual(t, podGPUs(req, target), podGPUs(req, target+1), "target %d: %s", target, describePodModel(req, target, target+1))
+	}
+}
+
+// TestRescaleMixedRerunNeverPassesItsTarget: over a grid of mixed-size
+// models and targets within 16 GPUs of what each holds, no cycle ends above
+// both its target and what the model held when it began, the first or the
+// second at the same target. Before #421 was fixed, 4924 first cycles and
+// 827 second ones did.
+func TestRescaleMixedRerunNeverPassesItsTarget(t *testing.T) {
+	r := rand.New(rand.NewPCG(421, 1))
+	points, wholeNode, firstPast, secondPast := 0, 0, 0, 0
+	example := ""
+	for range 1000 {
+		req := randomPodModel(r, true, false)
+		cur := podCurrentGPUs(req)
+		whole := slices.ContainsFunc(req.VariantStates, func(st domain.VariantReplicaState) bool { return st.GPUsPerReplica == 8 })
+		for target := max(cur-16, 0); target <= cur+16; target++ {
+			next := podApplied(req, target)
+			first := podCurrentGPUs(next)
+			second := podGPUs(next, target)
+			points++
+			if whole {
+				wholeNode++
+			}
+			if first > max(target, cur) {
+				firstPast++
+			}
+			if second > max(target, first) {
+				secondPast++
+				if example == "" {
+					example = fmt.Sprintf("target %d: %d to %d to %d: %s", target, cur, first, second, describePodModel(next, target))
+				}
+			}
+		}
+	}
+	t.Logf("%d points, %d on models with whole-node 8-GPU pods: %d first and %d second cycles pass their target",
+		points, wholeNode, firstPast, secondPast)
+	assert.Greater(t, points, 30000)
+	assert.Greater(t, wholeNode, 10000)
+	assert.Zero(t, firstPast, "a first cycle passes its target")
+	assert.Zero(t, secondPast, "a second cycle passes its target, first at %s", example)
 }
 
 // describePodModel prints a model's variants and demand, and what each of
