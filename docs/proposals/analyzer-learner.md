@@ -779,13 +779,14 @@ not cover a key.
 | "For good" self-sealing low mu | closed-loop probe (PR 3) |
 | k2 adopts its first reading (#392) | first sample |
 | Speculative decoding prices the ITL step as a token (#274) | known truth |
+| KV per request assumes one output length (#276) | known truth |
 
 **Where each row stands after 0b.** The code table is `findings` in
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 29 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 20 a mutant runs the production learner
+- **Caught:** 30 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 21 a mutant runs the production learner
   (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
@@ -805,7 +806,11 @@ finding above is in exactly one state:
   decoding prices the ITL step as a token" is caught since #274: ten vLLM
   replicas each accepting 0.5-2 draft tokens a step read ITL per step, and
   with the correction's replay switch off
-  known-truth/itl/speculative-accepted-tokens fails (20 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
+  known-truth/itl/speculative-accepted-tokens fails (20 of 20 seeds).  "KV per request
+  assumes one output length" is caught since #276: a bimodal workload with
+  lengths on vLLM's bucket bounds, read through the histogram's bound on
+  E[O^2], and with the spread's replay switch off known-truth/k2/output-spread
+  and known-truth/mu/output-spread each fail (19 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
   check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,

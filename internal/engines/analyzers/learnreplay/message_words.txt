@@ -1114,6 +1114,7 @@ kueue.releaseToNonReclaimingLenders
 kueueBorrowedGPUs
 kv-bound
 kv-cache-utilization-scorer
+kv-per-request-output-dispersion
 kvCacheThreshold
 kvCacheUsagePct
 kvCeiling
@@ -1296,6 +1297,7 @@ modelAvgInputTokens
 modelAvgOutputTokens
 modelCount
 modelID
+modelOutputFactor
 modelTotalAfter
 modelTotalBefore
 model_name
@@ -1473,6 +1475,7 @@ out
 outcome
 outlived
 output
+outputDispersion
 outputTokens
 outputTokensNow
 outputTokensWas

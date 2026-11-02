@@ -65,13 +65,70 @@ length) plus the prefix-cache hit rate, and two derived figures.
 ```
 hitRate  = clamp(hitRate, 0, 1)        // NaN -> 0
 ILeff    = IL x (1 - hitRate)
-KVreq    = ILeff + OL/2
+D        = E[O^2] / OL^2               // the spread of output lengths, >= 1
+KVreq    = ILeff + D x OL/2
 ```
 
 `ILeff` is the prompt the engine must actually compute — a prefix-cache hit
 costs nothing. `KVreq` is the KV footprint of **one resident request**, averaged
-over its life: it holds the whole prompt throughout, and its generation grows
-from nothing to `OL`, so the generation contributes its mean, `OL/2`.
+over the time requests are resident: it holds the whole prompt throughout, and
+its generation grows from nothing to its length.
+
+When every request generates `OL` tokens, the generation contributes its mean,
+`OL/2`, and `D` is 1. When lengths vary, a long request stays resident longer,
+so a snapshot of the batch finds it in proportion to how long it stays, and the
+average resident request holds `ILeff + E[O^2]/(2 OL)` (issue #276). With `D`
+taken as 1, the resident requests were over-counted by 7% for uniform lengths,
+20% for exponential ones and 44% for a lognormal with cv 1.5, at `IL = 2 OL`.
+
+`D` is read from the engine's output-length histogram over the same `[5m]` as
+`OL`: vLLM's `vllm:request_generation_tokens_bucket`, and SGLang's
+`sglang:generation_tokens_histogram_bucket`, which SGLang publishes behind the
+`--collect-tokens-histogram` its `OL` needs too. The buckets bound `E[O^2]`
+rather than give it, so the collector takes the least `E[O^2]` the buckets and
+the exact mean allow (`domain.SquaredMeanLowerBound`,
+`ReplicaMetrics.AvgOutputTokensSquared`): every bucket's requests at one length,
+a water level clamped into each bucket's bounds. The true `E[O^2]` is never
+below it, so `D` moves `KVreq` towards the truth and never past it, and equal
+lengths read `D = 1`. On vLLM's 1-2-5 buckets it recovers about half of the
+spread of a smooth distribution, and all of it when lengths sit on the buckets'
+upper bounds (a bucket's least length is taken as its lower bound, not one
+above it). A mean up to 1% outside what the buckets allow (rate extrapolation)
+is clamped onto them, and the bound is returned against the caller's own mean,
+so the clamp does not inflate `D`.
+
+`D` is 1, and `KVreq` is `ILeff + OL/2` as before, when:
+
+- any generating replica lacks the histogram (an engine that does not publish
+  it, a relabelling that drops it, or a histogram refused as not one reading:
+  no `+Inf` bucket, a mean outside the buckets): its lengths would otherwise
+  count as all one length beside the others' spread (`fleetOutputDispersion`).
+  This sets the fleet's `D`, which the mu and the zero-replica estimate read;
+  the derived k2 of each live replica reads that replica's own `D`, so on a
+  mixed fleet the replicas that read the histogram keep theirs in k2;
+- a shape change is outstanding (the window `shapeChangeHoldSeconds` opens),
+  on every path: the `[5m]` histogram then holds both shapes, and their
+  difference would read as a spread of one workload's lengths. At IL 2000 and
+  1000 -> 100 out, half way through, it reads `D` 1.67 and prices k2 20% high;
+- the replay switch `kv-per-request-output-dispersion`
+  (`SwitchKVPerRequestOutputDispersion`) is off.
+
+The fleet's `D` is request-weighted, as `OL` is. The derived k2 of a live
+replica uses the replica's own `D`, from however many requests it completed in
+the window: the ratio is biased low on few, so a quiet replica's k2 errs low
+(more replicas) and moves from cycle to cycle. A zero-replica variant's
+estimate multiplies the model's plain mean output length by
+`modelOutputFactor = E[O^2] / (E[O] x plain mean)`, so its generated half is
+the fleet's request-weighted `E[O^2] / (2 E[O])`; the request-weighted `D`
+times the plain mean mixed two populations and priced up to 42% too much
+capacity. The factor is under 1 when the request-weighted mean is well under
+the plain one (99 requests a second of 100 tokens beside 1 of 1000 read 0.33),
+and is then priced as 1: the estimate never moves below the `I + O/2` it had
+before, which in that case is the old over-statement, not a new one. The log
+carries the factor as computed. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
+likewise, and `zero-replica-capacity-estimate` the factor as
+`modelOutputFactor`. The throughput and slo analyzers still price
+`ILeff + OL/2` (#433).
 
 `KVreq` is the single most load-bearing quantity in the analyzer. Everything
 that asks "how many requests fit" divides by it.
@@ -112,15 +169,23 @@ I = avgInputTokens
 O = avgOutputTokens
 
 N_steady = min(B x O / (I + O), S)
-k2       = floor(N_steady x (I + O/2))
+k2       = floor(N_steady x (I + D x O/2))
 ```
 
 `N_steady` is how many requests a continuous-batching engine holds in steady
 state: each step spends `B` token-slots, a request needs `I` of prefill once
 and `O` decode steps, so the fraction of a request's life that is decode is
 `O/(I+O)` and the batch sustains `B·O/(I+O)` of them — capped by the engine's
-own `--max-num-seqs`. Multiplying by `(I + O/2)` converts a count of requests
-into the tokens they occupy, the same per-request footprint as `KVreq`.
+own `--max-num-seqs`. Multiplying by `(I + D x O/2)` converts a count of
+requests into the tokens they occupy, the same per-request footprint as
+`KVreq`, with the same spread `D` (the replica's own; see the shape above).
+`N_steady` is a throughput over the token budget and keeps the means.
+
+The spread moves the two figures it enters in opposite directions, both
+towards the truth: `k2` rises (the sequences the batch cap admits hold more KV
+each, so a replica holds more before its batch binds, and fewer replicas are
+ordered), and the derived mu falls where the KV and not the batch cap binds
+(fewer sequences fit at `kPrice`, so more replicas are ordered).
 
 `S` is the batch cap `pricingBatchCap` (`batch_cap.go`) hands `computeK2`,
 and the `k2-decision` line names its source (`batchCapSource`):
@@ -162,7 +227,7 @@ reads low, toward more replicas (the `slo` analyzer's `reachableFill`
 accounts for this; saturation does not).
 
 With no `EngineParams` at all (the scale target was never read), a learned cap
-still prices P3, with `B` taken as not binding (`estimateCapacityAtCap`);
+still prices P3, with `B` taken as not binding (`estimateCapacityAtCapSpread`);
 `min(k1, k2)` keeps that at or under the k1 it replaces.
 
 The learned cap (`observeBatchCap`, issue #399) is the max, per engine rank,
@@ -1402,8 +1467,9 @@ the per-variant `replica-capacity-summary` stands in for them.
 - `derived-mu` — every term of the mu derivation, because a mu wrong by 8x
   looks identical in the log whether the fault is the output length, the
   sequence count, the ITL line or the pricing point. `kvReqPerSeq` is the
-  priced shape and `kvReqFleet` the fleet's own; `muShortWindow` says whether
-  the pair moved to the short window.
+  priced shape and `kvReqFleet` the fleet's own; `outputDispersion` is the
+  spread of output lengths priced into `kvReqPerSeq` (1 is none, or none
+  read); `muShortWindow` says whether the pair moved to the short window.
   It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
   `itl-line-borrowed`, `itl-line-none`, `itl-gps-mismatch`), carries `namespace` beside
   `variant`: one Deployment applied to two namespaces logs the same variant

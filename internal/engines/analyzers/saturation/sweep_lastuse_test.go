@@ -56,6 +56,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				0,    // tokensInUse
 				600,  // avgOutput
 				1000, // avgInput
+				1,    // outputDispersion
 				10,   // queueThreshold
 				params,
 				flagsBatchCap(params),
@@ -175,7 +176,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				return a.computeK2(historyKey, model, ns, variant,
 					50,    // queueLen over threshold: Priority 1 fires
 					10000, // tokensInUse -> k2Observed well below the stored 90,000
-					600, 1000, 10,
+					600, 1000, 1, 10,
 					nil, pricedBatchCap{}, 1,
 					1000000, 1000000,
 					domain.RoleDecode, false, admission{}, false, logr.Discard())

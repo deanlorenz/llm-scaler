@@ -197,9 +197,11 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // shape it is serving now, with its resident sequences capped at batchCap per
 // engine rank.
 //
-// kvPerRequest is the time-averaged footprint IL + OL/2 (shape.Shape.KVreq):
-// sequence ages are spread over [0, OL] in steady state, so the average
-// resident sequence carries half its generation.
+// kvPerRequest is the time-averaged footprint ILeff + D*OL/2
+// (shape.Shape.KVreq): sequence ages are spread over each request's length,
+// so with equal lengths the average resident sequence carries half its
+// generation, and with a spread D = E[O^2]/OL^2 of them a long request,
+// resident longer, weighs more (shape.WithOutputDispersion, issue #276).
 //
 // The cap is the one the derived k2 is priced at (pricingBatchCap): the
 // engine's max_num_seqs, lowered by --max-num-active-seqs when set (issue
@@ -242,7 +244,7 @@ func deriveMuAtCap(model itl.Model, params *capacity.EngineParams, batchCap int6
 	}
 	capacityTokens := capacityTokensFor(params, ranks, totalKvTokens)
 	// The SHAPE's KVreq, not one re-derived here. shape.New computes
-	// ILeff = IL*(1 - prefixHitRate) and KVreq = ILeff + OL/2, so a fleet
+	// ILeff = IL*(1 - prefixHitRate) and KVreq = ILeff + D*OL/2, so a fleet
 	// whose prompts are largely cache hits occupies far less than IL + OL/2
 	// and holds correspondingly more sequences. Re-deriving it dropped the
 	// hit-rate term, which on a caching workload under-states the resident

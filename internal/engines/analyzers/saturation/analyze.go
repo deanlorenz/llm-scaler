@@ -193,6 +193,14 @@ type cycle struct {
 	stableInput  float64
 	stableOutput float64
 	shapeChanged bool
+	// fleetDispersion is the spread of the fleet's output lengths, D =
+	// E[O^2]/E[O]^2 (fleetOutputDispersion): 1 with no reading, while a
+	// shape change is outstanding, or with SwitchKVPerRequestOutputDispersion
+	// off.
+	fleetDispersion float64
+	// shapeChanging is a shape change outstanding (resolvePricing): the mu
+	// moves to the short window if it can, and no path prices a spread.
+	shapeChanging bool
 	// keys is the output length the k2 and throughput keys are built from:
 	// the fleet's, its bucket held across a boundary (keyLengths), and the
 	// move of its bucket this cycle, if one happened.
@@ -318,6 +326,12 @@ func (c *cycle) observeFleetShape() {
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	c.fleetOutput = fleetOutputLength(c.input.ReplicaMetrics, c.rolesByVariant)
+	// The spread of those lengths, which the KV a resident request holds
+	// depends on as much as on their mean (issue #276).
+	c.fleetDispersion = 1
+	if c.a.kvOutputDispersion {
+		c.fleetDispersion = fleetOutputDispersion(c.input.ReplicaMetrics, c.rolesByVariant)
+	}
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -390,8 +404,14 @@ func (c *cycle) resolvePricing() {
 	c.muDivisor = c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	c.muInput, c.muShortWindow = c.fleetInput, false
 	// On a.now: noteFleetShape stamps lastChangedAt with it.
-	if c.a.shapeChangedWithin(c.input.Namespace, c.input.ModelID,
-		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), c.a.now()) {
+	c.shapeChanging = c.a.shapeChangedWithin(c.input.Namespace, c.input.ModelID,
+		c.cfg.ShapeChangeWindow(ShapeChangeHoldMax), c.a.now())
+	// No spread while the shape changes, on any path (issue #276): the [5m]
+	// histogram then holds both shapes, and their difference would read as a
+	// spread of one workload's lengths. The k2 path reads the same gate
+	// (replicaOutputDispersion), and so does the zero-replica estimate.
+	if c.shapeChanging {
+		c.fleetDispersion = 1
 		if recent := fleetOutputLengthRecent(c.input.ReplicaMetrics, c.rolesByVariant); recent > 0 {
 			c.muDivisor = recent
 			if recentIn := servedPromptLengthRecent(c.input.ReplicaMetrics); recentIn > 0 {
@@ -614,12 +634,24 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// it: see its comment for the run that decided that.
 		itlModel := c.itlModels[rm.VariantName]
 		engineParams := engineParamsFor(c.a, c.input.Namespace, c.input.ModelID, rm.VariantName)
-		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate)
+		// The spread of output lengths is priced into the KV a resident
+		// request holds (KVreq = ILeff + D*OL/2, issue #276): with lengths
+		// that vary, a long request stays resident longer, so fewer
+		// requests fit the same KV. D is 1 with no reading.
+		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate).WithOutputDispersion(c.fleetDispersion)
 		// muShape is the shape mu is PRICED at: fleetShape on a steady fleet,
 		// and both halves on the short window while a shape change is
 		// outstanding (see resolvePricing). fleetShape stays the fleet's own
 		// [5m] reading, because that is the figure noteLineMismatch compares
 		// an observed token rate against.
+		//
+		// The short-window shape takes no spread. That is not a guard of its
+		// own: the short window opens only while a shape change is
+		// outstanding, and then resolvePricing has already set
+		// fleetDispersion to 1 for every shape. The gate there is what keeps
+		// the [5m] spread, which then holds both shapes, off the new shape's
+		// requests; TestKVOutputDispersion_TheShortWindowTakesNoSpread holds
+		// it.
 		muShape := fleetShape
 		if c.muShortWindow {
 			muShape = shape.New(c.muInput, c.muDivisor, rm.PrefixCacheHitRate)
@@ -690,6 +722,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"muShortWindow", c.muShortWindow,
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
+				// D = E[O^2]/E[O]^2 of the output lengths, priced into
+				// KVreq; 1 is no spread, or none read.
+				"outputDispersion", muShape.OutputDispersion,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).
@@ -705,7 +740,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
-			}, c.logger)
+			}, c.shapeChanging, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through
@@ -763,9 +798,18 @@ func variantsPricedFromBorrowedLine(caps []capacity.ReplicaCapacity) map[string]
 // priceDemand aggregates the per-replica records to variant and role totals,
 // and adds what the router is holding and no pod has started.
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
+	// The zero-replica estimate's factor on the model's mean output length
+	// (modelOutputFactor, issue #276): 1 while the shape changes, as on every
+	// path, and with the switch off.
+	modelFactor := 1.0
+	if c.a.kvOutputDispersion && !c.shapeChanging {
+		roles := rolesFromStates(c.input.VariantStates)
+		_, plain, _ := computeModelWorkloadAverages(c.input.ReplicaMetrics, roles)
+		modelFactor = modelOutputFactor(c.input.ReplicaMetrics, roles, plain)
+	}
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
-		!c.cfg.EnableLearnedStateReuse, c.logger)
+		!c.cfg.EnableLearnedStateReuse, modelFactor, c.logger)
 	pricedFromLine := variantsPricedFromBorrowedLine(caps)
 	for i := range variantCapacities {
 		vc := &variantCapacities[i]

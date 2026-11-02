@@ -232,6 +232,10 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 		Description: "Mean output tokens per request per pod over a SHORT window, used only as the derived mu divisor (see AvgOutputTokensRecent)",
 	})
 
+	// The output-length histogram over the same [5m], for the spread of
+	// output lengths beside the mean (issue #276).
+	registerOutputLengthQueries(registry)
+
 	// Average input (prompt) tokens per completed request
 	// Used in k2 derivation formula: k2 = N_max × (I + O/2)
 	// Grouping key and namespace scoping: see the note above RegisterSaturationQueries

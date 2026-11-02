@@ -28,6 +28,7 @@ var EngineSpecificQueries = []string{
 	QueryCacheConfigInfo,
 	QueryAvgOutputTokens,
 	QueryAvgOutputTokensRecent,
+	QueryOutputTokensBuckets,
 	QueryAvgInputTokens,
 	QueryAvgInputTokensRecent,
 	QueryPrefixCacheHitRate,

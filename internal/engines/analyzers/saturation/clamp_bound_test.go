@@ -46,7 +46,7 @@ func TestACeilingSurvivesADifferenceTheBorrowRefuses(t *testing.T) {
 			rec := a.capacityStore.Get(ns, model, zero)
 			require.NotNil(t, rec)
 
-			got := a.estimateStoredCapacity(rec, model, ns, zero, accel, 1, 0.9, 1000, 600, logr.Discard())
+			got := a.estimateStoredCapacity(rec, model, ns, zero, accel, 1, 0.9, 1000, 600, 1, logr.Discard())
 			require.Equal(t, float64(ceiling), got,
 				"the parked variant's estimate is not bounded by its live sibling's measured capacity")
 		})
