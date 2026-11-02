@@ -99,4 +99,11 @@ func TestMergePodInstances_OutputTokensSquared(t *testing.T) {
 	if got := collapseToPods([]domain.ReplicaMetrics{rank(100, 20000, 0, true), rank(0, 0, 0, false)}); got[0].AvgOutputTokensSquaredKnown {
 		t.Error("a plain mean over an instance with no output doubles the spread, and is not a reading")
 	}
+	// An instance with a request rate and no mean (its mean series missing)
+	// weighs both figures with a zero: two equal instances read the spread
+	// doubled.
+	if got := collapseToPods([]domain.ReplicaMetrics{rank(100, 20000, 1, true), rank(0, 0, 1, false)}); got[0].AvgOutputTokensSquaredKnown {
+		t.Errorf("an instance with a rate and no output length must leave the pod unknown, got E[O^2] %v against a mean %v",
+			got[0].AvgOutputTokensSquared, got[0].AvgOutputTokens)
+	}
 }

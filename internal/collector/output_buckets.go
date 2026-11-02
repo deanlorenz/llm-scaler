@@ -15,12 +15,15 @@ import (
 // the rest, like the other supplementary series (extractSequenceCap).
 //
 // The query is engine-specific, and filterResultsToModel has narrowed it to
-// the model already; a foreign model's series is skipped here as well, so
-// the block does not rest on that. One carrying no model_name is kept, as
-// the instance key already ties it to a seen pod. A series whose bound
-// does not parse, or whose rate is not a finite non-negative number, is
-// dropped; a histogram missing a bucket is then refused as a whole by
-// domain.SquaredMeanLowerBound, never read with a hole in it.
+// this model already, dropping a series with no model_name or another one.
+// The same check here keeps the block from resting on that.
+//
+// A series whose bound does not parse, or whose rate is not a finite
+// non-negative number, is dropped. A dropped finite bucket only widens the
+// span between its neighbours (the counts are cumulative), so the bound
+// stays a bound, a little lower. A dropped +Inf bucket leaves the requests
+// above the last bound uncounted, and domain.SquaredMeanLowerBound refuses
+// the histogram.
 func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	result := results[registration.QueryOutputTokensBuckets]
@@ -28,7 +31,7 @@ func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, mode
 		return
 	}
 	for _, value := range result.Values {
-		if m, ok := value.Labels[seriesModelLabel]; ok && m != "" && m != modelID {
+		if value.Labels[seriesModelLabel] != modelID {
 			continue
 		}
 		le, err := strconv.ParseFloat(value.Labels["le"], 64)

@@ -313,11 +313,11 @@ func TestBatchCapReaders_ADeclaredCapAbove256(t *testing.T) {
 // tracked by #427. Pinned so that changing it is a deliberate act.
 func TestBatchCapReaders_TheZeroReplicaEstimateIgnoresTheDeclaredCap(t *testing.T) {
 	assert.Equal(t,
-		estimateCapacityAtCap(declaredParams(64), 256, 1000, 500),
-		estimateCapacityFromParams(declaredParams(64), 1000, 500))
+		estimateCapacityAtCapSpread(declaredParams(64), 256, 1000, 500, 1),
+		estimateCapacityFromParams(declaredParams(64), 1000, 500, 1))
 	assert.NotEqual(t,
-		estimateCapacityAtCap(declaredParams(64), 64, 1000, 500),
-		estimateCapacityFromParams(declaredParams(64), 1000, 500), "the declared 64 would bind")
+		estimateCapacityAtCapSpread(declaredParams(64), 64, 1000, 500, 1),
+		estimateCapacityFromParams(declaredParams(64), 1000, 500, 1), "the declared 64 would bind")
 }
 
 // A learned cap lowers the derived mu, as it lowers P3, where the policy

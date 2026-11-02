@@ -39,7 +39,8 @@ type Shape struct {
 	ILeff float64
 	// OutputDispersion is D = E[O^2] / E[O]^2 of the output lengths, at
 	// least 1 (dispersion.go). New sets 1, every request the same length;
-	// WithOutputDispersion sets a measured spread.
+	// WithOutputDispersion sets a measured spread. A Shape literal leaves it
+	// 0, which a reader takes as 1, as KVreq does.
 	OutputDispersion float64
 	// KVreq is the time-averaged KV token footprint per in-flight request:
 	//   KVreq = ILeff + OutputDispersion * AvgOutputTokens/2

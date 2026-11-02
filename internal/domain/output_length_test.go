@@ -127,6 +127,14 @@ func TestSquaredMeanLowerBound_Edges(t *testing.T) {
 	if want := (4*100.0*100 + 6*350.0*350) / 10; math.Abs(a-want) > 1e-3*want {
 		t.Fatalf("bound %.1f, want %.1f", a, want)
 	}
+	// A negative or -Inf bound is no length: it is dropped, not read as a
+	// span whose top is under its bottom.
+	for _, bad := range []float64{-5, math.Inf(-1)} {
+		v, ok := SquaredMeanLowerBound(append([]LengthBucket{{bad, 2}}, sorted...), 250)
+		if !ok || math.Abs(v-a) > 1e-6 {
+			t.Errorf("a bound of %v: %v %v, want %v as without it", bad, v, ok, a)
+		}
+	}
 	if _, ok := SquaredMeanLowerBound([]LengthBucket{{100, 6}, {500, 4}, {inf, 10}}, 200); !ok {
 		t.Fatal("a falling rate must read as no requests in that bucket, not refuse the histogram")
 	}

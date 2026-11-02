@@ -355,18 +355,27 @@ func mergeMetadata(group []domain.ReplicaMetrics) *domain.ReplicaMetricsMetadata
 
 // mergeOutputSquared is the pod's E[O^2] bound, weighted as AvgOutputTokens
 // is (weightedByRequestRate), so the two divide into the pod's spread of
-// output lengths. It is known only when every rank that completed requests
-// (AvgOutputTokens > 0) read one: a rank without a histogram would otherwise
-// count as no spread. A rank that completed nothing adds nothing. So is the
-// fallback to a plain mean, when no rank reports a request rate, known only
-// when every rank completed requests: a plain mean over a rank with no output
-// halves the mean and the bound alike, which doubles their ratio.
+// output lengths.
+//
+// It is known only when every rank that completed requests (AvgOutputTokens
+// > 0) read one: a rank without a histogram would otherwise count as no
+// spread. A rank with no output length adds nothing only while it carries no
+// weight. One that reports a request rate (its mean series missing, the rate
+// present) would weigh both the mean and the bound with a zero, dividing
+// each by the same share, which multiplies their ratio by its inverse: two
+// equal ranks, one without a mean, doubled the spread. So a rank with a rate
+// and no output length leaves the pod unknown. With no rate anywhere the
+// merge falls back to a plain mean, which counts every rank, so it is known
+// only when every rank completed requests.
 func mergeOutputSquared(group []domain.ReplicaMetrics) (float64, bool) {
 	var counted int
 	var rate float64
 	for _, m := range group {
 		rate += m.RequestRate
 		if !(m.AvgOutputTokens > 0) {
+			if m.RequestRate > 0 {
+				return 0, false
+			}
 			continue
 		}
 		if !m.AvgOutputTokensSquaredKnown {

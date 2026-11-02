@@ -85,25 +85,25 @@ func TestPricingBatchCap_Sources(t *testing.T) {
 
 // The derived k2 with no params at all: S sequences of I + O/2, B unknown.
 func TestEstimateCapacityAtCap(t *testing.T) {
-	if got := estimateCapacityAtCap(nil, 100, 1000, 500); got != 125_000 {
+	if got := estimateCapacityAtCapSpread(nil, 100, 1000, 500, 1); got != 125_000 {
 		t.Errorf("no params: %d, want 125000", got)
 	}
 	// B binds: 2000 x 500/1500 = 666 sequences under a cap of 1000.
 	p := &capacity.EngineParams{EffectiveMaxBatchedTokens: 2000}
 	nSteady := 2000.0 * 500 / 1500
-	if got := estimateCapacityAtCap(p, 1000, 1000, 500); got != int64(nSteady*1250) {
+	if got := estimateCapacityAtCapSpread(p, 1000, 1000, 500, 1); got != int64(nSteady*1250) {
 		t.Errorf("B binding: %d", got)
 	}
 	for _, s := range []int64{0, -1} {
-		if got := estimateCapacityAtCap(nil, s, 1000, 500); got != 0 {
+		if got := estimateCapacityAtCapSpread(nil, s, 1000, 500, 1); got != 0 {
 			t.Errorf("cap %d: %d, want 0", s, got)
 		}
 	}
-	if got := estimateCapacityAtCap(nil, 100, 1000, 0); got != 0 {
+	if got := estimateCapacityAtCapSpread(nil, 100, 1000, 0, 1); got != 0 {
 		t.Errorf("no output: %d, want 0", got)
 	}
 	// Params with no budget price nothing, as before the learned cap.
-	if got := estimateCapacityAtCap(&capacity.EngineParams{}, 100, 1000, 500); got != 0 {
+	if got := estimateCapacityAtCapSpread(&capacity.EngineParams{}, 100, 1000, 500, 1); got != 0 {
 		t.Errorf("params with no budget: %d, want 0", got)
 	}
 }

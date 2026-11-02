@@ -79,6 +79,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (replicaRouting): whether its resident KV is charged at its instant
 	// reading.
 	routing replicaRouting,
+	// shapeChanging is the cycle's shape change outstanding (resolvePricing),
+	// read once per cycle so every replica and the fleet shape agree: the
+	// derived k2 then prices no spread (replicaOutputDispersion).
+	shapeChanging bool,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	if rm.TotalKvCapacityTokens <= 0 {
@@ -242,9 +246,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.BusiestRankQueue(), rm.BusiestRankTokens(),
 		rm.AvgOutputTokens, rm.AvgInputTokens,
 		// No spread while a shape change is outstanding, as on the mu's path
-		// (resolvePricing).
-		a.replicaOutputDispersion(rm, a.shapeChangedWithin(namespace, modelID,
-			config.ShapeChangeWindow(ShapeChangeHoldMax), a.now())),
+		// (resolvePricing): the cycle's own reading of the window.
+		a.replicaOutputDispersion(rm, shapeChanging),
 		config.QueueLengthThreshold,
 		engineParams,
 		batchCap,
@@ -1284,7 +1287,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {
-		if derived := estimateCapacityAtCapSpread(rec.EngineParams, rec.EngineParams.BatchCap(), modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
+		if derived := estimateCapacityFromParams(rec.EngineParams, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
 			bounded := derived
 			boundedBy := "derived"
 
@@ -1362,37 +1365,35 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 }
 
 // estimateCapacityFromParams computes a capacity estimate using the k2 derivation
-// formula: N_steady = min(B * O / (I + O), S), capacity = N_steady * (I + O/2).
-// Used by computeK2 (Priority 3) for per-replica estimation and by
-// estimateStoredCapacity for zero-replica variants with model-level workload averages.
-// Returns 0 if estimation is not possible.
+// formula: N_steady = min(B * O / (I + O), S), capacity = N_steady * (I + D*O/2),
+// at the batch cap the engine params state. Used by estimateStoredCapacity
+// for zero-replica variants with model-level workload averages, with dispersion
+// the model's factor (modelOutputFactor); computeK2 (Priority 3) prices a live
+// replica at its pricing batch cap through estimateCapacityAtCapSpread instead.
+// A dispersion below 1, or not finite, is read as 1. Returns 0 if estimation
+// is not possible.
 //
 // The figure is ONE engine's: B and S bound a single data-parallel rank.
 // computeK2 multiplies it by the ranks the live replica reports. The
 // zero-replica path has no live replica to count and keeps the one-engine
 // figure, which can only under-price a data-parallel variant and order more
 // on its way up from zero; its first live replica then prices it in full.
-func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
+func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput, dispersion float64) int64 {
 	if params == nil || params.EffectiveMaxBatchedTokens <= 0 {
 		return 0
 	}
 	// S is the engine's batch cap: max_num_seqs, or a lower
 	// --max-num-active-seqs, the most sequences vLLM runs at once (#335).
-	return estimateCapacityAtCap(params, params.BatchCap(), avgInput, avgOutput)
+	return estimateCapacityAtCapSpread(params, params.BatchCap(), avgInput, avgOutput, dispersion)
 }
 
-// estimateCapacityAtCap is estimateCapacityFromParams at batch cap S, one
-// engine rank's. With no params at all -- a scale target never read, priced
-// from a learned cap -- the budget B is unknown and taken as not binding:
-// nSteady = S. Returns 0 when S or avgOutput is not positive, or when params
-// carry no budget, as estimateCapacityFromParams always has.
-func estimateCapacityAtCap(params *capacity.EngineParams, batchCap int64, avgInput, avgOutput float64) int64 {
-	return estimateCapacityAtCapSpread(params, batchCap, avgInput, avgOutput, 1)
-}
-
-// estimateCapacityAtCapSpread is estimateCapacityAtCap with the spread of
-// output lengths priced into the KV a resident request holds:
-// capacity = N_steady * (I + D*O/2), D = E[O^2]/E[O]^2 (issue #276).
+// estimateCapacityAtCapSpread is estimateCapacityFromParams at batch cap S,
+// one engine rank's, with the spread of output lengths priced into the KV a
+// resident request holds: capacity = N_steady * (I + D*O/2), D =
+// E[O^2]/E[O]^2 (issue #276). With no params at all -- a scale target never
+// read, priced from a learned cap -- the budget B is unknown and taken as
+// not binding: nSteady = S. Returns 0 when S or avgOutput is not positive,
+// or when params carry no budget, as estimateCapacityFromParams always has.
 //
 // I + O/2 is a resident request's KV averaged over its life when every
 // request generates O tokens. With lengths that vary, a request generating

@@ -121,7 +121,11 @@ estimate multiplies the model's plain mean output length by
 `modelOutputFactor = E[O^2] / (E[O] x plain mean)`, so its generated half is
 the fleet's request-weighted `E[O^2] / (2 E[O])`; the request-weighted `D`
 times the plain mean mixed two populations and priced up to 42% too much
-capacity. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
+capacity. The factor is under 1 when the request-weighted mean is well under
+the plain one (99 requests a second of 100 tokens beside 1 of 1000 read 0.33),
+and is then priced as 1: the estimate never moves below the `I + O/2` it had
+before, which in that case is the old over-statement, not a new one. The log
+carries the factor as computed. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
 likewise, and `zero-replica-capacity-estimate` the factor as
 `modelOutputFactor`. The throughput and slo analyzers still price
 `ILeff + OL/2` (#433).
@@ -223,7 +227,7 @@ reads low, toward more replicas (the `slo` analyzer's `reachableFill`
 accounts for this; saturation does not).
 
 With no `EngineParams` at all (the scale target was never read), a learned cap
-still prices P3, with `B` taken as not binding (`estimateCapacityAtCap`);
+still prices P3, with `B` taken as not binding (`estimateCapacityAtCapSpread`);
 `min(k1, k2)` keeps that at or under the k1 it replaces.
 
 The learned cap (`observeBatchCap`, issue #399) is the max, per engine rank,

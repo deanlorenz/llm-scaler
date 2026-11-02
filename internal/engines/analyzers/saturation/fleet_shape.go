@@ -124,8 +124,9 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 //
 // 1, no spread, unless EVERY generating replica with an output length read
 // the bound. One without it (an engine that publishes no histogram, a
-// relabelling that drops it) would otherwise count as a replica whose requests are all one
-// length, and the mix of the two is neither fleet's spread.
+// relabelling that drops it) would otherwise count as a replica whose
+// requests are all one length, and the mix of the two is neither fleet's
+// spread.
 func fleetOutputDispersion(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
 	mean, squared, ok := fleetOutputMoments(replicas, rolesByVariant)
 	if !ok {
@@ -163,8 +164,14 @@ func fleetOutputMoments(replicas []domain.ReplicaMetrics, rolesByVariant map[str
 // 1 of 1000 reads D 3.02 against a plain mean of 550, and priced I + 830 where
 // the fleet's requests hold I + 287 -- 42% too much capacity at I = 1000. So
 // f = E[O^2] / (E[O] x plain). 1, the estimate as before, with no bound read
-// (fleetOutputMoments) or no plain mean. A factor under 1 is read as 1 by
-// estimateCapacityAtCapSpread: the estimate is never priced below I + O/2.
+// (fleetOutputMoments) or no plain mean.
+//
+// The factor is under 1 when the request-weighted mean is well under the
+// plain one: 99 requests a second of 100 tokens beside 1 of 1000 read f
+// 0.33. estimateCapacityFromParams reads it as 1, deliberately: the
+// estimate is never priced below the I + O/2 it had before #276, which here
+// is above what the requests hold (1275 against 1091). That is the old
+// over-statement, not a new one. The log carries the factor as computed.
 func modelOutputFactor(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string, plainMean float64) float64 {
 	mean, squared, ok := fleetOutputMoments(replicas, rolesByVariant)
 	if !ok || !(plainMean > 0) {

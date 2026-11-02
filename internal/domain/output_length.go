@@ -47,7 +47,9 @@ func SquaredMeanLowerBound(buckets []LengthBucket, mean float64) (float64, bool)
 	}
 	bs := make([]LengthBucket, 0, len(buckets))
 	for _, b := range buckets {
-		if math.IsNaN(b.UpperBound) || !(b.Rate >= 0) || math.IsInf(b.Rate, 0) {
+		// A length is never negative, so neither is a bound; -Inf or a
+		// negative bound would put a span's top under its bottom.
+		if !(b.UpperBound >= 0) || !(b.Rate >= 0) || math.IsInf(b.Rate, 0) {
 			continue
 		}
 		bs = append(bs, b)
@@ -138,7 +140,9 @@ func SquaredMeanLowerBound(buckets []LengthBucket, mean float64) (float64, bool)
 	if clamped := target / total; clamped != mean {
 		sq *= (mean / clamped) * (mean / clamped)
 	}
-	// Never below mean^2 (Jensen); rounding in the bisection must not make a
-	// one-length fleet read a spread under 1.
+	// Never below mean^2 (Jensen). In exact arithmetic the water level's sum
+	// of squares already is, so this only guards rounding in the bisection,
+	// which must not make a one-length fleet read a spread under 1; no test
+	// can tell it from the bare sum.
 	return max(sq/total, mean*mean), true
 }

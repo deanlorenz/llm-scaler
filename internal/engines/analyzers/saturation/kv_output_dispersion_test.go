@@ -25,6 +25,13 @@ func withSpread(rm domain.ReplicaMetrics, d float64) domain.ReplicaMetrics {
 	return rm
 }
 
+// derivedEstimate is the source a zero-replica-capacity-estimate line names
+// for an estimate derived from the Deployment's engine params.
+const derivedEstimate = "deployment-derived"
+
+// zeroVariant is the variant at zero replicas the estimate tests price.
+const zeroVariant = "variant-z"
+
 // switchOff turns SwitchKVPerRequestOutputDispersion off.
 func switchOff(a *SaturationAnalyzer) { a.kvOutputDispersion = false }
 
@@ -144,7 +151,7 @@ func zeroReplicaEstimate(t *testing.T, d float64, edit func(*SaturationAnalyzer)
 	_, err := a.Analyze(ctx, in)
 	require.NoError(t, err)
 	for _, e := range logs.FilterMessage("zero-replica-capacity-estimate").All() {
-		if f := e.ContextMap(); f["variant"] == "variant-z" && f["source"] == "deployment-derived" {
+		if f := e.ContextMap(); f["variant"] == zeroVariant && f["source"] == derivedEstimate {
 			return f
 		}
 	}
@@ -211,7 +218,7 @@ func TestKVOutputDispersion_TheFleetSpreadIsRequestWeighted(t *testing.T) {
 // one-figure form is the spread form at 1.
 func TestKVOutputDispersion_EstimateReadsABadSpreadAsNone(t *testing.T) {
 	p := deploymentParams()
-	base := estimateCapacityAtCap(p, 256, 1000, 500)
+	base := estimateCapacityAtCapSpread(p, 256, 1000, 500, 1)
 	for _, d := range []float64{0, 0.5, -1, math.NaN(), math.Inf(1)} {
 		assert.Equal(t, base, estimateCapacityAtCapSpread(p, 256, 1000, 500, d), "D %v", d)
 	}
@@ -244,7 +251,7 @@ func TestKVOutputDispersion_AZeroReplicaEstimateIsRequestWeighted(t *testing.T) 
 	require.NoError(t, err)
 	var got any
 	for _, e := range logs.FilterMessage("zero-replica-capacity-estimate").All() {
-		if f := e.ContextMap(); f["variant"] == "variant-z" && f["source"] == "deployment-derived" {
+		if f := e.ContextMap(); f["variant"] == zeroVariant && f["source"] == derivedEstimate {
 			got = f["derivedCapacity"]
 		}
 	}
@@ -311,4 +318,96 @@ func TestKVOutputDispersion_AShapeChangeHoldsTheK2Spread(t *testing.T) {
 	_, k2 := shapeSwap(t, nil)
 	assert.InDelta(t, 1, k2["outputDispersion"], 1e-12)
 	assert.EqualValues(t, 256*2275, k2["k2"])
+}
+
+// zeroReplicaSwap runs shapeSwap's two cycles for a live variant beside a
+// variant at zero replicas whose record is derived from its Deployment, and
+// returns the second cycle's zero-replica-capacity-estimate line.
+func zeroReplicaSwap(t *testing.T) map[string]any {
+	t.Helper()
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-z", capacity.Record{
+		AcceleratorName: "A100", GpuCount: 1, EngineParams: deploymentParams(),
+		EffectiveCapacity: 1, LearnedFrom: "deployment",
+	}, time.Now())
+	a := NewSaturationAnalyzer(store)
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-a", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+		{VariantName: "variant-z", Role: domain.RoleDecode, AcceleratorName: "A100", CurrentReplicas: 0, GPUsPerReplica: 1},
+	}
+	row := func(out5m, squared, out1m float64) []domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-1", "variant-a", 50_000, 1_000_000, 0, 2000, out5m)
+		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = squared, true
+		rm.AvgOutputTokensRecent, rm.AvgInputTokensRecent = out1m, 2000
+		return []domain.ReplicaMetrics{rm}
+	}
+	ctx1, _ := observedCtx(t)
+	_, err := a.Analyze(ctx1, makeAnalyzerInput(row(1000, 1_000_000, 1000), states))
+	require.NoError(t, err)
+	ctx2, logs := observedCtx(t)
+	_, err = a.Analyze(ctx2, makeAnalyzerInput(row(550, 505_000, 100), states))
+	require.NoError(t, err)
+	for _, e := range logs.FilterMessage("zero-replica-capacity-estimate").All() {
+		if f := e.ContextMap(); f["variant"] == zeroVariant && f["source"] == derivedEstimate {
+			return f
+		}
+	}
+	require.FailNow(t, "no deployment-derived estimate for variant-z")
+	return nil
+}
+
+// Nor does the zero-replica estimate take the mixed window's spread while
+// the change is outstanding: 256 x (2000 + 550/2) = 582,400, where the
+// factor 1.67 the window reads priced 629,527.
+func TestKVOutputDispersion_AShapeChangeHoldsTheZeroReplicaSpread(t *testing.T) {
+	f := zeroReplicaSwap(t)
+	assert.InDelta(t, 1, f["modelOutputFactor"], 1e-12)
+	assert.EqualValues(t, 256*2275, f["derivedCapacity"])
+}
+
+// The replay hook reaches the switch: off through SetSwitchesForReplay, the
+// derived k2 at D 2 prices I + O/2 as before (320,000); on again, 384,000.
+func TestKVOutputDispersion_TheReplayHookSetsTheSwitch(t *testing.T) {
+	set := func(on bool) func(*SaturationAnalyzer) {
+		return func(a *SaturationAnalyzer) {
+			require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchKVPerRequestOutputDispersion: on}))
+		}
+	}
+	assert.EqualValues(t, 320_000, derivedK2(t, 2, set(false))["k2"])
+	assert.EqualValues(t, 384_000, derivedK2(t, 2, set(true))["k2"])
+}
+
+// A factor under 1 is priced as 1. One replica serves 99 requests a second
+// of 100 tokens and one serves 1 of 1000: E[O] 109, E[O^2] 19,900, a plain
+// mean of 550, so the factor is 19,900 / (109 x 550) = 0.33. The estimate
+// keeps 256 x (1000 + 550/2) = 326,400, the price before #276, rather than
+// moving below it to the 1000 + 91 the requests hold; the log carries the
+// factor as computed.
+func TestKVOutputDispersion_AZeroReplicaFactorUnderOneIsPricedAsOne(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-z", capacity.Record{
+		AcceleratorName: "A100", GpuCount: 1, EngineParams: deploymentParams(),
+		EffectiveCapacity: 1, LearnedFrom: "deployment",
+	}, time.Now())
+	a := NewSaturationAnalyzer(store)
+	short := withSpread(makeReplicaMetrics("pod-1", "variant-a", 50_000, 1_000_000, 0, 1000, 100), 1)
+	short.RequestRate = 99
+	long := withSpread(makeReplicaMetrics("pod-2", "variant-a", 50_000, 1_000_000, 0, 1000, 1000), 1)
+	long.RequestRate = 1
+	in := makeAnalyzerInput([]domain.ReplicaMetrics{short, long}, []domain.VariantReplicaState{
+		{VariantName: "variant-a", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 2, GPUsPerReplica: 1},
+		{VariantName: "variant-z", Role: domain.RoleDecode, AcceleratorName: "A100", CurrentReplicas: 0, GPUsPerReplica: 1},
+	})
+	_, err := a.Analyze(ctx, in)
+	require.NoError(t, err)
+	var f map[string]any
+	for _, e := range logs.FilterMessage("zero-replica-capacity-estimate").All() {
+		if m := e.ContextMap(); m["variant"] == zeroVariant && m["source"] == derivedEstimate {
+			f = m
+		}
+	}
+	require.NotNil(t, f, "no deployment-derived estimate for variant-z")
+	assert.InDelta(t, 19_900.0/(109*550), f["modelOutputFactor"], 1e-9)
+	assert.EqualValues(t, 326_400, f["derivedCapacity"])
 }

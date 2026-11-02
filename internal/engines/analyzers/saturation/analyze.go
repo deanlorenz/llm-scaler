@@ -412,8 +412,6 @@ func (c *cycle) resolvePricing() {
 	// (replicaOutputDispersion), and so does the zero-replica estimate.
 	if c.shapeChanging {
 		c.fleetDispersion = 1
-	}
-	if c.shapeChanging {
 		if recent := fleetOutputLengthRecent(c.input.ReplicaMetrics, c.rolesByVariant); recent > 0 {
 			c.muDivisor = recent
 			if recentIn := servedPromptLengthRecent(c.input.ReplicaMetrics); recentIn > 0 {
@@ -647,11 +645,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// [5m] reading, because that is the figure noteLineMismatch compares
 		// an observed token rate against.
 		//
-		// The short-window shape takes no spread, as no shape does while a
-		// change is outstanding (resolvePricing): the spread is read over
-		// [5m], and across a shape change that window holds both shapes, so
-		// their difference would read as a spread of one workload's lengths
-		// and price the new shape's requests far larger than they are.
+		// The short-window shape takes no spread. That is not a guard of its
+		// own: the short window opens only while a shape change is
+		// outstanding, and then resolvePricing has already set
+		// fleetDispersion to 1 for every shape. The gate there is what keeps
+		// the [5m] spread, which then holds both shapes, off the new shape's
+		// requests; TestKVOutputDispersion_TheShortWindowTakesNoSpread holds
+		// it.
 		muShape := fleetShape
 		if c.muShortWindow {
 			muShape = shape.New(c.muInput, c.muDivisor, rm.PrefixCacheHitRate)
@@ -740,7 +740,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
-			}, c.logger)
+			}, c.shapeChanging, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through
