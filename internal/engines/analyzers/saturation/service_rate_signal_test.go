@@ -61,7 +61,7 @@ func srReadings(variant string, n int) []domain.ReplicaMetrics {
 		rm := makeReplicaMetrics(fmt.Sprintf("%s-%d", variant, i), variant, 5000, 16000, 0, 6000, 1000)
 		rm.Ready = true
 		rm.KvUsageInstant = k
-		rm.AvgITL = tracedModel.ITLAt(k)
+		rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 		out = append(out, rm)
 	}
 	return out

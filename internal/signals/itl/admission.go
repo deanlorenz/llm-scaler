@@ -46,6 +46,32 @@ type Admission struct {
 	// fitted under other known arguments is not held: it describes another
 	// engine.
 	Args string
+
+	// Settle, when set, is the settle tracker a replica's settle is read
+	// from (settle.go). Nil keeps the key's own trace of each replica, the
+	// rule before the tracker.
+	Settle *Settle
+	// WaitsAfterRestart makes a replica already serving on the key's first
+	// Observe wait its settle too: a controller restart is a settle, and the
+	// line does not refit from it for Steadiness.For. Without it, as before,
+	// such a replica is taken as settled.
+	WaitsAfterRestart bool
+	// KeepsThroughMissingRow keeps a replica's settle through a cycle it is
+	// missing from, up to the absence tolerance: one missed scrape is not a
+	// replica that left and came back. On the tracker the tracker's
+	// tolerance rules; on the key's own trace, AbsenceTolerance. Without
+	// it, as before, a replica missing from one cycle starts over.
+	KeepsThroughMissingRow bool
+	// AbsenceTolerance is how long a replica may go without a row and keep
+	// its trace on the key's own trace (KeepsThroughMissingRow): the settle
+	// tracker's tolerance at the controller's interval
+	// (settle.Tolerance). At or below settle.Period, settle.Period.
+	AbsenceTolerance time.Duration
+	// FiniteOnly reads a row's ITL by its presence bits: a reading needs the
+	// Finite state (domain.ReplicaMetrics.ITLState), so a Pod with an Absent
+	// rank, whose AvgITL is its Finite ranks' mean, is no reading. Without
+	// it, as before, any finite AvgITL above zero is.
+	FiniteOnly bool
 }
 
 // mayHold reports whether a key's last A may stand in for a fit at now: it was

@@ -309,6 +309,11 @@ func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 		return true
 	})
 	maps.DeleteFunc(a.muCycles, func(m string, _ *muCycle) bool { return gone(m) })
+	// The ITL line's: its cycle and pending forgotten keys with the model,
+	// and what learner-write last logged of a key once the key's variant
+	// has gone unseen (variantIsStale, in evictStaleHistory).
+	maps.DeleteFunc(a.itlCycles, func(m string, _ []learn.Report) bool { return gone(m) })
+	maps.DeleteFunc(a.itlForgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
 }
 
 // LearnerReports is each learner's report of each variant the model priced
@@ -336,8 +341,11 @@ func (a *SaturationAnalyzer) LearnerReports() map[string][]learn.Report {
 // an error, and nothing is forgotten. A test walks the list and holds every
 // name to handled. Callers hold a.mu.
 func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, variant string, by learn.By) (dropped int, handled bool) {
-	if name == learn.K2 {
+	switch name {
+	case learn.K2:
 		return a.forgetK2Locked(namespace, modelID, variant, by), true
+	case learn.ITL:
+		return a.forgetITLLocked(namespace, modelID, variant, by), true
 	}
 	ctrl.Log.WithName("saturation").Error(nil, "learner on learn.Learners has no forget code; nothing forgotten",
 		"learner", name, "namespace", namespace, "modelID", modelID, "variant", variant)

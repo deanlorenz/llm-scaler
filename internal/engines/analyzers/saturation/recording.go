@@ -112,8 +112,10 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchIdleBand, SwitchK2KeyBucketHeld, SwitchBatchCapDeclared,
 // SwitchBatchCapLearned, SwitchMuKeyBucketHeld, SwitchMuSwapFreeze,
 // SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
-// SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken and
-// SwitchKVPerRequestOutputDispersion; a name it does not know is an error,
+// SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken,
+// SwitchKVPerRequestOutputDispersion, SwitchITLReadsSettle,
+// SwitchITLWaitsAfterRestart, SwitchITLKeepsSettleThroughMissingRow and
+// SwitchITLReadsFinitePodMean; a name it does not know is an error,
 // and sets nothing. Never called on a production path; a
 // test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -154,6 +156,12 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 
 		// #276: the spread of output lengths in the KV per request.
 		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
+
+		// Learner PR 4a: the ITL line on the settle tracker (itl_settle.go).
+		SwitchITLReadsSettle:                  &a.itlReadsSettle,
+		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
+		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
+		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 	}
 }
 

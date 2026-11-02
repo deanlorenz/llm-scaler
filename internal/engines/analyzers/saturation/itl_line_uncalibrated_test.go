@@ -45,7 +45,7 @@ func TestDerivedMuIsTheLinesOwnFigure(t *testing.T) {
 	rm := makeReplicaMetrics("qwen32b-decode-st2v9", "qwen32b-decode-wva",
 		int64(240947), kvTokens, 0, 1000, output) // k x kvTokens
 	rm.KvUsageInstant = k
-	rm.AvgITL = line.ITLAt(k)
+	rm.AvgITL, rm.AvgITLKnown = line.ITLAt(k), true
 	rm.GenerationTokenRate = 1.4 * predicted
 
 	var fields map[string]any

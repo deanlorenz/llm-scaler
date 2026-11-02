@@ -114,12 +114,19 @@ func (r *scriptedRouter) CollectRouterLatency(_ context.Context, modelID, _ stri
 const recITLA, recITLB = 0.02, 0.006
 
 // recRow is one Ready replica at fill k with every presence bit set.
+//
+// Its Pod became Ready before the day's first cycle and stays Ready: the
+// same Ready time on every cycle of a day. A Ready time that moved with the
+// cycle (at less 30 min, as the committed acceptance and engine recordings
+// were taken) is a new Ready time under the same name on every cycle, which
+// the settle tracker reads as an engine restart each time
+// (settle.Restarted), so no replica ever settled.
 func recRow(model, variant, pod string, k float64, at time.Time) domain.ReplicaMetrics {
 	const kvCap = 100_000
 	itl := recITLB + recITLA*k
 	return domain.ReplicaMetrics{
 		PodName: pod, VariantName: variant, Namespace: recNS, ModelID: model,
-		Ready: true, ReadySince: at.Add(-30 * time.Minute), StartSeconds: 75, Revision: "r1",
+		Ready: true, ReadySince: at.Truncate(24 * time.Hour).Add(-30 * time.Minute), StartSeconds: 75, Revision: "r1",
 		KvCacheUsage: k, KvCacheUsageKnown: true, KvUsageInstant: k, KvUsageInstantKnown: true,
 		MaxRankKvCacheUsage: k, EngineRanks: 1,
 		NumGpuBlocks: kvCap / 16, BlockSize: 16, TotalKvCapacityTokens: kvCap,
@@ -267,7 +274,8 @@ func (s *recScript) engine(t *testing.T) *Engine {
 	e := newEngine(s.k8s, s.k8s, clientgoscheme.Scheme, nil, registry, cfg, allocation.NewNoOpLimiter("test"), s.base)
 	sat := e.saturationAnalyzer().(*saturation.SaturationAnalyzer)
 	judging := slo.New(s.router, e.capacityStore).WithClock(e.clock).
-		WithStateTimeout(sat.Horizons().VariantTimeout).WithSlopeHoldFor(sat.Horizons().BucketRetention)
+		WithStateTimeout(sat.Horizons().VariantTimeout).WithSlopeHoldFor(sat.Horizons().BucketRetention).
+		WithSettleView(e.settleTracker())
 	e.sloAnalyzer = judging
 	e.analyzers.replaceBuiltin(domain.SLOAnalyzerName, judging)
 	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(e.Clock())))
@@ -511,12 +519,17 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		saturation.KindExportLearnedState:   5,
 		saturation.KindTakeRestoreOutcomes:  12,
 		saturation.KindStableAcceleratorFor: 64,
-		saturation.KindPublishLine:          9,
-		saturation.KindBorrowLine:           11,
-		slo.KindBeginCycle:                  12,
-		slo.KindEvictStale:                  12,
-		slo.KindNoteVariantsPresent:         28,
-		settle.KindObserve:                  28,
+		// The run starts at a controller start with the snapshot on: the
+		// ITL line waits its settle (SwitchITLWaitsAfterRestart) through
+		// the first two minutes, and settles again after each day the
+		// clock jumps (the settle tracker's absence tolerance). One line
+		// is fitted and published, and borrowed on three cycles.
+		saturation.KindPublishLine:  1,
+		saturation.KindBorrowLine:   3,
+		slo.KindBeginCycle:          12,
+		slo.KindEvictStale:          12,
+		slo.KindNoteVariantsPresent: 28,
+		settle.KindObserve:          28,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -998,7 +1011,11 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 			}
 		}
 	}
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 22, throughput.KindAnalyze: 52}, priced,
+	// The slo line waits its settle after the controller start, and again
+	// after each day the clock jumps (slo.SwitchITLWaitsAfterRestart and the
+	// settle tracker's absence tolerance): it has no line, and prices
+	// nothing, on those cycles.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 52}, priced,
 		"variants priced per analyzer")
 }
 

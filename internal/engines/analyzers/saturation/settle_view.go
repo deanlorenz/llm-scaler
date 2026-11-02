@@ -103,10 +103,7 @@ func (a *SaturationAnalyzer) observeOwnSettle(input domain.AnalyzerInput, now ti
 	first := !a.ownSettled[input.Namespace+"|"+input.ModelID]
 	a.ownSettled[input.Namespace+"|"+input.ModelID] = true
 	a.mu.Unlock()
-	if first {
-		a.ownSettle.Observe(model, rows, now.Add(-JoinedReplicaWindow))
-	}
-	a.ownSettle.Observe(model, rows, now)
+	settlerow.ObserveOwn(a.ownSettle, model, rows, first, JoinedReplicaWindow, now)
 }
 
 // settleModel is the settle tracker's name for a model: the engine's
@@ -177,7 +174,7 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 	if readyAt.IsZero() {
 		first = r.FirstSeen
 	}
-	if back := readyAgain(trace); back.After(first) {
+	if back := settlerow.ReadyAgain(trace); back.After(first) {
 		first = back
 	}
 	if !a.k2WaitsAfterRestart && !first.After(firstCycle) {
@@ -192,19 +189,4 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 	// when a new one under a name already seen is what began the sighting.
 	restarted := !readyAt.IsZero() && r.ReadySeen.After(r.FirstSeen)
 	return joined, joined && !readyAt.IsZero() && (since.Equal(readyAt) || restarted), readyKnown, since
-}
-
-// readyAgain is the first Ready row after the last row of trace that was not
-// Ready, zero when every row is Ready or none after it is.
-func readyAgain(trace []settle.Sample) time.Time {
-	for i := len(trace) - 1; i >= 0; i-- {
-		if trace[i].Row.Ready {
-			continue
-		}
-		if i+1 < len(trace) {
-			return trace[i+1].At
-		}
-		return time.Time{}
-	}
-	return time.Time{}
 }

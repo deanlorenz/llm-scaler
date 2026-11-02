@@ -133,7 +133,7 @@ func TestAnalyzeStageOrderIsObservable(t *testing.T) {
 				400_000, tracedKv, 10, 1000, 6000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			fitted = append(fitted, rm)
 		}
 

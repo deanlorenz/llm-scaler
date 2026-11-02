@@ -32,7 +32,7 @@ func TestLightLoadKeepsLearnedLineAndNamesMissingOne(t *testing.T) {
 		rm := makeReplicaMetrics("pod-0", variant, int64(k*16000), 16000, 0, 1000, 500)
 		rm.Namespace = ns
 		rm.KvUsageInstant = k
-		rm.AvgITL = itlSec
+		rm.AvgITL, rm.AvgITLKnown = itlSec, itlSec > 0
 		return rm
 	}
 
@@ -128,7 +128,7 @@ func TestHeldSlopeEndsAtBucketRetention(t *testing.T) {
 		rm := makeReplicaMetrics("pod-0", variant, int64(k*16000), 16000, 0, 1000, 500)
 		rm.Namespace = ns
 		rm.KvUsageInstant = k
-		rm.AvgITL = itlSec
+		rm.AvgITL, rm.AvgITLKnown = itlSec, itlSec > 0
 		return rm
 	}
 	a, _ := NewSaturationAnalyzer(capacity.NewStore()).WithHorizons(capacity.Horizons{BucketRetention: retention})
@@ -181,7 +181,7 @@ func TestHeldSlopeEndsOnArgsChange(t *testing.T) {
 	key := "ns|m|" + variant + "|H200|1"
 	row := func(k, itlSec float64) []domain.ReplicaMetrics {
 		return []domain.ReplicaMetrics{{PodName: "p", VariantName: variant, Ready: true,
-			KvUsageInstant: k, AvgITL: itlSec}}
+			KvUsageInstant: k, AvgITL: itlSec, AvgITLKnown: itlSec > 0}}
 	}
 	a.itlUnderArgs(key, "args-1")
 	for range itl.DefaultMinSamples {

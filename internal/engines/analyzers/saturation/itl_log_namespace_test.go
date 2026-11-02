@@ -27,7 +27,7 @@ func TestITLLinesNameTheirNamespace(t *testing.T) {
 		rm := makeReplicaMetrics(pod, variant, 8000, 16000, 0, 1000, 500)
 		rm.Namespace = namespace
 		rm.KvUsageInstant = 0.5
-		rm.AvgITL = 0.05
+		rm.AvgITL, rm.AvgITLKnown = 0.05, true
 		// Far from anything the fitted line predicts, so itl-gps-mismatch
 		// fires and its namespace can be checked too.
 		rm.GenerationTokenRate = 1

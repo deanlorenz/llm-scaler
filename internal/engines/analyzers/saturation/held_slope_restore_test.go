@@ -35,7 +35,7 @@ func TestAHeldITLLineSurvivesARestart(t *testing.T) {
 	replica := func(k, itlSec float64) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics("pod-0", variant, int64(k*16000), 16000, 0, 1000, 500)
 		rm.KvUsageInstant = k
-		rm.AvgITL = itlSec
+		rm.AvgITL, rm.AvgITLKnown = itlSec, itlSec > 0
 		return rm
 	}
 	clock := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)

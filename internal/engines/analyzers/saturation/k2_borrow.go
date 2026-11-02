@@ -304,6 +304,7 @@ func (a *SaturationAnalyzer) WithOptimizationInterval(interval time.Duration) *S
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.borrowTickGap = max(BorrowedK2TickGap, 3*interval)
+	a.settleInterval = interval
 	// The analyzer's own settle tracker judges absence at the same cadence
 	// the engine's does (settle.Tolerance).
 	if a.ownSettle != nil {

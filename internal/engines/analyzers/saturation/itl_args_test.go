@@ -44,7 +44,7 @@ func TestTheITLWindowTakesNoReadingsMidRollout(t *testing.T) {
 			k := 0.20 + 0.04*float64(i)
 			rm := makeReplicaMetrics(fmt.Sprintf("pod-%d", i), "decode-a", int64(k*16000), 16000, 0, 100, 50)
 			rm.KvUsageInstant = k
-			rm.AvgITL = 0.01 + 0.02*k
+			rm.AvgITL, rm.AvgITLKnown = 0.01+0.02*k, true
 			rows = append(rows, rm)
 		}
 		in := makeAnalyzerInput(rows, []domain.VariantReplicaState{{

@@ -260,7 +260,7 @@ func TestLogContract_ITLWindowCountsEveryRow(t *testing.T) {
 	analyzer := NewSaturationAnalyzer(capacity.NewStore())
 
 	light := makeReplicaMetrics("pod-1", "variant-d", 5000, 100000, 0, 1000, 500)
-	light.KvUsageInstant, light.AvgITL = 0.05, 0.0145 // that run, at 0.5 requests/s
+	light.KvUsageInstant, light.AvgITL, light.AvgITLKnown = 0.05, 0.0145, true // that run, at 0.5 requests/s
 	input := makeAnalyzerInput(
 		[]domain.ReplicaMetrics{light},
 		[]domain.VariantReplicaState{
@@ -298,7 +298,7 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 		analyzer := NewSaturationAnalyzer(store)
 		capped := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 768, 1000, 500)
 		capped.Ready = true
-		capped.KvUsageInstant, capped.AvgITL = 0.87, 0.079
+		capped.KvUsageInstant, capped.AvgITL, capped.AvgITLKnown = 0.87, 0.079, true
 		capped.RunningRequests, capped.PreemptionRateKnown = running, true
 		input := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{capped},
@@ -339,7 +339,7 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 		analyzer := NewSaturationAnalyzer(capacity.NewStore())
 		rm := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 0, 1000, 500)
 		rm.Ready = true
-		rm.KvUsageInstant, rm.AvgITL = 0.87, 0.079
+		rm.KvUsageInstant, rm.AvgITL, rm.AvgITLKnown = 0.87, 0.079, true
 		input := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, []domain.VariantReplicaState{
 			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
 				CurrentReplicas: 1, GPUsPerReplica: 1},

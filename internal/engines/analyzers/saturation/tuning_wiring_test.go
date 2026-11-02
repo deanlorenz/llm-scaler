@@ -196,7 +196,7 @@ func TestTuningSteadyGateReachesTheITLTracker(t *testing.T) {
 			a.now = func() time.Time { return at }
 			rm := makeReplicaMetrics("p0", e1Variant, int64(k*float64(e1Cache)), e1Cache, 0, 1000, 498)
 			rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-			rm.AvgITL = 0.02*k + 0.01
+			rm.AvgITL, rm.AvgITLKnown = 0.02*k+0.01, true
 			rm.RequestRate, rm.GenerationTokenRate = 1, 498
 			in := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, []domain.VariantReplicaState{{
 				VariantName: e1Variant, AcceleratorName: "H200", CurrentReplicas: 1,

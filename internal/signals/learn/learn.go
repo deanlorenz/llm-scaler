@@ -24,13 +24,18 @@ const K2 = "k2"
 // its choice against the rate derived from the ITL line (row 6).
 const Mu = "mu"
 
+// ITL is the saturation analyzer's ITL line, ITL(k) = A*k + B (its row 1):
+// the window of (k, ITL) readings per key, its intercept and its held
+// slope.
+const ITL = "itl"
+
 // Learners is every learner the forget-learned-state annotation reaches, by
 // name, in the order Forget reaches them. A plain list, not a registry: each
 // analyzer forgets a name on it with code of its own, and a test holds every
 // name to that code. A learner joins the list in the PR that moves it onto
 // the shared rules.
 func Learners() []string {
-	return []string{K2}
+	return []string{K2, ITL}
 }
 
 // By is what forgot a key.

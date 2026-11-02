@@ -75,7 +75,7 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 			rm := makeReplicaMetrics(fmt.Sprintf("lender-%d", i), lender, 5000, 16000, 0, 6000, 1000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			out = append(out, rm)
 		}
 		return out

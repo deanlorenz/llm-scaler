@@ -46,7 +46,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		rm := makeReplicaMetrics(pod, variant, 900_000, tracedKv, 0, 1000, 6000)
 		rm.Ready = true
 		rm.StartSeconds = startSeconds
-		rm.AvgITL = 0.02
+		rm.AvgITL, rm.AvgITLKnown = 0.02, true
 		rm.KvUsageInstant = itl.DefaultMinObservableK / 2
 		return rm
 	}

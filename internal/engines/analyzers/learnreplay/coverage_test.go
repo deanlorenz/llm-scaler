@@ -83,8 +83,10 @@ var reviewed = map[reflect.Type]buckets{
 		recorded: []string{"Analyze", "EvictStale", "BeginCycle", "NoteVariantsPresent"},
 		// PathCounts reads the per-path counters of the slo line's fits
 		// (2.5), which only a replay reads and nothing restores.
-		readers:  []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
-		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder"},
+		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
+		// WithSettleView hands the slo line the engine's settle tracker; the
+		// replay hands it its own, as it does k2's (settle.go).
+		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder", "WithSettleView"},
 		seams:    []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
@@ -241,7 +243,7 @@ func newFixture(at time.Time) *fixture {
 		store:  store,
 		settle: tracker,
 		sat:    saturation.NewSaturationAnalyzer(store).WithClock(clk).WithRecorder(rec).WithSettleView(tracker),
-		slo:    slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec),
+		slo:    slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec).WithSettleView(tracker),
 		tp:     throughput.NewThroughputAnalyzer().WithClock(clk).WithRecorder(rec),
 	}
 }

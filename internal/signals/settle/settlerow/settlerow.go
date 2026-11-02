@@ -6,6 +6,8 @@
 package settlerow
 
 import (
+	"time"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
@@ -51,4 +53,37 @@ func Row(rm domain.ReplicaMetrics, prefill bool) settle.Row {
 // Key is the settle tracker's key of rm.
 func Key(rm domain.ReplicaMetrics) settle.Key {
 	return settle.Key{Pod: rm.PodName, Variant: rm.VariantName, Bridge: rm.FromWarmPool}
+}
+
+// ReadyAgain is the first Ready row after the last row of trace that was not
+// Ready, zero when every row is Ready or none after it is. A Pod that left
+// the rotation and came back with no Ready time to say so has restarted as
+// far as anything can tell: k2's joined test and the ITL line both age it
+// from here.
+func ReadyAgain(trace []settle.Sample) time.Time {
+	for i := len(trace) - 1; i >= 0; i-- {
+		if trace[i].Row.Ready {
+			continue
+		}
+		if i+1 < len(trace) {
+			return trace[i+1].At
+		}
+		return time.Time{}
+	}
+	return time.Time{}
+}
+
+// ObserveOwn observes one cycle of a model's rows into a tracker an analyzer
+// keeps when the engine gave it none (a test that drives Analyze alone). The
+// analyzer alone stands for a controller that has watched the fleet for as
+// long as the caller says, not for one that has just started: on the
+// model's first observation (first) it observes the same rows backdate
+// earlier too, so a replica on that cycle is not a joiner. A controller
+// restart is the engine's tracker's first cycle; a test of one hands the
+// analyzer a tracker of its own making instead.
+func ObserveOwn(t *settle.Tracker, model string, rows []settle.Row, first bool, backdate time.Duration, now time.Time) {
+	if first {
+		t.Observe(model, rows, now.Add(-backdate))
+	}
+	t.Observe(model, rows, now)
 }

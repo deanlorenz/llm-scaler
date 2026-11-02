@@ -2,7 +2,6 @@ package itl
 
 import (
 	"maps"
-	"math"
 	"sync"
 	"time"
 
@@ -208,18 +207,33 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		// reading -- k below the band, no ITL yet -- still says where the
 		// replica's load is.
 		steady, settling := false, false
+		hasITL := adm.hasITL(rm)
 		var trace *replicaTrace
 		if rm.Ready && !rm.FromWarmPool {
 			seen[rm.PodName] = true
 			trace = traces.replicas[rm.PodName]
+			// Back, on the key's own trace, from an absence -- cycles of the
+			// key that went without it -- longer than the tolerance: it
+			// starts over, as one missing from a cycle did before
+			// (KeepsThroughMissingRow). On the tracker, the tracker judges
+			// the absence.
+			if trace != nil && adm.KeepsThroughMissingRow && adm.Settle == nil && trace.missed &&
+				now.Sub(trace.lastSeen) > adm.absenceTolerance() {
+				trace = nil
+			}
 			if trace == nil {
-				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
+				trace = &replicaTrace{since: now, joined: now.After(traces.since) || adm.WaitsAfterRestart}
 				traces.replicas[rm.PodName] = trace
 			}
-			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(k), now, s)
-			settling = trace.settling(now, s)
+			trace.lastSeen, trace.missed = now, false
+			if adm.Settle == nil {
+				trace.serving(hasITL, traceable(k), now, s)
+				settling = trace.settling(now, s)
+			} else {
+				settling = trace.settlingOnTracker(adm.Settle, rm, traces.since, adm.WaitsAfterRestart, now, s)
+			}
 			if traceable(k) {
-				steady = trace.steady(k, now, s)
+				steady = !settling && trace.still(k, now, s)
 			} else {
 				// Present, so its trace is kept; no k, so nothing is noted.
 				trace = nil
@@ -228,8 +242,9 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		switch {
 		case !rm.Ready || rm.FromWarmPool:
 			r.NotReady++
-		case !(rm.AvgITL > 0) || math.IsInf(rm.AvgITL, 1):
-			// +Inf passes "> 0": a rate over a window with no tokens in it.
+		case !hasITL:
+			// No ITL to pair (Admission.hasITL). +Inf passes "> 0": a rate
+			// over a window with no tokens in it.
 			r.NoITL++
 		case !(k > 0):
 			r.NoK++
@@ -264,10 +279,24 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		}
 	}
 	// A replica missing from this cycle starts over when it returns: what it
-	// served in between is unknown.
-	for pod := range traces.replicas {
-		if !seen[pod] {
+	// served in between is unknown. With KeepsThroughMissingRow, only one
+	// missing past the tolerance does (above), or, on the tracker, one the
+	// tracker starts again; its trace is kept until the tracker would have
+	// forgotten it. A row that is not Ready, or is lent by the warm pool,
+	// still starts it over.
+	notServing := make(map[string]bool, len(rows))
+	for _, rm := range rows {
+		if rm.VariantName == variant && (!rm.Ready || rm.FromWarmPool) && !seen[rm.PodName] {
+			notServing[rm.PodName] = true
+		}
+	}
+	for pod, rt := range traces.replicas {
+		switch {
+		case seen[pod]:
+		case !adm.KeepsThroughMissingRow || notServing[pod] || now.Sub(rt.lastSeen) > adm.forgetAfter():
 			delete(traces.replicas, pod)
+		default:
+			rt.missed = true
 		}
 	}
 	w.Prune(now)
@@ -546,6 +575,17 @@ func (t *Tracker) WindowLen(key string) int {
 		return w.Len()
 	}
 	return 0
+}
+
+// Newest is when the newest reading of the window filed under key was taken,
+// zero when it holds none.
+func (t *Tracker) Newest(key string) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if w, ok := t.windows[key]; ok && len(w.observations) > 0 {
+		return w.observations[len(w.observations)-1].Timestamp
+	}
+	return time.Time{}
 }
 
 // WindowLens returns, for every key holding a window, how many readings it
