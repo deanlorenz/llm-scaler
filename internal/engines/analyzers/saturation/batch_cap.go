@@ -89,6 +89,13 @@ const SwitchBatchCapDecodeView = "batch-cap-decode-view"
 // flags' cap or the parser's default of 256.
 const SwitchBatchCapDerivedMu = "batch-cap-derived-mu"
 
+// SwitchBatchCapZeroReplica is the replay switch for the zero-replica
+// estimate's batch cap (issue #427). On, a variant at zero replicas is
+// priced at the cap the flags or the llm-d.ai/max-num-seqs annotation state
+// (zeroReplicaBatchCap). Off, as before, at the flags' cap or the parser's
+// default of 256.
+const SwitchBatchCapZeroReplica = "batch-cap-zero-replica"
+
 // Where the batch cap a derived k2 was priced at came from, as the
 // k2-decision line names it (batchCapSource).
 const (
@@ -353,6 +360,24 @@ func flagsOrDefaultBatchCap(params *capacity.EngineParams) pricedBatchCap {
 		return pricedBatchCap{perRank: d, source: batchCapDefault}
 	}
 	return pricedBatchCap{}
+}
+
+// zeroReplicaBatchCap is the batch cap one engine rank of a variant at zero
+// replicas is priced at by its derived estimate (estimateStoredCapacity),
+// and its source: the cap the flags state, else, with
+// SwitchBatchCapZeroReplica and SwitchBatchCapDeclared on, the cap the
+// llm-d.ai/max-num-seqs annotation declares (capacity.EngineParams.
+// StatedBatchCap), else the parser's default. A variant at zero replicas has
+// no pod to learn from, so the learned cap never applies; it reads no
+// learned state and stamps none as used. Off, as before issue #427, the
+// flags' cap or the default (flagsOrDefaultBatchCap): a variant that
+// declares 64 was priced at 64 per replica once a pod ran, and at 256 on its
+// way up from zero.
+func (a *SaturationAnalyzer) zeroReplicaBatchCap(params *capacity.EngineParams) pricedBatchCap {
+	if c := a.atCapBatchCap(params, a.batchCapZeroReplica); c.perRank > 0 {
+		return c
+	}
+	return flagsOrDefaultBatchCap(params)
 }
 
 // sweepBatchCapsLocked drops a learned cap neither confirmed by a pod nor

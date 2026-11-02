@@ -133,10 +133,18 @@ func TestKVOutputDispersion_TheDerivedMuFitsFewerSequences(t *testing.T) {
 // its Deployment, and returns the zero-replica-capacity-estimate line.
 func zeroReplicaEstimate(t *testing.T, d float64, edit func(*SaturationAnalyzer)) map[string]any {
 	t.Helper()
+	return zeroReplicaEstimateOf(t, deploymentParams(), d, edit)
+}
+
+// zeroReplicaEstimateOf is zeroReplicaEstimate with the zero-replica
+// variant's record derived from params.
+func zeroReplicaEstimateOf(t *testing.T, params *capacity.EngineParams, d float64,
+	edit func(*SaturationAnalyzer)) map[string]any {
+	t.Helper()
 	ctx, logs := observedCtx(t)
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "variant-z", capacity.Record{
-		AcceleratorName: "A100", GpuCount: 1, EngineParams: deploymentParams(),
+		AcceleratorName: "A100", GpuCount: 1, EngineParams: params,
 		EffectiveCapacity: 1, LearnedFrom: "deployment",
 	}, time.Now())
 	a := NewSaturationAnalyzer(store)

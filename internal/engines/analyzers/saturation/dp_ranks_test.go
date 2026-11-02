@@ -56,7 +56,7 @@ func TestCapacityTokensForScalesOnlyTheFlag(t *testing.T) {
 func TestDerivedK2ScalesWithRanks(t *testing.T) {
 	params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256}
 	// N_steady = min(8192 * 1000 / 2000, 256) = 256; k2 = 256 * (1000 + 500).
-	perEngine := estimateCapacityFromParams(params, 1000, 1000, 1)
+	perEngine := estimateCapacityFromParams(params, 1000, 1000)
 	require.Equal(t, int64(384000), perEngine, "precondition: one engine's derived figure")
 
 	k2 := func(ranks int) (int64, capacity.K2Source) {

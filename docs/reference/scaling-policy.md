@@ -1457,11 +1457,8 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 
 - It is used only where the flags state no cap. A cap in the flags wins.
 - The derived capacity, the derived throughput (mu), the ITL line's reading
-  of a replica at its cap, a P/D decode's queue at its cap, and the `slo`
-  analyzer all read it. The estimate for a variant at **zero replicas** does
-  not: it still prices at the flags' cap or 256, so a variant that declares
-  a lower cap is under-priced on its way up from zero until its first replica
-  is priced ([#427](https://github.com/ev-shindin/llm-scaling-manager/issues/427)).
+  of a replica at its cap, a P/D decode's queue at its cap, the estimate for
+  a variant at **zero replicas**, and the `slo` analyzer all read it.
 - **It moves the price either way.** A declared cap below 256 lowers the
   derived capacity, mu and the `slo` price, so more replicas. A declared cap
   above 256 (vLLM V1's own default is 1024 on large accelerators) raises
