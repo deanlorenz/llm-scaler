@@ -27,26 +27,29 @@ no controller installed, or (later, only if asked) inside the controller.
 ### What a session looks like
 
 The command and flags are proposed. The central values in the first two
-sessions are the [worked example](#worked-example-ols-sweep), computed from the
-`ols-sweep` golden's last ITL line. The bands, and everything in the last two
-sessions, are illustrative.
+sessions are the [worked example](#worked-example-ols-sweep): the decode side
+is computed from the `ols-sweep` golden's last ITL line; the prefill throughput
+`V_P` is **assumed** (30,000 tok/s), because that golden holds no evidence of
+it and the tool would refuse. The bands, and the last two sessions, are
+illustrative.
 
 ```
 $ whatif replicas-to-slo --recording ols-sweep.jsonl.gz --cycle last \
-    --model m --prefill 1 --decode 1 --ttft-percentile 90
+    --model m --prefill 1 --decode 1 --ttft-percentile 90 --assume-vp 30000
 knee            13.31 r/s   decode, batch cap binds at fill 0.732
 operating rate  11.32 r/s   0.85 x knee (scaleUpThreshold)
 mean TPOT       3.66 ms     [3.58 .. 3.79]   line ols, observed fill up to 0.62
-TTFT p90        166 ms      [151 .. 219]     UNVALIDATED; V_P lower bound (observed peak)
+TTFT p90        164 ms      [150 .. 212]     UNVALIDATED; V_P ASSUMED (--assume-vp)
 flags: no KV transfer series (P/D): T_xfer omitted; prompt spread assumed (cv 1)
 estimate from cycles 1-226, not a guarantee; see basis (-o json)
 
 $ whatif slo-to-rate --recording ols-sweep.jsonl.gz --cycle last \
-    --model m --prefill 1 --decode 1 --tpot 3.66ms --ttft 166ms@p90
-role     est. rate at SLO   bound by            basis
-decode   11.32 r/s          TPOT, fill 0.474    ols [11.0 .. 11.5]
-prefill  11.32 r/s          TTFT p90            V_P lower bound, UNVALIDATED
-fleet    11.32 r/s          both
+    --model m --prefill 1 --decode 1 --tpot 4ms --ttft 200ms@p90 --assume-vp 30000
+role     est. rate at SLO   bound by                              basis
+decode   11.32 r/s          operating-point cap (TPOT alone: 12.03)   ols [11.0 .. 11.5]
+prefill  11.32 r/s          operating-point cap (TTFT alone: 11.87,   UNVALIDATED; V_P ASSUMED
+                            held down by decode admission)
+fleet    11.32 r/s          operating-point cap
 estimate from cycles 1-226, not a guarantee; see basis (-o json)
 
 $ whatif slo-to-rate --prometheus https://prom.example:9091 --bearer-token-file t \
@@ -55,12 +58,25 @@ decode   refused: NoLine (ITL window held 3 readings over fill 0.21-0.24; need s
 exit 3
 
 $ whatif slo-to-rate --prometheus https://prom.example:9091 --namespace llm \
-    --role-of prefill=app=m-prefill --role-of decode=app=m-decode --model m --tpot 4ms
+    --role-of prefill=app=m-prefill --role-of decode=app=m-decode \
+    --batch-cap 64 --model m --tpot 4ms
 decode   9.8 r/s   TPOT, fill 0.43   pinned-B (learned B), admitted without readiness [8.9 .. 10.4]
+estimate from the last 1h, not a guarantee; see basis (-o json)
 ```
 
-Bands are the 10th and 90th percentiles of a block bootstrap, so they are not
-symmetric. Every table ends with the "not a guarantee" footer.
+How to read them:
+
+- **Knee:** the rate at which a role saturates. The fleet's knee is the lower
+  of the two roles'.
+- **Operating rate:** 0.85 of the knee, the headroom the autoscaler keeps. The
+  answers are what the fleet holds there.
+- **Fill:** how full a decode replica's KV cache is, 0 to 1.
+- **Bound by:** the constraint that set the rate. When several give the same
+  rate, all are named; the operating-point cap is named first.
+- **Bands:** the 10th and 90th percentiles of a block bootstrap, so not
+  symmetric.
+
+Every table ends with the "not a guarantee" footer.
 
 ### Modes and what each needs
 
@@ -106,11 +122,11 @@ Every answer is either an `Answer{Value, Band, Basis, Flags}` or an
 | `NoPrefillCapacity` | No `V_P` from a conservative source (SGLang, which has no computed-token series, always lands here) |
 | `TailTPOT` | A percentile was asked of TPOT, which is a mean |
 | `TargetBelowFloor` | The target is below what any number of replicas can reach |
-| `DecodeBound` | The TTFT asked lies past the decode knee |
 
 Out-of-range inputs are **flags**, never refusals: extrapolation (with its
-distance), a borrowed or held line, a lower-bound `V_P`, no readiness, an
-unstable tier, and **UNVALIDATED** on every TTFT figure until the
+distance), a borrowed or held line, a lower-bound or assumed `V_P`, no
+readiness, an unstable tier, a rate held down by decode admission, and
+**UNVALIDATED** on every TTFT figure until the
 [staircase run](#validation) passes.
 
 Exit codes: `0` every role answered; `3` at least one role refused (output still
@@ -180,15 +196,24 @@ Corrections that apply:
   and `reachableFill` clamps `k` to `batchCap·KVreq/C`.
 
 **Decode admission.** A new request waits for a sequence slot when the decode
-pod is full. When the batch cap binds, the pod is an M/G/c queue with
-`c = batchCap·ranks` slots and service time equal to the residence
-`OL·ITL(k)`. The wait is Erlang C, with the Allen-Cunneen factor `(1 + Co²)/2`
-for the spread of output length `Co²`. When KV binds first, `c` is the
+pod is full. The pod is a birth-death chain on the number of requests `n` it
+holds: arrivals at `λ_rep`, completions at
+
+    μ_n = m / ( OL · ITL(m·KVreq/C) ),   m = min(n, c)
+
+with `c = batchCap·ranks` slots. The chain uses the line at each state's own
+fill, because a fuller pod serves each sequence more slowly. A constant ITL
+(Erlang C at the mean fill) under-states the wait near the knee: in the worked
+example it gives a wait probability of 0.0007 at 0.85 of the knee, against the
+chain's 0.032, and 0.016 against 0.13 at 0.90. A request that finds all slots
+busy waits for `j + 1` completions at rate `μ_c`, so its wait percentile
+follows from the chain's distribution. When KV binds before the cap, `c` is the
 sequences a **full** cache holds, `C/KVreq`, not the policy's 0.80 of it, and
-the answer is flagged approximate (KV admission is by blocks, not slots).
-Slots are large, so the wait is negligible until close to the knee, and then
-rises fast: it is why question 1 never answers at the knee
-([below](#question-1-from-an-slo-to-a-rate)).
+the answer is flagged approximate (KV admission is by blocks, not slots). The
+chain treats residence as exponential, which is the remaining approximation.
+The wait is negligible until close to the knee and then rises fast: at 0.90 of
+the example's knee its p90 is 203 ms. That is why question 1 caps decode at
+the operating point ([below](#question-1-from-an-slo-to-a-rate)).
 
 ## TTFT: a model built from what is collected
 
@@ -240,7 +265,7 @@ TTFT at the router, on P/D:
 | `W_prefill` | Wait on the chosen prefill pod | The per-pod queue below |
 | `own_prefill` | `a + I/V_P`, this request's own prefill | `a` from low-load minutes plus the overhead; `V_P` below |
 | `T_xfer` | KV transfer to decode | `nixl_xfer_time_seconds` once collected; until then omitted and flagged |
-| `W_decode` | Decode admission wait | Erlang C, [above](#decode-tpot-from-the-itl-line) |
+| `W_decode` | Decode admission wait | The birth-death chain, [above](#decode-tpot-from-the-itl-line) |
 | `ITL(k_d)` | Decode's first step, which streams the first token | The decode line at its fill |
 
 On an aggregated pod the first token comes from the same pod, so the last
@@ -273,9 +298,13 @@ use work alone:
    measured window uses a median. On P/D this is expected to be rare:
    saturation has never recorded a non-back-pressured prefill saturation
    there.
-2. **Observed peak.** The highest `PrefillComputedTokenRate` the pod sustained
-   over at least 3 minutes. Throughput achieved never exceeds capacity, so
-   this is a lower bound and the answer is conservative. Flagged.
+2. **Observed peak, under a queue.** The highest `PrefillComputedTokenRate` the
+   pod sustained over at least 3 minutes **in which it held a queue on some
+   sample**. Throughput achieved never exceeds capacity, so this is a lower
+   bound, conservative and flagged. A peak with no queue is only the offered
+   load and is not used: on `ols-sweep` the pod never queued, its peak
+   (about 29,700 tok/s) is the offered load, and taking it as `V_P` would put
+   that minute at `ρ = 1` and over-predict its service time about 4.6 times.
 3. **Back-pressure bound.** Saturation's prefill lower-bound window
    (`prefill_bound.go`), also a lower bound. Flagged.
 4. Otherwise, `NoPrefillCapacity`.
@@ -283,8 +312,11 @@ use work alone:
 The **low-load slope** of service time against prompt length is not one of
 them. A lone prompt runs as `T(I) = s0 + c·I`, and a busy pod's steps of `B`
 tokens run at `B/(s0 + c·B) < 1/c`. So `1/slope ≥ V_P`, an upper bound: on
-`ols-sweep` it gives about 760k tok/s against an observed peak of 30k. It is
+`ols-sweep` it gives about 760k tok/s against an offered peak of 30k. It is
 kept as a validation signal only.
+
+For an illustration, or a what-if on hardware not yet measured, `--assume-vp`
+supplies `V_P` by hand. Every answer built on it is flagged ASSUMED.
 
 **The queue is per pod.** The router sends each request to one pod, which
 queues it. One run measured 439 waiting with 3 of 4 prefill pods idle: the
@@ -318,8 +350,8 @@ share, from per-pod `PrefillComputedTokenRate`. Two corrections:
   sees the whole stream for that window, and a per-minute share averages the
   rotating winners back toward 1. Where the router's refresh is known to be
   sticky, the worst pod gets `Ca²` raised by the burst (the stream arrives in
-  windows of length `w`, so `Ca² ≈ 1 + λ_w·w`), and `f` is read at the finest
-  resolution Prometheus holds.
+  windows of length `w`, so `Ca² ≈ 1 + λ_w·w`, which is not capped), and `f` is
+  read at the finest resolution Prometheus holds.
 - **Noise.** At low load the max over `N_p` Poisson-noisy minute rates exceeds
   the mean by chance. `f` is taken only over minutes with at least 100
   requests per pod, and the expected max of `N_p` Poisson counts at that mean
@@ -327,8 +359,9 @@ share, from per-pod `PrefillComputedTokenRate`. Two corrections:
 
 **Decode back-pressure.** A prefill request finishes only when decode admits
 its KV. Measured: 41 queued at 77% prefill KV while decode was short, and 820
-queued with decode at its ceiling. Past the decode knee, TTFT gives
-`DecodeBound`.
+queued with decode at its ceiling. So the TTFT bisection runs only below the
+decode knee, and prices decode admission at every rate it tries (next
+section).
 
 **Aggregated pods.** Prefill and decode share each step's budget, so `V_P` falls
 as decode load rises. The first version reads `V_P` at the decode load it was
@@ -358,12 +391,17 @@ PR with its own switch.
    removes the cap and prints the admission wait instead.
 
 **Prefill, TTFT target `T` at percentile `q`.** TTFT rises with the rate, so
-bisect on `λ` below the prefill knee for the largest rate with
-`TTFT_q(λ) ≤ T`. The bisection prices `W_decode` at the same `λ`, so a rate that
-starves decode's slots fails the TTFT test. If `a + I_q/V_P + T_xfer + ITL(k_d)`
-alone exceeds `T`, `TargetBelowFloor`.
+bisect on `λ` below the lower of the two knees for the largest rate with
+`TTFT_q(λ) ≤ T`. The bisection prices `W_decode` from the chain at the same
+`λ`. When the prefill terms alone would allow more, the answer is the rate
+decode admission holds it to, flagged "held down by decode admission"; it is
+not a refusal. If `a + I_q/V_P + T_xfer + ITL(band.lo)` alone exceeds `T`,
+`TargetBelowFloor`.
 
-**The fleet** carries the smaller, and the answer names the binding role.
+**The fleet** carries the smaller of the two roles, then the operating-point
+cap. The answer names every constraint that gives the same rate, the cap
+first, so a tie is never read as the TPOT or TTFT binding. With
+`--headroom 1` the cap is lifted, and the decode admission wait is printed.
 
 ### Question 2: from replicas to an SLO
 
@@ -381,7 +419,8 @@ alone exceeds `T`, `TargetBelowFloor`.
 3. **The answer.** One pair at that rate: mean TPOT from the closed-form fill,
    and TTFT at percentile `q`. `q` is `--ttft-percentile`, else the policy's
    TTFT percentile, else 90. The floors are printed too: TPOT never beats
-   `ITL(band.lo)`, TTFT never beats `a + I_q/V_P + T_xfer + ITL(k_d)`.
+   `ITL(band.lo)`, and TTFT never beats `a + I_q/V_P + T_xfer + ITL(band.lo)`,
+   the first decode step at the lowest fill.
 
 **Two conventions for the headroom.** The tool applies 0.85 in rate.
 Saturation, which drives scaling, applies it in fill (`pricingK` =
@@ -416,9 +455,11 @@ and above), which `classifyInputLength` reuses for prompts.
 From the `ols-sweep` golden: the last published line (`A` = 0.004438,
 `B` = 0.001557 s), `C` = 131,072 tokens (1024 blocks of 128), batch cap 64, one
 rank, one prefill and one decode pod. Shape: `IL` = `OL` = 1000, no prefix hits.
-Prefill: `a` = 10.1 ms plus the 2.5 ms overhead; `V_P` = 29,764 tok/s, the
-observed peak, so a lower bound. Prompt spread: an assumed coefficient of
-variation of 1 (the recording has means only). `q` = 0.90.
+Prefill: `a` = 10.1 ms plus the 2.5 ms overhead, both from the golden.
+**`V_P` = 30,000 tok/s is assumed** (`--assume-vp`): the golden's prefill pod
+never queued, so the tool refuses `V_P` from it (`NoPrefillCapacity`). Prompt
+spread: an assumed coefficient of variation of 1 (the recording has means
+only). `q` = 0.90.
 
 | Step | Formula | Value |
 | --- | --- | --- |
@@ -427,22 +468,36 @@ variation of 1 (the recording has means only). `q` = 0.90.
 | `k_full` | min(band top 0.80, 0.732) | 0.732: the batch cap binds |
 | `ITL(k_full)` | `A·0.732 + B` | 4.81 ms |
 | Decode knee | `64 / (0.00481 · 1000)` | **13.31 r/s** |
-| Prefill knee | `29764 / 1000` | 29.76 r/s |
+| Prefill knee | `30000 / 1000` | 30.0 r/s |
 | Binding role | the lower knee | decode |
 | Operating rate | `0.85 · 13.31` | **11.32 r/s** |
 | Decode fill at it | `11.32·1000·B / (131072/1500 − 11.32·1000·A)` | 0.474 (41.4 sequences) |
 | Mean TPOT | `ITL(0.474)` | **3.66 ms** |
-| Decode admission | Erlang C, 64 slots, 41.4 erlangs | wait probability 0.0007; p90 wait 0 |
-| Prefill `ρ_w` | `11.32 · 1000 / 29764` | 0.380 |
-| Prefill wait p90 | `θ = 0.0336·2/(2·0.620)` = 54.2 ms; `θ·ln(0.380/0.10)` | 72.4 ms |
-| Own prefill p90 | `I_q` = 2303 tokens; `0.0126 + 2303/29764` | 90.0 ms |
+| Decode admission | the chain, 64 slots, at 11.32 r/s | wait probability 0.032; p90 wait 0 |
+| Prefill `ρ_w` | `11.32 · 1000 / 30000` | 0.377 |
+| Prefill wait p90 | `θ = 0.0333·2/(2·0.623)` = 53.5 ms; `θ·ln(0.377/0.10)` | 71.1 ms |
+| Own prefill p90 | `I_q` = 2303 tokens; `0.0126 + 2303/30000` | 89.4 ms |
 | First decode step | `ITL(0.474)` | 3.7 ms |
-| **TTFT p90** | 72.4 + 90.0 + 0 + 3.7 (no `T_xfer`) | **166 ms** |
-| Question 1 back | `k* = (0.00366 − B)/A` | 0.474 → **11.32 r/s** |
+| **TTFT p90** | 71.1 + 89.4 + 0 + 3.7 (no `T_xfer`) | **164 ms** |
+| Floors | TPOT `ITL(0.15)`; TTFT `12.6 + 76.8 + ITL(0.15)` | 2.22 ms; 91.6 ms |
 
-Question 1 at the SLO question 2 returned gives back question 2's rate. The
-TTFT figure is unvalidated: `ols-sweep`'s prefill ran at `ρ` about 0.1, and its
-`V_P` is a lower bound.
+**Question 1 on the same fleet: mean TPOT 4 ms, TTFT p90 200 ms.**
+
+| Step | Value |
+| --- | --- |
+| TPOT inverts to `k* = (0.004 − B)/A` | 0.551, under the batch cap: 12.03 r/s |
+| TTFT, prefill terms alone | 14.87 r/s, past the decode knee |
+| TTFT, bisected below the decode knee with decode admission priced | 11.87 r/s, held down by decode admission (its p90 wait reaches 200 ms − the other terms there) |
+| Operating-point cap | 11.32 r/s |
+| **Answer** | **11.32 r/s**, bound by the cap; with `--headroom 1`, 11.87 r/s, bound by TTFT through decode admission |
+
+The round trip, question 1 at the SLO question 2 returned (3.661 ms unrounded,
+164 ms), gives back 11.32 r/s, but only because both sit at the cap. The
+property case therefore runs below it: a TPOT of 3.0 ms inverts to 9.47 r/s
+and the fill there gives back 3.00 ms.
+
+The TTFT figures are unvalidated, and on this golden rest on an assumed `V_P`.
+`ols-sweep`'s prefill ran far below its capacity; it fits `a`, not `V_P`.
 
 ## Data per mode
 
@@ -508,6 +563,7 @@ per-request duration is compared with `AvgServiceTime` at the observed load.
 | `W_router` taken as 0 | Over-promises | slo-tiers open question 5 |
 | `T_xfer` omitted (not collected) | Over-promises | — |
 | KV-bound decode admission approximated by slots | Either way | — |
+| Decode residence taken as exponential in the chain | Either way; a constant ITL instead would over-promise near the knee | — |
 | Output-length spread ignored (`D` = 1) | Over-promises decode by 7-44% | #276 |
 | Prefix-cache hits still occupy KV | Over-promises decode, up to about 4x under multi-turn reuse | #277 |
 | Positive prompt/output correlation | Over-promises decode | — |
@@ -565,7 +621,7 @@ operating point):
 | Check | Measured | Bound |
 | --- | --- | --- |
 | Mean TPOT at the observed fill | Engine ITL mean | ±10% median signed error |
-| Prefill own latency at the observed prompt | `AvgServiceTime` | ±15% |
+| Prefill own latency at the observed prompt | `AvgServiceTime` | ±15%; SKIPPED where `V_P` is refused or assumed (so on `ols-sweep`) |
 | Decode knee | Saturated throughput windows, if the golden has at least 5 | ±15% |
 
 A check with no data is **SKIPPED with a reason** in the output, never passed.
@@ -613,9 +669,12 @@ mutation-checked: a mutant of the formula must fail it.
 
 - The rate never falls when a target loosens, and never rises when prompts or
   answers lengthen.
-- Round trip, within 1e-6 relative: question 1 at question 2's SLO gives back
-  question 2's rate, at unclamped points only (fill strictly inside the band
-  and `n` under the batch cap).
+- Round trip, within 1e-6 relative, with `--headroom 1` and at a `--rate`
+  below the operating point: question 1 at question 2's SLO gives back
+  question 2's rate, at unclamped points only (fill strictly inside the band,
+  `n` under the batch cap, and the rate under the operating-point cap). A
+  round trip through the cap passes for any inversion, so it is not a test.
+- The chain at a constant ITL reduces to Erlang C exactly.
 - Every `Unanswerable` reason has a case asserting it. NaN in any input gives
   a reason, never 0 or +Inf.
 - With `f` = 1 and one pod, the wait equals Pollaczek-Khinchine exactly.
@@ -636,7 +695,7 @@ fails on `main` first.
 | 3 | Tracker and analyzer accessors, the replay function, bands (fixed seed), basis, `cmd/whatif` from a recording or snapshot, the footer, exit codes, `make whatif` | None | 2 |
 | 4 | `internal/whatifsource` and `--prometheus`. No replay switch: no controller path changes; the readiness-less admission lives only in the adapter | None | 3 |
 | **TTFT** | | | |
-| 5a | `internal/signals/prefill`, observing: `V_P` (busy minutes, observed peak, back-pressure bound), `a` and the overhead from low-load minutes, `f`. Admission reasons and the settled-replica tracker. Logs every cycle; nothing reads it. Switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` only | None (log only) | — |
+| 5a | `internal/signals/prefill`, observing: `V_P` (busy minutes, observed peak under a queue, back-pressure bound), `a` and the overhead from low-load minutes, `f`. Admission reasons and the settled-replica tracker. Logs every cycle; nothing reads it. Switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and the overhead, and refuses `V_P` and `f` | None (log only) | — |
 | 5b | A prefill-stress recording added as a golden: single phase, prefill-heavy (30k prompts), 3 prefill pods, decode held below its ceiling, fixed replicas. It exercises busy minutes and `f` | Adds one fixture | 5a, the run |
 | 5c | TTFT in `whatif`: the per-pod queue, the pooled bound, the decode terms, both inversions; printed UNVALIDATED. No switch: the controller does not read it | None | 5b, 2 |
 | 6 | Collect what is missing, with presence bits: `request_prefill_time_seconds` (aggregated pods), the queue-time and prompt-length `_bucket` series, `nixl_xfer_time_seconds`. Updates `learnreplay`'s export leak and coverage tests and the `metrics.go` comment. Old recordings replay with the presence bits false | Regenerated by `learnergolden update`; values unchanged, new columns empty | — |
@@ -644,7 +703,7 @@ fails on `main` first.
 | 7 | Per-bucket and mix answers from histograms; aggregated TTFT | None | 5c, 6, #276 |
 | 8 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | 4, 7 |
 | Only if asked | The controller endpoint and two gauges (the knee at the current count, TPOT at the current rate) | None | 5c |
-| Later | Prefill line in the snapshot; the floor's derived prefill mu from `V_P`; shared prefill/decode budget; #275, #432, #277 | — | — |
+| Later | Prefill line in the snapshot; the learned batch cap in the snapshot (open question 4); the floor's derived prefill mu from `V_P`; shared prefill/decode budget; #275, #432, #277 | — | — |
 
 The ols-sweep-slo run, in progress on 2026-11-02, scales out, so it cannot
 exercise the queue term. It does carry router TTFT. Export its Prometheus data
@@ -667,7 +726,8 @@ series are retained.
    as saturation keys its prefill windows; add a term only if bucket B of the
    staircase misses by more than 15%.
 2. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance
-   across cycles, cap it at 4, and show it in the basis.
+   across cycles, cap that estimate at 4, and show it in the basis. The
+   sticky-routing term is not capped.
 3. **Which imbalance signal?** *Recommend:* the computed-token share in busy
    minutes, de-biased; queue length when no busy minute exists.
 4. **Persist the learned batch cap in the snapshot?** *Recommend:* yes, in a
