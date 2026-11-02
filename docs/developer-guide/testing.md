@@ -410,8 +410,9 @@ The `ols-sweep` golden is the cluster recording whose ITL line comes from
 full fits (`itl-ols`), not only from fits with B pinned. A full fit needs
 steady readings at least 0.30 of k apart, and a steady load never gives
 that: it holds k in a narrow band. The stock P/D decode pod cannot get
-there at all. It holds 1.16M tokens of KV, and 16 sequences of at most
-16384 tokens fill no more than about 0.23 of it.
+there at all. On an H200 its KV holds about 1.16M tokens (about 9080 blocks of 128),
+and 16 sequences of at most 16384 tokens fill no more than about 0.23 of
+it.
 
 So the run shrinks the decode KV and steps the load. It is the P/D
 benchmark scenario with EPP flow control off, and decode pinned at one
@@ -425,27 +426,51 @@ fits, and some pinned ones.
 
 To take it again at a new commit:
 
-1. Stand up the P/D scenario as for `pd-restart`, step 1. Then give the
-   decode engine `--num-gpu-blocks-override 1024` (131072 tokens),
-   `--max-num-seqs 64` and `--max-model-len 16384`. Give the decode
-   ScaledObject 1-1 replicas and the prefill one 1-2.
+1. Stand up the scenario `hack/benchmark/scenarios/guides/pd-disaggregation.yaml`
+   with `MODEL_ID=Qwen/Qwen3-0.6B`, as for `pd-restart`, step 1, with these
+   changes to the decode Deployment instead of its 16 sequences:
+   - set the `vllm` container's environment variable `VLLM_MAX_NUM_SEQ` to
+     `64` (the decode command passes it as `--max-num-seq`);
+   - keep `VLLM_MAX_MODEL_LEN` at the scenario's `16384` (`--max-model-len`);
+   - add `--num-gpu-blocks-override 1024` to the decode `customCommand`,
+     after `--max-num-batched-tokens 8192`. At the scenario's block size of
+     128 that is 131072 tokens of KV. The engine reports it as
+     `num_gpu_blocks="1024"` in `vllm:cache_config_info`.
+
+   Give the decode ScaledObject 1-1 replicas and the prefill one 1-2.
 2. Remove EPP flow control and turn the recorder on, as for `pd-restart`,
    steps 2 and 3.
-3. Run the load. Keep a fixed number of requests in flight, each with a
-   random prompt of the input length, `max_tokens` of the output length
-   and `ignore_eos` (never `min_tokens`: the P/D sidecar refuses it).
-   Start with 10 in flight at 1000 in and 4000 out for 5 minutes. Then run
-   these eleven levels, 270 seconds each, as in flight / tokens in /
-   tokens out:
-   24/1000/4000, 10/1000/4000, 24/1000/500, 56/1000/500, 5/6000/1000,
-   11/6000/1000, 4/6000/1000, 24/1000/4000, 20/1000/500, 10/6000/1000,
-   8/1000/4000. Change levels with no gap between them: requests above
-   the new count finish, and new ones start at once.
-   On the first level, read the decode pod's `vllm:kv_cache_usage_perc`.
-   If it is far from 0.25, scale the counts so that every level stays
-   inside 0.15 to 0.80.
+3. Run the load with `hack/benchmark/closed_loop_sweep.py`, from anywhere
+   with Python 3, `aiohttp`, and a route to the router service:
+
+   ```bash
+   python3 hack/benchmark/closed_loop_sweep.py --url http://ROUTER:80 --model Qwen/Qwen3-0.6B
+   ```
+
+   Its default schedule is the one this golden ran. The first level is 10
+   requests in flight at 1000 tokens in and 4000 out, for 300 seconds. Then
+   come eleven levels of 270 seconds each, as in flight / tokens in / tokens
+   out: 24/1000/4000, 10/1000/4000, 24/1000/500, 56/1000/500, 5/6000/1000,
+   11/6000/1000, 4/6000/1000, 24/1000/4000, 20/1000/500, 10/6000/1000 and
+   8/1000/4000.
+
+   During the first level, read the decode pod's `vllm:kv_cache_usage_perc`.
+   It should be about 0.25. If it is not, stop the script and start it
+   again with `--scale` set to 0.25 divided by that reading. The script
+   multiplies every in-flight count by the factor, rounds it, and keeps it
+   between 1 and 64.
 4. Copy the recording out, as in [Copy the recordings out](#copy-the-recordings-out).
-   Then add it with `make learner-golden-add` at that commit.
+   Then add it at that commit. `REPLACE=1` replaces the committed golden of
+   the same name:
+
+   ```bash
+   make learner-golden-add RECORDING=learnrec-<start>.jsonl NAME=ols-sweep REPLACE=1 \
+     SOURCE="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, load sweeps of concurrency and shape, default analyzerTuning"
+   ```
+
+   A new recording has new wall-clock times. Move the cut time in
+   `TestGoldens_OLSSweepReplayFitsOLS`, and the times in its comment, to
+   the new run's first fit.
 
 #### The engine layer
 
@@ -781,7 +806,7 @@ Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.
 `make learner-goldens-check` runs the check alone and prints, per output, how
 many rows changed and the first change with its sign and size.
-`make learner-goldens` does not rewrite the counts that tests write by hand:
+`make learner-goldens` does not rewrite the counts and floors that tests write by hand:
 `TestGoldens_PDRestartReplayRestartsForReal` and
 `TestGoldens_OLSSweepReplayFitsOLS`. If your change moves them, update them in
 the test and say why in the PR.

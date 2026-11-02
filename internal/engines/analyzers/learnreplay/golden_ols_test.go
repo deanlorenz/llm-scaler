@@ -46,10 +46,12 @@ func TestGoldens_OLSSweepReplayFitsOLS(t *testing.T) {
 	assert.Positive(t, rep.Paths[saturation.PathITLPinned],
 		"pinned fits are there too: the load holds still between its steps")
 
-	// A head with no fit of any kind yet: the first line of either tier came
-	// at 22:02:17Z, after the window had held enough steady readings. Cut at
-	// the first cycle that begins after 22:01:00Z. The fits above come from
-	// the run, not from the replay's start.
+	// A head with no fit of any kind yet. What keeps it fit-free is the
+	// steadiness and sample gate (itl.DefaultSteadyFor, DefaultMinSamples),
+	// not the spread: the head already holds readings more than 0.30 of k
+	// apart. The first line of either tier came at 22:02:17Z; cut at the
+	// first cycle that begins after 22:01:00Z. Both are wall-clock times of
+	// this recording: a re-take moves them (testing.md, ols-sweep).
 	head := replayHeadBefore(t, rec, time.Date(2026, 11, 1, 22, 1, 0, 0, time.UTC))
 	assert.Zero(t, head.Paths[saturation.PathITLOLS], "no full fit yet")
 	assert.Zero(t, head.Paths[saturation.PathITLPinned], "no pinned fit yet")
