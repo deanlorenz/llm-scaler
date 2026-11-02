@@ -21,8 +21,13 @@ import (
 // once for the shed, shifts one set per reachable value of each role, at most
 // 4097 x 65 word operations per role. BenchmarkPodSearchAtTheBound measures
 // one joint search over two roles at the bound at 0.35-0.47 ms. roundExact
-// runs the pair again for each lower target whose room still exceeds its best
-// plan: the GPUs whole pods leave below the room.
+// runs the pair again at most once per distinct split below the target, and
+// only while that split's room still exceeds the best plan so far, which in
+// practice is about the largest pod's size in units. On the mixed-size test
+// grids 98% of roundings run no lower plan and none runs more than 14; on a
+// fleet built to make it scan (32-GPU growth pods, unit 1), a model takes
+// 70-90 us on average against 33-41 us before, and 0.6-0.9 ms at worst
+// against 0.3-0.6 ms.
 const podSearchMaxUnits = 4096
 
 // podBits is a set of small non-negative integers: GPU sums, in units.
@@ -269,11 +274,14 @@ type podPlan struct {
 	bound int
 }
 
-// fillPlan is the fill side: the roles not cut (tgt at or above cur), each
-// taking no more than its demand dem still asks for or its own share rounded
-// up to one replica, the bound the greedy pass applies, and all of them no
-// more than their summed growth.
-func fillPlan(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+// fillPlan is the fill side: the roles not cut (tgt at or above cur) and not
+// under a scale-up hold, each taking no more than its demand dem still asks
+// for or its own share rounded up to one replica, the bound the greedy pass
+// applies, and all of them no more than the summed growth of every role not
+// cut. A held role is left out of the fill, which skips it anyway: in it, a
+// shed paid for pods the fill never placed. Its growth still counts toward
+// the bound, as it did when the role was searched.
+func fillPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	roles []string, tgt, cur, dem, targets map[string]int, unit int) podPlan {
 	var p podPlan
 	growth := 0
@@ -284,7 +292,7 @@ func fillPlan(records []variantRecord, stateMap map[string]domain.VariantReplica
 	}
 	p.bound = toUnits(growth, unit)
 	for _, role := range roles {
-		if tgt[role] < cur[role] {
+		if tgt[role] < cur[role] || e.Holds[role].NoScaleUp {
 			continue
 		}
 		want := tgt[role] - cur[role]
@@ -303,9 +311,9 @@ func fillPlan(records []variantRecord, stateMap map[string]domain.VariantReplica
 // removable pod, its pods most expensive first, and all of them no more than
 // the summed cut, each role counted no further than it can give. Each
 // variant keeps its minReplicas, and a role keeps its last replica when it
-// has a share or the cheapest-at-one rule protects it.
+// has a share, in tgt or in keep, or the cheapest-at-one rule protects it.
 func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	roles []string, tgt, cur, targets map[string]int, unit int) podPlan {
+	roles []string, tgt, cur, keep, targets map[string]int, unit int) podPlan {
 	var p podPlan
 	total := 0
 	for _, role := range roles {
@@ -341,7 +349,7 @@ func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[strin
 		// It is barred when the role has a share or its cheapest variant
 		// still holds a replica (the cheapest-at-one rule).
 		if removable > 0 && removable == held && top == removable/unit &&
-			(tgt[role] > 0 || targets[ordered[len(ordered)-1].VariantName] >= 1) {
+			(tgt[role] > 0 || keep[role] > 0 || targets[ordered[len(ordered)-1].VariantName] >= 1) {
 			set.unset(top)
 		}
 		can := set.maxAtMost(top)
@@ -369,22 +377,30 @@ func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[strin
 // At one target, the fill is searched within the growing roles' growth and
 // the shed within the cut roles' cut, each exactly over the pods' sums, and of
 // every pair of a fill and a shed the model takes the one that leaves it the
-// most GPUs without passing the room, what the shares add above what the
-// model holds (planExact). Bounded by the room, the model ends at or below its
-// target, or where it is when the target is the lower: rounded alone, a role
-// rounded up to a whole pod left the next cycle a cut no pod meets while the
-// other role grew, and the model ended a partial pod above its target (#421).
+// most GPUs without passing the room (planExact). The room is what the target
+// adds above what the model holds, or what the shares add when they sum to
+// more. Bounded by it, the model ends at or below its target, or where it is
+// when the target is the lower: rounded alone, a role rounded up to a whole
+// pod left the next cycle a cut no pod meets while the other role grew, and
+// the model ended a partial pod above its target (#421). A model shrinking
+// toward its target may now end up to a partial pod below it, where rounding
+// alone left it above.
 //
 // That plan alone is not monotone in the target: one GPU more can turn a cut
 // of a pod into a cut no pod meets, and the pair that shed the pod is gone.
 // So the model takes the best plan of this target and every lower one, the
 // one that leaves it the most GPUs, the plan of the highest such target among
-// equals; a lower target's plan that empties a role this target gives a share
-// is passed over. A best-of-every-lower-target never falls as the target rises, and
-// no lower target's room exceeds this one's, so the model still ends at or
-// below its target. The scan stops at the first lower target whose room,
-// or this target's largest fill, cannot beat the best so far, since neither
-// rises as the target falls.
+// equals. No lower target's room exceeds this one's, so the model still ends
+// at or below its target. The scan stops at the first lower target whose
+// room, or this target's largest fill, cannot beat the best so far, since
+// neither rises as the target falls.
+//
+// A lower target's plan keeps the last replica of every role this target
+// gives a share, since the rescale may not empty it. That is the one case in
+// which a larger target can leave fewer GPUs: where a role's share rises from
+// zero, the lower target's best plan emptied it, and no plan that keeps it
+// reaches as far without passing the target
+// (TestRescaleMixedKeepingARoleCanCostGPUs).
 //
 // Among pairs of equal GPUs the one that sheds most is taken, so a model at
 // its target still moves a pod between its roles. A cut of a pod or more has
@@ -393,7 +409,7 @@ func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[strin
 func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	roles []string, split func(int) map[string]int, target int, tgt, cur, dem, targets map[string]int) {
 	unit := podUnit(records, stateMap)
-	best := planExact(e, records, stateMap, roles, tgt, cur, dem, targets, unit)
+	best := planExact(e, records, stateMap, roles, target, tgt, cur, dem, nil, targets, unit)
 	prev := tgt
 	for t := target - 1; t >= 0 && best.net < best.fillMax; t-- {
 		shares := split(t)
@@ -401,14 +417,10 @@ func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[str
 			continue
 		}
 		prev = shares
-		room := 0
-		for _, role := range roles {
-			room += shares[role] - cur[role]
-		}
-		if floorUnits(room, unit) <= best.net {
+		if floorUnits(planRoom(roles, t, shares, cur), unit) <= best.net {
 			break
 		}
-		if p := planExact(e, records, stateMap, roles, shares, cur, dem, targets, unit); p.net > best.net && !p.empties(tgt) {
+		if p := planExact(e, records, stateMap, roles, t, shares, cur, dem, tgt, targets, unit); p.net > best.net {
 			best = p
 		}
 	}
@@ -426,59 +438,53 @@ func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[str
 	}
 }
 
+// planRoom is what a plan of target with role shares tgt may add to the
+// model, in GPUs: what the target adds above what the model holds cur, or
+// what the shares add when they sum to more. Every role at its ceiling leaves
+// the shares short of the target; bounded by the shares, a role whose cut no
+// pod meets kept the other role from growing to its share with the target's
+// GPUs unused.
+func planRoom(roles []string, target int, tgt, cur map[string]int) int {
+	shares, held := 0, 0
+	for _, role := range roles {
+		shares += tgt[role]
+		held += cur[role]
+	}
+	return max(shares, target) - held
+}
+
 // exactPlan is a rounding of a model's role shares to whole pods: the GPUs
-// each growing role ends at (tgt), the pods shed per variant (shed), and the
-// roles the shed leaves with no pod (emptied). net is what the plan adds to
-// the model, in units, and fillMax the most its fill can add.
+// each growing role ends at (tgt) and the pods shed per variant (shed). net
+// is what the plan adds to the model, in units, and fillMax the most its fill
+// can add.
 type exactPlan struct {
 	tgt     map[string]int
 	shed    map[string]int
-	emptied []string
 	net     int
 	fillMax int
 }
 
-// empties reports whether p leaves a role with no pod that has a share in
-// tgt: a plan of a lower target may empty a role the target gives a share.
-func (p exactPlan) empties(tgt map[string]int) bool {
-	for _, role := range p.emptied {
-		if tgt[role] > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// planExact rounds the role shares tgt, at one target, to whole pods: of every
-// pair of a fill within the growing roles' growth and a shed within the cut
-// roles' cut, the one whose net is the largest at most the room (netPlan).
+// planExact rounds the role shares tgt of target to whole pods: of every pair
+// of a fill within the growing roles' growth and a shed within the cut roles'
+// cut, the one whose net is the largest at most the room (netPlan). A role
+// with a share in keep keeps its last replica as one with a share in tgt does.
 func planExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	roles []string, tgt, cur, dem, targets map[string]int, unit int) exactPlan {
-	room := 0 // what the shares add above what the model holds
-	for _, role := range roles {
-		room += tgt[role] - cur[role]
-	}
-	fill := fillPlan(records, stateMap, roles, tgt, cur, dem, targets, unit)
-	shed := shedPlan(e, records, stateMap, roles, tgt, cur, targets, unit)
+	roles []string, target int, tgt, cur, dem, keep, targets map[string]int, unit int) exactPlan {
+	fill := fillPlan(e, records, stateMap, roles, tgt, cur, dem, targets, unit)
+	shed := shedPlan(e, records, stateMap, roles, tgt, cur, keep, targets, unit)
 	fillLayers := jointLayers(fill.sets, fill.caps, fill.bound)
 	fills := fillLayers[len(fillLayers)-1]
 	shedLayers := jointLayers(shed.sets, shed.caps, shed.bound)
-	grow, drop := netPlan(fills, fill.bound, shedLayers[len(shedLayers)-1], shed.bound, floorUnits(room, unit))
-	p := exactPlan{tgt: map[string]int{}, shed: map[string]int{}, net: grow - drop, fillMax: max(fills.maxAtMost(fill.bound), 0)}
+	grow, drop := netPlan(fills, fill.bound, shedLayers[len(shedLayers)-1], shed.bound,
+		floorUnits(planRoom(roles, target, tgt, cur), unit))
+	p := exactPlan{tgt: map[string]int{}, shed: map[string]int{}, net: grow - drop,
+		fillMax: max(fills.maxAtMost(fill.bound), 0)}
 	for i, a := range jointSplit(fillLayers, fill.sets, fill.caps, grow, fill.ideal) {
 		p.tgt[fill.roles[i]] = cur[fill.roles[i]] + a*unit
 	}
 	for i, s := range jointSplit(shedLayers, shed.sets, shed.caps, drop, shed.ideal) {
-		left := 0
-		for _, vc := range variantsForRole(records, shed.roles[i]) {
-			left += targets[vc.VariantName]
-		}
 		for j, n := range composePods(shed.items[i], s) {
 			p.shed[shed.items[i][j].name] += n
-			left -= n
-		}
-		if left == 0 {
-			p.emptied = append(p.emptied, shed.roles[i])
 		}
 	}
 	return p

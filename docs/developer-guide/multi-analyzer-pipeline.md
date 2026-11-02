@@ -589,20 +589,24 @@ across roles, is rounded by an exact pod search instead (`roundExact` in
 `rescale_pods.go`): a bounded knapsack, on bitsets, over each role's
 variants. At one target it searches every pair of a fill and a shed:
 
-- **Fill** the roles not cut, within their summed growth, each role bounded
-  as the greedy pass bounds it.
+- **Fill** the roles not cut and not held against scale-up, within the
+  summed growth of every role not cut, each role bounded as the greedy pass
+  bounds it.
 - **Shed** the roles cut, within their summed cut, each role no further than
   its cut rounded up to its smallest removable pod, keeping `minReplicas`,
   scale-down holds, a role's last replica while it has a share, and the
   cheapest-at-one rule.
 
 Of those pairs the model takes the one that leaves it the most GPUs without
-passing the room, what the shares add above what the model holds, and among
-equals the one that sheds most, so a model at its target still moves a pod
-to the role its demand moved to. When no pair is within the room, the model
-sheds what it can and grows nothing. A cut of a pod or more is shed, and a
-growing role short of a pod no longer makes a cut role shed one for nothing,
-which the next cycle took back.
+passing the room, and among equals the one that sheds most, so a model at
+its target still moves a pod to the role its demand moved to. The room is
+what the target adds above what the model holds, or what the shares add when
+they sum to more. When every role is at its ceiling the shares sum to less
+than the target; bounded by them, a cut no pod meets kept the other role
+below its share with the target's GPUs unused. When no pair is within the
+room, the model sheds what it can and grows nothing. A cut of a pod or more
+is shed, and a growing role short of a pod no longer makes a cut role shed
+one for nothing, which the next cycle took back.
 
 Bounded by the room, a model never ends above both its target and what it
 holds. Rounding each side alone did: prefill on one 8-GPU pod and decode on
@@ -611,20 +615,39 @@ pods. On the next cycle prefill was cut by 4, which no pod meets, while
 decode still grew, and the model ended at 44
 ([#421](https://github.com/ev-shindin/llm-scaling-manager/issues/421)). On
 the rerun grid of `TestRescaleMixedRerunIsStable`, the second cycles that
-move went from 1240 to 264, and none passes its target.
+move went from 1240 to 282, and none passes its target.
+
+The same bound changes shrinking: a model above its target now ends at or
+below it, up to a partial pod below, where rounding alone left it up to a
+partial pod above. Held at 108 GPUs and given 63, one model ended at 60
+where it had ended at 64. The GPUs go to the other models of the group.
 
 The plan of one target alone is not monotone: one GPU more can turn a cut of
 a pod into a cut no pod meets. Prefill on a 12-GPU pod and decode on three
 8-GPU pods reach 40 at a target of 41 by shedding a decode pod; at 42 decode
 is cut by 7, and the plan of 42 alone keeps 36. So the model takes the best
 plan of its target and of every lower one, the plan of the highest target
-among equals. That best never falls as the target rises, so a larger target
-never leaves fewer GPUs (greedy, prefill on an empty 8-GPU variant and
-decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and 8 at 11),
-and no lower target's room exceeds this one's, so the model still stays
-within its target. The scan of lower targets stops at the first whose room
-cannot beat the best so far; over the mixed-size test grids 98% of
-roundings need no lower target and none needs more than 14.
+among equals. No lower target's room exceeds this one's, so the model still
+stays within its target. Greedy, prefill on an empty 8-GPU variant and
+decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and 8 at 11.
+
+A larger target still leaves fewer GPUs in one case. A lower target's plan
+must keep the last replica of every role this target gives a share, so
+where a role's share rises from zero to a GPU or two, the plan that emptied
+it is gone, and the best plan that keeps it may hold fewer GPUs. Prefill on
+one 2-GPU pod and decode on 4-GPU pods end at 12 at a target of 12, with
+prefill emptied, and at 10 at 13, with prefill kept: 14 would pass the
+target (`TestRescaleMixedKeepingARoleCanCostGPUs`). It needs pods smaller
+than a node. On a grid built to provoke it, one point in 254,703 broke; on
+the same grid with 8- to 24-GPU pods, and on the general mixed-size grids,
+none did.
+
+The scan of lower targets runs at most one plan per distinct split below the
+target, and stops at the first whose room cannot beat the best so far. Over
+the mixed-size test grids 98% of roundings run no lower plan and none runs
+more than 14; over a wider grid with held roles, 97.5% and 28. On a fleet
+built to make it scan, a model takes 70-90 µs on average against 33-41 µs
+before, and 0.6-0.9 ms at worst against 0.3-0.6 ms.
 
 The search takes the most GPUs first and cost order only among equal sums, a
 change from the greedy pass: on a cheap 6-GPU variant and a dearer 4-GPU
