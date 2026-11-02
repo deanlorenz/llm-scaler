@@ -84,7 +84,7 @@ taken as 1, the resident requests were over-counted by 7% for uniform lengths,
 `D` is read from vLLM's `vllm:request_generation_tokens_bucket` over the same
 `[5m]` as `OL`. The buckets bound `E[O^2]` rather than give it, so the collector
 takes the least `E[O^2]` the buckets and the exact mean allow
-(`shape.SquaredMeanLowerBound`, `ReplicaMetrics.AvgOutputTokensSquared`): every
+(`domain.SquaredMeanLowerBound`, `ReplicaMetrics.AvgOutputTokensSquared`): every
 bucket's requests at one length, a water level clamped into each bucket's
 bounds. The true `E[O^2]` is never below it, so `D` moves `KVreq` towards the
 truth and never past it, and equal lengths read `D = 1`. On vLLM's 1-2-5

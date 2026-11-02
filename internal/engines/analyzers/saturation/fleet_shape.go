@@ -120,7 +120,7 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 // averages and with its weights, so the two are one reading of one fleet.
 // E[O^2] is each replica's lower bound (AvgOutputTokensSquared), so D is too:
 // it prices the KV a resident request holds towards the truth and never past
-// it (shape.SquaredMeanLowerBound).
+// it (domain.SquaredMeanLowerBound).
 //
 // 1, no spread, unless EVERY generating replica with an output length read
 // the bound. One without it (an SGLang replica, a relabelling that drops the

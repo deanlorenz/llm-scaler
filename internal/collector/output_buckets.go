@@ -7,7 +7,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // extractOutputBuckets reads the output-length histogram into the instances
@@ -19,7 +19,7 @@ import (
 // as the instance key already ties it to a seen pod. A series whose bound
 // does not parse, or whose rate is not a finite non-negative number, is
 // dropped; a histogram missing a bucket is then refused as a whole by
-// shape.SquaredMeanLowerBound, never read with a hole in it.
+// domain.SquaredMeanLowerBound, never read with a hole in it.
 func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	result := results[registration.QueryOutputTokensBuckets]
@@ -52,15 +52,15 @@ func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, mode
 }
 
 // outputTokensSquared reduces an instance's histogram and its mean output
-// length to the lower bound on E[O^2] (shape.SquaredMeanLowerBound), and
+// length to the lower bound on E[O^2] (domain.SquaredMeanLowerBound), and
 // whether it is a reading.
 func outputTokensSquared(buckets map[float64]float64, mean float64) (float64, bool) {
 	if len(buckets) == 0 {
 		return 0, false
 	}
-	bs := make([]shape.Bucket, 0, len(buckets))
+	bs := make([]domain.LengthBucket, 0, len(buckets))
 	for le, rate := range buckets {
-		bs = append(bs, shape.Bucket{UpperBound: le, Rate: rate})
+		bs = append(bs, domain.LengthBucket{UpperBound: le, Rate: rate})
 	}
-	return shape.SquaredMeanLowerBound(bs, mean)
+	return domain.SquaredMeanLowerBound(bs, mean)
 }

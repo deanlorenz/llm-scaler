@@ -16,7 +16,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // Variable output lengths (#276): a long request stays resident longer, so
@@ -73,7 +72,7 @@ func (w spreadWorkload) replicaLengths(r *rand.Rand, n int) []float64 {
 
 // spreadRow is one decode replica of variant v that completed lengths, as
 // the collector reads it: the mean, and the bound on E[O^2] from the
-// histogram (shape.SquaredMeanLowerBound), one request a second.
+// histogram (domain.SquaredMeanLowerBound), one request a second.
 func spreadRow(pod string, w spreadWorkload, lengths []float64, kvTokens int64) domain.ReplicaMetrics {
 	var sum float64
 	for _, x := range lengths {
@@ -83,7 +82,7 @@ func spreadRow(pod string, w spreadWorkload, lengths []float64, kvTokens int64) 
 	rm := makeReplicaMetrics(pod, "v", kvTokens/20, kvTokens, 0, w.il, mean)
 	rm.KvUsageInstant, rm.KvUsageInstantKnown = rm.KvCacheUsage, true
 	rm.RequestRate = 1
-	buckets := make([]shape.Bucket, 0, len(vllmLengthBounds)+1)
+	buckets := make([]domain.LengthBucket, 0, len(vllmLengthBounds)+1)
 	for _, b := range append(append([]float64{}, vllmLengthBounds...), math.Inf(1)) {
 		var n float64
 		for _, x := range lengths {
@@ -91,9 +90,9 @@ func spreadRow(pod string, w spreadWorkload, lengths []float64, kvTokens int64) 
 				n++
 			}
 		}
-		buckets = append(buckets, shape.Bucket{UpperBound: b, Rate: n / 300})
+		buckets = append(buckets, domain.LengthBucket{UpperBound: b, Rate: n / 300})
 	}
-	if sq, ok := shape.SquaredMeanLowerBound(buckets, mean); ok {
+	if sq, ok := domain.SquaredMeanLowerBound(buckets, mean); ok {
 		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = sq, true
 	}
 	return rm

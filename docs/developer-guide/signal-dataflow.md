@@ -135,7 +135,7 @@ KVreq   = ILeff + D x O/2
 | --- | --- | --- | --- |
 | `I` = `AvgInputTokens` | tokens/request | collector, `request_prompt_tokens_sum/count` `[5m]` | the prompt length the fleet is serving |
 | `O` = `AvgOutputTokens` | tokens/request | collector, `request_generation_tokens_sum/count` `[5m]` | the generation length |
-| `E[O^2]` = `AvgOutputTokensSquared` | tokens^2/request | collector, the least `E[O^2]` that `request_generation_tokens_bucket` `[5m]` and `O` allow (`shape.SquaredMeanLowerBound`), vLLM only; `AvgOutputTokensSquaredKnown` says it was read | the spread of output lengths, `D` (issue #276) |
+| `E[O^2]` = `AvgOutputTokensSquared` | tokens^2/request | collector, the least `E[O^2]` that `request_generation_tokens_bucket` `[5m]` and `O` allow (`domain.SquaredMeanLowerBound`), vLLM only; `AvgOutputTokensSquaredKnown` says it was read | the spread of output lengths, `D` (issue #276) |
 | `hitRate` = `PrefixCacheHitRate` | fraction 0-1 | collector, `prefix_cache_hits / queries` | share of prompt tokens served from cache |
 
 `ILeff` is the prompt the engine must actually compute — a cached prefix costs

@@ -11,7 +11,7 @@ package saturation
 // and 44% (lognormal, cv 1.5) at IL = 2 OL.
 //
 // D is read from vLLM's output-length histogram as a lower bound
-// (shape.SquaredMeanLowerBound, domain.ReplicaMetrics.AvgOutputTokensSquared),
+// (domain.SquaredMeanLowerBound, domain.ReplicaMetrics.AvgOutputTokensSquared),
 // so it moves the KV per request towards the truth and never past it. Equal
 // lengths read as D = 1, and with no histogram (SGLang, or a relabelling that
 // drops it) nothing changes.

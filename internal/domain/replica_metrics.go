@@ -232,7 +232,7 @@ type ReplicaMetrics struct {
 	// length per request on this replica, over the [5m] window
 	// AvgOutputTokens is taken over: the least E[O^2] that
 	// vllm:request_generation_tokens_bucket and AvgOutputTokens allow
-	// (shape.SquaredMeanLowerBound). With AvgOutputTokens it gives the
+	// (SquaredMeanLowerBound). With AvgOutputTokens it gives the
 	// spread of output lengths, D = E[O^2]/E[O]^2, which sets the KV a
 	// resident request holds: a long request stays resident longer, so
 	// KVreq = ILeff + D*OL/2, not ILeff + OL/2 (issue #276).
