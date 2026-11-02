@@ -483,15 +483,22 @@ At the commit they were added, each replay took the same counts as the
 controller's own log of the run, for both analyzers (the saturation
 analyzer's `itl-fit` lines and the slo analyzer's `slo-variant` lines):
 
-| Golden | Full fits | Pinned fits | slo `Analyze` calls with router latency |
-| --- | --- | --- | --- |
-| `ols-sweep-slo` | 15 | 33 | 79 of 83 |
-| `ols-sweep-slo-restart` | 57 | 66 | 143 of 143 |
+| Golden | Full fits | Pinned fits | slo `Analyze` calls with router latency | Judged TPOT / TTFT |
+| --- | --- | --- | --- | --- |
+| `ols-sweep-slo` | 15 | 33 | 79 of 83 | 55 / 55 |
+| `ols-sweep-slo-restart` | 57 | 66 | 143 of 143 | 115 / 113 |
 
-The slo analyzer's fits count as `slo-itl-ols` and `slo-itl-pinned` in a
-replay's paths. `TestGoldens_OLSSweepSLOReplayFitsBothLines` requires a
-floor of full fits of each line and of `Analyze` calls with router latency
-in each golden, and no fit of either tier before each golden's first fit.
+A judged objective has a finite observed figure and is not excluded. The
+rest came in the first minutes after each controller start: no router
+requests yet, or excluded as a transient (`unobserved`), and at the end of
+the restart file two TTFT windows with too few requests. The slo analyzer's fits
+count as `slo-itl-ols` and `slo-itl-pinned` in a replay's paths, and the
+golden check requires both, as it does saturation's.
+`TestGoldens_OLSSweepSLOReplayFitsBothLines` requires, in each golden, a
+floor of full fits of each line, of `Analyze` calls with router latency
+(an input of the recording), and of objectives the replay judged (its
+output). Before each golden's first fit it requires no fit of either
+tier: there the pinned fit declines, and the head must reach that.
 
 To take them again at a new commit, follow the `ols-sweep` steps with
 these changes:
@@ -508,15 +515,17 @@ these changes:
    namespace has its own `wva-scaling-policy-config`, that map replaces
    the global one whole, and a tier written only into the global map
    does not exist for the model: the controller logs
-   `Scaling policy not found` and runs the model with `slo` off.
+   `Scaling policy not found` and falls back to that map's `default`
+   entry, which here has no `slo`.
 
    Before the load, check that the model's `Effective scaling policy` line
    shows `"scalingPolicy": "slo-watch"` and
-   `"slo": "tpot mean<=50ms, ttft p95<=2s (observe)"`. The first cycle
-   after a controller start can run before the ConfigMaps load and log
-   `slo off`; wait for the next line. That line does not show the
-   `analyzers:` list, so also check that the recording holds both
-   `saturation.Analyze` and `slo.Analyze` events.
+   `"slo": "tpot mean<=50ms, ttft p95<=2s (observe)"`. The `(observe)`
+   says the slo analyzer is listed. The first cycle after a controller
+   start can run before the ConfigMaps load and log `"slo": "off"`; wait
+   for the next line. The line does not say whether saturation is listed,
+   so also check that the recording holds both `saturation.Analyze` and
+   `slo.Analyze` events: both analyzers are listed and ran.
 2. **A streamed load.** The router measures TTFT and TPOT only on streamed
    requests. Run the sweep with `--stream`. It sends `stream: true` with
    `stream_options` `include_usage`, and reads each stream to its

@@ -20,6 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -200,7 +201,16 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	}
 	require.Len(t, unrunSettle, 2, "the head recording leaves these required settle paths unrun: %v. "+
 		"It lends no bridge and restarts no replica, so settle-lent and settle-restarted; check the list and update the 2", unrunSettle)
+	// The slo analyzer's line fits: the head recording never analyzes slo.
+	var unrunSLO []string
+	for _, p := range slo.PathNames() {
+		if rep.Paths[p] == 0 {
+			unrunSLO = append(unrunSLO, p)
+		}
+	}
+	require.Len(t, unrunSLO, 2, "the head recording leaves these slo paths unrun: %v. "+
+		"It never analyzes slo, so both; check the list and update the 2", unrunSLO)
 	out, err = runOut("check", "-dir", dir)
 	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs",
-		len(unrun)+len(unrunSettle)+len(steadystate.LearnerReplayPathNames())), out)
+		len(unrun)+len(unrunSettle)+len(unrunSLO)+len(steadystate.LearnerReplayPathNames())), out)
 }
