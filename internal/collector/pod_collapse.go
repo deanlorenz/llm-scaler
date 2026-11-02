@@ -235,11 +235,15 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// rate when no instance reports a generation rate.
 	pod.AvgITL = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
 		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
-	// Per step, like AvgITL, and weighted alike: the tokens generated stand in
-	// for the steps, which no row carries. Known only when every rank read
-	// one, so a rank that speculates and was not read keeps the pod unknown.
+	// Per step, so weighted by each rank's steps: the tokens it generated
+	// over the tokens a step emits, G / (1 + E). Weighting by the tokens
+	// alone gave a high-acceptance rank more than its share and over-stated
+	// E, the direction that under-orders. Known only when every rank was
+	// read, so a rank that speculates and was not read keeps the pod unknown.
 	pod.SpecAcceptedPerStep = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.SpecAcceptedPerStep },
-		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
+		func(m domain.ReplicaMetrics) float64 {
+			return m.GenerationTokenRate / (1 + max(m.SpecAcceptedPerStep, 0))
+		})
 	if !pod.SpecAcceptedPerStepKnown {
 		pod.SpecAcceptedPerStep = 0
 	}

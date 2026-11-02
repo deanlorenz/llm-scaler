@@ -601,9 +601,13 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 	for k := range s.VariantSeenAt {
 		note(k)
 	}
+	// liveParams is the configuration each variant runs now, which says
+	// whether its ITL entries are in a unit that can differ (itlUnitsDiffer).
+	liveParams := map[string]*capacity.EngineParams{}
 	for v, m := range models {
 		ns, name, _ := strings.Cut(v, "/")
 		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams != nil {
+			liveParams[v] = rec.EngineParams
 			s.Config[v] = rec.EngineParams.Fingerprint()
 			s.Args[v] = windowArgs(rec.EngineParams)
 			if a.itlPerToken && rec.EngineParams.SpeculatesPerStep() {
@@ -642,8 +646,10 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 		// Its ITL entries go out in the unit they came in, which is marked
 		// per variant (ITLPerToken): beside the variant's live entries, which
 		// are in this analyzer's unit, ones in the other unit are left out,
-		// since one mark cannot say both.
-		if !ok || p.perToken == a.itlPerToken {
+		// since one mark cannot say both. Only on an engine where the units
+		// differ, as the install decides (itlUnitsDiffer): elsewhere a step
+		// is a token and no mark is written, so the pending entries go out.
+		if !ok || !a.itlUnitsDiffer(p.perToken, liveParams[v]) {
 			if p.perToken {
 				markITLPerToken(&s, v)
 			}

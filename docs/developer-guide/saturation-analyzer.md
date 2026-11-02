@@ -354,9 +354,32 @@ Before the window takes a row, `fitLines` reads the variant's rows through
 
 | counter | flags speculate | the row the window reads |
 | --- | --- | --- |
-| known | either | `AvgITL / (1 + E)` |
-| missing | yes | withheld: `AvgITL` 0, absent (a missing counter is not "no speculation") |
+| known, at most `num_speculative_tokens` | either | `AvgITL / (1 + E)` |
+| known, above `num_speculative_tokens` | yes | withheld (`ITLOverMax`): no step accepts more drafts than it proposed |
+| missing | yes | withheld (`ITLNoCounter`): a missing counter is not "no speculation" |
 | missing | no | as read: one token a step |
+
+`num_speculative_tokens` is read from `--speculative-config` as one JSON
+object or in the dotted `--speculative-config.num_speculative_tokens`
+spelling (`EngineParams.SpeculativeTokens`); unstated, no bound applies. An
+over-read `E` over-states the token rate, the direction that under-orders,
+which is why a count above it is withheld rather than clamped. On an SGLang
+engine (`domain.ITLStep.PerToken`) every row is read as it is.
+
+A withheld reading counts as `noITL` in `itl-window`, which an idle replica
+reads too, so `noteITLWithheld` logs `itl-withheld` with the reason once when
+a variant's readings start being withheld, and `itl-withheld-ended` once when
+they stop (`itlWithheldLogged`, per window key): once per change, within the
+default-verbosity budget (#303).
+
+A pod of several engine instances (external data-parallel load balancing)
+merges `E` weighted by each instance's steps, `GenerationTokenRate / (1 + E)`;
+ranks behind one API server are summed exactly in PromQL.
+
+`E` counts drafts accepted, not tokens emitted: a draft accepted and then cut
+by a stop string or `max_tokens` counts and is never sent. On very short
+outputs (a P/D handoff) that over-states `E` slightly. It is a known limit,
+small next to the step-time error it replaces.
 
 SGLang's flags never speculate per step. The window, the baseline, the held
 slope and the shared line are then per token. Their unit differs from a step
@@ -367,7 +390,13 @@ installed (`RestoredVariant.ITLOtherUnit`, logged `itlOtherUnit`), and a line
 in the other unit is not lent to a speculating borrower (`borrowLine`). A
 snapshot from before the field marks nothing, so it reads as step time: on
 the first restart after the upgrade a speculating variant fits its ITL line
-again. Other engines and other fields restore as before.
+again. Other engines and other fields restore as before; the export keeps a
+non-speculating variant's pending entries for the same reason the install
+does (`itlUnitsDiffer`). The mark is per variant and taken from the flags it
+runs now, while a put-aside baseline belongs to the arguments it was learned
+under: a step-time stash of speculating arguments, restored for a variant
+that no longer speculates, comes back unmarked if it returns to them. That
+errs safe (a baseline too high over-provisions) and ages out.
 
 The switch is `SwitchITLPerToken` (`itl-per-accepted-token`), on in
 production. Off, the line is fitted from the step time, as before. No

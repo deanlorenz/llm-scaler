@@ -332,6 +332,10 @@ type SaturationAnalyzer struct {
 	// itlPerToken is SwitchITLPerToken (#274): on from the constructor; a
 	// replay turns it off (SetSwitchesForReplay).
 	itlPerToken bool
+	// itlWithheldLogged is, per ITL window key, the reasons its readings were
+	// last logged as withheld for (itl_per_token.go), so the line is logged
+	// once per change rather than every cycle.
+	itlWithheldLogged map[string]itlWithheldReasons
 	// k2Pending is the readings held for each k2 key whose window they would
 	// start, until a later cycle confirms them (k2_confirm.go), and
 	// analyzeSeq numbers the Analyze calls, the cycles a confirmation is
@@ -504,6 +508,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muMarginClamp:          true,
 		k2FirstReadingWaits:    true,
 		itlPerToken:            true,
+		itlWithheldLogged:      make(map[string]itlWithheldReasons),
 		k2Pending:              make(map[string]*k2PendingReadings),
 	}
 }

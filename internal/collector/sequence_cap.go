@@ -9,13 +9,14 @@ import (
 )
 
 // extractSequenceCap reads the running-batch size, the preemption rate and
-// the speculative tokens accepted per step into the instances the model-scoped queries already found, and skips the
-// rest, like the other supplementary series: a scrape-skewed row must not
-// enter the fleet.
+// the speculative tokens accepted per step into the instances the
+// model-scoped queries already found, and skips the rest, like the other
+// supplementary series: a scrape-skewed row must not enter the fleet.
 //
 // The preemption rate and the accepted tokens are agnostic queries, which
-// filterResultsToModel does not narrow, so their series are matched to the model here; one carrying no
-// model_name is kept, as the instance key already ties it to a seen pod.
+// filterResultsToModel does not narrow, so their series are matched to the
+// model here; one carrying no model_name is kept, as the instance key already
+// ties it to a seen pod.
 func (c *ReplicaMetricsCollector) extractSequenceCap(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	each := func(query string, fn func(d *podMetricData, v float64, finite bool)) {

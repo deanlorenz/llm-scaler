@@ -317,6 +317,7 @@ accelerator-specific
 accelerator_type
 accelerators
 accel|
+accepted
 account
 across
 acting
@@ -579,6 +580,7 @@ concurrency
 condition
 config
 config.ScalingPolicy
+config.num_speculative_tokens
 config/components/learner-recorder
 configMap
 configuration
@@ -1023,6 +1025,8 @@ itl-ols
 itl-per-accepted-token
 itl-pinned
 itl-window
+itl-withheld
+itl-withheld-ended
 itlA
 itlArgs
 itlAtKPrice
@@ -1038,6 +1042,7 @@ itlModel
 itlOtherUnit
 itlResidualPct
 itlWindows
+itlWithheldLogged
 itlZero
 itl_non_positive
 itlslope|
@@ -1414,6 +1419,7 @@ now
 null
 num_gpu_blocks_override
 num_redundant_experts
+num_speculative_tokens
 number
 object
 objective
@@ -1467,6 +1473,7 @@ outside
 outstanding
 over
 over-stated
+overMax
 overQuotaGPUs
 override
 own
@@ -1947,6 +1954,7 @@ source
 spaces
 spare
 spec
+speculative
 speculative_
 speculative_algorithm
 speculative_config
@@ -2219,6 +2227,7 @@ victim
 vllm
 vllm.entrypoints
 vllm:cache_config_info
+vllm:spec_decode_num_accepted_tokens_total
 volume
 wait
 waitBeforeReverseMove

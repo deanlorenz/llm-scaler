@@ -74,23 +74,28 @@ func TestITLPerToken(t *testing.T) {
 	finite := ReplicaMetrics{AvgITL: 0.03, AvgITLKnown: true}
 	withCounter := finite
 	withCounter.SpecAcceptedPerStep, withCounter.SpecAcceptedPerStepKnown = 2, true
+	spec := ITLStep{Speculates: true}
 	for _, tc := range []struct {
-		name       string
-		m          ReplicaMetrics
-		speculates bool
-		itl        float64
-		state      ITLState
+		name  string
+		m     ReplicaMetrics
+		step  ITLStep
+		itl   float64
+		state ITLState
+		why   ITLWithheld
 	}{
-		{"counter read", withCounter, true, 0.01, ITLFinite},
-		{"counter read, flags silent", withCounter, false, 0.01, ITLFinite},
-		{"counter missing under speculative flags", finite, true, 0, ITLAbsent},
-		{"no speculation", finite, false, 0.03, ITLFinite},
-		{"idle", ReplicaMetrics{AvgITLEmpty: true}, true, 0, ITLEmpty},
-		{"absent", ReplicaMetrics{}, true, 0, ITLAbsent},
+		{"counter read", withCounter, spec, 0.01, ITLFinite, ITLKept},
+		{"counter read, flags silent", withCounter, ITLStep{}, 0.01, ITLFinite, ITLKept},
+		{"counter at the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 2}, 0.01, ITLFinite, ITLKept},
+		{"counter above the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 1}, 0, ITLAbsent, ITLOverMax},
+		{"counter missing under speculative flags", finite, spec, 0, ITLAbsent, ITLNoCounter},
+		{"no speculation", finite, ITLStep{}, 0.03, ITLFinite, ITLKept},
+		{"an engine whose ITL is per token already", withCounter, ITLStep{PerToken: true, Speculates: true}, 0.03, ITLFinite, ITLKept},
+		{"idle", ReplicaMetrics{AvgITLEmpty: true}, spec, 0, ITLEmpty, ITLKept},
+		{"absent", ReplicaMetrics{}, spec, 0, ITLAbsent, ITLKept},
 	} {
-		got := tc.m.ITLPerToken(tc.speculates)
-		if math.Abs(got.AvgITL-tc.itl) > 1e-12 || got.ITLState() != tc.state {
-			t.Errorf("%s: AvgITL %v (%s), want %v (%s)", tc.name, got.AvgITL, got.ITLState(), tc.itl, tc.state)
+		got, why := tc.m.ITLPerToken(tc.step)
+		if math.Abs(got.AvgITL-tc.itl) > 1e-12 || got.ITLState() != tc.state || why != tc.why {
+			t.Errorf("%s: AvgITL %v (%s, %v), want %v (%s, %v)", tc.name, got.AvgITL, got.ITLState(), why, tc.itl, tc.state, tc.why)
 		}
 	}
 }

@@ -241,9 +241,9 @@ func TestCollapseToPods_MeanKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
 }
 
 func TestCollapseToPods_SpecAcceptedKnownOnlyIfEveryRankReportedIt(t *testing.T) {
-	// The tokens a speculative step emits, per rank: weighted by the tokens
-	// each generated, like the ITL they correct, and known only when every
-	// rank was read (#274).
+	// The tokens a speculative step emits, per rank: weighted by the steps
+	// each ran, its tokens over 1 + E, and known only when every rank was
+	// read (#274). pod-b: 300/2 = 150 steps at 1 and 100/3 at 2.
 	instances := []domain.ReplicaMetrics{
 		{PodName: "pod-a", GenerationTokenRate: 100, SpecAcceptedPerStep: 1.5, SpecAcceptedPerStepKnown: true},
 		{PodName: "pod-a", GenerationTokenRate: 100},
@@ -257,5 +257,5 @@ func TestCollapseToPods_SpecAcceptedKnownOnlyIfEveryRankReportedIt(t *testing.T)
 	assert.False(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: one rank had no series")
 	assert.Zero(t, pods[0].SpecAcceptedPerStep, "an unknown pod carries no figure")
 	assert.True(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: both ranks reported one")
-	assert.InDelta(t, 1.25, pods[1].SpecAcceptedPerStep, 1e-9)
+	assert.InDelta(t, (150*1+100.0/3*2)/(150+100.0/3), pods[1].SpecAcceptedPerStep, 1e-9)
 }

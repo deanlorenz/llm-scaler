@@ -1,7 +1,11 @@
 package saturation
 
 import (
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -36,23 +40,47 @@ import (
 // line is fitted from the step time, as before.
 const SwitchITLPerToken = "itl-per-accepted-token"
 
-// itlRows is rows with variant's read per token (domain.ReplicaMetrics.
-// ITLPerToken) under params, the engine flags the variant runs. Other
-// variants' rows are left as they are; the window reads only variant's. With
-// the switch off, or when no row changes, rows is returned itself; otherwise a
-// copy, since the input is shared with the rest of the cycle.
-func (a *SaturationAnalyzer) itlRows(rows []domain.ReplicaMetrics, variant string,
-	params *capacity.EngineParams) []domain.ReplicaMetrics {
-	if !a.itlPerToken {
-		return rows
+// itlWithheldReasons counts, for one cycle of one variant, the readings
+// ITLPerToken withheld, by reason.
+type itlWithheldReasons struct {
+	noCounter int
+	overMax   int
+}
+
+// itlStepOf is how the engine params runs reports its ITL (domain.ITLStep).
+func itlStepOf(params *capacity.EngineParams) domain.ITLStep {
+	return domain.ITLStep{
+		PerToken:    params != nil && params.Engine == inferenceengine.EngineSGLang,
+		Speculates:  params.SpeculatesPerStep(),
+		MaxAccepted: params.SpeculativeTokens(),
 	}
-	speculates := params.SpeculatesPerStep()
+}
+
+// itlRows is rows with variant's read per token (domain.ReplicaMetrics.
+// ITLPerToken) under params, the engine flags the variant runs, and how many
+// of its readings were withheld, by reason. Other variants' rows are left as
+// they are; the window reads only variant's. With the switch off, or when no
+// row changes, rows is returned itself; otherwise a copy, since the input is
+// shared with the rest of the cycle.
+func (a *SaturationAnalyzer) itlRows(rows []domain.ReplicaMetrics, variant string,
+	params *capacity.EngineParams) ([]domain.ReplicaMetrics, itlWithheldReasons) {
+	var withheld itlWithheldReasons
+	if !a.itlPerToken {
+		return rows, withheld
+	}
+	step := itlStepOf(params)
 	var out []domain.ReplicaMetrics
 	for i, rm := range rows {
 		if rm.VariantName != variant {
 			continue
 		}
-		read := rm.ITLPerToken(speculates)
+		read, why := rm.ITLPerToken(step)
+		switch why {
+		case domain.ITLNoCounter:
+			withheld.noCounter++
+		case domain.ITLOverMax:
+			withheld.overMax++
+		}
 		if read.AvgITL == rm.AvgITL && read.AvgITLKnown == rm.AvgITLKnown {
 			continue
 		}
@@ -63,9 +91,44 @@ func (a *SaturationAnalyzer) itlRows(rows []domain.ReplicaMetrics, variant strin
 		out[i] = read
 	}
 	if out == nil {
-		return rows
+		return rows, withheld
 	}
-	return out
+	return out, withheld
+}
+
+// noteITLWithheld logs, once per change of reason, that variant's ITL
+// readings are withheld (itlRows), and once when they no longer are. A
+// withheld reading counts as noITL in itl-window, which an idle replica reads
+// too, so without this line a speculating variant with no ITL line could not
+// be told from an idle one. Logged at DEFAULT, once per change rather than per
+// cycle, within the default-verbosity budget (#303).
+func (a *SaturationAnalyzer) noteITLWithheld(key, variant string, w itlWithheldReasons, logger logr.Logger) {
+	on := itlWithheldReasons{noCounter: min(w.noCounter, 1), overMax: min(w.overMax, 1)}
+	a.mu.Lock()
+	last := a.itlWithheldLogged[key]
+	if on == last {
+		a.mu.Unlock()
+		return
+	}
+	if on == (itlWithheldReasons{}) {
+		delete(a.itlWithheldLogged, key)
+	} else {
+		a.itlWithheldLogged[key] = on
+	}
+	a.mu.Unlock()
+	switch {
+	case on.noCounter > 0:
+		logger.V(logging.DEFAULT).Info("itl-withheld",
+			"variant", variant, "key", key, "withheld", w.noCounter+w.overMax,
+			"reason", "speculative flags, no vllm:spec_decode_num_accepted_tokens_total",
+			"overMax", w.overMax)
+	case on.overMax > 0:
+		logger.V(logging.DEFAULT).Info("itl-withheld",
+			"variant", variant, "key", key, "withheld", w.overMax,
+			"reason", "accepted tokens per step above num_speculative_tokens")
+	default:
+		logger.V(logging.DEFAULT).Info("itl-withheld-ended", "variant", variant, "key", key)
+	}
 }
 
 // itlUnitsDiffer says whether ITL state learned in the unit perToken names

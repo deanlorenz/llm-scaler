@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -48,7 +49,7 @@ func TestITLPerToken_AMissingCounterUnderSpeculativeFlagsWithholdsTheReading(t *
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := []domain.ReplicaMetrics{row(tc.counter)}
-			got := a.itlRows(in, "v", tc.params)
+			got, _ := a.itlRows(in, "v", tc.params)
 			require.Len(t, got, 1)
 			assert.InDelta(t, tc.itl, got[0].AvgITL, 1e-12)
 			assert.Equal(t, tc.known, got[0].AvgITLKnown)
@@ -61,7 +62,7 @@ func TestITLPerToken_AMissingCounterUnderSpeculativeFlagsWithholdsTheReading(t *
 	other := row(true)
 	other.VariantName = "w"
 	idle := domain.ReplicaMetrics{PodName: "q", VariantName: "v", Ready: true, AvgITLEmpty: true}
-	got := a.itlRows([]domain.ReplicaMetrics{other, idle}, "v", specParams())
+	got, _ := a.itlRows([]domain.ReplicaMetrics{other, idle}, "v", specParams())
 	assert.InDelta(t, 0.03, got[0].AvgITL, 0)
 	assert.Equal(t, domain.ITLEmpty, got[1].ITLState())
 }
@@ -164,4 +165,85 @@ func TestITLPerToken_TheExportMarksOnlySpeculatingVariants(t *testing.T) {
 			assert.True(t, ok, "its line is lent after the restart")
 		})
 	}
+}
+
+// A variant that does not speculate keeps its pending restored ITL entries in
+// the export: one step is one token there, so their unit cannot differ, and
+// dropping them lost its held slope and baseline across a second restart
+// (review of #274, SHOULD-1).
+func TestITLPerToken_APendingNonSpeculatingVariantIsExported(t *testing.T) {
+	params := keyParams(256)
+	a, _, _ := waProcess(params)
+	key := a.itlWindowKey("test-ns", "test-model", "variant-a", "H100", 1)
+	now := time.Now()
+	a.mu.Lock()
+	a.variantSeenAt[key] = now
+	a.mu.Unlock()
+	a.RestoreLearnedState(LearnedState{
+		Config:        map[string]string{"test-ns/variant-a": params.Fingerprint()},
+		Args:          map[string]string{"test-ns/variant-a": params.ArgsFingerprint()},
+		VariantSeenAt: map[string]time.Time{key: now},
+		ITLBaseline:   map[string]float64{key: 0.012},
+		ITLSlopes:     map[string]SlopeSnapshot{key: {A: 0.05, FittedAt: now.Add(-time.Hour), Args: params.ArgsFingerprint()}},
+	})
+	a.mu.Lock()
+	_, pending := a.pendingRestore["test-ns/variant-a"]
+	a.mu.Unlock()
+	require.True(t, pending, "precondition: the entries are pending")
+	s := a.ExportLearnedState()
+	assert.Contains(t, s.ITLBaseline, key, "pending ITL baseline of a non-speculating variant dropped from the export")
+	assert.Contains(t, s.ITLSlopes, key, "pending ITL slope of a non-speculating variant dropped from the export")
+}
+
+// An accepted count above num_speculative_tokens is not one a step can
+// produce: the reading is withheld rather than over-stating the token rate.
+// At the stated length it is corrected. Both spellings of the flag.
+func TestITLPerToken_AnAcceptedCountAboveTheDraftLengthIsWithheld(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	dotted := keyParams(256)
+	dotted.SpeculativeConfig = "config.method=mtp;config.num_speculative_tokens=3"
+	for name, params := range map[string]*capacity.EngineParams{"json": specParams(), "dotted": dotted} {
+		require.Equal(t, 3, params.SpeculativeTokens(), name)
+		for _, tc := range []struct {
+			accepted float64
+			itl      float64
+			known    bool
+			overMax  int
+		}{
+			{3, 0.01, true, 0},
+			{3.5, 0, false, 1},
+		} {
+			row := domain.ReplicaMetrics{PodName: "p", VariantName: "v", Ready: true, KvUsageInstant: 0.5,
+				AvgITL: 0.04, AvgITLKnown: true, SpecAcceptedPerStep: tc.accepted, SpecAcceptedPerStepKnown: true}
+			got, withheld := a.itlRows([]domain.ReplicaMetrics{row}, "v", params)
+			assert.InDelta(t, tc.itl, got[0].AvgITL, 1e-12, "%s, E %v", name, tc.accepted)
+			assert.Equal(t, tc.known, got[0].AvgITLKnown, "%s, E %v", name, tc.accepted)
+			assert.Equal(t, tc.overMax, withheld.overMax, "%s, E %v", name, tc.accepted)
+		}
+	}
+}
+
+// A withheld reading is logged once when it starts and once when it ends,
+// not every cycle, and names why (review of #274, SHOULD-3).
+func TestITLPerToken_AWithheldReadingIsLoggedOncePerChange(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{Verbosity: 2})
+	row := domain.ReplicaMetrics{PodName: "p", VariantName: "v", Ready: true, KvUsageInstant: 0.5,
+		AvgITL: 0.04, AvgITLKnown: true}
+	cycle := func(rows []domain.ReplicaMetrics) {
+		_, w := a.itlRows(rows, "v", specParams())
+		a.noteITLWithheld("k", "v", w, logger)
+	}
+	for range 3 {
+		cycle([]domain.ReplicaMetrics{row})
+	}
+	require.Len(t, lines, 1, "logged once over three cycles: %v", lines)
+	assert.Contains(t, lines[0], `"itl-withheld"`)
+	assert.Contains(t, lines[0], "no vllm:spec_decode_num_accepted_tokens_total")
+	row.SpecAcceptedPerStep, row.SpecAcceptedPerStepKnown = 1, true
+	cycle([]domain.ReplicaMetrics{row})
+	cycle([]domain.ReplicaMetrics{row})
+	require.Len(t, lines, 2, "logged once more when it ends: %v", lines)
+	assert.Contains(t, lines[1], `"itl-withheld-ended"`)
 }

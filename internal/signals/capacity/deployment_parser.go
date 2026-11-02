@@ -430,6 +430,32 @@ func (p *EngineParams) SpeculatesPerStep() bool {
 	return p != nil && p.Engine == inferenceengine.EngineVLLM && p.SpeculativeConfig != ""
 }
 
+// SpeculativeTokens is the draft tokens a vLLM step proposes at most,
+// num_speculative_tokens of --speculative-config (as one JSON object, or the
+// dotted --speculative-config.num_speculative_tokens spelling), and so the
+// most a step can accept. Zero when the flags do not speculate per step or do
+// not state it as a positive integer.
+func (p *EngineParams) SpeculativeTokens() int {
+	if !p.SpeculatesPerStep() {
+		return 0
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(p.SpeculativeConfig), &cfg); err == nil {
+		if n, ok := cfg["num_speculative_tokens"].(float64); ok && n >= 1 && n == math.Trunc(n) && n < 1<<20 {
+			return int(n)
+		}
+		return 0
+	}
+	for _, part := range strings.Split(p.SpeculativeConfig, ";") {
+		if v, ok := strings.CutPrefix(part, "config.num_speculative_tokens="); ok {
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
 // maxNumSeqsKeys are the normalised flags either parser reads into
 // MaxNumSeqs.
 var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}
