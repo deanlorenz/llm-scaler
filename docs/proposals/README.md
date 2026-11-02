@@ -209,10 +209,12 @@ last; it is the unit change that makes the other two land.
   questions from a recording, a live Prometheus or the controller: what rate
   a TTFT/TPOT SLO allows, and what SLO a given number of prefill and decode
   replicas holds before it saturates, per token bucket or for the current mix.
-  Reuses the ITL line and the TPOT pricing as they are. Adds the TTFT model
-  nothing has today, mostly from series already collected: a per-pod queue
-  with the measured imbalance, prefill capacity as a busy-minute throughput,
-  and KV transfer plus decode's first step on P/D.
+  Reuses the ITL line and the TPOT pricing as they are. Adds the end-to-end
+  TTFT model nothing has today: the router's flow-control queue and the engine
+  queue as one queue, prefill capacity as a busy-minute throughput, KV transfer
+  and decode admission, combined by a union bound rather than by adding
+  percentiles. Extends the learner recorder first, adds a Prometheus capture,
+  and makes TTFT pricing in the SLO analyzer a track sharing the same library.
 
 ## Product and lifecycle
 

@@ -14,15 +14,18 @@ for what runs today.
 
 ### The two questions
 
-1. **"My SLO is a mean TPOT of 4 ms and a TTFT of 200 ms at p90. What request
-   rate can this fleet carry?"** Optionally per token bucket, such as "prompts
+1. **"My SLO is a mean TPOT of 4 ms and an end-to-end TTFT of 200 ms at p90.
+   What request rate can this fleet carry?"** Optionally per token bucket, such as "prompts
    of 6000 tokens and up".
 2. **"I run 1 prefill and 1 decode replica. At what rate do they saturate, and
    what SLO do they hold below that?"** The answer is one pair, mean TPOT and
    TTFT at percentile `q`, at one operating rate. It is not a frontier.
 
-Both are answered from a recording of a past run, from a live Prometheus with
-no controller installed, or (later, only if asked) inside the controller.
+TTFT here is **end to end, as the client sees it**: the router's own queue
+(EPP flow control, when it is on), the engine's queue, the prefill itself, the
+KV transfer and decode's first step. Both questions are answered from a
+recording of a past run, from a live Prometheus with no controller installed,
+or (later, only if asked) inside the controller.
 
 ### What a session looks like
 
@@ -39,16 +42,18 @@ $ whatif replicas-to-slo --recording ols-sweep.jsonl.gz --cycle last \
 knee            13.31 r/s   decode, batch cap binds at fill 0.732
 operating rate  11.32 r/s   0.85 x knee (scaleUpThreshold)
 mean TPOT       3.66 ms     [3.58 .. 3.79]   line ols, observed fill up to 0.62
-TTFT p90        164 ms      [150 .. 212]     UNVALIDATED; V_P ASSUMED (--assume-vp)
-flags: no KV transfer series (P/D): T_xfer omitted; prompt spread assumed (cv 1)
+TTFT p90        177 ms      [160 .. 231]     end to end; UNVALIDATED; V_P ASSUMED (--assume-vp)
+                (154 ms if the prefill-side and decode-side waits were independent)
+flags: flow control off (recorded); no KV transfer series (P/D): T_xfer omitted;
+       prompt spread assumed (cv 1)
 estimate from cycles 1-226, not a guarantee; see basis (-o json)
 
 $ whatif slo-to-rate --recording ols-sweep.jsonl.gz --cycle last \
     --model m --prefill 1 --decode 1 --tpot 4ms --ttft 200ms@p90 --assume-vp 30000
 role     est. rate at SLO   bound by                              basis
 decode   11.32 r/s          operating-point cap (TPOT alone: 12.03)   ols [11.0 .. 11.5]
-prefill  11.32 r/s          operating-point cap (TTFT alone: 11.87,   UNVALIDATED; V_P ASSUMED
-                            held down by decode admission)
+prefill  11.32 r/s          operating-point cap (TTFT alone: 11.53,   UNVALIDATED; V_P ASSUMED
+                            where decode admission's wait turns on)
 fleet    11.32 r/s          operating-point cap
 estimate from cycles 1-226, not a guarantee; see basis (-o json)
 
@@ -90,7 +95,10 @@ Every table ends with the "not a guarantee" footer.
 **Standalone flags.** `--prometheus URL`, with `--bearer-token-file`,
 `--ca-file` and `--insecure-skip-verify` for a managed Prometheus or Thanos;
 `--namespace` (vLLM series are namespaced); `--lookback` (default 1h) and
-`--step` (default 15s, the controller's cycle).
+`--step` (default 15s, the controller's cycle). Flow control is detected from
+its series; `--flow-control on|off` overrides, and `--fc-queue-threshold`,
+`--fc-kv-threshold` or `--fc-max-concurrency` give the detector's settings when
+the EPP configuration cannot be read.
 
 **Kubeconfig.** Read-only `get` and `list` on Pods, Deployments and
 LeaderWorkerSets in `--namespace`. It reads pod labels (role, variant),
@@ -122,10 +130,12 @@ Every answer is either an `Answer{Value, Band, Basis, Flags}` or an
 | `NoPrefillCapacity` | No `V_P` from a conservative source (SGLang, which has no computed-token series, always lands here) |
 | `TailTPOT` | A percentile was asked of TPOT, which is a mean |
 | `TargetBelowFloor` | The target is below what any number of replicas can reach |
+| `FlowControlUnknown` | Standalone cannot tell whether EPP flow control is on (no flow-control series and no `--flow-control on\|off`), or it is on with a saturation detector whose thresholds are neither readable nor given (`--fc-queue-threshold`, `--fc-kv-threshold`, `--fc-max-concurrency`) |
 
 Out-of-range inputs are **flags**, never refusals: extrapolation (with its
 distance), a borrowed or held line, a lower-bound or assumed `V_P`, no
-readiness, an unstable tier, a rate held down by decode admission, and
+readiness, an unstable tier, a rate held down by decode admission, several
+flow-control priority bands (the answer is for one band), and
 **UNVALIDATED** on every TTFT figure until the
 [staircase run](#validation) passes.
 
@@ -137,11 +147,12 @@ printed); `2` usage or input error; `1` internal error.
 | | |
 | --- | --- |
 | **Decode** | Reuses the ITL line and the SLO analyzer's TPOT pricing unchanged. The functions move to a `signals` package so a CLI can call them. |
-| **TTFT** | A new model: own prefill latency, plus a per-pod queue on prefill work, plus decode admission, KV transfer and decode's first step on P/D. |
+| **TTFT** | End to end: the router's flow-control queue and the engine queue, modelled as one queue, plus own prefill, KV transfer, decode admission and decode's first step. Percentiles combine by convolution where the parts are independent and by a union bound where they are not; never by adding percentiles. |
 | **Prefill capacity** | A token throughput `V_P`, from conservative sources only. The fixed per-request cost `a` goes into each request's own latency, not into utilization. |
 | **Queue** | Per pod with the measured imbalance. A pooled queue is only an optimistic bound. |
 | **Packaging** | `internal/signals/whatif` and `internal/signals/prefill`, a standalone adapter `internal/whatifsource`, a CLI `cmd/whatif`. |
-| **Validated** | Decode against the goldens. TTFT is labelled unvalidated until a fixed-replica staircase run passes. |
+| **Validated** | Decode against the goldens. TTFT against the router's TTFT histogram, the end-to-end ground truth; labelled unvalidated until a fixed-replica staircase run, with flow control off and on, passes. |
+| **Recorder** | Extended first, so every recording the planner and the SLO analyzer's TTFT pricing need carries TTFT and its parts; plus `whatif capture`, which writes a recording from Prometheus with no controller. |
 
 ## Terms
 
@@ -226,6 +237,11 @@ the operating point ([below](#question-1-from-an-slo-to-a-rate)).
 | Prefill tokens computed per second | `QueryPrefillComputedTokenRate` | Collected, **vLLM only**. Read by saturation's prefill lower bound |
 | Queue length per pod | `QueryQueueLength`, `QueryMaxRankQueueLength` | Collected |
 | Router TTFT histogram | `QuerySLORouterTTFTBuckets` | Collected. The SLO analyzer judges it; nothing prices it |
+| Flow-control queue size and bytes | `QuerySchedulerQueueSize`, `QuerySchedulerQueueBytes` (`llm_d_epp_flow_control_queue_size`, or the `inference_extension_` name) | Collected per model into `AnalyzerInput.SchedulerQueue`, and recorded. With the arrival rate, Little's law gives the mean router wait |
+| Flow-control arrivals | `flow_control_request_enqueue_duration_seconds_count` | Collected, as the arrival rate (`QueryModelArrivalRate`) |
+| Flow-control queue duration | `flow_control_request_queue_duration_seconds` (histogram; `priority`, `outcome` labels) | **Not collected** |
+| Flow-control pool saturation | `flow_control_pool_saturation{stage=prefill\|decode\|effective}` | **Not collected** |
+| Flow-control outcomes | `flow_control_requests_total{outcome}` (dispatched, rejected, evicted on TTL) | **Not collected** |
 | Per-stage prefill time | `vllm:request_prefill_time_seconds` | **Not collected** |
 | Queue-time and prompt-length histograms | `request_queue_time_seconds_bucket`, `request_prompt_tokens_bucket` | **Not collected**; only means |
 | KV transfer time | `vllm:nixl_xfer_time_seconds` | **Not collected** |
@@ -247,7 +263,7 @@ per-stage series is needed.
 queue length 0 on every row, prompts 983 to 6011 tokens. It supports `a`
 (10.1 ms at low load) and the low-load slope, and the TTFT mean at about
 `ρ = 0.1`. It does **not** support a measured `V_P` (no busy minute) or `f`
-(one pod). A prefill-stress recording is part of the plan (PR 5b).
+(one pod). A prefill-stress recording is part of the plan (P2).
 
 So, plainly: **no code models TTFT.** The SLO analyzer reports whether the
 router's target is met; `priceVariant` returns no-data for prefill ("TTFT is
@@ -255,21 +271,31 @@ not priced yet"); saturation and throughput mention TTFT only in comments.
 
 ### The model
 
-TTFT at the router, on P/D:
+End-to-end TTFT, as the client sees it:
 
-    TTFT = W_router + W_prefill + own_prefill + T_xfer + W_decode + ITL(k_d)
+    TTFT = W_router + W_engine + own_prefill + T_xfer + W_decode + ITL(k_d)
 
-| Term | What it is | From |
+| Term | What it is | Model |
 | --- | --- | --- |
-| `W_router` | EPP flow-control queue | Not separable. Taken as 0, which over-promises |
-| `W_prefill` | Wait on the chosen prefill pod | The per-pod queue below |
+| `W_router` | EPP flow-control queue: requests held before dispatch | [The router queue](#the-router-queue-flow-control) |
+| `W_engine` | The prefill pod's own queue | Per-pod M/G/1 (flow control off) or the residual behind the gate (on) |
 | `own_prefill` | `a + I/V_P`, this request's own prefill | `a` from low-load minutes plus the overhead; `V_P` below |
-| `T_xfer` | KV transfer to decode | `nixl_xfer_time_seconds` once collected; until then omitted and flagged |
+| `T_xfer` | KV transfer to decode (P/D) | `nixl_xfer_time_seconds` once collected; until then omitted and flagged |
 | `W_decode` | Decode admission wait | The birth-death chain, [above](#decode-tpot-from-the-itl-line) |
-| `ITL(k_d)` | Decode's first step, which streams the first token | The decode line at its fill |
+| `ITL(k_d)` | Decode's first step, which streams the first token (P/D) | The decode line at its fill |
 
-On an aggregated pod the first token comes from the same pod, so the last
-three terms collapse into `own_prefill`.
+Which terms exist depends on the deployment:
+
+| | Flow control off (the default) | Flow control on |
+| --- | --- | --- |
+| **P/D** | `W_router` = 0. `W_engine` on the prefill pod; `own_prefill`; `T_xfer`; `W_decode` on the decode pod; `ITL(k_d)` | `W_router` holds most of the wait, for prefill **and** decode capacity (the gate reads both stages); `W_engine` is a residual behind the gate; `W_decode` mostly moves into `W_router`; `own_prefill`, `T_xfer`, `ITL(k_d)` |
+| **Aggregated** | `W_router` = 0. `W_engine` is the pod's queue, which also holds decode admission; `own_prefill` produces the first token, so no `T_xfer`, no separate `W_decode` or `ITL(k_d)` | `W_router`; a residual `W_engine`; `own_prefill` |
+
+With flow control off, the router admits everything (sheddable requests, with
+priority below 0, are rejected under saturation rather than queued), so the
+wait is in the engines. With it on, the wait moves to the router: that is its
+purpose. **The two waits are therefore one queue seen at two places, not two
+independent queues**, and the model treats them so.
 
 **Prefill capacity is a throughput.** A vLLM prefill pod schedules prompts
 first come, first served, under a token budget per step
@@ -318,30 +344,24 @@ kept as a validation signal only.
 For an illustration, or a what-if on hardware not yet measured, `--assume-vp`
 supplies `V_P` by hand. Every answer built on it is flagged ASSUMED.
 
-**The queue is per pod.** The router sends each request to one pod, which
-queues it. One run measured 439 waiting with 3 of 4 prefill pods idle: the
-prefill routing profile had one usable scorer, so one pod won every request in
-a refresh window. A pooled M/G/c queue would promise capacity that fleet did
-not have.
+**With flow control off, the queue is per pod.** The router sends each
+request to one pod, which queues it. One run measured 439 waiting with 3 of 4
+prefill pods idle: the prefill routing profile had one usable scorer, so one
+pod won every request in a refresh window. A pooled M/G/c queue would promise
+capacity that fleet did not have.
 
 So each pod is an M/G/1 queue on prefill work. With `f` the imbalance (below),
 the worst pod sees `λ_w = f·λ/N_p`. With `Cs² = E[I_eff²]/E[I_eff]² − 1`:
 
     W̄ = λ_w · E[S_work²] / (2·(1 − ρ_w))                   (Pollaczek-Khinchine)
     θ = E[S_work]·(1 + Cs²) / (2·(1 − ρ_w))                  so that W̄ = ρ_w·θ
-    W_q = max( 0,  θ · ln( ρ_w / (1 − q) ) )                 from P(W > t) ≈ ρ_w·e^(−t/θ)
+    P(W_engine > t) ≈ ρ_w · e^(−t/θ)
 
 The tail matches the P-K mean exactly. For bursty arrivals, `1 + Cs²` becomes
-`Ca² + Cs²` (Kingman). The TTFT percentile is then
-
-    TTFT_q ≈ W_q + (a + I_q/V_P) + T_xfer + W_decode,q + ITL(k_d)
-
-with `I_q` the prompt length at percentile `q`. Taking the worst pod's
-percentile is stricter than the router's histogram, which mixes all pods; the
-tool may instead bisect the mixture `Σ share_i · P(W_i > t) = 1 − q`, which is
-cheap. Adding percentiles is usually conservative, not always with heavy
-tails. The pooled M/G/c (Allen-Cunneen) figure is printed beside it as an
-optimistic bound.
+`Ca² + Cs²` (Kingman). Taking the worst pod is stricter than the router's
+histogram, which mixes all pods; the tool may instead use the mixture
+`Σ share_i · P(W_i > t)`. The pooled M/G/c (Allen-Cunneen) figure is printed
+beside it as an optimistic bound.
 
 **Measuring `f`.** `f` is the busiest pod's share of prefill work over the mean
 share, from per-pod `PrefillComputedTokenRate`. Two corrections:
@@ -362,6 +382,93 @@ its KV. Measured: 41 queued at 77% prefill KV while decode was short, and 820
 queued with decode at its ceiling. So the TTFT bisection runs only below the
 decode knee, and prices decode admission at every rate it tries (next
 section).
+
+### The router queue (flow control)
+
+**What EPP flow control does.** It is off by default (the `flowControl`
+feature gate). When on, the EPP holds each request in a per-flow queue and runs
+a dispatch cycle that releases **at most one request per cycle**:
+
+1. **Gate.** A saturation detector scores the pool. The default
+   (`utilization-detector`) scores each endpoint
+   `max(queueDepth/5, kvUsage/0.8)` and takes the **mean** over endpoints; on
+   P/D it scores the prefill and decode stages apart and gates on the worse.
+   The alternative (`concurrency-detector`) gates on in-flight requests over a
+   configured `maxConcurrency`. At saturation ≥ the band's ceiling (1.0 under
+   the default static policy), the cycle stops: nothing dispatches, even from
+   lower bands (deliberate head-of-line blocking).
+2. **Band.** Priority bands are served highest first.
+3. **Flow.** A fairness policy picks a flow in the band (round robin by
+   default).
+4. **Request.** An ordering policy picks within the flow (first come, first
+   served by default).
+
+A request waits at most its TTL (60 s by default), then is evicted; band and
+global capacity limits reject at enqueue. The scheduler then picks a pod for
+the dispatched request, as without flow control.
+
+**Its metrics** (`llm_d_epp_` prefix, or `inference_extension_` on older
+EPPs): `flow_control_queue_size` and `_bytes` (collected),
+`flow_control_request_queue_duration_seconds` (the router wait, a histogram by
+`priority` and `outcome`), `flow_control_pool_saturation` by stage, and
+`flow_control_requests_total` by outcome. The last three are not collected
+yet (the recorder PR adds them).
+
+**The model.** Because the gate releases work only while the engines are below
+their thresholds, the router queue and the engine queues form one queue in
+tandem: the router holds the excess, and each engine holds about the
+detector's threshold. So, with flow control on:
+
+- **The pre-service wait `W_router + W_engine` is one queue.** The router is a
+  central first-come queue in front of the fleet, so the wait to reach a pod is
+  that of a pooled M/G/c with `c = N_p`, on prefill work.
+- **Plus an engine residual.** A dispatched request still lands behind the
+  requests its pod already holds. The gate bounds that: under the default
+  detector a pod holds at most about `queueDepthThreshold` (5) when the fleet
+  is balanced, and up to `N_p × 5` on one hot pod, because the gate reads the
+  mean. The residual is bounded by that depth times `E[S_work]`, or read from
+  the per-pod `num_requests_waiting` at percentile `q` when it is measured.
+- **The decode gate is in the router too.** With mean decode KV at 0.8 or mean
+  decode queue at 5, the router stops dispatching. Decode admission waits there
+  instead of on the decode pod, and the decode knee under flow control is the
+  lower of the band top, the batch-cap fill and the detector's KV threshold. It
+  is counted once, as `W_decode`, never in both places.
+- **With the concurrency detector**, each pod holds at most `maxConcurrency` in
+  flight; the router is then a central queue in front of `N_p × maxConcurrency`
+  slots, and the engine residual is at most the pod's own scheduler queue.
+- **Bands.** The model is for one band under the static policy. With several
+  bands or a holdback policy, a low band waits for every higher one; the answer
+  is given for the highest band and flagged.
+
+With one prefill pod the residual vanishes (the pooled and per-pod queues are
+the same server), which is why the worked example's answer does not depend on
+flow control.
+
+### Combining the waits into a percentile
+
+**Percentiles do not add.** The p95 of a sum is not the sum of the p95s:
+adding them is neither safe nor exact. In the worked example at p95, adding
+gives 224 ms, the dependence-free bound below gives 334 ms, and treating every
+part as independent gives 210 ms.
+
+The tool combines the parts in two blocks:
+
+1. **The prefill side**: the pre-service wait (one queue, router and engine
+   together) and the request's own prefill. These are independent (a
+   request's prompt does not depend on the queue ahead of it), so they are
+   **convolved** exactly. `T_xfer` joins this block.
+2. **The decode side**: decode admission. It is driven by the same arrivals as
+   the prefill wait, so it is not independent of block 1.
+
+The answer is the **union bound** across the two blocks, which holds whatever
+their dependence:
+
+    TTFT_q  ≤  Q_{1 − (1−q)/2}(block 1)  +  Q_{1 − (1−q)/2}(W_decode)  +  ITL(k_d)
+
+That is the default, and it can only over-state TTFT. The figure for two
+independent blocks is printed beside it as the optimistic estimate. Where
+decode admission's wait probability is below `(1−q)/2` its term is 0, and the
+two figures differ only by block 1 read at `1 − (1−q)/2` rather than at `q`.
 
 **Aggregated pods.** Prefill and decode share each step's budget, so `V_P` falls
 as decode load rises. The first version reads `V_P` at the decode load it was
@@ -392,10 +499,10 @@ PR with its own switch.
 
 **Prefill, TTFT target `T` at percentile `q`.** TTFT rises with the rate, so
 bisect on `λ` below the lower of the two knees for the largest rate with
-`TTFT_q(λ) ≤ T`. The bisection prices `W_decode` from the chain at the same
-`λ`. When the prefill terms alone would allow more, the answer is the rate
-decode admission holds it to, flagged "held down by decode admission"; it is
-not a refusal. If `a + I_q/V_P + T_xfer + ITL(band.lo)` alone exceeds `T`,
+`TTFT_q(λ) ≤ T`, with `TTFT_q` the union bound above. The bisection prices the
+router queue and `W_decode` at the same `λ`. When the prefill terms alone
+would allow more, the answer is the rate decode admission holds it to, flagged
+"held down by decode admission"; it is not a refusal. If `a + I_q/V_P + T_xfer + ITL(band.lo)` alone exceeds `T`,
 `TargetBelowFloor`.
 
 **The fleet** carries the smaller of the two roles, then the operating-point
@@ -459,7 +566,7 @@ Prefill: `a` = 10.1 ms plus the 2.5 ms overhead, both from the golden.
 **`V_P` = 30,000 tok/s is assumed** (`--assume-vp`): the golden's prefill pod
 never queued, so the tool refuses `V_P` from it (`NoPrefillCapacity`). Prompt
 spread: an assumed coefficient of variation of 1 (the recording has means
-only). `q` = 0.90.
+only). Flow control off, as in that run. `q` = 0.90.
 
 | Step | Formula | Value |
 | --- | --- | --- |
@@ -473,12 +580,14 @@ only). `q` = 0.90.
 | Operating rate | `0.85 · 13.31` | **11.32 r/s** |
 | Decode fill at it | `11.32·1000·B / (131072/1500 − 11.32·1000·A)` | 0.474 (41.4 sequences) |
 | Mean TPOT | `ITL(0.474)` | **3.66 ms** |
-| Decode admission | the chain, 64 slots, at 11.32 r/s | wait probability 0.032; p90 wait 0 |
-| Prefill `ρ_w` | `11.32 · 1000 / 30000` | 0.377 |
-| Prefill wait p90 | `θ = 0.0333·2/(2·0.623)` = 53.5 ms; `θ·ln(0.377/0.10)` | 71.1 ms |
-| Own prefill p90 | `I_q` = 2303 tokens; `0.0126 + 2303/30000` | 89.4 ms |
+| Decode admission | the chain, 64 slots, at 11.32 r/s | wait probability 0.032 |
+| Prefill `ρ_w` | `11.32 · 1000 / 30000` | 0.377; `θ = 0.0333·2/(2·0.623)` = 53.5 ms |
+| Block 1 at p95 | wait (atom 0.623 at 0, else exponential θ) convolved with own (`12.6 ms + I/V_P`, `I` exponential, mean 1000) | 172.9 ms |
+| Decode admission at p95 | wait probability 0.032 < 0.05 | 0 |
 | First decode step | `ITL(0.474)` | 3.7 ms |
-| **TTFT p90** | 71.1 + 89.4 + 0 + 3.7 (no `T_xfer`) | **164 ms** |
+| **TTFT p90** | union bound: 172.9 + 0 + 3.7 (no `T_xfer`) | **177 ms** |
+| TTFT p90, blocks independent | the full convolution at p90, + 3.7 | 154 ms |
+| TTFT p95 | union bound: 210.0 (block 1 at p97.5) + 119.9 (decode at p97.5) + 3.7 | 334 ms (independent: 210 ms) |
 | Floors | TPOT `ITL(0.15)`; TTFT `12.6 + 76.8 + ITL(0.15)` | 2.22 ms; 91.6 ms |
 
 **Question 1 on the same fleet: mean TPOT 4 ms, TTFT p90 200 ms.**
@@ -486,13 +595,15 @@ only). `q` = 0.90.
 | Step | Value |
 | --- | --- |
 | TPOT inverts to `k* = (0.004 − B)/A` | 0.551, under the batch cap: 12.03 r/s |
-| TTFT, prefill terms alone | 14.87 r/s, past the decode knee |
-| TTFT, bisected below the decode knee with decode admission priced | 11.87 r/s, held down by decode admission (its p90 wait reaches 200 ms − the other terms there) |
+| TTFT p90 ≤ 200 ms, bisected below the decode knee | 11.53 r/s (independent: 11.75). At 11.53 decode admission's wait probability crosses 5% and its p95 term turns on (21.9 ms) |
 | Operating-point cap | 11.32 r/s |
-| **Answer** | **11.32 r/s**, bound by the cap; with `--headroom 1`, 11.87 r/s, bound by TTFT through decode admission |
+| **Answer** | **11.32 r/s**, bound by the cap; with `--headroom 1`, 11.53 r/s, bound by TTFT through decode admission |
+
+At p95 instead, the same 200 ms allows 9.98 r/s (independent: 11.22), and TTFT
+binds below the cap.
 
 The round trip, question 1 at the SLO question 2 returned (3.661 ms unrounded,
-164 ms), gives back 11.32 r/s, but only because both sit at the cap. The
+177 ms), gives back 11.32 r/s, but only because both sit at the cap. The
 property case therefore runs below it: a TPOT of 3.0 ms inverts to 9.47 r/s
 and the fill there gives back 3.00 ms.
 
@@ -506,7 +617,12 @@ The TTFT figures are unvalidated, and on this golden rest on an assumed `V_P`.
 The answer is what the controller knew then. Of the real goldens, `ols-sweep`
 answers decode and the prefill `a`; `pd-restart` publishes no line; `e1` and
 `e1-tuned` list slo as notRun; none has router TTFT (only the synthetic
-`acceptance` fixture judges a router). Recordings carry means, not histograms.
+`acceptance` fixture judges a router). Recordings carry means, not histograms,
+until the [recorder](#the-recorder) is extended.
+
+**Capture.** `whatif capture` writes a recording from Prometheus alone, for a
+past window, in the same format ([the recorder](#the-recorder)). It answers
+offline like any recording and can become a golden.
 
 **Standalone.** The collector's query templates (`source.QueryList.Build`) and
 `prometheus.NewPrometheusSource` need only a Prometheus client. The adapter
@@ -560,7 +676,13 @@ per-request duration is compared with `AvgServiceTime` at the observed load.
 | Decode assumed balanced across `N_d` | Over-promises | — |
 | Exponential wait tail, heavy-tailed prompts | Over-promises | — |
 | Poisson arrivals on bursty traffic | Over-promises | — |
-| `W_router` taken as 0 | Over-promises | slo-tiers open question 5 |
+| Router queue as one band, first come first served, static ceiling | Over-promises for low bands, under-promises for the highest | — |
+| Dispatch-gate delays (metric staleness up to 200 ms, a 50 ms candidate cache) not modelled | Over-promises, slightly, near saturation | — |
+| Engine residual under flow control bounded by the detector threshold | Under-promises | — |
+| Requests evicted on TTL or rejected are not served, and the router histogram does not record them | The model over-promises attainment near the TTL; the ground truth reads high | slo-tiers |
+| Proxy hop before the EPP is outside the router histogram | Over-promises by that hop | slo-tiers |
+| Union bound across the prefill and decode sides | Under-promises (the default answer) | — |
+| The independent figure printed beside it | Over-promises | — |
 | `T_xfer` omitted (not collected) | Over-promises | — |
 | KV-bound decode admission approximated by slots | Either way | — |
 | Decode residence taken as exponential in the chain | Either way; a constant ITL instead would over-promise near the knee | — |
@@ -587,7 +709,7 @@ No package in the pipeline layers imports an analyzer, the engine, the
 collector or a client, which respects [engine structure](engine-structure.md)
 stage 3 (#345).
 
-**What PR 1 moves.** From `slo/price.go`: `priceTPOT`, `reachableFill`,
+**What D1 moves.** From `slo/price.go`: `priceTPOT`, `reachableFill`,
 `replicaTokenRate`, `realisedFill`, and the types `fillBand` and `pricing`. From
 `saturation/mu_from_itl.go`: `deriveMuAtCap`, `capacityTokensFor`, `derivedMu`.
 `pricingK` takes the two thresholds and the band as numbers; the analyzer keeps
@@ -607,9 +729,85 @@ The paths cited in `docs/developer-guide/saturation-analyzer.md` and
   capacity per variant.
 - Replay: one function, "replay to cycle N and return the learned state", not
   `learnreplay`'s `Options` and `Report`. `cmd/learnergolden` already imports
-  `learnreplay`, so its "test support only" doc is stale; PR 3 corrects it.
+  `learnreplay`, so its "test support only" doc is stale; D3 corrects it.
+
+## The recorder
+
+The planner and the SLO analyzer's TTFT pricing (still to be built) both
+learn from recordings, and both need TTFT and its parts recorded. So the
+recorder is extended **first**, before any recording either depends on.
+
+**What is already recorded.**
+
+| Where | Field | Holds |
+| --- | --- | --- |
+| Every analyzer's `Analyze` event, `learnrec.Input` | `ReplicaMetrics` per pod | `AvgTTFT`, `AvgServiceTime`, `PrefillComputedTokenRate`, `QueueLength`, `AvgInputTokens`, `AvgOutputTokens` (means), `RunningRequests`, KV fields |
+| same | `SchedulerQueue` | Flow-control `QueueSize` and `QueueBytes` per model |
+| same | `ArrivalRate` | The EPP arrival rate per model |
+| `slo.Analyze` only, `AnalyzeEvent` | `RouterLatency` | `WindowSeconds`, `TTFTBuckets` (the router TTFT histogram as per-second bucket rates, streaming only, 5-minute window), `TPOTSumRate`, `TPOTCountRate`. **Present only when the SLO analyzer is listed and judging** (`RouterCalled`) |
+
+**What is new**, each with a presence bit so old recordings replay unchanged:
+
+| Level | Field | Source |
+| --- | --- | --- |
+| Per pod | Prompt- and output-length histograms | `request_prompt_tokens_bucket`, `request_generation_tokens_bucket` |
+| Per pod | Engine TTFT histogram | `time_to_first_token_seconds_bucket` |
+| Per pod | Queue-time mean and histogram | `request_queue_time_seconds` |
+| Per pod | Prefill-time mean | `request_prefill_time_seconds` (aggregated pods need it) |
+| Per pod | KV transfer time mean | `nixl_xfer_time_seconds` |
+| Per model | Router TTFT and TPOT, **on every cycle** | The SLO analyzer's queries, recorded into `learnrec.Input` whether or not the SLO analyzer runs |
+| Per model | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total` |
+| Per model | Flow control on or off, and the detector's thresholds | Presence of the series; the EPP configuration when readable |
+
+Histograms are recorded as bucket rates over the collector's window, as
+`RouterLatency.TTFTBuckets` already is. They hold numbers only, so the
+export's pseudonymisation needs no new rule; its leak and coverage tests
+(`learnreplay/coverage_test.go`, `export_leak*_test.go`) are extended to the new
+fields. The goldens are regenerated with `learnergolden update`: their values do
+not change, and the new fields are absent.
+
+**`whatif capture`.**
+
+```
+whatif capture --prometheus URL --namespace NS (--kubeconfig K | --role-of ROLE=SELECTOR ...) \
+    --from 2026-11-02T10:00:00Z --to 2026-11-02T11:00:00Z [--step 15s] -o run.jsonl.gz
+```
+
+It walks the window at the controller's cycle, runs the collector's query
+templates at each step through `internal/whatifsource`, and writes one
+`capture.Cycle` event per model per step, carrying a `learnrec.Input`. It
+records no analyzer results: replaying a capture in `Normal` mode drives the
+real analyzers and produces a full recording, which is what
+`learnergolden add` takes. The output is pseudonymised by the same export as
+`learnergolden export`. A capture needs Prometheus to have kept the series for
+the window; for the `_bucket` series that is often days, not weeks.
+
+**What `ols-sweep-slo` gives the TTFT work.** It ran with flow control **off**,
+the SLO analyzer listed and streamed load. It carries the router TTFT
+histogram (through `slo.Analyze`), and per pod `AvgTTFT`, `AvgServiceTime`,
+`QueueLength` and `PrefillComputedTokenRate`. It lacks the length histograms,
+engine queue-time and prefill-time, KV transfer time, any flow-control
+series, and fixed replicas (it scales out). A capture of its window, if
+Prometheus still holds it, adds the histograms.
 
 ## Validation
+
+**The ground truth is the router's TTFT histogram**,
+`llm_d_epp_request_ttft_seconds`. It starts when the EPP receives the request
+headers, before flow control, so it includes the router queue; it misses only
+the proxy hop in front of the EPP. It records streaming requests only, at end
+of stream, so requests evicted or rejected are absent.
+
+Each term is fitted, and checked, on its own series:
+
+| Term | Fitted from | Checked against |
+| --- | --- | --- |
+| `W_router` | `flow_control_request_queue_duration_seconds` (new); its mean also from `SchedulerQueue.QueueSize / ArrivalRate` (recorded today) | the router queue-duration histogram |
+| `W_engine` | `AvgTTFT − AvgServiceTime` on P/D prefill pods (today); `request_queue_time_seconds` (new) | per-pod queue-time histogram |
+| `own_prefill` | `a` from low-load `AvgServiceTime`; `V_P` from busy minutes | `AvgServiceTime` at load; `request_prefill_time_seconds` (new) |
+| `T_xfer` | `nixl_xfer_time_seconds` (new) | — |
+| `W_decode` | the decode line and batch cap | the decode pod's queue time (new) |
+| End to end | the sum, combined as above | the router TTFT histogram; and the mean router TTFT against the sum of the parts' means, whose residual is the proxy hop and scheduling |
 
 ### Against the goldens
 
@@ -642,7 +840,8 @@ from a separate warm-up recording, so the run does not feed its own answer.
 | Measured per step | Router TTFT p90 and mean TPOT over the last 7 minutes |
 | Runs away | TTFT p90 above twice the target for the whole measured window |
 | Repeats | 3 runs; the statistic is the median over runs, per bucket |
-| Recorded | A learner recording with the SLO analyzer listed (observe mode), Prometheus kept with the `_bucket` series, per-pod `num_requests_waiting` |
+| Flow control | Each bucket run twice: flow control **off**, then **on** (default utilization detector, one band, static ceiling). The on phase tests the tandem model, the engine residual and the decode gate in the router |
+| Recorded | A learner recording on a build with the [recorder](#the-recorder) fields, with the SLO analyzer listed (observe mode); per-pod `num_requests_waiting` |
 
 **Measured rate at SLO** is the highest step rate, interpolated linearly
 between steps, whose TTFT p90 and mean TPOT meet the target.
@@ -677,7 +876,12 @@ mutation-checked: a mutant of the formula must fail it.
 - The chain at a constant ITL reduces to Erlang C exactly.
 - Every `Unanswerable` reason has a case asserting it. NaN in any input gives
   a reason, never 0 or +Inf.
-- With `f` = 1 and one pod, the wait equals Pollaczek-Khinchine exactly.
+- With `f` = 1 and one pod, the wait equals Pollaczek-Khinchine exactly, and
+  flow control on gives the same TTFT as off.
+- The union bound is never below the independent figure, and adding
+  percentiles is never used.
+- With flow control on, decode admission is counted once (in the router), never
+  also on the decode pod.
 - `V_P` from any source is never above the busy-minute median on a synthetic
   pod (the slope is excluded by construction).
 
@@ -685,30 +889,38 @@ mutation-checked: a mutant of the formula must fail it.
 
 Learner PRs follow [the learner rules](analyzer-learner.md): one behaviour
 change per replay switch, goldens replayed on and off, and a property case that
-fails on `main` first.
+fails on `main` first. **The recorder PRs land first**, so every recording made
+for this work carries what it needs.
 
 | PR | What | Goldens | Depends on |
 | --- | --- | --- | --- |
+| **Recorder (first)** | | | |
+| R1 | Collect and record the new fields with presence bits ([the recorder](#the-recorder)): length, engine TTFT and queue-time histograms; prefill-time and KV transfer means; router TTFT/TPOT on every cycle; the flow-control wait histogram, pool saturation and outcomes. Extends the export's leak and coverage tests; updates the `metrics.go` comment. No switch: nothing reads the fields | Regenerated; values unchanged, new fields absent | — |
+| R2 | `internal/whatifsource` (Prometheus to `domain.ReplicaMetrics`, the pod-to-role map, readiness fallback) and `whatif capture`, with the `capture.Cycle` event and its replay | None | R1 |
+| **Recordings** (after R1) | The prefill-stress run (30k prompts, 3 prefill pods, decode below its ceiling, fixed replicas); a capture of the `ols-sweep-slo` window if Prometheus still holds it; the staircase's warm-up recording, flow control off and on | — | R1 |
 | **Decode** | | | |
-| 1 | Move the decode pricing into `internal/signals/whatif` at layer 32; one copy of the sequence-cap arithmetic. Proof: input/output vectors captured from `main` before the move, frozen in `testdata`, asserted bit-identical. The fails-on-main rule is waived for a pure move; the frozen vectors stand in for it | None move | — |
-| 2 | Closed-form fill, both TPOT inversions, decode admission, `Answer`/`Unanswerable`, property cases | None (library only) | 1 |
-| 3 | Tracker and analyzer accessors, the replay function, bands (fixed seed), basis, `cmd/whatif` from a recording or snapshot, the footer, exit codes, `make whatif` | None | 2 |
-| 4 | `internal/whatifsource` and `--prometheus`. No replay switch: no controller path changes; the readiness-less admission lives only in the adapter | None | 3 |
-| **TTFT** | | | |
-| 5a | `internal/signals/prefill`, observing: `V_P` (busy minutes, observed peak under a queue, back-pressure bound), `a` and the overhead from low-load minutes, `f`. Admission reasons and the settled-replica tracker. Logs every cycle; nothing reads it. Switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and the overhead, and refuses `V_P` and `f` | None (log only) | — |
-| 5b | A prefill-stress recording added as a golden: single phase, prefill-heavy (30k prompts), 3 prefill pods, decode held below its ceiling, fixed replicas. It exercises busy minutes and `f` | Adds one fixture | 5a, the run |
-| 5c | TTFT in `whatif`: the per-pod queue, the pooled bound, the decode terms, both inversions; printed UNVALIDATED. No switch: the controller does not read it | None | 5b, 2 |
-| 6 | Collect what is missing, with presence bits: `request_prefill_time_seconds` (aggregated pods), the queue-time and prompt-length `_bucket` series, `nixl_xfer_time_seconds`. Updates `learnreplay`'s export leak and coverage tests and the `metrics.go` comment. Old recordings replay with the presence bits false | Regenerated by `learnergolden update`; values unchanged, new columns empty | — |
+| D1 | Move the decode pricing into `internal/signals/whatif` at layer 32; one copy of the sequence-cap arithmetic. Proof: input/output vectors captured from `main` before the move, frozen in `testdata`, asserted bit-identical. The fails-on-main rule is waived for a pure move; the frozen vectors stand in for it | None move | — |
+| D2 | Closed-form fill, both TPOT inversions, decode admission (the chain), `Answer`/`Unanswerable`, property cases | None (library only) | D1 |
+| D3 | Tracker and analyzer accessors, the replay function, bands (fixed seed), basis, `cmd/whatif` from a recording or snapshot, the footer, exit codes, `make whatif` | None | D2 |
+| D4 | Standalone answers from `--prometheus`. No replay switch: the readiness-less admission lives only in the adapter | None | D3, R2 |
+| **Prefill and TTFT (shared library)** | | | |
+| P1 | `internal/signals/prefill`, observing: `V_P` (busy minutes, observed peak under a queue, back-pressure bound), `a` and the overhead, `f`. Admission reasons, the settled-replica tracker. Logs every cycle; nothing reads it. Switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | None (log only) | — |
+| P2 | The prefill-stress recording as a golden | Adds one fixture | P1, R1, the run |
+| P3 | The TTFT model in `whatif`: the per-pod queue, the router queue in tandem, the engine residual, the decode terms, the two-block union bound, both inversions; printed UNVALIDATED. No switch: the controller does not read it | None | P2, D2 |
+| **The SLO analyzer prices TTFT** | | | |
+| S1 | The SLO analyzer prices each prefill (and aggregated) variant against the TTFT target, **in shadow**: the rate per replica at which the union-bound TTFT meets the target, from the same `signals/prefill` and `whatif` queue model as the planner, so the two never disagree. Published as `wva_slo_*` series and the cycle log; no replica count changes. Switch `slo-ttft-price`; goldens move only with it on (`slo-published.csv`); property cases shared with P3 | Moves with the switch on | P3, a golden with router TTFT and the R1 fields |
+| S2 | TTFT enforce, as [SLO tiers](slo-tiers.md) phase 2c, after S1's shadow data passes its gate | Moves | S1, the staircase |
 | **Merge** | | | |
-| 7 | Per-bucket and mix answers from histograms; aggregated TTFT | None | 5c, 6, #276 |
-| 8 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | 4, 7 |
-| Only if asked | The controller endpoint and two gauges (the knee at the current count, TPOT at the current rate) | None | 5c |
-| Later | Prefill line in the snapshot; the learned batch cap in the snapshot (open question 4); the floor's derived prefill mu from `V_P`; shared prefill/decode budget; #275, #432, #277 | — | — |
+| M1 | Per-bucket and mix answers from histograms; aggregated TTFT | None | P3, R1, #276 |
+| M2 | The staircase run (flow control off and on); an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, M1 |
+| Only if asked | The controller endpoint and two gauges | None | P3 |
+| Later | Prefill line in the snapshot; the learned batch cap in the snapshot; the floor's derived prefill mu from `V_P`; shared prefill/decode budget; #275, #432, #277 | — | — |
 
-The ols-sweep-slo run, in progress on 2026-11-02, scales out, so it cannot
-exercise the queue term. It does carry router TTFT. Export its Prometheus data
-for the same window now, while the raw `_bucket`, prefill-time and queue-time
-series are retained.
+**What S1 can use from `ols-sweep-slo`.** Router TTFT, `AvgTTFT`,
+`AvgServiceTime` and the arrival rate: enough to fit `a` and to check a
+predicted TTFT mean at low load. Not enough to fit `V_P` (no queue), the router
+queue (flow control off) or a tail (no histograms). Its golden for S1 is
+therefore the prefill-stress recording, made after R1.
 
 ## Risks
 
@@ -718,7 +930,8 @@ series are retained.
   an assumed spread. The staircase is the check.
 - **The answer is read as a promise.** The footer, the UNVALIDATED label, the
   asymmetric pass mark and the refusals exist for that.
-- **Drift from the analyzers.** PR 1 removes the copies first.
+- **Drift from the analyzers.** D1 removes the copies first, and the SLO analyzer's
+  TTFT pricing (S1) uses the same library as the planner.
 
 ## Open questions
 
@@ -736,7 +949,21 @@ series are retained.
 5. **Per-request logs for the joint length distribution?** *Recommend:* an
    optional input; otherwise assume independence and say so.
 6. **ITL per token in the SLO analyzer (#430's known limit).** *Recommend:* a
-   separate PR with its own switch, not PR 1.
+   separate PR with its own switch, not D1.
+7. **Is the tandem model right when flow control is on?** The pooled central
+   queue plus a bounded residual assumes the gate keeps engines near the
+   threshold. *Recommend:* answer with it, flagged, until the staircase's
+   flow-control-on phase scores it.
+8. **Model the dispatch-gate delay?** The gate reads metrics up to 200 ms old
+   and releases one request per cycle. *Recommend:* not until the staircase
+   shows a residual at the knee larger than the proxy hop.
+9. **Several priority bands.** *Recommend:* answer for the highest band and
+   flag; per-band answers need per-band arrival rates, which the router
+   histogram does not split.
+10. **The union bound's cost.** At p95 in the worked example it is 334 ms
+    against 210 ms independent. *Recommend:* keep it as the default, because it
+    cannot over-promise, and print the independent figure; revisit if the
+    staircase shows the two blocks are nearly independent.
 
 ## Appendix: where things are
 
@@ -763,7 +990,9 @@ series are retained.
 | Length histograms | No | No | Yes |
 | Prefill service, wait (P/D) | `AvgServiceTime`, `AvgTTFT` | No | Yes |
 | `V_P` | `PrefillComputedTokenRate` with `QueueLength` | Lower bounds only | Yes |
-| Router TTFT | Only if the SLO analyzer ran | No | `QuerySLORouterTTFTBuckets` |
+| Router TTFT | Only if the SLO analyzer ran (every cycle after R1) | No | `QuerySLORouterTTFTBuckets` |
+| Flow-control queue size | `SchedulerQueue` | No | `QuerySchedulerQueueSize` |
+| Flow-control wait histogram, saturation, outcomes | After R1 | No | Yes, queried directly |
 | Arrival rate | `Input.ArrivalRate` | No | `QueryModelArrivalRate` |
 
 ## See also
