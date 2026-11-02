@@ -62,7 +62,7 @@ var dp8Folded = map[string]float64{
 	registration.QueryAvgInputTokens:        1792,
 	registration.QueryAvgInputTokensRecent:  1792,
 	registration.QueryPrefixCacheHitRate:    0.35714285714285715,
-	registration.QueryAvgITL:                0.04241071428571429,
+	registration.QueryAvgITL:                0.04242754888268156,
 	registration.QueryAvgTTFT:               0.4375,
 	registration.QueryAvgServiceTime:        14,
 	// Already per-pod sums before issue #150, unchanged by it.
@@ -175,7 +175,7 @@ func TestCollectReplicaMetrics_SingleFrontendDPPod(t *testing.T) {
 	assert.InDelta(t, 0.203125, pod.KvCacheUsage, 1e-12, "the mean over the ranks, not the busiest rank's 0.875")
 	assert.Equal(t, int64(1040000), pod.TokensInUse, "used tokens summed over the ranks")
 	assert.Equal(t, 8, pod.QueueLength, "every rank's waiting requests")
-	assert.InDelta(t, 0.04241071428571429, pod.AvgITL, 1e-15, "the token-weighted mean, not the slowest rank's 0.0625")
+	assert.InDelta(t, 0.04242754888268156, pod.AvgITL, 1e-15, "the per-interval mean, not the slowest rank's 0.0625")
 	// Beside the sum and the mean, the busiest rank: what the saturation
 	// guards judge.
 	assert.Equal(t, 6, pod.MaxRankQueueLength, "rank 7's queue, of the pod's 8")

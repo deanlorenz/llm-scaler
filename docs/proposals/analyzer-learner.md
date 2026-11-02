@@ -357,8 +357,14 @@ and none Absent; Empty needs every rank Empty and none that generated tokens.
 The Pod's mean is generation-weighted over its Finite ranks only (#341 4a's
 named change, made in the collector ahead of 4a): an Empty rank that generated
 tokens (max_tokens=1) has no interval, so it neither dilutes the mean nor
-blocks Finite. A prefill-role Pod reads Empty permanently, so readers gate by
-role.
+blocks Finite. Each Finite rank weighs by its inter-token intervals
+(generated tokens less one per request), the count the per-pod query divides
+by, so the merged value matches the one-API-server layout. The k paired with
+that ITL is still capacity-weighted over every rank, Empty ones included, so a
+pod with a busy Empty rank pairs the Finite ranks' ITL with a lower k. That
+fits ITL(k) high and mu low, the side that over-orders; it is left as is and
+must not be "fixed" by putting the Empty ranks back into the ITL mean. A
+prefill-role Pod reads Empty permanently, so readers gate by role.
 
 `RunningRequestsKnown` is a prerequisite of #277 (reading
 `num_requests_running` as resident load). `RunningRequests` is "zero when the

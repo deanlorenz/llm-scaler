@@ -29,6 +29,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 			KvCacheUsage: 0.25, KvUsageInstant: 0.25, KvUsageMean: 0.25, QueueLength: 2,
 			RequestRate: 1, GenerationTokenRate: 100,
 			AvgInputTokens: 100, AvgOutputTokens: 20, AvgITL: 0.02, AvgServiceTime: 10, PrefixCacheHitRate: 0.4,
+			AvgITLKnown: true, RequestRateKnown: true,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 5 * time.Second, FreshnessStatus: "fresh"},
 		},
 		{
@@ -37,6 +38,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 			KvCacheUsage: 1.0, KvUsageInstant: 1.0, KvUsageMean: 1.0, QueueLength: 5,
 			RequestRate: 3, GenerationTokenRate: 300,
 			AvgInputTokens: 200, AvgOutputTokens: 40, AvgITL: 0.06, AvgServiceTime: 30, PrefixCacheHitRate: 0.8,
+			AvgITLKnown: true, RequestRateKnown: true,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 30 * time.Second, FreshnessStatus: "stale"},
 		},
 	}
@@ -68,8 +70,8 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 	// Request shape is weighted by traffic: rank B serves 3 of every 4 requests.
 	assert.InDelta(t, 175.0, pod.AvgInputTokens, 1e-9)
 	assert.InDelta(t, 35.0, pod.AvgOutputTokens, 1e-9)
-	// Weighted by generated tokens (100 and 300 tok/s, the same 1:3 as the
-	// requests here).
+	// Weighted by inter-token intervals (100 - 1 and 300 - 3 per second, the
+	// same 1:3 as the requests here).
 	assert.InDelta(t, 0.05, pod.AvgITL, 1e-9)
 	// Weighted by request rate, and asymmetric on purpose: a plain
 	// mean would give 20, so 25 is what distinguishes the weighting from an
@@ -351,4 +353,50 @@ func TestCollapseToPods_SpecAcceptedCoversTheFiniteRanks(t *testing.T) {
 	assert.InDelta(t, 1, pods[1].SpecAcceptedPerStep, 1e-9, "pod-b: the Absent rank's count was blended in")
 	assert.False(t, pods[2].SpecAcceptedPerStepKnown, "pod-c: no Finite rank, so no count")
 	assert.Zero(t, pods[2].SpecAcceptedPerStep)
+}
+
+func TestCollapseToPods_ITLMeanWeighsByInterval(t *testing.T) {
+	// The per-pod ITL query divides by inter-token intervals, one fewer than
+	// the tokens of each request, so the merge weighs each Finite rank by
+	// GenerationTokenRate - RequestRate. pod-a: 1 req/s of 100 tokens at 20ms
+	// (99 intervals/s) and 50 req/s of 2 tokens at 60ms (50 intervals/s) is
+	// (99 x 0.02 + 50 x 0.06) / 149 = 33.4ms; by tokens it read 40ms.
+	// pod-b: one rank's request rate unknown, so the pod weighs by tokens.
+	// pod-c: every request one token long, no interval anywhere, so the pod
+	// weighs by tokens (here 1:3).
+	rank := func(pod string, itl, gen, req float64, reqKnown bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, AvgITL: itl, AvgITLKnown: true,
+			GenerationTokenRate: gen, RequestRate: req, RequestRateKnown: reqKnown}
+	}
+	instances := []domain.ReplicaMetrics{
+		rank("pod-a", 0.02, 100, 1, true),
+		rank("pod-a", 0.06, 100, 50, true),
+		rank("pod-b", 0.02, 100, 1, true),
+		rank("pod-b", 0.06, 100, 50, false),
+		rank("pod-c", 0.02, 10, 10, true),
+		rank("pod-c", 0.06, 30, 30, true),
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 3)
+	assert.InDelta(t, (99*0.02+50*0.06)/149, pods[0].AvgITL, 1e-12, "pod-a: weighed by tokens, not intervals")
+	assert.InDelta(t, 0.0334, pods[0].AvgITL, 1e-4)
+	assert.InDelta(t, 0.04, pods[1].AvgITL, 1e-12, "pod-b: an unknown request rate must fall back to tokens")
+	assert.InDelta(t, 0.05, pods[2].AvgITL, 1e-12, "pod-c: no interval anywhere must fall back to tokens")
+}
+
+func TestCollapseToPods_NoFiniteRankReadsNoITL(t *testing.T) {
+	// With no Finite rank there is no mean, and AvgITL is 0 whatever the
+	// ranks carry, so a reader of AvgITL > 0 sees no reading.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", AvgITL: 0.02, GenerationTokenRate: 100},
+		{PodName: "pod-a", AvgITLEmpty: true, GenerationTokenRate: 50},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 1)
+	assert.Equal(t, domain.ITLAbsent, pods[0].ITLState())
+	assert.Zero(t, pods[0].AvgITL)
 }
