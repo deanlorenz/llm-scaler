@@ -29,8 +29,19 @@ more or less than the one the default schedule was written for.
 The log prints one LEVEL line at each change and one STATUS line every 30 s,
 so a step that did not happen, or requests that fail, are visible.
 
+STREAMING
+---------
+--stream sends each request with stream: true and stream_options
+include_usage, and reads the event stream to its end. The router measures
+time to first token and time per output token only on a streamed response,
+so a run that needs its llm_d_epp_request_ttft_seconds and
+llm_d_epp_request_streaming_tpot_seconds (the slo analyzer's router
+latency) needs it. It drove the `ols-sweep-slo` golden. A streamed request
+counts as ok only when the stream ends with "data: [DONE]". The default
+stays a plain response, as `ols-sweep` ran.
+
 usage:
-  closed_loop_sweep.py --url http://ROUTER:80 --model MODEL [--schedule ...] [--scale F]
+  closed_loop_sweep.py --url http://ROUTER:80 --model MODEL [--schedule ...] [--scale F] [--stream]
 """
 import argparse
 import asyncio
@@ -71,25 +82,55 @@ def now():
 
 
 class Sweep:
-    def __init__(self, url, model):
-        self.url, self.model = url.rstrip("/") + "/v1/completions", model
+    def __init__(self, url, model, stream=False):
+        self.url, self.model, self.stream = url.rstrip("/") + "/v1/completions", model, stream
         self.target = self.n_in = self.n_out = self.level = 0
         self.ok = self.err = self.active = 0
         self.lat = 0.0
         self.lasterr = ""
 
+    def request(self, n_in, n_out):
+        """One request body: a random prompt of about n_in words asking for about n_out tokens."""
+        words = random.randint(int(n_in * 0.9), int(n_in * 1.1))
+        body = {"model": self.model, "prompt": " ".join(random.choice(WORDS) for _ in range(words)),
+                "max_tokens": random.randint(int(n_out * 0.9), int(n_out * 1.1)),
+                "ignore_eos": True, "temperature": 0, "stream": self.stream}
+        if self.stream:
+            body["stream_options"] = {"include_usage": True}
+        return body
+
+    @staticmethod
+    async def read_stream(r):
+        """Read a streamed response to its end. It returns "" when the stream
+        ended with data: [DONE], and otherwise what it ended with."""
+        last = ""
+        async for raw in r.content:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            if line == "data: [DONE]":
+                return ""
+            last = line
+        return "stream ended without [DONE]: " + last[:160]
+
     async def worker(self, i, sess):
         self.active += 1
         try:
             while i < self.target:
-                n_in, n_out = self.n_in, self.n_out
-                words = random.randint(int(n_in * 0.9), int(n_in * 1.1))
-                body = {"model": self.model, "prompt": " ".join(random.choice(WORDS) for _ in range(words)),
-                        "max_tokens": random.randint(int(n_out * 0.9), int(n_out * 1.1)),
-                        "ignore_eos": True, "temperature": 0, "stream": False}
+                body = self.request(self.n_in, self.n_out)
                 t0 = time.time()
                 try:
                     async with sess.post(self.url, json=body) as r:
+                        if r.status == 200 and self.stream:
+                            txt = await self.read_stream(r)
+                            if not txt:
+                                self.ok += 1
+                                self.lat += time.time() - t0
+                                continue
+                            self.lasterr = txt
+                            self.err += 1
+                            await asyncio.sleep(1)
+                            continue
                         txt = await r.text()
                         if r.status == 200:
                             self.ok += 1
@@ -139,15 +180,17 @@ def main():
     ap.add_argument("--schedule", default=DEFAULT_SCHEDULE, help="hold:inflight:in:out,... (default: ols-sweep's)")
     ap.add_argument("--scale", type=float, default=1.0, help="multiply every in-flight count (default 1)")
     ap.add_argument("--max-inflight", type=int, default=64, help="clamp for a scaled count (default 64)")
+    ap.add_argument("--stream", action="store_true",
+                    help="stream each response (stream_options include_usage) and read it to its end")
     ap.add_argument("--dry-run", action="store_true", help="print the levels and exit")
     a = ap.parse_args()
     levels = parse_schedule(a.schedule, a.scale, a.max_inflight)
     total = sum(h for h, _, _, _ in levels)
-    print("%s %d levels, %d s: %s" % (now(), len(levels), total,
-                                      ",".join("%d:%d:%d:%d" % lv for lv in levels)), flush=True)
+    print("%s %d levels, %d s, stream=%s: %s" % (now(), len(levels), total, "on" if a.stream else "off",
+                                                 ",".join("%d:%d:%d:%d" % lv for lv in levels)), flush=True)
     if a.dry_run:
         return
-    asyncio.run(Sweep(a.url, a.model).run(levels))
+    asyncio.run(Sweep(a.url, a.model, a.stream).run(levels))
 
 
 if __name__ == "__main__":
