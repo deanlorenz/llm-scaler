@@ -67,8 +67,9 @@ func missing(from, to int) func(i int) []domain.ReplicaMetrics {
 	}
 }
 
-func run(from, n int) []int {
-	out := make([]int, n)
+// run is the steadyFor cycles of a settle that starts on cycle from.
+func run(from int) []int {
+	out := make([]int, int(DefaultSteadyFor/settleTestCycle))
 	for i := range out {
 		out[i] = from + i
 	}
@@ -88,7 +89,6 @@ func equalInts(a, b []int) bool {
 }
 
 func TestAdmissionSettleFields(t *testing.T) {
-	steadyFor := int(DefaultSteadyFor / settleTestCycle)
 	for _, tc := range []struct {
 		name    string
 		adm     Admission
@@ -101,13 +101,13 @@ func TestAdmissionSettleFields(t *testing.T) {
 		// The key's own trace.
 		{name: "own trace: a replica on the key's first cycle is settled", rows: fleetAlways, n: 12, at: every},
 		{name: "own trace: WaitsAfterRestart makes it wait steadyFor", adm: Admission{WaitsAfterRestart: true},
-			rows: fleetAlways, n: 12, at: every, want: run(0, steadyFor)},
+			rows: fleetAlways, n: 12, at: every, want: run(0)},
 		{name: "own trace: one missed cycle restarts the settle without KeepsThroughMissingRow",
-			rows: missing(10, 11), n: 25, at: every, want: run(11, steadyFor)},
+			rows: missing(10, 11), n: 25, at: every, want: run(11)},
 		{name: "own trace: KeepsThroughMissingRow keeps it through one missed cycle",
-			adm: Admission{KeepsThroughMissingRow: true}, rows: missing(10, 11), n: 25, at: every},
+			adm: Admission{KeepsThroughMissingRow: true}, rows: missing(12, 13), n: 25, at: every},
 		{name: "own trace: KeepsThroughMissingRow restarts it past the absence tolerance (75 s > 1 min)",
-			adm: Admission{KeepsThroughMissingRow: true}, rows: missing(10, 15), n: 30, at: every, want: run(15, steadyFor)},
+			adm: Admission{KeepsThroughMissingRow: true}, rows: missing(10, 15), n: 30, at: every, want: run(15)},
 		{name: "own trace: a longer AbsenceTolerance (2 min) keeps a 75 s absence",
 			adm: Admission{KeepsThroughMissingRow: true, AbsenceTolerance: 2 * time.Minute}, rows: missing(10, 15), n: 30, at: every},
 		{name: "own trace: a gap between the key's cycles is no absence",
@@ -121,15 +121,15 @@ func TestAdmissionSettleFields(t *testing.T) {
 		// The settle tracker.
 		{name: "tracker: settled on the first cycle without the wait", tracked: true, rows: fleetAlways, n: 12, at: every},
 		{name: "tracker: WaitsAfterRestart waits from the tracker's first sight", tracked: true,
-			adm: Admission{WaitsAfterRestart: true}, rows: fleetAlways, n: 12, at: every, want: run(0, steadyFor)},
+			adm: Admission{WaitsAfterRestart: true}, rows: fleetAlways, n: 12, at: every, want: run(0)},
 		{name: "tracker: a new Ready time under the name settles with RestartUnderName", tracked: true,
-			adm: Admission{RestartUnderName: true}, rows: newReadyAt(10), n: 25, at: every, want: run(10, steadyFor)},
+			adm: Admission{RestartUnderName: true}, rows: newReadyAt(10), n: 25, at: every, want: run(10)},
 		{name: "tracker: and is missed without it", tracked: true, rows: newReadyAt(10), n: 25, at: every},
 		{name: "tracker: a scrape that read nothing does not idle with IdleOnEvidence", tracked: true,
 			adm: Admission{IdleOnEvidence: true}, rows: readNothing(10), n: 25, at: every},
-		{name: "tracker: and does without it", tracked: true, rows: readNothing(10), n: 25, at: every, want: run(12, steadyFor)},
+		{name: "tracker: and does without it", tracked: true, rows: readNothing(10), n: 25, at: every, want: run(12)},
 		{name: "tracker: a not-Ready row ageing out of the tracker's trace starts nothing", tracked: true,
-			rows: notReadyAt(10), n: 50, at: every, want: run(11, steadyFor)},
+			rows: notReadyAt(10), n: 50, at: every, want: run(11)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := settleRun(tc.adm, tc.tracked, tc.n, tc.at, tc.rows); !equalInts(got, tc.want) {
@@ -150,7 +150,7 @@ func newReadyAt(at int) func(i int) []domain.ReplicaMetrics {
 	}
 }
 
-// readNothing makes p2's rows at at and at+1 read nothing at all.
+// readNothing makes p2's rows read nothing at all on cycles at and at+1.
 func readNothing(at int) func(i int) []domain.ReplicaMetrics {
 	return func(i int) []domain.ReplicaMetrics {
 		f := settleTestFleet()
