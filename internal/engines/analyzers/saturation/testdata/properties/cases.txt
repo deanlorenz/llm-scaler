@@ -106,6 +106,7 @@ known-truth/borrowed-k2/lower-only
 known-truth/floor/steady-order
 known-truth/itl/line-at-kprice
 known-truth/itl/line-at-kprice-timebase
+known-truth/itl/speculative-accepted-tokens
 known-truth/k2/priced-per-replica
 known-truth/mu/choice-priced
 known-truth/shared-line/borrowed-is-the-lenders

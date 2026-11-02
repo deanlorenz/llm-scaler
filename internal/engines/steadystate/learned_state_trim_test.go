@@ -62,7 +62,10 @@ func TestTheTrimKeepsAPriorWithItsClock(t *testing.T) {
 // document and to neither list is caught here, rather than growing past the
 // bound with nothing able to trim it -- which is how the prior got in.
 func TestEveryLearnedStateMapIsTrimmable(t *testing.T) {
-	kept := map[string]bool{"Config": true, "Args": true}
+	// ITLPerToken is a per-variant tag like them: one bool, and losing it
+	// only makes a speculating variant's ITL entries read as step time,
+	// which the restore then leaves out.
+	kept := map[string]bool{"Config": true, "Args": true, "ITLPerToken": true}
 	var s saturation.LearnedState
 	v := reflect.ValueOf(&s).Elem()
 	for i := range v.NumField() {

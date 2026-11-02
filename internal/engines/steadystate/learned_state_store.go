@@ -625,8 +625,18 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 			out = append(out, learnedStateEntry{spare: true, key: "itlslope|" + k, drop: func() { delete(s.ITLSlopes, k) }})
 		}
 	}
+	// A line's unit mark goes with the line; a mark left with no line goes
+	// first, as a spent bound does.
 	for k, l := range s.ITLLines {
-		out = append(out, learnedStateEntry{at: l.LearnedAt, key: "itl|" + k, drop: func() { delete(s.ITLLines, k) }})
+		out = append(out, learnedStateEntry{at: l.LearnedAt, key: "itl|" + k, drop: func() {
+			delete(s.ITLLines, k)
+			delete(s.ITLLinesPerToken, k)
+		}})
+	}
+	for k := range s.ITLLinesPerToken {
+		if _, line := s.ITLLines[k]; !line {
+			out = append(out, learnedStateEntry{spare: true, key: "itlunit|" + k, drop: func() { delete(s.ITLLinesPerToken, k) }})
+		}
 	}
 	for k, m := range s.Accelerators {
 		out = append(out, learnedStateEntry{at: m.LastUsed, key: "accel|" + k, drop: func() { delete(s.Accelerators, k) }})
