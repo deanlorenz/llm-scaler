@@ -37,14 +37,16 @@ time to first token and time per output token only on a streamed response,
 so a run that needs its llm_d_epp_request_ttft_seconds and
 llm_d_epp_request_streaming_tpot_seconds (the slo analyzer's router
 latency) needs it. It drove the `ols-sweep-slo` golden. A streamed request
-counts as ok only when the stream ends with "data: [DONE]". The default
-stays a plain response, as `ols-sweep` ran.
+counts as ok only when the stream ends with "data: [DONE]" and no event of it
+carried an "error" (vLLM sends the error, then [DONE]). The default stays a
+plain response, as `ols-sweep` ran.
 
 usage:
   closed_loop_sweep.py --url http://ROUTER:80 --model MODEL [--schedule ...] [--scale F] [--stream]
 """
 import argparse
 import asyncio
+import json
 import random
 import sys
 import time
@@ -102,16 +104,24 @@ class Sweep:
     @staticmethod
     async def read_stream(r):
         """Read a streamed response to its end. It returns "" when the stream
-        ended with data: [DONE], and otherwise what it ended with."""
-        last = ""
+        ended with data: [DONE] and no event carried an "error"; otherwise the
+        error, or what the stream ended with."""
+        last, error = "", ""
         async for raw in r.content:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
             if line == "data: [DONE]":
-                return ""
+                return error
             last = line
-        return "stream ended without [DONE]: " + last[:160]
+            if line.startswith("data: {") and '"error"' in line:
+                try:
+                    event = json.loads(line[len("data: "):])
+                except ValueError:
+                    event = {}
+                if isinstance(event, dict) and "error" in event:
+                    error = "error in stream: " + line[:160]
+        return error or "stream ended without [DONE]: " + last[:160]
 
     async def worker(self, i, sess):
         self.active += 1
@@ -122,21 +132,15 @@ class Sweep:
                 try:
                     async with sess.post(self.url, json=body) as r:
                         if r.status == 200 and self.stream:
-                            txt = await self.read_stream(r)
-                            if not txt:
-                                self.ok += 1
-                                self.lat += time.time() - t0
-                                continue
-                            self.lasterr = txt
-                            self.err += 1
-                            await asyncio.sleep(1)
-                            continue
-                        txt = await r.text()
-                        if r.status == 200:
+                            failure = await self.read_stream(r)
+                        else:
+                            txt = await r.text()
+                            failure = "" if r.status == 200 else "%d %s" % (r.status, txt[:200])
+                        if not failure:
                             self.ok += 1
                             self.lat += time.time() - t0
                             continue
-                        self.lasterr = "%d %s" % (r.status, txt[:200])
+                        self.lasterr = failure
                 except Exception as e:  # noqa: BLE001 -- counted and shown; the load goes on
                     self.lasterr = repr(e)[:200]
                 self.err += 1
