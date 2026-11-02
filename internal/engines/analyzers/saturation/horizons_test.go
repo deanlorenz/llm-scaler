@@ -200,6 +200,7 @@ var _ = Describe("learned-state horizons", func() {
 				900000, // tokensInUse: this episode's reading
 				600,    // avgOutput
 				1000,   // avgInput
+				1,      // outputDispersion
 				10,     // queueThreshold
 				nil,    // engineParams
 				pricedBatchCap{},

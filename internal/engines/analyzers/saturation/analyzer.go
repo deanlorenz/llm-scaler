@@ -304,6 +304,9 @@ type SaturationAnalyzer struct {
 	batchCapITLAdmission bool
 	batchCapDecodeView   bool
 	batchCapDerivedMu    bool
+	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (#276): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	kvOutputDispersion bool
 	// batchCaps is each variant's learned batch cap, and batchCapPlateaus
 	// each pod's run of cycles at one running count (batch_cap.go). Keyed
 	// namespace|variant|model|, and the pod after it.
@@ -495,6 +498,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		batchCapITLAdmission:   true,
 		batchCapDecodeView:     true,
 		batchCapDerivedMu:      true,
+		kvOutputDispersion:     true,
 		batchCaps:              make(map[string]*learnedBatchCap),
 		batchCapPlateaus:       make(map[string]*batchCapPlateau),
 		batchCapAdmission:      batchCapRules(),

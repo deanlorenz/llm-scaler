@@ -39,7 +39,9 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
 - **Price a replica more exactly.** Speculative decoding
   ([#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)), mixed
   prefill and decode pods ([#275](https://github.com/ev-shindin/llm-scaling-manager/issues/275)),
-  output length ([#276](https://github.com/ev-shindin/llm-scaling-manager/issues/276)),
+  output length in the throughput and slo analyzers (the saturation analyzer
+  prices the spread of output lengths since
+  [#276](https://github.com/ev-shindin/llm-scaling-manager/issues/276)),
   prefix-cache hits ([#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)),
   KV-landed P/D requests ([#307](https://github.com/ev-shindin/llm-scaling-manager/issues/307))
   and `--max-num-active-seqs` ([#308](https://github.com/ev-shindin/llm-scaling-manager/issues/308)).

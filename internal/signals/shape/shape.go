@@ -15,7 +15,9 @@ const DefaultChangeTolerance = 0.20
 
 // Shape captures the stable (IL, OL) characterization for a calibration period.
 //
-// KVreq = ILeff + OL/2 is the time-averaged per-in-flight-request KV footprint.
+// KVreq = ILeff + OL/2 is the time-averaged per-in-flight-request KV footprint
+// when every request generates the same number of tokens; with a spread of
+// lengths it is ILeff + D*OL/2 (WithOutputDispersion, issue #276).
 // ILeff is used for both N(k*) (current fleet) and N(k_sat) (new replica capacity).
 //
 // Rationale for using ILeff for new replicas: with cache-aware scheduling (EPP
@@ -35,8 +37,12 @@ type Shape struct {
 	// ILeff is the effective input length after prefix cache reduction:
 	//   ILeff = AvgInputTokens × (1 − PrefixHitRate)
 	ILeff float64
+	// OutputDispersion is D = E[O^2] / E[O]^2 of the output lengths, at
+	// least 1 (dispersion.go). New sets 1, every request the same length;
+	// WithOutputDispersion sets a measured spread.
+	OutputDispersion float64
 	// KVreq is the time-averaged KV token footprint per in-flight request:
-	//   KVreq = ILeff + AvgOutputTokens/2
+	//   KVreq = ILeff + OutputDispersion * AvgOutputTokens/2
 	KVreq float64
 }
 
@@ -54,11 +60,12 @@ func New(il, ol, hitRate float64) Shape {
 	}
 	ileff := il * (1 - hitRate)
 	return Shape{
-		AvgInputTokens:  il,
-		AvgOutputTokens: ol,
-		PrefixHitRate:   hitRate,
-		ILeff:           ileff,
-		KVreq:           ileff + ol/2,
+		AvgInputTokens:   il,
+		AvgOutputTokens:  ol,
+		PrefixHitRate:    hitRate,
+		ILeff:            ileff,
+		OutputDispersion: 1,
+		KVreq:            ileff + ol/2,
 	}
 }
 

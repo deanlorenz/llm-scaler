@@ -106,8 +106,10 @@ known-truth/borrowed-k2/lower-only
 known-truth/floor/steady-order
 known-truth/itl/line-at-kprice
 known-truth/itl/line-at-kprice-timebase
+known-truth/k2/output-spread
 known-truth/k2/priced-per-replica
 known-truth/mu/choice-priced
+known-truth/mu/output-spread
 known-truth/shared-line/borrowed-is-the-lenders
 known-truth/slo-itl/line-at-kprice
 liveness/borrowed-k2/expires-to-own

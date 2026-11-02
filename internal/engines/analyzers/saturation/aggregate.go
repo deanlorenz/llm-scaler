@@ -43,6 +43,13 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 	// Compute model-level workload averages from live replica metrics.
 	// Used for capacity estimation of zero-replica variants with deployment-derived params.
 	modelAvgInput, modelAvgOutput, _ := computeModelWorkloadAverages(inputMetrics, rolesFromStates(variantStates))
+	// And the spread of the output lengths, priced into the derived figure's
+	// KV per request (issue #276); 1, as before, with none read or the
+	// switch off.
+	modelDispersion := 1.0
+	if a.kvOutputDispersion {
+		modelDispersion = fleetOutputDispersion(inputMetrics, rolesFromStates(variantStates))
+	}
 
 	result := make([]domain.VariantCapacity, 0, len(variantStates))
 	for _, vs := range variantStates {
@@ -196,7 +203,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			// No ready replicas — use stored capacity, enhanced with k2 derivation
 			// for deployment-derived records when workload data is available.
 			perReplicaCapacity = a.estimateStoredCapacity(rec, modelID, namespace, vs.VariantName, accelerator, vs.GPUsPerReplica,
-				kvCacheThreshold, modelAvgInput, modelAvgOutput, logger)
+				kvCacheThreshold, modelAvgInput, modelAvgOutput, modelDispersion, logger)
 			capacityLabel = satReasonP0Store
 		} else if rec := a.lookupCompatibleCapacity(namespace, modelID, vs.VariantName, accelerator, vs.GPUsPerReplica, reuseDisabled); rec != nil {
 			// No own record — try cross-variant estimation from a compatible variant

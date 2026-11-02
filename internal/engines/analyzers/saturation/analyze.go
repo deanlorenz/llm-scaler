@@ -189,6 +189,10 @@ type cycle struct {
 	stableInput  float64
 	stableOutput float64
 	shapeChanged bool
+	// fleetDispersion is the spread of the fleet's output lengths, D =
+	// E[O^2]/E[O]^2 (fleetOutputDispersion): 1 with no reading, or with
+	// SwitchKVPerRequestOutputDispersion off.
+	fleetDispersion float64
 	// keys is the output length the k2 and throughput keys are built from:
 	// the fleet's, its bucket held across a boundary (keyLengths), and the
 	// move of its bucket this cycle, if one happened.
@@ -314,6 +318,12 @@ func (c *cycle) observeFleetShape() {
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	c.fleetOutput = fleetOutputLength(c.input.ReplicaMetrics, c.rolesByVariant)
+	// The spread of those lengths, which the KV a resident request holds
+	// depends on as much as on their mean (issue #276).
+	c.fleetDispersion = 1
+	if c.a.kvOutputDispersion {
+		c.fleetDispersion = fleetOutputDispersion(c.input.ReplicaMetrics, c.rolesByVariant)
+	}
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -607,12 +617,21 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// it: see its comment for the run that decided that.
 		itlModel := c.itlModels[rm.VariantName]
 		engineParams := engineParamsFor(c.a, c.input.Namespace, c.input.ModelID, rm.VariantName)
-		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate)
+		// The spread of output lengths is priced into the KV a resident
+		// request holds (KVreq = ILeff + D*OL/2, issue #276): with lengths
+		// that vary, a long request stays resident longer, so fewer
+		// requests fit the same KV. D is 1 with no reading.
+		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate).WithOutputDispersion(c.fleetDispersion)
 		// muShape is the shape mu is PRICED at: fleetShape on a steady fleet,
 		// and both halves on the short window while a shape change is
 		// outstanding (see resolvePricing). fleetShape stays the fleet's own
 		// [5m] reading, because that is the figure noteLineMismatch compares
 		// an observed token rate against.
+		//
+		// The short-window shape takes no spread. The spread is read over
+		// [5m], and across a shape change that window holds both shapes, so
+		// their difference would read as a spread of one workload's lengths
+		// and price the new shape's requests far larger than they are.
 		muShape := fleetShape
 		if c.muShortWindow {
 			muShape = shape.New(c.muInput, c.muDivisor, rm.PrefixCacheHitRate)
@@ -683,6 +702,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"muShortWindow", c.muShortWindow,
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
+				// D = E[O^2]/E[O]^2 of the output lengths, priced into
+				// KVreq; 1 is no spread, or none read.
+				"outputDispersion", muShape.OutputDispersion,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).

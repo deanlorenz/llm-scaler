@@ -65,6 +65,7 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"muShortWindow":    {excluded: "the shape family (stage 1, the window label), not built yet"},
 	"kvReqPerSeq":      {excluded: "the shape family (stage 1, wva_shape_kv_tokens_per_request{basis=priced}), not built yet"},
 	"kvReqFleet":       {excluded: "the shape family (stage 1, wva_shape_kv_tokens_per_request{basis=fleet}), not built yet"},
+	"outputDispersion": {excluded: "a term of kvReqPerSeq (#276), and published with it: the shape family (stage 1), not built yet"},
 }
 
 // derivedMuLogKeys parses analyze.go and returns the string-literal keys of

@@ -5,6 +5,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // The one shape the whole fleet is serving this cycle, out of readings that
@@ -112,6 +113,43 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
+}
+
+// fleetOutputDispersion is the spread of the output lengths the fleet is
+// serving, D = E[O^2] / E[O]^2, over the generating replicas fleetOutputLength
+// averages and with its weights, so the two are one reading of one fleet.
+// E[O^2] is each replica's lower bound (AvgOutputTokensSquared), so D is too:
+// it prices the KV a resident request holds towards the truth and never past
+// it (shape.SquaredMeanLowerBound).
+//
+// 1, no spread, unless EVERY generating replica with an output length read
+// the bound. One without it (an SGLang replica, a relabelling that drops the
+// histogram) would otherwise count as a replica whose requests are all one
+// length, and the mix of the two is neither fleet's spread.
+func fleetOutputDispersion(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	counted := func(rm domain.ReplicaMetrics) bool {
+		return rm.AvgOutputTokens > 0 && generatesOutput(rm, rolesByVariant)
+	}
+	if !slices.ContainsFunc(replicas, counted) ||
+		slices.ContainsFunc(replicas, func(rm domain.ReplicaMetrics) bool {
+			return counted(rm) && !(rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0)
+		}) {
+		return 1
+	}
+	mean := fleetOutputLength(replicas, rolesByVariant)
+	squared := fleet.Mean(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensSquared }, counted)
+	return shape.Dispersion(mean, squared)
+}
+
+// replicaOutputDispersion is one replica's own spread of output lengths, D =
+// E[O^2] / E[O]^2, for the k2 it is priced at (estimateCapacityAtCapSpread):
+// 1 with no bound read, or with SwitchKVPerRequestOutputDispersion off.
+func (a *SaturationAnalyzer) replicaOutputDispersion(rm domain.ReplicaMetrics) float64 {
+	if !a.kvOutputDispersion || !rm.AvgOutputTokensSquaredKnown {
+		return 1
+	}
+	return shape.Dispersion(rm.AvgOutputTokens, rm.AvgOutputTokensSquared)
 }
 
 // fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is

@@ -57,6 +57,9 @@ var agnosticReplicaQueries = []string{
 	// vLLM publishes a preemption counter and SGLang none, so this is
 	// registered once as well (registration.QueryPreemptionRate).
 	registration.QueryPreemptionRate,
+	// vLLM's output-length histogram; SGLang's is behind a flag, under other
+	// names (registration.QueryOutputTokensBuckets).
+	registration.QueryOutputTokensBuckets,
 	// vLLM's waiting count split by reason; SGLang publishes no reason.
 	registration.QueryCapacityQueueLength,
 	registration.QueryMaxRankCapacityQueueLength,

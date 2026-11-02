@@ -222,6 +222,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 
 	pod.AvgInputTokens = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokens })
 	pod.AvgOutputTokens = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokens })
+	pod.AvgOutputTokensSquared, pod.AvgOutputTokensSquaredKnown = mergeOutputSquared(group)
 	// Weighted like their [5m] siblings: both are per-request costs, so the
 	// instance that served more requests counts for more.
 	pod.AvgOutputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensRecent })
@@ -323,4 +324,31 @@ func mergeMetadata(group []domain.ReplicaMetrics) *domain.ReplicaMetricsMetadata
 		}
 	}
 	return merged
+}
+
+// mergeOutputSquared is the pod's E[O^2] bound, weighted as AvgOutputTokens
+// is (weightedByRequestRate), so the two divide into the pod's spread of
+// output lengths. It is known only when every rank that completed requests
+// (AvgOutputTokens > 0) read one: a rank without a histogram would otherwise
+// count as no spread. A rank that completed nothing adds nothing. So is the
+// fallback to a plain mean, when no rank reports a request rate, known only
+// when every rank completed requests: a plain mean over a rank with no output
+// halves the mean and the bound alike, which doubles their ratio.
+func mergeOutputSquared(group []domain.ReplicaMetrics) (float64, bool) {
+	var counted int
+	var rate float64
+	for _, m := range group {
+		rate += m.RequestRate
+		if !(m.AvgOutputTokens > 0) {
+			continue
+		}
+		if !m.AvgOutputTokensSquaredKnown {
+			return 0, false
+		}
+		counted++
+	}
+	if counted == 0 || (!(rate > 0) && counted < len(group)) {
+		return 0, false
+	}
+	return weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensSquared }), true
 }

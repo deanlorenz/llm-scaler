@@ -64,7 +64,7 @@ func TestDerivedK2ScalesWithRanks(t *testing.T) {
 		const k1 = 100_000_000 // far above either figure, so it cannot be the answer
 		d := a.computeK2("dp-key", "m", "ns", "decode-v",
 			0, 0, // not saturated, no history: the chain reaches P3
-			1000, 1000, 10,
+			1000, 1000, 1, 10,
 			params, flagsBatchCap(params), ranks,
 			k1, k1,
 			domain.RoleDecode, false, admission{}, false, logr.Discard())
