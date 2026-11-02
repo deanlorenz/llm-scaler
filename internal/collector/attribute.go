@@ -409,6 +409,9 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 			avgTTFT = 0
 		}
 	}
+	// The spread of output lengths: the histogram and the mean over the same
+	// [5m] reduced to a lower bound on E[O^2] (output_buckets.go).
+	outputSquared, outputSquaredKnown := outputTokensSquared(data.outputTokensBuckets, data.avgOutputTokens)
 	metric := domain.ReplicaMetrics{
 		PodName:                  podName,
 		ModelID:                  modelID,
@@ -430,6 +433,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		MaxRankKvCacheUsage:      maxRankKv,
 		TokensInUse:              tokensInUse,
 		AvgOutputTokens:          data.avgOutputTokens,
+		AvgOutputTokensSquared:   outputSquared,
 		AvgOutputTokensRecent:    data.avgOutputTokensRecent,
 		AvgInputTokens:           data.avgInputTokens,
 		AvgInputTokensRecent:     data.avgInputTokensRecent,
@@ -458,6 +462,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		GenerationTokenRateKnown:      data.generationTokenRateKnown,
 		RequestRateKnown:              data.requestRateKnown,
 		RunningRequestsKnown:          data.runningRequestsKnown,
+		AvgOutputTokensSquaredKnown:   outputSquaredKnown,
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,
 			Age:             freshnessAge,

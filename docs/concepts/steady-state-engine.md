@@ -387,6 +387,7 @@ model; check the health metrics below.
 | `vllm:num_requests_waiting_by_reason` (`reason="capacity"`) | gauge | on decode of a P/D model, the local queue without requests waiting for their KV from prefill (vLLM v0.20.0 and later) — *optional*: without it the whole queue counts |
 | `vllm:request_prompt_tokens_sum` / `_count` | histogram | average **input** tokens per request |
 | `vllm:request_generation_tokens_sum` / `_count` | histogram | average **output** tokens per request |
+| `vllm:request_generation_tokens_bucket` | histogram | the spread of output lengths: a long request stays resident longer, so it holds more KV per request than the mean says (SGLang: `sglang:generation_tokens_histogram_bucket`) — *optional*: without it every request is priced at the mean length, as before |
 | `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |
 | `inference_extension_flow_control_queue_size` / `_bytes` | gauges (EPP) | upstream scheduler-queue demand — *optional* |
 

@@ -50,6 +50,7 @@ var derivedMuFields = []string{
 	"muShortWindow",
 	"namespace",
 	"ok",
+	"outputDispersion",
 	"pod",
 	"rate",
 	"replicaKvTokens",

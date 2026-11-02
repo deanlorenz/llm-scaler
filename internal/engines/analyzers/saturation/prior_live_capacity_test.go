@@ -63,13 +63,13 @@ func TestAParkedVariantIsNotPricedAboveItsLastMeasurementAfterARollout(t *testin
 			require.Zero(t, rec.TotalKvCapacityTokens, "precondition: no k1 carried")
 
 			a := NewSaturationAnalyzer(store)
-			got := a.estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, logr.Discard())
+			got := a.estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, 1, logr.Discard())
 			require.Greater(t, got, 0.0, "precondition: the estimate path ran")
 			require.LessOrEqual(t, got, float64(measured),
 				"a parked variant was priced above what it was last measured at")
 
 			// Without workload averages the stored fallback is capped alike.
-			got = a.estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 0, 0, logr.Discard())
+			got = a.estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 0, 0, 1, logr.Discard())
 			require.LessOrEqual(t, got, float64(measured))
 		})
 	}

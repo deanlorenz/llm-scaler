@@ -2292,8 +2292,10 @@ demand/supply models, so the difference is by design, not an inconsistency:
 | Throughput (`shape.Shape.KVreq`) | `ILeff + O/2` | Time-averaged residency (`ILeff = I × (1 − PrefixHitRate)`) |
 
 One asymmetry *is* internal to saturation V2 and should not be confused with the
-above: its own k2 derivation (`estimateCapacityFromParams`) prices a *concurrent*
-request at `I + O/2`. So a queued request is charged more than it occupies on
+above: its own k2 derivation (`estimateCapacityAtCapSpread`) prices a *concurrent*
+request at `I + D × O/2`, `D = E[O²]/O²` the spread of output lengths (1 when
+every request generates the same number of tokens, or when the engine
+publishes no `vllm:request_generation_tokens_bucket`). So a queued request is charged more than it occupies on
 average, biasing this term toward scale-up — accepted deliberately, since
 under-provisioning decode capacity causes preemption thrash. Changing it means
 moving the demand/capacity pair together. See the `waitingQueueDemand` doc

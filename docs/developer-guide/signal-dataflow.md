@@ -127,19 +127,26 @@ once and divided by everywhere.
 ```
 hitRate = clamp(hitRate, 0, 1)        // NaN -> 0
 ILeff   = I x (1 - hitRate)
-KVreq   = ILeff + O/2
+D       = E[O^2] / O^2                // 1 with no histogram
+KVreq   = ILeff + D x O/2
 ```
 
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
 | `I` = `AvgInputTokens` | tokens/request | collector, `request_prompt_tokens_sum/count` `[5m]` | the prompt length the fleet is serving |
 | `O` = `AvgOutputTokens` | tokens/request | collector, `request_generation_tokens_sum/count` `[5m]` | the generation length |
+| `E[O^2]` = `AvgOutputTokensSquared` | tokens^2/request | collector, the least `E[O^2]` that the output-length histogram `[5m]` (`request_generation_tokens_bucket`, SGLang `generation_tokens_histogram_bucket`) and `O` allow (`domain.SquaredMeanLowerBound`); `AvgOutputTokensSquaredKnown` says it was read | the spread of output lengths, `D` (issue #276) |
 | `hitRate` = `PrefixCacheHitRate` | fraction 0-1 | collector, `prefix_cache_hits / queries` | share of prompt tokens served from cache |
 
 `ILeff` is the prompt the engine must actually compute — a cached prefix costs
 nothing. `KVreq` is the KV footprint of **one resident request averaged over
-its life**: the prompt is held throughout, the generation grows from 0 to `O`,
-so it contributes its mean.
+its life**: the prompt is held throughout, the generation grows from 0 to its
+length. With equal lengths it contributes its mean, `O/2`; with lengths that
+vary, a long request stays resident longer and the average resident request
+holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram,
+while a shape change is outstanding (on every path), and with the replay
+switch `kv-per-request-output-dispersion` off. The throughput and slo
+analyzers still price `ILeff + O/2` (#433).
 
 `KVreq` is the most load-bearing quantity in the analyzer; everything that asks
 "how many requests fit" divides by it. `O` reaches the replica count through
@@ -642,10 +649,12 @@ ordered 1 -> 1 in every cycle while prefill held a queue of 1119 and its own
 floor asked for five.
 
 **What is collected and not used:** `AvgTTFT`. Prefill has no fitted
-throughput ceiling today. [A TTFT model is
-proposed](../proposals/prefill-ttft-model.md) — fit `TTFT(T) = A·T + B` so
-`1/A` is the replica's prefill token ceiling, obtainable without driving it
-into saturation, which is exactly the limitation above.
+throughput ceiling today. The earlier [TTFT model](../proposals/prefill-ttft-model.md)
+(fit `TTFT(T) = A·T + B`, take `1/A` as the ceiling) was built and removed:
+queue wait landed in the intercept. [What-if capacity](../proposals/slo-capacity-planner-ttft.md#prefill-capacity)
+supersedes it with a prefill throughput `V_P` read from busy minutes, or a
+lower bound when there are none, which
+the floor could later use for the limitation above.
 
 ## What crosses each boundary
 
@@ -667,7 +676,8 @@ Three log lines, in this order. The first two are per replica, at
 
 1. `derived-mu` — every term of the service rate, because the result alone
    cannot be attributed to one of them. `kvReqPerSeq` is the priced shape,
-   `kvReqFleet` the fleet's own; `muShortWindow` says whether the pair moved.
+   `kvReqFleet` the fleet's own; `outputDispersion` the spread of output
+   lengths priced into it; `muShortWindow` says whether the pair moved.
 2. `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`,
    `k2Source`, `boundBy`, `saturatedThroughput`.
 3. `throughput-demand-floor` — `arrivalRate`, `backlogRequests`,

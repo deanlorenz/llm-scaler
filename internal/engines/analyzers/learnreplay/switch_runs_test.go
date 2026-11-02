@@ -36,14 +36,16 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #274's ITL per accepted token: no recording runs speculative decoding, so
-// it names no output and is held by its unit tests (heldBy). Earlier PRs'
-// switches (learner PRs 2 and 3, #396's bands, #399's batch cap, #415's mu
-// key, #392's k2 first reading, #420's batch-cap readers) are not here: "all
-// off" is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
+// #276's spread of output lengths in the KV per request: no recording
+// carries the output-length histogram, so it names no output and is held by
+// its unit tests (heldBy). Earlier PRs' switches (learner PRs 2 and 3,
+// #396's bands, #399's batch cap, #415's mu key, #392's first k2 reading,
+// #420's batch-cap readers, #274's ITL per accepted token) are not here:
+// "all off" is this PR's switches, and an earlier PR's stay at their
+// constructor default, on, as the base goldens were written
+// (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchITLPerToken: nil,
+	saturation.SwitchKVPerRequestOutputDispersion: nil,
 }
 
 // switchPackage is the package whose hook accepts the switch name.
@@ -85,6 +87,7 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchBatchCapDerivedMu:    nil,
 	slo.SwitchBatchCapAdmission:           nil,
 	slo.SwitchBatchCapPerRank:             nil,
+	saturation.SwitchITLPerToken:          nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -99,6 +102,12 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestITLPerToken_AStepTimeSnapshotIsNotRestoredForASpeculatingVariant"},
 		{"../saturation", "TestITLPerToken_AnAcceptedCountAboveTheDraftLengthIsWithheld"},
 		{"../saturation", "TestITLPerToken_AWithheldReadingIsLoggedOncePerChange"},
+	},
+	saturation.SwitchKVPerRequestOutputDispersion: {
+		{"../saturation", "TestKVOutputDispersion_TheDerivedK2HoldsTheSpread"},
+		{"../saturation", "TestKVOutputDispersion_TheDerivedMuFitsFewerSequences"},
+		{"../saturation", "TestKVOutputDispersion_AZeroReplicaVariantIsPricedWithTheSpread"},
+		{"../saturation", "TestKVOutputDispersion_AZeroReplicaEstimateIsRequestWeighted"},
 	},
 	saturation.SwitchBatchCapITLAdmission: {
 		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},
@@ -234,8 +243,8 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (01b40048a, main after #426). This PR's switch
-// names none.
+// commit's goldens hold it (bc4dc748a, main after #430). No switch of this
+// PR names one.
 var switchBase = map[string]string{}
 
 func TestGoldens_TheSwitchRuns(t *testing.T) {

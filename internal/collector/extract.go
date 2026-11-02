@@ -77,6 +77,9 @@ type podMetricData struct {
 	// tokens accepted per decode step, and whether that was read.
 	specAcceptedPerStep      float64
 	specAcceptedPerStepKnown bool
+	// The output-length histogram (registration.QueryOutputTokensBuckets),
+	// by bucket bound: the requests a second at or under each bound.
+	outputTokensBuckets map[float64]float64
 	// Presence bits: each is set when its series was present and finite (and
 	// in the range its block accepts), so a zero above can be told from a
 	// missing reading (domain.ReplicaMetrics.KvCacheUsageKnown and its
@@ -655,6 +658,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 	}
 
 	c.extractSequenceCap(ctx, modelID, namespace, results, podData)
+	c.extractOutputBuckets(ctx, modelID, namespace, results, podData)
 
 	return podData, nil
 }

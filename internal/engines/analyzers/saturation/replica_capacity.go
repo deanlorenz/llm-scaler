@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -78,6 +79,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (replicaRouting): whether its resident KV is charged at its instant
 	// reading.
 	routing replicaRouting,
+	// shapeChanging is the cycle's shape change outstanding (resolvePricing),
+	// read once per cycle so every replica and the fleet shape agree: the
+	// derived k2 then prices no spread (replicaOutputDispersion).
+	shapeChanging bool,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	if rm.TotalKvCapacityTokens <= 0 {
@@ -240,6 +245,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		modelID, namespace, rm.VariantName,
 		rm.BusiestRankQueue(), rm.BusiestRankTokens(),
 		rm.AvgOutputTokens, rm.AvgInputTokens,
+		// No spread while a shape change is outstanding, as on the mu's path
+		// (resolvePricing): the cycle's own reading of the window.
+		a.replicaOutputDispersion(rm, shapeChanging),
 		config.QueueLengthThreshold,
 		engineParams,
 		batchCap,
@@ -700,6 +708,10 @@ func (a *SaturationAnalyzer) computeK2(
 	modelID, namespace, variantName string,
 	queueLen int, tokensInUse int64,
 	avgOutput, avgInput float64,
+	// outputDispersion is the replica's spread of output lengths, D =
+	// E[O^2]/E[O]^2 (replicaOutputDispersion), that the derived k2 (P3)
+	// prices into the KV a resident request holds; 1 is none.
+	outputDispersion float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
 	// batchCap is the batch cap the derived k2 (P3) prices one engine rank
@@ -719,7 +731,7 @@ func (a *SaturationAnalyzer) computeK2(
 ) k2Decision {
 	var refused string
 	chain, chainSrc, borrowed := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
-		avgOutput, avgInput, queueThreshold, engineParams, batchCap, ranks, k1, kvCeiling, role, downstreamSaturated,
+		avgOutput, avgInput, outputDispersion, queueThreshold, engineParams, batchCap, ranks, k1, kvCeiling, role, downstreamSaturated,
 		adm, borrowDisabled, &refused, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, refused == k2ReasonObsUnconfirmed, logger)
@@ -817,6 +829,10 @@ func (a *SaturationAnalyzer) k2Chain(
 	modelID, namespace, variantName string,
 	queueLen int, tokensInUse int64,
 	avgOutput, avgInput float64,
+	// outputDispersion is the replica's spread of output lengths, D =
+	// E[O^2]/E[O]^2 (replicaOutputDispersion), that the derived k2 (P3)
+	// prices into the KV a resident request holds; 1 is none.
+	outputDispersion float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
 	batchCap pricedBatchCap,
@@ -1160,7 +1176,12 @@ func (a *SaturationAnalyzer) k2Chain(
 		// or learned one (batch_cap.go). With no engine params at all a
 		// learned cap still prices it, B unknown and taken as not binding;
 		// min(k1, k2) keeps that at or under the k1 it replaces.
-		if k2Derived := estimateCapacityAtCap(engineParams, batchCap.perRank, avgInput, avgOutput) * int64(max(ranks, 1)); k2Derived > 0 {
+		//
+		// The KV a resident request holds is priced with the spread of
+		// output lengths (outputDispersion, issue #276): a long request
+		// stays resident longer, so the sequences the batch cap admits hold
+		// more KV than I + O/2 each, and k2 is that much higher.
+		if k2Derived := estimateCapacityAtCapSpread(engineParams, batchCap.perRank, avgInput, avgOutput, outputDispersion) * int64(max(ranks, 1)); k2Derived > 0 {
 			if b, ok := borrow(min(k1, k2Derived)); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, b.source(), b
@@ -1168,7 +1189,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			logger.V(perReplicaLogLevel).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
-				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
+				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput, "outputDispersion", outputDispersion,
 				"engineParams", engineParams, "engineRanks", max(ranks, 1),
 				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source, "k2", k2Derived)
 			return k2Derived, capacity.K2SrcDerived, k2Borrow{}
@@ -1244,6 +1265,11 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	gpuCount int,
 	kvCacheThreshold float64,
 	modelAvgInput, modelAvgOutput float64,
+	// modelFactor is the factor the derived figure multiplies modelAvgOutput
+	// by in its KV per request, I + f x O/2 (modelOutputFactor): the
+	// fleet's request-weighted E[O^2]/(2 E[O]) over the plain mean's half.
+	// 1 is none.
+	modelFactor float64,
 	logger logr.Logger,
 ) float64 {
 	if rec == nil {
@@ -1261,7 +1287,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {
-		if derived := estimateCapacityFromParams(rec.EngineParams, modelAvgInput, modelAvgOutput); derived > 0 {
+		if derived := estimateCapacityFromParams(rec.EngineParams, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
 			bounded := derived
 			boundedBy := "derived"
 
@@ -1318,7 +1344,8 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"source", "deployment-derived", "boundedBy", boundedBy,
 				"derivedCapacity", derived, "perReplicaCapacity", bounded,
-				"modelAvgInputTokens", modelAvgInput, "modelAvgOutputTokens", modelAvgOutput)
+				"modelAvgInputTokens", modelAvgInput, "modelAvgOutputTokens", modelAvgOutput,
+				"modelOutputFactor", modelFactor)
 			return float64(bounded)
 		}
 	}
@@ -1338,31 +1365,47 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 }
 
 // estimateCapacityFromParams computes a capacity estimate using the k2 derivation
-// formula: N_steady = min(B * O / (I + O), S), capacity = N_steady * (I + O/2).
-// Used by computeK2 (Priority 3) for per-replica estimation and by
-// estimateStoredCapacity for zero-replica variants with model-level workload averages.
-// Returns 0 if estimation is not possible.
+// formula: N_steady = min(B * O / (I + O), S), capacity = N_steady * (I + D*O/2),
+// at the batch cap the engine params state. Used by estimateStoredCapacity
+// for zero-replica variants with model-level workload averages, with dispersion
+// the model's factor (modelOutputFactor); computeK2 (Priority 3) prices a live
+// replica at its pricing batch cap through estimateCapacityAtCapSpread instead.
+// A dispersion below 1, or not finite, is read as 1. Returns 0 if estimation
+// is not possible.
 //
 // The figure is ONE engine's: B and S bound a single data-parallel rank.
 // computeK2 multiplies it by the ranks the live replica reports. The
 // zero-replica path has no live replica to count and keeps the one-engine
 // figure, which can only under-price a data-parallel variant and order more
 // on its way up from zero; its first live replica then prices it in full.
-func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
+func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput, dispersion float64) int64 {
 	if params == nil || params.EffectiveMaxBatchedTokens <= 0 {
 		return 0
 	}
 	// S is the engine's batch cap: max_num_seqs, or a lower
 	// --max-num-active-seqs, the most sequences vLLM runs at once (#335).
-	return estimateCapacityAtCap(params, params.BatchCap(), avgInput, avgOutput)
+	return estimateCapacityAtCapSpread(params, params.BatchCap(), avgInput, avgOutput, dispersion)
 }
 
-// estimateCapacityAtCap is estimateCapacityFromParams at batch cap S, one
-// engine rank's. With no params at all -- a scale target never read, priced
-// from a learned cap -- the budget B is unknown and taken as not binding:
-// nSteady = S. Returns 0 when S or avgOutput is not positive, or when params
-// carry no budget, as estimateCapacityFromParams always has.
-func estimateCapacityAtCap(params *capacity.EngineParams, batchCap int64, avgInput, avgOutput float64) int64 {
+// estimateCapacityAtCapSpread is estimateCapacityFromParams at batch cap S,
+// one engine rank's, with the spread of output lengths priced into the KV a
+// resident request holds: capacity = N_steady * (I + D*O/2), D =
+// E[O^2]/E[O]^2 (issue #276). With no params at all -- a scale target never
+// read, priced from a learned cap -- the budget B is unknown and taken as
+// not binding: nSteady = S. Returns 0 when S or avgOutput is not positive,
+// or when params carry no budget, as estimateCapacityFromParams always has.
+//
+// I + O/2 is a resident request's KV averaged over its life when every
+// request generates O tokens. With lengths that vary, a request generating
+// O_i tokens is resident for O_i steps, so a snapshot of the batch finds the
+// long ones in proportion to how long they stay, and the average resident
+// request holds I + E[O^2]/(2 E[O]) = I + D*O/2. N_steady, a throughput over
+// the token budget, depends on the means alone and keeps them. A D below 1,
+// or not a finite number, is read as 1.
+func estimateCapacityAtCapSpread(params *capacity.EngineParams, batchCap int64, avgInput, avgOutput, dispersion float64) int64 {
+	if !(dispersion >= 1) || math.IsInf(dispersion, 0) {
+		dispersion = 1
+	}
 	if batchCap <= 0 || avgOutput <= 0 || (params != nil && params.EffectiveMaxBatchedTokens <= 0) {
 		return 0
 	}
@@ -1374,7 +1417,7 @@ func estimateCapacityAtCap(params *capacity.EngineParams, batchCap int64, avgInp
 	if params != nil {
 		nSteady = min(float64(params.EffectiveMaxBatchedTokens)*O/(I+O), S)
 	}
-	k2Derived := int64(nSteady * (I + O/2))
+	k2Derived := int64(nSteady * (I + dispersion*O/2))
 	if k2Derived > 0 {
 		return k2Derived
 	}

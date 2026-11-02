@@ -373,7 +373,17 @@ The re-specified 2a observes per-replica points against offered prompt load.
 Until then, read the raw per-pod series `vllm:request_prefill_time_seconds`
 and `vllm:request_queue_time_seconds`, which hold the same data (vLLM only).
 
-**The 2b design, not built.** Recorded so 2a's data can test it. **2b is
+**The 2b design below is superseded** by
+[end-to-end TTFT](slo-capacity-planner-ttft.md), which [phase 2](#phase-2-ttft)
+now uses: the utilization-binned isotonic curve, the tail mapped through the
+router's `q_p ÷ mean` ratio and "queue as zero" below a bin are replaced by a
+per-pod queue on prefill work, a prefill throughput `V_P` and a union bound for
+the percentile. What survives: the TTFT formula of parts; the blame rule (a miss
+with decode at its ceiling is decode's), which the new model keeps as its
+decode-back-pressure check; SGLang abstaining (the new model refuses `V_P` on
+SGLang); and the transient being out of scope. Kept below for the record.
+
+**The 2b design (superseded).** **2b is
 prefill-role only** until an x-axis for aggregated variants is chosen (for
 example, offered prompt load over a measured `both` ceiling).
 
@@ -514,9 +524,28 @@ then no gate is computable.
 ### Phase 2: TTFT
 
 **2a** (not built) observes what open question 5 asks for. **2b** runs the
-TTFT contributor in shadow, prefill role only, once 2a's data answers
-[open question 5](#open-questions). **2c** enforces TTFT once 2b's shadow
+TTFT contributor in shadow. [Open question 5](#open-questions) no longer gates
+2b: its x-axis and bins belonged to the superseded binned curve, and the new
+model needs none. 2b is gated instead by its recordings (the prefill-stress
+golden) and, for 2c, by the staircase run. **2c** enforces TTFT once 2b's shadow
 predictions track observed attainment.
+
+**The TTFT model 2b uses** is the one in
+[end-to-end TTFT](slo-capacity-planner-ttft.md): prefill capacity as a token
+throughput, a per-pod queue with the measured imbalance, the router's
+flow-control queue above its onset, and an optimised union bound for the
+percentile. The SLO analyzer and the what-if tool use one library for it
+(`internal/signals/prefill`, `internal/signals/whatif`), so they never disagree.
+Two PRs, under [the learner rules](analyzer-learner.md):
+
+| PR | What | Goldens | Depends on |
+| --- | --- | --- | --- |
+| S1 (2b) | Price each prefill and aggregated variant against the TTFT target in shadow: the rate per replica at which the bounded TTFT meets it. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price` | `slo-published.csv` moves with the switch on | the what-if P3; a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
+| S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; the what-if staircase run itself, not the per-bucket PR that precedes it in that plan |
+
+`ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
+arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
+queue), the router queue (flow control off) or a tail (no histograms).
 
 ### Phase 3: the attainment trim
 
@@ -529,9 +558,13 @@ llm-d's one-minute control law. **Designed later**, after phase 1 data.
 
 ### Later: a TPOT percentile
 
-llm-d scores p90 TPOT. A percentile needs a tail ratio `q_p ÷ mean` from
-`vllm:request_time_per_output_token_seconds`, measured near the `k` it is
-applied at. Deferred until a user asks for it.
+llm-d scores p90 TPOT. The ratio `q_p ÷ mean` is now specified once, in
+[what-if capacity](slo-capacity-planner.md#tpot-as-a-percentile-over-requests),
+and the analyzer would use the same rule and library: the router's per-request
+TPOT histogram by default, the engine's per-pod
+`vllm:request_time_per_output_token_seconds` as a flagged fallback near the
+`k` it is applied at. A TPOT percentile in the policy stays a validation error
+until this is built. Deferred until a user asks for it.
 
 ## Tests
 
@@ -636,7 +669,10 @@ accelerator, in its own run.
 3. **Pinned pricing.** Whether `pinned` may price in sizer mode, decided from
    how often `pinned` and `own` disagree.
 4. **`vllm:nixl_xfer_time_seconds`**: per request or per chunk?
-5. **What 2a must observe before 2b prices anything.** The x-axis: offered
+5. **What 2a would observe (no longer a gate for 2b).** 2b now uses the
+   per-pod model of [end-to-end TTFT](slo-capacity-planner-ttft.md), which needs
+   no utilization bins; 2a remains useful only as an observation of the TTFT
+   curve, and is not required before 2b. Kept for the record. The x-axis: offered
    prompt load `ArrivalRate × ILeff` against the ceiling (served utilization
    pins at 1 under overload), and one for aggregated (`both`) variants.
    Per-replica points, not variant means (convexity biases pooled means up).

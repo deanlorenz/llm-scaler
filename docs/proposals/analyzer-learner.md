@@ -779,13 +779,14 @@ not cover a key.
 | "For good" self-sealing low mu | closed-loop probe (PR 3) |
 | k2 adopts its first reading (#392) | first sample |
 | Speculative decoding prices the ITL step as a token (#274) | known truth |
+| KV per request assumes one output length (#276) | known truth |
 
 **Where each row stands after 0b.** The code table is `findings` in
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 29 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 20 a mutant runs the production learner
+- **Caught:** 30 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 21 a mutant runs the production learner
   (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
@@ -805,7 +806,11 @@ finding above is in exactly one state:
   decoding prices the ITL step as a token" is caught since #274: ten vLLM
   replicas each accepting 0.5-2 draft tokens a step read ITL per step, and
   with the correction's replay switch off
-  known-truth/itl/speculative-accepted-tokens fails (20 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
+  known-truth/itl/speculative-accepted-tokens fails (20 of 20 seeds).  "KV per request
+  assumes one output length" is caught since #276: a bimodal workload with
+  lengths on vLLM's bucket bounds, read through the histogram's bound on
+  E[O^2], and with the spread's replay switch off known-truth/k2/output-spread
+  and known-truth/mu/output-spread each fail (19 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
   check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,
@@ -846,6 +851,123 @@ of the older runs does.
 
 LWS and SGLang have no recording. Their synthetic suites stand in until one
 exists, and the PR says so.
+
+### 2.9 Recorder fields for TTFT, and capture
+
+[What-if capacity](slo-capacity-planner.md) and TTFT pricing in the SLO analyzer
+([SLO tiers](slo-tiers.md#phase-2-ttft), phase 2) both learn TTFT from
+recordings, and today's recordings carry too little of it. Both PRs here land
+before any recording either of them depends on is made.
+
+**What is recorded today.** Every `Analyze` event's `learnrec.Input` carries,
+per pod, `AvgTTFT`, `AvgServiceTime`, `PrefillComputedTokenRate`,
+`QueueLength`, the length means and the KV fields, and per model
+`SchedulerQueue` (flow-control queue size and bytes) and `ArrivalRate`.
+`slo.Analyze`'s `AnalyzeEvent.RouterLatency` carries the router's TTFT
+histogram as per-second bucket rates (streaming only, 5-minute window) and the
+TPOT sum and count rates. It is present only when the SLO analyzer is listed,
+the policy has an SLO (`slo.Empty()` is false) and it judged (`RouterCalled`).
+
+**R1: collect and record**, each field behind a presence bit, so a recording
+made before R1 replays unchanged:
+
+| Level | Field | vLLM source (SGLang) |
+| --- | --- | --- |
+| Per pod | Presence bits for `AvgTTFT`, `AvgServiceTime`, `QueueLength`, which have none today | — |
+| Per pod | Prompt- and output-length histograms | `request_prompt_tokens_bucket`, `request_generation_tokens_bucket` (`prompt_tokens_histogram`, `generation_tokens_histogram`) |
+| Per pod | Engine TTFT histogram | `time_to_first_token_seconds_bucket` (same name) |
+| Per pod | Queue-time mean and histogram | `request_queue_time_seconds` (`queue_time_seconds`) |
+| Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
+| Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
+| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
+| Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
+| Per pod | Engine per-request TPOT histogram | `vllm:request_time_per_output_token_seconds_bucket`, the fallback source for the TPOT ratio (vLLM only) |
+| Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+
+`learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on
+both. Replay keeps serving `AnalyzeEvent.RouterLatency` to the SLO analyzer, for
+fidelity; the new field is read only by the planner and by the SLO analyzer's
+TTFT pricing. Histograms are bucket rates over the collector's window, as
+`RouterLatency.TTFTBuckets` already is. They hold numbers only, so the export
+needs no new pseudonymisation rule, and its leak and coverage tests
+(`learnreplay/coverage_test.go`, `export_leak*_test.go`) are extended. The
+goldens are regenerated with `learnergolden update`: values unchanged, new
+fields absent. No switch: nothing reads the fields in R1. R1 also updates the
+comment on `constants.VLLMRequestPrefillTimeSeconds`, which then becomes
+collected.
+
+**R2: `whatif capture` and a `Generate` replay mode.**
+
+```
+whatif capture --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...) \
+    --from T0 --to T1 [--step 15s] [--policy FILE] -o run.jsonl.gz
+```
+
+A file of inputs alone cannot be replayed: `Replay` needs a `start` line, and
+both of its modes apply the engine's own events, per analyzer, with the store
+records each one read. So capture writes **cycle inputs** (one per model per
+step, a `learnrec.Input` built by `internal/whatifsource` from the collector's
+query templates; R2 creates that package, and the planner's standalone mode
+extends it). A new third mode, **`Generate`**, writes the `start` line
+(`learnrec.Start`: the saturation horizons including `BorrowTickGap`, the SLO
+configuration and `Judging`, `Throughput`, from the policy file or the
+defaults), then plays each cycle in the order a cycle calls them
+(`engine.go`, `engine_v2.go`):
+
+1. `slo.BeginCycle`, called by the cycle before `optimizeV2`
+   (`engine.go:881`); the SLO analyzer counts its judging windows by it;
+2. `NoteVariantsPresent` on saturation and slo, including parked variants when
+   the capture can see them (`engine_v2.go:482-514`, `:519` onwards);
+3. the three sweeps, saturation's `EvictStaleHistory`, the store's
+   `EvictStale` and slo's `EvictStale` (`engine.go:1478-1479`,
+   `engine_v2.go:561-616`), before anything stamps state this cycle;
+
+then, **per model**:
+
+4. `observeSettle` (`engine_v2.go:187`; "the settle tracker first"), or
+   `holdSettle` for a model with no rows or no policy;
+5. per variant, in key order, `StableAcceleratorFor` and then
+   `FileScaleTarget` through `LoadFromScaleTarget` (`engine_v2.go:74-101`,
+   reached from `buildAnalyzerInput` at `:199`). `forgetOnRequest` is left out:
+   a capture has no annotation history, so it writes no `ForgetVariant` events;
+6. `Analyze`: saturation first (`:203`), then the listed analyzers. With slo
+   listed, its router source serves the captured router latency.
+
+The variant states come from the role map, and the policy from `--policy` or the
+defaults. The output is an ordinary recording that carries the commit of the
+build that generated it, so `learnergolden add` (which replays at the recorded
+commit) accepts it.
+
+**Roles and readiness for a past window** cannot come from a kubeconfig, which
+sees today's pods: a scaled-out run's pods are gone. They come from
+kube-state-metrics in the same Prometheus, with three limits:
+
+- `kube_pod_labels` exports no `label_*` by default since kube-state-metrics
+  v2; the role and variant labels need
+  `--metric-labels-allowlist=pods=[...]`. Without them, `--role-of` selectors on
+  pod names give the role map, flagged as inferred; capture does not refuse.
+- `kube_pod_status_ready` and `kube_pod_status_ready_time` give readiness and
+  `ReadySince`; `kube_deployment_spec_replicas` gives replica counts for
+  Deployments only. A LeaderWorkerSet needs a custom-resource-state
+  configuration, or `--role-of`.
+- **Engine parameters are not in kube-state-metrics.** `FileScaleTarget` parses
+  the container's arguments (batch cap, `max-num-batched-tokens`, ranks), which
+  it does not export; the `llm-d.ai/max-num-seqs` annotation appears only
+  through `kube_deployment_annotations` with an allowlist. Only the GPU count
+  (`kube_pod_container_resource_requests`) and the accelerator (`kube_pod_info`
+  joined to `kube_node_labels`) are derivable. The rest come from flags
+  (`--batch-cap`, ...) or the current Deployment, flagged when it may differ
+  from the window's. The output is pseudonymised by the
+same export as `learnergolden export`. A capture needs Prometheus to have kept
+the series for the window; `_bucket` series are often kept for days, not weeks,
+so a window worth keeping is preserved first as a Prometheus snapshot (the TSDB
+snapshot API, or a `promtool tsdb` dump) and captured from it later.
+
+**What `ols-sweep-slo` gives this work**: flow control off, the SLO analyzer
+listed, streamed load; router TTFT, and per pod `AvgTTFT`, `AvgServiceTime`,
+`QueueLength` and `PrefillComputedTokenRate`. It lacks the histograms, queue and
+prefill time, transfer time, any flow-control series and fixed replicas. A
+capture of its window adds the histograms if Prometheus still holds them.
 
 ## 3. A shared vocabulary, not a shared loop
 

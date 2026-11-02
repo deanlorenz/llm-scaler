@@ -134,9 +134,10 @@ last; it is the unit change that makes the other two land.
   which rows are measured and which are predicted. Derives decode's mu from the
   ITL line so a shift reprices on the cycle it is observed.
 - **[Prefill capacity from a fitted TTFT model](prefill-ttft-model.md)** —
-  prefill has no throughput ceiling today. Fits `TTFT(T) = A*T + B` so `1/A` is
-  the replica's prefill token ceiling, obtainable without driving it into
-  saturation.
+  superseded for the model by [what-if capacity](slo-capacity-planner.md). Its
+  `TTFT(T) = A*T + B` fit was built and removed (queue wait landed in the
+  intercept). Still worth reading for the measurements, and for the floor's
+  derived prefill mu, which survives as a consumer of `V_P`.
 - **[A per-token economy](per-token-economy.md)** — the reference for every
   component and formula in the saturation analyzer, and the argument for making
   tokens the native unit of demand and capacity on both roles. Both documents
@@ -204,6 +205,17 @@ last; it is the unit change that makes the other two land.
   Combined later by the composite analyzer: guard mode (max with saturation)
   or sizer mode (saturation explicitly disabled, the per-variant fallback).
   Review findings are folded in.
+- **[What-if capacity](slo-capacity-planner.md)** — proposed. Answers two
+  questions from a recording, a live Prometheus or the controller: what rate
+  a TTFT/TPOT SLO allows, and what SLO a given number of prefill and decode
+  replicas holds before it saturates, per token bucket or for the current mix.
+  Reuses the ITL line and the TPOT pricing as they are.
+- **[What-if capacity: end-to-end TTFT](slo-capacity-planner-ttft.md)** —
+  proposed. The TTFT model nothing has today: prefill capacity as a token
+  throughput, a per-pod queue with the measured imbalance, the router's
+  flow-control queue above the rate where its gate closes, and an optimised
+  union bound for the percentile. Shared with the SLO analyzer's TTFT pricing;
+  validated by a fixed-replica staircase.
 
 ## Product and lifecycle
 

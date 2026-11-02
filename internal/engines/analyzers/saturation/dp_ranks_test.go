@@ -56,7 +56,7 @@ func TestCapacityTokensForScalesOnlyTheFlag(t *testing.T) {
 func TestDerivedK2ScalesWithRanks(t *testing.T) {
 	params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256}
 	// N_steady = min(8192 * 1000 / 2000, 256) = 256; k2 = 256 * (1000 + 500).
-	perEngine := estimateCapacityFromParams(params, 1000, 1000)
+	perEngine := estimateCapacityFromParams(params, 1000, 1000, 1)
 	require.Equal(t, int64(384000), perEngine, "precondition: one engine's derived figure")
 
 	k2 := func(ranks int) (int64, capacity.K2Source) {
@@ -64,7 +64,7 @@ func TestDerivedK2ScalesWithRanks(t *testing.T) {
 		const k1 = 100_000_000 // far above either figure, so it cannot be the answer
 		d := a.computeK2("dp-key", "m", "ns", "decode-v",
 			0, 0, // not saturated, no history: the chain reaches P3
-			1000, 1000, 10,
+			1000, 1000, 1, 10,
 			params, flagsBatchCap(params), ranks,
 			k1, k1,
 			domain.RoleDecode, false, admission{}, false, logr.Discard())
@@ -95,7 +95,7 @@ func TestReplicaCapacityPricesEveryRank(t *testing.T) {
 		rm.EngineRanks = ranks
 		cfg := &config.ScalingPolicy{KvCacheThreshold: 0.8, ScaleUpThreshold: 0.85, QueueLengthThreshold: 10}
 		return a.computeReplicaCapacity(rm, cfg, tuningOf(cfg), "m", "ns", 8, domain.RoleDecode, "H200",
-			outputKeys{k2: 1000, mu: 1000}, 1000, 1000, 0, derivedMu{}, servedRates{}, false, false, replicaRouting{}, logr.Discard())
+			outputKeys{k2: 1000, mu: 1000}, 1000, 1000, 0, derivedMu{}, servedRates{}, false, false, replicaRouting{}, false, logr.Discard())
 	}
 
 	eight := price(8)

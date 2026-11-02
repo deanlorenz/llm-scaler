@@ -32,6 +32,10 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 	// as the resolved value the way kvCacheThreshold is rather than as the
 	// policy, so this function keeps taking only what it reads.
 	reuseDisabled bool,
+	// modelFactor is the factor a zero-replica variant's derived estimate
+	// multiplies the model's mean output length by in its KV per request
+	// (modelOutputFactor, issue #276); 1 prices it as before.
+	modelFactor float64,
 	logger logr.Logger,
 ) []domain.VariantCapacity {
 	// Group replicas by variant
@@ -196,7 +200,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			// No ready replicas — use stored capacity, enhanced with k2 derivation
 			// for deployment-derived records when workload data is available.
 			perReplicaCapacity = a.estimateStoredCapacity(rec, modelID, namespace, vs.VariantName, accelerator, vs.GPUsPerReplica,
-				kvCacheThreshold, modelAvgInput, modelAvgOutput, logger)
+				kvCacheThreshold, modelAvgInput, modelAvgOutput, modelFactor, logger)
 			capacityLabel = satReasonP0Store
 		} else if rec := a.lookupCompatibleCapacity(namespace, modelID, vs.VariantName, accelerator, vs.GPUsPerReplica, reuseDisabled); rec != nil {
 			// No own record — try cross-variant estimation from a compatible variant
