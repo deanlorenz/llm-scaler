@@ -10,13 +10,13 @@ import (
 // 2.5), as the saturation analyzer keeps its own: how often this analyzer's
 // own ITL line came from each fit. Its tracker is its own instance, so the
 // saturation analyzer's counts say nothing of it.
-
-// PathITLOLS counts the cycles a variant's SLO line came from a full fit.
-const PathITLOLS = "slo-itl-ols"
-
-// PathITLPinned counts the cycles a variant's SLO line came from the pinned
-// fit, a held slope included.
-const PathITLPinned = "slo-itl-pinned"
+const (
+	// PathITLOLS counts the cycles a variant's SLO line came from a full fit.
+	PathITLOLS = "slo-itl-ols"
+	// PathITLPinned counts the cycles a variant's SLO line came from the
+	// pinned fit, a held slope included.
+	PathITLPinned = "slo-itl-pinned"
+)
 
 // pathCounters is the analyzer's per-path counts. Atomic, so a path counts
 // without taking a.mu.
