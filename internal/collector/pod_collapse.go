@@ -148,6 +148,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.GenerationTokenRateKnown = true
 	pod.RequestRateKnown = true
 	pod.RunningRequestsKnown = true
+	pod.SpecAcceptedPerStepKnown = true
 	// ITL has three states (domain.ITLState). The pod's mean is known when
 	// at least one rank measured one and no rank is absent: an idle rank adds
 	// no tokens to the per-token mean, a missing one would hide its own. It
@@ -161,6 +162,8 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// the finite ranks only is #341 4a's named change, and until then the
 	// state says the mean is not a measurement.
 	itlAnyKnown, itlAllEmpty, itlNoneAbsent, itlEmptyGenerated := false, true, true, false
+	// specCounted: at least one busy rank read an accepted count.
+	specCounted := false
 	for _, m := range group {
 		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
 		pod.KvUsageMeanKnown = pod.KvUsageMeanKnown && m.KvUsageMeanKnown
@@ -171,6 +174,13 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 		pod.GenerationTokenRateKnown = pod.GenerationTokenRateKnown && m.GenerationTokenRateKnown
 		pod.RequestRateKnown = pod.RequestRateKnown && m.RequestRateKnown
 		pod.RunningRequestsKnown = pod.RunningRequestsKnown && m.RunningRequestsKnown
+		// An idle rank (no decode step in the window: its ITL is empty and
+		// its count 0/0) adds nothing, as it adds nothing to the ITL mean;
+		// it must not make the busy ranks' count unknown.
+		if m.SpecAcceptedPerStepKnown || m.ITLState() != domain.ITLEmpty {
+			pod.SpecAcceptedPerStepKnown = pod.SpecAcceptedPerStepKnown && m.SpecAcceptedPerStepKnown
+			specCounted = specCounted || m.SpecAcceptedPerStepKnown
+		}
 		state := m.ITLState()
 		itlAnyKnown = itlAnyKnown || state == domain.ITLFinite
 		itlAllEmpty = itlAllEmpty && state == domain.ITLEmpty
@@ -234,6 +244,23 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// rate when no instance reports a generation rate.
 	pod.AvgITL = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
 		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
+	// Per step, so weighted by each rank's steps: the tokens it generated
+	// over the tokens a step emits, G / (1 + E). Weighting by the tokens
+	// alone gave a high-acceptance rank more than its share and over-stated
+	// E, the direction that under-orders. Known only when every busy rank was
+	// read, so a rank that speculates and was not read keeps the pod unknown.
+	// The pod's AvgITL above is token-weighted, so dividing it by 1 + this E
+	// is exact only when its ranks run alike (equal ITL and E), the normal
+	// homogeneous data-parallel layout; ranks behind one API server are
+	// summed exactly in PromQL and never reach this merge.
+	pod.SpecAcceptedPerStep = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.SpecAcceptedPerStep },
+		func(m domain.ReplicaMetrics) float64 {
+			return m.GenerationTokenRate / (1 + max(m.SpecAcceptedPerStep, 0))
+		})
+	pod.SpecAcceptedPerStepKnown = pod.SpecAcceptedPerStepKnown && specCounted
+	if !pod.SpecAcceptedPerStepKnown {
+		pod.SpecAcceptedPerStep = 0
+	}
 	// Weighted like AvgITL: both are per-request costs, so the engine instance
 	// that served more requests should count for more when merging a pod's
 	// instances into one replica.

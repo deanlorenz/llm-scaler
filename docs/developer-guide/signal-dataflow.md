@@ -221,7 +221,8 @@ TokenRate              = Sequences / ITL(k)
 
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
-| `itl` = `AvgITL` | seconds/token | collector, `inter_token_latency_seconds_sum/count` | the gap between two generated tokens |
+| `itl` = `AvgITL` | seconds/token | collector, `inter_token_latency_seconds_sum/count` | the gap between two generated tokens; on vLLM with speculative decoding, the gap between two engine steps, divided by `1 + SpecAcceptedPerStep` before the saturation analyzer's window reads it (issue #274) |
+| `SpecAcceptedPerStep` | tokens/step | collector, `rate(spec_decode_num_accepted_tokens_total[1m]) / rate(inter_token_latency_seconds_count[1m])`, vLLM only | the draft tokens a speculative step accepted beside its own token |
 | `k` = `KvUsageForITL()` | fraction 0-1 | collector, `kv_cache_usage_perc` **averaged over the ITL's minute** (`KvUsageMean`, `avg_over_time[1m]`); the instantaneous `KvUsageInstant` when that was not read | the occupancy over the minute the ITL was measured in |
 | `RunningRequests`, `PreemptionRate` | count, 1/s | collector, `num_requests_running` and `rate(num_preemptions_total[1m])` | whether a reading above `k` 0.80 is a replica at its sequence cap, which the window keeps (issue #287) |
 | `n` | count | the window | how many `(k, itl)` observations the fit is over; at least `DefaultMinSamples` |

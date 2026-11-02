@@ -84,6 +84,7 @@ var findings = []finding{
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
 	{row: "Restart fix stubbed", status: statusCaught},
 	{row: "k2 adopts its first reading (#392)", status: statusCaught},
+	{row: "Speculative decoding prices the ITL step as a token (#274)", status: statusCaught},
 	{row: "KV per request assumes one output length (#276)", status: statusCaught},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
@@ -228,6 +229,9 @@ func propertyMutants() []propMutant {
 		{row: "k2 adopts its first reading (#392)", caseID: "first-sample/k2/second-reading", level: levelStub,
 			how:   "SwitchK2FirstReadingWaits off: a window's first reading is written, and prices, at once",
 			check: checkK2FirstSampleOn(func(a *SaturationAnalyzer) { a.k2FirstReadingWaits = false })},
+		{row: "Speculative decoding prices the ITL step as a token (#274)", caseID: "known-truth/itl/speculative-accepted-tokens", level: levelStub,
+			how:   "SwitchITLPerToken off: the line is fitted from vLLM's step time, as before",
+			check: checkITLSpeculativeOn(func(a *SaturationAnalyzer) { a.itlPerToken = false })},
 		{row: "KV per request assumes one output length (#276)", caseID: "known-truth/k2/output-spread", level: levelStub,
 			how:   "SwitchKVPerRequestOutputDispersion off: the derived k2 prices a resident request at IL + O/2, as before",
 			check: checkK2OutputSpreadOn(func(a *SaturationAnalyzer) { a.kvOutputDispersion = false })},

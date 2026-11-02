@@ -36,8 +36,10 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   Planned: cluster evidence for it, and for a decode at its sequence cap,
   before either is relied on.
   [#320](https://github.com/ev-shindin/llm-scaling-manager/issues/320)
-- **Price a replica more exactly.** Speculative decoding
-  ([#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)), mixed
+- **Price a replica more exactly.** Speculative decoding in the throughput
+  and slo analyzers (the saturation analyzer reads vLLM's ITL per accepted
+  token since
+  [#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)), mixed
   prefill and decode pods ([#275](https://github.com/ev-shindin/llm-scaling-manager/issues/275)),
   output length in the throughput and slo analyzers (the saturation analyzer
   prices the spread of output lengths since

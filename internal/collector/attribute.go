@@ -450,6 +450,8 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		RunningRequests:          data.runningRequests,
 		PreemptionRate:           data.preemptionRate,
 		PreemptionRateKnown:      data.preemptionRateOK,
+		SpecAcceptedPerStep:      data.specAcceptedPerStep,
+		SpecAcceptedPerStepKnown: data.specAcceptedPerStepKnown,
 		RequestRate:              data.requestRate,
 		// Presence bits: present and finite. KV is known only beside a KV
 		// series that was read at all.

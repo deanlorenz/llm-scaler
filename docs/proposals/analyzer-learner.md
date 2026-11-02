@@ -763,14 +763,15 @@ not cover a key.
 | Restart fix stubbed | per-path counter "joined refusals with a known ReadySince", required from 0b (the Ready time is on since #288) |
 | "For good" self-sealing low mu | closed-loop probe (PR 3) |
 | k2 adopts its first reading (#392) | first sample |
+| Speculative decoding prices the ITL step as a token (#274) | known truth |
 | KV per request assumes one output length (#276) | known truth |
 
 **Where each row stands after 0b.** The code table is `findings` in
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 29 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 20 a mutant runs the production learner
+- **Caught:** 30 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 21 a mutant runs the production learner
   (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
@@ -786,7 +787,11 @@ finding above is in exactly one state:
   a stub mutant turns each band's replay switch off, and its edge case
   fails (13 of 50 seeds, and 98 of 100). "k2 adopts its first reading" is caught since
   #392: a stub mutant turns the hold's replay switch off, and
-  first-sample/k2/second-reading fails (20 of 20 seeds). "KV per request
+  first-sample/k2/second-reading fails (20 of 20 seeds). "Speculative
+  decoding prices the ITL step as a token" is caught since #274: ten vLLM
+  replicas each accepting 0.5-2 draft tokens a step read ITL per step, and
+  with the correction's replay switch off
+  known-truth/itl/speculative-accepted-tokens fails (20 of 20 seeds).  "KV per request
   assumes one output length" is caught since #276: a bimodal workload with
   lengths on vLLM's bucket bounds, read through the histogram's bound on
   E[O^2], and with the spread's replay switch off known-truth/k2/output-spread
@@ -809,7 +814,7 @@ finding above is in exactly one state:
 | "For good" self-sealing low mu | the closed-loop probe (PR 3) |
 | Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |
 | Alert debounce and sustain (#283 M2/M3) | not a learner |
-| Speculative decoding; shape dependence of the ITL line (#274) | no generator models them |
+| Shape dependence of the ITL line (#275) | no generator models it |
 | A self-sealing error in a PR that does not touch a hold | the probe runs only when a PR names a closed-loop change |
 
 ### 2.8 Recordings each PR needs
@@ -1324,7 +1329,9 @@ that fails it. The owning PR adds the test, or keeps it green if it exists.
 - **The recorder can evict the controller** if pointed at `/tmp`. It is off by
   default and has its own volume and cap.
 - **Open defects this does not fix:** instantaneous k paired with a rate[1m]
-  ITL; speculative decoding; shape dependence of the ITL line (#274).
+  ITL; shape dependence of the ITL line (#275). Speculative decoding is read
+  per accepted token in the saturation analyzer since #274; the throughput
+  and slo analyzers still read the step time.
 
 ## Deferred to the implementing PRs
 

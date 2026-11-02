@@ -73,6 +73,10 @@ type podMetricData struct {
 	runningRequests  int
 	preemptionRate   float64
 	preemptionRateOK bool
+	// Speculative decoding (spec_decode.go in registration): the draft
+	// tokens accepted per decode step, and whether that was read.
+	specAcceptedPerStep      float64
+	specAcceptedPerStepKnown bool
 	// The output-length histogram (output_length.go), by bucket bound: the
 	// requests a second at or under each bound.
 	outputTokensBuckets map[float64]float64
