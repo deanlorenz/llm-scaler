@@ -22,9 +22,9 @@ import (
 const engineFixture = "engine"
 
 // engineFixtures is every committed golden whose recording carries engine
-// events: the in-process engine run, and a cluster recording made after the
-// engine layer landed. The others were recorded before it.
-var engineFixtures = []string{engineFixture, "pd-restart"}
+// events: the in-process engine run, and the cluster recordings made after
+// the engine layer landed. The others were recorded before it.
+var engineFixtures = []string{engineFixture, "pd-restart", olsFixture}
 
 // Each golden that carries engine events lists every engine output, and no
 // other lists one. Each compares rows in each, but for an output its replay
@@ -187,7 +187,15 @@ func TestGoldens_PDRestartReplayRestartsForReal(t *testing.T) {
 
 	// The engine was killed at 12:48:54Z and Ready again at 12:49:46Z; cut at
 	// the first cycle that begins after 12:48:00Z.
-	cut := time.Date(2026, 11, 1, 12, 48, 0, 0, time.UTC)
+	head := replayHeadBefore(t, rec, time.Date(2026, 11, 1, 12, 48, 0, 0, time.UTC))
+	assert.Zero(t, head.Paths[restarted], "before the kill, no restart")
+	assert.Positive(t, head.Paths[settlePathPrefix+string(settle.Joined)], "precondition: the head replays, joins included")
+}
+
+// replayHeadBefore replays rec up to, and not including, the first cycle
+// that begins at or after cut: the head a negative control replays.
+func replayHeadBefore(t *testing.T, rec []byte, cut time.Time) *Report {
+	t.Helper()
 	lines := strings.SplitAfter(string(rec), "\n")
 	n := 0
 	for i, l := range lines {
@@ -208,6 +216,5 @@ func TestGoldens_PDRestartReplayRestartsForReal(t *testing.T) {
 	head, err := Replay(context.Background(), []byte(strings.Join(lines[:n], "")), Options{Mode: Normal})
 	require.NoError(t, err)
 	require.Empty(t, head.Failed())
-	assert.Zero(t, head.Paths[restarted], "before the kill, no restart")
-	assert.Positive(t, head.Paths[settlePathPrefix+string(settle.Joined)], "precondition: the head replays, joins included")
+	return head
 }
