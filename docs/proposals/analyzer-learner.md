@@ -832,6 +832,90 @@ of the older runs does.
 LWS and SGLang have no recording. Their synthetic suites stand in until one
 exists, and the PR says so.
 
+### 2.9 Recorder fields for TTFT, and capture
+
+[What-if capacity](slo-capacity-planner.md) and TTFT pricing in the SLO analyzer
+([SLO tiers](slo-tiers.md#phase-2-ttft), phase 2) both learn TTFT from
+recordings, and today's recordings carry too little of it. Both PRs here land
+before any recording either of them depends on is made.
+
+**What is recorded today.** Every `Analyze` event's `learnrec.Input` carries,
+per pod, `AvgTTFT`, `AvgServiceTime`, `PrefillComputedTokenRate`,
+`QueueLength`, the length means and the KV fields, and per model
+`SchedulerQueue` (flow-control queue size and bytes) and `ArrivalRate`.
+`slo.Analyze`'s `AnalyzeEvent.RouterLatency` carries the router's TTFT
+histogram as per-second bucket rates (streaming only, 5-minute window) and the
+TPOT sum and count rates. It is present only when the SLO analyzer is listed,
+the policy has an SLO (`slo.Empty()` is false) and it judged (`RouterCalled`).
+
+**R1: collect and record**, each field behind a presence bit, so a recording
+made before R1 replays unchanged:
+
+| Level | Field | vLLM source (SGLang) |
+| --- | --- | --- |
+| Per pod | Presence bits for `AvgTTFT`, `AvgServiceTime`, `QueueLength`, which have none today | — |
+| Per pod | Prompt- and output-length histograms | `request_prompt_tokens_bucket`, `request_generation_tokens_bucket` (`prompt_tokens_histogram`, `generation_tokens_histogram`) |
+| Per pod | Engine TTFT histogram | `time_to_first_token_seconds_bucket` (same name) |
+| Per pod | Queue-time mean and histogram | `request_queue_time_seconds` (`queue_time_seconds`) |
+| Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
+| Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
+| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
+| Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+
+`learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on
+both. Replay keeps serving `AnalyzeEvent.RouterLatency` to the SLO analyzer, for
+fidelity; the new field is read only by the planner and by the SLO analyzer's
+TTFT pricing. Histograms are bucket rates over the collector's window, as
+`RouterLatency.TTFTBuckets` already is. They hold numbers only, so the export
+needs no new pseudonymisation rule, and its leak and coverage tests
+(`learnreplay/coverage_test.go`, `export_leak*_test.go`) are extended. The
+goldens are regenerated with `learnergolden update`: values unchanged, new
+fields absent. No switch: nothing reads the fields in R1. R1 also updates the
+comment on `constants.VLLMRequestPrefillTimeSeconds`, which then becomes
+collected.
+
+**R2: `whatif capture` and a `Generate` replay mode.**
+
+```
+whatif capture --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...) \
+    --from T0 --to T1 [--step 15s] [--policy FILE] -o run.jsonl.gz
+```
+
+A file of inputs alone cannot be replayed: `Replay` needs a `start` line, and
+both of its modes apply the engine's own events, per analyzer, with the store
+records each one read. So capture writes **cycle inputs** (one per model per
+step, a `learnrec.Input` built by `internal/whatifsource` from the collector's
+query templates), and a new third mode, **`Generate`**, plays the engine's
+per-cycle call order over them:
+
+1. the `start` line: horizons, SLO configuration and `Judging`, from the policy
+   file or the defaults;
+2. the store filings (`FileScaleTarget`), from the Deployment history in
+   kube-state-metrics or from flags;
+3. `NoteVariantsPresent`, then each listed analyzer's `Analyze` in the engine's
+   order;
+4. `EvictStale` and the settle events.
+
+The variant states come from the role map, and the policy from `--policy` or the
+defaults. The output is an ordinary recording that carries the commit of the
+build that generated it, so `learnergolden add` (which replays at the recorded
+commit) accepts it.
+
+**Roles and readiness for a past window** cannot come from a kubeconfig, which
+sees today's pods: a scaled-out run's pods are gone. They come from
+kube-state-metrics in the same Prometheus (`kube_pod_labels` for the role and
+variant labels, `kube_pod_status_ready` and `kube_pod_status_ready_time` for
+readiness and `ReadySince`, `kube_deployment_spec_replicas` for replica counts),
+or from `--role-of` selectors on pod names. The output is pseudonymised by the
+same export as `learnergolden export`. A capture needs Prometheus to have kept
+the series for the window; `_bucket` series are often kept for days, not weeks.
+
+**What `ols-sweep-slo` gives this work**: flow control off, the SLO analyzer
+listed, streamed load; router TTFT, and per pod `AvgTTFT`, `AvgServiceTime`,
+`QueueLength` and `PrefillComputedTokenRate`. It lacks the histograms, queue and
+prefill time, transfer time, any flow-control series and fixed replicas. A
+capture of its window adds the histograms if Prometheus still holds them.
+
 ## 3. A shared vocabulary, not a shared loop
 
 ### 3.1 The terms

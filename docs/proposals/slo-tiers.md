@@ -518,6 +518,23 @@ TTFT contributor in shadow, prefill role only, once 2a's data answers
 [open question 5](#open-questions). **2c** enforces TTFT once 2b's shadow
 predictions track observed attainment.
 
+**The TTFT model 2b uses** is the one in
+[end-to-end TTFT](slo-capacity-planner-ttft.md): prefill capacity as a token
+throughput, a per-pod queue with the measured imbalance, the router's
+flow-control queue above its onset, and an optimised union bound for the
+percentile. The SLO analyzer and the what-if tool use one library for it
+(`internal/signals/prefill`, `internal/signals/whatif`), so they never disagree.
+Two PRs, under [the learner rules](analyzer-learner.md):
+
+| PR | What | Goldens | Depends on |
+| --- | --- | --- | --- |
+| S1 (2b) | Price each prefill and aggregated variant against the TTFT target in shadow: the rate per replica at which the bounded TTFT meets it. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price` | `slo-published.csv` moves with the switch on | the what-if P3; a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
+| S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; the what-if staircase run itself, not the per-bucket PR that precedes it in that plan |
+
+`ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
+arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
+queue), the router queue (flow control off) or a tail (no histograms).
+
 ### Phase 3: the attainment trim
 
 `P` is open-loop: a model of latency, trusted. Phase 3 adds a slow per-variant
