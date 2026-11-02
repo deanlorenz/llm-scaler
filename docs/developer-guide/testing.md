@@ -406,6 +406,47 @@ It cannot be written again in-process. To take it again at a new commit:
 5. Copy the recording out, then add it with `make learner-golden-add` at
    that commit.
 
+The `ols-sweep` golden is the cluster recording whose ITL line comes from
+full fits (`itl-ols`), not only from fits with B pinned. A full fit needs
+steady readings at least 0.30 of k apart, and a steady load never gives
+that: it holds k in a narrow band. The stock P/D decode pod cannot get
+there at all. It holds 1.16M tokens of KV, and 16 sequences of at most
+16384 tokens fill no more than about 0.23 of it.
+
+So the run shrinks the decode KV and steps the load. It is the P/D
+benchmark scenario with EPP flow control off, and decode pinned at one
+replica. The load is closed loop and changes every 4.5 minutes, over
+three shapes: 1000 tokens in and 4000 out, 1000 and 500, and 6000 and
+1000. The decode pod's k sat near 0.2 on the low levels, and at 0.45 to
+0.6 on the high ones. At the commit it was added, its replay took 101 full
+fits and 94 pinned ones, the same counts as the controller's own log of
+that run. `TestGoldens_OLSSweepReplayFitsOLS` requires at least 80 full
+fits, and some pinned ones.
+
+To take it again at a new commit:
+
+1. Stand up the P/D scenario as for `pd-restart`, step 1. Then give the
+   decode engine `--num-gpu-blocks-override 1024` (131072 tokens),
+   `--max-num-seqs 64` and `--max-model-len 16384`. Give the decode
+   ScaledObject 1-1 replicas and the prefill one 1-2.
+2. Remove EPP flow control and turn the recorder on, as for `pd-restart`,
+   steps 2 and 3.
+3. Run the load. Keep a fixed number of requests in flight, each with a
+   random prompt of the input length, `max_tokens` of the output length
+   and `ignore_eos` (never `min_tokens`: the P/D sidecar refuses it).
+   Start with 10 in flight at 1000 in and 4000 out for 5 minutes. Then run
+   these eleven levels, 270 seconds each, as in flight / tokens in /
+   tokens out:
+   24/1000/4000, 10/1000/4000, 24/1000/500, 56/1000/500, 5/6000/1000,
+   11/6000/1000, 4/6000/1000, 24/1000/4000, 20/1000/500, 10/6000/1000,
+   8/1000/4000. Change levels with no gap between them: requests above
+   the new count finish, and new ones start at once.
+   On the first level, read the decode pod's `vllm:kv_cache_usage_perc`.
+   If it is far from 0.25, scale the counts so that every level stays
+   inside 0.15 to 0.80.
+4. Copy the recording out, as in [Copy the recordings out](#copy-the-recordings-out).
+   Then add it with `make learner-golden-add` at that commit.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,
@@ -740,6 +781,10 @@ Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.
 `make learner-goldens-check` runs the check alone and prints, per output, how
 many rows changed and the first change with its sign and size.
+`make learner-goldens` does not rewrite the counts that tests write by hand:
+`TestGoldens_PDRestartReplayRestartsForReal` and
+`TestGoldens_OLSSweepReplayFitsOLS`. If your change moves them, update them in
+the test and say why in the PR.
 
 #### Write the acceptance run again
 
