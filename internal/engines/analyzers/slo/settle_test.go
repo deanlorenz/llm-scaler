@@ -201,3 +201,66 @@ func TestSettle_ANotReadyRowAgeingOutStartsNoSettle(t *testing.T) {
 	assert.Equal(t, append(span(0, settleCycles), span(blipAt+1, settleCycles)...),
 		settlingCycles(newSettleRig(t, nil), n, rows))
 }
+
+// settleIdle makes rm idle on evidence: a known KV of 0 and a known empty
+// ITL window.
+func settleIdle(rm *domain.ReplicaMetrics) {
+	rm.KvUsageInstant, rm.KvCacheUsage, rm.KvCacheUsageKnown = 0, 0, true
+	rm.AvgITL, rm.AvgITLKnown, rm.AvgITLEmpty = 0, false, true
+}
+
+// An absence past the tracker's tolerance (1 min at 15 s) is a replica that
+// left and came back: its settle starts again, switch on or off.
+func TestSettle_AnAbsencePastTheToleranceStartsTheSettleAgain(t *testing.T) {
+	missFrom, missFor := settleCycles+2, 5
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i >= missFrom && i < missFrom+missFor {
+			return f[:2]
+		}
+		return f
+	}
+	back := missFrom + missFor
+	want := append(span(0, settleCycles), span(back, settleCycles)...)
+	n := back + settleCycles + 3
+	assert.Equal(t, want, settlingCycles(newSettleRig(t, nil), n, rows))
+	assert.Equal(t, want, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLKeepsSettleThroughMissingRow: false}), n, rows))
+}
+
+// Load back after idleRows rows idle on evidence: the replica's settle
+// starts again.
+func TestSettle_LoadBackAfterAnIdleRunStartsTheSettle(t *testing.T) {
+	idleFrom := settleCycles + 2
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == idleFrom || i == idleFrom+1 {
+			settleIdle(&f[2])
+		}
+		return f
+	}
+	n := idleFrom + 2 + settleCycles + 3
+	assert.Equal(t, append(span(0, settleCycles), span(idleFrom+2, settleCycles)...),
+		settlingCycles(newSettleRig(t, nil), n, rows))
+}
+
+// The tracker keeps a replica's last eight returns of load; eight short
+// idle spells after the one return that met idleRows evict it. The replica
+// does not settle again (a start only moves forward), and the single-row
+// spells are no return of their own: idleRows is 2.
+func TestSettle_AReturnEvictedFromTheTrackerStartsNoSettle(t *testing.T) {
+	idleAt := settleCycles + 2
+	short := idleAt + 2 + settleCycles + 2
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		switch {
+		case i == idleAt || i == idleAt+1:
+			settleIdle(&f[2])
+		case i >= short && i < short+16 && (i-short)%2 == 0:
+			settleIdle(&f[2])
+		}
+		return f
+	}
+	n := short + 16 + settleCycles + 3
+	assert.Equal(t, append(span(0, settleCycles), span(idleAt+2, settleCycles)...),
+		settlingCycles(newSettleRig(t, nil), n, rows))
+}

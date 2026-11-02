@@ -37,3 +37,32 @@ func TestOfReadsRolesAndITLStates(t *testing.T) {
 		}
 	}
 }
+
+// ReadyAgain is the first Ready row after the last row that was not Ready:
+// zero with no row that was not Ready, or with none Ready after it.
+func TestReadyAgain(t *testing.T) {
+	at := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	trace := func(ready ...bool) []settle.Sample {
+		out := make([]settle.Sample, len(ready))
+		for i, r := range ready {
+			out[i] = settle.Sample{At: at.Add(time.Duration(i) * time.Minute), Row: settle.Row{Ready: r}}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		trace []settle.Sample
+		want  time.Time
+	}{
+		{"no rows", nil, time.Time{}},
+		{"every row Ready", trace(true, true, true), time.Time{}},
+		{"Ready again after one that was not", trace(true, false, true, true), at.Add(2 * time.Minute)},
+		{"the last of two blips", trace(true, false, true, false, true), at.Add(4 * time.Minute)},
+		{"not Ready still", trace(true, true, false), time.Time{}},
+		{"never Ready yet", trace(false, false), time.Time{}},
+	} {
+		if got := ReadyAgain(tc.trace); !got.Equal(tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package itl
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -185,5 +186,47 @@ func TestAdmissionFiniteOnly(t *testing.T) {
 		if r.Offered != tc.offered || r.NoITL != tc.noITL {
 			t.Errorf("FiniteOnly %v: offered %d noITL %d, want %d and %d", tc.finite, r.Offered, r.NoITL, tc.offered, tc.noITL)
 		}
+	}
+}
+
+// FiniteOnly also reads the value: a row whose bits say Finite but whose
+// AvgITL is 0, NaN or +Inf (a hand-built or replayed row; the collector
+// never writes one) is no reading, as it was not before the bits.
+func TestAdmissionFiniteOnlyReadsTheValueToo(t *testing.T) {
+	for _, itl := range []float64{0, math.NaN(), math.Inf(1)} {
+		rm := settleTestRow("p0", 0.4)
+		rm.AvgITL = itl
+		r := NewTracker().Observe("k", "v", []domain.ReplicaMetrics{rm}, Admission{FiniteOnly: true}, settleT0)
+		if r.Offered != 0 || r.NoITL != 1 {
+			t.Errorf("AvgITL %v with AvgITLKnown: offered %d noITL %d, want 0 and 1", itl, r.Offered, r.NoITL)
+		}
+	}
+}
+
+// A Pod that left the rotation and came back with the same Ready time is a
+// restart as far as anything can tell (settlerow.ReadyAgain): its settle
+// starts again. Here its not-Ready row reaches the tracker but not the line
+// (the analyzer withheld the variant's rows that cycle), so only the
+// tracker's trace says it happened.
+func TestAdmissionReadyAgainOnTheTrackerStartsTheSettle(t *testing.T) {
+	tr := NewTracker()
+	st := settle.NewTracker()
+	st.SetInterval(settleTestCycle)
+	adm := Admission{Settle: &Settle{View: st, Model: "ns/m"}, KeepsThroughMissingRow: true}
+	var got []int
+	for i := range 25 {
+		rows := settleTestFleet()
+		lineRows := rows
+		if i == 10 {
+			rows[2].Ready = false
+			lineRows = nil
+		}
+		st.Observe("ns/m", settlerow.Of(rows, nil), every(i))
+		if tr.Observe("k", "v", lineRows, adm, every(i)).Settling > 0 {
+			got = append(got, i)
+		}
+	}
+	if want := run(11); !equalInts(got, want) {
+		t.Errorf("settling cycles %v, want %v", got, want)
 	}
 }

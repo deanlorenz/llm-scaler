@@ -147,10 +147,13 @@ var earlierSeams = map[string][]string{
 // no committed golden moves under it, so the runs below see nothing of it,
 // and a switch whose off path were dead would pass them. Each test named
 // must exist (by its func declaration, in the package directory given).
+// The guard checks only that; each named test must also fail with its
+// switch off (each of 4a's runs the switch on and off and asserts both). A
+// test that holds the same on either side is a control, not a hold, and is
+// not listed here.
 var heldBy = map[string][]heldTest{
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
-		{"../saturation", "TestITLSettle_AnAbsencePastTheToleranceStartsTheSettleAgain"},
 	},
 	saturation.SwitchITLReadsFinitePodMean: {
 		{"../saturation", "TestITLSettle_APodWithAnAbsentRankIsNoReading"},
