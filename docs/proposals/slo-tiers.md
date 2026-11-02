@@ -373,7 +373,17 @@ The re-specified 2a observes per-replica points against offered prompt load.
 Until then, read the raw per-pod series `vllm:request_prefill_time_seconds`
 and `vllm:request_queue_time_seconds`, which hold the same data (vLLM only).
 
-**The 2b design, not built.** Recorded so 2a's data can test it. **2b is
+**The 2b design below is superseded** by
+[end-to-end TTFT](slo-capacity-planner-ttft.md), which [phase 2](#phase-2-ttft)
+now uses: the utilization-binned isotonic curve, the tail mapped through the
+router's `q_p ÷ mean` ratio and "queue as zero" below a bin are replaced by a
+per-pod queue on prefill work, a prefill throughput `V_P` and a union bound for
+the percentile. What survives: the TTFT formula of parts; the blame rule (a miss
+with decode at its ceiling is decode's), which the new model keeps as its
+decode-back-pressure check; SGLang abstaining (the new model refuses `V_P` on
+SGLang); and the transient being out of scope. Kept below for the record.
+
+**The 2b design (superseded).** **2b is
 prefill-role only** until an x-axis for aggregated variants is chosen (for
 example, offered prompt load over a measured `both` ceiling).
 
@@ -514,8 +524,10 @@ then no gate is computable.
 ### Phase 2: TTFT
 
 **2a** (not built) observes what open question 5 asks for. **2b** runs the
-TTFT contributor in shadow, prefill role only, once 2a's data answers
-[open question 5](#open-questions). **2c** enforces TTFT once 2b's shadow
+TTFT contributor in shadow. [Open question 5](#open-questions) no longer gates
+2b: its x-axis and bins belonged to the superseded binned curve, and the new
+model needs none. 2b is gated instead by its recordings (the prefill-stress
+golden) and, for 2c, by the staircase run. **2c** enforces TTFT once 2b's shadow
 predictions track observed attainment.
 
 **The TTFT model 2b uses** is the one in

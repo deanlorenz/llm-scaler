@@ -8,7 +8,7 @@ treatment](shape-shift-treatment.md) derives decode's `mu` from the ITL line so
 a shape change reprices on the cycle it is seen, and [prefill capacity from a
 fitted TTFT model](prefill-ttft-model.md) gets prefill a throughput ceiling it
 has never had (that model is now superseded by
-[what-if capacity](slo-capacity-planner.md), which reads the ceiling `V_P` from
+[what-if capacity](slo-capacity-planner-ttft.md#prefill-capacity), which reads the ceiling `V_P` from
 busy-minute throughput instead of a TTFT fit). Both then convert their result **back into requests per second**
 at the boundary, because that is the unit the floor speaks. This document is
 about deleting that conversion.
@@ -231,7 +231,7 @@ replicas_decode = demand_decode / (ScaleUpThreshold * capacity_decode)
 **Prefill.** Capacity from the fitted TTFT line of
 [prefill-ttft-model.md](prefill-ttft-model.md), used directly rather than
 converted. That fit is superseded: read the capacity as `V_P` from
-[what-if capacity](slo-capacity-planner.md), in the same unit:
+[what-if capacity](slo-capacity-planner-ttft.md#prefill-capacity), in the same unit:
 
 ```
 TTFT(T)          = A_p*T + B_p                                seconds

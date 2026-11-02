@@ -26,7 +26,7 @@ adding percentiles.
 
 | Term | What it is | Model |
 | --- | --- | --- |
-| `W_router` | EPP flow-control queue: requests held before dispatch | 0 below the gate's onset; [the router queue](#the-router-queue-flow-control) above it |
+| `W_router` | EPP flow-control queue: requests held before dispatch | Almost always 0 below the gate's onset. Above the prefill onset it has no formula of its own: the per-pod wait covers `W_router + W_engine` together. Above the decode onset, not priced ([the router queue](#the-router-queue-flow-control)) |
 | `W_engine` | The prefill pod's own queue | [Per pod, with the imbalance `f`](#the-engine-queue) |
 | `own_prefill` | `a + I/V_P`, this request's own prefill | [Prefill capacity](#prefill-capacity) |
 | `T_xfer` | KV transfer to decode (P/D) | `I·κ/BW` once `nixl_xfer_time_seconds` is collected; omitted and flagged until then |
@@ -35,7 +35,7 @@ adding percentiles.
 
 | | Flow control off (the upstream default) | Flow control on |
 | --- | --- | --- |
-| **P/D** | `W_router` = 0; every other term | Below the onset: as off. Above it: `W_router` holds the excess; engines hold about the detector's threshold |
+| **P/D** | `W_router` = 0; every other term | Below the onsets: as off, approximately. Above the prefill onset: `W_router` holds the excess, engines hold about the detector's threshold. Above the decode onset: not priced |
 | **Aggregated** | `W_router` = 0; `W_engine` is the pod's queue, which also holds decode admission; `own_prefill` produces the first token, so no `T_xfer`, `W_decode` or `ITL(k_d)` | As P/D: as off below the onset |
 
 Flow control is off by default upstream, but this repository's scale-to-zero
@@ -179,7 +179,15 @@ gateway-api-inference-extension), the detectors' `config.go` under
 score is below 1, so the engines fill first. A prefill pod's mean waiting count
 is `ρ²(1 + Cs²)/(2(1 − ρ))`; at `Cs²` = 1 it reaches 5 at `ρ` = 0.854. A decode
 pod's mean waiting count comes from the chain. The **onset** of each stage is
-the rate at which its mean score reaches 1; the router queue is empty below it.
+the rate at which its mean score reaches 1; the router queue is **almost
+always** empty below it. The onset is a time average, while the gate reads the
+current score, so below the onset the gate still closes for the share of time
+`P(score ≥ 1)`, and every request waits while it does. In the worked example,
+with one decode pod, that is 0.8%, 1.4% and 3.4% of the time at 11.10, 11.32 and
+11.64 r/s (about `ρ⁶`, 0.3%, on the prefill side). The tool prints this closed
+fraction in the basis. The union bound adds block 1 and `W_decode` rather than
+overlapping them, so the answer is expected to stay conservative; the staircase
+checks it.
 
 **The model, in order of rate:**
 
@@ -216,7 +224,7 @@ or a holdback policy, the answer is for the highest band, flagged.
 ## Combining the parts into a percentile
 
 **Percentiles do not add.** In the worked example at p95, adding the parts'
-p95s gives 224 ms, the bound below 231 ms, and full independence 210 ms.
+p95s gives 224 ms, the optimised bound 231 ms, full independence 210 ms.
 
 Two blocks:
 
@@ -251,7 +259,6 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Exponential wait tail with heavy-tailed prompts | Over-promises |
 | Poisson arrivals on bursty traffic | Over-promises |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
-| Router queue modelled pooled | Over-promises under imbalance |
 | Dispatch-gate delays (scores up to 200 ms stale, a 50 ms candidate cache) | Over-promises, slightly, near the onset |
 | One band, static ceiling | Over-promises for low bands, under-promises for the highest |
 | TTL eviction (only where a TTL exists) | Evicted requests are not in the router histogram: the ground truth reads high near the TTL |
@@ -312,3 +319,5 @@ UNVALIDATED.
 5. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance,
    cap that estimate at 4; the sticky-routing term is not capped.
 6. **Several priority bands.** *Recommend:* the highest band only, flagged.
+7. **Which imbalance signal for `f`?** *Recommend:* the computed-token share in
+   busy minutes, de-biased; queue length when no busy minute exists.

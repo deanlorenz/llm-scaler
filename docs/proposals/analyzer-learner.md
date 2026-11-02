@@ -886,16 +886,23 @@ A file of inputs alone cannot be replayed: `Replay` needs a `start` line, and
 both of its modes apply the engine's own events, per analyzer, with the store
 records each one read. So capture writes **cycle inputs** (one per model per
 step, a `learnrec.Input` built by `internal/whatifsource` from the collector's
-query templates), and a new third mode, **`Generate`**, plays the engine's
-per-cycle call order over them:
+query templates; R2 creates that package, and the planner's standalone mode
+extends it). A new third mode, **`Generate`**, writes the `start` line
+(`learnrec.Start`: the saturation horizons including `BorrowTickGap`, the SLO
+configuration and `Judging`, `Throughput`, from the policy file or the
+defaults), then plays each cycle in the order `optimizeV2` calls them
+(`engine.go`, `engine_v2.go`):
 
-1. the `start` line: horizons, SLO configuration and `Judging`, from the policy
-   file or the defaults;
-2. the store filings (`FileScaleTarget`), from the Deployment history in
-   kube-state-metrics or from flags;
-3. `NoteVariantsPresent`, then each listed analyzer's `Analyze` in the engine's
-   order;
-4. `EvictStale` and the settle events.
+1. `slo.BeginCycle`, which the SLO analyzer counts its judging windows by;
+2. `NoteVariantsPresent` on saturation and slo;
+3. the three sweeps, saturation's `EvictStaleHistory`, the store's
+   `EvictStale` and slo's `EvictStale` (`engine.go:1478-1479`,
+   `engine_v2.go:561-616`), before anything stamps state this cycle;
+4. per variant, in key order, `StableAcceleratorFor` and then
+   `FileScaleTarget` through `LoadFromScaleTarget` (`engine_v2.go:74-101`);
+5. `observeSettle` (`engine_v2.go:184-187`);
+6. `Analyze`: saturation first, then the listed analyzers. With slo listed,
+   its router source serves the captured router latency.
 
 The variant states come from the role map, and the policy from `--policy` or the
 defaults. The output is an ordinary recording that carries the commit of the
@@ -904,12 +911,28 @@ commit) accepts it.
 
 **Roles and readiness for a past window** cannot come from a kubeconfig, which
 sees today's pods: a scaled-out run's pods are gone. They come from
-kube-state-metrics in the same Prometheus (`kube_pod_labels` for the role and
-variant labels, `kube_pod_status_ready` and `kube_pod_status_ready_time` for
-readiness and `ReadySince`, `kube_deployment_spec_replicas` for replica counts),
-or from `--role-of` selectors on pod names. The output is pseudonymised by the
+kube-state-metrics in the same Prometheus, with three limits:
+
+- `kube_pod_labels` exports no `label_*` by default since kube-state-metrics
+  v2; the role and variant labels need
+  `--metric-labels-allowlist=pods=[...]`. Without them, `--role-of` selectors on
+  pod names give the role map, flagged as inferred; capture does not refuse.
+- `kube_pod_status_ready` and `kube_pod_status_ready_time` give readiness and
+  `ReadySince`; `kube_deployment_spec_replicas` gives replica counts for
+  Deployments only. A LeaderWorkerSet needs a custom-resource-state
+  configuration, or `--role-of`.
+- **Engine parameters are not in kube-state-metrics.** `FileScaleTarget` parses
+  the container's arguments (batch cap, `max-num-batched-tokens`, ranks), which
+  it does not export; the `llm-d.ai/max-num-seqs` annotation appears only
+  through `kube_deployment_annotations` with an allowlist. Only the GPU count
+  (`kube_pod_container_resource_requests`) and the accelerator (`kube_pod_info`
+  joined to `kube_node_labels`) are derivable. The rest come from flags
+  (`--batch-cap`, ...) or the current Deployment, flagged when it may differ
+  from the window's. The output is pseudonymised by the
 same export as `learnergolden export`. A capture needs Prometheus to have kept
-the series for the window; `_bucket` series are often kept for days, not weeks.
+the series for the window; `_bucket` series are often kept for days, not weeks,
+so a window worth keeping is preserved first as a Prometheus snapshot (the TSDB
+snapshot API, or a `promtool tsdb` dump) and captured from it later.
 
 **What `ols-sweep-slo` gives this work**: flow control off, the SLO analyzer
 listed, streamed load; router TTFT, and per pod `AvgTTFT`, `AvgServiceTime`,

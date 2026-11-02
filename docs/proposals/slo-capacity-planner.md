@@ -398,8 +398,9 @@ mutation-checked:
   engine wait equals Pollaczek-Khinchine.
 - The union bound is never below the independent figure; the optimised split is
   never above the even split; percentiles are never added.
-- Below the flow-control onsets, flow control on equals off. Decode admission is
-  counted once.
+- Below the flow-control onsets, flow control on equals off within the gate's
+  closed fraction (or exactly, at `N_d` large enough that the mean score
+  concentrates). Decode admission is counted once.
 - Every `Unanswerable` reason has a case; NaN gives a reason, never 0 or +Inf.
 - `V_P` is never above the busy-minute median on a synthetic pod.
 
@@ -412,8 +413,10 @@ is made.**
 
 | PR | What | Goldens | Depends on |
 | --- | --- | --- | --- |
-| R1, R2 | Recorder fields for TTFT, and `whatif capture` with a `Generate` replay mode: [the learner rules, 2.9](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture) | regenerated, values unchanged | — |
-| Recordings | Prefill-stress (30k prompts, 3 prefill pods, decode below its ceiling, fixed replicas); a capture of the `ols-sweep-slo` window if Prometheus still holds it; the staircase warm-ups, flow control off and on | — | R1 |
+| R1 | Recorder fields for TTFT: [the learner rules, 2.9](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture) | regenerated, values unchanged | — |
+| R2 | `whatif capture` and the `Generate` replay mode; creates `internal/whatifsource`, which D4 extends | none | R1 |
+| Recordings | Prefill-stress (30k prompts, 3 prefill pods, decode below its ceiling, fixed replicas); the staircase warm-ups, flow control off and on | — | R1 |
+| Capture | The `ols-sweep-slo` window, from its Prometheus snapshot | — | R2 |
 | D1 | Move the decode pricing into `whatif` at layer 32. Proof: vectors captured from `main` before the move, frozen, asserted bit-identical; the fails-on-main rule is waived for a pure move | none move | — |
 | D2 | Closed form, TPOT inversions, the admission chain, `Answer`/`Unanswerable`, property cases | none | D1 |
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
@@ -427,8 +430,10 @@ is made.**
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #432, #277 | — | — |
 
-The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded) is
-worth capturing now, while Prometheus still holds its `_bucket` series.
+The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded)
+is worth preserving now, before any capture tool exists, as a Prometheus
+snapshot (the TSDB snapshot API or a `promtool tsdb` dump), while Prometheus
+still holds its `_bucket` series. R2 captures it from the snapshot later.
 
 ## Risks
 
@@ -451,8 +456,6 @@ TTFT's are on [its page](slo-capacity-planner-ttft.md#open-questions).
    optional input; otherwise assume independence and say so.
 3. **ITL per token in the SLO analyzer (#430's known limit).** *Recommend:* a
    separate PR with its own switch, not D1.
-4. **Which imbalance signal?** *Recommend:* the computed-token share in busy
-   minutes, de-biased; queue length when no busy minute exists.
 
 ## CLI reference
 
