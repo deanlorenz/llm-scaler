@@ -99,6 +99,9 @@ func learnedCapEntry(t *testing.T, a *SaturationAnalyzer, variant string) learne
 // highest plateau seen, so it may sit below the true cap, and a replica
 // held there by memory would be admitted above the band as capped. Nor is
 // it stamped as used: an at-cap test does not price a replica.
+//
+// A guard, not switch-off evidence: it passes with SwitchBatchCapITLAdmission
+// either way, since neither side reads the learned cap.
 func TestBatchCapReaders_ALearnedCapIsNotAnITLCap(t *testing.T) {
 	params := deploymentParams()
 	var a *SaturationAnalyzer
@@ -192,6 +195,9 @@ func TestBatchCapReaders_APDDecodeAtItsDeclaredCapKeepsTheFullQueue(t *testing.T
 // deferred requests are in flight, not a backlog. Read as one, a decode at
 // a learned 128 recorded k2 at half its cache, was charged 10x its demand,
 // and -- observeBatchCap reads the view -- confirmed the cap that caused it.
+//
+// A guard, not switch-off evidence: it passes with SwitchBatchCapDecodeView
+// either way, since neither side reads the learned cap.
 func TestBatchCapReaders_ALearnedCapIsNotADecodeViewCap(t *testing.T) {
 	params := deploymentParams()
 	var an *SaturationAnalyzer
@@ -205,9 +211,16 @@ func TestBatchCapReaders_ALearnedCapIsNotADecodeViewCap(t *testing.T) {
 
 // The switch off reads the flags' cap alone, as before #420.
 func TestBatchCapReaders_TheDecodeViewSwitchPicksTheSource(t *testing.T) {
-	a, res := pdDecodeAtCap(t, declaredParams(128), 128, func(a *SaturationAnalyzer) { a.batchCapDecodeView = false })
+	off := func(a *SaturationAnalyzer) { a.batchCapDecodeView = false }
+	a, res := pdDecodeAtCap(t, declaredParams(128), 128, off)
 	assert.False(t, recordedK2(a))
 	assert.InDelta(t, float64(halfCache), decodeDemand(t, res), 1)
+
+	stated := declaredParams(256)
+	stated.MaxNumSeqs, stated.MaxNumSeqsSet = 128, true
+	a, res = pdDecodeAtCap(t, stated, 128, off)
+	assert.True(t, recordedK2(a), "the flags' cap is read either way")
+	assert.InDelta(t, float64(halfCache)+queueCharge, decodeDemand(t, res), 1)
 }
 
 // derivedMuSeqs runs one cycle of a decode replica with a short shape whose
@@ -269,6 +282,42 @@ func TestBatchCapReaders_TheDerivedMuSwitchPicksTheSource(t *testing.T) {
 	assert.Equal(t, batchCapDefault, off["batchCapSource"])
 	assert.EqualValues(t, 256, off["batchCap"])
 	assert.InDelta(t, 256, off["seqs"], 1e-9)
+
+	stated := declaredParams(64)
+	stated.MaxNumSeqs, stated.MaxNumSeqsSet = 32, true
+	off = derivedMuSeqs(t, stated, func(a *SaturationAnalyzer) { a.batchCapDerivedMu = false })
+	assert.Equal(t, batchCapFromFlags, off["batchCapSource"], "the flags' cap is read either way")
+	assert.InDelta(t, 32, off["seqs"], 1e-9)
+}
+
+// A declared cap above the parser's 256 -- vLLM V1's own default is 1024 on
+// large accelerators -- raises what the readers price at: the documented
+// side of the declared cap that orders FEWER replicas than with the cap
+// unread. Right when the declaration is true.
+func TestBatchCapReaders_ADeclaredCapAbove256(t *testing.T) {
+	// mu: the cache's 0.68 x 100000 / 125 = 544 sequences bind, not 256.
+	fields := derivedMuSeqs(t, declaredParams(1024), nil)
+	assert.EqualValues(t, 1024, fields["batchCap"])
+	assert.Equal(t, batchCapDeclared, fields["batchCapSource"])
+	assert.InDelta(t, 544, fields["seqs"], 1e-9)
+
+	// ITL admission: a replica at a declared 1024 is at its cap.
+	fields = cappedITLWindow(t, declaredParams(1024), 1024, false, nil)
+	assert.EqualValues(t, 1024, fields["batchCap"])
+	assert.EqualValues(t, 1, fields["capped"])
+	assert.EqualValues(t, 0, fields["aboveBand"])
+}
+
+// The estimate for a variant at zero replicas still prices at the flags' cap
+// or the parser's default, not the declared cap: out of #420's scope, and
+// tracked by #427. Pinned so that changing it is a deliberate act.
+func TestBatchCapReaders_TheZeroReplicaEstimateIgnoresTheDeclaredCap(t *testing.T) {
+	assert.Equal(t,
+		estimateCapacityAtCap(declaredParams(64), 256, 1000, 500),
+		estimateCapacityFromParams(declaredParams(64), 1000, 500))
+	assert.NotEqual(t,
+		estimateCapacityAtCap(declaredParams(64), 64, 1000, 500),
+		estimateCapacityFromParams(declaredParams(64), 1000, 500), "the declared 64 would bind")
 }
 
 // A learned cap lowers the derived mu, as it lowers P3, where the policy

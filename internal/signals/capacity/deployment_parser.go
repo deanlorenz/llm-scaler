@@ -355,10 +355,12 @@ func (p *EngineParams) Complete() bool {
 // ExplicitMaxNumSeqs is one engine's batch cap as its flags state it: the
 // explicit max_num_seqs, lowered by --max-num-active-seqs when that is set,
 // and 0 when neither flag stated a cap, when a flag that bears on it could not
-// be read, or when p is nil. A caller that needs the engine's real cap, not an
-// estimate of it, reads this: the ITL fit admits a reading above its band
-// only for a replica at its cap (itl.Admission), and a P/D decode at its cap
-// keeps its full queue (ReplicaMetrics.AtBatchCap).
+// be read, or when p is nil. It is the flags' half of StatedBatchCap, which
+// a caller that needs the engine's real cap, not an estimate of it, reads:
+// the ITL fit admits a reading above its band only for a replica at its cap
+// (itl.Admission), and a P/D decode at its cap keeps its full queue
+// (ReplicaMetrics.AtBatchCap). The same callers read this alone with their
+// replay switch off (issue #420).
 //
 // --max-num-active-seqs alone is enough: vLLM refuses one above
 // max_num_seqs, so it is the cap whatever max_num_seqs is, stated or not.

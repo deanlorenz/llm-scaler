@@ -95,8 +95,9 @@ const (
 	batchCapFromFlags = "flags"
 	batchCapDeclared  = "declared"
 	batchCapLearned   = "learned"
-	// batchCapNone is no cap a reader at the cap may read
-	// (atCapBatchCap): the flags state none, and nothing is declared.
+	// batchCapNone is no cap to read: for a reader at the cap
+	// (atCapBatchCap), the flags state none and nothing is declared; for
+	// the derived mu, no cap at all (the scale target unread).
 	batchCapNone    = "none"
 	batchCapDefault = "default"
 )
@@ -319,7 +320,7 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 }
 
 // atCapBatchCap is the batch cap a reader that asks whether a replica is AT
-// its cap reads, and its source: the flags' cap, and with stated (that
+// its cap reads, and its source: the flags' cap, and with readsDeclared (that
 // reader's switch, issue #420) the cap the llm-d.ai/max-num-seqs annotation
 // declares where the flags state none (capacity.EngineParams.StatedBatchCap,
 // as the declared cap prices P3 only under SwitchBatchCapDeclared). Never
@@ -328,11 +329,11 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 // may still be growing -- and never the learned cap (see above). A zero
 // perRank, source batchCapNone, admits nothing as at its cap. It reads no
 // learned state, so it stamps none as used.
-func (a *SaturationAnalyzer) atCapBatchCap(params *capacity.EngineParams, stated bool) pricedBatchCap {
+func (a *SaturationAnalyzer) atCapBatchCap(params *capacity.EngineParams, readsDeclared bool) pricedBatchCap {
 	if s := params.ExplicitMaxNumSeqs(); s > 0 {
 		return pricedBatchCap{perRank: s, source: batchCapFromFlags}
 	}
-	if stated && a.batchCapDeclared {
+	if readsDeclared && a.batchCapDeclared {
 		if s := params.StatedBatchCap(); s > 0 {
 			return pricedBatchCap{perRank: s, source: batchCapDeclared}
 		}

@@ -21,13 +21,13 @@ import (
 //     (reason="capacity"). A request that cannot get blocks for its pull
 //     waits there, so a full decode still reads queued.
 //   - Except at the sequence cap (maxNumSeqs, the engine's max_num_seqs
-//     when its flag or the llm-d.ai/max-num-seqs annotation states it, never
-//     a default or a learned cap -- atCapBatchCap;
-//     domain.ReplicaMetrics.AtBatchCap): there the
-//     queue is the full count. vLLM keeps a request deferred from the moment
-//     its pull starts until it is scheduled, and the scheduler promotes a
-//     landed pull only when it looks at it, which it stops doing once the
-//     batch is at max_num_seqs. So at the cap every request whose pull began
+//     when its flag or the llm-d.ai/max-num-seqs annotation states it,
+//     never a default or a learned cap: atCapBatchCap, and
+//     domain.ReplicaMetrics.AtBatchCap): there the queue is the full
+//     count. vLLM keeps a request deferred from the moment its pull starts
+//     until it is scheduled, and the scheduler promotes a landed pull only
+//     when it looks at it, which it stops doing once the batch is at
+//     max_num_seqs. So at the cap every request whose pull began
 //     below it reads deferred, landed or not, and each of them waits for a
 //     batch slot on this replica. Read as the capacity part alone, a capped
 //     decode's backlog -- the one #287 measured at 256 running and 768

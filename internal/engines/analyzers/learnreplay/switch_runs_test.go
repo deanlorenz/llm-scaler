@@ -95,6 +95,7 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestBatchCapReaders_TheITLWindowTakesAReplicaAtItsDeclaredCap"},
 		{"../saturation", "TestBatchCapReaders_ALearnedCapIsNotAnITLCap"},
 		{"../saturation", "TestBatchCapReaders_TheITLAdmissionSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapReaders_ADeclaredCapAbove256"},
 	},
 	saturation.SwitchBatchCapDecodeView: {
 		{"../saturation", "TestBatchCapReaders_APDDecodeAtItsDeclaredCapKeepsTheFullQueue"},
@@ -105,6 +106,7 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestBatchCapReaders_TheDerivedMuIsCappedAtTheDeclaredCap"},
 		{"../saturation", "TestBatchCapReaders_TheDerivedMuSwitchPicksTheSource"},
 		{"../saturation", "TestBatchCapReaders_ALearnedCapLowersTheDerivedMu"},
+		{"../saturation", "TestBatchCapReaders_ADeclaredCapAbove256"},
 	},
 	slo.SwitchBatchCapAdmission: {
 		{"../slo", "TestBatchCap_TheLineTakesAReplicaAtItsDeclaredCap"},
@@ -114,6 +116,7 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestBatchCap_AReplicaIsPricedAtItsDeclaredCap"},
 		{"../slo", "TestBatchCap_ThePerRankSwitchPicksTheSource"},
 		{"../slo", "TestBatchCap_TheLogNamesThePricedCap"},
+		{"../slo", "TestBatchCap_ADeclaredCapAbove256RaisesThePrice"},
 	},
 	saturation.SwitchIdleBand: {
 		{"../saturation", "TestIdleBand_ARunStartsUnderTheLineAndEndsAtTheTop"},

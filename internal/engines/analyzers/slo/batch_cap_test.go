@@ -145,3 +145,40 @@ func TestBatchCap_TheLogNamesThePricedCap(t *testing.T) {
 	assert.EqualValues(t, 256, d.batchCap)
 	assert.Equal(t, batchCapDefault, d.batchCapSource)
 }
+
+// pricedAtKV is pricedAt with every row's KV capacity set to kvTokens.
+func pricedAtKV(t *testing.T, params capacity.EngineParams, kvTokens int64) float64 {
+	t.Helper()
+	clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	a := batchCapAnalyzer(params, &clock, nil)
+	var res *domain.AnalyzerResult
+	for i := range 5 {
+		rows := cycleRows("agg", i)
+		for j := range rows {
+			rows[j].TotalKvCapacityTokens = kvTokens
+		}
+		var err error
+		res, err = a.Analyze(context.Background(), domain.AnalyzerInput{
+			ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 0), ArrivalRate: 2,
+			VariantStates: []domain.VariantReplicaState{batchCapAgg}, ReplicaMetrics: rows,
+		})
+		require.NoError(t, err)
+		clock = clock.Add(15 * time.Second)
+	}
+	require.Len(t, res.VariantCapacities, 1)
+	return res.VariantCapacities[0].PerReplicaCapacity
+}
+
+// A declared cap above the parser's 256 raises the price: with 300000 KV
+// tokens, k = 0.6 implies 360 sequences, which the default of 256 caps and
+// a declared 512 does not. So a fleet whose cap is declared above 256 runs
+// fewer replicas than one whose flags are unread -- right when the
+// declaration is true, and priced exactly as the same cap stated in flags.
+func TestBatchCap_ADeclaredCapAbove256RaisesThePrice(t *testing.T) {
+	const kv = 300_000
+	unread := pricedAtKV(t, capacity.EngineParams{MaxNumSeqs: 256}, kv)
+	declared := pricedAtKV(t, capacity.EngineParams{MaxNumSeqs: 256, DeclaredBatchCap: 512}, kv)
+	stated := pricedAtKV(t, capacity.EngineParams{MaxNumSeqs: 512, MaxNumSeqsSet: true}, kv)
+	assert.Greater(t, declared, unread*1.05, "the default of 256 binds; the declared 512 does not")
+	assert.InDelta(t, stated, declared, 1e-6, "declared as if stated in the flags")
+}

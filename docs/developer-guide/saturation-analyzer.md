@@ -139,10 +139,10 @@ declared cap and never the learned one (`atCapBatchCap`):
 
 | reader | reads | switch |
 |---|---|---|
-| ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `atCapBatchCap`: flags, else declared, else 0; `itl-window` logs `batchCap` and `batchCapSource` | `SwitchBatchCapITLAdmission` |
-| P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `atCapBatchCap` | `SwitchBatchCapDecodeView` |
+| ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `atCapBatchCap`: flags, else declared (only while `SwitchBatchCapDeclared` is on too), else 0; `itl-window` logs `batchCap` and `batchCapSource` (`none` for 0) | `SwitchBatchCapITLAdmission` |
+| P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `atCapBatchCap`, as above | `SwitchBatchCapDecodeView` |
 | derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`: flags, declared, learned, default; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
-| `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared | `slo.SwitchBatchCapAdmission` |
+| `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared (not gated by `SwitchBatchCapDeclared`, a saturation switch); `slo-variant` logs `lineBatchCap` and `lineBatchCapSource` | `slo.SwitchBatchCapAdmission` |
 | `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap`; `slo-variant` logs `batchCap` and `batchCapSource` | `slo.SwitchBatchCapPerRank` |
 
 Why the at-cap readers do not read the learned cap: it is the highest
@@ -156,7 +156,7 @@ replicas.
 
 The `slo` analyzer does not read the learned cap: it lives in the saturation
 analyzer's memory. The zero-replica estimate (`estimateCapacityFromParams`)
-still prices at `BatchCap`. A capped mu is still priced at `ITL(kPrice)`,
+still prices at `BatchCap` (#427). A capped mu is still priced at `ITL(kPrice)`,
 although a replica held by its cap runs below `kPrice` and so faster: mu
 reads low, toward more replicas (the `slo` analyzer's `reachableFill`
 accounts for this; saturation does not).

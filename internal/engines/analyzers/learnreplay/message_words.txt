@@ -1174,6 +1174,8 @@ limiters
 line
 lineA
 lineB
+lineBatchCap
+lineBatchCapSource
 lineBorrowed
 lineBorrowedFrom
 lineHeld

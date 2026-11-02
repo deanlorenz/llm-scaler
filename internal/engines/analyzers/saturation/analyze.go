@@ -369,7 +369,7 @@ func (c *cycle) observeFleetShape() {
 // window the backlog projection exists for. A measurement always wins, so a
 // warm fleet is unaffected.
 //
-// BOTH HALVES OR NEITHER. deriveMu reads the output length twice: as the
+// BOTH HALVES OR NEITHER. deriveMuAtCap reads the output length twice: as the
 // divisor, and inside the shape, where KVreq = ILeff + OL/2 sets how many
 // sequences fit. Moving only the divisor leaves the two halves of one division
 // on different timescales, and a swap that raises the generation while dropping
@@ -433,7 +433,7 @@ func (c *cycle) fitLines() {
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
-		// deriveMu divides a token rate by an output length; prefill emits
+		// deriveMuAtCap divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
 		// same arithmetic would read three orders of magnitude low, which is
 		// why saturatedCompletionRate special-cases it on the measured path
@@ -623,7 +623,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		//
 		// This has always held, but only by accident: fitLines populates
 		// itlModels for RoleDecode alone, so a prefill lookup returned the
-		// zero Model and deriveMu declined on IsZero() in another file, keyed
+		// zero Model and deriveMuAtCap declined on IsZero() in another file, keyed
 		// on the opposite condition. A role-classification slip, or anyone
 		// legitimately extending that population to RoleBoth, would have
 		// started pricing prefill from decode's physics with nothing to say
@@ -638,6 +638,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			if c.a.batchCapDerivedMu {
 				batchCap = c.a.pricingBatchCap(c.input.Namespace, c.input.ModelID, rm.VariantName, engineParams,
 					c.cfg.EnableBatchCapLearning)
+			}
+			if batchCap.perRank <= 0 {
+				// No cap at all (the scale target unread): say so, not "".
+				batchCap.source = batchCapNone
 			}
 			derived = deriveMuAtCap(itlModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)

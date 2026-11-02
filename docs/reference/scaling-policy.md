@@ -1456,9 +1456,12 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 ```
 
 - It is used only where the flags state no cap. A cap in the flags wins.
-- Everything that reads the cap reads it: the derived capacity, the derived
-  throughput (mu), the ITL line's reading of a replica at its cap, a P/D
-  decode's queue at its cap, and the `slo` analyzer.
+- The derived capacity, the derived throughput (mu), the ITL line's reading
+  of a replica at its cap, a P/D decode's queue at its cap, and the `slo`
+  analyzer all read it. The estimate for a variant at **zero replicas** does
+  not: it still prices at the flags' cap or 256, so a variant that declares
+  a lower cap is under-priced on its way up from zero until its first replica
+  is priced ([#427](https://github.com/ev-shindin/llm-scaling-manager/issues/427)).
 - **It moves the price either way.** A declared cap below 256 lowers the
   derived capacity, mu and the `slo` price, so more replicas. A declared cap
   above 256 (vLLM V1's own default is 1024 on large accelerators) raises
@@ -1516,9 +1519,19 @@ more replicas than needed until a higher count is seen. These limits apply:
   priced a replica nor was seen again.
 - One direction only, like `enableLearnedStateReuse`.
 
-To see which cap priced a replica, read `batchCapSource` (`flags`, `declared`,
-`learned` or `default`) and `batchCap` on the `k2-decision` line for
-[`P3-k2`](cycle-log.md#reason-values-reason-field).
+To see which cap a reader used, read `batchCap` (per engine rank) and
+`batchCapSource` on its log line:
+
+| line | the cap of | `batchCapSource` |
+|---|---|---|
+| `k2-decision` ([`P3-k2`](cycle-log.md#reason-values-reason-field)) | the derived capacity | `flags`, `declared`, `learned` or `default` |
+| `derived-mu` | the derived throughput (mu) | `flags`, `declared`, `learned`, `default`, or `none` (the scale target unread) |
+| `itl-window` | the ITL line's reading of a replica at its cap | `flags`, `declared`, or `none`: no cap is stated, so no reading above the band is taken as capped |
+| `slo-variant` | the `slo` analyzer's price | `flags`, `declared`, `default` or `none`; `lineBatchCap` and `lineBatchCapSource` are the cap its line's admission read |
+
+On `slo-variant`, `maxNumSeqs` is `--max-num-seqs` alone, so it reads 256
+where the flags are unread even when a declared cap priced the replica:
+`batchCap` is the one that priced it.
 
 ### Advanced tuning: `analyzerTuning` and `loadImbalance`
 
