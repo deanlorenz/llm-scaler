@@ -10,15 +10,16 @@ import (
 
 // Issue #427: the estimate for a variant at zero replicas reads the cap the
 // scale target states -- the flags, else the llm-d.ai/max-num-seqs
-// annotation -- as the derived k2 does once a pod runs. The model runs 1000
+// annotation -- as the derived k2 does once a decode or aggregated pod runs
+// (P3 never prices prefill). The variants here are decode. The model runs 1000
 // in / 500 out with equal lengths, under 8192 batched tokens, so the budget
 // allows 2730 sequences and the cap binds: the estimate is S x 1250.
 
-// estimateCapacityFromParams is the derived k2, with equal output lengths,
-// at the cap the flags state, else the parser's default
-// (EngineParams.BatchCap): the figure the zero-replica estimate priced before
-// #427, and the formula the tests pin. 0 for nil params or no budget.
-func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
+// derivedAtDefaultCap is a test helper: estimateCapacityAtCapSpread with
+// equal output lengths at the cap the flags state, else the parser's default
+// (EngineParams.BatchCap), the figure the zero-replica estimate priced before
+// #427. 0 for nil params or no budget, which production never passes here.
+func derivedAtDefaultCap(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
 	if params == nil || params.EffectiveMaxBatchedTokens <= 0 {
 		return 0
 	}
@@ -36,8 +37,8 @@ func flagParams(perRank, declared int64) *capacity.EngineParams {
 	return p
 }
 
-// A variant that declares 64 is priced at 64 sequences from zero, as its
-// first replica will be: 64 x 1250 = 80,000, not 256 x 1250 = 320,000.
+// A decode variant that declares 64 is priced at 64 sequences from zero, as
+// its first replica will be: 64 x 1250 = 80,000, not 256 x 1250 = 320,000.
 func TestBatchCapZeroReplica_TheEstimateIsPricedAtTheDeclaredCap(t *testing.T) {
 	f := zeroReplicaEstimateOf(t, declaredParams(64), 1, nil)
 	assert.EqualValues(t, 80_000, f["derivedCapacity"])

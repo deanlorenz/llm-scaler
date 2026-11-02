@@ -1288,8 +1288,9 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {
 		// S is the cap the scale target states, flags else declared, else
-		// the default: no pod runs to learn one from (issue #427).
-		batchCap := a.zeroReplicaBatchCap(rec.EngineParams)
+		// the default, and never the learned cap (zeroReplicaBatchCap,
+		// issue #427).
+		batchCap := a.zeroReplicaBatchCap(namespace, modelID, variantName, rec.EngineParams)
 		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
 			bounded := derived
 			boundedBy := "derived"

@@ -364,18 +364,22 @@ func flagsOrDefaultBatchCap(params *capacity.EngineParams) pricedBatchCap {
 
 // zeroReplicaBatchCap is the batch cap one engine rank of a variant at zero
 // replicas is priced at by its derived estimate (estimateStoredCapacity),
-// and its source: the cap the flags state, else, with
-// SwitchBatchCapZeroReplica and SwitchBatchCapDeclared on, the cap the
-// llm-d.ai/max-num-seqs annotation declares (capacity.EngineParams.
-// StatedBatchCap), else the parser's default. A variant at zero replicas has
-// no pod to learn from, so the learned cap never applies; it reads no
-// learned state and stamps none as used. Off, as before issue #427, the
+// and its source. With SwitchBatchCapZeroReplica on it is pricingBatchCap
+// without learning: the cap the flags state, else, with
+// SwitchBatchCapDeclared on, the cap the llm-d.ai/max-num-seqs annotation
+// declares, else the parser's default. Off, as before issue #427, the
 // flags' cap or the default (flagsOrDefaultBatchCap): a variant that
 // declares 64 was priced at 64 per replica once a pod ran, and at 256 on its
 // way up from zero.
-func (a *SaturationAnalyzer) zeroReplicaBatchCap(params *capacity.EngineParams) pricedBatchCap {
-	if c := a.atCapBatchCap(params, a.batchCapZeroReplica); c.perRank > 0 {
-		return c
+//
+// The learned cap is not read, so none is stamped as used. A variant that
+// ran is priced from its live record (LearnedFromLive) before this path,
+// and a learned cap is keyed to engine arguments a rollout replaces, so a
+// learned cap would rarely apply here in any case.
+func (a *SaturationAnalyzer) zeroReplicaBatchCap(namespace, modelID, variant string,
+	params *capacity.EngineParams) pricedBatchCap {
+	if a.batchCapZeroReplica {
+		return a.pricingBatchCap(namespace, modelID, variant, params, false)
 	}
 	return flagsOrDefaultBatchCap(params)
 }
