@@ -8,14 +8,15 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 )
 
-// extractSequenceCap reads the running-batch size and the preemption rate
-// into the instances the model-scoped queries already found, and skips the
-// rest, like the other supplementary series: a scrape-skewed row must not
-// enter the fleet.
+// extractSequenceCap reads the running-batch size, the preemption rate and
+// the speculative tokens accepted per step into the instances the
+// model-scoped queries already found, and skips the rest, like the other
+// supplementary series: a scrape-skewed row must not enter the fleet.
 //
-// The preemption rate is an agnostic query, which filterResultsToModel does
-// not narrow, so its series are matched to the model here; one carrying no
-// model_name is kept, as the instance key already ties it to a seen pod.
+// The preemption rate and the accepted tokens are agnostic queries, which
+// filterResultsToModel does not narrow, so their series are matched to the
+// model here; one carrying no model_name is kept, as the instance key already
+// ties it to a seen pod.
 func (c *ReplicaMetricsCollector) extractSequenceCap(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	each := func(query string, fn func(d *podMetricData, v float64, finite bool)) {
@@ -46,5 +47,9 @@ func (c *ReplicaMetricsCollector) extractSequenceCap(ctx context.Context, modelI
 	each(registration.QueryPreemptionRate, func(d *podMetricData, v float64, finite bool) {
 		d.preemptionRate = v
 		d.preemptionRateOK = finite
+	})
+	each(registration.QuerySpecAcceptedPerStep, func(d *podMetricData, v float64, finite bool) {
+		d.specAcceptedPerStep = v
+		d.specAcceptedPerStepKnown = finite
 	})
 }

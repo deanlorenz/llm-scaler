@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // A record of one rank is its own busiest rank, whatever the busiest-rank
 // fields hold: the guards read exactly what they read before ranks existed.
@@ -61,5 +64,44 @@ func TestBusiestRankWithoutAReading(t *testing.T) {
 	m.MaxRankKvCacheUsage = 1.5
 	if got := m.BusiestRankTokens(); got != 8000 {
 		t.Errorf("BusiestRankTokens = %d, want the capacity 8000", got)
+	}
+}
+
+// ITLPerToken reads a speculating replica's step time per token, withholds
+// it when the counter is missing under speculative flags, and leaves every
+// other reading alone (#274).
+func TestITLPerToken(t *testing.T) {
+	finite := ReplicaMetrics{AvgITL: 0.03, AvgITLKnown: true}
+	withCounter := finite
+	withCounter.SpecAcceptedPerStep, withCounter.SpecAcceptedPerStepKnown = 2, true
+	spec := ITLStep{Speculates: true}
+	withRounding := withCounter
+	withRounding.SpecAcceptedPerStep = 2 + 1e-9
+	negative := withCounter
+	negative.SpecAcceptedPerStep = -0.5
+	for _, tc := range []struct {
+		name  string
+		m     ReplicaMetrics
+		step  ITLStep
+		itl   float64
+		state ITLState
+		why   ITLWithheld
+	}{
+		{"counter read", withCounter, spec, 0.01, ITLFinite, ITLKept},
+		{"counter read, flags silent", withCounter, ITLStep{}, 0.01, ITLFinite, ITLKept},
+		{"counter at the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 2}, 0.01, ITLFinite, ITLKept},
+		{"counter above the stated draft length", withCounter, ITLStep{Speculates: true, MaxAccepted: 1}, 0, ITLAbsent, ITLOverMax},
+		{"counter a rounding error over the draft length", withRounding, ITLStep{Speculates: true, MaxAccepted: 2}, 0.03 / (3 + 1e-9), ITLFinite, ITLKept},
+		{"a negative counter is not a count", negative, spec, 0, ITLAbsent, ITLNoCounter},
+		{"counter missing under speculative flags", finite, spec, 0, ITLAbsent, ITLNoCounter},
+		{"no speculation", finite, ITLStep{}, 0.03, ITLFinite, ITLKept},
+		{"an engine whose ITL is per token already", withCounter, ITLStep{PerToken: true, Speculates: true}, 0.03, ITLFinite, ITLKept},
+		{"idle", ReplicaMetrics{AvgITLEmpty: true}, spec, 0, ITLEmpty, ITLKept},
+		{"absent", ReplicaMetrics{}, spec, 0, ITLAbsent, ITLKept},
+	} {
+		got, why := tc.m.ITLPerToken(tc.step)
+		if math.Abs(got.AvgITL-tc.itl) > 1e-12 || got.ITLState() != tc.state || why != tc.why {
+			t.Errorf("%s: AvgITL %v (%s, %v), want %v (%s, %v)", tc.name, got.AvgITL, got.ITLState(), why, tc.itl, tc.state, tc.why)
+		}
 	}
 }

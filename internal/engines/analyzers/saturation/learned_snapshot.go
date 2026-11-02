@@ -105,13 +105,27 @@ type LearnedState struct {
 	// baseline and restored with it. Without it a restart under light load
 	// had a baseline and no slope, so no line, and the variant was sized by
 	// KV occupancy alone (issue #316).
-	ITLSlopes     map[string]SlopeSnapshot `json:"itlSlopes,omitempty"`
-	StartSeconds  map[string]float64       `json:"startSeconds,omitempty"`
-	VariantSeenAt map[string]time.Time     `json:"variantSeenAt,omitempty"`
+	ITLSlopes map[string]SlopeSnapshot `json:"itlSlopes,omitempty"`
+	// ITLPerToken names, keyed namespace/variant like Config, each variant
+	// running vLLM with speculative decoding whose ITL baseline, put-aside
+	// baselines and slopes were learned from ITL read per token
+	// (itl_per_token.go). Such a variant it does not name learned them from
+	// the step time, as every build before the field did, and the two differ
+	// by the tokens a step emits: entries in the other unit than the analyzer
+	// reads are not installed. Any other engine is not named: one step is one
+	// token, and its entries are installed either way.
+	ITLPerToken   map[string]bool      `json:"itlPerToken,omitempty"`
+	StartSeconds  map[string]float64   `json:"startSeconds,omitempty"`
+	VariantSeenAt map[string]time.Time `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
 	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
 	ITLLines     map[string]LineSnapshot        `json:"itlLines,omitempty"`
+	// ITLLinesPerToken names, keyed like ITLLines, each line fitted on vLLM
+	// with speculative decoding from ITL read per token
+	// (learnedLine.perToken). A line it does not name was fitted from the
+	// step time, or on an engine where one step is one token.
+	ITLLinesPerToken map[string]bool `json:"itlLinesPerToken,omitempty"`
 	// K2BorrowedSince is the start of each running sibling borrow, the form
 	// a controller before LowerBounds reads. Written for a rollback; read only
 	// for a key LowerBounds does not have.
@@ -363,6 +377,10 @@ type RestoredVariant struct {
 	BoundPriors int
 	// Entries is how many entries were installed, or rejected.
 	Entries int
+	// ITLOtherUnit is true when the variant runs vLLM with speculative
+	// decoding and its ITL baseline and slopes were learned in the other ITL
+	// unit (per step, or per token: itl_per_token.go), so they were left out.
+	ITLOtherUnit bool
 }
 
 // priorKeyRuns says whether a k2 key can be read by the variant on the
@@ -388,7 +406,9 @@ func priorKeyRuns(key string, rec *capacity.Record) bool {
 type pendingVariant struct {
 	expect     string // the fingerprint they were learned under
 	expectArgs string // the same without the image; empty in an older document
-	state      LearnedState
+	// perToken is the unit its ITL entries were learned in (ITLPerToken).
+	perToken bool
+	state    LearnedState
 	// stored is how many k2 windows the document held for the variant,
 	// counted when it was read: the sweep that runs before the variant's
 	// first cycle prunes windows past retention from state, and a window
@@ -539,6 +559,12 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 	}
 	for k, l := range a.itlLines {
 		s.ITLLines[k] = LineSnapshot{A: l.model.A, B: l.model.B, FromVariant: l.fromVariant, LearnedAt: l.learnedAt}
+		if l.perToken {
+			if s.ITLLinesPerToken == nil {
+				s.ITLLinesPerToken = map[string]bool{}
+			}
+			s.ITLLinesPerToken[k] = true
+		}
 	}
 	for k, lb := range a.lowerBounds {
 		s.LowerBounds[k] = lb.snapshot()
@@ -575,11 +601,18 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 	for k := range s.VariantSeenAt {
 		note(k)
 	}
+	// liveParams is the configuration each variant runs now, which says
+	// whether its ITL entries are in a unit that can differ (itlUnitsDiffer).
+	liveParams := map[string]*capacity.EngineParams{}
 	for v, m := range models {
 		ns, name, _ := strings.Cut(v, "/")
 		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams != nil {
+			liveParams[v] = rec.EngineParams
 			s.Config[v] = rec.EngineParams.Fingerprint()
 			s.Args[v] = windowArgs(rec.EngineParams)
+			if a.itlPerToken && rec.EngineParams.SpeculatesPerStep() {
+				markITLPerToken(&s, v)
+			}
 		}
 	}
 
@@ -610,18 +643,29 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 		mergeAbsent(s.K2, p.state.K2)
 		mergeAbsent(s.Throughput, p.state.Throughput)
 		mergeAbsent(s.VariantSeenAt, p.state.VariantSeenAt)
-		mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
-		if len(p.state.ITLBaselineStash) > 0 {
-			if s.ITLBaselineStash == nil {
-				s.ITLBaselineStash = map[string]float64{}
+		// Its ITL entries go out in the unit they came in, which is marked
+		// per variant (ITLPerToken): beside the variant's live entries, which
+		// are in this analyzer's unit, ones in the other unit are left out,
+		// since one mark cannot say both. Only on an engine where the units
+		// differ, as the install decides (itlUnitsDiffer): elsewhere a step
+		// is a token and no mark is written, so the pending entries go out.
+		if !ok || !a.itlUnitsDiffer(p.perToken, liveParams[v]) {
+			if p.perToken {
+				markITLPerToken(&s, v)
 			}
-			mergeAbsent(s.ITLBaselineStash, p.state.ITLBaselineStash)
-		}
-		if len(p.state.ITLSlopes) > 0 {
-			if s.ITLSlopes == nil {
-				s.ITLSlopes = map[string]SlopeSnapshot{}
+			mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
+			if len(p.state.ITLBaselineStash) > 0 {
+				if s.ITLBaselineStash == nil {
+					s.ITLBaselineStash = map[string]float64{}
+				}
+				mergeAbsent(s.ITLBaselineStash, p.state.ITLBaselineStash)
 			}
-			mergeAbsent(s.ITLSlopes, p.state.ITLSlopes)
+			if len(p.state.ITLSlopes) > 0 {
+				if s.ITLSlopes == nil {
+					s.ITLSlopes = map[string]SlopeSnapshot{}
+				}
+				mergeAbsent(s.ITLSlopes, p.state.ITLSlopes)
+			}
 		}
 		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
 		mergeAbsent(s.K2Args, p.state.K2Args)
@@ -796,7 +840,8 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 		case now.Sub(learnedAt) > bucketRetention:
 			rep.Aged++
 		default:
-			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: learnedAt}
+			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: learnedAt,
+				perToken: s.ITLLinesPerToken[k]}
 			rep.ITLLines++
 		}
 	}
@@ -828,7 +873,7 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 		}
 		p := a.pendingRestore[v]
 		if p == nil {
-			p = &pendingVariant{expect: expect, expectArgs: s.Args[v]}
+			p = &pendingVariant{expect: expect, expectArgs: s.Args[v], perToken: s.ITLPerToken[v]}
 			a.pendingRestore[v] = p
 		}
 		return p
@@ -1098,10 +1143,16 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 	delete(a.pendingRestore, key)
 	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size(), Stored: p.stored,
 		BoundPriors: a.boundPriorsLocked(namespace, modelID, variant, rec)}
+	// ITL entries learned in the other unit than this analyzer reads, on an
+	// engine where the two differ, are not latency figures of it: neither its
+	// baseline and slopes nor its put-aside baselines are installed.
+	otherUnit := a.itlUnitsDiffer(p.perToken, rec.EngineParams)
+	out.ITLOtherUnit = otherUnit && (len(p.state.ITLBaseline) > 0 || len(p.state.ITLSlopes) > 0 ||
+		len(p.state.ITLBaselineStash) > 0)
 	switch {
 	case whole:
 		out.Outcome, out.Installed = RestoredWhole, true
-		out.Entries = a.installLocked(p.state, windowsUnder, true)
+		out.Entries = a.installLocked(p.state, windowsUnder, !otherUnit)
 	case args:
 		out.Outcome, out.Installed, out.ImageChanged = RestoredArgs, true, true
 		out.Entries = a.installLocked(p.state, windowsUnder, false)
@@ -1129,8 +1180,19 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 		out.Outcome = RestoredDiffers
 		out.Priors, _ = a.installPreviousK2Locked(p.state, legacyArgsPrefix+p.expect, rec)
 	}
-	a.installITLStashLocked(p, out.Installed)
+	if !otherUnit {
+		a.installITLStashLocked(p, out.Installed)
+	}
 	return out, true
+}
+
+// markITLPerToken names v in s.ITLPerToken: its ITL entries were learned
+// from ITL read per token.
+func markITLPerToken(s *LearnedState, v string) {
+	if s.ITLPerToken == nil {
+		s.ITLPerToken = map[string]bool{}
+	}
+	s.ITLPerToken[v] = true
 }
 
 // installPreviousK2Locked installs a variant's restored k2 and throughput

@@ -62,7 +62,10 @@ func TestTheTrimKeepsAPriorWithItsClock(t *testing.T) {
 // document and to neither list is caught here, rather than growing past the
 // bound with nothing able to trim it -- which is how the prior got in.
 func TestEveryLearnedStateMapIsTrimmable(t *testing.T) {
-	kept := map[string]bool{"Config": true, "Args": true}
+	// ITLPerToken is a per-variant tag like them: one bool, and losing it
+	// only makes a speculating variant's ITL entries read as step time,
+	// which the restore then leaves out.
+	kept := map[string]bool{"Config": true, "Args": true, "ITLPerToken": true}
 	var s saturation.LearnedState
 	v := reflect.ValueOf(&s).Elem()
 	for i := range v.NumField() {
@@ -89,5 +92,37 @@ func TestEveryLearnedStateMapIsTrimmable(t *testing.T) {
 		if f.Len() != 0 {
 			t.Errorf("LearnedState.%s keeps an entry the size bound cannot drop", name)
 		}
+	}
+}
+
+// A line's unit mark left with no line (#274) is spare: the size bound drops
+// it before any entry that prices something, and a line keeps its own mark.
+func TestTheTrimDropsAnOrphanedLineUnitMarkFirst(t *testing.T) {
+	now := time.Now()
+	s := saturation.LearnedState{
+		ITLLines: map[string]saturation.LineSnapshot{"line": {A: 0.05, B: 0.01, FromVariant: "ns|m|v|H100|1",
+			LearnedAt: now.Add(-time.Hour)}},
+		ITLLinesPerToken: map[string]bool{"line": true, "orphan": true},
+	}
+	full, dropped, err := encodeLearnedState(s, now, 1<<20)
+	if err != nil || dropped != 0 {
+		t.Fatalf("precondition: full encode, dropped=%d err=%v", dropped, err)
+	}
+	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	if err != nil {
+		t.Fatalf("trimmed encode: %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("one entry over the bound, %d dropped", dropped)
+	}
+	var doc learnedStateDoc
+	if err := json.NewDecoder(strings.NewReader(raw)).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.State.ITLLinesPerToken["orphan"] {
+		t.Error("the orphaned mark was kept and something else dropped")
+	}
+	if _, kept := doc.State.ITLLines["line"]; !kept || !doc.State.ITLLinesPerToken["line"] {
+		t.Errorf("the line or its mark was dropped before the orphan: %+v %+v", doc.State.ITLLines, doc.State.ITLLinesPerToken)
 	}
 }

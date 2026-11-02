@@ -322,6 +322,22 @@ type ReplicaMetrics struct {
 	AvgITLKnown bool
 	AvgITLEmpty bool
 
+	// SpecAcceptedPerStep is the draft tokens vLLM's speculative decoding
+	// (or MTP) accepted per decode step on this replica, over AvgITL's window:
+	// rate(vllm:spec_decode_num_accepted_tokens_total) over
+	// rate(vllm:inter_token_latency_seconds_count). vLLM observes ITL once per
+	// request per step, however many tokens the step emitted, so with
+	// speculation AvgITL is the step time and a step emits
+	// 1 + SpecAcceptedPerStep tokens (issue #274). SGLang's ITL is already per
+	// token, and it is never collected for SGLang.
+	SpecAcceptedPerStep float64
+	// SpecAcceptedPerStepKnown is set when SpecAcceptedPerStep was read from a
+	// present, finite, non-negative series. vLLM publishes the counter only
+	// with a speculative configuration, so an absent series is either no
+	// speculation or a missing reading; the engine's flags tell the two apart
+	// (ITLPerToken). A pod whose ranks did not all report one is not known.
+	SpecAcceptedPerStepKnown bool
+
 	// AvgTTFT is the average time to first token on this replica in seconds.
 	// Derived from rate(vllm:time_to_first_token_seconds_sum[1m]) / rate(..._count[1m]),
 	// and the SGLang histogram of the same name.
@@ -479,6 +495,78 @@ func (m ReplicaMetrics) ITLState() ITLState {
 	default:
 		return ITLAbsent
 	}
+}
+
+// ITLStep says how a replica's engine reports its inter-token latency, for
+// ITLPerToken.
+type ITLStep struct {
+	// PerToken is an engine whose ITL is per token already (SGLang divides
+	// each step's interval by the tokens it emitted): its rows are read as
+	// they are, whatever counter they carry.
+	PerToken bool
+	// Speculates is an engine whose ITL is per step and whose flags configure
+	// speculative decoding or MTP (vLLM's --speculative-config).
+	Speculates bool
+	// MaxAccepted is the draft tokens a step proposes at most
+	// (num_speculative_tokens), and so the most it can accept; 0 when the
+	// flags do not state it.
+	MaxAccepted int
+}
+
+// ITLWithheld is why ITLPerToken withheld a reading: no counter beside
+// speculative flags, or a counter above what a step can accept.
+type ITLWithheld int
+
+// The reasons ITLPerToken withholds a reading.
+const (
+	// ITLKept is a reading kept, corrected or not.
+	ITLKept ITLWithheld = iota
+	// ITLNoCounter is a reading of an engine whose flags speculate, with no
+	// SpecAcceptedPerStep read.
+	ITLNoCounter
+	// ITLOverMax is a reading whose SpecAcceptedPerStep is above
+	// ITLStep.MaxAccepted, which no step can accept.
+	ITLOverMax
+)
+
+// ITLPerToken is the record with AvgITL read per generated token rather
+// than per engine step (issue #274), and why a reading was withheld.
+//
+//   - On an engine whose ITL is per token already (ITLStep.PerToken), the
+//     record is returned as it is.
+//   - A known SpecAcceptedPerStep divides a finite AvgITL by the tokens a
+//     step emits, 1 + SpecAcceptedPerStep, flags or not: the counter exists
+//     only when the engine speculates. Above ITLStep.MaxAccepted, when that
+//     is stated, it is not a count a step can produce, and the reading is
+//     withheld (ITLOverMax): an over-read count over-states the token rate,
+//     the direction that under-orders.
+//   - Without it, a replica whose flags speculate has its finite AvgITL
+//     withheld (ITLNoCounter): a step time of unknown length is not a
+//     per-token reading, and a missing counter is not "no speculation".
+//   - Otherwise the record is returned as it is: one token per step.
+//
+// A withheld reading is zeroed as well as marked absent: the ITL window reads
+// AvgITL > 0, and the value too must say there is no reading. A record with
+// no positive finite AvgITL is returned as it is: an idle replica is idle in
+// either unit.
+func (m ReplicaMetrics) ITLPerToken(step ITLStep) (ReplicaMetrics, ITLWithheld) {
+	if step.PerToken || !(m.AvgITL > 0) || math.IsInf(m.AvgITL, 1) {
+		return m, ITLKept
+	}
+	switch {
+	case m.SpecAcceptedPerStepKnown && m.SpecAcceptedPerStep >= 0 && !math.IsInf(m.SpecAcceptedPerStep, 0):
+		// A ratio of two rates at full acceptance can land a rounding error
+		// over the bound; that is not a count over it.
+		if step.MaxAccepted > 0 && m.SpecAcceptedPerStep > float64(step.MaxAccepted)*(1+1e-6) {
+			m.AvgITL, m.AvgITLKnown = 0, false
+			return m, ITLOverMax
+		}
+		m.AvgITL /= 1 + m.SpecAcceptedPerStep
+	case step.Speculates:
+		m.AvgITL, m.AvgITLKnown = 0, false
+		return m, ITLNoCounter
+	}
+	return m, ITLKept
 }
 
 // Ranks is the number of data-parallel engine ranks the record covers, never

@@ -153,7 +153,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		Expect(fitA.IsZero()).To(BeFalse(), "ten readings over 0.36 of k must fit")
 		a.publishLine(physics, keyA, fitA, a.now())
 
-		got, from, ok := a.borrowLine(physics, keyB)
+		got, from, ok := a.borrowLine(physics, keyB, false)
 		Expect(ok).To(BeTrue(), "B must be able to start from A's line")
 		Expect(from).To(Equal(keyA), "the owner is reported so a log can name it")
 		Expect(got).To(Equal(fitA))
@@ -169,7 +169,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{}, a.now(), logr.Discard()).Model
 		a.publishLine(physics, keyA, fitA, a.now())
 
-		_, _, ok := a.borrowLine(physics, keyA)
+		_, _, ok := a.borrowLine(physics, keyA, false)
 		Expect(ok).To(BeFalse(), "a variant's own line is not a borrow")
 	})
 
@@ -206,7 +206,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{}, a.now(), logr.Discard()).Model
 		a.publishLine(physics, keyA, fitA, a.now())
 
-		_, _, ok := a.borrowLine(physics, keyB)
+		_, _, ok := a.borrowLine(physics, keyB, false)
 		Expect(ok).To(BeTrue())
 		Expect(a.itlLines[physics].fromVariant).To(Equal(keyA),
 			"the recorded owner must still be the variant that measured it")
@@ -222,7 +222,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		a.publishLine("", "k", itl.Model{A: 0.03, B: 0.002}, a.now())
 		Expect(a.itlLines).To(BeEmpty())
-		_, _, ok := a.borrowLine("", "k")
+		_, _, ok := a.borrowLine("", "k", false)
 		Expect(ok).To(BeFalse())
 	})
 
