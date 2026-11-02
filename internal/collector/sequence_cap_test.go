@@ -149,7 +149,7 @@ func TestSequenceCapAcrossRanks(t *testing.T) {
 	rank := func(running int) domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", VariantName: "v", Ready: true,
 			TotalKvCapacityTokens: 100000, KvUsageInstant: 0.87, KvUsageInstantKnown: true,
-			AvgITL: 0.08, GenerationTokenRate: 3000, RequestRate: 3,
+			AvgITL: 0.08, AvgITLKnown: true, GenerationTokenRate: 3000, RequestRate: 3, RequestRateKnown: true,
 			RunningRequests: running, QueueLength: 384, PreemptionRateKnown: true}
 	}
 	adm := itl.Admission{MaxNumSeqs: maxSeqs}

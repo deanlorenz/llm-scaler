@@ -29,6 +29,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 			KvCacheUsage: 0.25, KvUsageInstant: 0.25, KvUsageMean: 0.25, QueueLength: 2,
 			RequestRate: 1, GenerationTokenRate: 100,
 			AvgInputTokens: 100, AvgOutputTokens: 20, AvgITL: 0.02, AvgServiceTime: 10, PrefixCacheHitRate: 0.4,
+			AvgITLKnown: true, RequestRateKnown: true,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 5 * time.Second, FreshnessStatus: "fresh"},
 		},
 		{
@@ -37,6 +38,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 			KvCacheUsage: 1.0, KvUsageInstant: 1.0, KvUsageMean: 1.0, QueueLength: 5,
 			RequestRate: 3, GenerationTokenRate: 300,
 			AvgInputTokens: 200, AvgOutputTokens: 40, AvgITL: 0.06, AvgServiceTime: 30, PrefixCacheHitRate: 0.8,
+			AvgITLKnown: true, RequestRateKnown: true,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 30 * time.Second, FreshnessStatus: "stale"},
 		},
 	}
@@ -240,15 +242,57 @@ func TestCollapseToPods_MeanKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
 	assert.InDelta(t, 0.3, pods[1].KvUsageMean, 1e-9)
 }
 
+func TestCollapseToPods_ITLMeanCoversFiniteRanksOnly(t *testing.T) {
+	// The pod's ITL is the generation-weighted mean over the ranks that
+	// measured one (#341 4a). An Empty rank that generated tokens
+	// (max_tokens=1 requests) has no interval: weighed in, it read pod-a as
+	// 0.02 x 100 / 150 = 13.3ms and Absent. pod-b: an Absent rank still makes
+	// the pod Absent, but the value is the Finite rank's. pod-c: with no
+	// generation rate the fallback weighs the Finite ranks by request rate,
+	// and the busy Empty rank is left out of that too, (0.02 + 3 x 0.06) / 4,
+	// not (0.02 + 3 x 0.06) / 14.
+	finite := func(pod string, itl, gen, req float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, AvgITL: itl, AvgITLKnown: true,
+			GenerationTokenRate: gen, RequestRate: req}
+	}
+	instances := []domain.ReplicaMetrics{
+		finite("pod-a", 0.02, 100, 1),
+		{PodName: "pod-a", AvgITLEmpty: true, GenerationTokenRate: 50, RequestRate: 50},
+		finite("pod-b", 0.02, 100, 1),
+		{PodName: "pod-b", GenerationTokenRate: 200, RequestRate: 2},
+		finite("pod-c", 0.02, 0, 1),
+		finite("pod-c", 0.06, 0, 3),
+		{PodName: "pod-c", AvgITLEmpty: true, RequestRate: 10},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 3)
+	assert.Equal(t, domain.ITLFinite, pods[0].ITLState(), "pod-a: the Empty rank that generated blocked Finite")
+	assert.InDelta(t, 0.02, pods[0].AvgITL, 1e-12, "pod-a: the Empty rank diluted the mean")
+	assert.Equal(t, 150.0, pods[0].GenerationTokenRate, "the rate still sums every rank")
+	assert.Equal(t, domain.ITLAbsent, pods[1].ITLState(), "pod-b: an Absent rank hides its own mean")
+	assert.InDelta(t, 0.02, pods[1].AvgITL, 1e-12, "pod-b: the Absent rank diluted the mean")
+	assert.Equal(t, domain.ITLFinite, pods[2].ITLState())
+	assert.InDelta(t, 0.05, pods[2].AvgITL, 1e-12, "pod-c: the request-rate fallback counted the Empty rank")
+}
+
 func TestCollapseToPods_SpecAcceptedKnownOnlyIfEveryRankReportedIt(t *testing.T) {
 	// The tokens a speculative step emits, per rank: weighted by the steps
-	// each ran, its tokens over 1 + E, and known only when every rank was
-	// read (#274). pod-b: 300/2 = 150 steps at 1 and 100/3 at 2.
+	// each ran, its tokens over 1 + E, and known only when every Finite rank
+	// was read (#274). pod-b: 300/2 = 150 steps at 1 and 100/3 at 2.
+	finite := func(pod string, gen float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, GenerationTokenRate: gen, AvgITL: 0.03, AvgITLKnown: true}
+	}
+	counted := func(m domain.ReplicaMetrics, e float64) domain.ReplicaMetrics {
+		m.SpecAcceptedPerStep, m.SpecAcceptedPerStepKnown = e, true
+		return m
+	}
 	instances := []domain.ReplicaMetrics{
-		{PodName: "pod-a", GenerationTokenRate: 100, SpecAcceptedPerStep: 1.5, SpecAcceptedPerStepKnown: true},
-		{PodName: "pod-a", GenerationTokenRate: 100},
-		{PodName: "pod-b", GenerationTokenRate: 300, SpecAcceptedPerStep: 1, SpecAcceptedPerStepKnown: true},
-		{PodName: "pod-b", GenerationTokenRate: 100, SpecAcceptedPerStep: 2, SpecAcceptedPerStepKnown: true},
+		counted(finite("pod-a", 100), 1.5),
+		finite("pod-a", 100),
+		counted(finite("pod-b", 300), 1),
+		counted(finite("pod-b", 100), 2),
 	}
 
 	pods := collapseToPods(instances)
@@ -280,4 +324,78 @@ func TestCollapseToPods_AnIdleRankDoesNotHideTheSpecAcceptedCount(t *testing.T) 
 	assert.True(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: the idle rank hid the busy rank's count")
 	assert.InDelta(t, 2, pods[0].SpecAcceptedPerStep, 1e-9)
 	assert.False(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: no rank read a count")
+}
+
+func TestCollapseToPods_SpecAcceptedCoversTheFiniteRanks(t *testing.T) {
+	// The count covers the ranks the ITL mean covers, since 1 + E divides
+	// that mean. pod-a: an Empty rank that generated tokens (max_tokens=1)
+	// ran no decode step; its missing count does not hide the Finite rank's,
+	// as it does not block the pod's ITL. pod-b: an Absent rank is not in the
+	// mean, so its count, read or not, is not in E: E is the Finite rank's 1,
+	// not a blend with the Absent rank's 3. pod-c: no Finite rank, no count.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 2, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-a", GenerationTokenRate: 50, AvgITLEmpty: true},
+		{PodName: "pod-b", GenerationTokenRate: 300, AvgITL: 0.03, AvgITLKnown: true,
+			SpecAcceptedPerStep: 1, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-b", GenerationTokenRate: 300, SpecAcceptedPerStep: 3, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-c", GenerationTokenRate: 300, SpecAcceptedPerStep: 1, SpecAcceptedPerStepKnown: true},
+		{PodName: "pod-c", GenerationTokenRate: 50, AvgITLEmpty: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 3)
+	assert.True(t, pods[0].SpecAcceptedPerStepKnown, "pod-a: the Empty rank that generated hid the count")
+	assert.InDelta(t, 2, pods[0].SpecAcceptedPerStep, 1e-9)
+	assert.True(t, pods[1].SpecAcceptedPerStepKnown, "pod-b: the Absent rank's count is not the mean's")
+	assert.InDelta(t, 1, pods[1].SpecAcceptedPerStep, 1e-9, "pod-b: the Absent rank's count was blended in")
+	assert.False(t, pods[2].SpecAcceptedPerStepKnown, "pod-c: no Finite rank, so no count")
+	assert.Zero(t, pods[2].SpecAcceptedPerStep)
+}
+
+func TestCollapseToPods_ITLMeanWeighsByTokens(t *testing.T) {
+	// Each Finite rank weighs by the tokens it generated, not by its
+	// inter-token intervals (GenerationTokenRate - RequestRate), because
+	// RequestRate counts finished requests and bursts when a batch drains.
+	// pod-a: 1 req/s of 100 tokens at 20ms beside 50 req/s of 2 tokens at
+	// 60ms reads 40ms by tokens. The per-pod PromQL mean divides by intervals
+	// and reads (99 x 0.02 + 50 x 0.06) / 149 = 33.4ms; the token weight
+	// gives the short-request rank more, here the slower one, so it reads
+	// higher, the safe side. pod-b: the slow rank's batch just drained, so
+	// its finished requests (150/s) outrun its tokens (100/s). By intervals
+	// it would clamp to weight 0 and the pod would read the fast rank's 20ms;
+	// by tokens it keeps its share and the pod reads 40ms.
+	rank := func(pod string, itl, gen, req float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, AvgITL: itl, AvgITLKnown: true,
+			GenerationTokenRate: gen, RequestRate: req, RequestRateKnown: true}
+	}
+	instances := []domain.ReplicaMetrics{
+		rank("pod-a", 0.02, 100, 1),
+		rank("pod-a", 0.06, 100, 50),
+		rank("pod-b", 0.02, 100, 1),
+		rank("pod-b", 0.06, 100, 150),
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.InDelta(t, 0.04, pods[0].AvgITL, 1e-12, "pod-a: weighed by intervals, not tokens (33.4ms)")
+	assert.InDelta(t, 0.04, pods[1].AvgITL, 1e-12, "pod-b: the draining slow rank dropped out of the mean")
+}
+
+func TestCollapseToPods_NoFiniteRankReadsNoITL(t *testing.T) {
+	// With no Finite rank there is no mean, and AvgITL is 0 whatever the
+	// ranks carry, so a reader of AvgITL > 0 sees no reading.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", AvgITL: 0.02, GenerationTokenRate: 100},
+		{PodName: "pod-a", AvgITLEmpty: true, GenerationTokenRate: 50},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 1)
+	assert.Equal(t, domain.ITLAbsent, pods[0].ITLState())
+	assert.Zero(t, pods[0].AvgITL)
 }
