@@ -352,10 +352,13 @@ add a second one. A bit is true when the series was present, finite and inside
 its block's range. A read zero is known (no work), except for ITL: ITL is
 `ITLFinite` only for a finite value above 0; a NaN is `ITLEmpty`; ±Inf, a
 value at or below 0, or a failed query is `ITLAbsent`. A not-Ready Pod clears
-only its ITL bits. Ranks merge by AND; for ITL, Finite needs one Finite rank,
-none Absent, and no Empty rank that generated tokens; Empty needs every rank
-Empty. A prefill-role Pod reads Empty permanently, so readers gate by role.
-Computing the Pod's mean over Finite ranks only is #341 4a's named change.
+only its ITL bits. Ranks merge by AND; for ITL, Finite needs one Finite rank
+and none Absent; Empty needs every rank Empty and none that generated tokens.
+The Pod's mean is generation-weighted over its Finite ranks only (#341 4a's
+named change, made in the collector ahead of 4a): an Empty rank that generated
+tokens (max_tokens=1) has no interval, so it neither dilutes the mean nor
+blocks Finite. A prefill-role Pod reads Empty permanently, so readers gate by
+role.
 
 `RunningRequestsKnown` is a prerequisite of #277 (reading
 `num_requests_running` as resident load). `RunningRequests` is "zero when the

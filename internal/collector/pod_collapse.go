@@ -49,16 +49,17 @@ import (
 //     merges the same way, and is known only if every instance reported it.
 //   - Every other presence bit (the ...Known fields) is likewise known only if
 //     every instance reported it. ITL's three states merge as described at
-//     the loop: known if one rank measured a mean, none is absent and no
-//     empty rank generated tokens; empty only if every rank is.
+//     the loop: known if one rank measured a mean and none is absent;
+//     empty only if every rank is and none generated tokens.
 //   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
 //     instance serving more of them should dominate. ITL is a mean per
-//     generated token and weighs by GenerationTokenRate; the prefix hit rate
-//     is a fraction of prompt tokens and weighs by the prompt-token rate. Each
-//     weight is the count the matching PromQL mean divides by, so ranks merged
-//     here and ranks folded by the per-pod queries give the same figure. With
-//     no traffic anywhere on the pod they fall back to the plain mean.
+//     generated token, taken over the ranks that measured one, and weighs
+//     by GenerationTokenRate; the prefix hit rate is a fraction of prompt
+//     tokens and weighs by the prompt-token rate. Each weight is the count
+//     the matching PromQL mean divides by, so ranks merged here and ranks
+//     folded by the per-pod queries give the same figure. With no traffic
+//     anywhere on the pod they fall back to the plain mean.
 //   - Metadata takes the worst freshness and the oldest age across the
 //     instances, so a pod is only as trustworthy as its stalest rank.
 //
@@ -149,18 +150,22 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.RequestRateKnown = true
 	pod.RunningRequestsKnown = true
 	// ITL has three states (domain.ITLState). The pod's mean is known when
-	// at least one rank measured one and no rank is absent: an idle rank adds
-	// no tokens to the per-token mean, a missing one would hide its own. It
-	// is empty only when every rank is.
+	// at least one rank measured one (Finite) and no rank is Absent: a
+	// missing rank would hide its own mean, so any Absent rank makes the pod
+	// Absent. It is Empty only when every rank is Empty and none generated
+	// tokens.
 	//
-	// An empty rank that GENERATED tokens (max_tokens=1 requests give a
-	// generation rate and no inter-token interval) makes the pod absent:
-	// AvgITL below weighs each rank by its generation rate, so that rank adds
-	// weight with an ITL of 0 and dilutes the mean. The value is left as it
-	// is, since the analyzers read it today; computing the pod's mean over
-	// the finite ranks only is #341 4a's named change, and until then the
-	// state says the mean is not a measurement.
-	itlAnyKnown, itlAllEmpty, itlNoneAbsent, itlEmptyGenerated := false, true, true, false
+	// The mean is taken over the Finite ranks only (AvgITL below). An Empty
+	// rank has no inter-token interval to give, even when it GENERATED
+	// tokens (max_tokens=1 requests give a generation rate and no interval).
+	// Weighing it in by its generation rate would add its tokens at an ITL
+	// of 0 and read the pod low, which prices mu high. So an Empty rank,
+	// with or without tokens, neither enters the mean nor blocks Finite. A
+	// pod whose ranks are all Empty and one of which generated tokens stays
+	// Absent: it served tokens and measured no interval, so it is neither a
+	// mean nor an idle window.
+	itlAllEmpty, itlNoneAbsent, itlEmptyGenerated := true, true, false
+	itlFinite := make([]domain.ReplicaMetrics, 0, len(group))
 	for _, m := range group {
 		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
 		pod.KvUsageMeanKnown = pod.KvUsageMeanKnown && m.KvUsageMeanKnown
@@ -172,7 +177,9 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 		pod.RequestRateKnown = pod.RequestRateKnown && m.RequestRateKnown
 		pod.RunningRequestsKnown = pod.RunningRequestsKnown && m.RunningRequestsKnown
 		state := m.ITLState()
-		itlAnyKnown = itlAnyKnown || state == domain.ITLFinite
+		if state == domain.ITLFinite {
+			itlFinite = append(itlFinite, m)
+		}
 		itlAllEmpty = itlAllEmpty && state == domain.ITLEmpty
 		itlNoneAbsent = itlNoneAbsent && state != domain.ITLAbsent
 		itlEmptyGenerated = itlEmptyGenerated || (state == domain.ITLEmpty && m.GenerationTokenRate > 0)
@@ -204,7 +211,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	if !pod.CapacityQueueKnown {
 		pod.CapacityQueueLength, pod.MaxRankCapacityQueueLength = 0, 0
 	}
-	pod.AvgITLKnown = itlAnyKnown && itlNoneAbsent && !itlEmptyGenerated
+	pod.AvgITLKnown = len(itlFinite) > 0 && itlNoneAbsent
 	pod.AvgITLEmpty = itlAllEmpty && !itlEmptyGenerated
 
 	// BlockSize is a per-instance config value, uniform across a pod's ranks;
@@ -226,12 +233,22 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// instance that served more requests counts for more.
 	pod.AvgOutputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensRecent })
 	pod.AvgInputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokensRecent })
-	// ITL is a per-TOKEN mean, so each instance weighs by the tokens it
-	// generated. That is what the per-pod ITL query computes for ranks behind
-	// one API server (sum of the ITL sums over sum of the counts, one count
-	// per generated token), so both layouts agree. Falls back to the request
-	// rate when no instance reports a generation rate.
-	pod.AvgITL = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
+	// ITL is a per-TOKEN mean over the Finite ranks, so each weighs by the
+	// tokens it generated. That is what the per-pod ITL query computes for
+	// ranks behind one API server (sum of the ITL sums over sum of the
+	// counts, one count per inter-token interval), so both layouts agree. An
+	// Empty rank's tokens have no interval in that count, so it is left out
+	// here too. Falls back to the request rate when no Finite rank reports a
+	// generation rate. The value is computed even when an Absent rank makes
+	// the state Absent: readers that gate on the value rather than the
+	// state get the Finite ranks' mean, not one diluted by the missing rank.
+	// With no Finite rank there is no mean; the value is the whole pod's, as
+	// before, and the state says it is not a measurement.
+	itlRanks := itlFinite
+	if len(itlRanks) == 0 {
+		itlRanks = group
+	}
+	pod.AvgITL = weightedBy(itlRanks, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
 		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
 	// Weighted like AvgITL: both are per-request costs, so the engine instance
 	// that served more requests should count for more when merging a pod's

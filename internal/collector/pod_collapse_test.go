@@ -239,3 +239,38 @@ func TestCollapseToPods_MeanKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
 	assert.True(t, pods[1].KvUsageMeanKnown, "pod-b: both ranks reported one")
 	assert.InDelta(t, 0.3, pods[1].KvUsageMean, 1e-9)
 }
+
+func TestCollapseToPods_ITLMeanCoversFiniteRanksOnly(t *testing.T) {
+	// The pod's ITL is the generation-weighted mean over the ranks that
+	// measured one (#341 4a). An Empty rank that generated tokens
+	// (max_tokens=1 requests) has no interval: weighed in, it read pod-a as
+	// 0.02 x 100 / 150 = 13.3ms and Absent. pod-b: an Absent rank still makes
+	// the pod Absent, but the value is the Finite rank's. pod-c: with no
+	// generation rate the fallback weighs the Finite ranks by request rate,
+	// and the busy Empty rank is left out of that too, (0.02 + 3 x 0.06) / 4,
+	// not (0.02 + 3 x 0.06) / 14.
+	finite := func(pod string, itl, gen, req float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, AvgITL: itl, AvgITLKnown: true,
+			GenerationTokenRate: gen, RequestRate: req}
+	}
+	instances := []domain.ReplicaMetrics{
+		finite("pod-a", 0.02, 100, 1),
+		{PodName: "pod-a", AvgITLEmpty: true, GenerationTokenRate: 50, RequestRate: 50},
+		finite("pod-b", 0.02, 100, 1),
+		{PodName: "pod-b", GenerationTokenRate: 200, RequestRate: 2},
+		finite("pod-c", 0.02, 0, 1),
+		finite("pod-c", 0.06, 0, 3),
+		{PodName: "pod-c", AvgITLEmpty: true, RequestRate: 10},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 3)
+	assert.Equal(t, domain.ITLFinite, pods[0].ITLState(), "pod-a: the Empty rank that generated blocked Finite")
+	assert.InDelta(t, 0.02, pods[0].AvgITL, 1e-12, "pod-a: the Empty rank diluted the mean")
+	assert.Equal(t, 150.0, pods[0].GenerationTokenRate, "the rate still sums every rank")
+	assert.Equal(t, domain.ITLAbsent, pods[1].ITLState(), "pod-b: an Absent rank hides its own mean")
+	assert.InDelta(t, 0.02, pods[1].AvgITL, 1e-12, "pod-b: the Absent rank diluted the mean")
+	assert.Equal(t, domain.ITLFinite, pods[2].ITLState())
+	assert.InDelta(t, 0.05, pods[2].AvgITL, 1e-12, "pod-c: the request-rate fallback counted the Empty rank")
+}
