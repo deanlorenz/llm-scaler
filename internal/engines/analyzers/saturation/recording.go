@@ -114,9 +114,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
 // SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken,
 // SwitchKVPerRequestOutputDispersion and SwitchBatchCapZeroReplica; a name
-// it does not know is an error,
-// and sets nothing. Never called on a production path; a
-// test holds that.
+// it does not know is an error, and sets nothing. Never called on a
+// production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -156,7 +155,8 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// #276: the spread of output lengths in the KV per request.
 		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
 
-		// #427: the zero-replica estimate reads the declared batch cap.
+		// #427: the zero-replica estimate reads the declared batch cap
+		// where the flags state none.
 		SwitchBatchCapZeroReplica: &a.batchCapZeroReplica,
 	}
 }

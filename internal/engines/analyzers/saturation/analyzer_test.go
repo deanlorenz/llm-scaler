@@ -1019,7 +1019,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					AcceleratorName: accel, GpuCount: 1, LearnedFrom: "deployment",
 					EffectiveCapacity: params.EffectiveMaxBatchedTokens, EngineParams: &params,
 				}
-				return NewSaturationAnalyzer(capacity.NewStore()).estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, 1, logr.Discard())
+				return NewSaturationAnalyzer(capacity.NewStore()).estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, 1, "", logr.Discard())
 			}
 			// N_steady = min(65536*600/1600, S) = S; capacity = S * (1000 + 300).
 			Expect(estimate("--max-num-seqs=256", "--max-num-batched-tokens=65536")).To(Equal(float64(256 * 1300)))

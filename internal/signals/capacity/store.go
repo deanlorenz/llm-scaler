@@ -151,9 +151,9 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 //
 // The reason to keep serving an old record is NOT that the figure is clamped.
 // A record's commonest use on the read path is rec.EngineParams, which feeds
-// the saturation analyzer's zero-replica estimate (estimateStoredCapacity)
-// -- the DERIVED k2, the figure the rest of this
-// change calls the one that raises capacity. So a stale record there pushes
+// the DERIVED k2 of the saturation analyzer's zero-replica estimate
+// (estimateStoredCapacity), the figure the rest of this change calls the one
+// that raises capacity. So a stale record there pushes
 // capacity UP, the opposite of the k2-history argument, which does not
 // transfer to this package. Two further paths set capacity from a record with
 // no bound from any current k1 at all:

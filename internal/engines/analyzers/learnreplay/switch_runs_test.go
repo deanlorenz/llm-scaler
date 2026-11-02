@@ -103,6 +103,8 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestBatchCapZeroReplica_ADeclaredCapAbove256RaisesTheEstimate"},
 		{"../saturation", "TestBatchCapZeroReplica_TheFlagsWinAndTheDefaultIsNamed"},
 		{"../saturation", "TestBatchCapZeroReplica_TheSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapZeroReplica_APrefillVariantKeepsTheFlagsOrTheDefault"},
+		{"../saturation", "TestBatchCapZeroReplica_ALearnedCapIsNeverRead"},
 	},
 	saturation.SwitchITLPerToken: {
 		{"../saturation", "TestITLPerToken_TheLineIsFittedPerAcceptedToken"},

@@ -1270,6 +1270,9 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	// fleet's request-weighted E[O^2]/(2 E[O]) over the plain mean's half.
 	// 1 is none.
 	modelFactor float64,
+	// role is the variant's role: a prefill variant keeps the batch cap
+	// its flags state or the default (zeroReplicaBatchCap).
+	role string,
 	logger logr.Logger,
 ) float64 {
 	if rec == nil {
@@ -1290,7 +1293,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		// S is the cap the scale target states, flags else declared, else
 		// the default, and never the learned cap (zeroReplicaBatchCap,
 		// issue #427).
-		batchCap := a.zeroReplicaBatchCap(namespace, modelID, variantName, rec.EngineParams)
+		batchCap := a.zeroReplicaBatchCap(namespace, modelID, variantName, role, rec.EngineParams)
 		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
 			bounded := derived
 			boundedBy := "derived"

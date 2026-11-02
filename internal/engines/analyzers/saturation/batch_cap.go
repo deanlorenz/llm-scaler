@@ -364,21 +364,24 @@ func flagsOrDefaultBatchCap(params *capacity.EngineParams) pricedBatchCap {
 
 // zeroReplicaBatchCap is the batch cap one engine rank of a variant at zero
 // replicas is priced at by its derived estimate (estimateStoredCapacity),
-// and its source. With SwitchBatchCapZeroReplica on it is pricingBatchCap
-// without learning: the cap the flags state, else, with
+// and its source. With SwitchBatchCapZeroReplica on, for a decode or
+// aggregated variant, it is pricingBatchCap without learning: the cap the flags state, else, with
 // SwitchBatchCapDeclared on, the cap the llm-d.ai/max-num-seqs annotation
 // declares, else the parser's default. Off, as before issue #427, the
 // flags' cap or the default (flagsOrDefaultBatchCap): a variant that
 // declares 64 was priced at 64 per replica once a pod ran, and at 256 on its
 // way up from zero.
 //
-// The learned cap is not read, so none is stamped as used. A variant that
-// ran is priced from its live record (LearnedFromLive) before this path,
-// and a learned cap is keyed to engine arguments a rollout replaces, so a
-// learned cap would rarely apply here in any case.
-func (a *SaturationAnalyzer) zeroReplicaBatchCap(namespace, modelID, variant string,
+// The learned cap is never read, so none is stamped as used.
+//
+// A prefill variant keeps the flags' cap or the default, switch on or off.
+// P3 never prices prefill, so no live prefill replica is priced at a
+// declared cap, and the zero-replica figure for prefill is not the figure
+// its first replica will get. Moving it would change the order from zero
+// and the optimizer's cost ranking on a cap nothing else reads for prefill.
+func (a *SaturationAnalyzer) zeroReplicaBatchCap(namespace, modelID, variant, role string,
 	params *capacity.EngineParams) pricedBatchCap {
-	if a.batchCapZeroReplica {
+	if a.batchCapZeroReplica && domain.CanonicalRole(role) != domain.RolePrefill {
 		return a.pricingBatchCap(namespace, modelID, variant, params, false)
 	}
 	return flagsOrDefaultBatchCap(params)

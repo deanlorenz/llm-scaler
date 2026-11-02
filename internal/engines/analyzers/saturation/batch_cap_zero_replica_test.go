@@ -2,9 +2,11 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -84,4 +86,58 @@ func TestBatchCapZeroReplica_TheSwitchPicksTheSource(t *testing.T) {
 	f = zeroReplicaEstimateOf(t, declaredParams(64), 1, func(a *SaturationAnalyzer) { a.batchCapDeclared = false })
 	assert.EqualValues(t, 320_000, f["derivedCapacity"])
 	assert.Equal(t, batchCapDefault, f["batchCapSource"])
+}
+
+// A prefill variant keeps the flags' cap or the default from zero, whatever
+// it declares: P3 never prices a live prefill replica at a declared cap, so
+// the zero-replica figure does not move to it either.
+func TestBatchCapZeroReplica_APrefillVariantKeepsTheFlagsOrTheDefault(t *testing.T) {
+	f := zeroReplicaEstimateAs(t, declaredParams(64), domain.RolePrefill, 1, 1, nil)
+	assert.EqualValues(t, 320_000, f["derivedCapacity"])
+	assert.EqualValues(t, 256, f["batchCap"])
+	assert.Equal(t, batchCapDefault, f["batchCapSource"])
+
+	f = zeroReplicaEstimateAs(t, flagParams(128, 64), domain.RolePrefill, 1, 1, nil)
+	assert.EqualValues(t, 160_000, f["derivedCapacity"])
+	assert.Equal(t, batchCapFromFlags, f["batchCapSource"])
+
+	// An aggregated variant reads the declared cap, as decode does.
+	f = zeroReplicaEstimateAs(t, declaredParams(64), domain.RoleBoth, 1, 1, nil)
+	assert.EqualValues(t, 80_000, f["derivedCapacity"])
+	assert.Equal(t, batchCapDeclared, f["batchCapSource"])
+}
+
+// The learned cap never prices a variant at zero replicas, even one filed
+// under the variant's own engine arguments and below both the declared cap
+// and the default, and it is not stamped as used.
+func TestBatchCapZeroReplica_ALearnedCapIsNeverRead(t *testing.T) {
+	for _, tc := range []struct {
+		params *capacity.EngineParams
+		cap    int64
+		source string
+	}{
+		{deploymentParams(), 256, batchCapDefault},
+		{declaredParams(64), 64, batchCapDeclared},
+	} {
+		var a *SaturationAnalyzer
+		seed := learnedCapOf(zeroVariant, 32, tc.params, time.Now())
+		f := zeroReplicaEstimateOf(t, tc.params, 1, func(x *SaturationAnalyzer) { seed(x); a = x })
+		assert.EqualValues(t, tc.cap, f["batchCap"])
+		assert.Equal(t, tc.source, f["batchCapSource"])
+		assert.EqualValues(t, tc.cap*1250, f["derivedCapacity"])
+		assert.True(t, learnedCapEntry(t, a, zeroVariant).usedAt.IsZero(), "the learned cap is stamped as used")
+	}
+}
+
+// A data-parallel variant at zero replicas is priced at one engine rank's
+// figure, not the pod's: an 8-GPU pod of 8 ranks that declares 64 per rank
+// is 64 x 1250 = 80,000, an eighth of what its first replica will be priced
+// at. A known under-price (#438), pinned so that changing it is deliberate.
+func TestBatchCapZeroReplica_ADataParallelVariantIsPricedAtOneRank(t *testing.T) {
+	params := declaredParams(64)
+	params.DataParallelSize = 8
+	f := zeroReplicaEstimateAs(t, params, domain.RoleDecode, 8, 1, nil)
+	assert.EqualValues(t, 64, f["batchCap"])
+	assert.EqualValues(t, 80_000, f["derivedCapacity"])
+	assert.EqualValues(t, 80_000, f["perReplicaCapacity"])
 }
