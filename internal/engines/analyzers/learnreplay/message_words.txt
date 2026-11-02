@@ -1940,6 +1940,8 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-ols
+slo-itl-pinned
 slo-model
 slo-transient
 slo-variant
