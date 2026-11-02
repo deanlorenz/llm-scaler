@@ -121,7 +121,11 @@ to the batch-cap fill `batchCap·KVreq/C`.
 `(e2e − TTFT)/(output tokens − 1)`, the average gap over its own generation. A
 percentile target says that share `q` of requests must have their own TPOT at or
 below the target. The router records exactly this, one observation per request,
-in `llm_d_epp_request_streaming_tpot_seconds` (a histogram).
+in `llm_d_epp_request_streaming_tpot_seconds` (a histogram), for streaming
+requests with at least 2 output tokens, and only when the response carries
+`usage` (the client sends `stream_options.include_usage`, or vLLM runs with
+`--enable-force-include-usage`). Without that, the series is empty even on a
+router that publishes it.
 
 **What is not supported: percentiles over token gaps** (ITL, every gap of every
 request pooled). The ITL line models the mean step time against fill, and
@@ -145,7 +149,36 @@ holding the `q` quantile, read at its **upper edge**, over the window's mean
 (`_sum / _count`). `R_q` is the 90th percentile of those per-window ratios, and
 never below 1. The histogram is model-wide, so it pools output lengths and
 variants: a per-bucket answer uses the pooled `R_q` and is flagged, unless a
-load generator's per-request log supplies the per-bucket ratio.
+load generator's per-request log supplies the per-bucket ratio. The window mean
+is request-weighted, while `ITL(k)` is a step-time mean, which is
+token-weighted; multiplying one by a ratio over the other assumes the two
+agree, the same assumption the mean TPOT target already makes.
+
+**Resolution.** The router's default edges (`DefaultRequestTPOTBuckets`) are
+0.5, 2.05, 5 and 10 ms, then coarser. At the worked example's 3.66 ms mean, the
+p90 lands in `(2.05, 5]` or `(5, 10]`, so a window reads 1.37 or 2.73, whatever
+the true spread: `R_q` is set by the grid, not the traffic. It stays
+conservative (an upper edge never under-states), but coarse. So:
+
+- the remedy is the router's `RequestTPOTBuckets` override, with edges a few
+  percent apart around the target (for example every 0.25 ms from 2 to 8 ms
+  for a 4 ms target);
+- the basis prints the `q` bucket's width over the mean, and flags it above
+  0.25;
+- a `q` quantile in the `+Inf` bucket has no upper edge, and gives
+  `TPOTQuantileUnbounded`.
+
+The example's assumed 1.3 could not be learned from the default buckets: the
+smallest ratio they can give there is 1.37.
+
+**Sources.** The router histogram is the default, because it is what the client
+sees and what the SLO is judged on. The engine's per-pod
+`vllm:request_time_per_output_token_seconds` is the fallback: it is per variant,
+needs no `usage` option and is read near the `k` it is applied at, but it misses
+the router's own streaming path and exists for vLLM only. It is used, flagged,
+when the router histogram is empty or its resolution is flagged. The SLO
+analyzer's percentile ([SLO tiers](slo-tiers.md#later-a-tpot-percentile)) uses
+the same rule and the same library.
 
 **Without a histogram**, a percentile TPOT is refused (`NoTPOTHistogram`).
 `--assume-tpot-ratio R` gives a flagged answer instead. Recommendation: refuse
@@ -154,7 +187,8 @@ be read as one.
 
 **Inversion.** Question 1 inverts `ITL(k)·R_q = t`: `k* = (t/R_q − B)/A`, then
 the same clamps and cap as the mean. Question 2 reports TPOT at both the mean
-and percentile `q` (`--tpot-percentile`, else the policy's, else the mean only).
+and percentile `q` (`--tpot-percentile`; else the mean only, since the scaling
+policy has no TPOT percentile today: setting one is a validation error).
 
 ### Decode admission
 
@@ -247,7 +281,7 @@ figures are reproduced by two independent scripts.
 | Operating rate `0.85·13.31` | **11.32 r/s** |
 | Decode fill at it | 0.474 (41.4 sequences) |
 | Mean TPOT `ITL(0.474)` | **3.66 ms** |
-| TPOT p90, per request | 4.76 ms, with `R_q` = 1.3 **assumed** and flagged: `ols-sweep` carries no TPOT histogram |
+| TPOT p90, per request | 4.76 ms, with `R_q` = 1.3 **assumed** and flagged: `ols-sweep` carries no TPOT histogram, and the router's default buckets could not give a ratio below 1.37 here |
 | Decode wait probability (the chain) | 0.032 |
 | Prefill `ρ`, `θ` | 0.377, 53.5 ms |
 | **TTFT p90**, optimised union bound | **160 ms** (decode share of the tail 0.032; independent 154 ms) |
@@ -344,6 +378,8 @@ TTFT's rows are on [its page](slo-capacity-planner-ttft.md#where-it-is-most-wron
 | Residence exponential in the admission chain | Either way; a constant ITL would over-promise near the knee | — |
 | `R_q` learned under one load and applied at another | Learned at lower load and applied near the knee, over-promises (the spread grows with load); the reverse under-promises | — |
 | `R_q` pooled across output lengths, applied to a short-output bucket | Over-promises | — |
+| `R_q` pooled across output lengths, applied to a long-output bucket | Under-promises | — |
+| `R_q` read off coarse buckets | Under-promises (an upper edge over-states the ratio) | — |
 | KV-bound admission approximated by slots | Either way | — |
 
 ## Packaging
@@ -394,6 +430,9 @@ mutation-checked:
   gives back the rate whose fill is `k`.
 - `R_q` is never below 1, including from a histogram whose bucketed quantile
   falls below its mean.
+- A known per-request TPOT distribution, bucketed on the router's default
+  edges, gives an `R_q` at or above the true ratio; a quantile in `+Inf` gives
+  `TPOTQuantileUnbounded`.
 - The chain at constant ITL equals Erlang C; with `f` = 1 and one pod, the
   engine wait equals Pollaczek-Khinchine.
 - The union bound is never below the independent figure; the optimised split is
@@ -509,13 +548,15 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `NoTraffic` | No traffic in the window |
 | `NoPrefillCapacity` | No `V_P` from a conservative source (always on SGLang) |
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
-| `NoTPOTHistogram` | A per-request TPOT percentile with no router TPOT histogram and no `--assume-tpot-ratio` |
+| `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
+| `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
 
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
-tier, an assumed `R_q`, a pooled `R_q` on a bucket, a rate held down by decode
+tier, an assumed `R_q`, a pooled `R_q` on a bucket, a coarse TPOT bucket, the
+engine TPOT histogram used in place of the router's, a rate held down by decode
 admission, flow control inferred off, above a
 flow-control onset, several priority bands, and UNVALIDATED on TTFT.
 

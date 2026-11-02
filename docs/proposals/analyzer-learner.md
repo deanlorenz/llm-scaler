@@ -861,6 +861,7 @@ made before R1 replays unchanged:
 | Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
 | Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
 | Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
+| Per pod | Engine per-request TPOT histogram | `vllm:request_time_per_output_token_seconds_bucket`, the fallback source for the TPOT ratio (vLLM only) |
 | Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
 
 `learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on
@@ -890,19 +891,27 @@ query templates; R2 creates that package, and the planner's standalone mode
 extends it). A new third mode, **`Generate`**, writes the `start` line
 (`learnrec.Start`: the saturation horizons including `BorrowTickGap`, the SLO
 configuration and `Judging`, `Throughput`, from the policy file or the
-defaults), then plays each cycle in the order `optimizeV2` calls them
+defaults), then plays each cycle in the order a cycle calls them
 (`engine.go`, `engine_v2.go`):
 
-1. `slo.BeginCycle`, which the SLO analyzer counts its judging windows by;
-2. `NoteVariantsPresent` on saturation and slo;
+1. `slo.BeginCycle`, called by the cycle before `optimizeV2`
+   (`engine.go:881`); the SLO analyzer counts its judging windows by it;
+2. `NoteVariantsPresent` on saturation and slo, including parked variants when
+   the capture can see them (`engine_v2.go:482-514`, `:519` onwards);
 3. the three sweeps, saturation's `EvictStaleHistory`, the store's
    `EvictStale` and slo's `EvictStale` (`engine.go:1478-1479`,
    `engine_v2.go:561-616`), before anything stamps state this cycle;
-4. per variant, in key order, `StableAcceleratorFor` and then
-   `FileScaleTarget` through `LoadFromScaleTarget` (`engine_v2.go:74-101`);
-5. `observeSettle` (`engine_v2.go:184-187`);
-6. `Analyze`: saturation first, then the listed analyzers. With slo listed,
-   its router source serves the captured router latency.
+
+then, **per model**:
+
+4. `observeSettle` (`engine_v2.go:187`; "the settle tracker first"), or
+   `holdSettle` for a model with no rows or no policy;
+5. per variant, in key order, `StableAcceleratorFor` and then
+   `FileScaleTarget` through `LoadFromScaleTarget` (`engine_v2.go:74-101`,
+   reached from `buildAnalyzerInput` at `:199`). `forgetOnRequest` is left out:
+   a capture has no annotation history, so it writes no `ForgetVariant` events;
+6. `Analyze`: saturation first (`:203`), then the listed analyzers. With slo
+   listed, its router source serves the captured router latency.
 
 The variant states come from the role map, and the policy from `--policy` or the
 defaults. The output is an ordinary recording that carries the commit of the

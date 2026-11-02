@@ -558,9 +558,13 @@ llm-d's one-minute control law. **Designed later**, after phase 1 data.
 
 ### Later: a TPOT percentile
 
-llm-d scores p90 TPOT. A percentile needs a tail ratio `q_p ÷ mean` from
-`vllm:request_time_per_output_token_seconds`, measured near the `k` it is
-applied at. Deferred until a user asks for it.
+llm-d scores p90 TPOT. The ratio `q_p ÷ mean` is now specified once, in
+[what-if capacity](slo-capacity-planner.md#tpot-as-a-percentile-over-requests),
+and the analyzer would use the same rule and library: the router's per-request
+TPOT histogram by default, the engine's per-pod
+`vllm:request_time_per_output_token_seconds` as a flagged fallback near the
+`k` it is applied at. A TPOT percentile in the policy stays a validation error
+until this is built. Deferred until a user asks for it.
 
 ## Tests
 
@@ -665,7 +669,10 @@ accelerator, in its own run.
 3. **Pinned pricing.** Whether `pinned` may price in sizer mode, decided from
    how often `pinned` and `own` disagree.
 4. **`vllm:nixl_xfer_time_seconds`**: per request or per chunk?
-5. **What 2a must observe before 2b prices anything.** The x-axis: offered
+5. **What 2a would observe (no longer a gate for 2b).** 2b now uses the
+   per-pod model of [end-to-end TTFT](slo-capacity-planner-ttft.md), which needs
+   no utilization bins; 2a remains useful only as an observation of the TTFT
+   curve, and is not required before 2b. Kept for the record. The x-axis: offered
    prompt load `ArrivalRate × ILeff` against the ceiling (served utilization
    pins at 1 under overload), and one for aggregated (`both`) variants.
    Per-replica points, not variant means (convexity biases pooled means up).
