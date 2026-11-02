@@ -16,8 +16,15 @@ for what runs today.
 1. **"My SLO is a mean TPOT of 4 ms and an end-to-end TTFT of 200 ms at p95.
    What request rate can this fleet carry?"** Optionally per token bucket.
 2. **"I run 1 prefill and 1 decode replica. At what rate do they saturate, and
-   what SLO do they hold below that?"** The answer is one pair, mean TPOT and
+   what SLO do they hold below that?"** The answer is one pair, TPOT and
    TTFT at percentile `q`, at one operating rate.
+
+TPOT is the mean by default. A TPOT target may instead be a **percentile over
+requests of each request's own TPOT**, `(e2e − TTFT)/(output tokens − 1)`, as
+MLPerf Inference's LLM server scenario, vLLM's `benchmark_serving`, guidellm,
+SLO-attainment work such as DistServe, and the QoS proposal state it:
+`--tpot 4ms@p90`. A percentile over individual token gaps (ITL) is not
+supported.
 
 TTFT is end to end, as the client sees it: router queue, engine queue, prefill,
 KV transfer, decode's admission and first step. Both questions are answered
@@ -28,7 +35,7 @@ from a recording, from a live Prometheus with no controller installed, or
 
 | | |
 | --- | --- |
-| **Decode** | Reuses the ITL line and the SLO analyzer's TPOT pricing unchanged, moved to a `signals` package so a CLI can call them. Decode admission is a birth-death chain over the batch cap's slots. |
+| **Decode** | Reuses the ITL line and the SLO analyzer's TPOT pricing unchanged, moved to a `signals` package so a CLI can call them. A per-request TPOT percentile is the mean times a ratio `R_q` learned from the router's per-request TPOT histogram. Decode admission is a birth-death chain over the batch cap's slots. |
 | **TTFT** | Per-pod queue with the measured imbalance; the router's flow-control queue only above the rate where it starts holding requests; prefill capacity as a token throughput from sources that cannot over-state it; parts combined by convolution and an optimised union bound. See [end-to-end TTFT](slo-capacity-planner-ttft.md). |
 | **Packaging** | `internal/signals/whatif` and `internal/signals/prefill`, an adapter `internal/whatifsource`, a CLI `cmd/whatif`. |
 | **Validated** | Decode against the goldens; TTFT on a fixed-replica staircase, flow control off and on. TTFT prints UNVALIDATED until then. |
@@ -42,10 +49,12 @@ because that golden holds no evidence of it. The bands are illustrative.
 
 ```
 $ whatif replicas-to-slo --recording ols-sweep.jsonl.gz --cycle last \
-    --model m --prefill 1 --decode 1 --ttft-percentile 90 --assume-vp 30000
+    --model m --prefill 1 --decode 1 --ttft-percentile 90 --assume-vp 30000 \
+    --tpot-percentile 90 --assume-tpot-ratio 1.3
 knee            13.31 r/s   decode, batch cap binds at fill 0.732
 operating rate  11.32 r/s   0.85 x knee (scaleUpThreshold)
 mean TPOT       3.66 ms     [3.58 .. 3.79]   line ols, observed fill up to 0.62
+TPOT p90        4.76 ms                      per request; R_q 1.3 ASSUMED (no TPOT histogram)
 TTFT p90        160 ms      [146 .. 207]     end to end; UNVALIDATED; V_P ASSUMED
                 (154 ms if prefill and decode waits were independent)
 flags: flow control inferred off (no series); T_xfer omitted (not collected);
@@ -86,8 +95,8 @@ Refusals, flags, the standalone mode and exit codes are in the
 
 ## Decode: TPOT from the ITL line
 
-**TPOT is a mean** (`slo/price.go`: "TPOT is a MEAN ... no tail model"). A
-percentile on TPOT is refused.
+**TPOT is a mean by default** (`slo/price.go`: "TPOT is a MEAN ... no tail
+model"); a per-request percentile is supported [below](#tpot-as-a-percentile-over-requests).
 
 A decode replica at fill `k` holds `n(k) = min(k·C/KVreq, batchCap·ranks)`
 sequences, each emitting a token every `ITL(k)`. So TPOT is `ITL(k)` and the
@@ -106,7 +115,50 @@ uncorrelated (the exact footprint is `E[IL·OL]/E[OL] + E[OL²]/(2·E[OL])`), so
 positive correlation makes the rate read high; and `reachableFill` clamps `k`
 to the batch-cap fill `batchCap·KVreq/C`.
 
-**Decode admission** is a birth-death chain on the requests a pod holds, with
+### TPOT as a percentile over requests
+
+**What it is.** Each request has its own TPOT,
+`(e2e − TTFT)/(output tokens − 1)`, the average gap over its own generation. A
+percentile target says that share `q` of requests must have their own TPOT at or
+below the target. The router records exactly this, one observation per request,
+in `llm_d_epp_request_streaming_tpot_seconds` (a histogram).
+
+**What is not supported: percentiles over token gaps** (ITL, every gap of every
+request pooled). The ITL line models the mean step time against fill, and
+nothing in the codebase models the spread of single steps: chunked prefill
+landing in a step, a preemption, a speculative step accepting zero tokens. A
+token-gap percentile also weights a long request by its length, so it is not a
+per-request service level. It gives `TokenGapPercentile`.
+
+**The model.** `TPOT_q = ITL(k) × R_q`, where `R_q` is the ratio of the `q`-th
+percentile to the mean of per-request TPOT. `R_q` is above 1 because:
+
+- a request's fill moves over its residence, so requests that live through the
+  busy periods see a higher mean ITL;
+- a short output averages few gaps, so its TPOT spreads more: `R_q` depends on
+  output length, and is learned per output bucket where the data allows;
+- speculative decoding accepts a variable number of tokens per step (#274);
+- on aggregated pods, prefill chunks land in decode steps (#275).
+
+**Learning `R_q`.** From the router's TPOT histogram, per window: the bucket
+holding the `q` quantile, read at its **upper edge**, over the window's mean
+(`_sum / _count`). `R_q` is the 90th percentile of those per-window ratios, and
+never below 1. The histogram is model-wide, so it pools output lengths and
+variants: a per-bucket answer uses the pooled `R_q` and is flagged, unless a
+load generator's per-request log supplies the per-bucket ratio.
+
+**Without a histogram**, a percentile TPOT is refused (`NoTPOTHistogram`).
+`--assume-tpot-ratio R` gives a flagged answer instead. Recommendation: refuse
+by default, because no default ratio has been measured; a stated default would
+be read as one.
+
+**Inversion.** Question 1 inverts `ITL(k)·R_q = t`: `k* = (t/R_q − B)/A`, then
+the same clamps and cap as the mean. Question 2 reports TPOT at both the mean
+and percentile `q` (`--tpot-percentile`, else the policy's, else the mean only).
+
+### Decode admission
+
+A birth-death chain on the requests a pod holds, with
 the line at each state's own fill; [end-to-end TTFT](slo-capacity-planner-ttft.md#decode-admission)
 has it. Its wait is negligible until close to the knee, then rises fast: in the
 worked example the wait probability is 0.032 at 0.85 of the knee and 0.131 at
@@ -130,8 +182,9 @@ optimised split, across the prefill and decode sides. The full model is
 
 ### Question 1: from an SLO to a rate
 
-**Decode, mean TPOT `t`.** `k* = (t − B)/A` (`priceTPOT`); `TargetBelowFloor`
-if `ITL(band.lo) ≥ t`. Clamp to the band and the batch cap (`reachableFill`).
+**Decode, TPOT `t`.** For the mean, `k* = (t − B)/A` (`priceTPOT`); for a
+per-request percentile, `k* = (t/R_q − B)/A`. `TargetBelowFloor` if
+`ITL(band.lo)·R_q ≥ t` (`R_q` = 1 for the mean). Clamp to the band and the batch cap (`reachableFill`).
 Rate `N_d·λ_rep(k*)`, **capped at the operating point**, because past it the
 admission wait is no longer small. `--headroom 1` lifts the cap.
 
@@ -153,9 +206,11 @@ transfer and `ITL(band.lo)` alone exceed `T`, `TargetBelowFloor`.
    binding role has the lower knee.
 2. **Operating point.** `scaleUpThreshold` (0.85) times the knee, in rate,
    applied once (as `realisedFill`), or `--rate`.
-3. **Answer.** Mean TPOT from the closed-form fill and TTFT at percentile `q`
+3. **Answer.** TPOT from the closed-form fill, as the mean and, when a TPOT
+   percentile is asked, as `ITL(k)·R_q`; TTFT at percentile `q`
    (`--ttft-percentile`, else the policy's, else 90). Floors are printed: TPOT
-   never beats `ITL(band.lo)`; TTFT never beats `a + I_q/V_P + ITL(band.lo)`.
+   never beats `ITL(band.lo)` (times `R_q`); TTFT never beats
+   `a + I_q/V_P + ITL(band.lo)`.
 
 **Two headroom conventions.** The tool applies 0.85 in rate; saturation applies
 it in fill (`pricingK` = `KvCacheThreshold × ScaleUpThreshold`, 0.68). The rate is
@@ -192,6 +247,7 @@ figures are reproduced by two independent scripts.
 | Operating rate `0.85·13.31` | **11.32 r/s** |
 | Decode fill at it | 0.474 (41.4 sequences) |
 | Mean TPOT `ITL(0.474)` | **3.66 ms** |
+| TPOT p90, per request | 4.76 ms, with `R_q` = 1.3 **assumed** and flagged: `ols-sweep` carries no TPOT histogram |
 | Decode wait probability (the chain) | 0.032 |
 | Prefill `ρ`, `θ` | 0.377, 53.5 ms |
 | **TTFT p90**, optimised union bound | **160 ms** (decode share of the tail 0.032; independent 154 ms) |
@@ -230,7 +286,8 @@ it. "R1" is the [recorder PR](analyzer-learner.md#29-recorder-fields-for-ttft-an
 | Pod queue length | `QueryQueueLength` | yes | yes | no | yes |
 | Queue-time, prefill-time, engine TTFT histograms | `request_queue_time_seconds`, `request_prefill_time_seconds`, `time_to_first_token_seconds_bucket` | no | after R1 | no | yes |
 | KV transfer | `nixl_xfer_time_seconds` | no | after R1 | no | yes |
-| Router TTFT histogram, TPOT | `QuerySLORouterTTFTBuckets`, streaming TPOT | yes | only when the SLO analyzer judges; every cycle after R1 | no | yes |
+| Router TTFT histogram, TPOT mean | `QuerySLORouterTTFTBuckets`; streaming TPOT `_sum`/`_count` | yes | only when the SLO analyzer judges; every cycle after R1 | no | yes |
+| Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket` | no (only `_sum` and `_count` today) | after R1 | no | yes |
 | Arrival rate | `QueryModelArrivalRate`: flow-control enqueues, else scheduler placements | yes | yes | no | yes |
 | Flow-control queue size | `QuerySchedulerQueueSize` | yes | yes (`SchedulerQueue`) | no | yes |
 | Flow-control wait, saturation, outcomes | `flow_control_request_queue_duration_seconds`, `_pool_saturation`, `_requests_total` (per pool) | no | after R1 | no | yes |
@@ -285,6 +342,8 @@ TTFT's rows are on [its page](slo-capacity-planner-ttft.md#where-it-is-most-wron
 | SLO analyzer reads step time, not per token | Under-promises on speculating vLLM by `1 + E` | #274 |
 | No saturation line for an unlabeled aggregated variant | Use the SLO analyzer's line | #432 |
 | Residence exponential in the admission chain | Either way; a constant ITL would over-promise near the knee | — |
+| `R_q` learned under one load and applied at another | Learned at lower load and applied near the knee, over-promises (the spread grows with load); the reverse under-promises | — |
+| `R_q` pooled across output lengths, applied to a short-output bucket | Over-promises | — |
 | KV-bound admission approximated by slots | Either way | — |
 
 ## Packaging
@@ -330,7 +389,11 @@ mutation-checked:
 - The rate never falls when a target loosens, never rises when prompts or
   answers lengthen.
 - Round trip within 1e-6, with `--headroom 1`, at unclamped points only (fill
-  inside the band, `n` under the cap, rate under the operating-point cap).
+  inside the band, `n` under the cap, rate under the operating-point cap), for
+  the mean TPOT and for a per-request percentile: question 1 at `ITL(k)·R_q`
+  gives back the rate whose fill is `k`.
+- `R_q` is never below 1, including from a histogram whose bucketed quantile
+  falls below its mean.
 - The chain at constant ITL equals Erlang C; with `f` = 1 and one pod, the
   engine wait equals Pollaczek-Khinchine.
 - The union bound is never below the independent figure; the optimised split is
@@ -442,13 +505,15 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `NoRoleMap` | Standalone with neither a kubeconfig nor `--role-of` |
 | `NoTraffic` | No traffic in the window |
 | `NoPrefillCapacity` | No `V_P` from a conservative source (always on SGLang) |
-| `TailTPOT` | A percentile asked of TPOT |
+| `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
+| `NoTPOTHistogram` | A per-request TPOT percentile with no router TPOT histogram and no `--assume-tpot-ratio` |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
 
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
-tier, a rate held down by decode admission, flow control inferred off, above a
+tier, an assumed `R_q`, a pooled `R_q` on a bucket, a rate held down by decode
+admission, flow control inferred off, above a
 flow-control onset, several priority bands, and UNVALIDATED on TTFT.
 
 Exit codes: `0` every role answered; `3` a role refused (output still printed);

@@ -860,6 +860,7 @@ made before R1 replays unchanged:
 | Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
 | Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
 | Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
+| Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
 | Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
 
 `learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on

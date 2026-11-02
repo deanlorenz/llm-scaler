@@ -282,15 +282,16 @@ The staircase is the TTFT pass mark (decode is validated against the goldens).
 | Start | 40% of the predicted knee |
 | Steps | +10% to 70% of the knee, then +3% to 110% |
 | Hold | 10 minutes per step; the first 3 discarded |
-| Measured | Router TTFT p90 and p95 and mean TPOT over the last 7 minutes; with flow control on, `pool_saturation` per stage, the direct test of the onset |
+| Measured | Router TTFT p90 and p95, mean TPOT and per-request TPOT p90 (router TPOT histogram, and guidellm per request) over the last 7 minutes; with flow control on, `pool_saturation` per stage, the direct test of the onset |
 | Runs away | TTFT p90 above twice the target for the whole window |
 | Repeats | 3; the statistic is the median over runs, per bucket |
 | Recorded | A learner recording on a build with the [TTFT recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture); per-pod `num_requests_waiting` |
 
 **Measured rate at SLO**: the highest step rate, interpolated between steps,
-whose TTFT percentile and mean TPOT meet the target. **Pass**: at the operating
-point, a predicted rate more than 10% above the measured one fails; more than
-25% below fails. **Noise floor**: an M/G/1 queue at `ρ` 0.85 relaxes in about
+whose TTFT percentile and TPOT (mean, and per-request percentile) meet the
+target. **Pass**: at the operating point, a predicted rate more than 10% above
+the measured one fails; more than 25% below fails. The same mark is applied
+separately to the mean TPOT and to the per-request TPOT percentile. **Noise floor**: an M/G/1 queue at `ρ` 0.85 relaxes in about
 `E[S](1 + Cs²)/(1 − √ρ)²`, about 330 `E[S]` at `Cs²` = 1, 90 s for an 8000-token
 prefill at 30k tok/s; a step whose window holds fewer than 4 such times is
 flagged and lengthened. Until the run passes, every TTFT figure prints
