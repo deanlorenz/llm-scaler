@@ -131,7 +131,8 @@ func TestSettle_OneMissingRowKeepsTheSettle(t *testing.T) {
 }
 
 // A new Ready time under the same Pod name is an engine restart: the
-// replica waits steadyFor. Off, the line's own trace missed it.
+// replica waits steadyFor. Off (SwitchITLRestartUnderName), as the line's own
+// trace did, it is missed.
 func TestSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle(t *testing.T) {
 	restartAt := settleCycles + 2
 	t0 := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -148,7 +149,7 @@ func TestSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle(t *testing.T) {
 	n := restartAt + settleCycles + 3
 	assert.Equal(t, append(span(0, settleCycles), span(restartAt, settleCycles)...),
 		settlingCycles(newSettleRig(t, nil), n, rows))
-	assert.Equal(t, span(0, settleCycles), settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows),
+	assert.Equal(t, span(0, settleCycles), settlingCycles(newSettleRig(t, map[string]bool{SwitchITLRestartUnderName: false}), n, rows),
 		"switch off: the restart is missed")
 }
 
@@ -163,4 +164,40 @@ func TestSettle_APodWithAnAbsentRankIsNoReading(t *testing.T) {
 	off := newSettleRig(t, map[string]bool{SwitchITLReadsFinitePodMean: false}).cycle(rows)
 	assert.Equal(t, 3, off.Offered, "switch off: the Absent pod's mean is a reading")
 	assert.Zero(t, off.NoITL)
+}
+
+// A scrape that read nothing is not idleness. Off (SwitchITLIdleOnEvidence),
+// as on the line's own trace, two rows with neither an ITL nor a k idle the
+// replica, and it waits steadyFor when load comes back.
+func TestSettle_AScrapeThatReadNothingIsNotIdle(t *testing.T) {
+	failFrom := settleCycles + 2
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == failFrom || i == failFrom+1 {
+			f[2] = domain.ReplicaMetrics{PodName: "agg-c", VariantName: "agg", Ready: true}
+		}
+		return f
+	}
+	n := failFrom + 2 + settleCycles + 3
+	assert.Equal(t, span(0, settleCycles), settlingCycles(newSettleRig(t, nil), n, rows))
+	assert.Equal(t, append(span(0, settleCycles), span(failFrom+2, settleCycles)...),
+		settlingCycles(newSettleRig(t, map[string]bool{SwitchITLIdleOnEvidence: false}), n, rows),
+		"switch off: two rows with neither an ITL nor a k idled the replica")
+}
+
+// Review r1 (B1): a settle start only moves forward. The row that was not
+// Ready ages out of the tracker's trace after 5 min; the replica does not
+// settle again then.
+func TestSettle_ANotReadyRowAgeingOutStartsNoSettle(t *testing.T) {
+	blipAt := settleCycles + 2
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == blipAt {
+			f[2].Ready = false
+		}
+		return f
+	}
+	n := blipAt + int(10*time.Minute/settleCycle)
+	assert.Equal(t, append(span(0, settleCycles), span(blipAt+1, settleCycles)...),
+		settlingCycles(newSettleRig(t, nil), n, rows))
 }

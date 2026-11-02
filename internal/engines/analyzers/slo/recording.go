@@ -84,8 +84,9 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
 // The switches are SwitchBatchCapAdmission, SwitchBatchCapPerRank,
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
-// SwitchITLKeepsSettleThroughMissingRow and SwitchITLReadsFinitePodMean; a
-// name it does not know is an error, and sets nothing. Never called on a
+// SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
+// SwitchITLRestartUnderName and SwitchITLIdleOnEvidence; a name it does not
+// know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -113,6 +114,8 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
 		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
+		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 	}
 }
 

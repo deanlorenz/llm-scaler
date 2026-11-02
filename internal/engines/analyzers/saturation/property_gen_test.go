@@ -120,7 +120,8 @@ func newTrackerITL(s itl.Steadiness) *trackerITL {
 	st.SetInterval(propCycle)
 	return &trackerITL{tr: itl.NewTracker(), settle: st, adm: itl.Admission{Steady: s,
 		Settle: &itl.Settle{View: st, Model: propSettleModel}, WaitsAfterRestart: true,
-		KeepsThroughMissingRow: true, AbsenceTolerance: settle.Tolerance(propCycle), FiniteOnly: true}}
+		KeepsThroughMissingRow: true, AbsenceTolerance: settle.Tolerance(propCycle), FiniteOnly: true,
+		RestartUnderName: true, IdleOnEvidence: true}}
 }
 
 func (l *trackerITL) observe(rows []domain.ReplicaMetrics, now time.Time) itl.Reading {

@@ -117,6 +117,8 @@ type Analyzer struct {
 	itlWaitsAfterRestart bool
 	itlKeepsSettle       bool
 	itlFiniteOnly        bool
+	itlRestartUnderName  bool
+	itlIdleOnEvidence    bool
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap
@@ -168,6 +170,8 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlWaitsAfterRestart: true,
 		itlKeepsSettle:       true,
 		itlFiniteOnly:        true,
+		itlRestartUnderName:  true,
+		itlIdleOnEvidence:    true,
 	}
 }
 

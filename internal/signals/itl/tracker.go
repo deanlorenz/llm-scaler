@@ -230,7 +230,8 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				trace.serving(hasITL, traceable(k), now, s)
 				settling = trace.settling(now, s)
 			} else {
-				settling = trace.settlingOnTracker(adm.Settle, rm, traces.since, adm.WaitsAfterRestart, now, s)
+				trace.countIdle(hasITL, traceable(k), now, s)
+				settling = trace.settlingOnTracker(adm, rm, traces.since, now, s)
 			}
 			if traceable(k) {
 				steady = !settling && trace.still(k, now, s)

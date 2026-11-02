@@ -62,7 +62,8 @@ func itlSource(r itl.Reading) learn.Source {
 // itlReasons is a reading's admission outcomes by reason: each row the
 // window was offered, counted once under why it was or was not taken, and of
 // those taken, the ones kept out of the full fit (unsteady) and those of a
-// replica inside its settle.
+// replica inside its settle. Writes is the same count as "offered": the
+// Report's total of readings admitted, beside the outcome by reason.
 func itlReasons(r itl.Reading) map[learn.Reason]int64 {
 	out := map[learn.Reason]int64{}
 	for reason, n := range map[learn.Reason]int{
@@ -96,8 +97,13 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key str
 	source := itlSource(r)
 	report := learn.Report{Learner: learn.ITL, Namespace: namespace, ModelID: modelID, Variant: variant,
 		Role: domain.RoleDecode, Source: source, Counts: itlReasons(r), Samples: r.Held, Writes: int64(r.Offered)}
+	// The key priced the variant when it holds a line of its own: a variant
+	// with none borrows (after this), or has no line at all.
+	if source != itlSourceNoLine {
+		report.PricingKey = key
+	}
 	if r.Held > 0 {
-		report.PricingKey, report.LastAdmitted = key, a.itlTracker.Newest(key)
+		report.LastAdmitted = a.itlTracker.Newest(key)
 	}
 	a.mu.Lock()
 	report.Forgotten = a.itlForgotten[model][variant]
@@ -108,7 +114,14 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key str
 		return
 	}
 	last, logged := a.itlLogged[key]
-	moved := func(now, was float64) bool { return math.Abs(now-was) > ITLWriteBand*math.Abs(was) }
+	// A value that is not a number moves when the other is one, or the
+	// comparison below never says so (NaN compares false).
+	moved := func(now, was float64) bool {
+		if math.IsNaN(now) || math.IsNaN(was) {
+			return math.IsNaN(now) != math.IsNaN(was)
+		}
+		return math.Abs(now-was) > ITLWriteBand*math.Abs(was)
+	}
 	if logged && last.source == source && !moved(r.Model.A, last.a) && !moved(r.Model.B, last.b) &&
 		now.Sub(last.at) < LearnerHeartbeat {
 		a.mu.Unlock()

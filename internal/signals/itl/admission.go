@@ -67,6 +67,18 @@ type Admission struct {
 	// tracker's tolerance at the controller's interval
 	// (settle.Tolerance). At or below settle.Period, settle.Period.
 	AbsenceTolerance time.Duration
+	// RestartUnderName, on the tracker (Settle), starts a settle when a
+	// replica's Ready time changes under the same Pod name
+	// (settle.Restarted), whether or not a row that was not Ready came
+	// between. Without it, as on the key's own trace, only the row that was
+	// not Ready shows the restart.
+	RestartUnderName bool
+	// IdleOnEvidence, on the tracker, reads load returning after idleRows
+	// idle rows from the tracker, idle on evidence (settle.Row.Activity: a
+	// known KV of 0, and a known empty ITL window or a known generation
+	// rate of 0); a scrape that read nothing is not idle. Without it, as on
+	// the key's own trace, a row with neither an ITL nor a k is idle.
+	IdleOnEvidence bool
 	// FiniteOnly reads a row's ITL by its presence bits: a reading needs the
 	// Finite state (domain.ReplicaMetrics.ITLState), so a Pod with an Absent
 	// rank, whose AvgITL is its Finite ranks' mean, is no reading. Without

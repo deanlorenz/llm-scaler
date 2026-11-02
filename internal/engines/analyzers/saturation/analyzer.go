@@ -324,6 +324,10 @@ type SaturationAnalyzer struct {
 	itlWaitsAfterRestart bool
 	itlKeepsSettle       bool
 	itlFiniteOnly        bool
+	// itlRestartUnderName and itlIdleOnEvidence are SwitchITLRestartUnderName
+	// and SwitchITLIdleOnEvidence: on from the constructor.
+	itlRestartUnderName bool
+	itlIdleOnEvidence   bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the ITL line's own
 	// trace judges an absence by (settle.Tolerance).
@@ -539,6 +543,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlWaitsAfterRestart:   true,
 		itlKeepsSettle:         true,
 		itlFiniteOnly:          true,
+		itlRestartUnderName:    true,
+		itlIdleOnEvidence:      true,
 		batchCaps:              make(map[string]*learnedBatchCap),
 		batchCapPlateaus:       make(map[string]*batchCapPlateau),
 		batchCapAdmission:      batchCapRules(),

@@ -42,6 +42,18 @@ const SwitchITLKeepsSettleThroughMissingRow = "slo-itl-keeps-the-settle-through-
 // AvgITL above zero is a reading.
 const SwitchITLReadsFinitePodMean = "slo-itl-reads-the-finite-pod-mean"
 
+// SwitchITLRestartUnderName is the replay switch for an engine restart under
+// the same Pod name, on the tracker: on, a new Ready time under the same
+// name starts a settle; off, as on the line's own trace, only a row that
+// was not Ready shows the restart.
+const SwitchITLRestartUnderName = "slo-itl-restart-under-its-name-settles"
+
+// SwitchITLIdleOnEvidence is the replay switch for what an idle row is, on
+// the tracker: on, idle only on evidence (a known KV of 0, and a known
+// empty ITL window or a known generation rate of 0); off, as on the line's
+// own trace, a row with neither an ITL nor a k is idle.
+const SwitchITLIdleOnEvidence = "slo-itl-idle-needs-evidence"
+
 // WithSettleView sets the settle tracker the line reads each replica's
 // settle from: the engine's, which it observes at the top of every cycle.
 // Call it before the analyzer is used. Without it the analyzer observes a
@@ -53,7 +65,10 @@ func (a *Analyzer) WithSettleView(v settle.View) *Analyzer {
 
 // ownSettleBackdate is how far before its first Analyze of a model the
 // analyzer's own tracker first observes the model's rows: the line's settle,
-// so a replica on the first cycle has settled (settlerow.ObserveOwn).
+// so a replica on the first cycle has settled (settlerow.ObserveOwn). The
+// saturation analyzer backdates by k2's JoinedReplicaWindow instead, the
+// wait its own tracker serves first; for the ITL line neither matters, since
+// a line with no engine tracker never waits after a restart.
 const ownSettleBackdate = itl.DefaultSteadyFor
 
 // settleView is the tracker the line reads: the engine's when it was given
@@ -99,6 +114,7 @@ func (a *Analyzer) evictOwnSettleLocked(now time.Time) {
 func (a *Analyzer) settleAdmission(adm *itl.Admission, namespace, modelID string) {
 	a.mu.Lock()
 	reads, waits, keeps, finite := a.itlReadsSettle, a.itlWaitsAfterRestart, a.itlKeepsSettle, a.itlFiniteOnly
+	restartUnderName, idleOnEvidence := a.itlRestartUnderName, a.itlIdleOnEvidence
 	a.mu.Unlock()
 	if reads {
 		adm.Settle = &itl.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(namespace, modelID)}
@@ -106,4 +122,5 @@ func (a *Analyzer) settleAdmission(adm *itl.Admission, namespace, modelID string
 	adm.WaitsAfterRestart = waits && a.settle != nil
 	adm.KeepsThroughMissingRow = keeps
 	adm.FiniteOnly = finite
+	adm.RestartUnderName, adm.IdleOnEvidence = restartUnderName, idleOnEvidence
 }

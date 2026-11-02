@@ -231,6 +231,7 @@ func TestITLSettleCases_TheLineBefore4aFailsTheChanges(t *testing.T) {
 		require.NoError(t, l.a.SetSwitchesForReplay(map[string]bool{
 			slo.SwitchITLReadsSettle: false, slo.SwitchITLWaitsAfterRestart: false,
 			slo.SwitchITLKeepsSettleThroughMissingRow: false, slo.SwitchITLReadsFinitePodMean: false,
+			slo.SwitchITLRestartUnderName: false, slo.SwitchITLIdleOnEvidence: false,
 		}))
 		return l
 	}

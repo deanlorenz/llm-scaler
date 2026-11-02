@@ -41,20 +41,51 @@ type Settle struct {
 // (settlerow.ReadyAgain). A replica the tracker does not know -- a caller
 // that skipped the observation -- has no start: zero, the same on every
 // cycle, so the key's first sight of it is its settle.
-func (s *Settle) start(rm domain.ReplicaMetrics, idleRows int) time.Time {
+//
+// Two of those are the admission's rules (Admission.RestartUnderName and
+// Admission.IdleOnEvidence). Without the first, a settle the tracker began
+// because the Ready time changed under the same name is not read: a restart
+// shows only as a row that was not Ready, as on the key's own trace. Without
+// the second, load returning is the key's own count instead (idleReturn: a
+// run of rows with neither an ITL nor a k).
+func (s *Settle) start(rm domain.ReplicaMetrics, adm Admission, idleRows int, idleReturn time.Time) time.Time {
 	key := settlerow.Key(rm)
 	r, ok := s.View.Replica(s.Model, key)
 	if !ok {
 		return time.Time{}
 	}
 	start := r.Since
-	if at, ok := r.ReturnedAfter(idleRows); ok && at.After(start) {
-		start = at
+	if r.Reason == settle.Restarted && !adm.RestartUnderName {
+		start = time.Time{}
+	}
+	returned, ok := idleReturn, !idleReturn.IsZero()
+	if adm.IdleOnEvidence {
+		returned, ok = r.ReturnedAfter(idleRows)
+	}
+	if ok && returned.After(start) {
+		start = returned
 	}
 	if back := settlerow.ReadyAgain(s.View.Trace(s.Model, key)); back.After(start) {
 		start = back
 	}
 	return start
+}
+
+// countIdle is the key's own idle rule on the tracker's path, for
+// Admission.IdleOnEvidence off: a row with an ITL after idleRows or more
+// rows with neither an ITL nor a k is load returning (idleReturn). It
+// starts nothing itself; the settle reads idleReturn (Settle.start).
+func (rt *replicaTrace) countIdle(hasITL, hasK bool, now time.Time, s Steadiness) {
+	if !hasITL {
+		if !hasK {
+			rt.idle++
+		}
+		return
+	}
+	if rt.idle >= s.IdleRows {
+		rt.idleReturn = now
+	}
+	rt.idle = 0
 }
 
 // hasITL is whether the row carries a reading's ITL: with FiniteOnly, a
@@ -98,10 +129,14 @@ func (a Admission) forgetAfter() time.Duration {
 // a replica whose settle began long before a key made anew (an operator's
 // forget, new engine arguments) does not wait again. A start the key read
 // later is a settle whatever waits says.
-func (rt *replicaTrace) settlingOnTracker(st *Settle, rm domain.ReplicaMetrics, keyFirst time.Time,
-	waits bool, now time.Time, s Steadiness) bool {
-	start := st.start(rm, s.IdleRows)
-	if rt.settleSeen.IsZero() || !start.Equal(rt.settleStart) {
+func (rt *replicaTrace) settlingOnTracker(adm Admission, rm domain.ReplicaMetrics, keyFirst time.Time,
+	now time.Time, s Steadiness) bool {
+	start := adm.Settle.start(rm, adm, s.IdleRows, rt.idleReturn)
+	waits := adm.WaitsAfterRestart
+	// Only forward: a start that moves back is an event the tracker no
+	// longer holds -- a not-Ready row aged out of its trace (TraceHorizon),
+	// or a return evicted from its last few -- not a new one.
+	if rt.settleSeen.IsZero() || start.After(rt.settleStart) {
 		rt.settleStart, rt.settleSeen = start, now
 	}
 	if rt.settleSeen.After(keyFirst) {

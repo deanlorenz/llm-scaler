@@ -114,8 +114,9 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
 // SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken,
 // SwitchKVPerRequestOutputDispersion, SwitchITLReadsSettle,
-// SwitchITLWaitsAfterRestart, SwitchITLKeepsSettleThroughMissingRow and
-// SwitchITLReadsFinitePodMean; a name it does not know is an error,
+// SwitchITLWaitsAfterRestart, SwitchITLKeepsSettleThroughMissingRow,
+// SwitchITLReadsFinitePodMean, SwitchITLRestartUnderName and
+// SwitchITLIdleOnEvidence; a name it does not know is an error,
 // and sets nothing. Never called on a production path; a
 // test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -162,6 +163,8 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
 		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
+		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 	}
 }
 

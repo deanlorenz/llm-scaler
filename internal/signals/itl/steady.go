@@ -129,6 +129,10 @@ type replicaTrace struct {
 	// replica, and settleSeen the cycle it first read it (Admission.Settle,
 	// settlingOnTracker).
 	settleStart, settleSeen time.Time
+	// idleReturn is the last time the key's own idle rule saw load return
+	// (countIdle), read on the tracker only with Admission.IdleOnEvidence
+	// off.
+	idleReturn time.Time
 }
 
 // idleRows is how many rows in a row with neither an ITL nor a k make a

@@ -51,7 +51,7 @@ func TestITLLearner_TheReportNamesTheLineAndItsReadings(t *testing.T) {
 	assert.EqualValues(t, 3, first.Counts["offered"])
 	assert.EqualValues(t, 3, first.Writes)
 	assert.Equal(t, 3, first.Samples)
-	assert.NotEmpty(t, first.PricingKey)
+	assert.Empty(t, first.PricingKey, "no line of its own priced it")
 	assert.Equal(t, itlSettleT0, first.LastAdmitted)
 	assert.Empty(t, first.Source, "three readings fit no line yet")
 
@@ -60,6 +60,7 @@ func TestITLLearner_TheReportNamesTheLineAndItsReadings(t *testing.T) {
 		last = r.cycle(t, context.Background(), itlSettleFleet())
 	}
 	assert.NotEmpty(t, last.Source, "a line once the window holds ten readings")
+	assert.NotEmpty(t, last.PricingKey, "its own line priced it")
 }
 
 // learner-write logs a line at V(3) when it is first set, when it changes

@@ -53,7 +53,11 @@ import (
 //     fit, not a full one. The cluster recordings are held.
 //   - The absence rule and the Finite-only reading move nothing: no
 //     recording misses a replica's row for a cycle, and every recorded Pod
-//     is one rank. Their unit tests hold them (heldBy).
+//     is one rank. Neither do the tracker's two rules with switches of
+//     their own, a restart under the same name and idle on evidence: no
+//     recording has a Pod's Ready time change with no row that is not Ready
+//     between, or a row that read nothing. Their unit tests hold all four
+//     (heldBy).
 //
 // The acceptance and engine recordings were taken again for this PR, with
 // the generator's Ready time fixed for the day: the earlier ones gave each
@@ -77,6 +81,8 @@ var replaySwitches = map[string][]string{
 	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
 	saturation.SwitchITLReadsFinitePodMean:           nil,
+	saturation.SwitchITLRestartUnderName:             nil,
+	saturation.SwitchITLIdleOnEvidence:               nil,
 	slo.SwitchITLReadsSettle: {
 		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
 		"engine/slo-published.csv", "engine/variant-capacities.csv",
@@ -89,6 +95,8 @@ var replaySwitches = map[string][]string{
 	},
 	slo.SwitchITLKeepsSettleThroughMissingRow: nil,
 	slo.SwitchITLReadsFinitePodMean:           nil,
+	slo.SwitchITLRestartUnderName:             nil,
+	slo.SwitchITLIdleOnEvidence:               nil,
 }
 
 // switchPackage is the package whose hook accepts the switch name.
@@ -152,6 +160,18 @@ var heldBy = map[string][]heldTest{
 	},
 	slo.SwitchITLReadsFinitePodMean: {
 		{"../slo", "TestSettle_APodWithAnAbsentRankIsNoReading"},
+	},
+	saturation.SwitchITLRestartUnderName: {
+		{"../saturation", "TestITLSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle"},
+	},
+	saturation.SwitchITLIdleOnEvidence: {
+		{"../saturation", "TestITLSettle_AScrapeThatReadNothingIsNotIdle"},
+	},
+	slo.SwitchITLRestartUnderName: {
+		{"../slo", "TestSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle"},
+	},
+	slo.SwitchITLIdleOnEvidence: {
+		{"../slo", "TestSettle_AScrapeThatReadNothingIsNotIdle"},
 	},
 	saturation.SwitchITLPerToken: {
 		{"../saturation", "TestITLPerToken_TheLineIsFittedPerAcceptedToken"},
