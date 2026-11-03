@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -72,6 +73,10 @@ func TestInputBuilder_TheEngineRunRecordsTheSameEventsInTheSamePhases(t *testing
 			var d saturation.ForgetVariantEvent
 			require.NoError(t, ev.DecodeData(&d))
 			key = cycleModel{ev.Now, utils.GetNamespacedKey(d.Namespace, d.ModelID)}
+		case slo.KindForgetVariant:
+			var d slo.ForgetVariantEvent
+			require.NoError(t, ev.DecodeData(&d))
+			key = cycleModel{ev.Now, utils.GetNamespacedKey(d.Namespace, d.ModelID)}
 		case saturation.KindForgottenToken:
 			var d saturation.ForgottenTokenEvent
 			require.NoError(t, ev.DecodeData(&d))
@@ -88,7 +93,7 @@ func TestInputBuilder_TheEngineRunRecordsTheSameEventsInTheSamePhases(t *testing
 	}
 	// The order check reached every kind it names: a fixture that stopped
 	// forgetting would pass it vacuously.
-	for _, kind := range []string{capacity.KindFileScaleTarget, saturation.KindForgetVariant, saturation.KindForgottenToken} {
+	for _, kind := range []string{capacity.KindFileScaleTarget, saturation.KindForgetVariant, slo.KindForgetVariant, saturation.KindForgottenToken} {
 		assert.Positive(t, checked[kind], "no %s event was checked", kind)
 	}
 

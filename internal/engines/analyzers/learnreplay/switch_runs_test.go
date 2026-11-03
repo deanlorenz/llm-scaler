@@ -71,11 +71,54 @@ import (
 // read at the upper bound on every priced line, but move nothing: every
 // derived mu they price is capped at their batch cap of 64 before the KV
 // binds.
+//
+// Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
+// batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
+// readers, #274's ITL per accepted token, #276's output spread, #427's
+// zero-replica batch cap, #431's forget of the slo line) are not here: "all
+// off" is this PR's switches, and an earlier PR's stay at their constructor
+// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchKVPerRequestHitsResident: {
 		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
 		"e1/results.csv", "e1/variant-capacities.csv",
 	},
+}
+
+// learner4aSeams is learner PR 4a's switches, earlier seams now (merged
+// into earlierSeams): the ITL line, and the slo analyzer's line, on the
+// settle tracker, six switches each, with the outputs 4a named each to
+// move. The restart wait moves the in-process runs and
+// ols-sweep-slo-restart; the move itself the in-process runs on the cycles
+// after their clock jumps a day (settle.Rejoined); the other four move
+// nothing and are held by their unit tests (heldBy).
+var learner4aSeams = map[string][]string{
+	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
+	saturation.SwitchITLWaitsAfterRestart: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
+		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
+		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+	},
+	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
+	saturation.SwitchITLReadsFinitePodMean:           nil,
+	saturation.SwitchITLRestartUnderName:             nil,
+	saturation.SwitchITLIdleOnEvidence:               nil,
+	slo.SwitchITLReadsSettle: {
+		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
+		"engine/slo-published.csv", "engine/variant-capacities.csv",
+	},
+	slo.SwitchITLWaitsAfterRestart: {
+		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
+		"engine/slo-published.csv", "engine/variant-capacities.csv",
+		"mu-paths/slo-published.csv", "mu-paths/variant-capacities.csv",
+		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+	},
+	slo.SwitchITLKeepsSettleThroughMissingRow: nil,
+	slo.SwitchITLReadsFinitePodMean:           nil,
+	slo.SwitchITLRestartUnderName:             nil,
+	slo.SwitchITLIdleOnEvidence:               nil,
 }
 
 // switchPackage is the package whose hook accepts the switch name.
@@ -90,8 +133,9 @@ func switchPackage(name string) string {
 // code still has, and the golden outputs that PR named it to move. Each
 // stays on, at its constructor default, in this PR's runs; off alone, from
 // all on, it may move only what it named. A seam's row goes with the seam,
-// in the PR, or cleanup PR, that deletes it with zero golden diff.
-var earlierSeams = map[string][]string{
+// in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
+// PR 4a's rows are learner4aSeams, merged in.
+var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
@@ -122,37 +166,29 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchBatchCapZeroReplica: nil,
 	// #276's spread of output lengths in the KV per request.
 	saturation.SwitchKVPerRequestOutputDispersion: nil,
-	// Learner PR 4a: the ITL line, and the slo analyzer's line, on the
-	// settle tracker. The wait after a controller restart moves the goldens
-	// whose load reaches the line within its settle of the controller start;
-	// the move itself the in-process runs after their clock jumps a day. The
-	// other four of each move nothing and are held by their unit tests.
-	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
-	saturation.SwitchITLWaitsAfterRestart: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
-		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
-		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
-		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
-	},
-	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
-	saturation.SwitchITLReadsFinitePodMean:           nil,
-	saturation.SwitchITLRestartUnderName:             nil,
-	saturation.SwitchITLIdleOnEvidence:               nil,
-	slo.SwitchITLReadsSettle: {
-		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
-		"engine/slo-published.csv", "engine/variant-capacities.csv",
-	},
-	slo.SwitchITLWaitsAfterRestart: {
-		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
-		"engine/slo-published.csv", "engine/variant-capacities.csv",
-		"mu-paths/slo-published.csv", "mu-paths/variant-capacities.csv",
-		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
-	},
-	slo.SwitchITLKeepsSettleThroughMissingRow: nil,
-	slo.SwitchITLReadsFinitePodMean:           nil,
-	slo.SwitchITLRestartUnderName:             nil,
-	slo.SwitchITLIdleOnEvidence:               nil,
+	// Issue #431 routes the forget-learned-state annotation to the slo
+	// analyzer's line, one switch, recorded as an event of its own
+	// (slo.ForgetVariant). It moves no golden, measured: the acceptance and
+	// engine recordings were taken again for it, and each carries one
+	// slo.ForgetVariant (and nothing else new), with no output moved with the
+	// switch on or off. Their forget lands at 09:31:30, on cycle 7, before the
+	// slo line's first fit on cycle 9, so it drops a raw window and the
+	// accelerator memo (Dropped 2, no intercept); two cycles later the clock
+	// jumps a day and that window would have aged out anyway. No cluster
+	// recording forgets. Its unit tests hold it (heldBy).
+	slo.SwitchITLForgetReachesTheLine: nil,
+})
+
+// withSeams is rows with more's rows added; a name in both is a row given
+// twice, and panics.
+func withSeams(more, rows map[string][]string) map[string][]string {
+	for name, outs := range more {
+		if _, dup := rows[name]; dup {
+			panic("earlierSeams: " + name + " has two rows")
+		}
+		rows[name] = outs
+	}
+	return rows
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -164,6 +200,12 @@ var earlierSeams = map[string][]string{
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #431's forget of the slo line.
+	slo.SwitchITLForgetReachesTheLine: {
+		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
+		{"../slo", "TestForget_DropsTheAcceleratorMemo"},
+		{"../slo", "TestForget_ReportsEachForgottenKey"},
+	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
 	},
@@ -343,8 +385,9 @@ func mergedRows() map[string][]string {
 	return out
 }
 
-// switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (ebefc0b74, main after #443).
+// switchBase is the sha256 of each output a switch of this PR names, as the
+// base commit's goldens hold it (8189fe1e5, main after #445; the four are
+// unchanged since ebefc0b74).
 var switchBase = map[string]string{
 	"e1-tuned/results.csv":            "2112395c6117d8706af287683103ea5e50427d06185d06c56b68b81595777f01",
 	"e1-tuned/variant-capacities.csv": "e5bb2e56c8ce764f3eb3ca38619f91f37e722e9ba271cdce401e3c2086bf4c08",

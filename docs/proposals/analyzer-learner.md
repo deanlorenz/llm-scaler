@@ -590,7 +590,7 @@ and `now`:
 | store mutations, engine-side | the exported values method behind `LoadFromScaleTarget` (the parsed `EngineParams`, accelerator, GPU count, `RollingOut`, `now`), `EvictStale` (the timeout and `now`; what it removed, as a check that fails only the fidelity run) |
 | settle observation, engine-side (from PR 1) | the model and the engine's own `now`, read where the engine observes the tracker; the rows are the next `Analyze` event's ([4.2](#42-one-owner)) |
 | `RestoreLearnedState`, `ExportLearnedState` | the document in or out |
-| `ForgetVariant`, `ForgetLearnedState` | the variant, key and cause (annotation, model gone) |
+| `ForgetVariant`, `ForgetLearnedState`; SLO `ForgetVariant` (#431) | the variant, key and cause (annotation, model gone) |
 | `EvictStaleHistory`, `NoteVariantsPresent`, SLO `BeginCycle`, `EvictStale`, `NoteVariantsPresent`, throughput `Observe` (engine-called only) | the arguments |
 | `HoldLowerBounds` | the flag |
 | `StableAcceleratorFor` | the arguments and the answer, when the engine calls it (it moves the memo) |

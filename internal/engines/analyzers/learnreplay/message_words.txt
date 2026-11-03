@@ -1967,6 +1967,7 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-forget-reaches-the-line
 slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
@@ -1981,7 +1982,9 @@ slo-variant
 slo.Analyze
 slo.BeginCycle
 slo.EvictStale
+slo.ForgetVariant
 slo.NoteVariantsPresent
+sloEntries
 slopeAge
 slopeAgeSeconds
 slopeHeld
