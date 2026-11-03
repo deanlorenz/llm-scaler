@@ -40,6 +40,46 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
+// #432 fits an ITL line for an aggregated (unlabeled, RoleBoth) variant, as
+// for decode, and prices its replicas from it; its line is shared only with
+// other aggregated variants (a physics key ending in |both). It moves the
+// acceptance and engine fixtures, the two whose models run aggregated
+// variants (model-01's variant-01 and variant-02, model-02's variant-03); no
+// other fixture has one. Measured, all off against all on:
+//
+//   - lines.csv: model-01's variant-01 publishes a line under its |both key
+//     on its first fit (09:32:00), and variant-02, on the same engine
+//     configuration, borrows it on three cycles. No decode line moves.
+//   - learned-state.csv: that line, variant-01's intercept and its held
+//     slope join the two exports (three rows each).
+//   - variant-capacities.csv: 28 of 180 rows (acceptance) and 28 of 156
+//     (engine), all on the three aggregated variants. ServiceRate reads the
+//     ITL window on all 28 and its sample count on 16; on six rows of
+//     variant-01 and variant-02 it has a line (A 0.020, B 0.006,
+//     ITL 0.0196 s at the pricing point) and a derived rate of 10.88/s. On
+//     variant-02's three borrowing cycles the record names the borrow
+//     (Borrowed: itl-line from variant-01). No demand, capacity or reason
+//     moves: TotalDemand, PerReplicaCapacity and Reason are unchanged on
+//     every row.
+//   - engine/composite-variants.csv: variant-02's three borrow rows, as
+//     above.
+//
+// Earlier PRs' rows: #277's switch (kv-per-request-hits-resident) went to
+// earlierSeams; off alone from all on it still moves only e1 and e1-tuned.
+//
+// The forget-learned-state annotation, the GPS check and the learner report
+// role move no golden; their unit tests hold them in the saturation package.
+var replaySwitches = map[string][]string{
+	saturation.SwitchITLFitsAggregated: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv",
+		"engine/variant-capacities.csv",
+	},
+}
+
+// kvHitsResidentSeam is #277's row, an earlier seam now (merged into
+// earlierSeams).
+//
 // #277 prices a resident request, where the running requests are read, at
 // the KV they are measured to hold, between the hit rate's discount and none;
 // with no reading, at the discount as before. It moves the derived mu, and
@@ -75,10 +115,16 @@ import (
 // Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
 // readers, #274's ITL per accepted token, #276's output spread, #427's
-// zero-replica batch cap, #431's forget of the slo line) are not here: "all
-// off" is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
-var replaySwitches = map[string][]string{
+// zero-replica batch cap, #431's forget of the slo line, #277's resident
+// KV) are not in replaySwitches: "all off" is this PR's switches, and an
+// earlier PR's stay at their constructor default, on, as the base goldens
+// were written (analyzer-learner.md, 2.5).
+//
+// #277's reading applies to an aggregated variant's derived mu too, with no
+// change of its own: fleetResidentKVPerRequest reads every Ready generating
+// replica (generatesOutput, every role but prefill), and the derived mu of
+// every role priced from a line takes it.
+var kvHitsResidentSeam = map[string][]string{
 	saturation.SwitchKVPerRequestHitsResident: {
 		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
 		"e1/results.csv", "e1/variant-capacities.csv",
@@ -93,7 +139,17 @@ var replaySwitches = map[string][]string{
 // after their clock jumps a day (settle.Rejoined); the other four move
 // nothing and are held by their unit tests (heldBy).
 var learner4aSeams = map[string][]string{
-	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
+	// Since #432 the move reaches the aggregated line of the acceptance and
+	// engine fixtures too: off, model-01's variant-01 does not settle in
+	// time for its first fit at 09:32:00, so it publishes no |both line that
+	// cycle, variant-02 borrows none, and their service rates and the
+	// learned-state export lose them, as the slo analyzer's line does under
+	// slo.SwitchITLReadsSettle.
+	saturation.SwitchITLReadsSettle: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv",
+		"engine/variant-capacities.csv",
+	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
@@ -135,7 +191,7 @@ func switchPackage(name string) string {
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, merged in.
-var earlierSeams = withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withSeams(kvHitsResidentSeam, withSeams(learner4aSeams, map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
@@ -177,7 +233,7 @@ var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	// jumps a day and that window would have aged out anyway. No cluster
 	// recording forgets. Its unit tests hold it (heldBy).
 	slo.SwitchITLForgetReachesTheLine: nil,
-})
+}))
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -386,13 +442,16 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (8189fe1e5, main after #445; the four are
-// unchanged since ebefc0b74).
+// base commit's goldens hold it (64f4747b0, main after #446; the seven are
+// unchanged since 0da4f9ac2).
 var switchBase = map[string]string{
-	"e1-tuned/results.csv":            "2112395c6117d8706af287683103ea5e50427d06185d06c56b68b81595777f01",
-	"e1-tuned/variant-capacities.csv": "e5bb2e56c8ce764f3eb3ca38619f91f37e722e9ba271cdce401e3c2086bf4c08",
-	"e1/results.csv":                  "5f88c8ad7b27f1e80cb6751fdd490653e3b399afc6e386cffdc187154f2cbcd8",
-	"e1/variant-capacities.csv":       "a84f06a5af093a84ad5b7f49ace7f02fd80d9e595c8fcca3fd5ea1c9c528af9b",
+	"acceptance/learned-state.csv":      "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
+	"acceptance/lines.csv":              "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
+	"acceptance/variant-capacities.csv": "30f5279ca4c19b6e50fb1567b8e018172423e5756782535a9a94411591ffb63a",
+	"engine/composite-variants.csv":     "43bb85189c577d3c09508de664d37c55c5302fa22cb41f03f1d581722b3f078f",
+	"engine/learned-state.csv":          "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
+	"engine/lines.csv":                  "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
+	"engine/variant-capacities.csv":     "4765d306858eb2dc564bc93cf352c5947ec85f3ca9d503d48629a98e11cab755",
 }
 
 // The slow tests of this package run in parallel with each other (each

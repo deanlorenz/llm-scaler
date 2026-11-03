@@ -131,7 +131,9 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // from: issue #393), so this can become a gate again. Until it does, the check
 // still pairs the instant k with the rate[1m] figures, and only logs.
 //
-// Warm-pool replicas and non-decode roles are skipped rather than logged: a
+// Warm-pool replicas and roles priced from no line (itlLineRole: prefill,
+// and an aggregated variant with SwitchITLFitsAggregated off) are skipped
+// rather than logged: a
 // bridge runs on the pool's own engine settings (noteITL excludes it from the
 // fit for that reason and floor.Estimate prices it not at all), and a prefill
 // replica generates about one token per request, so neither disagreement means
@@ -145,7 +147,7 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.EngineParams,
 	rm domain.ReplicaMetrics, role string, kvReq float64, borrowedFrom string,
 	logger logr.Logger) {
-	if rm.FromWarmPool || domain.CanonicalRole(role) != domain.RoleDecode {
+	if rm.FromWarmPool || !a.itlLineRole(role) {
 		return
 	}
 	capacityTokens := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens)

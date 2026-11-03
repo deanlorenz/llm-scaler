@@ -374,7 +374,7 @@ TTFT's rows are on [its page](slo-capacity-planner-ttft.md#where-it-is-most-wron
 | Positive prompt/output correlation | Over-promises | — |
 | ITL depends on shape on aggregated pods | Either way; about 40% of ITL at 1000/500 | #275 |
 | SLO analyzer reads step time, not per token | Under-promises on speculating vLLM by `1 + E` | #274 |
-| No saturation line for an unlabeled aggregated variant | Use the SLO analyzer's line | #432 |
+| No saturation line for an unlabeled aggregated variant | Fixed: saturation fits it, under its own key (switch `itl-line-fits-aggregated`) | #432 |
 | Residence exponential in the admission chain | Either way; a constant ITL would over-promise near the knee | — |
 | `R_q` learned under one load and applied at another | Learned at lower load and applied near the knee, over-promises (the spread grows with load); the reverse under-promises | — |
 | `R_q` pooled across output lengths, applied to a short-output bucket | Over-promises | — |
@@ -467,7 +467,7 @@ is made.**
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
-| Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #432, #277 | — | — |
+| Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
 The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded)
 is worth preserving now, before any capture tool exists, as a Prometheus

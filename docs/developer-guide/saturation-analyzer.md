@@ -49,7 +49,7 @@ recalibrated downstream — see [RC and SC](#rc-and-sc).
    outstanding ([Shape change](#shape-change)).
 3. Resolve the generation length the queue is priced at, and the shape `mu` is
    priced at ([The service rate](#the-service-rate-mu)).
-4. Fit one ITL line per decode variant ([The ITL line](#the-itl-line)).
+4. Fit one ITL line per decode or aggregated variant ([The ITL line](#the-itl-line)).
 5. Per replica: compute `k1`, `k2`, the effective capacity, and `mu`
    ([Per-replica capacity](#per-replica-capacity)).
 6. Price the scheduler queue and attribute it to a role
@@ -531,6 +531,32 @@ A fit is refused unless it is usable (`ValidModel`): `A` and `B` finite,
 `A > 1e-12` (a flat or falling line is not this physics), and
 `A x 0.85 + B > 0`.
 
+### Which roles fit a line
+
+`itlLineRole` (`itl_aggregated.go`) decides, for `fitLines` and for every
+consumer that prices from the line: decode always, an aggregated variant
+(`RoleBoth`, or no role label) with `SwitchITLFitsAggregated`
+(`itl-line-fits-aggregated`, issue #432) on, and prefill never. Before #432
+only decode fitted, so an ordinary unlabeled deployment had no derived mu and
+no service-rate line. The consumers that follow the rule are the derived mu
+(`priceReplicas`), the service-rate signal (`attachServiceRates`, which reads
+`itlModels`), the GPS check (`noteLineMismatch`) and the learner report's
+role. The settle tracker, the ITL band and the cap admission were never
+role-gated beyond prefill and need nothing. #277's resident-KV reading
+(`fleetResidentKVPerRequest`) already reads every generating replica, so it
+prices an aggregated variant's derived mu too. What stays decode-only is
+P/D-specific: the decode view of the queue (`pd_decode_queue.go`), the
+settled-idle count that relaxes prefill's hold (`idle_room.go`) and decode's
+saturation flag.
+
+An aggregated line is shared under its own key: `itlLineKeyForRole` appends
+`|both` to the physics key, so the same model on the same engine
+configuration keeps one line for decode pods and another for aggregated pods,
+and neither lends to the other. The window key is per variant already. An
+aggregated pod's ITL also carries the chunked prefill it interleaves, so its
+line depends on the request shape (issue #275); it is fitted at the shape the
+fleet runs and is not corrected for a change of it.
+
 ### ITL per accepted token (speculative decoding)
 
 vLLM observes `inter_token_latency` once per request per engine step, however
@@ -715,7 +741,7 @@ Each of the six is a replay switch, in both analyzers:
 `itl-keeps-the-settle-through-a-missing-row` and
 `itl-reads-the-finite-pod-mean`, with an `slo-` prefix in the slo analyzer.
 Off, each does what the line did before 4a. The line is a
-learner on the shared rules too: a `learn.Report` per decode variant
+learner on the shared rules too: a `learn.Report` per variant that fits a line
 (`itl_learner.go`), `learner-write` at `--v=3` when A or B moves more than
 `ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
 so the forget-learned-state annotation reaches it by name.

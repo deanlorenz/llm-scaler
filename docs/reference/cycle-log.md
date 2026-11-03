@@ -267,7 +267,7 @@ says). The k2 source is one of the values below. Then, when they apply:
 - `/P1-obs-…`: the replica read saturated but the reading was not recorded as
   k2, and the label says why (`unsettled`, `downstream`, `unadmitted`,
   `rollout` or `invalid`; see the table below).
-- `/mu:<why>`: a decode replica with no derived service rate. `why` is
+- `/mu:<why>`: a decode or aggregated (unlabeled) replica with no derived service rate. `why` is
   `no-line` (no ITL line fitted yet), `no-shape`, `k-price`, `no-seqs`,
   `no-itl` or `no-rate`.
 - `/bridge`: a warm-pool Pod lent to the variant.

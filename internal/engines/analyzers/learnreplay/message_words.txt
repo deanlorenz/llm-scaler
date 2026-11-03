@@ -1029,6 +1029,7 @@ itl-idle-needs-evidence
 itl-keeps-the-settle-through-a-missing-row
 itl-line
 itl-line-borrowed
+itl-line-fits-aggregated
 itl-line-none
 itl-ols
 itl-per-accepted-token
