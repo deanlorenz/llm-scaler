@@ -599,6 +599,7 @@ condition
 config
 config.ScalingPolicy
 config.num_speculative_tokens
+config.yaml
 config/components/learner-recorder
 configMap
 configuration

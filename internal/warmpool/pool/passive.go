@@ -18,8 +18,8 @@ var ErrPassive = errors.New("the model is passive: the warm pool does not act fo
 // it (Warm) or wake one into a serving replica (Activate). Returning a copy
 // (Deactivate) and unloading one (Evict) pass through: they give capacity
 // back to the pool and are the one change the pool may still make for a
-// passive model, as the share's mark cleanup is for its pods. ListWarm is
-// passed through: reading changes nothing.
+// passive model, as the share's mark cleanup is for its pods. They, and
+// ListWarm, are the embedded Pool's own: the guard does not override them.
 //
 // The refusal is logged once per variant while it lasts, and again after the
 // variant has been active.
@@ -68,15 +68,4 @@ func (g *PassiveGuard) Activate(ctx context.Context, pod types.NamespacedName, m
 		return Endpoint{}, ErrPassive
 	}
 	return g.Pool.Activate(ctx, pod, model)
-}
-
-// Deactivate returns a serving copy to the pool, passive variant or not: it
-// gives capacity back.
-func (g *PassiveGuard) Deactivate(ctx context.Context, pod types.NamespacedName, model ModelRef) error {
-	return g.Pool.Deactivate(ctx, pod, model)
-}
-
-// Evict unloads a copy, passive variant or not: it gives capacity back.
-func (g *PassiveGuard) Evict(ctx context.Context, pod types.NamespacedName, model ModelRef) error {
-	return g.Pool.Evict(ctx, pod, model)
 }

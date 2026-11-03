@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
 )
@@ -64,13 +65,13 @@ var _ = Describe("Passive mode through the external scaler", func() {
 		return o
 	}
 
-	newHandler := func(passive scaler.PassiveModels, objs ...client.Object) *scaler.Handler {
+	newHandler := func(pr scaler.PassiveResolver, objs ...client.Object) *scaler.Handler {
 		s := runtime.NewScheme()
 		Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
 		Expect(appsv1.AddToScheme(s)).To(Succeed())
 		c = fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 		reg = registry.New(0)
-		return scaler.NewHandler(c, store, reg).WithPassive(passive)
+		return scaler.NewHandler(c, store, reg).WithPassive(pr)
 	}
 
 	getMetrics := func(h *scaler.Handler) (int64, error) {
@@ -151,8 +152,8 @@ var _ = Describe("Passive mode through the external scaler", func() {
 		})
 
 		It("reports a kubectl scale from zero on the push stream within the recheck", func() {
-			defer scaler.SetPassiveZeroRecheckForTest(50 * time.Millisecond)()
-			h := newHandler(passiveModels{passiveModel: true}, so(ptr(0), nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(0)))
+			h := newHandler(passiveModels{passiveModel: true}, so(ptr(0), nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(0))).
+				WithZeroRecheckForTest(50 * time.Millisecond)
 			sctx, cancel := context.WithCancel(ctx)
 			stream := newFakeStream(sctx)
 			done := make(chan error, 1)
@@ -162,6 +163,16 @@ var _ = Describe("Passive mode through the external scaler", func() {
 			Expect(stream.nextPush()).To(BeTrue())
 			cancel()
 			Eventually(done).Should(Receive(BeNil()))
+		})
+
+		It("re-reads a held count every 5 s by default, and only a held one it reports inactive", func() {
+			Expect(scaler.ZeroRecheckOf(newHandler(nil))).To(Equal(5 * time.Second))
+			Expect(scaler.PassiveZeroRecheck).To(Equal(5 * time.Second))
+			Expect(scaler.RecheckDue(false, passive.Hold)).To(BeTrue())
+			Expect(scaler.RecheckDue(true, passive.Hold)).To(BeFalse(), "an active one is re-asserted by the keepalive")
+			for _, m := range []passive.Mode{passive.Observe, passive.ObserveUnsafe, passive.Active} {
+				Expect(scaler.RecheckDue(false, m)).To(BeFalse(), "mode %s answers no count to re-read", m)
+			}
 		})
 
 		It("follows the enrichment on an open stream: hold turns to observe when a trigger is added", func() {

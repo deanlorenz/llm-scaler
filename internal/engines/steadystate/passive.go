@@ -2,7 +2,6 @@ package steadystate
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -47,18 +46,8 @@ func (e *Engine) observePassive(logger logr.Logger, vas []llmdVariantAutoscaling
 		va := &vas[i]
 		target := va.GetScaleTargetName()
 		key := utils.GetNamespacedKey(va.Namespace, target)
-		var entry registry.Entry
-		found := false
-		if e.Variants != nil {
-			if entry, found = e.Variants.Get(va.Namespace, va.Name); !found {
-				entry, found = e.Variants.ByTargetName(va.Namespace, target)
-			}
-		}
-		meta := map[string]string{registry.ModelIDKey: va.Spec.ModelID}
-		if found {
-			meta = entry.Metadata
-		}
-		mode, source := e.Passive.ForMetadata(va.Namespace, meta, entry.Target)
+		res := e.Passive.Resolve(va.Namespace, va.Spec.ModelID, va.Name, target)
+		mode, source, entry := res.Mode, res.Source, res.Entry
 		st := passiveVariantState{mode: mode, source: source, paused: entry.Target.KEDAPaused,
 			fallback: mode == passive.Hold && entry.Target.HasFallback}
 		next[key] = st
@@ -90,12 +79,12 @@ func (e *Engine) reportPassiveChange(logger logr.Logger, va *llmdVariantAutoscal
 		logger.Info("Passive mode changed", append(kv, "previousMode", string(prev.mode))...)
 	}
 	if cur.mode == passive.ObserveUnsafe && prev.mode != passive.ObserveUnsafe {
-		logger.Info("WARNING: passive observe is unsupported here: the ScaledObject's scalingModifiers formula names "+
+		logger.Info("Passive observe is unsupported here: the ScaledObject's scalingModifiers formula names "+
 			"this controller's trigger, so its answer of 0 enters the formula. Remove the trigger from the formula, "+
 			"or remove the trigger", kv...)
 	}
 	if cur.fallback && !prev.fallback {
-		logger.Info("WARNING: the held variant's ScaledObject sets spec.fallback: if the scaler cannot read the "+
+		logger.Info("The held variant's ScaledObject sets spec.fallback: if the scaler cannot read the "+
 			"replica count it answers an error, and after failureThreshold errors KEDA sets the target to "+
 			"fallback.replicas. Remove spec.fallback for a strict hold", kv...)
 	}
@@ -137,7 +126,7 @@ func (e *Engine) groupPassive(g allocation.ShareGroup) bool {
 // event says what the controller would do, never that it did it.
 func (e *Engine) recordPassiveRecommendation(va *llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 	action domain.SaturationAction, current, target int, reason string) {
-	if e.Recorder == nil || !slices.Contains([]domain.SaturationAction{domain.ActionScaleUp, domain.ActionScaleDown}, action) {
+	if e.Recorder == nil || action != domain.ActionScaleUp && action != domain.ActionScaleDown {
 		return
 	}
 	e.recordEvent(va, corev1.EventTypeNormal, constants.K8SEventPassiveRecommendation,

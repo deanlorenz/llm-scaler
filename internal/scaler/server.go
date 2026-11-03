@@ -69,7 +69,7 @@ type Server struct {
 	DecisionInterval func() time.Duration
 	// Passive resolves which models are passive (passive.Resolver). Nil is
 	// every model active.
-	Passive PassiveModels
+	Passive PassiveResolver
 
 	// listening is set once a listener is bound and cleared when Start returns.
 	// Where the platform allows it the hand-off binds the full server before

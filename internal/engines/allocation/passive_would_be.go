@@ -71,16 +71,25 @@ func ChargeGrowth(constraints []*ResourceConstraints, decisions []domain.Variant
 	return out
 }
 
-// PassiveWouldBe is the passive models' would-be decisions: a quiet pass
-// (ShadowOptimize: it publishes, counts and logs nothing) over what the
+// PassiveWouldBe is the passive models' would-be decisions, over what the
 // active models' decisions left of constraints. So a passive model's would-be
-// growth takes nothing from an active model, and the active models are
-// allocated exactly as if the passive ones were absent at their real usage,
-// which the limiters already count.
-func (o *GreedyByScoreOptimizer) PassiveWouldBe(ctx context.Context, passive []ModelScalingRequest,
+// growth takes nothing from an active model, and the active models -- decided
+// by the caller without the passive ones -- are allocated exactly as if the
+// passive ones were absent at their real usage, which the limiters already
+// count.
+//
+// Under GreedyByScoreOptimizer the pass is quiet (ShadowOptimize: it
+// publishes, counts and logs nothing). Any other optimizer runs Optimize on
+// the passive models alone: the cost-aware optimizer decides each model on
+// its own and publishes nothing, so that is the same pass.
+func PassiveWouldBe(ctx context.Context, optimizer ScalingOptimizer, passive []ModelScalingRequest,
 	constraints []*ResourceConstraints, active []domain.VariantDecision) []domain.VariantDecision {
 	if len(passive) == 0 {
 		return nil
 	}
-	return o.ShadowOptimize(ctx, passive, ChargeGrowth(constraints, active))
+	left := ChargeGrowth(constraints, active)
+	if g, ok := optimizer.(*GreedyByScoreOptimizer); ok {
+		return g.ShadowOptimize(ctx, passive, left)
+	}
+	return optimizer.Optimize(ctx, passive, left)
 }

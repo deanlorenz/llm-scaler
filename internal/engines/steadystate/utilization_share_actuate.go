@@ -755,15 +755,15 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		// on the node its hole is on, not on the freest node.
 		allocation.ReservePromised(g.Nodes, holes)
 	}
-	// Under a limiter, the passive models are left out of the real pass: they
-	// count against the budget at their real usage, which the limiters already
-	// read, and their would-be growth takes nothing from a model that scales.
-	// Their would-be figures come from a quiet pass over what is left.
+	// The passive models are left out of the real pass, under any optimizer:
+	// they count against the budget at their real usage, which the limiters
+	// already read, and their would-be growth takes nothing from a model that
+	// scales. Their would-be figures come from a pass over what is left.
 	var decisions []domain.VariantDecision
-	if active, passive := allocation.SplitPassive(requests); greedy && len(passive) > 0 {
+	if active, passive := allocation.SplitPassive(requests); len(passive) > 0 {
 		withheld := allocation.WithholdPromised(constraints, promised)
 		decisions = optimizer.Optimize(ctx, active, withheld)
-		decisions = append(decisions, g.PassiveWouldBe(ctx, passive, withheld, decisions)...)
+		decisions = append(decisions, allocation.PassiveWouldBe(ctx, optimizer, passive, withheld, decisions)...)
 	} else {
 		decisions = optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
 	}

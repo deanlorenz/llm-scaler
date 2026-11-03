@@ -1,6 +1,35 @@
 package config
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+	"strconv"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ManagerConfigKey is the data key of the manager ConfigMap
+// (wva-manager-config) that holds its settings as YAML.
+const ManagerConfigKey = "config.yaml"
+
+// ManagerConfigPassive reads WVA_PASSIVE from the manager ConfigMap's data, as
+// the loader reads it at start: an absent key, or one that is not a boolean,
+// is false. set reports whether the key was there and parsed.
+func ManagerConfigPassive(data map[string]string) (passive, set bool) {
+	var m map[string]any
+	if err := yaml.Unmarshal([]byte(data[ManagerConfigKey]), &m); err != nil {
+		return false, false
+	}
+	v, found := m["WVA_PASSIVE"]
+	if !found {
+		return false, false
+	}
+	b, err := strconv.ParseBool(fmt.Sprint(v))
+	if err != nil {
+		return false, false
+	}
+	return b, true
+}
 
 // Passive-mode sources: the layer whose value decided a model's passive mode,
 // as ResolvePassive reports it and the "Passive mode" log lines print it.

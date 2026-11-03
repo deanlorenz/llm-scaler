@@ -90,22 +90,51 @@ func (r *Resolver) ForMetadata(namespace string, metadata map[string]string, t r
 	return ModeOf(passive, t), source
 }
 
+// Resolution is one variant's passive mode, the layer that decided whether
+// it is passive, and the registry entry it was read from.
+type Resolution struct {
+	Mode   Mode
+	Source string
+	// Entry is the variant's registry entry; zero when Found is false.
+	Entry registry.Entry
+	// Found reports a live registry entry for the variant.
+	Found bool
+}
+
+// Resolve is the passive mode of a variant of model modelID in namespace,
+// looked up in the registry by each of names in turn -- as a ScaledObject's
+// name, then as a scale target's -- so a caller passes what it knows. With no
+// live entry the model alone decides, with no ScaledObject read (hold). A nil
+// Resolver, or one without a Config, resolves everything active.
+func (r *Resolver) Resolve(namespace, modelID string, names ...string) Resolution {
+	if r == nil || r.Config == nil {
+		return Resolution{Mode: Active, Source: config.PassiveSourceFlag}
+	}
+	if r.Registry != nil {
+		for _, name := range names {
+			e, ok := r.Registry.Get(namespace, name)
+			if !ok {
+				e, ok = r.Registry.ByTargetName(namespace, name)
+			}
+			if ok {
+				m, src := r.ForMetadata(namespace, e.Metadata, e.Target)
+				return Resolution{Mode: m, Source: src, Entry: e, Found: true}
+			}
+		}
+	}
+	m, src := r.ForMetadata(namespace, map[string]string{registry.ModelIDKey: modelID}, registry.Target{})
+	return Resolution{Mode: m, Source: src}
+}
+
 // Variant is the mode of the registered variant named name in namespace: by
 // its ScaledObject's name, else by its scale target's. ok is false when no
 // live entry matches; the caller then treats the variant as Active.
 func (r *Resolver) Variant(namespace, name string) (Mode, bool) {
-	if r == nil || r.Config == nil || r.Registry == nil {
+	res := r.Resolve(namespace, "", name)
+	if !res.Found {
 		return Active, false
 	}
-	e, ok := r.Registry.Get(namespace, name)
-	if !ok {
-		e, ok = r.Registry.ByTargetName(namespace, name)
-	}
-	if !ok {
-		return Active, false
-	}
-	m, _ := r.ForMetadata(namespace, e.Metadata, e.Target)
-	return m, true
+	return res.Mode, true
 }
 
 // Clamp bounds a held count to the ScaledObject's envelope, as KEDA and the

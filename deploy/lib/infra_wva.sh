@@ -261,10 +261,15 @@ wva_resolve_prometheus_url() {
 wva_render_manager_config_patch() {
     local tmp_overlay="$1" src rendered passive
     src="$WVA_PROJECT/config/base/manager/manager-configmap.yaml"
-    [ -f "$src" ] || return 0
     # WVA_PASSIVE too: rendered, not patched after the apply, so the applied
-    # ConfigMap never carries the shipped false over a passive controller.
-    passive="$(wva_passive_want)" || exit 1
+    # ConfigMap never carries the shipped false over a passive controller. With
+    # passive mode to keep, a render that fails is an error, not a skip: the
+    # apply would reset the controller to active.
+    passive="$(wva_passive_want)" || return 1
+    if [ ! -f "$src" ]; then
+        [ -z "$passive" ] || { log_warning "cannot render WVA_PASSIVE=$passive: $src is missing"; return 1; }
+        return 0
+    fi
     [ -n "${PROMETHEUS_URL:-}" ] || [ -n "$passive" ] || return 0
 
     local skip="" ca=""
@@ -272,11 +277,18 @@ wva_render_manager_config_patch() {
         skip="$(wva_prometheus_skip_verify)"
         ca="$(wva_prometheus_ca_path)"
     fi
-    rendered="$(yq '.data."config.yaml"' "$src" \
+    # pipefail inside the substitution only: a stage that fails mid-pipe must
+    # fail the render, or a later stage renders its edit onto nothing and the
+    # applied config.yaml loses every other setting.
+    rendered="$(set -o pipefail; yq '.data."config.yaml"' "$src" \
         | if [ -n "${PROMETHEUS_URL:-}" ]; then WVA_URL="$PROMETHEUS_URL" yq '.PROMETHEUS_BASE_URL = strenv(WVA_URL)'; else cat; fi \
         | if [ -n "$skip" ]; then WVA_SKIP="$skip" yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'; else cat; fi \
         | if [ -n "$ca" ]; then WVA_CA="$ca" yq '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'; else cat; fi \
-        | if [ -n "$passive" ]; then WVA_P="$passive" yq '.WVA_PASSIVE = strenv(WVA_P)'; else cat; fi)" || return 0
+        | if [ -n "$passive" ]; then WVA_P="$passive" yq '.WVA_PASSIVE = strenv(WVA_P)'; else cat; fi)" || rendered=""
+    if [ -n "$passive" ] && [ "$(printf '%s\n' "$rendered" | wva_yaml_scalar '.WVA_PASSIVE')" != "$passive" ]; then
+        log_warning "could not render WVA_PASSIVE=$passive into wva-manager-config"
+        return 1
+    fi
     [ -n "$rendered" ] || return 0
 
     {
@@ -2000,9 +2012,9 @@ EOF
     # Passive mode as the live controller runs it, read before anything is
     # applied so the render below and the policy patch carry it.
     if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then
-        wva_live_passive "$WVA_NS"
+        wva_live_passive "$WVA_NS" || log_error "Cannot read the passive mode this controller runs with now (${WVA_LIVE_PASSIVE_ERR:-}), and this apply resets it. Fix the read, or re-run naming it: WVA_PASSIVE=true|false."
     fi
-    wva_render_manager_config_patch "$tmp_overlay"
+    wva_render_manager_config_patch "$tmp_overlay" || log_error "Refusing to apply: passive mode could not be rendered into wva-manager-config, and the apply would reset the controller to active."
     wva_append_prometheus_ca_mount_patch "$tmp_overlay/kustomization.yaml"
 
     # Who may call the external scaler: KEDA's namespace only, unless opted out.
@@ -2510,20 +2522,42 @@ wva_yaml_scalar() {
     printf '%s' "$v"
 }
 
+# wva_live_get prints one field of a live ConfigMap, nothing when the
+# ConfigMap does not exist. Any other failure -- Forbidden, a timeout -- is a
+# failure: an unreadable setting is not an absent one. The error goes to
+# WVA_LIVE_PASSIVE_ERR.
+wva_live_get() {
+    local ns="$1" name="$2" path="$3" out err rc=0
+    err="$(mktemp)"
+    out="$(kubectl get configmap "$name" -n "$ns" -o jsonpath="$path" 2>"$err")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if grep -q NotFound "$err"; then
+            rm -f "$err"
+            return 0
+        fi
+        WVA_LIVE_PASSIVE_ERR="$name in $ns: $(tr '\n' ' ' <"$err")"
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+    printf '%s' "$out"
+}
+
 # wva_live_passive reads the passive settings the live controller runs with,
 # before the apply: WVA_PASSIVE in wva-manager-config into WVA_LIVE_PASSIVE,
 # and `passive` on the default entry of wva-scaling-policy-config into
-# WVA_LIVE_DEFAULT_PASSIVE. Each is empty when unset or unreadable (a first
-# install).
+# WVA_LIVE_DEFAULT_PASSIVE. Each is empty when unset or when the ConfigMap does
+# not exist (a first install). A read that fails otherwise returns 1.
 wva_live_passive() {
     local ns="$1" cfg def
     WVA_LIVE_PASSIVE=""
     WVA_LIVE_DEFAULT_PASSIVE=""
-    cfg="$(kubectl get configmap wva-manager-config -n "$ns" -o jsonpath='{.data.config\.yaml}' 2>/dev/null)" || cfg=""
+    WVA_LIVE_PASSIVE_ERR=""
+    cfg="$(wva_live_get "$ns" wva-manager-config '{.data.config\.yaml}')" || return 1
     if [ -n "$cfg" ]; then
         WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | wva_yaml_scalar '.WVA_PASSIVE')"
     fi
-    def="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || def=""
+    def="$(wva_live_get "$ns" wva-scaling-policy-config '{.data.default}')" || return 1
     if [ -n "$def" ]; then
         WVA_LIVE_DEFAULT_PASSIVE="$(printf '%s\n' "$def" | wva_yaml_scalar '.passive')"
     fi

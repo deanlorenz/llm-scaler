@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
@@ -226,4 +227,38 @@ func TestPassiveShadowGroupIsNamed(t *testing.T) {
 		}
 	}
 	t.Fatalf("no %s series at 1", constants.WVAUtilizationSharePassiveShadow)
+}
+
+// recordingOptimizer records the models each Optimize call was given.
+type recordingOptimizer struct{ calls [][]string }
+
+func (r *recordingOptimizer) Name() string { return "recording" }
+func (r *recordingOptimizer) Optimize(_ context.Context, reqs []allocation.ModelScalingRequest,
+	_ []*allocation.ResourceConstraints) []domain.VariantDecision {
+	models := make([]string, 0, len(reqs))
+	out := make([]domain.VariantDecision, 0, len(reqs))
+	for _, req := range reqs {
+		models = append(models, req.ModelID)
+		out = append(out, domain.VariantDecision{Namespace: req.Namespace, ModelID: req.ModelID, VariantName: req.ModelID + "-v"})
+	}
+	r.calls = append(r.calls, models)
+	return out
+}
+
+// The passive exclusion holds under any optimizer, not only the greedy one:
+// the models that scale are decided without the passive ones, and the
+// passive would-be figures come from a pass of their own.
+func TestPassiveExclusionUnderAnyOptimizer(t *testing.T) {
+	act := growingA100("a", "act", 8)
+	pas := growingA100("p", "pas", 8)
+	pas.Passive = true
+	o := &recordingOptimizer{}
+	e := &Engine{Config: config.NewTestConfig()}
+	ds := e.decideV2(context.Background(), o, []allocation.ModelScalingRequest{act, pas}, nil, nil)
+	if len(o.calls) != 2 || len(o.calls[0]) != 1 || o.calls[0][0] != "act" || len(o.calls[1]) != 1 || o.calls[1][0] != "pas" {
+		t.Fatalf("Optimize calls %v, want [[act] [pas]]", o.calls)
+	}
+	if len(ds) != 2 {
+		t.Fatalf("%d decisions, want both models'", len(ds))
+	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
@@ -84,7 +85,10 @@ type Handler struct {
 	undecided undecidedTargets
 	// passive resolves which models are passive; nil is every model active.
 	// See WithPassive.
-	passive PassiveModels
+	passive PassiveResolver
+	// zeroRecheck is how often StreamIsActive re-reads a held variant it
+	// reports inactive: PassiveZeroRecheck, shorter only in tests.
+	zeroRecheck time.Duration
 }
 
 // NewHandler builds a Handler. A nil store falls back to decision.Default, and a
@@ -98,7 +102,7 @@ func NewHandler(c client.Reader, store *decision.Store, reg *registry.Registry) 
 	if reg == nil {
 		reg = registry.Default
 	}
-	return &Handler{client: c, store: store, registry: reg, now: time.Now}
+	return &Handler{client: c, store: store, registry: reg, now: time.Now, zeroRecheck: PassiveZeroRecheck}
 }
 
 // WithElected makes the handler refuse decision-bearing calls until elected is
@@ -753,14 +757,28 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 	// A held variant answers its live count, which an operator changes by
 	// hand; a decision-store wake-up does not follow that. While the stream
 	// says inactive, a held variant is re-read this often, so a kubectl scale
-	// from zero is reported active before KEDA's cooldown scales it back.
-	recheck := time.NewTicker(passiveZeroRecheck)
+	// from zero is reported active before KEDA's cooldown scales it back. The
+	// read is the scale subresource through h.client, which is uncached by
+	// design (see the field): one GET per tick, and only for a held variant
+	// at zero with its stream open. Observe never reads a count, so it is not
+	// re-read.
+	recheck := time.NewTicker(h.zeroRecheck)
 	defer recheck.Stop()
 
-	push := func(next bool, always bool) error {
-		if next == active && !always {
+	// push sends next when it changes what KEDA was told.
+	push := func(next bool) error {
+		if next == active {
 			return nil // nothing for KEDA to act on
 		}
+		active = next
+		if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
+			return err
+		}
+		logger.V(1).Info("external scaler pushed activation change", "active", active)
+		return nil
+	}
+	// keepalive re-asserts the current state whether or not it changed.
+	keepalive := func(next bool) error {
 		changed := next != active
 		active = next
 		if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
@@ -772,30 +790,37 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 		return nil
 	}
 	for {
-		var next bool
-		always := false
+		send := push
 		select {
 		case <-ctx.Done():
 			logger.V(1).Info("external scaler StreamIsActive closed")
 			return nil
 		case <-updates:
 		case <-ticker.C:
-			always = true
+			send = keepalive
 		case <-recheck.C:
-			if active || !h.passiveMode(ref, target()).Passive() {
+			if !recheckDue(active, h.passiveMode(ref, target())) {
 				continue
 			}
 		}
-		if next, err = activeNow(); err != nil {
+		next, err := activeNow()
+		if err != nil {
 			logger.V(1).Info("external scaler StreamIsActive failed", "err", err)
 			return err
 		}
-		if err := push(next, always); err != nil {
+		if err := send(next); err != nil {
 			return err
 		}
 	}
 }
 
-// passiveZeroRecheck is how often StreamIsActive re-reads a held variant it is
-// reporting inactive. See the recheck ticker there.
-var passiveZeroRecheck = 5 * time.Second
+// recheckDue reports whether the stream's recheck re-reads a variant: only a
+// held one it reports inactive. Observe answers no count, and an active held
+// variant is re-asserted by the keepalive.
+func recheckDue(active bool, mode passive.Mode) bool {
+	return !active && mode == passive.Hold
+}
+
+// PassiveZeroRecheck is how often StreamIsActive re-reads a held variant it
+// is reporting inactive (Handler.zeroRecheck). See the recheck ticker there.
+const PassiveZeroRecheck = 5 * time.Second

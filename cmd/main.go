@@ -919,7 +919,7 @@ func main() {
 		// ScaledObject is served by a cluster-wide informer, which is the LIST+WATCH
 		// this design exists to remove.
 		engine.Variants = registry.Default
-		engine.Passive = passiveResolver
+		wirePassive(passiveResolver, passiveComponents{SteadyState: engine})
 		engine.Status = controllerStatus
 		// Kueue's preemptions of managed pods, recorded from the pod informer
 		// the engine already reads pods through: a preempted pod and its
@@ -980,7 +980,7 @@ func main() {
 		// which is where the freshness actually lives, so neither re-reads what the
 		// other has just read.
 		engine.Variants = registry.Default
-		engine.Passive = passiveResolver
+		wirePassive(passiveResolver, passiveComponents{ScaleFromZero: engine})
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		// Let the engine bring the usage picture up to date immediately before it
@@ -1046,8 +1046,8 @@ func main() {
 		// 60 s). The engines read the interval once, when they start, so this
 		// matches what they publish at.
 		DecisionInterval: cfg.OptimizationInterval,
-		Passive:          passiveResolver,
 	}
+	wirePassive(passiveResolver, passiveComponents{Scaler: externalScaler})
 	// Without leader election this replica is the leader from the start; the
 	// manager's Elected channel says so too, but only after it has started
 	// the server, which would put it through a standby phase for nothing.
@@ -1532,36 +1532,27 @@ func runWarmPool(
 	// workload registered later.
 	go trigger.WatchRegistry(ctx, registry.Default, 30*time.Second)
 
+	// A passive model is observed, never scaled: the pool plans no copy and
+	// no borrow for it, and does not load or wake one (wirePassive).
+	guard := &warmpoolpool.PassiveGuard{Pool: warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram)}
+	demand := &warmpool.Demand{
+		Namespace:            warmPoolNS,
+		GPUMemoryUtilization: *warmPoolGPUUtil,
+		Registry:             registry.Default,
+		Decisions:            decision.Default,
+		Client:               mgr.GetClient(),
+		Datastore:            ds,
+		// SERVING replicas rather than merely Ready ones, for the return
+		// rule -- see Demand.Serving. Unknown falls back to the Ready count,
+		// which is all a fleet whose collector has not run yet has.
+		Serving: func(namespace, variant string) (int, bool) {
+			return decision.Serving(namespace, variant, warmpool.ContentionMaxAge, time.Now())
+		},
+	}
+	wirePassive(passiveResolver, passiveComponents{Demand: demand, Guard: guard})
 	reconciler := warmpool.New(
-		// A passive model is observed, never scaled: the pool does not wake,
-		// return, load or evict a copy for it (warmpoolpool.PassiveGuard).
-		&warmpoolpool.PassiveGuard{
-			Pool: warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram),
-			Passive: func(namespace, variant string) bool {
-				m, _ := passiveResolver.Variant(namespace, variant)
-				return m.Passive()
-			},
-		},
-		&warmpool.Demand{
-			Namespace:            warmPoolNS,
-			GPUMemoryUtilization: *warmPoolGPUUtil,
-			Registry:             registry.Default,
-			Decisions:            decision.Default,
-			// A passive model is observed, never scaled: no copy is planned
-			// for it, and no borrow.
-			Passive: func(namespace, variant string) bool {
-				m, _ := passiveResolver.Variant(namespace, variant)
-				return m.Passive()
-			},
-			Client:    mgr.GetClient(),
-			Datastore: ds,
-			// SERVING replicas rather than merely Ready ones, for the return
-			// rule -- see Demand.Serving. Unknown falls back to the Ready count,
-			// which is all a fleet whose collector has not run yet has.
-			Serving: func(namespace, variant string) (int, bool) {
-				return decision.Serving(namespace, variant, warmpool.ContentionMaxAge, time.Now())
-			},
-		},
+		guard,
+		demand,
 		warmpoolpolicy.Config{
 			SleepMinSize:       *warmPoolSleepMinSize,
 			MaxHold:            *warmPoolMaxHold,
@@ -1681,4 +1672,43 @@ func envBytes(name string, def int64) int64 {
 		return 1
 	}
 	return n
+}
+
+// passiveComponents are the components that must agree on which models are
+// passive (docs/reference/scaling-policy.md, "passive"). They are built at
+// different points of startup, so each call names the ones it has; a nil
+// field is one that call does not wire. Here rather than in a file of its
+// own because make build compiles cmd/main.go alone.
+type passiveComponents struct {
+	SteadyState   *steadystate.Engine
+	ScaleFromZero *scalefromzero.Engine
+	Scaler        *scaler.Server
+	Demand        *warmpool.Demand
+	Guard         *warmpoolpool.PassiveGuard
+}
+
+// wirePassive hands one resolver to every component in c, so the external
+// scaler, both engines and the warm pool answer "is this model passive?" the
+// same way. A component added to passiveComponents and not wired here fails
+// TestWirePassiveReachesEveryComponent.
+func wirePassive(r *passive.Resolver, c passiveComponents) {
+	variantPassive := func(namespace, variant string) bool {
+		m, _ := r.Variant(namespace, variant)
+		return m.Passive()
+	}
+	if c.SteadyState != nil {
+		c.SteadyState.Passive = r
+	}
+	if c.ScaleFromZero != nil {
+		c.ScaleFromZero.Passive = r
+	}
+	if c.Scaler != nil {
+		c.Scaler.Passive = r
+	}
+	if c.Demand != nil {
+		c.Demand.Passive = variantPassive
+	}
+	if c.Guard != nil {
+		c.Guard.Passive = variantPassive
+	}
 }

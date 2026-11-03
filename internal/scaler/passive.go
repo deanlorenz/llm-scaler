@@ -9,37 +9,32 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
-// PassiveModels reports whether a model is passive (passive.Resolver.Model).
-type PassiveModels interface {
+// PassiveResolver reports whether a model is passive (passive.Resolver.Model).
+type PassiveResolver interface {
 	Model(namespace, modelID string) (bool, string)
 }
 
 // WithPassive makes the handler answer passive models without moving them
 // (docs/reference/scaling-policy.md, "passive"). Nil leaves every model
 // active. Returns h for chaining.
-func (h *Handler) WithPassive(p PassiveModels) *Handler {
+func (h *Handler) WithPassive(p PassiveResolver) *Handler {
 	h.passive = p
 	return h
 }
 
-// passiveMode is the mode of the variant ref names, with scale target t.
-func (h *Handler) passiveMode(ref *pb.ScaledObjectRef, t registry.Target) passive.Mode {
-	if h.passive == nil {
-		return passive.Active
-	}
-	p, _ := h.passive.Model(ref.GetNamespace(), ref.GetScalerMetadata()[registry.ModelIDKey])
-	return passive.ModeOf(p, t)
-}
-
-// modelPassive reports whether the model ref names is passive, before its
-// target is known: the standby's cheap first question, so an active model
-// costs it no ScaledObject read.
-func (h *Handler) modelPassive(ref *pb.ScaledObjectRef) bool {
+// model reports whether the model ref names is passive: the one place the
+// handler resolves it, once per question.
+func (h *Handler) model(ref *pb.ScaledObjectRef) bool {
 	if h.passive == nil {
 		return false
 	}
 	p, _ := h.passive.Model(ref.GetNamespace(), ref.GetScalerMetadata()[registry.ModelIDKey])
 	return p
+}
+
+// passiveMode is the mode of the variant ref names, with scale target t.
+func (h *Handler) passiveMode(ref *pb.ScaledObjectRef, t registry.Target) passive.Mode {
+	return passive.ModeOf(h.model(ref), t)
 }
 
 // passiveAnswer is what GetMetrics answers for a passive variant, whatever the
@@ -91,12 +86,14 @@ func (h *Handler) passiveActive(ctx context.Context, ref *pb.ScaledObjectRef, t 
 // hand-off stops failing a metric the HPA would otherwise hold every
 // scale-down for. Only a passive model costs the ScaledObject read.
 func (h *Handler) standbyObserve(ctx context.Context, ref *pb.ScaledObjectRef) bool {
-	if !h.modelPassive(ref) {
+	// The model first: an active model costs the standby no ScaledObject read.
+	p := h.model(ref)
+	if !p {
 		return false
 	}
 	t, err := h.resolveTarget(ctx, ref)
 	if err != nil {
 		return false
 	}
-	return h.passiveMode(ref, t).Answers0()
+	return passive.ModeOf(p, t).Answers0()
 }
