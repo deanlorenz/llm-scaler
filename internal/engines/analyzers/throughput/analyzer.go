@@ -311,10 +311,10 @@ func (a *ThroughputAnalyzer) analyze(
 	ownMetrics := ownReplicasOnly(input.ReplicaMetrics)
 
 	// observe updates internal state (acquires/releases a.mu internally).
-	policy := itlPolicyOf(input.Config)
-	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) itl.Admission {
-		return a.admission(policy, input.Namespace, input.ModelID, variant)
-	})
+	// One admission for the model's variants until the line reads each
+	// variant's engine parameters (admission).
+	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(string) itl.Admission { return adm })
 
 	byVariant := groupByVariant(ownMetrics)
 

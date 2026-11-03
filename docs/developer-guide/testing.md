@@ -610,9 +610,16 @@ as the run did.
 It needs 2 H200 (one decode, one prefill) for about 70 minutes, setup
 included. Tear the scenario down on every exit path.
 
-1. **The scenario.** Follow the `ols-sweep` steps 1 and 2, with one change:
-   give the prefill ScaledObject 1-1 replicas, not 1-2. Decode stays 1-1.
-   With both pinned, listing throughput cannot change the fleet.
+The order matters. The controller registers the throughput analyzer only
+when it starts, and only if the policy lists it then. Turning the recorder
+on restarts the controller, so the policy goes in first and the recorder
+last.
+
+1. **The scenario.** Follow the `ols-sweep` step 1, with one change: give
+   the prefill ScaledObject 1-1 replicas, not 1-2. Decode stays 1-1. With
+   both pinned, listing throughput cannot change the fleet. Then remove EPP
+   flow control as in the `pd-restart` step 2, and install the controller
+   at the commit. Do **not** turn the recorder on yet.
 2. **The policy.** List throughput beside saturation in the `default`
    entry:
 
@@ -631,12 +638,27 @@ included. Tear the scenario down on every exit path.
    global one whole for the model, as for the slo pair. Keep
    `analyzerTuning` at its defaults and the learned-state snapshot off.
 3. **The recorder, last.** Turn the recorder on as in
-   [Learner Recordings](#learner-recordings). Its patch restarts the
-   controller, and that start registers the analyzer and opens the first
-   recording. Check the new Pod's log for
-   `ThroughputAnalyzer registered (enabled in saturation config)`. If it
-   says `NOT registered`, the global map does not list it: fix it and
-   restart the controller before any load.
+   [Learner Recordings](#learner-recordings). It is the change that rolls
+   the controller: the new Pod's start registers the analyzer and opens
+   the first recording. Check that Pod's log:
+
+   ```bash
+   kubectl -n "$NS" logs deployment/wva-controller-manager -c manager | grep ThroughputAnalyzer
+   ```
+
+   It must say `ThroughputAnalyzer registered (enabled in saturation
+   config)`. If it says `NOT registered`, or nothing, the global map did
+   not list throughput when the Pod started. Fix the map, then restart the
+   controller explicitly and check again:
+
+   ```bash
+   kubectl -n "$NS" rollout restart deployment/wva-controller-manager
+   kubectl -n "$NS" rollout status deployment/wva-controller-manager
+   ```
+
+   The recording volume is an `emptyDir`, so each Pod has its own. The
+   first recording is the one in the Pod that is running when the load
+   starts; anything an earlier Pod wrote went with it, and holds no load.
 4. **The load.** Run the sweep as for `ols-sweep`, step 3, with the same
    `--scale` check on the first level:
 
@@ -645,7 +667,9 @@ included. Tear the scenario down on every exit path.
    ```
 
 5. **A controller restart under load.** 90 seconds into the fifth level
-   (56 in flight, 1000 tokens in and 500 out, about 21 minutes in), copy
+   (56 in flight, 1000 tokens in and 500 out). The fifth level starts at
+   1110 s (300 s, then three levels of 270 s), so this is at 1200 s, 20
+   minutes into the sweep. Copy
    the leader's recordings out and delete it, as in the slo pair's step 3:
 
    ```bash
@@ -663,16 +687,20 @@ included. Tear the scenario down on every exit path.
      `ThroughputConfig` with `"SettleView":true` and
      `"CapacityStore":true`. The second file's first line carries
      `"StoreRecords":0`, and neither file holds a
-     `saturation.RestoreLearnedState` event.
+     `saturation.RestoreLearnedState` or `saturation.TakeRestoreOutcomes`
+     event: the restart restored nothing.
    - Each file holds `throughput.Analyze` events for the model.
    - Count, in each Pod's log and inside its file's window (from the start
      line to the last event), the `analyzer-result` lines with
      `"analyzer":"throughput"` by each variant's `reason`: `T1-ols`,
-     `T2-pinned`, `T2-default`. A cycle with no line skips the variant,
-     so it has no reason in either place. Each replay must give the same
-     counts in the `throughput.Analyze` rows of `variant-capacities.csv`. The first file must hold some `T1-ols`
-     (it has four level changes before the restart); if it holds none, the
-     KV check of step 4 was skipped, and the run is retaken.
+     `T2-pinned`, `T2-default`, and `T2-failed`. A `T2-failed` cycle has
+     no line, so the variant is skipped and carries no reason in either
+     the log or the CSV: count it as the throughput cycles of the window
+     less the other three, on both sides. Each replay must give the same
+     counts in the `throughput.Analyze` rows of
+     `variant-capacities.csv`. The first file must hold some `T1-ols` (it
+     has three level changes before the restart); if it holds none, the KV
+     check of step 4 was skipped, and the run is retaken.
 7. **Add each file** under its own name, at that commit:
 
    ```bash

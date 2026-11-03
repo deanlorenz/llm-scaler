@@ -52,59 +52,41 @@ func TestITLPolicyReadsTheBandTheGateAndTheCapRate(t *testing.T) {
 	}
 }
 
-// The admission takes the variant's stated cap and arguments from the
-// capacity store, the slope hold, and the engine's settle tracker with its
-// absence tolerance at the optimize interval.
-func TestAdmissionReadsTheStoreTheSettleViewAndTheHold(t *testing.T) {
+// The admission takes the policy's keys, the slope hold, and the engine's
+// settle tracker with its absence tolerance at the optimize interval. It
+// does not read the capacity store yet: a variant whose flags state a cap
+// still gets none, and no arguments, until the line reads them (4b-1, 4b-3).
+func TestAdmissionReadsThePolicyTheSettleViewAndTheHold(t *testing.T) {
 	store := capacity.NewStore()
-	flags := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, MaxNumSeqsSet: true, Image: "img:1"}
-	declared := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 256, DeclaredBatchCap: 48, Image: "img:1"}
-	defaulted := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 256, Image: "img:1"}
-	store.FileScaleTarget("ns", "m", "flags", "H100", 1, flags, false, admissionAt)
-	store.FileScaleTarget("ns", "m", "declared", "H100", 1, declared, false, admissionAt)
-	store.FileScaleTarget("ns", "m", "defaulted", "H100", 1, defaulted, false, admissionAt)
+	store.FileScaleTarget("ns", "m", "v1", "H100", 1,
+		capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, MaxNumSeqsSet: true, Image: "img:1"},
+		false, admissionAt)
 	view := settle.NewTracker()
 	a := NewThroughputAnalyzer().WithCapacityStore(store).WithSettleView(view).
 		WithOptimizationInterval(30 * time.Second).WithSlopeHoldFor(6 * time.Hour)
 	p := itlPolicy{lo: 0.2, hi: 0.7, capPreemption: 0.1, steady: itl.Steadiness{IdleRows: 4}}
 
-	for _, tc := range []struct {
-		variant string
-		cap     int64
-		source  string
-		args    string
-	}{
-		{"flags", 64, batchCapFlags, flags.ArgsTag()},
-		{"declared", 48, batchCapDeclared, declared.ArgsTag()},
-		{"defaulted", 0, batchCapNone, defaulted.ArgsTag()},
-		{"unfiled", 0, batchCapNone, ""},
-	} {
-		t.Run(tc.variant, func(t *testing.T) {
-			adm := a.admission(p, "ns", "m", tc.variant)
-			if adm.MinK != 0.2 || adm.MaxK != 0.7 || adm.CapMaxPreemptionRate != 0.1 || adm.Steady.IdleRows != 4 {
-				t.Errorf("the policy did not reach the admission: %+v", adm)
-			}
-			if adm.MaxNumSeqs != tc.cap || adm.MaxNumSeqsSource != tc.source {
-				t.Errorf("cap %d from %q, want %d from %q", adm.MaxNumSeqs, adm.MaxNumSeqsSource, tc.cap, tc.source)
-			}
-			if adm.Args != tc.args {
-				t.Errorf("args %q, want %q", adm.Args, tc.args)
-			}
-			if adm.SlopeHoldFor != 6*time.Hour {
-				t.Errorf("slope hold %v, want 6h", adm.SlopeHoldFor)
-			}
-			if adm.Settle == nil || adm.Settle.View != settle.View(view) || adm.Settle.Model != "ns/m" {
-				t.Errorf("settle %+v, want the engine's view for ns/m", adm.Settle)
-			}
-			if want := settle.Tolerance(30 * time.Second); adm.AbsenceTolerance != want {
-				t.Errorf("absence tolerance %v, want %v", adm.AbsenceTolerance, want)
-			}
-		})
+	adm := a.admission(p, "ns", "m")
+	if adm.MinK != 0.2 || adm.MaxK != 0.7 || adm.CapMaxPreemptionRate != 0.1 || adm.Steady.IdleRows != 4 {
+		t.Errorf("the policy did not reach the admission: %+v", adm)
+	}
+	if adm.SlopeHoldFor != 6*time.Hour {
+		t.Errorf("slope hold %v, want 6h", adm.SlopeHoldFor)
+	}
+	if adm.Settle == nil || adm.Settle.View != settle.View(view) || adm.Settle.Model != "ns/m" {
+		t.Errorf("settle %+v, want the engine's view for ns/m", adm.Settle)
+	}
+	if want := settle.Tolerance(30 * time.Second); adm.AbsenceTolerance != want {
+		t.Errorf("absence tolerance %v, want %v", adm.AbsenceTolerance, want)
+	}
+	if adm.MaxNumSeqs != 0 || adm.MaxNumSeqsSource != batchCapNone || adm.Args != "" {
+		t.Errorf("the store was read before anything reads it: cap %d from %q, args %q",
+			adm.MaxNumSeqs, adm.MaxNumSeqsSource, adm.Args)
 	}
 
-	// An analyzer given nothing has no cap, no arguments, no view and no
-	// hold: the admission is the policy alone.
-	bare := NewThroughputAnalyzer().admission(p, "ns", "m", "flags")
+	// An analyzer given nothing has no view and no hold: the admission is
+	// the policy alone.
+	bare := NewThroughputAnalyzer().admission(p, "ns", "m")
 	if bare.MaxNumSeqs != 0 || bare.MaxNumSeqsSource != batchCapNone || bare.Args != "" ||
 		bare.Settle != nil || bare.SlopeHoldFor != 0 || bare.AbsenceTolerance != 0 {
 		t.Errorf("an analyzer given nothing built %+v", bare)

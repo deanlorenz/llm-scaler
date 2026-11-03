@@ -1602,7 +1602,7 @@ on, as one run that gives two recordings.
 | analyzer config | the policy lists `saturation` and `throughput`, default `analyzerTuning`. Set it **before** the recorder: the throughput analyzer registers only at controller start (`config/config.go:425-437`) |
 | recorder | the `learner-recorder` patch as the last change before load; default cap (256Mi) |
 | load | `hack/benchmark/closed_loop_sweep.py`, default schedule (about 55 min) |
-| restart | the leader Pod deleted 90 s into level 5 (about 21 min in), snapshot off, as for the slo pair. The first recording is `throughput-sweep`, the second `throughput-sweep-restart`. The run is taken at a commit with 4b-0 merged; the recipe is [testing.md](../developer-guide/testing.md#learner-goldens) |
+| restart | the leader Pod deleted 90 s into level 5 (1200 s, 20 min in), snapshot off, as for the slo pair. The first recording is `throughput-sweep`, the second `throughput-sweep-restart`. The run is taken at a commit with 4b-0 merged; the recipe is [testing.md](../developer-guide/testing.md#learner-goldens) |
 | GPUs | 2 H200 for about 70 min including setup; torn down on every exit path |
 | counters above zero | throughput OLS and pinned cycles; settling readings; held cycles in the restart recording |
 
@@ -1648,7 +1648,7 @@ not hold the decode pod at its cap without preempting.
 
 | PR | contains | goldens |
 | --- | --- | --- |
-| 4b-0 | the admission's inputs, read and not yet used: settle view, capacity store (`EngineParams` only), slope hold and interval, wired in main (`Engine.NewThroughputAnalyzer`) and in replay; the policy read through interfaces (`itlPolicyOf`); `start.ThroughputConfig`, so a recording states the analyzer's settings and a replay builds it as the run did. The window still reads only the band | none move: every golden replays byte for byte |
+| 4b-0 | the admission's inputs, wired and not yet used: settle view, slope hold and interval in the admission; the capacity store wired but not read until 4b-1 (`EngineParams` only, then), wired in main (`Engine.NewThroughputAnalyzer`) and in replay; the policy read through interfaces (`itlPolicyOf`); `start.ThroughputConfig`, so a recording states the analyzer's settings and a replay builds it as the run did. The window still reads only the band | none move: every golden replays byte for byte |
 | 4b-1 | the two recordings with base goldens (own commit, taken after 4b-0 merged); the shared generator and simulator; the verbosity test; `throughput-itl-steady-gate`, `learner-write` | as named above |
 | 4b-2 | `throughput-itl-reads-the-settle-tracker`, `throughput-itl-waits-after-controller-restart` | the restart wait's |
 | 4b-3 | `throughput-itl-admits-at-sequence-cap` | none expected |
