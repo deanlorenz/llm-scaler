@@ -16,11 +16,11 @@ token 0.09 s and 3.5–6.0 s with sharing, against 51–73 s and 96–100 s
 without it, and no dropped requests against 116–123. It cost 39–43 % more
 GPU-seconds.** (Two runs, one rise per model each, two 8B models on H200:
 [measured](docs/well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota).)
-The runs without sharing varied by up to 32 s between themselves, and in one
-of them the quota did not bind. Without P/D, the latest run served the first
+Shadow mode, which plans and moves nothing and so should match no sharing,
+differed from it by up to 32 s, and in one run the quota did not bind. Without P/D, the latest run served the first
 burst at once (median 0.07 s, against 25.6 s in shadow mode, which plans the
-same and moves nothing); the second burst had the same p95, 287 s, and its
-GPU cost was not measured.
+same and moves nothing); the second burst had the same p95, 287 s. That
+run's GPU cost was not measured.
 
 Sharing is **experimental**: nine benchmark runs so far, two models at 1 GPU
 per Pod. Whole-node and multi-GPU pods, more than two models, a cluster-wide
@@ -79,10 +79,8 @@ Details, and the cases where it does not fit:
 
 Single runs unless noted; each link has the method and caveats.
 
-- **Sharing served both bursts of two P/D models**, in both runs, for 39 %
-  and 43 % more GPU-seconds (the numbers are at the top of this page). It made
-  bursts faster; it did not save GPUs
-  ([sharing, measured](docs/well-lit-paths/utilization-share/measured.md)).
+- **Sharing one quota**: the results are at the top of this page; all nine
+  runs are in [sharing, measured](docs/well-lit-paths/utilization-share/measured.md).
 - **Scale-ups at near-floor latency on 3 of 4 rises.** With a one-Pod warm
   pool, p95 time to first token per rise falls from **5.2–8.8 s to
   0.11–0.83 s**: within 50 ms of a two-replica floor on three rises, 831 ms
@@ -98,7 +96,7 @@ Single runs unless noted; each link has the method and caveats.
   ([P/D path, measured](docs/well-lit-paths/pd-disaggregation/measured.md);
   [known gaps](docs/why.md#known-gaps)).
 - **A warm Pod switches models in about 437 ms**, against about 41 s for a
-  cold start (the engine switch itself). In the benchmark above, the lend
+  cold start (the engine switch itself). In the warm-pool benchmark, the lend
   waits for the scale-up decision: it came 33–143 s after each rise
   ([why llm-scaling-manager](docs/why.md)).
 
@@ -177,7 +175,7 @@ Before you start:
 A cluster admin runs `setup-prereqs` once per namespace; the namespace owner
 runs the rest, and every later upgrade. If you are both, `make deploy-wva` does
 the two in one command. An upgrade that adds a prerequisite needs the admin's
-step again first ([upgrading](docs/reference/upgrade-and-uninstall.md#upgrading-from-before-v0100-rc1)).
+step again first ([upgrading](docs/reference/upgrade-and-uninstall.md#upgrade)).
 Re-running `make deploy-wva` turns sharing off; repeat the check, shadow and
 activate steps after an upgrade.
 
