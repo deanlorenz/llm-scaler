@@ -598,6 +598,94 @@ these changes:
    - Write the new counts and times in the comments. The test's own log
      line prints the replay's counts.
 
+The `throughput-sweep` and `throughput-sweep-restart` goldens are one run
+of the `ols-sweep` recipe with the throughput analyzer listed beside
+saturation, for learner PR 4b (the throughput analyzer's ITL line moving
+onto the shared tracker). Like the slo pair, the run restarts the
+controller under load and leaves two recordings. Take it at a commit with
+4b-0 merged: from then on the recording's first line carries the throughput
+analyzer's settings (`ThroughputConfig`), and a replay builds the analyzer
+as the run did.
+
+It needs 2 H200 (one decode, one prefill) for about 70 minutes, setup
+included. Tear the scenario down on every exit path.
+
+1. **The scenario.** Follow the `ols-sweep` steps 1 and 2, with one change:
+   give the prefill ScaledObject 1-1 replicas, not 1-2. Decode stays 1-1.
+   With both pinned, listing throughput cannot change the fleet.
+2. **The policy.** List throughput beside saturation in the `default`
+   entry:
+
+   ```yaml
+   analyzers:
+     - name: saturation
+       score: 1.0
+     - name: throughput
+       score: 1.0
+   ```
+
+   Write it into the global `wva-scaling-policy-config`: the controller
+   registers the throughput analyzer only at start, and only when an entry
+   of that map lists it. If the model's namespace has its own
+   `wva-scaling-policy-config`, write it there too: that map replaces the
+   global one whole for the model, as for the slo pair. Keep
+   `analyzerTuning` at its defaults and the learned-state snapshot off.
+3. **The recorder, last.** Turn the recorder on as in
+   [Learner Recordings](#learner-recordings). Its patch restarts the
+   controller, and that start registers the analyzer and opens the first
+   recording. Check the new Pod's log for
+   `ThroughputAnalyzer registered (enabled in saturation config)`. If it
+   says `NOT registered`, the global map does not list it: fix it and
+   restart the controller before any load.
+4. **The load.** Run the sweep as for `ols-sweep`, step 3, with the same
+   `--scale` check on the first level:
+
+   ```bash
+   python3 hack/benchmark/closed_loop_sweep.py --url http://ROUTER:80 --model Qwen/Qwen3-0.6B
+   ```
+
+5. **A controller restart under load.** 90 seconds into the fifth level
+   (56 in flight, 1000 tokens in and 500 out, about 21 minutes in), copy
+   the leader's recordings out and delete it, as in the slo pair's step 3:
+
+   ```bash
+   kubectl -n "$NS" get lease -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity
+   POD=<the holder, up to the first underscore>
+   kubectl -n "$NS" cp -c recordings "$POD:/var/lib/wva/learner-recordings" ./learner-recordings
+   kubectl -n "$NS" logs --timestamps -c manager "$POD" > controller-1.log
+   kubectl -n "$NS" delete pod "$POD"
+   ```
+
+   When the sweep ends, copy the new Pod's recordings and its log
+   (`controller-2.log`) out the same way, before teardown.
+6. **Check what was captured.**
+   - Each file's first line carries `"Throughput":true` and a
+     `ThroughputConfig` with `"SettleView":true` and
+     `"CapacityStore":true`. The second file's first line carries
+     `"StoreRecords":0`, and neither file holds a
+     `saturation.RestoreLearnedState` event.
+   - Each file holds `throughput.Analyze` events for the model.
+   - Count, in each Pod's log and inside its file's window (from the start
+     line to the last event), the `analyzer-result` lines with
+     `"analyzer":"throughput"` by each variant's `reason`: `T1-ols`,
+     `T2-pinned`, `T2-default`. A cycle with no line skips the variant,
+     so it has no reason in either place. Each replay must give the same
+     counts in the `throughput.Analyze` rows of `variant-capacities.csv`. The first file must hold some `T1-ols`
+     (it has four level changes before the restart); if it holds none, the
+     KV check of step 4 was skipped, and the run is retaken.
+7. **Add each file** under its own name, at that commit:
+
+   ```bash
+   SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, prefill 1-1, load sweeps of concurrency and shape, saturation and throughput listed, default analyzerTuning"
+   make learner-golden-add RECORDING=learnrec-<first start>.jsonl NAME=throughput-sweep SOURCE="$SRC; up to a controller restart"
+   make learner-golden-add RECORDING=learnrec-<second start>.jsonl NAME=throughput-sweep-restart SOURCE="$SRC; after a controller restart under load, snapshot off"
+   ```
+
+   The goldens land in a commit of their own, generated at the PR's base,
+   before any 4b switch (the golden rule,
+   [analyzer-learner.md 2.5](../proposals/analyzer-learner.md#25-replay-and-the-golden-rule)).
+   Write the counts of step 6 in the commit message.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,

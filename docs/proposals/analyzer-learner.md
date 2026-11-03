@@ -1455,7 +1455,10 @@ or deprecated, docs rows rewritten, tools updated.
 
 Later, each after a recorded run that covers it: idle room and the decode gate
 (#9, #10) after a P/D run; the prefill bound (#7), with a double-scrape fixture
-and its own-reading witness. Out of scope: drift actions, fit changes, #8, #11,
+and its own-reading witness. Out of scope: drift actions, fit changes (one
+named exception: PR 4b moves the throughput analyzer's pinned fit from least
+squares through B to row 1's k-weighted mean, since that is the fit
+`itl.Tracker` takes), #8, #11,
 #14, #15, and the share planner's holds (why a second transfer waited), which
 belong to the utilization-share work.
 
@@ -1535,9 +1538,10 @@ keys differ. What blocks the move today, each fixed in 4b-0:
    `admission` does (`slo/analyzer.go:504-517`). Replay already runs the
    analyzers on one store; the field check for a throughput-only replay is
    `EngineParams` (2.4).
-3. **The two window clears.** The tracker has no clear that keeps B. 4b adds
-   `Tracker.ClearWindows(key)`: the main and steady windows and the traces go,
-   B and the held slope stay. Row 1 never calls it.
+3. **The two window clears.** Kept (decided), holding B and the last A.
+   #453 added `Tracker.ClearWindow(key)` (`I/tracker.go:503`): the main and
+   steady windows go; B, the held slope and the settle traces stay. The
+   shape-change and GPS-mismatch clears call it from 4b-1.
 4. **Config through an interface.** `internal/config`'s tests import this
    package (`T/analyzer.go:295-297`), so steadiness and the cap's preemption
    rate are read as `ITLBand` is: `ITLSteadiness() itl.Steadiness` and
@@ -1558,7 +1562,7 @@ base goldens.
 
 | switch | changes | an operator sees | negative control (fails on the parent) |
 | --- | --- | --- | --- |
-| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. Shape and GPS clears through `ClearWindows` | `Reason` `T2-held`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
+| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. Shape and GPS clears through `ClearWindow` | `Reason` `T2-held`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
 | `throughput-itl-reads-the-settle-tracker` | A replica's settle start comes from the engine's tracker, with 4a's rules: restart under its name, idle on evidence, the absence tolerance, the Finite pod mean. Meaningful only with the gate on; on alone it moves nothing | None in logs; a missed scrape no longer restarts a replica's settle | A restart under the same Pod name with no not-Ready row between: settles on, not on the key's own trace |
 | `throughput-itl-waits-after-controller-restart` | After a controller restart, replicas already serving wait their settle. With no snapshot of this line (none exists), the analyzer has no line for `steadyFor` | `T2-failed` and no throughput capacity for about 2 min after a restart: the analyzer is not live, so it neither orders nor vetoes a scale-down | The restart case of 4a, through the throughput analyzer: a line on the first cycle on the parent, none for `steadyFor` on |
 | `throughput-itl-admits-at-sequence-cap` | Readings above the band from a replica at its stated cap, with preemption at most `itlBand.capMaxPreemptionRate`, enter the window | A line, and so throughput capacity, on a variant whose only replica in reach is at its cap (#287) | A replica at its cap above the band: refused on the parent, admitted on. With the gate on and this off, the variant has no line |
@@ -1598,7 +1602,7 @@ on, as one run that gives two recordings.
 | analyzer config | the policy lists `saturation` and `throughput`, default `analyzerTuning`. Set it **before** the recorder: the throughput analyzer registers only at controller start (`config/config.go:425-437`) |
 | recorder | the `learner-recorder` patch as the last change before load; default cap (256Mi) |
 | load | `hack/benchmark/closed_loop_sweep.py`, default schedule (about 55 min) |
-| restart | `kubectl rollout restart` of the controller at the start of level 9 (about 36 min in), snapshot off. The first recording is `throughput-sweep`, the second `throughput-sweep-restart` |
+| restart | the leader Pod deleted 90 s into level 5 (about 21 min in), snapshot off, as for the slo pair. The first recording is `throughput-sweep`, the second `throughput-sweep-restart`. The run is taken at a commit with 4b-0 merged; the recipe is [testing.md](../developer-guide/testing.md#learner-goldens) |
 | GPUs | 2 H200 for about 70 min including setup; torn down on every exit path |
 | counters above zero | throughput OLS and pinned cycles; settling readings; held cycles in the restart recording |
 
@@ -1644,14 +1648,21 @@ not hold the decode pod at its cap without preempting.
 
 | PR | contains | goldens |
 | --- | --- | --- |
-| 4b-0 | the two recordings with base goldens (own commit); settle view, store, slope hold and interval wired (main and replay); `ClearWindows`; the shared generator and simulator; the verbosity test | none move |
-| 4b-1 | `throughput-itl-steady-gate`, `learner-write` | as named above |
+| 4b-0 | the admission's inputs, read and not yet used: settle view, capacity store (`EngineParams` only), slope hold and interval, wired in main (`Engine.NewThroughputAnalyzer`) and in replay; the policy read through interfaces (`itlPolicyOf`); `start.ThroughputConfig`, so a recording states the analyzer's settings and a replay builds it as the run did. The window still reads only the band | none move: every golden replays byte for byte |
+| 4b-1 | the two recordings with base goldens (own commit, taken after 4b-0 merged); the shared generator and simulator; the verbosity test; `throughput-itl-steady-gate`, `learner-write` | as named above |
 | 4b-2 | `throughput-itl-reads-the-settle-tracker`, `throughput-itl-waits-after-controller-restart` | the restart wait's |
 | 4b-3 | `throughput-itl-admits-at-sequence-cap` | none expected |
 
 4b-1 can land on the synthetic goldens alone if the recording is late; the
 recordings then land in 4b-2 with their base goldens. Forget for this line
-(and mu, which waits for it, 4a's decisions) is not in 4b.
+(and mu, which waits for it, 4a's decisions) is not in 4b: a small PR of its
+own after 4b-3.
+
+Decided on the design: the real 2-GPU recording; the cap stays synthetic;
+the shape-change and GPS clears are kept, holding B and the last A; the
+analyzer reads `EngineParams` from the store now, not after #345;
+`T2-held` is a new `Reason`; the k-weighted pinned fit is in scope (the
+exception section 7 names); the four-PR split.
 
 ## 8. Risks and limits
 
