@@ -3,6 +3,7 @@ package e2e
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,10 @@ const (
 
 	// The manager ConfigMap that carries WVA_PASSIVE, read at start.
 	passiveManagerConfigMap = "wva-manager-config"
+
+	// Load pods: pods KEDA's kubernetes-workload trigger counts.
+	passiveLoadLabel  = "e2e.llm-d.ai/passive-observe-load"
+	passiveLoadPrefix = "passive-obs-load"
 )
 
 // passiveDirection is which way the controller would move a model.
@@ -149,7 +154,7 @@ func ptrString(b *bool) string {
 	if b == nil {
 		return "inherit"
 	}
-	return fmt.Sprint(*b)
+	return strconv.FormatBool(*b)
 }
 
 // create stands the model up at replicas, outside the serving pool unless
@@ -229,7 +234,7 @@ func (m passiveModel) waitReady(n int32) {
 }
 
 // waitSpec waits for spec.replicas to satisfy match.
-func (m passiveModel) waitSpec(what string, match func(int32) bool, timeout time.Duration) int32 {
+func (m passiveModel) waitSpec(what string, match func(int32) bool, timeout time.Duration) {
 	GinkgoHelper()
 	var last int32
 	Eventually(func(g Gomega) {
@@ -237,7 +242,6 @@ func (m passiveModel) waitSpec(what string, match func(int32) bool, timeout time
 		g.Expect(match(last)).To(BeTrue(), "spec.replicas is %d", last)
 	}, timeout, time.Second).Should(Succeed(), "%s: spec.replicas never became %s", m.deployment(), what)
 	GinkgoWriter.Printf("PASSIVE-EVIDENCE %s spec.replicas=%d (%s) at %s\n", m.deployment(), last, what, time.Now().UTC().Format(time.RFC3339))
-	return last
 }
 
 // passiveProm returns a Prometheus client, failing rather than skipping:
@@ -405,14 +409,14 @@ func (m passiveModel) hpaView() string {
 		hpa.Status.DesiredReplicas, hpa.Status.CurrentReplicas, values)
 }
 
-// expectHeld watches the model for window and fails if spec.replicas is ever
+// expectHeld watches the model for passiveHoldWindow and fails if spec.replicas is ever
 // anything but held. Every 10 s it reads wva_desired_replicas,
 // wva_current_replicas and wva_passive_mode{mode}; at least one read must
 // show the controller wanting to move the model in direction d, and the last
 // must show it in mode. during, when set, runs at the start of the window
 // (a restart, a rollout) while the recorder runs.
 func (m passiveModel) expectHeld(pc *utils.PrometheusClient, label string, held int32, d passiveDirection, mode string,
-	window time.Duration, during func()) []replicaSample {
+	during func()) {
 	GinkgoHelper()
 	rec := recordReplicas(m.deployment())
 	var (
@@ -430,7 +434,7 @@ func (m passiveModel) expectHeld(pc *utils.PrometheusClient, label string, held 
 	// The window starts once the disruption is over, so it covers the HPA's
 	// syncs after it as well as the disruption itself.
 	start = time.Now()
-	for time.Since(start) < window {
+	for time.Since(start) < passiveHoldWindow {
 		sample()
 		time.Sleep(10 * time.Second)
 	}
@@ -447,12 +451,11 @@ func (m passiveModel) expectHeld(pc *utils.PrometheusClient, label string, held 
 	}
 	Expect(wanted).To(BeTrue(), "%s: the controller never wanted to scale %s from %d during the window, so the hold proved nothing", label, d, held)
 	Expect(metrics[len(metrics)-1].on).To(Equal(1.0), "%s: wva_passive_mode{mode=%q} was not 1 at the end of the window", label, mode)
-	return samples
 }
 
 // expectLog waits for a controller log line holding every fragment, logged
 // since since.
-func expectLog(since time.Time, timeout time.Duration, fragments ...string) string {
+func expectLog(since time.Time, timeout time.Duration, fragments ...string) {
 	GinkgoHelper()
 	var hit string
 	Eventually(func(g Gomega) {
@@ -476,10 +479,9 @@ func expectLog(since time.Time, timeout time.Duration, fragments ...string) stri
 		g.Expect(hit).NotTo(BeEmpty(), "no controller log line since %s holds all of %q", since.UTC().Format(time.RFC3339), fragments)
 	}, timeout, 5*time.Second).Should(Succeed())
 	GinkgoWriter.Printf("PASSIVE-LOG %s\n", hit)
-	return hit
 }
 
-// logLines returns every controller log line since since holding every fragment.
+// logLines returns every controller log line logged from since on that holds every fragment.
 func logLines(since time.Time, fragments ...string) []string {
 	GinkgoHelper()
 	secs := int64(time.Since(since).Seconds()) + 1
@@ -511,7 +513,7 @@ func setControllerPassive(on bool) *corev1.ConfigMap {
 	original := cm.DeepCopy()
 	settings := map[string]any{}
 	Expect(yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &settings)).To(Succeed())
-	settings["WVA_PASSIVE"] = fmt.Sprint(on)
+	settings["WVA_PASSIVE"] = strconv.FormatBool(on)
 	out, err := yaml.Marshal(settings)
 	Expect(err).NotTo(HaveOccurred())
 	cm.Data["config.yaml"] = string(out)
@@ -571,12 +573,12 @@ func leaderPod() string {
 }
 
 // loadPod is a pod KEDA's kubernetes-workload trigger counts; it serves nothing.
-func loadPod(name, label string) *corev1.Pod {
+func loadPod(name string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: cfg.LLMDNamespace,
-			Labels:    map[string]string{label: "true", "test-resource": "true"},
+			Labels:    map[string]string{passiveLoadLabel: "true", "test-resource": "true"},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
@@ -593,12 +595,12 @@ func loadPod(name, label string) *corev1.Pod {
 }
 
 // setLoadPods makes exactly n load pods named prefix-<i> exist.
-func setLoadPods(prefix, label string, n int) {
+func setLoadPods(n int) {
 	GinkgoHelper()
 	for i := range 8 {
-		name := fmt.Sprintf("%s-%d", prefix, i)
+		name := fmt.Sprintf("%s-%d", passiveLoadPrefix, i)
 		if i < n {
-			_, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Create(ctx, loadPod(name, label), metav1.CreateOptions{})
+			_, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Create(ctx, loadPod(name), metav1.CreateOptions{})
 			if err != nil && !errors.IsAlreadyExists(err) {
 				Expect(err).NotTo(HaveOccurred())
 			}
@@ -610,11 +612,11 @@ func setLoadPods(prefix, label string, n int) {
 		}
 	}
 	Eventually(func(g Gomega) {
-		pods, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).List(ctx, metav1.ListOptions{LabelSelector: label + "=true"})
+		pods, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).List(ctx, metav1.ListOptions{LabelSelector: passiveLoadLabel + "=true"})
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(pods.Items).To(HaveLen(n))
 	}, 2*time.Minute, time.Second).Should(Succeed())
-	GinkgoWriter.Printf("PASSIVE-EVIDENCE %d load pods (%s=true) at %s\n", n, label, time.Now().UTC().Format(time.RFC3339))
+	GinkgoWriter.Printf("PASSIVE-EVIDENCE %d load pods (%s=true) at %s\n", n, passiveLoadLabel, time.Now().UTC().Format(time.RFC3339))
 }
 
 // sendQueuedRequests starts a Job that sends requests for modelID through
@@ -703,25 +705,25 @@ var _ = Describe("Passive mode: hold, controller-wide", Serial, Label("full", "p
 
 	It("holds while the controller would scale up", func() {
 		m.waitWouldBe(pc, 3, wouldScaleUp, "hold")
-		m.expectHeld(pc, "case1-up", 3, wouldScaleUp, "hold", passiveHoldWindow, nil)
+		m.expectHeld(pc, "case1-up", 3, wouldScaleUp, "hold", nil)
 	})
 
 	It("holds while the controller would scale down", func() {
 		m.policy(wouldScaleDown, nil)
 		m.waitWouldBe(pc, 3, wouldScaleDown, "hold")
-		m.expectHeld(pc, "case1-down", 3, wouldScaleDown, "hold", passiveHoldWindow, nil)
+		m.expectHeld(pc, "case1-down", 3, wouldScaleDown, "hold", nil)
 	})
 
 	It("keeps a kubectl scale from 3 to 5", func() {
 		m.scale(5)
 		m.waitWouldBe(pc, 5, wouldScaleDown, "hold")
-		m.expectHeld(pc, "case4-scale-3-to-5", 5, wouldScaleDown, "hold", passiveHoldWindow, nil)
+		m.expectHeld(pc, "case4-scale-3-to-5", 5, wouldScaleDown, "hold", nil)
 		m.waitReady(5)
 	})
 
 	It("holds through a controller restart and a leader change", func() {
 		before := leaderPod()
-		m.expectHeld(pc, "case7-restart", 5, wouldScaleDown, "hold", passiveHoldWindow, func() {
+		m.expectHeld(pc, "case7-restart", 5, wouldScaleDown, "hold", func() {
 			By("Restarting the controller: a new pod, and the lease handed to it")
 			Expect(restartWVAController(ctx)).To(Succeed())
 			after := leaderPod()
@@ -730,7 +732,7 @@ var _ = Describe("Passive mode: hold, controller-wide", Serial, Label("full", "p
 		})
 		By("Deleting the leader pod outright, so the lease is taken without a clean hand-off")
 		leader := leaderPod()
-		m.expectHeld(pc, "case7-leader-deleted", 5, wouldScaleDown, "hold", passiveHoldWindow, func() {
+		m.expectHeld(pc, "case7-leader-deleted", 5, wouldScaleDown, "hold", func() {
 			Expect(k8sClient.CoreV1().Pods(cfg.WVANamespace).Delete(ctx, leader, metav1.DeleteOptions{})).To(Succeed())
 			Eventually(func(g Gomega) {
 				lease, err := k8sClient.CoordinationV1().Leases(cfg.WVANamespace).Get(ctx, "72dd1cf1.llm-d.ai", metav1.GetOptions{})
@@ -795,7 +797,7 @@ var _ = Describe("Passive mode: per-model hold beside an active model", Serial, 
 	It("holds the passive model while its active neighbour scales", func() {
 		neighbour := recordReplicas(active.deployment())
 		held.waitWouldBe(pc, 2, wouldScaleUp, "hold")
-		held.expectHeld(pc, "case2-held", 2, wouldScaleUp, "hold", passiveHoldWindow, nil)
+		held.expectHeld(pc, "case2-held", 2, wouldScaleUp, "hold", nil)
 		active.waitSpec("at least 2", func(n int32) bool { return n >= 2 }, 3*time.Minute)
 		GinkgoWriter.Printf("PASSIVE-EVIDENCE case2 neighbour spec.replicas values %v\n", specValues(neighbour.Stop("case2-neighbour")))
 		d, _, on := active.metricsOf(pc, "active")
@@ -815,7 +817,7 @@ var _ = Describe("Passive mode: per-model hold beside an active model", Serial, 
 		at := held.specReplicas()
 		GinkgoWriter.Printf("PASSIVE-EVIDENCE case9 passive written at %s with spec.replicas=%d\n", since.UTC().Format(time.RFC3339), at)
 		GinkgoWriter.Printf("PASSIVE-EVIDENCE case9 spec.replicas values before the hold %v\n", specValues(rec.Stop("case9-scale-up")))
-		held.expectHeld(pc, "case9-held", at, wouldScaleUp, "hold", passiveHoldWindow, nil)
+		held.expectHeld(pc, "case9-held", at, wouldScaleUp, "hold", nil)
 		// Recorded, not required: the scaler reads passive live from the
 		// ConfigMap, the engine once a cycle. A flip shorter than a cycle
 		// moves the count with no "Passive mode left"/"entered" line.
@@ -873,17 +875,13 @@ var _ = Describe("Passive mode: hold at zero", Serial, Label("full", "passive"),
 
 var _ = Describe("Passive mode: observe beside a foreign trigger", Serial, Label("full", "passive"), Ordered, func() {
 	m := newPassiveModel("obs")
-	const (
-		loadLabel  = "e2e.llm-d.ai/passive-observe-load"
-		loadPrefix = "passive-obs-load"
-	)
 	var pc *utils.PrometheusClient
 
 	foreign := kedav1alpha1.ScaleTriggers{
 		Type: "kubernetes-workload",
 		Name: "pods",
 		Metadata: map[string]string{
-			"podSelector": loadLabel + "=true",
+			"podSelector": passiveLoadLabel + "=true",
 			"value":       "1",
 		},
 	}
@@ -895,12 +893,12 @@ var _ = Describe("Passive mode: observe beside a foreign trigger", Serial, Label
 		pc = passiveProm()
 		snapshotPolicy()
 		DeferCleanup(m.remove)
-		DeferCleanup(func() { setLoadPods(loadPrefix, loadLabel, 0) })
+		DeferCleanup(func() { setLoadPods(0) })
 
 		m.policy(wouldScaleUp, boolPtr(true))
 		// In the serving pool: the last spec parks it at zero and queues requests for it.
 		m.create(1, true)
-		setLoadPods(loadPrefix, loadLabel, 2)
+		setLoadPods(2)
 		since := time.Now()
 		m.register(0, 6, fixtures.WithForeignTrigger(foreign))
 		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, m.deployment(), m.soBase)
@@ -910,19 +908,19 @@ var _ = Describe("Passive mode: observe beside a foreign trigger", Serial, Label
 	It("follows the other trigger to 2 and never ours above it", func() {
 		m.waitSpec("2, the load pods' count", func(n int32) bool { return n == 2 }, 3*time.Minute)
 		m.waitWouldBe(pc, 2, wouldScaleUp, "observe")
-		m.expectHeld(pc, "case5-observe-2", 2, wouldScaleUp, "observe", passiveHoldWindow, nil)
+		m.expectHeld(pc, "case5-observe-2", 2, wouldScaleUp, "observe", nil)
 	})
 
 	It("follows the other trigger to 4", func() {
-		setLoadPods(loadPrefix, loadLabel, 4)
+		setLoadPods(4)
 		m.waitSpec("4, the load pods' count", func(n int32) bool { return n == 4 }, 3*time.Minute)
 		m.waitReady(4)
 		m.waitWouldBe(pc, 4, wouldScaleUp, "observe")
-		m.expectHeld(pc, "case5-observe-4", 4, wouldScaleUp, "observe", passiveHoldWindow, nil)
+		m.expectHeld(pc, "case5-observe-4", 4, wouldScaleUp, "observe", nil)
 	})
 
 	It("follows the other trigger to zero, and queued requests do not wake it", func() {
-		setLoadPods(loadPrefix, loadLabel, 0)
+		setLoadPods(0)
 		m.waitSpec("0, after the cooldown", func(n int32) bool { return n == 0 }, 4*time.Minute)
 		since := time.Now()
 		sendQueuedRequests(fmt.Sprintf("passive-obs-trigger-%d", time.Now().Unix()), m.modelID())
@@ -946,7 +944,9 @@ var _ = Describe("Passive mode: observe beside a foreign trigger", Serial, Label
 			GinkgoWriter.Printf("PASSIVE-EVIDENCE case5 health %s: %s failures=%d\n", name, h.Status, ptr.Deref(h.NumberOfFailures, 0))
 		}
 		events, err := k8sClient.CoreV1().Events(cfg.LLMDNamespace).List(ctx, metav1.ListOptions{
-			FieldSelector: "involvedObject.name=" + m.scaledObject(),
+			// This object only: an earlier one of the same name leaves its
+			// ScaledObjectDeleted warning behind.
+			FieldSelector: "involvedObject.name=" + m.scaledObject() + ",involvedObject.uid=" + string(so.UID),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		var warnings []string
@@ -963,7 +963,7 @@ var _ = Describe("Passive mode: observe beside a foreign trigger", Serial, Label
 		By("Replacing the ScaledObject with one whose formula adds our trigger to the other")
 		_ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, m.soBase)
 		m.scale(1)
-		setLoadPods(loadPrefix, loadLabel, 2)
+		setLoadPods(2)
 		since := time.Now()
 		rec := recordReplicas(m.deployment())
 		m.register(0, 6, fixtures.WithOwnTriggerName("wva"), fixtures.WithForeignTrigger(foreign),

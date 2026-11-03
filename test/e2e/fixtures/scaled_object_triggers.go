@@ -30,7 +30,7 @@ func WithForeignTrigger(t kedav1alpha1.ScaleTriggers) ScaledObjectOption {
 		if so.Annotations == nil {
 			so.Annotations = make(map[string]string)
 		}
-		var pending []kedav1alpha1.ScaleTriggers
+		pending := make([]kedav1alpha1.ScaleTriggers, 0, 1)
 		if raw, ok := so.Annotations[pendingForeignTriggersKey]; ok {
 			_ = json.Unmarshal([]byte(raw), &pending)
 		}
