@@ -31,8 +31,14 @@ import (
 // steadyGate.minSettledSamples settled; B is remembered only when positive;
 // an ITL of +Inf is no reading; and when there are too few readings the
 // line holds its last A (Reason T2-held), for at most the slope hold and
-// under the same engine arguments. The settle is the key's own trace of each
-// replica (the engine's settle tracker is PR 4b-2's). Off, as before: a
+// under the same engine arguments. A key with neither a line in the band nor
+// a slope it may hold -- one that never fitted, under load that holds every
+// replica above the band -- fits from its steady, settled readings above the
+// band instead (Reason T2-above-band, itl.Admission.AboveBandFallback),
+// until the band fits. A shape change empties the window and drops the held
+// slope: the old shape's A is not held into the new shape. The settle is the
+// key's own trace of each replica (the engine's settle tracker is PR 4b-2's).
+// Off, as before: a
 // window of every healthy reading in the band, OLS when it is ready, else A
 // by least squares through B over the cycle's healthy rows, at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"
@@ -50,6 +56,11 @@ const SwitchITLKeepsWindowOnGPSMismatch = "throughput-itl-keeps-the-window-on-gp
 // itlReasonT2Held is the Reason of a line whose A is held from an earlier
 // fit, its window too short to fit one (SwitchITLSteadyGate).
 const itlReasonT2Held = "T2-held"
+
+// itlReasonT2AboveBand is the Reason of a line fitted from the readings above
+// the band, the band giving none and the key holding no slope it may hold
+// (SwitchITLSteadyGate; itl.Admission.AboveBandFallback).
+const itlReasonT2AboveBand = "T2-above-band"
 
 // ITLWriteBand is how far a variant's A or B must move from the value
 // learner-write last logged, as a fraction of that value, before it logs
@@ -81,12 +92,17 @@ func ReplaySwitchNames() []string {
 }
 
 // lineAdmission is adm for one variant of the model: with the line on the
-// tracker, the engine arguments its rows were produced under, which bound a
-// held slope (itl.Admission.Args). The settle tracker is not handed on until
-// PR 4b-2: the line judges each replica's settle from its own trace.
+// tracker, the above-band fallback, and the engine arguments its rows were
+// produced under, which bound a held slope (itl.Admission.Args). The settle
+// tracker is not handed on until PR 4b-2: the line judges each replica's
+// settle from its own trace.
 func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID, variant string) itl.Admission {
 	adm.Settle = nil
-	if !a.itlSteadyGate || a.store == nil {
+	if !a.itlSteadyGate {
+		return adm
+	}
+	adm.AboveBandFallback = !a.noAboveBandFallback
+	if a.store == nil {
 		return adm
 	}
 	if rec := a.store.Get(namespace, modelID, variant); rec != nil {
@@ -120,10 +136,29 @@ func (a *ThroughputAnalyzer) lineModel(ctx context.Context, key string, state *v
 	r := state.reading
 	reason := lineReason(r)
 	a.noteLearnerWrite(ctx, key, r, reason, namespace, modelID, variant, now)
+	noteLineSilence(ctx, state, r, reason, namespace, modelID, variant)
 	if r.Tier == "" {
 		return itl.Model{}, reason, false
 	}
 	return r.Model, reason, true
+}
+
+// noteLineSilence logs one line at the default level when the variant's line
+// goes silent -- no line, so no throughput capacity and no say in the
+// decision -- or comes back, as the GPS summary logs, with what its rows
+// were this cycle: in the band, above it, below it, and settling; and what
+// the band's and the above-band windows hold. Called with a.mu held.
+func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, reason,
+	namespace, modelID, variant string) {
+	silent := r.Tier == ""
+	if silent == state.lineSilent {
+		return
+	}
+	state.lineSilent = silent
+	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
+		"variant", variant, "silent", silent, "source", reason,
+		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
+		"held", r.Held, "aboveBandHeld", r.AboveBandHeld)
 }
 
 // lineReason is the Reason a reading's line carries.
@@ -131,6 +166,8 @@ func lineReason(r itl.Reading) string {
 	switch {
 	case r.Tier == itl.TierOLS:
 		return itlReasonT1OLS
+	case r.Tier == itl.TierPinnedB && r.AboveBandFit:
+		return itlReasonT2AboveBand
 	case r.Tier == itl.TierPinnedB && r.SlopeHeld:
 		return itlReasonT2Held
 	case r.Tier == itl.TierPinnedB && r.BaselineLearned:
@@ -203,6 +240,7 @@ func (a *ThroughputAnalyzer) lineVariantState(key string, state *variantState, s
 func (a *ThroughputAnalyzer) noteGPSMismatch(ctx context.Context, state *variantState,
 	metrics []domain.ReplicaMetrics, s shape.Shape, model itl.Model, namespace, modelID, variant string) bool {
 	if s.KVreq <= 0 {
+		endGPSMismatch(ctx, state, namespace, modelID, variant)
 		return false
 	}
 	logger := ctrl.LoggerFrom(ctx)
@@ -213,7 +251,9 @@ func (a *ThroughputAnalyzer) noteGPSMismatch(ctx context.Context, state *variant
 		}
 		k := m.KvUsageForITL()
 		errPct, ok := itl.GPSErrorPct(model, k, float64(m.TotalKvCapacityTokens), s.KVreq, m.GenerationTokenRate)
-		if !ok || errPct <= DefaultGPSMismatchThresholdPct {
+		// A NaN error (an infinite observed rate) is unknown, as !ok is: it
+		// is no evidence of a mismatch.
+		if !ok || !(errPct > DefaultGPSMismatchThresholdPct) {
 			continue
 		}
 		pods++
@@ -228,10 +268,27 @@ func (a *ThroughputAnalyzer) noteGPSMismatch(ctx context.Context, state *variant
 	}
 	mismatched := pods > 0
 	if mismatched != state.gpsMismatched {
-		logger.Info("throughput analyzer: GPS mismatch", "namespace", namespace, "modelID", modelID,
-			"variant", variant, "mismatched", mismatched, "pods", pods, "worstPod", worstPod, "worstErrPct", worst,
-			"thresholdPct", DefaultGPSMismatchThresholdPct)
+		logGPSMismatch(ctx, namespace, modelID, variant, mismatched, pods, worstPod, worst)
 	}
 	state.gpsMismatched = mismatched
 	return mismatched
+}
+
+// endGPSMismatch ends the variant's GPS mismatch when there is nothing to
+// compare -- no line, or no shape -- logging the end if one was logged as
+// started, so a mismatch is never left open in the log. Called with a.mu
+// held.
+func endGPSMismatch(ctx context.Context, state *variantState, namespace, modelID, variant string) {
+	if state.gpsMismatched {
+		logGPSMismatch(ctx, namespace, modelID, variant, false, 0, "", 0)
+	}
+	state.gpsMismatched = false
+}
+
+// logGPSMismatch is the variant's GPS mismatch summary line.
+func logGPSMismatch(ctx context.Context, namespace, modelID, variant string, mismatched bool, pods int,
+	worstPod string, worst float64) {
+	ctrl.LoggerFrom(ctx).Info("throughput analyzer: GPS mismatch", "namespace", namespace, "modelID", modelID,
+		"variant", variant, "mismatched", mismatched, "pods", pods, "worstPod", worstPod, "worstErrPct", worst,
+		"thresholdPct", DefaultGPSMismatchThresholdPct)
 }

@@ -242,57 +242,77 @@ func TestThroughputProbe_AControllerRestartBeforeALoadStepSettlesAtNeed(t *testi
 
 // The same restart 15 s before the step, as the plan states the case: the
 // step lands before the restarted line has its ten readings, and the step
-// pushes every replica above the band, where no reading is admitted (the
-// sequence-cap admission is 4b-3's, and these replicas queue below any
-// stated cap). The restarted analyzer has no line for the rest of the run:
-// alone, it never orders the scale-up, and the fleet stays under need. Known
-// failing and open: a silent analyzer is out of the vote, so under the
-// engine the saturation analyzer's order carries the step (analyzer-learner.md,
-// PR 4b, "What can move the fleet size"); a policy that lists throughput
-// alone has no such floor. When a change gives the restarted line a figure
-// here, this test fails, and becomes a passing case.
-func TestThroughputProbe_KnownFailing_ARestartJustBeforeAStepAboveTheBandLeavesNoLine(t *testing.T) {
+// pushes every replica above the band, where the band admits no reading
+// (the sequence-cap admission is 4b-3's, and these replicas queue below any
+// stated cap). The restarted line has never fitted, so it fits from the
+// readings above the band (T2-above-band) until the scale-up it orders
+// brings the fleet back into the band, and the fleet is under need for no
+// longer than a start and a settle take.
+//
+// Before the fallback, measured on this case: need 9, final 4, peak 4, under
+// need for 24m45s, reasons T2-default 58 (before the restart) and T2-failed
+// 102 -- the restarted line was silent for the rest of the run, and alone
+// the analyzer never ordered the scale-up. With it: need 9, final 9, peak
+// 9, under need for 30s. Negative control: with the fallback off the case
+// fails as it did.
+func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *testing.T) {
 	on := runProbe(t, restartCase(15*time.Second), NewThroughputAnalyzer)
 	t.Logf("on the tracker: %s", on)
-	v := on.Verdict()
-	require.Contains(t, v, "under-ordered", "the restarted line priced the step: if that was fixed, make this a passing case")
+	require.Empty(t, on.Verdict())
+	require.Positive(t, on.reasons[itlReasonT2AboveBand], "premise: the restarted line priced from above the band")
+	require.LessOrEqual(t, on.UnderFor, learnertest.UnderFor)
+
+	off := runProbe(t, restartCase(15*time.Second), func() *ThroughputAnalyzer {
+		a := NewThroughputAnalyzer()
+		a.noAboveBandFallback = true
+		return a
+	})
+	t.Logf("negative control, no above-band fallback: %s", off)
+	require.Contains(t, off.Verdict(), "under-ordered", "negative control: without the fallback the restarted line stays silent")
+	require.Zero(t, off.reasons[itlReasonT2AboveBand])
+
 	parent := runProbe(t, restartCase(15*time.Second), newParentLineAnalyzer)
 	t.Logf("the parent's line: %s", parent)
 }
 
 // One replica at its sequence cap with its siblings below the band: the
 // only reading in reach is above the band, from a replica at its stated
-// cap. The line has no cap admission until learner PR 4b-3
-// (throughput-itl-admits-at-sequence-cap), so the variant has no line and
-// no throughput capacity: the analyzer is silent. Known failing, synthetic
-// (a sweep does not hold a decode pod at its cap without preempting): when
-// 4b-3 admits the reading, this test fails, and becomes a passing case.
-func TestThroughputProbe_KnownFailing_AReplicaAtItsCapWithSiblingsBelowTheBandHasNoLine(t *testing.T) {
-	run := func(a *ThroughputAnalyzer) map[string]int {
+// cap. The band has no cap admission until learner PR 4b-3
+// (throughput-itl-admits-at-sequence-cap), so the band's window holds no
+// reading, and the line that prices the variant is the above-band
+// fallback's (T2-above-band), from the capped replica's readings, once
+// there are ten of them. Synthetic (a sweep does not hold a decode pod at
+// its cap without preempting): when 4b-3 admits the reading, the band's
+// window fills and this test fails.
+func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromAboveTheBand(t *testing.T) {
+	run := func(a *ThroughputAnalyzer) (map[string]int, int) {
 		store := capacity.NewStore()
 		store.Update("ns", "m", "v1", capacity.Record{EngineParams: &capacity.EngineParams{Engine: "vllm", DeclaredBatchCap: 64}},
-			learnertest.Start)
-		r := newPropRun(a.WithCapacityStore(store))
-		early := learnertest.Start.Add(-time.Hour)
-		reasons := map[string]int{}
+			lineStart)
+		r := newLineRun(t, a.WithCapacityStore(store))
+		early := lineStart.Add(-time.Hour)
+		reasons, most := map[string]int{}, 0
 		for range 40 {
 			capped := probeRow("r00", 0.92, probeITL(0.92), early, 3, 6)
 			capped.RunningRequests, capped.PreemptionRate, capped.PreemptionRateKnown = 64, 0, true
 			rows := []domain.ReplicaMetrics{capped,
 				probeRow("r01", 0.08, probeITL(0.08), early, 0.3, 0), probeRow("r02", 0.08, probeITL(0.08), early, 0.3, 0)}
-			_, has, err := r.step(rows)
-			require.NoError(t, err)
+			vc, has := r.step(rows)
 			if has {
-				reasons["line"]++
+				reasons[vc.Reason]++
 			} else {
-				reasons["no line"]++
+				reasons[itlReasonT2Failed]++
 			}
+			st, _ := a.VariantState("m", "ns", "v1")
+			most = max(most, st.SampleCount)
 		}
-		return reasons
+		return reasons, most
 	}
-	on := run(NewThroughputAnalyzer())
-	parent := run(newParentLineAnalyzer())
-	t.Logf("on the tracker: %v; the parent's line: %v", on, parent)
-	require.Zero(t, on["line"], "the capped replica's reading was admitted: if 4b-3 landed, make this a passing case")
-	require.Positive(t, parent["line"], "the parent prices from the below-band rows' tier-2 fit")
+	on, inBand := run(NewThroughputAnalyzer())
+	parent, _ := run(newParentLineAnalyzer())
+	t.Logf("on the tracker: %v, the band's window up to %d readings; the parent's line: %v", on, inBand, parent)
+	require.Zero(t, inBand, "the capped replica's reading was admitted to the band: if 4b-3 landed, make this its case")
+	require.Equal(t, 9, on[itlReasonT2Failed], "silent until the capped replica's tenth reading")
+	require.Equal(t, 31, on[itlReasonT2AboveBand], "the above-band fallback prices the variant after it")
+	require.Positive(t, parent[itlReasonT2Default], "the parent prices from the below-band rows' tier-2 fit")
 }

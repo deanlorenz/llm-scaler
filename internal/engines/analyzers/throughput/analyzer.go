@@ -60,6 +60,10 @@ type ThroughputAnalyzer struct {
 	// learner PR 4b-1 (itl_line.go): SwitchITLSteadyGate and
 	// SwitchITLKeepsWindowOnGPSMismatch. On by the constructor.
 	itlSteadyGate, itlKeepsOnGPSMismatch bool
+	// noAboveBandFallback turns the line's above-band fallback off
+	// (itl.Admission.AboveBandFallback), for the tests' negative controls
+	// only: nothing in production sets it.
+	noAboveBandFallback bool
 	// paths counts the line's fits by path, for the replay (path_counts.go).
 	paths pathCounters
 }
@@ -97,6 +101,10 @@ type variantState struct {
 	// mismatch, so its summary line logs only when that changes
 	// (SwitchITLKeepsWindowOnGPSMismatch).
 	gpsMismatched bool
+	// lineSilent is whether the variant's line was silent (no line) on the
+	// last cycle it was read, so its summary line logs only when that
+	// changes (SwitchITLSteadyGate).
+	lineSilent bool
 }
 
 // NewThroughputAnalyzer creates a ThroughputAnalyzer with default configuration.
@@ -218,7 +226,13 @@ func (a *ThroughputAnalyzer) observe(
 			state.observationWindow.Clear()
 			state.consecutiveGPSMismatches = 0
 			if a.itlSteadyGate {
+				// The held slope goes with the window: a shape change moves
+				// A (shorter requests, a higher A), and the old shape's A,
+				// held until the new shape's readings fit, priced a lower
+				// ITL, so fewer replicas. Until the new shape fits, the line
+				// is the above-band fallback or silent.
 				a.lines.ClearWindow(key)
+				a.lines.ForgetSlope(key)
 			}
 		}
 
@@ -442,6 +456,9 @@ func (a *ThroughputAnalyzer) analyze(
 				"modelID", input.ModelID,
 				"variant", variantName,
 			)
+			if a.itlKeepsOnGPSMismatch {
+				endGPSMismatch(ctx, state, input.Namespace, input.ModelID, variantName)
+			}
 			continue
 		}
 

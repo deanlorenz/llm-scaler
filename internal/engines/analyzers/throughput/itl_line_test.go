@@ -32,6 +32,8 @@ type lineRun struct {
 	a     *ThroughputAnalyzer
 	clock *clocktesting.FakePassiveClock
 	cycle int
+	// ctx is what each cycle is analyzed under; nil for the background.
+	ctx context.Context
 }
 
 var lineStart = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
@@ -48,7 +50,11 @@ func (r *lineRun) now() time.Time { return lineStart.Add(time.Duration(r.cycle) 
 func (r *lineRun) step(rows []domain.ReplicaMetrics) (domain.VariantCapacity, bool) {
 	r.t.Helper()
 	r.clock.SetTime(r.now())
-	res, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, err := r.a.Analyze(ctx, domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
 		ReplicaMetrics: rows, ArrivalRate: 4,
 		VariantStates: []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: len(rows), GPUsPerReplica: 1}}})
 	require.NoError(r.t, err)

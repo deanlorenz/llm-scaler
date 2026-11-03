@@ -105,8 +105,13 @@ func TestThroughputLogAtTheShippedVerbosityDoesNotGrowPerReplica(t *testing.T) {
 	require.Positive(t, logLinesWith(verboseLarge, "learner-write"), "precondition: the run fitted a line and logged it")
 	require.Equal(t, 1, logLinesWith(shippedLarge, "throughput analyzer: GPS mismatch"),
 		"the variant's mismatch is one summary line, when it starts")
-	assert.Equal(t, logLines(shippedSmall), logLines(shippedLarge),
+	// Fewer replicas may log more: the line's silence summary logs when the
+	// line goes silent and comes back, and a small fleet needs more cycles
+	// for its ten readings, while a large one has them on the first.
+	assert.LessOrEqual(t, logLines(shippedLarge), logLines(shippedSmall),
 		"lines at the shipped verbosity must not grow with the replica count")
+	assert.LessOrEqual(t, logLinesWith(shippedSmall, "throughput analyzer: ITL line"), 2,
+		"the line's silence is one summary line when it starts and one when it ends")
 	assert.Equal(t, logLinesWith(verboseLarge, "learner-write"),
 		logLinesWith(logRun(t, NewThroughputAnalyzer(), logging.VERBOSE, small), "learner-write"),
 		"learner-write is per variant, not per replica")

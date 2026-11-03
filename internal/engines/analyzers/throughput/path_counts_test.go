@@ -10,7 +10,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// Each per-path counter counts its own path: full fits on a spread fleet,
+// Each per-path counter counts its own path: above-band fits on a fleet
+// started above the band, full fits on a spread fleet,
 // pinned fits on a narrow one, a held slope once the narrow fleet falls
 // below the band, and the settling readings of a replica that joins. The
 // parent's line counts nothing: the replay's required paths fail on it
@@ -19,6 +20,15 @@ func TestPathCounts_EachPathCountsItsOwn(t *testing.T) {
 	run := func(a *ThroughputAnalyzer) map[string]int64 {
 		r := newLineRun(t, a)
 		early := lineStart.Add(-time.Hour)
+		// Started into saturated load: every replica above the band, so the
+		// line's first fits are the above-band fallback's.
+		for range 8 {
+			rows := steadyFleet()
+			for i := range rows {
+				rows[i].KvCacheUsage, rows[i].KvUsageInstant, rows[i].AvgITL = 0.90, 0.90, lineAt(0.90)
+			}
+			r.step(rows)
+		}
 		spread := func() []domain.ReplicaMetrics {
 			rows := make([]domain.ReplicaMetrics, 0, 4)
 			for i, k := range []float64{0.20, 0.40, 0.60, 0.75} {
@@ -52,5 +62,5 @@ func TestPathCounts_EachPathCountsItsOwn(t *testing.T) {
 	for _, p := range PathNames() {
 		assert.Zero(t, parent[p], "the parent's line counted %s", p)
 	}
-	require.ElementsMatch(t, PathNames(), []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling})
+	require.ElementsMatch(t, PathNames(), []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling, PathITLAboveBand})
 }

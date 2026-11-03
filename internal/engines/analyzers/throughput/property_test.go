@@ -56,7 +56,10 @@ const (
 	// small part of every reading (10 ms of 20 to 48 ms), so propNoise on the
 	// ITL is several times that on B: at N = 4 over 20 min the full fit's B
 	// lands within 15 % on every seed, and within 10 % on all but about one
-	// in a hundred. A B stuck at the default is 40 % off.
+	// in a hundred. A B stuck at the default is 40 % off. Measured on the
+	// tracker, the converged B's relative error has mean about 0 and SD
+	// about 3.6 %, so 15 % is about 4 SD. It is this case's declared
+	// tolerance, set with the case, not one widened to pass it.
 	propStaleTol = 0.15
 	// propNoise and propRho are the ITL gauge's relative noise and its
 	// lag-one correlation across cycles.
@@ -182,6 +185,7 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 		c(learnertest.ClassHeterogeneity, "slow-replica", direct, cheap, checkSlowReplica(newA)),
 		c(learnertest.ClassKnownTruth, "line-at-kprice", direct, cheap, checkKnownTruth(newA, false)),
 		c(learnertest.ClassKnownTruth, "line-at-kprice-timebase", timeBase, cheap, checkKnownTruth(newA, true)),
+		c(learnertest.ClassKnownTruth, "above-band-fallback", direct, cheap, checkAboveBandFallback(newA)),
 		c(learnertest.ClassEdges, "ten-readings", direct, 1, checkTenReadings(newA)),
 		c(learnertest.ClassEdges, "spread-0.30", direct, 1, checkSpreadEdge(newA)),
 		c(learnertest.ClassEdges, "band-edges-default", direct, 1, checkBandEdges(newA, nil, itl.DefaultMinObservableK, itl.DefaultMaxObservableK)),
@@ -478,6 +482,97 @@ func checkKnownTruth(newA propAnalyzer, timeBase bool) func(uint64) error {
 			}
 		}
 		return learnertest.Holds(priced > 0, learnertest.KindNotLearned, "no line priced after five minutes")
+	}
+}
+
+// Known truth, the above-band fallback: a key that never fitted, its
+// replicas steady above the band (k 0.84 to 0.93), prices from the
+// above-band readings (T2-above-band). The fallback pins B as the band's fit
+// does, to itl.DefaultBaselineSec (6 ms) on a key that never fitted, so
+// which side of an in-band fit it lands on is decided by the true B
+// (itl.Tracker's aboveBandLine):
+//
+//   - true B at or below the pinned one (4 ms): the fallback never prices a
+//     higher mu than an in-band fit on the same true line (replicas at k
+//     0.30 to 0.50, a pinned fit too) -- its priced ITL is at least the
+//     in-band fit's, on every cycle both price;
+//   - true B above it (propTrueB, 10 ms): the in-band fit errs high, and the
+//     fallback may price a little under the truth (its B term is at most
+//     0.15 of the B error, 0.6 ms of 52.5); it stays within known truth's
+//     propTruthTol.
+//
+// Margins, measured over the 100 seeds: the fallback's priced ITL is at
+// least 1.01 times the in-band fit's on every cycle both price (3 seeds fail
+// at 1.02); and at most 2.7 % under the truth (1 seed fails at 2.5 %, none
+// at 3 %), the B term and the noise of a fit on its first ten readings.
+func checkAboveBandFallback(newA propAnalyzer) func(uint64) error {
+	return func(seed uint64) error {
+		const cycles = 24
+		r := learnertest.Rand(seed)
+		above := newPropFleet(r, cycles, 0.84, 0.88, 0.93)
+		inBand := newPropFleet(r, cycles, 0.30, 0.40, 0.50)
+		// rows is f's rows on the true line through b.
+		rows := func(f propFleet, b float64) func(int) []domain.ReplicaMetrics {
+			return func(c int) []domain.ReplicaMetrics {
+				out := f.rows(c)
+				for i := range out {
+					out[i].AvgITL = (propTrueA*f.ks[i] + b) * (1 + f.noise[i][c])
+				}
+				return out
+			}
+		}
+		run := func(f propFleet, b float64) (map[int]itl.Model, map[string]int64, error) {
+			a := newA()
+			_, _, lines, err := lineOf(a, cycles, rows(f, b))
+			return lines, a.PathCounts(), err
+		}
+		for _, b := range []float64{0.004, propTrueB} {
+			fb, paths, err := run(above, b)
+			if err != nil {
+				return err
+			}
+			if len(fb) == 0 {
+				return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: no line in %d cycles above the band", b, cycles)
+			}
+			if paths[PathITLAboveBand] == 0 {
+				return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: a line above the band, but not the fallback's: %v", b, paths)
+			}
+			if b <= itl.DefaultBaselineSec {
+				in, _, err := run(inBand, b)
+				if err != nil {
+					return err
+				}
+				both := 0
+				for c := range cycles {
+					m, okF := fb[c]
+					mi, okI := in[c]
+					if !okF || !okI {
+						continue
+					}
+					both++
+					if propPriced(m) < propPriced(mi) {
+						return learnertest.Violate(learnertest.KindOverPriced,
+							"true B %.3f s, cycle %d: the fallback priced %.4f s, under the in-band fit's %.4f s", b, c, propPriced(m), propPriced(mi))
+					}
+				}
+				if both == 0 {
+					return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: no cycle priced both above and in the band", b)
+				}
+				continue
+			}
+			truth := propTrueA*itl.DefaultKSat + b
+			for c := range cycles {
+				m, ok := fb[c]
+				if !ok {
+					continue
+				}
+				if p := propPriced(m); p*(1+propTruthTol) < truth {
+					return learnertest.Violate(learnertest.KindOverPriced, "true B %.3f s, cycle %d: the fallback priced %.4f s, under the truth %.4f s by %.1f %%",
+						b, c, p, truth, 100*(1-p/truth))
+				}
+			}
+		}
+		return nil
 	}
 }
 
