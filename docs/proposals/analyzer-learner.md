@@ -1667,6 +1667,71 @@ analyzer reads `EngineParams` from the store now, not after #345;
 `T2-held` is a new `Reason`; the k-weighted pinned fit is in scope (the
 exception section 7 names); the four-PR split.
 
+#### 4b-1 as built
+
+Status: built on `feat/learner-4b1`, on main after 4b-0 (#455). The
+`throughput-sweep` recordings are not in it; they land in their own commit,
+with base goldens, when the run is taken (`TestGoldens_ThroughputSweepFloors`
+waits for them).
+
+What each switch moves, measured on the in-process goldens (`acceptance`,
+`engine`, `mu-paths`, the only fixtures that run the throughput analyzer),
+each switch on alone against all off; base f7b4f7e47, the same tree as main's
+69fb6395c, so `switchBase` is unchanged by the merge:
+
+| switch | outputs it moves | how |
+| --- | --- | --- |
+| `throughput-itl-steady-gate` | `results.csv` and `variant-capacities.csv` of all three; `composite-holds.csv`, `composite-release.csv` and `composite-variants.csv` of `engine` | each variant's first cycles have no throughput capacity (10 readings first), and the line after them is the window's pinned or full fit, not one cycle's rows |
+| `throughput-itl-keeps-the-window-on-gps-mismatch` | `variant-capacities.csv` of all three | the in-process rows trip the GPS check; kept, the window reaches a full fit where the clear had emptied it |
+
+What else 4b-1 built:
+
+- **Shared test helpers.** `internal/engines/analyzers/internal/learnertest`
+  holds what the saturation and throughput tests share: the seeded
+  generators and the time-base family, the property judgement against a
+  known-failures ledger, and the closed-loop fleet simulator
+  (`learnertest.Fleet`). The saturation tests run on it unchanged: every
+  case id in `cases.txt` and every closed-loop probe's result is the same
+  as before the move. A test holds that no non-test file imports it.
+- **Property cases on the throughput line** (2.6;
+  `throughput/property_test.go`, ledger and case list under
+  `throughput/testdata/properties`): transient (joiner warm-up, load step
+  with an ITL overshoot, controller restart); first sample; stale B at
+  N = 2 and 4; missing and duplicated (+Inf ITL, k of 0, a missed row);
+  contamination paired with heterogeneity (one slower replica moves A by its
+  weight); known truth at `itl.DefaultKSat`, direct and on the time base;
+  edges (10 readings, spread 0.30, the band at the default and at
+  [0.05, 0.90], `steadyFor` at the default and at 10 min, the sequence cap).
+  The mutant is the steady gate off: joiner warm-up, load step, one reading,
+  +Inf ITL, ten readings and both `steadyFor` edges fail on the parent
+  (`TestThroughputPropertyMutants`). One ledger row: the sequence cap, owner
+  4b-3.
+- **Closed-loop probe** (`throughput/closed_loop_probe_test.go`), each
+  case run on the tracker and on the parent's line: the slope hold through
+  35 min of light load (on: settles at need, the line held 39 cycles;
+  parent: runs to the replica cap, ends 6 against a need of 3); a scale-up
+  whose joiners carry warm-up ITL (on: peak 6, need 6; parent: peak 33); a
+  restart 2 min before a step (on: settles at need; parent: peak 40, ends
+  over). Two known-failing cases: a restart 15 s before a step that pushes
+  every replica above the band leaves the restarted line with no reading
+  for the rest of the run (open; under the engine the saturation analyzer's
+  order carries it, a throughput-only policy has no such floor), and a
+  replica at its cap with siblings below the band has no line (4b-3).
+- **Verbosity** (`throughput/replica_log_test.go`): the shipped-behaviour
+  row's two tests. At the default level a run logs the same lines at 8
+  replicas as at 64 (1 line, the variant's GPS summary); the parent's line
+  logs 76 and 616. No line passes the CRI limit at the default or the
+  verbose level.
+- **Per-path counters** (`throughput.PathNames`): `throughput-itl-ols`,
+  `throughput-itl-pinned`, `throughput-itl-held` and
+  `throughput-itl-settling`. The golden check requires the first three (the
+  in-process goldens reach each); settling is zero there by construction and
+  is required by `TestGoldens_ThroughputSweepFloors`, which skips, saying
+  so, until the `throughput-sweep` recordings are listed in `goldens.yaml`,
+  and then requires full, pinned and settling counts on both and held
+  counts on the restart recording, with the parent's line (the steady gate
+  off) as its negative control.
+
 #### The GPS-mismatch clear: dropped in 4b-1
 
 **Decision: the throughput line's window is no longer cleared on a GPS
