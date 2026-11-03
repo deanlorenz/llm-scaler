@@ -1620,7 +1620,10 @@ spelling is reported as an unknown key and ignored.
 | `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |
 
 The slo analyzer reads the same gate, so both fit their lines from the same
-readings.
+readings. So does the throughput analyzer's ITL line, with the same settle:
+a replica waits `steadyFor` after it joins, restarts under its name, is back
+after more than a minute without a row, or takes load after `idleRows` idle
+cycles, and every replica waits it after a controller restart.
 
 #### `analyzerTuning.k2Settle`: is a saturated reading a limit or a load step
 

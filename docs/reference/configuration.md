@@ -885,6 +885,16 @@ analyzer's) does not refit for
 - **The slo analyzer** has no learned-state restore. Its line waits after
   every restart, with the snapshot on or off; its figures are published as
   no line until it refits. It does not size the fleet.
+- **The throughput analyzer** (a policy that lists `throughput`) has no
+  learned-state restore either. Its ITL line waits after every restart too,
+  and the analyzer has no throughput capacity until the line refits:
+  `steadyFor` and then its ten readings, about 8 cycles (2 minutes at 15 s)
+  for a variant of three or more replicas, longer for fewer. It is silent
+  meanwhile: it neither orders a scale-up nor holds the fleet against a
+  scale-down, so the other analyzers decide. On a simulated restart 15 s
+  before a load step it left the fleet under need for 1m45s, against 30 s
+  without the wait. A policy that lists `throughput` alone has nothing else
+  to hold the fleet in that time but the scale-down stabilization above.
 
 What is restored, and what is not:
 

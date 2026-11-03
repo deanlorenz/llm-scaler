@@ -1854,6 +1854,80 @@ The recipe keeps its step 4 grep: the recording is taken on 4b-0, where the
 clear still runs, and its count of clears is the evidence above, measured
 on the line itself.
 
+#### 4b-2 as built
+
+Status: built on `feat/learner-4b2`, on 4b-1's tip (bd4807f67); pushed
+after 4b-1 merges. The line reads each replica's settle from the engine's
+settle tracker (`T/settle.go`), which 4b-0 wired (`WithSettleView`) and
+4b-1 withheld. An analyzer given no view -- a test that drives `Analyze`
+alone, a replay of a recording with no `start.ThroughputConfig` -- observes
+a tracker of its own, as the slo analyzer does, and stands for a controller
+that has watched the fleet: nothing waits after a restart.
+
+**The switches, split as 4a split them.** The table above names one switch
+for the move, with "restart under its name, idle on evidence, the absence
+tolerance, the Finite pod mean" inside it. Each of those moves the fleet on
+its own, and 4a's review split them out for the saturation and slo lines
+(`itl-restart-under-its-name-settles` and `itl-idle-needs-evidence` in
+9b52db281). 4b-2 takes the same six, prefixed `throughput-`:
+
+| switch | changes against 4b-1's own trace | which way the fleet can move |
+| --- | --- | --- |
+| `throughput-itl-reads-the-settle-tracker` | the settle start is the tracker's: joined, back past the tolerance (`settle.Rejoined`), lent, a new revision under the same name (`settle.RolledOut`), Ready again after a not-Ready row. Its own differences: a gap between two of the model's cycles past the tolerance (a paused controller, a clock jump) settles every replica, and a rollout that keeps the Pod's name settles; the own trace saw neither | fewer readings after a gap or an in-place rollout: **silent more often** (the risky side, 4.4), and a rollout's warm-up kept out: **down** |
+| `throughput-itl-waits-after-controller-restart` | the engine's tracker is new with the controller and reads every replica on its first cycle as `settle.Joined`; on, those replicas wait `steadyFor` from that sight. Off, as 4b-1, they are taken as settled. Only with an engine view: the analyzer alone never waits | **silent** for `steadyFor` plus the ten readings (cycle 8 on a three-replica variant at 15 s); a joiner whose warm-up straddles the restart is kept out: **down** against the parent's over-order |
+| `throughput-itl-keeps-the-settle-through-a-missing-row` | one missing row keeps the settle up to the tolerance (2.5 intervals, at least 1 min). Off, as 4b-1, the replica starts over | more readings, **live more often**; a replica restarted inside the tolerance with nothing to show it (no not-Ready row, no new Ready time) is admitted while warm: **up**, the cost side |
+| `throughput-itl-restart-under-its-name-settles` | a new Ready time under the same name settles. Off, only a not-Ready row shows the restart | a fast restart's warm-up kept out of A: **down** (the parent over-orders) |
+| `throughput-itl-idle-needs-evidence` | idle only on evidence (KV known 0, and ITL known-empty or generation rate known 0; prefill by its request rate). Off, a row with neither ITL nor k is idle | a failed scrape no longer settles a busy replica: **live more often**; an idle replica whose gauges are unknown is not idle, so its return's warm-up is admitted: **up** |
+| `throughput-itl-reads-the-finite-pod-mean` | a Pod with an Absent rank is no reading. Off, its Finite ranks' mean was one | fewer readings: **silent more often** on a fleet of such pods; and **either way** on the line: the pod's fill counts the Absent rank and its ITL does not, so the reading sat left of its line (an idle rank, A too steep, over-order) or right of it (a busy rank, A too flat, under-order) |
+
+**A lend moves nothing on this line.** A warm-pool lend is a new key on the
+tracker (`settle.Lent`), but the analyzer drops lent rows before the line
+(`ownReplicasOnly`) and `itl.Tracker` refuses a `FromWarmPool` row, on either
+path (`TestITLSettle_ALentPodIsNoReadingOnEitherPath`). **A rejoin** past
+the tolerance settles on either path, as 4b-1's own trace with the absence
+rule did (`TestITLSettle_AnAbsencePastTheToleranceStartsTheSettleAgain`);
+the move's only rejoin of its own is the gap between cycles above.
+
+**`throughput-itl-waits-after-controller-restart` is 4b-2's**, as the Order
+table has it, not later: it is defined against the engine's view, which
+4b-2 is the first to read, and with the view and the move on, leaving it
+off would read a controller restart as a fleet that was watched.
+
+Negative controls, each through `Analyze` on the engine's rig
+(`T/settle_test.go`), run against 4b-1's tip with the switch names shimmed:
+the restart, settling cycles `nil` against `[0..7]`; one missing row,
+`[11..18]` against `[0..7]`; a new Ready time under the name, `nil` against
+`[0..7, 10..17]`; a new revision under the name, the same; a 3 min gap
+between cycles, the same; a scrape that read nothing, `[12..19]` against
+`[0..7]`; a Pod with an Absent rank, 3 readings offered against 2. Each test
+also runs its switch off on this tree and asserts the parent's result.
+
+Property cases (`T/property_settle_test.go`, on the engine's rig, a new
+tracker per controller): `transient/throughput-itl/controller-restart-with-a-joiner`
+(a replica joins two cycles before a controller restart, its warm-up lasting
+six cycles) fails on 100 of 100 seeds with the wait off and on 4b-1's tip
+(seed 1: priced 0.2698 s against 0.0564 s, 378.6 %), and passes with it on;
+`joiner-warm-up-on-the-engine-tracker` and
+`missed-row-on-the-engine-tracker` pass on either path and are guards.
+
+Closed-loop probe (`TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle`),
+the restart case of 4b-1 on the engine's rig, need 9: a step 2 min after
+the restart, final 10, under need for 30 s, 18 cycles silent, against final
+9, 0 s and 4 silent with the wait off; a step 15 s after, final 10, under
+need for 1m45s, 16 silent, against 30 s and 5. Both inside the probe's
+5 min, on the SLO side as 4.4 says.
+
+**Goldens.** No committed recording gives the throughput analyzer the
+engine's view (the in-process three predate `ThroughputConfig`), so the
+restart wait moves none until `throughput-sweep-restart` lands, and is held
+by its unit tests (`heldBy`). The move is expected to move the acceptance
+and engine throughput rows after their day-long clock jump, as
+`itl-reads-the-settle-tracker` moved the saturation line's; the other four
+are expected to move none, as their 4a twins moved none. Not yet measured:
+the switch runs, goldens and message words are regenerated when the cluster
+recording now running is done, and `replaySwitches` is corrected to what
+they measure.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at
