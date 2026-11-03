@@ -116,7 +116,7 @@ func TestGoldens_TheCheckFails(t *testing.T) {
 		})
 		p := checkProblems(t, dir)
 		require.Len(t, p, 1, "%v", p)
-		assert.Contains(t, p[0], "golden no longer reproduces: acceptance/variant-capacities.csv: 1 of 180 rows changed, 0 added, 0 removed; first:")
+		assert.Contains(t, p[0], "golden no longer reproduces: acceptance/variant-capacities.csv: 1 of 149 rows changed, 0 added, 0 removed; first:")
 		assert.Contains(t, p[0], ".PerReplicaCapacity:")
 		t.Log(p[0])
 	})

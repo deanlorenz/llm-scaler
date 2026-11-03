@@ -20,6 +20,8 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // The switch runs of the golden rule (analyzer-learner.md 2.5), over every
@@ -75,10 +77,35 @@ import (
 // prefix-cache hits, #432's aggregated line) are not here: "all off" is this
 // PR's switches, and an earlier PR's stay at their constructor default, on,
 // as the base goldens were written (analyzer-learner.md, 2.5).
+//
+// Since learner PR 4b-1 the rows above (#275's two switches, #438's) are
+// earlier seams (earlierSeams), and this PR's are the throughput analyzer's
+// two: its ITL line on the shared tracker (throughput.SwitchITLSteadyGate)
+// and the GPS-mismatch clear dropped
+// (throughput.SwitchITLKeepsWindowOnGPSMismatch). Its base is f7b4f7e47
+// (4b-0). The fixtures that run the throughput analyzer are the in-process
+// three (acceptance, engine, mu-paths); no cluster recording does yet.
+// Measured, each alone against all off:
+//
+//   - The steady gate moves the throughput rows of results.csv and
+//     variant-capacities.csv in all three, and, through the composite, the
+//     engine fixture's composite-holds, composite-release and
+//     composite-variants. Its line needs 10 readings in the window and a
+//     settled replica's, where the parent priced the first cycle's rows: the
+//     first cycles of each variant have no throughput capacity.
+//   - The GPS-mismatch switch alone moves the throughput rows of
+//     variant-capacities.csv in all three: the in-process rows trip the check,
+//     and kept, the window reaches a full fit where the clear had emptied it.
 var replaySwitches = map[string][]string{
-	saturation.SwitchZeroReplicaDataParallel: nil,
-	saturation.SwitchITLAggregatedShapeTerm:  {"acceptance/learned-state.csv", "engine/learned-state.csv"},
-	saturation.SwitchITLAggregatedSizes:      nil,
+	throughput.SwitchITLSteadyGate: {
+		"acceptance/results.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-holds.csv", "engine/composite-release.csv", "engine/composite-variants.csv",
+		"engine/results.csv", "engine/variant-capacities.csv",
+		"mu-paths/results.csv", "mu-paths/variant-capacities.csv",
+	},
+	throughput.SwitchITLKeepsWindowOnGPSMismatch: {
+		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv", "mu-paths/variant-capacities.csv",
+	},
 }
 
 // learner4aSeams is learner PR 4a's switches, earlier seams now (merged
@@ -131,6 +158,9 @@ func switchPackage(name string) string {
 	if slices.Contains(slo.ReplaySwitchNames(), name) {
 		return PackageSLO
 	}
+	if slices.Contains(throughput.ReplaySwitchNames(), name) {
+		return PackageThroughput
+	}
 	return PackageSaturation
 }
 
@@ -141,6 +171,11 @@ func switchPackage(name string) string {
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, merged in.
 var earlierSeams = withSeams(learner4aSeams, map[string][]string{
+	// #275 (two switches) and #438, this file's own rows before learner PR
+	// 4b-1 (see replaySwitches).
+	saturation.SwitchZeroReplicaDataParallel: nil,
+	saturation.SwitchITLAggregatedShapeTerm:  {"acceptance/learned-state.csv", "engine/learned-state.csv"},
+	saturation.SwitchITLAggregatedSizes:      nil,
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
@@ -396,7 +431,7 @@ var heldBy = map[string][]heldTest{
 // an earlier PR's seam still in the code. A seam with no row is a switch no
 // run drives.
 func TestGoldens_EverySwitchHasARow(t *testing.T) {
-	names := append(saturation.ReplaySwitchNames(), slo.ReplaySwitchNames()...)
+	names := append(append(saturation.ReplaySwitchNames(), slo.ReplaySwitchNames()...), throughput.ReplaySwitchNames()...)
 	for _, name := range names {
 		_, mine := replaySwitches[name]
 		_, earlier := earlierSeams[name]
@@ -444,11 +479,17 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (67790e633, main after #432). #438's switch and
-// #275's lift name none.
+// base commit's goldens hold it (f7b4f7e47, learner PR 4b-0).
 var switchBase = map[string]string{
-	"acceptance/learned-state.csv": "abbdac1e95770a5ae4c725df3fad79ff7161c51ddcbb4f4b5556a04ad5ef81fe",
-	"engine/learned-state.csv":     "b952523f5c06d191f70de1b824a8d9db1ab760f37122d0cdb5672f5632ed6aa1",
+	"acceptance/results.csv":            "948487bf37d359a8bd3d7967fa4394a2558409844030ab153ea661132e535915",
+	"acceptance/variant-capacities.csv": "b4932d51ae2e081430e2161eb6f3c3bdd9a839f84ad77f035fc4ad47ce325346",
+	"engine/composite-holds.csv":        "c26c788b73e0a292e70789ed60520fd9c83254c0dc3c294f29283c297d518dc7",
+	"engine/composite-release.csv":      "4fc0b13906d8d1fdb039493b3cc6182cb7cce1b3af61bdfb2975d8b23e9a6fe5",
+	"engine/composite-variants.csv":     "43bb85189c577d3c09508de664d37c55c5302fa22cb41f03f1d581722b3f078f",
+	"engine/results.csv":                "61718c5eee24d49ae90051c0c42ba862587dc9ee2436e04f467593bc1d1455f4",
+	"engine/variant-capacities.csv":     "c97cb118dda1a6abb54296e45650437cb7f8d86e78970645e5116362547a0f05",
+	"mu-paths/results.csv":              "f87ec1d3d61babdba014fc786e2a4e52e2b947bcdce15ab6f20cdcfa619c450b",
+	"mu-paths/variant-capacities.csv":   "62b4c7881d656e45126691ef86e4af91e35925a7e361c69b02076f008a48ec94",
 }
 
 // The slow tests of this package run in parallel with each other (each
@@ -621,6 +662,21 @@ func replayGolden(rec []byte, name string, sw map[string]bool) (map[string][]byt
 			byPkg[pkg] = map[string]bool{}
 		}
 		byPkg[pkg][n] = on
+	}
+	// A run without the throughput analyzer has none of its switches: off
+	// and on are the same run there.
+	if _, ok := byPkg[PackageThroughput]; ok {
+		read, err := learnrec.Read(rec)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		var start learnrec.Start
+		if err := read.Events[0].DecodeData(&start); err != nil {
+			return nil, fmt.Errorf("%s: start: %w", name, err)
+		}
+		if !start.Throughput {
+			delete(byPkg, PackageThroughput)
+		}
 	}
 	rep, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: byPkg})
 	if err != nil {

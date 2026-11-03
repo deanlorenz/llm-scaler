@@ -262,6 +262,7 @@ Successfully
 T1-ols
 T2-default
 T2-failed
+T2-held
 T2-pinned
 Target
 The
@@ -1338,6 +1339,7 @@ minute
 minutes
 misconfigured
 mismatch
+mismatched
 missing
 missing_kv_capacity
 missing_shape_metrics
@@ -2182,6 +2184,8 @@ thresholdPct
 throughput
 throughput-demand-floor
 throughput-demand-floor-total
+throughput-itl-keeps-the-window-on-gps-mismatch
+throughput-itl-steady-gate
 throughput.Analyze
 throughput.Observe
 throughputHeld
@@ -2406,6 +2410,8 @@ workload-variant-autoscaler
 workload-variant-autoscaler-system
 workload/
 works
+worstErrPct
+worstPod
 would
 write
 writer
