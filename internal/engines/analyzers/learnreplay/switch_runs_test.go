@@ -40,49 +40,22 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #277 prices a resident request, where the running requests are read, at
-// the KV they are measured to hold, between the hit rate's discount and none;
-// with no reading, at the discount as before. It moves the derived mu, and
-// the decode demand the floor prices from it, in the two fixtures whose
-// derived mu the KV binds rather than the batch cap: e1 and e1-tuned, both
-// cluster recordings with a hit rate of about 1.5%. Every rate moved falls
-// (ServiceRate.Rate on 153 and 158 rows, by 0.02% to 0.54%), as the change
-// says it must: a reading can take the discount back, never add to it. Of
-// the derived-mu lines with the switch on, e1 priced 19 inside the bounds,
-// 275 at the upper bound, 180 at the lower (as before), 457 with no reading
-// (as before) and 208 for a replica with no hit (as before); e1-tuned 19,
-// 288, 150, 466 and 208. The band's count gate takes no reading that moved
-// a golden: the outputs are the ones the fill gate alone gave.
-//
-// The decode demand rises on most cycles it moves (70 of 107 in e1, 57 of
-// 93 in e1-tuned, by up to 0.49%) and falls on the rest, by at most 0.08%.
-// Traced cycle by cycle with the switch off and on, every fall (37 and 36)
-// is the floor's trust blend, and none the backlog cap, which binds on none
-// of them: the floor moves want towards the resident demand by trust, and
-// trust grows with the arrival demand lambda x PerReplica / mu, which a
-// lower mu raises (throughput_floor.go,
-// want -= trust x (want - max(resident, tokens))).
-// In e1, ns-01's decode on the second floor line: mu 6.3771 -> 6.3678 at an
-// arrival of 12/s, flooredTo 683929.0 -> 683923.9, between the resident
-// 683453 and the 684954 before the floor, with one request queued and none
-// capped.
-//
-// The acceptance, engine and mu-paths fixtures carry a hit rate of 0.1 and
-// read at the upper bound on every priced line, but move nothing: every
-// derived mu they price is capped at their batch cap of 64 before the KV
-// binds.
+// #438 prices a vLLM data-parallel decode or aggregated variant at zero
+// replicas at every engine rank its leader pod runs, not one: the derived
+// figure, and the stored budget it falls back to. It moves no golden: no
+// recorded scale target states a data-parallel size above 1, so every
+// zero-replica estimate the fixtures price is one rank's either way. Its unit
+// tests hold it (heldBy).
 //
 // Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
 // readers, #274's ITL per accepted token, #276's output spread, #427's
-// zero-replica batch cap, #431's forget of the slo line) are not here: "all
-// off" is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
+// zero-replica batch cap, #431's forget of the slo line, #277's resident
+// prefix-cache hits) are not here: "all off" is this PR's switches, and an
+// earlier PR's stay at their constructor default, on, as the base goldens
+// were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchKVPerRequestHitsResident: {
-		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
-		"e1/results.csv", "e1/variant-capacities.csv",
-	},
+	saturation.SwitchZeroReplicaDataParallel: nil,
 }
 
 // learner4aSeams is learner PR 4a's switches, earlier seams now (merged
@@ -177,6 +150,14 @@ var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	// jumps a day and that window would have aged out anyway. No cluster
 	// recording forgets. Its unit tests hold it (heldBy).
 	slo.SwitchITLForgetReachesTheLine: nil,
+	// #277 prices a resident request at the KV it is measured to hold,
+	// between the prefix-cache hit rate's discount and none. It moves the
+	// derived mu, and the decode demand the floor prices from it, in the two
+	// fixtures whose derived mu the KV binds rather than the batch cap.
+	saturation.SwitchKVPerRequestHitsResident: {
+		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
+		"e1/results.csv", "e1/variant-capacities.csv",
+	},
 })
 
 // withSeams is rows with more's rows added; a name in both is a row given
@@ -200,6 +181,15 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #438's data-parallel ranks at zero replicas.
+	saturation.SwitchZeroReplicaDataParallel: {
+		{"../saturation", "TestZeroReplicaDataParallel_AnEightRankDecodeIsPricedAtEveryRank"},
+		{"../saturation", "TestZeroReplicaDataParallel_AWholeNodePodWithNoDeclaredCap"},
+		{"../saturation", "TestZeroReplicaDataParallel_TheClampsStillBound"},
+		{"../saturation", "TestZeroReplicaDataParallel_AGroupIsPricedAtItsLeadersRanks"},
+		{"../saturation", "TestZeroReplicaDataParallel_TheColdStartBudgetIsEveryRanks"},
+		{"../saturation", "TestZeroReplicaDataParallel_UnknownPodsNeedTheGPUsToMatch"},
+	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {
 		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
@@ -386,14 +376,9 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (8189fe1e5, main after #445; the four are
-// unchanged since ebefc0b74).
-var switchBase = map[string]string{
-	"e1-tuned/results.csv":            "2112395c6117d8706af287683103ea5e50427d06185d06c56b68b81595777f01",
-	"e1-tuned/variant-capacities.csv": "e5bb2e56c8ce764f3eb3ca38619f91f37e722e9ba271cdce401e3c2086bf4c08",
-	"e1/results.csv":                  "5f88c8ad7b27f1e80cb6751fdd490653e3b399afc6e386cffdc187154f2cbcd8",
-	"e1/variant-capacities.csv":       "a84f06a5af093a84ad5b7f49ace7f02fd80d9e595c8fcca3fd5ea1c9c528af9b",
-}
+// base commit's goldens hold it (64f4747b0, main after #446). #438 names
+// none.
+var switchBase = map[string]string{}
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays
