@@ -278,6 +278,13 @@ type SaturationAnalyzer struct {
 	// each role, and what learner-write last logged per throughput key.
 	muCycles map[string]*muCycle
 	muLogged map[string]muLogged
+	// The ITL line as a learner (itl_learner.go): its reports of the cycle
+	// in progress per namespace|model, the line learner-write last logged
+	// per ITL key, and the keys forgotten per namespace|model and variant
+	// since the variant's last report.
+	itlCycles    map[string][]learn.Report
+	itlLogged    map[string]itlLogged
+	itlForgotten map[string]map[string][]learn.Forgotten
 	// k2ReadsSettle is SwitchK2ReadsSettle and k2WaitsAfterRestart
 	// SwitchK2WaitsAfterRestart: on from the constructor; a replay turns
 	// them off (SetSwitchesForReplay).
@@ -309,6 +316,24 @@ type SaturationAnalyzer struct {
 	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (#276): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	kvOutputDispersion bool
+	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle and
+	// itlFiniteOnly are the ITL line's settle switches (itl_settle.go):
+	// SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
+	// SwitchITLKeepsSettleThroughMissingRow and SwitchITLReadsFinitePodMean.
+	// On from the constructor; a replay turns them off
+	// (SetSwitchesForReplay).
+	itlReadsSettle       bool
+	itlWaitsAfterRestart bool
+	itlKeepsSettle       bool
+	itlFiniteOnly        bool
+	// itlRestartUnderName and itlIdleOnEvidence are SwitchITLRestartUnderName
+	// and SwitchITLIdleOnEvidence: on from the constructor.
+	itlRestartUnderName bool
+	itlIdleOnEvidence   bool
+	// settleInterval is the controller's optimize interval
+	// (WithOptimizationInterval), zero until set: what the ITL line's own
+	// trace judges an absence by (settle.Tolerance).
+	settleInterval time.Duration
 	// batchCaps is each variant's learned batch cap, and batchCapPlateaus
 	// each pod's run of cycles at one running count (batch_cap.go). Keyed
 	// namespace|variant|model|, and the pod after it.
@@ -502,6 +527,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		learnerStarted:         make(map[string]bool),
 		muCycles:               make(map[string]*muCycle),
 		muLogged:               make(map[string]muLogged),
+		itlCycles:              make(map[string][]learn.Report),
+		itlLogged:              make(map[string]itlLogged),
+		itlForgotten:           make(map[string]map[string][]learn.Forgotten),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
 		muRepeatIsUse:          true,
@@ -514,6 +542,12 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		batchCapDerivedMu:      true,
 		batchCapZeroReplica:    true,
 		kvOutputDispersion:     true,
+		itlReadsSettle:         true,
+		itlWaitsAfterRestart:   true,
+		itlKeepsSettle:         true,
+		itlFiniteOnly:          true,
+		itlRestartUnderName:    true,
+		itlIdleOnEvidence:      true,
 		batchCaps:              make(map[string]*learnedBatchCap),
 		batchCapPlateaus:       make(map[string]*batchCapPlateau),
 		batchCapAdmission:      batchCapRules(),
@@ -810,6 +844,12 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	for key := range a.itlArgs {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.itlArgs, key)
+		}
+	}
+	// What learner-write last logged of a line goes with its variant.
+	for key := range a.itlLogged {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlLogged, key)
 		}
 	}
 	// The withheld-reading log state (itl_per_token.go) goes with them.

@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -101,6 +102,28 @@ type Analyzer struct {
 	// turns them off (SetSwitchesForReplay).
 	batchCapAdmission bool
 	batchCapPerRank   bool
+
+	// settle is the engine's settle tracker, read-only (WithSettleView);
+	// nil when the engine gave none, and ownSettle, observed by the
+	// analyzer itself, stands in (settle.go). ownSettled is when each model
+	// was last observed into it, keyed namespace/model.
+	settle     settle.View
+	ownSettle  *settle.Tracker
+	ownSettled map[string]time.Time
+	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle, itlFiniteOnly,
+	// itlRestartUnderName and itlIdleOnEvidence are the line's six settle
+	// switches (settle.go): on from the constructor; a replay turns them off
+	// (SetSwitchesForReplay).
+	itlReadsSettle       bool
+	itlWaitsAfterRestart bool
+	itlKeepsSettle       bool
+	itlFiniteOnly        bool
+	itlRestartUnderName  bool
+	itlIdleOnEvidence    bool
+	// settleInterval is the controller's optimize interval
+	// (WithOptimizationInterval), zero until set: what the line's own trace
+	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
+	settleInterval time.Duration
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap
@@ -145,6 +168,15 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 
 		batchCapAdmission: true,
 		batchCapPerRank:   true,
+
+		ownSettle:            settle.NewTracker(),
+		ownSettled:           make(map[string]time.Time),
+		itlReadsSettle:       true,
+		itlWaitsAfterRestart: true,
+		itlKeepsSettle:       true,
+		itlFiniteOnly:        true,
+		itlRestartUnderName:  true,
+		itlIdleOnEvidence:    true,
 	}
 }
 
@@ -206,6 +238,9 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		AnalyzedAt:   now,
 	}
 	snap := metrics.SLOModelSnapshot{Namespace: input.Namespace, ModelName: input.ModelID}
+	// Without the engine's settle tracker, the analyzer observes its own
+	// first, as the engine does before any analyzer runs (settle.go).
+	a.observeOwnSettle(input, now)
 
 	fleet := readFleet(input)
 	// An output length nobody has reported yet is not a demand of zero: it is
@@ -261,6 +296,11 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"belowBand", d.line.BelowBand,
 				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
+				// Of the kept, those out of the full fit (their replica's
+				// load had moved) and those of a replica inside its settle
+				// (the settle tracker: it joined, restarted, or load came
+				// back), out of the pinned fit too.
+				"unsteady", d.line.Unsteady, "settling", d.line.Settling,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
 				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks,
@@ -386,6 +426,9 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	args := params.ArgsTag()
 	a.linesUnderArgs(key, args, now)
 	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, args
+	// When each replica's settle began: the engine's settle tracker
+	// (settle.go).
+	a.settleAdmission(&adm, input.Namespace, input.ModelID)
 	// The fill is clamped to the band the line is fitted over.
 	band := fillBand{lo: adm.MinK, hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
@@ -652,6 +695,7 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 			ev.Accelerators++
 		}
 	}
+	a.evictOwnSettleLocked(now)
 	return ev
 }
 

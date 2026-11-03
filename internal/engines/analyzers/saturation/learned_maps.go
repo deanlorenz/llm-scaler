@@ -14,8 +14,9 @@ import (
 // with how their keys name a variant, and TestEveryAnalyzerMapIsRegistered
 // fails when a map field of SaturationAnalyzer is not in it. The ITL windows
 // and baselines are not maps of the analyzer's but the tracker's
-// (itl.Tracker), keyed like scopeITLKey: dropVariantLocked and
-// ForgetLearnedState reach them through it.
+// (itl.Tracker), keyed like scopeITLKey: a variant's forget reaches them
+// through the ITL learner (forgetITLLocked, on learn.Learners) and
+// ForgetLearnedState through the tracker.
 
 // keyScope is how a map's keys name the variant an entry belongs to.
 type keyScope int
@@ -116,6 +117,9 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("learnerStarted", scopeShared, a.learnerStarted),
 		registered("muCycles", scopeShared, a.muCycles),
 		registered("muLogged", scopeShared, a.muLogged),
+		registered("itlLogged", scopeITLKey, a.itlLogged).working(),
+		registered("itlCycles", scopeShared, a.itlCycles),
+		registered("itlForgotten", scopeShared, a.itlForgotten),
 	}
 }
 
@@ -139,7 +143,5 @@ func (a *SaturationAnalyzer) dropVariantLocked(namespace, modelID, variant strin
 			n += m.dropIf(func(k string) bool { return k == name })
 		}
 	}
-	windows, baselines := a.itlTracker.Sweep(a.now(), func(k string) bool { return strings.HasPrefix(k, itlPrefix) })
-	n += windows + baselines
 	return n
 }

@@ -125,7 +125,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		rm := makeReplicaMetrics(pod, variant, 900_000, tracedKv, 0, 1000, 6000)
 		rm.Ready = true
 		rm.KvUsageInstant = k
-		rm.AvgITL = avgITL
+		rm.AvgITL, rm.AvgITLKnown = avgITL, avgITL > 0
 		return rm
 	}
 

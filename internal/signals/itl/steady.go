@@ -119,6 +119,20 @@ type replicaTrace struct {
 	// ITL nor a k: no tokens in the rate window and nothing in the cache, so
 	// nothing was served.
 	idle int
+	// lastSeen is the replica's last row under the key, and missed is set
+	// once a cycle of the key went without it: what
+	// Admission.KeepsThroughMissingRow judges an absence by. A gap between
+	// two of the key's cycles is no absence of the replica's.
+	lastSeen time.Time
+	missed   bool
+	// settleStart is the settle tracker's start the key last read for the
+	// replica, and settleSeen the cycle it first read it (Admission.Settle,
+	// settlingOnTracker).
+	settleStart, settleSeen time.Time
+	// idleReturn is the last time the key's own idle rule saw load return
+	// (countIdle), read on the tracker only with Admission.IdleOnEvidence
+	// off.
+	idleReturn time.Time
 }
 
 // idleRows is how many rows in a row with neither an ITL nor a k make a
@@ -166,21 +180,20 @@ type keyTraces struct {
 	replicas map[string]*replicaTrace
 }
 
-// steady reports whether a reading of k taken now from this replica is a
-// steady-state pair, judged from what was seen BEFORE now: a replica offered
-// several rows in one Observe is not unsteady against itself.
+// still reports whether k has moved by no more than s.MaxKDrift from any of
+// the replica's readings within s.For before now. A reading of k taken now is
+// a steady-state pair when its replica is not settling and it is still,
+// judged from what was seen BEFORE now: a replica offered several rows in one
+// Observe is not unsteady against itself.
 //
-// A replica present when the key was first observed has no history to judge
-// by and is taken as steady: nothing says otherwise, and requiring two minutes
-// of history from every replica would delay the first full fit after every
-// controller restart. One that joined later is new -- a pod just started, or
-// back from a rollout -- and its ITL covers its own warm-up, so it waits out
-// DefaultSteadyFor. So does one the load came back to after it idled: see
-// idleRows.
-func (rt *replicaTrace) steady(k float64, now time.Time, s Steadiness) bool {
-	if rt.settling(now, s) {
-		return false
-	}
+// On the key's own trace, a replica present when the key was first observed
+// has no history to judge by and is taken as settled, unless
+// Admission.WaitsAfterRestart says a controller restart is a settle: then it
+// waits out DefaultSteadyFor, as one that joined later does -- a pod just
+// started, or back from a rollout, whose ITL covers its own warm-up. So does
+// one the load came back to after it idled: see idleRows. On the settle
+// tracker the same rules are read from the tracker (settlingOnTracker).
+func (rt *replicaTrace) still(k float64, now time.Time, s Steadiness) bool {
 	cutoff := now.Add(-s.For)
 	for _, sm := range rt.samples {
 		if !sm.at.Before(now) || sm.at.Before(cutoff) {

@@ -82,8 +82,11 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
-// The switches are SwitchBatchCapAdmission and SwitchBatchCapPerRank; a name
-// it does not know is an error, and sets nothing. Never called on a
+// The switches are SwitchBatchCapAdmission, SwitchBatchCapPerRank,
+// SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
+// SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
+// SwitchITLRestartUnderName and SwitchITLIdleOnEvidence; a name it does not
+// know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -105,6 +108,14 @@ func (a *Analyzer) switchFields() map[string]*bool {
 	return map[string]*bool{
 		SwitchBatchCapAdmission: &a.batchCapAdmission,
 		SwitchBatchCapPerRank:   &a.batchCapPerRank,
+
+		// Learner PR 4a: the line on the settle tracker (settle.go).
+		SwitchITLReadsSettle:                  &a.itlReadsSettle,
+		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
+		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
+		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
+		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 	}
 }
 

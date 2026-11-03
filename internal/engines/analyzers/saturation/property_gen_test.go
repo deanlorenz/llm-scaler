@@ -12,6 +12,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // Generators and learner adapters for the property tests. Every generator
@@ -99,17 +101,31 @@ type itlLearner interface {
 
 const propITLKey = "ns|v|model|H200|1|decode|medium"
 
-// trackerITL is the production learner, itl.Tracker, under an admission.
+// trackerITL is the production learner, itl.Tracker, under an admission, as
+// the engine drives it (learner PR 4a): the engine's settle tracker, at the
+// cycle's interval, observed with each cycle's rows before the line reads
+// them, and every settle switch on. A new learner is a controller start.
 type trackerITL struct {
-	tr  *itl.Tracker
-	adm itl.Admission
+	tr     *itl.Tracker
+	settle *settle.Tracker
+	adm    itl.Admission
 }
 
+// propSettleModel is the settle tracker's name for the property cases'
+// model.
+const propSettleModel = "ns/model"
+
 func newTrackerITL(s itl.Steadiness) *trackerITL {
-	return &trackerITL{tr: itl.NewTracker(), adm: itl.Admission{Steady: s}}
+	st := settle.NewTracker()
+	st.SetInterval(propCycle)
+	return &trackerITL{tr: itl.NewTracker(), settle: st, adm: itl.Admission{Steady: s,
+		Settle: &itl.Settle{View: st, Model: propSettleModel}, WaitsAfterRestart: true,
+		KeepsThroughMissingRow: true, AbsenceTolerance: settle.Tolerance(propCycle), FiniteOnly: true,
+		RestartUnderName: true, IdleOnEvidence: true}}
 }
 
 func (l *trackerITL) observe(rows []domain.ReplicaMetrics, now time.Time) itl.Reading {
+	l.settle.Observe(propSettleModel, settlerow.Of(rows, nil), now)
 	return l.tr.Observe(propITLKey, "v", rows, l.adm, now)
 }
 
@@ -341,7 +357,8 @@ const (
 func propertyCases() []propCase {
 	out := make([]propCase, 0, 192)
 	for _, part := range [][]propCase{itlCases(), k2Cases(), muCases(), floorCases(), otherCases(),
-		learnerCases(), edgeCases(), moreCases(), reviewEdgeCases(), batchCapCases(), specCases(), spreadCases()} {
+		learnerCases(), edgeCases(), moreCases(), reviewEdgeCases(), batchCapCases(), specCases(), spreadCases(),
+		itlSettleCases()} {
 		out = append(out, part...)
 	}
 	return out

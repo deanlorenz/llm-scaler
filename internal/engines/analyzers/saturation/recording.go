@@ -113,9 +113,12 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchBatchCapLearned, SwitchMuKeyBucketHeld, SwitchMuSwapFreeze,
 // SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
 // SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken,
-// SwitchKVPerRequestOutputDispersion and SwitchBatchCapZeroReplica; a name
-// it does not know is an error, and sets nothing. Never called on a
-// production path; a test holds that.
+// SwitchKVPerRequestOutputDispersion, SwitchBatchCapZeroReplica,
+// SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
+// SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
+// SwitchITLRestartUnderName and SwitchITLIdleOnEvidence; a name it does not
+// know is an error, and sets nothing. Never called on a production path; a
+// test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -158,6 +161,14 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// #427: the zero-replica estimate reads the declared batch cap
 		// where the flags state none.
 		SwitchBatchCapZeroReplica: &a.batchCapZeroReplica,
+
+		// Learner PR 4a: the ITL line on the settle tracker (itl_settle.go).
+		SwitchITLReadsSettle:                  &a.itlReadsSettle,
+		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
+		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
+		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
+		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 	}
 }
 

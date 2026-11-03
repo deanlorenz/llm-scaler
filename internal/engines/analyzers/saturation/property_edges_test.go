@@ -244,20 +244,37 @@ func probeSettled(tn config.AnalyzerTuning) probe {
 // steadyFor.
 func probeSteadyFor(tn config.AnalyzerTuning) probe {
 	return func(_ *rand.Rand, s float64) (bool, error) {
-		adm := itl.Admission{Steady: steadinessOf(tn)}
-		tr := itl.NewTracker()
-		tr.Observe(propITLKey, "v", fleetAt([]float64{0.4}), adm, propStart)
+		// The engine's learner, past the controller start's own settle, so
+		// only the joiner can be settling.
+		l := newTrackerITL(steadinessOf(tn))
+		join := pastRestart(l, fleetAt([]float64{0.4}), steadinessOf(tn))
 		rows := func() []domain.ReplicaMetrics {
 			return append(fleetAt([]float64{0.4}), itlRow("joiner", 0.5, propITL(0.5)))
 		}
-		join := propStart.Add(propCycle)
-		tr.Observe(propITLKey, "v", rows(), adm, join)
+		l.observe(rows(), join)
 		var r itl.Reading
 		for at := join.Add(propCycle); !at.After(join.Add(time.Duration(s) * time.Second)); at = at.Add(propCycle) {
-			r = tr.Observe(propITLKey, "v", rows(), adm, at)
+			r = l.observe(rows(), at)
 		}
 		return r.Settling > 0, nil
 	}
+}
+
+// pastRestart observes rows on l from propStart until the controller
+// start's settle (s.For) has run out, and returns the next cycle's instant.
+func pastRestart(l *trackerITL, rows []domain.ReplicaMetrics, s itl.Steadiness) time.Time {
+	at := propStart
+	for ; !at.After(propStart.Add(s.For)); at = at.Add(propCycle) {
+		l.observe(rows, at)
+	}
+	return at
+}
+
+// idleRow is r0 idle on positive evidence (settle.Row.Activity): a known KV
+// fill of 0 and a known empty ITL window.
+func idleRow() domain.ReplicaMetrics {
+	return domain.ReplicaMetrics{PodName: "r0", VariantName: "v", Ready: true, KvCacheUsageKnown: true,
+		KvUsageInstantKnown: true, AvgITLEmpty: true}
 }
 
 // probeDrift: a replica present from the first cycle moves its k by d over
@@ -272,19 +289,18 @@ func probeDrift(tn config.AnalyzerTuning) probe {
 	}
 }
 
-// probeIdleRows: a replica reads n rows with neither ITL nor k, then serves
-// again: from idleRows such rows it restarts as a joiner, settling.
+// probeIdleRows: a replica reads n rows idle on positive evidence (a known
+// KV of 0 and a known empty ITL window, learner PR 4a), then serves again:
+// from idleRows such rows its settle starts again, and it is settling.
 func probeIdleRows(tn config.AnalyzerTuning) probe {
 	return func(_ *rand.Rand, n float64) (bool, error) {
-		adm := itl.Admission{Steady: steadinessOf(tn)}
-		tr := itl.NewTracker()
-		at := propStart
-		tr.Observe(propITLKey, "v", fleetAt([]float64{0.4}), adm, at)
+		l := newTrackerITL(steadinessOf(tn))
+		at := pastRestart(l, fleetAt([]float64{0.4}), steadinessOf(tn))
 		for range int(n) {
+			l.observe([]domain.ReplicaMetrics{idleRow()}, at)
 			at = at.Add(propCycle)
-			tr.Observe(propITLKey, "v", []domain.ReplicaMetrics{{PodName: "r0", VariantName: "v", Ready: true}}, adm, at)
 		}
-		r := tr.Observe(propITLKey, "v", fleetAt([]float64{0.4}), adm, at.Add(propCycle))
+		r := l.observe(fleetAt([]float64{0.4}), at)
 		return r.Settling > 0, nil
 	}
 }

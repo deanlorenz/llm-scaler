@@ -47,7 +47,7 @@ func cappedITLWindow(t *testing.T, params *capacity.EngineParams, running int, l
 	}
 	capped := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 768, 1000, 500)
 	capped.Ready = true
-	capped.KvUsageInstant, capped.AvgITL = 0.87, 0.079
+	capped.KvUsageInstant, capped.AvgITL, capped.AvgITLKnown = 0.87, 0.079, true
 	capped.RunningRequests, capped.PreemptionRateKnown = running, true
 	in := makeAnalyzerInput([]domain.ReplicaMetrics{capped}, []domain.VariantReplicaState{
 		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",

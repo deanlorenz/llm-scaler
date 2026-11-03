@@ -309,6 +309,7 @@ __name__
 a
 abort
 above
+above-band
 aboveBand
 absent
 accType
@@ -441,6 +442,7 @@ before
 behind
 being
 below
+below-band
 belowBand
 beside
 best-effort
@@ -1023,12 +1025,18 @@ itl
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
+itl-idle-needs-evidence
+itl-keeps-the-settle-through-a-missing-row
 itl-line
 itl-line-borrowed
 itl-line-none
 itl-ols
 itl-per-accepted-token
 itl-pinned
+itl-reads-the-finite-pod-mean
+itl-reads-the-settle-tracker
+itl-restart-under-its-name-settles
+itl-waits-after-controller-restart
 itl-window
 itl-withheld
 itl-withheld-ended
@@ -1042,7 +1050,10 @@ itlBand.minObservableK
 itlBand.minObservableK/maxObservableK
 itlBaselineStash
 itlBaselines
+itlCycles
+itlForgotten
 itlLines
+itlLogged
 itlModel
 itlOtherUnit
 itlResidualPct
@@ -1386,6 +1397,7 @@ no-compatible-donor
 no-data
 no-decode-candidate
 no-itl
+no-k
 no-limiter
 no-line
 no-listed-analyzer-sizes-role
@@ -1420,6 +1432,7 @@ noout
 nor
 not
 not-actionable
+not-ready
 not-serving
 notReady
 note
@@ -1542,6 +1555,7 @@ physicalGroups
 physicsKey
 picture
 pinned-B
+pinned-B-held
 pins
 pipeline_parallel_size
 place
@@ -1595,6 +1609,8 @@ present
 pressure-needs-scale-up
 previous
 previous-desired
+previousA
+previousB
 previousSource
 previousValue
 price
@@ -1944,8 +1960,14 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-idle-needs-evidence
+slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
 slo-itl-pinned
+slo-itl-reads-the-finite-pod-mean
+slo-itl-reads-the-settle-tracker
+slo-itl-restart-under-its-name-settles
+slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
 slo-variant
@@ -1954,6 +1976,7 @@ slo.BeginCycle
 slo.EvictStale
 slo.NoteVariantsPresent
 slopeAge
+slopeAgeSeconds
 slopeHeld
 slow
 slower

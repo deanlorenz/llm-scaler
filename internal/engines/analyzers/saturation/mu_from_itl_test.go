@@ -304,7 +304,7 @@ var _ = Describe("the floor's mu, through Analyze", func() {
 			rm := makeReplicaMetrics(fmt.Sprintf("d%d", i), variant, tokens, tracedKv, queue, avgIn, avgOut)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			rm.RequestRate = 0.6
 			rm.GenerationTokenRate = rm.RequestRate * avgOut
 			rms = append(rms, rm)
@@ -399,7 +399,7 @@ var _ = Describe("noteITL", func() {
 		rm := makeReplicaMetrics(pod, variant, 900_000, tracedKv, 0, 1000, 6000)
 		rm.Ready = true
 		rm.KvUsageInstant = k
-		rm.AvgITL = avgITL
+		rm.AvgITL, rm.AvgITLKnown = avgITL, avgITL > 0
 		return rm
 	}
 	// Ten readings on the traced line, enough to fit it.
@@ -634,7 +634,7 @@ var _ = Describe("the learned ITL baseline", func() {
 			rm := makeReplicaMetrics(fmt.Sprintf("d%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			rms = append(rms, rm)
 		}
 		return rms
@@ -650,7 +650,7 @@ var _ = Describe("the learned ITL baseline", func() {
 			rm := makeReplicaMetrics(fmt.Sprintf("f%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			rms = append(rms, rm)
 		}
 		return rms
@@ -838,7 +838,7 @@ var _ = Describe("the one-parameter fallback's own floor", func() {
 			rm := makeReplicaMetrics(fmt.Sprintf("f%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = tracedModel.ITLAt(k)
+			rm.AvgITL, rm.AvgITLKnown = tracedModel.ITLAt(k), true
 			rms = append(rms, rm)
 		}
 		return rms
@@ -872,7 +872,7 @@ var _ = Describe("the one-parameter fallback's own floor", func() {
 			rm := makeReplicaMetrics(fmt.Sprintf("i%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
 			rm.Ready = true
 			rm.KvUsageInstant = k
-			rm.AvgITL = 0.030 - 0.01*k
+			rm.AvgITL, rm.AvgITLKnown = 0.030-0.01*k, true
 			rms = append(rms, rm)
 		}
 		got := a.noteITL("inverted|"+variant, rms, variant, itl.Admission{}, a.now(), logr.Discard()).Model

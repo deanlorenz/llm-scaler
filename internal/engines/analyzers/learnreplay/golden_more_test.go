@@ -113,6 +113,7 @@ func writeFixtureRecording(t *testing.T, dir string, b []byte) {
 
 // The check's other problem paths: each is reported, none passes.
 func TestCheckGoldens_ProblemPaths(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	manifest := func(t *testing.T, dir string, edit func(string) string) {
 		p := filepath.Join(dir, ManifestName)
 		b, err := os.ReadFile(p)
@@ -314,6 +315,7 @@ func TestAddGolden(t *testing.T) {
 // UpdateGoldens repairs what the check reports, and leaves a fixture whose
 // replay fails as it was.
 func TestUpdateGoldens_Repairs(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	ctx := context.Background()
 	dir := copyGoldens(t)
 	editGolden(t, dir, OutputVariantCapacities, func(rows []row) []row { rows[0].data = `{"moved":1}`; return rows })

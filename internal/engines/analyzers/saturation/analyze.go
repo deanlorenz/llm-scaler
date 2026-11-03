@@ -102,6 +102,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	a.logLearnerStart(ctx, input.Namespace, input.ModelID, variantNames)
 	a.beginK2Cycle(input.Namespace, input.ModelID)
 	a.beginMuCycle(input.Namespace, input.ModelID)
+	a.beginITLCycle(input.Namespace, input.ModelID)
 
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
@@ -116,6 +117,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	// learner-write lines.
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
+	a.closeITLCycle(input.Namespace, input.ModelID)
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
@@ -518,7 +520,12 @@ func (c *cycle) fitLines() {
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
 			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+		// When each replica's settle began: the engine's settle tracker
+		// (itl_settle.go).
+		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
+		// The line as a learner: its report and learner-write (itl_learner.go).
+		c.a.noteITLLearner(c.input.Namespace, c.input.ModelID, variant, variantKey, reading, c.a.now(), c.logger)
 		own := reading.Model
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how

@@ -32,7 +32,7 @@ func moreCases() []propCase {
 		{class: classLiveness, learner: "k2", name: "tp2-dp4-whole-node", family: familyDirect, tuning: tunedDefault, check: checkK2Ranks(4, 8)},
 		{class: classLiveness, learner: "k2", name: "tp8-whole-node", family: familyDirect, tuning: tunedDefault, check: checkK2Ranks(1, 8)},
 		{class: classLiveness, learner: "k2", name: "prefill-role", family: familyDirect, tuning: tunedDefault, check: checkK2Prefill},
-		{class: classLiveness, learner: "itl", name: "line-within-3-min", family: familyDirect, tuning: tunedDefault, check: checkITLLiveness(def)},
+		{class: classLiveness, learner: "itl", name: "line-within-steady-for-plus-1-min", family: familyDirect, tuning: tunedDefault, check: checkITLLiveness(def)},
 		{class: classLiveness, learner: "prefill-bound", name: "behind-full-decode", family: familyDirect, tuning: tunedPolicy,
 			policy: prefillBoundPolicy, check: checkBoundAnalyzeOn(1, true, prefillBoundPolicy)},
 		{class: classLiveness, learner: "prefill-bound", name: "pd-analyze", family: familyDirect, tuning: tunedPolicy,
@@ -114,17 +114,21 @@ func checkK2Prefill(seed uint64) error {
 	return holds(relErr(got, truth) <= propBand, kindBiased, "prefill k2 %.0f against %.0f", got, truth)
 }
 
-// checkITLLiveness: three replicas held at distinct steady levels give a line
-// within 3 min, within the truth tolerance at kPrice.
+// checkITLLiveness: three replicas held at distinct steady levels from a
+// controller start give a line within steadyFor and 1 min, within the truth
+// tolerance at kPrice. The line waits the controller start's settle
+// (steadyFor, learner PR 4a) and then fits from the readings after it; the
+// minute is a pinned fit's three settled readings and margin.
 func checkITLLiveness(newL func() itlLearner) func(uint64) error {
 	return func(seed uint64) error {
-		const cycles = 12
+		within := steadinessOf(tuningDefault).For + time.Minute
+		cycles := int(within / propCycle)
 		readings := itlRun(newL(), cycles, steadyFleet(propRand(seed), 3, cycles))
 		got, want := itlAt(readings[cycles-1]), propITL(propKPrice)
 		if math.IsNaN(got) {
-			return violation(kindNotLearned, "no line after 3 min of three steady replicas")
+			return violation(kindNotLearned, "no line after %s of three steady replicas", within)
 		}
-		return holds(relErr(got, want) <= propTruthTol, kindBiased, "ITL(%.2f) %.5f after 3 min against %.5f", propKPrice, got, want)
+		return holds(relErr(got, want) <= propTruthTol, kindBiased, "ITL(%.2f) %.5f after %s against %.5f", propKPrice, got, within, want)
 	}
 }
 

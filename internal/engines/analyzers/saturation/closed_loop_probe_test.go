@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"testing"
@@ -9,7 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // The closed-loop probe (analyzer-learner.md, 2.5): the saturation analyzer
@@ -86,6 +90,40 @@ type probeCase struct {
 	// meanMu is the fleet's mean true mu at the horizon, which need is
 	// priced at.
 	meanMu float64
+	// decode runs the fleet as a P/D decode role whose rows carry an ITL
+	// on probeITL, so the floor can price a derived mu, and the analyzer
+	// reads a settle tracker observed before each cycle, as the engine runs
+	// it.
+	decode bool
+	// restartAt, when set, restarts the controller then: a new analyzer and
+	// a new settle tracker. With snapshot, the learned state the old one
+	// exported is restored into the new one; without it nothing is.
+	restartAt time.Duration
+	snapshot  bool
+	// stabilization replaces probeStabilization when set.
+	stabilization time.Duration
+	// switches are set on every process (SetSwitchesForReplay).
+	switches map[string]bool
+}
+
+// probeITL is the decode replicas' ITL at fill k: a line on which the mu
+// derived at the pricing fill (0.68) is the true mu of 1, at the probe's
+// shape (1000 in, 1000 out) and KV (imbKv).
+func probeITL(k float64) float64 { return 0.119 + 0.6*k }
+
+// probeProcess is one controller process of a decode probe: its analyzer
+// over a store holding the variant's engine parameters, and its settle
+// tracker, with switches set.
+func probeProcess(t *testing.T, rig *propRig, switches map[string]bool) *settle.Tracker {
+	t.Helper()
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: mtParams(1024, "vllm:v1")}, rig.clock)
+	st := settle.NewTracker()
+	st.SetInterval(propCycle)
+	rig.a = NewSaturationAnalyzer(store).WithSettleView(st)
+	rig.a.now = func() time.Time { return rig.clock }
+	require.NoError(t, rig.a.SetSwitchesForReplay(switches))
+	return st
 }
 
 // probeResult is what the loop did.
@@ -130,9 +168,30 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 	needAt := func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) }
 	res := probeResult{need: needAt(pc.lambda(pc.horizon)), muCounts: map[learn.Reason]int64{}}
 	bound := float64(res.need)*(1+probeOverTolerance) + 1
+	stabilization := probeStabilization
+	if pc.stabilization > 0 {
+		stabilization = pc.stabilization
+	}
+	var st *settle.Tracker
+	if pc.decode {
+		st = probeProcess(t, rig, pc.switches)
+	}
+	restarted := false
 	var overFrom, underFrom time.Time
 	for rig.clock.Sub(start) < pc.horizon {
 		elapsed := rig.clock.Sub(start)
+		if pc.restartAt > 0 && !restarted && elapsed >= pc.restartAt {
+			restarted = true
+			doc := rig.a.ExportLearnedState()
+			st = probeProcess(t, rig, pc.switches)
+			if pc.snapshot {
+				raw, err := json.Marshal(doc)
+				require.NoError(t, err)
+				var back LearnedState
+				require.NoError(t, json.Unmarshal(raw, &back))
+				rig.a.RestoreLearnedState(back)
+			}
+		}
 		lambda := pc.lambda(elapsed)
 		var ready []int
 		for i, p := range pods {
@@ -150,10 +209,21 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 			if p.backlog > 0 || offered >= mu {
 				served, kv = mu, 0.95
 			}
-			rows = append(rows, imbRow(p.name, "v", kv, int(math.Round(p.backlog)), 1000, 1000, served))
+			rm := imbRow(p.name, "v", kv, int(math.Round(p.backlog)), 1000, 1000, served)
+			if pc.decode {
+				rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
+				rm.AvgITL, rm.AvgITLKnown = probeITL(kv), true
+				rm.ReadySince = p.readyAt
+			}
+			rows = append(rows, rm)
 		}
 		now := rig.clock
-		out, err := rig.analyze(rows, aggStates(len(rows)), lambda, propCycle)
+		states := aggStates(len(rows))
+		if pc.decode {
+			states = decodeStates(len(rows))
+			st.Observe(settleModel("test-ns", "test-model"), settlerow.Of(rows, map[string]string{"v": domain.RoleDecode}), rig.clock)
+		}
+		out, err := rig.analyze(rows, states, lambda, propCycle)
 		require.NoError(t, err)
 		for _, r := range rig.a.LearnerReports()["test-ns|test-model"] {
 			if r.Learner != learn.Mu {
@@ -171,7 +241,7 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 			ordered = 1
 		}
 		orders = append(orders, order{at: rig.clock, n: ordered})
-		for len(orders) > 0 && rig.clock.Sub(orders[0].at) > probeStabilization {
+		for len(orders) > 0 && rig.clock.Sub(orders[0].at) > stabilization {
 			orders = orders[1:]
 		}
 		starting := len(pods) - len(ready)
@@ -304,4 +374,71 @@ func slowReplicaCase(slow float64) probeCase {
 		lambda:  func(time.Duration) float64 { return 12.8 },
 		horizon: 45 * time.Minute,
 	}
+}
+
+// The probe through a controller restart (analyzer-learner.md 4.4, learner
+// PR 4a). A decode fleet of four at 2.5 requests/s learns its ITL line;
+// the controller restarts at 15 min, and 15 s later the load steps to 12
+// (need 17). After the restart every replica waits its settle again: k2
+// and the mu written beside it a minute, the ITL line steadyFor (2 min),
+// so the floor is silent until the new process measures or derives a mu.
+func restartStepCase(restart time.Duration, snapshot bool, stabilization time.Duration) probeCase {
+	return probeCase{
+		name: "restart-step", pods: []float64{1, 1, 1, 1}, addedMu: 1, meanMu: 1, decode: true,
+		lambda: stepTo(2.5, 12, 15*time.Minute+15*time.Second), horizon: 40 * time.Minute,
+		restartAt: restart, snapshot: snapshot, stabilization: stabilization,
+	}
+}
+
+// With the snapshot off, the restart costs the step its floor: the fleet
+// grows on occupancy alone until the new process has a mu, and sits under
+// need for longer than without the restart -- but inside the bound a
+// start and a settle take, and it settles at need. The SLO side, as 4.4
+// says; measured here, not asserted.
+func TestClosedLoopProbe_AControllerRestartBeforeALoadStepSettlesAtNeed(t *testing.T) {
+	control := runProbe(t, restartStepCase(0, false, 0))
+	require.Empty(t, control.verdict(), "premise: without a restart the step settles at need")
+	r := runProbe(t, restartStepCase(15*time.Minute, false, 0))
+	t.Logf("need %d, final %d, peak %d; under need for %s, against %s without the restart", r.need, r.final, r.peak,
+		r.underFor, control.underFor)
+	require.Empty(t, r.verdict())
+	require.Greater(t, r.underFor, control.underFor, "the restart's settle costs the step its floor for a while")
+
+	// The ITL line's share of it: the same restart with the line taking the
+	// first cycle's replicas as settled, as before learner PR 4a.
+	before := restartStepCase(15*time.Minute, false, 0)
+	before.switches = map[string]bool{SwitchITLWaitsAfterRestart: false}
+	b := runProbe(t, before)
+	t.Logf("with the ITL line not waiting after the restart: under need for %s", b.underFor)
+	require.Empty(t, b.verdict())
+	require.GreaterOrEqual(t, r.underFor, b.underFor, "the line's wait adds to the restart's cost, never takes from it")
+}
+
+// With the snapshot on, the restored k2, mu and ITL slope price the step as
+// the process that exported them would have: no longer under need than
+// without the restart.
+func TestClosedLoopProbe_ARestoredSnapshotCarriesTheFleetThroughARestart(t *testing.T) {
+	control := runProbe(t, restartStepCase(0, false, 0))
+	r := runProbe(t, restartStepCase(15*time.Minute, true, 0))
+	t.Logf("need %d, final %d, peak %d; under need for %s, against %s without the restart", r.need, r.final, r.peak,
+		r.underFor, control.underFor)
+	require.Empty(t, r.verdict())
+	require.Equal(t, control.underFor, r.underFor, "the snapshot restores what the floor prices from")
+}
+
+// A scale-down stabilization of 120 s, under the 2.75 min the floor can be
+// silent after a restart, with the load stepping in the gap. 4.4 names
+// this as the case the default 300 s no longer masks. In the probe the
+// gap shows on the way up, where stabilization does not enter: the fleet
+// is under need exactly as long as with 300 s, inside the bound, and it
+// settles at need. The probe's fleet orders at need on occupancy alone
+// once no replica queues, so nothing it does after the restart asks for a
+// scale-down for the stabilization to hold.
+func TestClosedLoopProbe_AShortStabilizationThroughARestartSettlesAtNeed(t *testing.T) {
+	long := runProbe(t, restartStepCase(15*time.Minute, false, 0))
+	short := runProbe(t, restartStepCase(15*time.Minute, false, 2*time.Minute))
+	t.Logf("need %d, final %d, peak %d; under need for %s at 120 s, %s at 300 s", short.need, short.final, short.peak,
+		short.underFor, long.underFor)
+	require.Empty(t, short.verdict())
+	require.Equal(t, long.underFor, short.underFor)
 }

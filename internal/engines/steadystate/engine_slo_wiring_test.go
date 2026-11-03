@@ -315,7 +315,7 @@ func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
 	rows := func(i int) []domain.ReplicaMetrics {
 		row := func(pod string, k float64) domain.ReplicaMetrics {
 			return domain.ReplicaMetrics{PodName: pod, ModelID: "m", Namespace: "ns", VariantName: "v", Ready: true,
-				KvUsageInstant: k, AvgITL: 0.04*k + 0.02, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 1.5,
+				KvUsageInstant: k, AvgITL: 0.04*k + 0.02, AvgITLKnown: true, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 1.5,
 				TotalKvCapacityTokens: 100000}
 		}
 		return []domain.ReplicaMetrics{row("p0", 0.20+0.05*float64(i)), row("p1", 0.25+0.05*float64(i))}

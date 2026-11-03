@@ -19,6 +19,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -103,6 +105,7 @@ type sloITL struct {
 	policy *config.ScalingPolicy
 	b      float64
 	haveB  bool
+	settle *settle.Tracker
 }
 
 // newSLOITL is the SLO analyzer under the given analyzerTuning (the
@@ -119,7 +122,11 @@ func newSLOITL(tn *config.AnalyzerTuning) *sloITL {
 	if tn != nil {
 		l.policy.AnalyzerTuning = *tn
 	}
-	l.a = slo.New(nil, capacity.NewStore()).WithClock(l.clock)
+	// As the engine runs it (learner PR 4a): the engine's settle tracker,
+	// observed with each cycle's rows before the analyzer reads them.
+	l.settle = settle.NewTracker()
+	l.settle.SetInterval(propCycle)
+	l.a = slo.New(nil, capacity.NewStore()).WithClock(l.clock).WithSettleView(l.settle)
 	return l
 }
 
@@ -132,6 +139,7 @@ func (l *sloITL) observe(rows []domain.ReplicaMetrics, now time.Time) itl.Readin
 		rm.AvgOutputTokens, rm.TotalKvCapacityTokens = 500, propKv
 		in.ReplicaMetrics = append(in.ReplicaMetrics, rm)
 	}
+	l.settle.Observe("ns/m", settlerow.Of(in.ReplicaMetrics, map[string]string{"v": domain.RoleDecode}), now)
 	if _, err := l.a.Analyze(l.ctx, in); err != nil {
 		return itl.Reading{}
 	}
@@ -145,7 +153,8 @@ func (l *sloITL) observe(rows []domain.ReplicaMetrics, now time.Time) itl.Readin
 		b, _ := m["lineB"].(float64)
 		tier, _ := m["lineTier"].(string)
 		source, _ := m["source"].(string)
-		r = itl.Reading{Model: itl.Model{A: a, B: b}, Tier: tier}
+		settling, _ := m["settling"].(int64)
+		r = itl.Reading{Model: itl.Model{A: a, B: b}, Tier: tier, Settling: int(settling)}
 		if tier == "" {
 			r.Model = itl.Model{}
 		}

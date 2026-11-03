@@ -40,7 +40,7 @@ func policy(tpot, ttft time.Duration) *config.ScalingPolicy {
 func row(variant, pod string, k float64) domain.ReplicaMetrics {
 	return domain.ReplicaMetrics{
 		PodName: pod, VariantName: variant, Ready: true,
-		KvUsageInstant: k, AvgITL: line.ITLAt(k),
+		KvUsageInstant: k, AvgITL: line.ITLAt(k), AvgITLKnown: true,
 		TotalKvCapacityTokens: 100000, AvgOutputTokens: 1000, RequestRate: 1,
 	}
 }
@@ -215,7 +215,7 @@ var _ = Describe("Analyzer", func() {
 				// One ordinary replica with no ITL reading, so the variant
 				// still has a shape and demand.
 				own := row("agg", "agg-own", 0.3)
-				own.AvgITL = 0
+				own.AvgITL, own.AvgITLKnown = 0, false
 				res = analyze(cfg, []domain.VariantReplicaState{agg}, append(rows, own))
 				clock = clock.Add(15 * time.Second)
 			}

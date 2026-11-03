@@ -105,8 +105,11 @@ func build(start learnrec.Start, now time.Time, opts Options, rec *learnrec.Reco
 			r.router = &recordedRouter{}
 			src = r.router
 		}
+		// The slo line reads the replay's settle tracker too, as it read
+		// the engine's.
 		r.slo = slo.New(src, r.store).WithClock(r.clock).WithStateTimeout(s.StateTimeout).
-			WithSlopeHoldFor(s.SlopeHoldFor).WithRecorder(rec)
+			WithSlopeHoldFor(s.SlopeHoldFor).WithRecorder(rec).WithSettleView(r.settle.tracker).
+			WithOptimizationInterval(start.Saturation.BorrowTickGap / 3)
 	}
 	if start.Throughput {
 		r.tp = throughput.NewThroughputAnalyzer().WithClock(r.clock).WithRecorder(rec)

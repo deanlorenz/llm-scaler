@@ -405,6 +405,8 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// LEARNED_STATE_BUCKET_RETENTION bounds how long both hold a line's slope.
 	sloAnalyzer := slo.New(replicaCollector, capacityStore).
 		WithClock(cycleClock).
+		WithSettleView(settleTracker).
+		WithOptimizationInterval(cfg.OptimizationInterval()).
 		WithStateTimeout(satV2.Horizons().VariantTimeout).
 		WithSlopeHoldFor(satV2.Horizons().BucketRetention)
 

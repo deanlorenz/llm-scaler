@@ -198,6 +198,7 @@ func TestAddGolden_AHeadThatDropsAnAnalyzerIsRefused(t *testing.T) {
 // recording that does none of those leaves each empty, and the check is
 // clean.
 func TestGoldens_AnEmptyOutputNeedsARule(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	ctx := context.Background()
 	acc, err := readAnalyzerUse(fixtureRecording(t), 0)
 	require.NoError(t, err)
