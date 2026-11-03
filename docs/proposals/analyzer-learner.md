@@ -1664,6 +1664,17 @@ analyzer reads `EngineParams` from the store now, not after #345;
 `T2-held` is a new `Reason`; the k-weighted pinned fit is in scope (the
 exception section 7 names); the four-PR split.
 
+**For 4b-1 to decide: the GPS-mismatch clear.** The throughput analyzer
+clears its window after three cycles in a row whose generated-token rate
+disagrees with its line (`T/analyzer.go`, `DefaultGPSMismatchClearThreshold`),
+a rule that predates 4b. Kept, it can empty the window every few cycles, so
+a run never fills it and never fits a full line; a differential test of
+4b-0 had to drop the generated-token rate to fill its window at all. The
+recording counts the clears (the recipe's step 4 greps for
+`GPS mismatch persisted, clearing observation window`) and is kept whatever
+the count. 4b-1 reads that count against the run's full fits and decides
+whether the clear stays, holding B and the last A, or goes for the line.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at

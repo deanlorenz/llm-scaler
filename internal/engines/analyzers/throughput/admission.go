@@ -20,9 +20,9 @@ import (
 // analyzers' lines do.
 
 // batchCapNone is where an admission's sequence cap came from when it has
-// none (itl.Admission.MaxNumSeqsSource), the value the slo analyzer logs:
-// nothing above the band is admitted.
-const batchCapNone = "none"
+// none: the value the slo analyzer logs too (itl.MaxNumSeqsSourceNone).
+// Nothing above the band is admitted.
+const batchCapNone = itl.MaxNumSeqsSourceNone
 
 // itlPolicy is what the ITL line reads of a model's policy.
 type itlPolicy struct {
@@ -34,22 +34,20 @@ type itlPolicy struct {
 	capPreemption float64
 }
 
-// itlPolicyOf reads cfg's ITL keys. Through interfaces: internal/config's
-// tests import this package, so importing config here would be a cycle.
-// *config.ScalingPolicy implements all three, nil included. A config that
-// implements none reads as the defaults: the default band, a zero gate
-// (itl.Steadiness's defaults) and no preemption at the cap.
+// itlPolicyOf reads cfg's ITL keys through itl.PolicyReader:
+// internal/config's tests import this package, so importing config here
+// would be a cycle. *config.ScalingPolicy implements it, nil included, and
+// config asserts that at compile time, so a renamed method fails the build
+// rather than reading as the defaults here. A config that does not
+// implement it (none in production) reads as the defaults: the default
+// band, a zero gate (itl.Steadiness's defaults) and no preemption at the cap.
 func itlPolicyOf(cfg domain.AnalyzerConfig) itlPolicy {
-	p := itlPolicy{lo: itl.DefaultMinObservableK, hi: itl.DefaultMaxObservableK}
-	if c, ok := cfg.(interface{ ITLBand() (float64, float64) }); ok {
-		p.lo, p.hi = c.ITLBand()
+	r, ok := cfg.(itl.PolicyReader)
+	if !ok {
+		return itlPolicy{lo: itl.DefaultMinObservableK, hi: itl.DefaultMaxObservableK}
 	}
-	if c, ok := cfg.(interface{ ITLSteadiness() itl.Steadiness }); ok {
-		p.steady = c.ITLSteadiness()
-	}
-	if c, ok := cfg.(interface{ ITLCapPreemptionRate() float64 }); ok {
-		p.capPreemption = c.ITLCapPreemptionRate()
-	}
+	p := itlPolicy{steady: r.ITLSteadiness(), capPreemption: r.ITLCapPreemptionRate()}
+	p.lo, p.hi = r.ITLBand()
 	return p
 }
 
@@ -64,6 +62,11 @@ func itlPolicyOf(cfg domain.AnalyzerConfig) itlPolicy {
 // annotation declares (StatedBatchCap), never a learned or default cap, as
 // the slo analyzer reads it; the arguments are ArgsTag, as the saturation
 // analyzer tags its windows.
+//
+// Built whole although the window reads only its band today: it is the one
+// value 4b-1 hands itl.Tracker unchanged, and building it on every cycle is
+// what lets TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes hold that
+// nothing it carries changes what the window admits. It costs no lookup.
 func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) itl.Admission {
 	adm := itl.Admission{
 		MinK: p.lo, MaxK: p.hi,
@@ -83,7 +86,9 @@ func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) i
 
 // WithSettleView sets the settle tracker the ITL line reads each replica's
 // settle from: the engine's, which it observes at the top of every cycle.
-// Call it before the analyzer is used.
+// Call it before the analyzer is used. Unset, the admission carries no
+// settle tracker, and the line, once on itl.Tracker, judges each replica's
+// settle from its own trace.
 func (a *ThroughputAnalyzer) WithSettleView(v settle.View) *ThroughputAnalyzer {
 	a.settle = v
 	return a
@@ -91,7 +96,8 @@ func (a *ThroughputAnalyzer) WithSettleView(v settle.View) *ThroughputAnalyzer {
 
 // WithOptimizationInterval sets the controller's optimize interval, which
 // sets how long a replica may go without a row and keep its settle
-// (settle.Tolerance). Call it before the analyzer is used.
+// (settle.Tolerance). Call it before the analyzer is used. Unset, the
+// tolerance is the least, settle.Period.
 func (a *ThroughputAnalyzer) WithOptimizationInterval(d time.Duration) *ThroughputAnalyzer {
 	a.settleInterval = d
 	return a
@@ -100,6 +106,7 @@ func (a *ThroughputAnalyzer) WithOptimizationInterval(d time.Duration) *Throughp
 // WithSlopeHoldFor sets how long after it was fitted the ITL line's last
 // slope may be held when its window cannot fit one: the controller's bucket
 // retention, as for the other lines. Call it before the analyzer is used.
+// Unset, a held slope has no age limit (itl.Admission.SlopeHoldFor).
 func (a *ThroughputAnalyzer) WithSlopeHoldFor(d time.Duration) *ThroughputAnalyzer {
 	a.slopeHoldFor = d
 	return a
@@ -107,7 +114,9 @@ func (a *ThroughputAnalyzer) WithSlopeHoldFor(d time.Duration) *ThroughputAnalyz
 
 // WithCapacityStore sets the capacity store the analyzer reads each
 // variant's engine parameters from. It reads them only, and writes nothing.
-// Call it before the analyzer is used.
+// Call it before the analyzer is used. Unset, no variant has a stated
+// sequence cap or known engine arguments: nothing above the band is
+// admitted, and a held slope is not bounded by the arguments.
 func (a *ThroughputAnalyzer) WithCapacityStore(s *capacity.Store) *ThroughputAnalyzer {
 	a.store = s
 	return a

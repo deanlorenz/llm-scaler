@@ -392,8 +392,9 @@ const (
 	batchCapDefault  = "default"
 	// batchCapNone is no cap to read: for the line's admission, none the
 	// flags or the annotation state; for the price, none at all (the scale
-	// target unread). Nothing is at it, and nothing is capped by it.
-	batchCapNone = "none"
+	// target unread). Nothing is at it, and nothing is capped by it. The
+	// throughput analyzer logs the same value (itl.MaxNumSeqsSourceNone).
+	batchCapNone = itl.MaxNumSeqsSourceNone
 )
 
 // priceVariant fits the variant's line and prices one replica of it at the

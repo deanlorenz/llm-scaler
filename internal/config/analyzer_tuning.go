@@ -621,6 +621,11 @@ func (t *AnalyzerTuning) resetNonFinite(nonFinite func(field string, v *float64)
 	nonFinite(p+"backlogGrowth.fraction", &t.BacklogGrowth.Fraction)
 }
 
+// The ITL keys an analyzer that cannot import this package reads through
+// itl.PolicyReader (the throughput analyzer): a renamed method fails the
+// build here, rather than reading as the defaults there.
+var _ itl.PolicyReader = (*ScalingPolicy)(nil)
+
 // ITLBand is the KV band the ITL fit reads inside (analyzerTuning.itlBand),
 // with the defaults for an edge left unset. An inverted or out-of-range pair
 // reads as the defaults, never as a band that admits nothing. A nil policy
