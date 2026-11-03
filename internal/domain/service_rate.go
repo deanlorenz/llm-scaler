@@ -39,6 +39,12 @@ const (
 	// rate is at least this. The throughput floor may grow prefill on it, up
 	// to a growth cap, and an own measured window replaces it.
 	ServiceRateSourceLowerBound = "lower-bound"
+	// ServiceRateSourceReportOnly is a rate derived from an aggregated
+	// variant's own ITL(k) line, reported and not priced: the line depends on
+	// the request shape (chunked prefill), so the throughput floor does not
+	// order on it, and the variant is sized as if it had no rate (#432, until
+	// #275).
+	ServiceRateSourceReportOnly = "derived-report-only"
 )
 
 // ServiceRateSignal is what the saturation analyzer priced one variant's

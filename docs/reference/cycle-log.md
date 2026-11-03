@@ -246,7 +246,7 @@ A mu reading is admitted beside a k2 reading, so each entry normally carries
 that reading's `settledForSeconds` and `passedBy`; an entry with no k2
 margin on record leaves both out.
 
-For `learner` `itl` the key is the decode variant's ITL window, and the line
+For `learner` `itl` the key is the ITL window of the decode or aggregated (unlabeled) variant, and the line
 carries `a` and `b` (seconds per token, and seconds per token per unit of KV
 fill) with `previousA` and `previousB`, `source` (`ols` for a full fit,
 `pinned-B` for a fit of A with B pinned, `pinned-B-held` for the last A held
@@ -267,7 +267,7 @@ says). The k2 source is one of the values below. Then, when they apply:
 - `/P1-obs-…`: the replica read saturated but the reading was not recorded as
   k2, and the label says why (`unsettled`, `downstream`, `unadmitted`,
   `rollout` or `invalid`; see the table below).
-- `/mu:<why>`: a decode replica with no derived service rate. `why` is
+- `/mu:<why>`: a decode or aggregated (unlabeled) replica with no derived service rate. `why` is
   `no-line` (no ITL line fitted yet), `no-shape`, `k-price`, `no-seqs`,
   `no-itl` or `no-rate`.
 - `/bridge`: a warm-pool Pod lent to the variant.

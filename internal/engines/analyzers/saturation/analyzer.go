@@ -319,6 +319,9 @@ type SaturationAnalyzer struct {
 	// kvHitsResident is SwitchKVPerRequestHitsResident (#277): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	kvHitsResident bool
+	// itlFitsAggregated is SwitchITLFitsAggregated (#432): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	itlFitsAggregated bool
 	// zeroReplicaDP is SwitchZeroReplicaDataParallel (#438): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	zeroReplicaDP bool
@@ -549,6 +552,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		batchCapZeroReplica:    true,
 		kvOutputDispersion:     true,
 		kvHitsResident:         true,
+		itlFitsAggregated:      true,
 		zeroReplicaDP:          true,
 		itlReadsSettle:         true,
 		itlWaitsAfterRestart:   true,

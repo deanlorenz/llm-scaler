@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -57,8 +58,30 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 			sig.ITLAtPricingK = line.ITLAt(kPrice)
 		}
 		sig.Rate, sig.RateSource = variantServiceRate(name, caps)
+		// An aggregated variant priced on no rate of its own still reports
+		// the mu its line derives, under a source that says it sized nothing
+		// (itlLineReportOnly, #432).
+		if sig.RateSource == "" && serving {
+			if r, ok := medianRate(c.reportedMu[name]); ok {
+				sig.Rate, sig.RateSource = r, domain.ServiceRateSourceReportOnly
+			}
+		}
 		variants[i].ServiceRate = sig
 	}
+}
+
+// medianRate is the median of rates, the central pair averaged on an even
+// count, as variantServiceRate takes it; false with none.
+func medianRate(rates []float64) (float64, bool) {
+	if len(rates) == 0 {
+		return 0, false
+	}
+	s := slices.Sorted(slices.Values(rates))
+	n := len(s)
+	if n%2 == 0 {
+		return (s[n/2-1] + s[n/2]) / 2, true
+	}
+	return s[n/2], true
 }
 
 // lineUsableAt reports whether a line can derive a service rate at k: the

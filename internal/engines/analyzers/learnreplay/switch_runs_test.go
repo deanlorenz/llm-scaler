@@ -40,6 +40,35 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
+// #432 fits an ITL line for an aggregated (unlabeled, RoleBoth) variant, as
+// for decode, and reports the mu it derives without pricing it (until #275:
+// the line depends on the request shape); its line is shared only with
+// other aggregated variants (a physics key ending in |both). It moves the
+// acceptance and engine fixtures, the two whose models run aggregated
+// variants (model-01's variant-01 and variant-02, model-02's variant-03); no
+// other fixture has one. Measured, all off against all on:
+//
+//   - lines.csv: model-01's variant-01 publishes a line under its |both key
+//     on its first fit (09:32:00), and variant-02, on the same engine
+//     configuration, borrows it on three cycles. No decode line moves.
+//   - learned-state.csv: that line, variant-01's intercept and its held
+//     slope join the two exports (three rows each).
+//   - variant-capacities.csv: 28 of 180 rows (acceptance) and 28 of 156
+//     (engine), all on the three aggregated variants. ServiceRate reads the
+//     ITL window on all 28 and its sample count on 16; on six rows of
+//     variant-01 and variant-02 it has a line (A 0.020, B 0.006,
+//     ITL 0.0196 s at the pricing point) and a reported rate of 10.88/s,
+//     source derived-report-only. Nothing is priced from it: no demand,
+//     capacity, reason or borrow record moves (TotalDemand,
+//     PerReplicaCapacity, Reason and Borrowed are unchanged on every row),
+//     and the composite's records do not move at all.
+//
+// That the line never sizes -- at steady load, through a shape change and
+// after it, held through light load -- moves no golden further: no fixture
+// would order on it. TestITLAggregated_TheDerivedMuIsReportedNotPriced,
+// TestITLAggregated_AnOldShapeLineNeverOrders and
+// TestITLAggregated_AHeldLineNeverOrders hold it.
+//
 // #438 prices a vLLM data-parallel decode or aggregated variant at zero
 // replicas at every engine rank its leader pod runs, not one: the derived
 // figure, and the stored budget it falls back to. It moves no golden: no
@@ -56,6 +85,10 @@ import (
 // were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchZeroReplicaDataParallel: nil,
+	saturation.SwitchITLFitsAggregated: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+	},
 }
 
 // learner4aSeams is learner PR 4a's switches, earlier seams now (merged
@@ -66,7 +99,16 @@ var replaySwitches = map[string][]string{
 // after their clock jumps a day (settle.Rejoined); the other four move
 // nothing and are held by their unit tests (heldBy).
 var learner4aSeams = map[string][]string{
-	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
+	// Since #432 the move reaches the aggregated line of the acceptance and
+	// engine fixtures too: off, model-01's variant-01 does not settle in
+	// time for its first fit at 09:32:00, so it publishes no |both line that
+	// cycle, variant-02 borrows none, and their reported service rates and
+	// the learned-state export lose them, as the slo analyzer's line does
+	// under slo.SwitchITLReadsSettle.
+	saturation.SwitchITLReadsSettle: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
@@ -376,9 +418,16 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (64f4747b0, main after #446). #438 names
-// none.
-var switchBase = map[string]string{}
+// base commit's goldens hold it (ebcba8528, main after #450; the six are
+// unchanged since 0da4f9ac2). #438's switch names none.
+var switchBase = map[string]string{
+	"acceptance/learned-state.csv":      "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
+	"acceptance/lines.csv":              "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
+	"acceptance/variant-capacities.csv": "30f5279ca4c19b6e50fb1567b8e018172423e5756782535a9a94411591ffb63a",
+	"engine/learned-state.csv":          "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
+	"engine/lines.csv":                  "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
+	"engine/variant-capacities.csv":     "4765d306858eb2dc564bc93cf352c5947ec85f3ca9d503d48629a98e11cab755",
+}
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays

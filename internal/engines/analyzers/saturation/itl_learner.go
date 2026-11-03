@@ -91,12 +91,13 @@ func (a *SaturationAnalyzer) beginITLCycle(namespace, modelID string) {
 // time, changed source (dropping to no line included), moved ITLWriteBand
 // from what was last logged, or has not logged for LearnerHeartbeat. At
 // V(3), at most one line per key per cycle.
-func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key string, r itl.Reading,
+func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, key string, r itl.Reading,
 	now time.Time, logger logr.Logger) {
 	model := namespace + "|" + modelID
 	source := itlSource(r)
+	role = a.itlReportRole(role)
 	report := learn.Report{Learner: learn.ITL, Namespace: namespace, ModelID: modelID, Variant: variant,
-		Role: domain.RoleDecode, Source: source, Counts: itlReasons(r), Samples: r.Held, Writes: int64(r.Offered)}
+		Role: role, Source: source, Counts: itlReasons(r), Samples: r.Held, Writes: int64(r.Offered)}
 	// The key priced the variant when it holds a line of its own: a variant
 	// with none borrows (after this), or has no line at all.
 	if source != itlSourceNoLine {
@@ -135,7 +136,7 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key str
 	a.mu.Unlock()
 	logger.V(perReplicaLogLevel).Info("learner-write",
 		"learner", learn.ITL, "modelID", modelID, "namespace", namespace, "variant", variant,
-		"role", domain.RoleDecode, "key", key, "a", r.Model.A, "b", r.Model.B,
+		"role", role, "key", key, "a", r.Model.A, "b", r.Model.B,
 		"previousA", last.a, "previousB", last.b, "firstWrite", !logged,
 		"source", source, "previousSource", last.source, "samples", r.Held,
 		"steadyHeld", r.SteadyHeld, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
@@ -144,15 +145,22 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, key str
 // closeITLCycle ends the ITL line's cycle for a model: its reports join k2's
 // and mu's (LearnerReports), and a variant whose keys were forgotten and
 // which fitted nothing this cycle still files one, to say so.
-func (a *SaturationAnalyzer) closeITLCycle(namespace, modelID string) {
+//
+// rolesByVariant names each variant's role; a forgotten variant it does not
+// name is reported as decode, as before the aggregated line (#432).
+func (a *SaturationAnalyzer) closeITLCycle(namespace, modelID string, rolesByVariant map[string]string) {
 	model := namespace + "|" + modelID
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	reports := a.itlCycles[model]
 	delete(a.itlCycles, model)
 	for _, variant := range slices.Sorted(maps.Keys(a.itlForgotten[model])) {
+		role := domain.RoleDecode
+		if r, ok := rolesByVariant[variant]; ok {
+			role = a.itlReportRole(r)
+		}
 		reports = append(reports, learn.Report{Learner: learn.ITL, Namespace: namespace, ModelID: modelID,
-			Variant: variant, Role: domain.RoleDecode, Forgotten: a.itlForgotten[model][variant]})
+			Variant: variant, Role: role, Forgotten: a.itlForgotten[model][variant]})
 	}
 	delete(a.itlForgotten, model)
 	a.learnerReports[model] = append(a.learnerReports[model], reports...)
