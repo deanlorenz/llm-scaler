@@ -1060,8 +1060,11 @@ it):
 ### Passive mode on upgrade and rollback
 
 `make deploy-wva` keeps passive mode: the live `WVA_PASSIVE` in
-`wva-manager-config`, and `passive` on the scaling-policy `default` entry. Pass
-`WVA_PASSIVE=true` or `false` to change the controller-wide one.
+`wva-manager-config`, `passive` on the scaling-policy `default` entry, and
+every other entry of that ConfigMap. They are written into what it applies, so
+a controller pod that starts during the upgrade starts passive too. Pass
+`WVA_PASSIVE=true` or `false` to change the controller-wide one; when the
+running controller read another value at start, the install restarts it.
 
 **Rolling back to a release without passive mode starts scaling every passive
 model at once.** That release ignores `WVA_PASSIVE` and logs `passive` as an

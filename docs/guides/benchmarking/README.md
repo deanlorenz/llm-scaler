@@ -251,9 +251,12 @@ scale and have the scaling manager only report. Nothing else is needed.
    ```
 
    ```promql
-   wva_passive_mode{model_name="<model-id>", mode="observe"} == 1
-   wva_desired_replicas{namespace="<namespace>"}   # what the scaling manager would run
-   wva_current_replicas{namespace="<namespace>"}   # what KEDA runs
+   # observe means our trigger stays out of KEDA's way; observe-unsafe means a
+   # scalingModifiers formula reads it, and the comparison is not clean
+   wva_passive_mode{model_name="<model-id>", mode=~"observe|observe-unsafe"} == 1
+   # exported_namespace is the model's namespace; namespace is the controller's
+   wva_desired_replicas{exported_namespace="<namespace>"}   # what the scaling manager would run
+   wva_current_replicas{exported_namespace="<namespace>"}   # what KEDA runs
    ```
 
 The would-be count is computed from a fleet KEDA sized, so it says what the

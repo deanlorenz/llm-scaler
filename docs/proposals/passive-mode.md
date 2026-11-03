@@ -36,7 +36,9 @@ and a field on every scaling-policy entry (`config.ResolvePassive`).
 Most specific first: per-model entry, then the tier (the variant's
 `scalingPolicy`, else `default.defaultPolicy`), then the `default` entry (the
 namespace's own map when it has one), then `WVA_PASSIVE`. With variants in
-different tiers, the model is passive if any tier says so. `passive` is a
+different tiers, the model is passive if any tier says so; a variant that
+names none counts as the `default` entry (unlike the thresholds, where it
+follows its siblings' tier), since "any" must see every variant. `passive` is a
 pointer because `Merge` copies only non-zero fields, and `passive: false` must
 be able to turn a passive default back to active for one model.
 
@@ -84,9 +86,20 @@ HPA source (Kubernetes v1.33, `pkg/controller/podautoscaler`) gives the rules:
 `minReplicaCount`/`maxReplicaCount`, on every poll. That equals target ×
 current, so the HPA holds. `IsActive` and `StreamIsActive` answer "held count >
 0": a target at zero stays at zero, a running one is never deactivated, and a
-decision-store wake-up changes nothing. Nothing is latched or saved: a
-restart, a lease hand-off or a `kubectl scale` all read the same live count, and
-a count set by hand sticks.
+decision-store wake-up changes nothing. An unreadable count is an error, never
+"active", so a failed read does not wake a target at zero. Nothing is latched
+or saved: a restart, a lease hand-off or a `kubectl scale` all read the same
+live count, and a count set by hand sticks. While the push stream reports a
+held variant inactive it re-reads it every 5 s, so a `kubectl scale` from zero
+is reported before KEDA's cooldown parks it again.
+
+The hold is as exact as the HPA lets it be. Inside the 10% tolerance (ratio =
+answer / `status.replicas`, inclusive) the HPA proposes `status.replicas`: a
+surge pod at `spec` 9 or more ratchets the count up by one per rollout, and a
+pod that cannot be created at `spec` 11 or more proposes one fewer, which the
+300 s scale-down window holds unless it lasts. With `spec.fallback`, KEDA sets
+`fallback.replicas` after `failureThreshold` errors; the controller warns once.
+The strict hold is KEDA's own `autoscaling.keda.sh/paused-replicas`.
 
 **observe.** `GetMetrics` answers `0`: outside tolerance, so the proposal is 0
 and never the highest. `IsActive` and `StreamIsActive` answer false. Never an
@@ -101,16 +114,20 @@ a ScaledObject, an HPA or a Kueue Workload.
 
 | writer | passive |
 | --- | --- |
-| warm pool adapter: supervisor create/delete, pod patches | refused by `pool.PassiveGuard` |
-| `utilization_share_marks.go`, `utilization_share_history.go` | the group runs in shadow when it holds a passive model |
+| warm pool: planning a copy or a borrow | the variant is left out of the planner's demand (`warmpool.Demand.Passive`) |
+| warm pool adapter: load a copy, wake one (supervisor create, pod patch) | refused by `pool.PassiveGuard` |
+| warm pool adapter: return or unload a copy | **kept**: it gives capacity back; the one change the pool still makes |
+| `utilization_share_marks.go`, `utilization_share_history.go` | the group runs in shadow when it holds a passive model; a transfer already in flight is held for the 2 min absence grace, then its marks are removed (the one write left) |
 | `warmpool/preflight.go` | kept: a SelfSubjectAccessReview writes nothing |
 | `learned_state_store.go`, `controllerstatus/publisher.go` | kept |
 | Events `ScaledUp`/`ScaledDown`/`ScaledToZero` | `PassiveRecommendation` instead |
 
 In-process orders skipped too, or they would reserve capacity for replicas that
 never come: the in-flight ledger (`inFlightAdmissions`), the borrowed-capacity
-draws (`recordBorrowDraws`), and the scale-from-zero wake (no decision, no hole,
-no draw; logged once).
+draws (`recordBorrowDraws`), and the scale-from-zero wake (`passiveGate`: no
+decision, no hole, no draw; logged once). The Kueue release paths count no GPU
+a passive model's would-be shrink frees (`budgetOf`), and never lower it for a
+lender (`lenderCandidates`) or a reclaim (`yieldReclaimed`): nothing lowers it.
 
 ## Metrics and logs
 
@@ -125,11 +142,16 @@ no draw; logged once).
 
 ## Interactions
 
-**Limiter, quota, share.** One limiter pass. A passive model counts at its real
-usage, and its would-be count comes from the same pass, so its would-be growth
-can take budget from an active model in that pass, and its would-be shrink
-frees nothing. A share group holding a passive model is planned in shadow; its
-active models get the ordinary optimizer's targets.
+**Limiter, quota, share.** Under a limiter the models that scale are allocated
+first, with the passive ones left out of the pass: a passive model counts at its
+real usage, which the limiter already reads, so an active model gets exactly
+what it would with the passive neighbour absent. The passive would-be counts
+come from a quiet pass (`GreedyByScoreOptimizer.PassiveWouldBe`) over what the
+active models' growth left, at the level of the pools: node fit and cohort
+borrowing are not modelled for it. Without a limiter the models are independent
+and one pass serves both. A share group holding a passive model is planned in
+shadow (`wva_utilization_share_passive_shadow`); its active models get the
+ordinary optimizer's targets.
 
 **Passive to active.** The HPA's own behavior, no ramp. Under the installer's
 ScaledObject a scale-up applies at the next sync and can double every 5 s; a
@@ -139,6 +161,11 @@ held count.
 **Leader election.** Passive is configuration, the same on every replica.
 `hold` needs the live count and is answered by the leader; `observe` is
 answered by a standby too.
+
+**Our trigger** is an `external`/`external-push` trigger in our metadata schema
+(`modelID` or `warmPoolName`) whose `scalerAddress` is the one KEDA called us
+with. Another external scaler's trigger is foreign even if it carries a
+`modelID`.
 
 **KEDA `paused`.** Nothing read it before. Now the enricher reads it
 (`Target.KEDAPaused`) and the engine logs it. It is not treated as passive:
@@ -183,14 +210,21 @@ not what was applied:
 - `warmpool/pool`: the guard refuses all four actions and passes an active
   model through.
 
-Not covered by a test: the scale-from-zero engine's passive gate (its harness
-needs a live EPP scrape), and the installer's keep of `WVA_PASSIVE`.
+The scale-from-zero gate is tested as `passiveGate` directly: reaching it
+through `processInactiveModel` needs a live EPP scrape. The installer's keep
+is executed by `hack/check-passive-keep.sh` in `make lint-deploy-scripts`.
 
 ## Upgrade and rollback
 
 - Upgrade: both keys absent is active, as before.
-- `make deploy-wva` keeps the live `WVA_PASSIVE` and the default entry's
-  `passive`; `WVA_PASSIVE=true|false` sets it.
+- `make deploy-wva` renders the live `WVA_PASSIVE`, the default entry's
+  `passive` and every other policy entry into the manifests it applies, so no
+  applied state is ever active; `WVA_PASSIVE=true|false` sets it. When the
+  running controller read another value at start (`passiveDefault` in
+  `wva-controller-status`) the install restarts it. `hack/check-passive-keep.sh`
+  executes this against a stub kubectl.
+- A live edit of `WVA_PASSIVE` logs `restart required` and a
+  `PassiveRestartRequired` event.
 - Rollback to a release without passive mode scales every passive model at
   once: it ignores both keys. Annotate the ScaledObjects that must not move with
   `autoscaling.keda.sh/paused=true` first

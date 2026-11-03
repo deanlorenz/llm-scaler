@@ -739,12 +739,13 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Gauge
 - **Description**: `1` for the [passive mode](scaling-policy.md#passive) a variant's trigger is in, `0` for the other three. `active`: scaled as usual. `hold`: our trigger is alone on the ScaledObject and answers the live replica count, so nothing moves it. `observe`: our trigger sits beside others, answers `0`, and KEDA scales on the others. `observe-unsafe`: as `observe`, but a `scalingModifiers` formula names our trigger, which is unsupported. Published by the leader every cycle; a variant that leaves the fleet loses its series.
 - **Labels**: `namespace`, `model_name`, `variant_name`, `mode`, optional `controller_instance`
-- **Use Case**: Compare a passive model's would-be count with the real one, with nothing else installed:
+- **Use Case**: Compare a passive model's would-be count with the real one, with nothing else installed. Join on `exported_namespace`, the workload's namespace ([why](#notes-on-name_spaces-in-metrics)):
 
 ```promql
-# what the controller would run, next to what runs
-wva_desired_replicas - on(namespace, variant_name) wva_current_replicas
-  and on(namespace, variant_name) (wva_passive_mode{mode=~"hold|observe"} == 1)
+# what the controller would run, minus what runs
+(wva_desired_replicas - on(exported_namespace, variant_name) wva_current_replicas)
+  and on(exported_namespace, variant_name)
+  (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
 ```
 
 ### Optimization metrics
@@ -1353,6 +1354,7 @@ Published only while the optimizer acts (`shadow: false`):
 | --- | --- | --- | --- |
 | `wva_utilization_share_promised_gpus` | gauge | group | GPUs released for a receiver and not yet held by it. |
 | `wva_utilization_share_reserve_debt_gpus` | gauge | group | `reserveGPUs` spent and not yet refilled. |
+| `wva_utilization_share_passive_shadow` | gauge | group | `1` while the group is planned in shadow because it holds a [passive](scaling-policy.md#passive) model, under an optimizer configured to act; `0` for every other group it plans. The log line says `would rebalance (shadow: the group holds a passive model)`. |
 | `wva_utilization_share_headroom_capped` | gauge | group | `1` while the quota is contended -- its roles' peak needs over the swing window, in whole replicas, do not fit the budget together (a peak counts once two readings in a row reach it; while no role's peak is known -- a new group, or after a restart that restored no stored need history, until a swing window of history exists -- each counts at its `maxReplicas`, or the whole budget; a role joining a group whose peaks are known counts at what it holds) -- and each role's headroom is capped at `maxHeadroomReplicas` times its weight; `0` while the spare is spread by weight. Not published in a cycle the planner did not plan, such as the restart quiet period. The log says when it flips, with its `cause` (`peaks-unknown` or `peaks-exceed-budget`). |
 | `wva_utilization_share_swinging` | gauge | role | `1` while the role is planned on its mean need because it reversed direction `stabilization.swingReversals` times (three by default) within the swing window (a transfer called off on a reversal counts as the move it would have made). It drops to `0` before the window ends once the role's need has stayed more than a quarter from its mean, on one side, for as long as a move takes and longer than any earlier swing in the window: the load moved for good. |
 | `wva_utilization_share_in_flight` | gauge | group + `state` | Transfers in flight, by `state`: `releasing` (the donor has not released its GPUs yet) or `filling` (released, or an idle fill, and the receiver has not taken the GPUs yet). Both series exist for every active group, `0` when nothing is in flight. |
