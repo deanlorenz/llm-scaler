@@ -1287,13 +1287,29 @@ read the `-v` output.
     A pods with `"planned": true`, raise B only after both release, and B's
     second pod must run.
 
-### Passive-mode specs (full tier)
+### Passive-mode specs (own CI job)
 
-Label `passive`, 19 specs in seven containers, about 45 minutes. Run them alone
-with `FOCUS="Passive mode" make test-e2e-full USE_SIMULATOR=true
-SCALE_TO_ZERO_ENABLED=true`. They check
+Label `passive`, 19 specs in seven containers, about 45 minutes. They check
 [passive mode](../reference/scaling-policy.md#passive) against a real KEDA,
-HPA and controller.
+HPA and controller. They carry the `full` label, but the full tier's label
+filter excludes them: with them it outgrew its 90-minute CI job. They run in
+parallel in the CI job `e2e-tests-passive`, which has the same triggers as
+`e2e-tests-full` and the same rule for skipping a PR that touches no compiled
+file.
+
+```bash
+CREATE_CLUSTER=true USE_SIMULATOR=true SCALE_TO_ZERO_ENABLED=true \
+  make test-e2e-passive-with-setup
+# or, on a cluster from make deploy-e2e-infra with the same two settings:
+USE_SIMULATOR=true SCALE_TO_ZERO_ENABLED=true make test-e2e-passive
+```
+
+`USE_SIMULATOR=true` and `SCALE_TO_ZERO_ENABLED=true` are required: without
+the simulator's `--fake-metrics` or EPP flow control the specs skip. Check the
+summary says `Ran 19 of ... Specs` with no skips. The budget is
+`E2E_PASSIVE_TIMEOUT=70m` (ginkgo), `E2E_PASSIVE_GO_TIMEOUT=75m` and a
+95-minute job: the 19 specs took 43 minutes on a 22-CPU kind host, and setup
+about 15.
 
 - **`passive_mode_test.go`**: hold controller-wide (`WVA_PASSIVE=true`) and per
   model, hold at zero under queued requests, a `kubectl scale` that sticks,
@@ -1480,6 +1496,7 @@ test, lint or e2e, so retarget it to `main` before review.
 | `ci-pr-checks.yaml` / `kustomize-build` | `kustomize build` of the cluster-scoped kubernetes, namespace-scoped kubernetes and namespace-scoped openshift overlays | `make kustomize`, then `bin/kustomize build config/overlays/<scope>/<env> > /dev/null` |
 | `ci-pr-checks.yaml` / `e2e-tests-smoke` | `make test-e2e-smoke-with-setup` on a fresh Kind cluster, then the release's blocking Trivy scan (fixable CRITICAL) of the image it built; skipped when a PR changes only docs or metadata | `CREATE_CLUSTER=true make test-e2e-smoke-with-setup` |
 | `ci-pr-checks.yaml` / `e2e-tests-full` | `make test-e2e-full-with-setup` with `SCALE_TO_ZERO_ENABLED=true`; returns early when no compiled file (Go, Makefile, `config/`, `test/`, workflows) changed | `CREATE_CLUSTER=true SCALE_TO_ZERO_ENABLED=true make test-e2e-full-with-setup` |
+| `ci-pr-checks.yaml` / `e2e-tests-passive` | `make test-e2e-passive-with-setup` with `SCALE_TO_ZERO_ENABLED=true`, in parallel with `e2e-tests-full`; same triggers, and returns early on the same rule | `CREATE_CLUSTER=true USE_SIMULATOR=true SCALE_TO_ZERO_ENABLED=true make test-e2e-passive-with-setup` |
 | `ci-signed-commits.yaml` / `signed-commits` | fails if any commit in the PR lacks a verified signature | `git log --show-signature origin/main..HEAD` |
 
 On a push to `main`, only `lint-and-test`, `deploy-scripts-check`, `docs-check`

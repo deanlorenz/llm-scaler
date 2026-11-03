@@ -253,7 +253,7 @@ func passiveProm() *utils.PrometheusClient {
 	Expect(pc).NotTo(BeNil(), "no Prometheus client could be built")
 	_, err := pc.QueryWithRetry(ctx, "vector(1)")
 	Expect(err).NotTo(HaveOccurred(),
-		"Prometheus is not reachable from the test host; run through make test-e2e-full, which port-forwards it")
+		"Prometheus is not reachable from the test host; run through make test-e2e-passive, which port-forwards it")
 	return pc
 }
 

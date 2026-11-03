@@ -484,9 +484,118 @@ jobs:
           # (kueue_quota_test.go), which needs only the CRDs: no Kueue
           # controller, so no Kueue webhook the rest of the suite could trip on.
           KUEUE_CONTROLLER: "false"
+          # The passive-mode specs are excluded from this suite's label filter
+          # too, and run in parallel in e2e-tests-passive: with them the suite
+          # outgrew this job's 90 minutes.
           # Same simulator saturation tuning as smoke — defaults are too high for reliable scale-up signals.
         run: |
           make test-e2e-full-with-setup
+
+  # The passive-mode e2e specs (label passive), on their own kind cluster in
+  # parallel with e2e-tests-full, which excludes them: 19 specs, each with 90 s
+  # hold windows, pushed the full suite past its 90-minute limit. Same triggers
+  # and the same in-job decision as e2e-tests-full, so it runs whenever the full
+  # suite would have run them, and always reports a conclusion.
+  #
+  # Budget: the 19 specs took 43 minutes (2602 s) on a 22-CPU kind host.
+  # test-e2e-passive bounds them at 70m (ginkgo, E2E_PASSIVE_TIMEOUT) and 75m
+  # (go test, which must exceed ginkgo's), about 1.6 times that, for a slower
+  # runner. Setup (kind, image, infra) takes about 15 minutes, so the job
+  # timeout, 95m, is above both and a slow run fails with ginkgo's report, not
+  # a kill.
+  e2e-tests-passive:
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, check-code-changes]
+    if: >-
+      !cancelled() && needs.lint-and-test.result == 'success'
+      && (github.event_name == 'pull_request'
+      || (github.event_name == 'workflow_dispatch' && inputs.run_full_tests))
+    timeout-minutes: 95
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      # The same rule as e2e-tests-full's step of this name: skip only when
+      # every changed file is outside the compiled surface.
+      - name: Decide whether the passive e2e is needed
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          if [ "${{ github.event_name }}" != 'pull_request' ]; then
+            echo 'Manual dispatch asked for the full suite.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)"
+          if [ -z "$changed" ]; then
+            echo 'Could not read the changed-file list; running the passive e2e.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "$changed" | sed 's/^/  /'
+          if echo "$changed" | grep -qE '(\.go|go\.mod|go\.sum|Dockerfile|Makefile)$|^(config|test)/|^\.github/workflows/|^deploy/ci-pr-checks/'; then
+            echo 'Compiled surface touched -- running the passive e2e.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+          else
+            echo 'Every changed file is outside the compiled surface; skipping the passive e2e.'
+            echo 'run=false' >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract Go version from go.mod
+        if: steps.decide.outputs.run == 'true'
+        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
+
+      - name: Set up Go with cache
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache-dependency-path: ./go.sum
+
+      - name: Install dependencies
+        if: steps.decide.outputs.run == 'true'
+        run: go mod download
+
+      - name: Install Kind
+        if: steps.decide.outputs.run == 'true'
+        run: deploy/ci-pr-checks/install-kind.sh
+
+      - name: Set up Docker Buildx
+        if: steps.decide.outputs.run == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build WVA image locally
+        if: steps.decide.outputs.run == 'true'
+        id: build-image
+        env:
+          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: deploy/ci-pr-checks/build-wva-image-local.sh
+
+      # USE_SIMULATOR and SCALE_TO_ZERO_ENABLED are required, not tuning: the
+      # specs skip without the simulator's --fake-metrics or EPP flow control.
+      - name: Run the passive-mode e2e
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        env:
+          ENVIRONMENT: kind-emulator
+          USE_SIMULATOR: "true"
+          SCALE_TO_ZERO_ENABLED: "true"
+          CREATE_CLUSTER: "true"
+          SCALER_BACKEND: keda
+          LLM_D_ROUTER_VERSION: "v0.9.0"
+          E2E_EXPECT_SCALER_TLS: "true"
+          IMG: ${{ steps.build-image.outputs.image }}
+          SKIP_BUILD: "true"
+          DELETE_CLUSTER: "false"
+        run: |
+          make test-e2e-passive-with-setup
 
   # The live-Kueue cohort borrowing e2e, alone on its own kind cluster. Runs on
   # a PR that touches borrowing (the paths below), on a PR labelled
