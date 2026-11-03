@@ -42,13 +42,14 @@ import (
 //
 // Issue #431 routes the forget-learned-state annotation to the slo
 // analyzer's line, one switch, recorded as an event of its own
-// (slo.ForgetVariant). It moves no golden, measured: the in-process
-// acceptance and engine runs, taken again at this commit, each carry one
-// slo.ForgetVariant and move no output with the switch on or off. Their
-// forget lands at 09:31:30, on cycle 7, before the slo line's first fit on
-// cycle 9, so it drops a raw window (Dropped 1, no intercept); two cycles
-// later the clock jumps a day and that window would have aged out anyway.
-// No cluster recording forgets. Its unit tests hold it (heldBy).
+// (slo.ForgetVariant). It moves no golden, measured: the acceptance and
+// engine recordings were taken again for it, and each carries one
+// slo.ForgetVariant (and nothing else new), with no output moved with the
+// switch on or off. Their forget lands at 09:31:30, on cycle 7, before the
+// slo line's first fit on cycle 9, so it drops a raw window and the
+// accelerator memo (Dropped 2, no intercept); two cycles later the clock
+// jumps a day and that window would have aged out anyway. No cluster
+// recording forgets. Its unit tests hold it (heldBy).
 //
 // Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
