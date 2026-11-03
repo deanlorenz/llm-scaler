@@ -1938,6 +1938,7 @@ sh
 shadow
 shape
 shape-change
+shape-stale-line
 shapeChangeHoldSeconds
 share
 share-claimed
