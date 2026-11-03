@@ -89,6 +89,9 @@ type Handler struct {
 	// zeroRecheck is how often StreamIsActive re-reads a held variant it
 	// reports inactive: PassiveZeroRecheck, shorter only in tests.
 	zeroRecheck time.Duration
+	// modes is each ScaledObject's passive mode as this handler last
+	// answered it, so a change is logged once. See passiveMode.
+	modes passiveModes
 }
 
 // NewHandler builds a Handler. A nil store falls back to decision.Default, and a
@@ -451,7 +454,7 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
 	}
-	if mode := h.passiveMode(ref, t); mode.Passive() {
+	if mode := h.passiveMode(ctx, ref, t); mode.Passive() {
 		value, err := h.passiveAnswer(ctx, ref, t, mode)
 		if err != nil {
 			logger.V(1).Info("external scaler GetMetrics failed: passive (hold) and the current replica count is unreadable",
@@ -588,7 +591,7 @@ func (h *Handler) isActive(ctx context.Context, ref *pb.ScaledObjectRef) (bool, 
 // activeFor is isActive for a target already resolved and its decision already
 // read. Only a passive variant whose count cannot be read answers an error.
 func (h *Handler) activeFor(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, d decision.Decision, ok bool) (bool, error) {
-	if mode := h.passiveMode(ref, t); mode.Passive() {
+	if mode := h.passiveMode(ctx, ref, t); mode.Passive() {
 		return h.passiveActive(ctx, ref, t, mode)
 	}
 	if ok && h.honoursDecision(d) {
@@ -799,7 +802,7 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 		case <-ticker.C:
 			send = keepalive
 		case <-recheck.C:
-			if !recheckDue(active, h.passiveMode(ref, target())) {
+			if !recheckDue(active, h.passiveMode(ctx, ref, target())) {
 				continue
 			}
 		}

@@ -2,8 +2,11 @@ package scaler
 
 import (
 	"context"
+	"sync"
 
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
@@ -33,8 +36,55 @@ func (h *Handler) model(ref *pb.ScaledObjectRef) bool {
 }
 
 // passiveMode is the mode of the variant ref names, with scale target t.
-func (h *Handler) passiveMode(ref *pb.ScaledObjectRef, t registry.Target) passive.Mode {
-	return passive.ModeOf(h.model(ref), t)
+//
+// The scaler reads passive live, at every KEDA call; the steady-state engine
+// once a cycle. A switch shorter than a cycle moves the count (or stops it)
+// with no line from the engine, so the scaler logs every change it answers
+// from, once.
+func (h *Handler) passiveMode(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target) passive.Mode {
+	if h.passive == nil {
+		return passive.Active
+	}
+	modelID := ref.GetScalerMetadata()[registry.ModelIDKey]
+	p, source := h.passive.Model(ref.GetNamespace(), modelID)
+	mode := passive.ModeOf(p, t)
+	key := types.NamespacedName{Namespace: ref.GetNamespace(), Name: ref.GetName()}
+	if prev, changed := h.modes.swap(key, mode); changed {
+		kv := []any{"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "model", modelID,
+			"mode", string(mode), "previousMode", string(prev), "source", source}
+		logger := log.FromContext(ctx)
+		switch {
+		case mode.Passive() && !prev.Passive():
+			logger.Info("Passive mode entered: the external scaler answers KEDA for this variant without moving it", kv...)
+		case !mode.Passive() && prev.Passive():
+			logger.Info("Passive mode left: the external scaler answers KEDA with the controller's decision again", kv...)
+		case mode.Passive():
+			logger.Info("Passive mode changed: the external scaler answers KEDA in the new mode", kv...)
+		}
+	}
+	return mode
+}
+
+// passiveModes is each ScaledObject's passive mode as a handler last
+// answered it. The zero value is ready to use.
+type passiveModes struct {
+	mu   sync.Mutex
+	last map[types.NamespacedName]passive.Mode
+}
+
+// swap records mode for key and returns the mode it replaces, and whether
+// it differs. A key not seen before replaces "", which is not passive, so
+// the first answer of an active variant is no change worth a line and the
+// first of a passive one is "entered".
+func (m *passiveModes) swap(key types.NamespacedName, mode passive.Mode) (passive.Mode, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.last == nil {
+		m.last = map[types.NamespacedName]passive.Mode{}
+	}
+	prev := m.last[key]
+	m.last[key] = mode
+	return prev, prev != mode
 }
 
 // passiveAnswer is what GetMetrics answers for a passive variant, whatever the

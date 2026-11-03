@@ -136,9 +136,60 @@ func TestObservePassiveThroughTheRegistry(t *testing.T) {
 	if got := modes(); got[constants.PassiveModeObserve] != 1 || got[constants.PassiveModeActive] != 0 || len(got) != 4 {
 		t.Fatalf("wva_passive_mode = %v, want observe=1 and the other three 0", got)
 	}
+	// At zero replicas the variant is in no active list, and it is still
+	// observed: its mode stays published.
+	e.observePassive(logr.Discard(), nil)
+	if got := modes(); got[constants.PassiveModeObserve] != 1 || len(got) != 4 {
+		t.Fatalf("wva_passive_mode at zero replicas = %v, want observe=1 and the other three 0", got)
+	}
+	vars.Forget("ns", "chat-so")
 	e.observePassive(logr.Discard(), nil)
 	if got := modes(); len(got) != 0 {
 		t.Fatalf("wva_passive_mode after the variant left = %v, want no series", got)
+	}
+}
+
+// passiveAtZero lists only passive variants outside the active list: an
+// active model parked at zero (the control) and a warm pool's trigger, which
+// names no model, are left out, and so is a variant already listed.
+func TestPassiveAtZeroListsOnlyPassiveVariants(t *testing.T) {
+	cfg := config.NewTestConfig()
+	yes := true
+	cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+		"m": {ModelID: "acme/held", Namespace: "ns", Passive: &yes}})
+	vars := registry.New(0)
+	vars.Observe("ns", "held-so", map[string]string{registry.ModelIDKey: "acme/held"})
+	vars.Observe("ns", "parked-so", map[string]string{registry.ModelIDKey: "acme/parked"})
+	vars.Observe("ns", "pool-so", map[string]string{registry.WarmPoolNameKey: "pool"})
+	vars.Observe("ns", "running-so", map[string]string{registry.ModelIDKey: "acme/held"})
+	e := &Engine{Config: cfg, Variants: vars, Passive: &passive.Resolver{Config: cfg, Registry: vars}}
+	running := variant.VariantAutoscaling{ObjectMeta: metav1.ObjectMeta{Name: "running-so", Namespace: "ns"}}
+	got := e.passiveAtZero([]variant.VariantAutoscaling{running})
+	want := []metrics.PassiveVariant{{Namespace: "ns", ModelName: "acme/held", Variant: "held-so", Mode: constants.PassiveModeHold}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("passiveAtZero = %+v, want %+v", got, want)
+	}
+}
+
+// For a passive variant the decision line says it was published, not
+// applied; an active variant keeps the applied line (the control).
+func TestLogDecisionNeverSaysAppliedForAPassiveVariant(t *testing.T) {
+	for _, tc := range []struct {
+		passive bool
+		want    string
+	}{
+		{false, "Applied saturation decision via shared cache"},
+		{true, "Passive: decision published, not applied"},
+	} {
+		var lines []string
+		logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+		logDecision(logger, tc.passive, "variant", "chat-so", "action", "scale-down", "target", 2)
+		if len(lines) != 1 || !strings.Contains(lines[0], tc.want) {
+			t.Fatalf("passive=%v: logged %q, want one line holding %q", tc.passive, lines, tc.want)
+		}
+		if tc.passive && strings.Contains(lines[0], "Applied") {
+			t.Fatalf("passive: the line reads as applied: %q", lines[0])
+		}
 	}
 }
 

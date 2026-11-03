@@ -477,9 +477,11 @@ That is passive mode doing its job ([passive](scaling-policy.md#passive)).
    formula.
 5. **At zero with requests waiting.** A passive model is not woken. Scale it
    by hand, or make it active.
-6. **A held count moved by one.** A rollout's surge pod at 9 or more replicas,
-   or a pod that cannot be created at 11 or more, moves it inside the HPA's
-   tolerance ([how exact the hold is](scaling-policy.md#how-exact-the-hold-is)).
+6. **A held count moved by one.** A rollout that holds exactly one surge pod
+   at 9 or more replicas (`maxSurge: 1`), or a pod that cannot be created at 11
+   or more, moves it inside the HPA's tolerance
+   ([how exact the hold is](scaling-policy.md#how-exact-the-hold-is)). Roll a
+   held model with `maxSurge: 0` to rule out the first.
    For a count that must not move, use `autoscaling.keda.sh/paused-replicas`.
 7. **`WVA_PASSIVE` edited, nothing changed.** It is read at start: the log says
    `restart required` and the ConfigMap gets a `PassiveRestartRequired` event.

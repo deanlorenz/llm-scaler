@@ -2,8 +2,10 @@ package scaler_test
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -15,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
@@ -96,6 +99,43 @@ var _ = Describe("Passive mode through the external scaler", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		store = decision.NewStore()
+	})
+
+	// The scaler reads passive live; the engine once a cycle. A switch it
+	// answers from is logged here once, so a count that moves (or stops)
+	// between two cycles is never unexplained. An active variant's first
+	// answer, and a repeat of the same mode, log nothing (the control).
+	It("logs each passive mode change it answers from, once", func() {
+		var lines []string
+		ctx = crlog.IntoContext(ctx, funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+		models := passiveModels{}
+		h := newHandler(models, so(nil, nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(3)))
+		store.Set(testNamespace, "chat-decode-deploy", 5)
+		count := func(msg string) int {
+			n := 0
+			for _, l := range lines {
+				if strings.Contains(l, msg) {
+					n++
+				}
+			}
+			return n
+		}
+
+		Expect(getMetrics(h)).To(Equal(int64(5)))
+		Expect(count("Passive mode")).To(BeZero(), "an active variant's first answer is no change: %v", lines)
+
+		models[passiveModel] = true
+		Expect(getMetrics(h)).To(Equal(int64(3)))
+		Expect(isActive(h)).To(BeTrue())
+		Expect(getMetrics(h)).To(Equal(int64(3)))
+		Expect(count("Passive mode entered")).To(Equal(1), "%v", lines)
+		Expect(lines).To(ContainElement(And(ContainSubstring(`"mode"="hold"`), ContainSubstring(`"previousMode"="active"`))))
+
+		models[passiveModel] = false
+		Expect(getMetrics(h)).To(Equal(int64(5)))
+		Expect(isActive(h)).To(BeTrue())
+		Expect(count("Passive mode left")).To(Equal(1), "%v", lines)
+		Expect(count("Passive mode")).To(Equal(2), "%v", lines)
 	})
 
 	Context("hold: our trigger alone", func() {

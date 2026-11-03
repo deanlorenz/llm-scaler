@@ -2493,7 +2493,7 @@ func (e *Engine) applySaturationDecisions(
 					logger.Error(err, "Failed to emit replica scaling metrics")
 				}
 			}
-			logger.Info("Applied saturation decision via shared cache",
+			logDecision(logger, e.variantPassive(va.Namespace, va.GetScaleTargetName()),
 				"variant", vaName,
 				"namespace", updateVa.Namespace,
 				"action", decision.Action,

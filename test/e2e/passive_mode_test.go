@@ -818,9 +818,10 @@ var _ = Describe("Passive mode: per-model hold beside an active model", Serial, 
 		GinkgoWriter.Printf("PASSIVE-EVIDENCE case9 passive written at %s with spec.replicas=%d\n", since.UTC().Format(time.RFC3339), at)
 		GinkgoWriter.Printf("PASSIVE-EVIDENCE case9 spec.replicas values before the hold %v\n", specValues(rec.Stop("case9-scale-up")))
 		held.expectHeld(pc, "case9-held", at, wouldScaleUp, "hold", nil)
-		// Recorded, not required: the scaler reads passive live from the
-		// ConfigMap, the engine once a cycle. A flip shorter than a cycle
-		// moves the count with no "Passive mode left"/"entered" line.
+		// The scaler reads passive live, the engine once a cycle: a flip
+		// shorter than a cycle may leave no engine line, so the scaler's own
+		// line is what must explain the stop.
+		expectLog(since, 2*time.Minute, "Passive mode entered: the external scaler", held.scaledObject(), `"previousMode": "active"`)
 		for _, l := range logLines(since.Add(-3*time.Minute), "Passive mode", held.modelID()) {
 			GinkgoWriter.Printf("PASSIVE-LOG case9 %s\n", l)
 		}
@@ -858,6 +859,7 @@ var _ = Describe("Passive mode: hold at zero", Serial, Label("full", "passive"),
 		expectNoWake(since, m.modelID(), m.scaledObject())
 		_, _, on := m.metricsOf(pc, "hold")
 		GinkgoWriter.Printf("PASSIVE-METRICS case3 wva_passive_mode{mode=\"hold\"}=%v\n", on)
+		Expect(on).To(Equal(1.0), "a passive variant at zero replicas must still publish its mode")
 	})
 
 	It("keeps a kubectl scale from zero to 2", func() {

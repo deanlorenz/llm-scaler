@@ -60,7 +60,33 @@ func (e *Engine) observePassive(logger logr.Logger, vas []llmdVariantAutoscaling
 		e.reportPassiveChange(logger, va, target, e.passiveLast[key], st, entry.Target)
 	}
 	e.passiveLast = next
-	metrics.PublishPassiveModes(published)
+	metrics.PublishPassiveModes(append(published, e.passiveAtZero(vas)...))
+}
+
+// passiveAtZero lists the passive variants not among vas: a variant at zero
+// replicas is in no active list, yet it is held (or observed) all the same,
+// and wva_passive_mode must say so. Read from the registry the scaler fills;
+// a warm pool's trigger, which names no model, is left out.
+func (e *Engine) passiveAtZero(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) []metrics.PassiveVariant {
+	if e.Variants == nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(vas))
+	for i := range vas {
+		listed[utils.GetNamespacedKey(vas[i].Namespace, vas[i].Name)] = true
+	}
+	var out []metrics.PassiveVariant
+	for _, entry := range e.Variants.Snapshot() {
+		modelID := entry.Metadata[registry.ModelIDKey]
+		if modelID == "" || listed[utils.GetNamespacedKey(entry.Namespace, entry.Name)] {
+			continue
+		}
+		if mode := e.Passive.Resolve(entry.Namespace, modelID, entry.Name).Mode; mode.Passive() {
+			out = append(out, metrics.PassiveVariant{
+				Namespace: entry.Namespace, ModelName: modelID, Variant: entry.Name, Mode: string(mode)})
+		}
+	}
+	return out
 }
 
 // reportPassiveChange logs what changed between a variant's last reported
@@ -131,4 +157,16 @@ func (e *Engine) recordPassiveRecommendation(va *llmdVariantAutoscalingV1alpha1.
 	}
 	e.recordEvent(va, corev1.EventTypeNormal, constants.K8SEventPassiveRecommendation,
 		fmt.Sprintf("passive: would scale from %d to %d replicas: %s", current, target, reason))
+}
+
+// logDecision logs the cycle's decision for one variant. For a passive
+// variant the decision is published (wva_desired_replicas) and answered by
+// nobody: KEDA holds the count, so the line says what the controller would
+// do, never that it applied it.
+func logDecision(logger logr.Logger, passive bool, kv ...any) {
+	if passive {
+		logger.Info("Passive: decision published, not applied (KEDA holds this count)", kv...)
+		return
+	}
+	logger.Info("Applied saturation decision via shared cache", kv...)
 }

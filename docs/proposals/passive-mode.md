@@ -95,7 +95,9 @@ is reported before KEDA's cooldown parks it again.
 
 The hold is as exact as the HPA lets it be. Inside the 10% tolerance (ratio =
 answer / `status.replicas`, inclusive) the HPA proposes `status.replicas`: a
-surge pod at `spec` 9 or more ratchets the count up by one per rollout, and a
+sync that lands while a rollout holds exactly `spec`+1 pods at `spec` 9 or more
+adds one (likely with `maxSurge: 1`; at 10 replicas the default 25% surges 3
+pods, outside the tolerance, and two rollouts on kind did not drift), and a
 pod that cannot be created at `spec` 11 or more proposes one fewer, which the
 300 s scale-down window holds unless it lasts. With `spec.fallback`, KEDA sets
 `fallback.replicas` after `failureThreshold` errors; the controller warns once.
@@ -134,10 +136,18 @@ lender (`lenderCandidates`) or a reclaim (`yieldReclaimed`): nothing lowers it.
 - `wva_desired_replicas` is the would-be count, `wva_current_replicas` the real
   one; the side-by-side comparison is those two.
 - `wva_passive_mode{namespace,model_name,variant_name,mode}`: 1 for the mode,
-  0 for the others.
+  0 for the others. A passive variant at zero replicas, in no active list, is
+  published from the registry (`Engine.passiveAtZero`).
 - `Passive mode entered` / `left` / `changed`, once per change, with `mode`,
   `source` (the layer) and `foreignTriggers`; a warning on `observe-unsafe`;
   a line when KEDA's `paused` annotation is set or cleared.
+- The same three lines from the external scaler (`Handler.passiveMode`), once
+  per change it answers from, with `scaledObject` and `previousMode`. The
+  scaler reads passive at every KEDA call and the engine once a cycle, so a
+  switch shorter than a cycle moves the count with no engine line; the
+  scaler's line explains it.
+- The decision line for a passive variant is `Passive: decision published,
+  not applied` (`logDecision`), never `Applied saturation decision`.
 - `Passive: would scale` per variant per cycle, at V(3).
 
 ## Interactions

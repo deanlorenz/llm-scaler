@@ -280,8 +280,12 @@ passive: true    # or false; absent inherits
 | `default` entry | the namespace's own `wva-scaling-policy-config` when it has one, else the controller's |
 | `WVA_PASSIVE` | `wva-manager-config`, controller-wide, read at start ([configuration](configuration.md#deployment-flags)) |
 
-The key is live: a ConfigMap edit applies at the next cycle. `WVA_PASSIVE` is
-not: an edit logs `restart required` and a `PassiveRestartRequired` event, and
+The key is live. The external scaler applies an edit at KEDA's next call
+about the variant (every `pollingInterval`, and every HPA sync); the engine
+applies it at its next cycle. A switch can therefore move the count, or stop
+it, before the engine has run: the scaler logs every change it answers from,
+once (`Passive mode entered` / `left`, with `scaledObject`). `WVA_PASSIVE` is
+not live: an edit logs `restart required` and a `PassiveRestartRequired` event, and
 `make deploy-wva` restarts the controller for you. When a model's variants
 name different tiers, the model is passive if any of them is, a variant that
 names none counting as the `default` entry. A per-model `passive: false` is
@@ -334,12 +338,20 @@ nothing.
 `hold` answers the count you set; the HPA, not the controller, makes the last
 call, and in three cases it moves the count:
 
-- **A rollout at 9 or more replicas.** Within a 10% tolerance the HPA proposes
-  the pods that exist (`status.replicas`), not our answer. A surge pod at
-  `spec` 9 or more is inside it: the HPA scales up by one, and the next answer
-  holds the new count. Each rollout can add one replica this way (more with a
-  larger `maxSurge`). At 8 or fewer the surge pod is outside the tolerance and
-  nothing moves.
+- **A rollout at 9 or more replicas, when an HPA sync lands at exactly
+  `spec`+1 pods.** Within a 10% tolerance the HPA proposes the pods that exist
+  (`status.replicas`), not our answer. Our answer is `spec`; `spec`+1 pods is
+  inside the tolerance only at `spec` 9 or more, and then the HPA scales up by
+  one. `spec`+2 or more is outside it at any count below 18, and the HPA keeps
+  our answer.
+  - With the default `maxSurge` of 25%, the surge at 10 replicas is 3 pods:
+    `status.replicas` jumps from 10 to 13, outside the tolerance, and passes
+    through 11 only briefly on the way down. Measured on kind at 10 replicas:
+    two rollouts, no drift (10, 13, then 10 again within 9 s).
+  - `maxSurge: 1` at 9 or more replicas holds `status.replicas` at exactly
+    `spec`+1 for the whole rollout, so every sync can add a replica while it
+    lasts, each new count with a surge pod of its own. Drift is then likely.
+  - At 8 or fewer, or with `maxSurge: 0`, nothing moves.
 - **A pod that cannot be created at 11 or more replicas** (quota, no node). The
   HPA proposes one fewer. The 300 s scale-down window holds it, so the count
   drops only if the pod stays missing longer than the window.
@@ -380,10 +392,13 @@ to zero if its `cooldownPeriod` ends first.
 **What stays live:** `wva_desired_replicas` is what the controller would do, next
 to `wva_current_replicas`, the actual count. The analyzers, the learned state,
 the limiter and the share evaluation run as for any model.
-`wva_passive_mode{mode}` says which mode each variant is in
-([metrics](prometheus.md#passive-mode)). The log says `Passive mode entered`
-and `Passive mode left`, with the layer that decided it (`source`), and at
-verbosity 3 `Passive: would scale` per variant per cycle. To compare, join on
+`wva_passive_mode{mode}` says which mode each variant is in, a passive one at
+zero replicas included ([metrics](prometheus.md#passive-mode)). The log says
+`Passive mode entered` and `Passive mode left`, with the layer that decided it
+(`source`): once from the engine, at its cycle, and once from the external
+scaler, at the KEDA call that first answers in the new mode. The cycle's
+decision line for a passive variant is `Passive: decision published, not
+applied`, and at verbosity 3 `Passive: would scale` per variant per cycle. To compare, join on
 `exported_namespace` (the workload's namespace; `namespace` is the
 controller's):
 
