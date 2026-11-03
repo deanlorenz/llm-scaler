@@ -107,7 +107,18 @@ var _ = Describe("Passive mode through the external scaler", func() {
 	// answer, and a repeat of the same mode, log nothing (the control).
 	It("logs each passive mode change it answers from, once", func() {
 		var lines []string
-		ctx = crlog.IntoContext(ctx, funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+		logged := crlog.IntoContext(context.Background(),
+			funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+		get := func(h *scaler.Handler) int64 {
+			resp, err := h.GetMetrics(logged, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", meta), MetricName: scaler.MetricName})
+			Expect(err).NotTo(HaveOccurred())
+			return resp.MetricValues[0].MetricValue
+		}
+		active := func(h *scaler.Handler) bool {
+			resp, err := h.IsActive(logged, ref("chat-decode", meta))
+			Expect(err).NotTo(HaveOccurred())
+			return resp.Result
+		}
 		models := passiveModels{}
 		h := newHandler(models, so(nil, nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(3)))
 		store.Set(testNamespace, "chat-decode-deploy", 5)
@@ -121,19 +132,19 @@ var _ = Describe("Passive mode through the external scaler", func() {
 			return n
 		}
 
-		Expect(getMetrics(h)).To(Equal(int64(5)))
+		Expect(get(h)).To(Equal(int64(5)))
 		Expect(count("Passive mode")).To(BeZero(), "an active variant's first answer is no change: %v", lines)
 
 		models[passiveModel] = true
-		Expect(getMetrics(h)).To(Equal(int64(3)))
-		Expect(isActive(h)).To(BeTrue())
-		Expect(getMetrics(h)).To(Equal(int64(3)))
+		Expect(get(h)).To(Equal(int64(3)))
+		Expect(active(h)).To(BeTrue())
+		Expect(get(h)).To(Equal(int64(3)))
 		Expect(count("Passive mode entered")).To(Equal(1), "%v", lines)
 		Expect(lines).To(ContainElement(And(ContainSubstring(`"mode"="hold"`), ContainSubstring(`"previousMode"="active"`))))
 
 		models[passiveModel] = false
-		Expect(getMetrics(h)).To(Equal(int64(5)))
-		Expect(isActive(h)).To(BeTrue())
+		Expect(get(h)).To(Equal(int64(5)))
+		Expect(active(h)).To(BeTrue())
 		Expect(count("Passive mode left")).To(Equal(1), "%v", lines)
 		Expect(count("Passive mode")).To(Equal(2), "%v", lines)
 	})
