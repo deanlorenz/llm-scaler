@@ -54,7 +54,31 @@ type rescaleInput struct {
 	Priority  float64 // model priority multiplier (>= 0)
 	Demand    float64 // model demand for the weight (any unit; ratio only), raised as the cap's is
 	FloorGPUs int     // reserved: sum over variants of minReplicas x gpusPerReplica
-	CapGPUs   int     // upper bound: sum over roles of min(demand-in-GPUs, the role's maxReplicas GPUs); >= FloorGPUs
+	CapGPUs   int     // upper bound: sum over roles of min(demand-in-GPUs, the role's maxReplicas GPUs); >= HeldGPUs
+	HeldGPUs  int     // least it keeps when its share is less: a held role's current GPUs; >= FloorGPUs
+}
+
+// heldRescaleTargets is computeRescaleTargets where a model keeps at least its
+// HeldGPUs: a model whose target falls below that is set to it, as its floor
+// and its cap, and the rest re-splits over the others. HeldGPUs is not
+// reserved beneath a share of the rest: the GPUs a model gained were the next
+// cycle's reserve, so one with a role held against scale-down took more of
+// the budget every cycle, to two thirds of it against an equal model (#440).
+func heldRescaleTargets(in []rescaleInput, budget int) (map[string]int, bool) {
+	in = slices.Clone(in)
+	for {
+		targets, overBudget := computeRescaleTargets(in, budget)
+		more := false
+		for i, m := range in {
+			if m.HeldGPUs > m.FloorGPUs && targets[m.ID] < m.HeldGPUs {
+				in[i].FloorGPUs, in[i].CapGPUs = m.HeldGPUs, m.HeldGPUs
+				more = true
+			}
+		}
+		if !more {
+			return targets, overBudget
+		}
+	}
 }
 
 // computeRescaleTargets distributes `budget` GPUs across models by priority-weighted
@@ -312,7 +336,7 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 			continue // uncontended: leave to the additive path
 		}
 
-		targets, overBudget := computeRescaleTargets(inputs, budget)
+		targets, overBudget := heldRescaleTargets(inputs, budget)
 		if overBudget {
 			logger.Info("rescale: minReplicas floors exceed the group budget (Conflict); clamping to floors",
 				"accType", k.accType, "scope", k.scope, "budget", budget)
@@ -418,20 +442,12 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
-		// A role that may not shrink keeps what it has in the split, so the
-		// other roles are cut to what is left rather than to a share computed
-		// as if this one would shrink.
-		if satNamed.Holds[role].NoScaleDown {
-			floorByRole[role] = max(floorByRole[role], curByRole[role])
-		}
 	}
 	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
 		split := func(total int) map[string]int {
-			uncapped := distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, nil)
-			ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
-			return distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, ceilByRole)
+			return splitRoles(satNamed, records, stateMap, accType, roles, total, demByRole, curByRole, floorByRole)
 		}
 		tgtByRole = split(targetGPUs)
 		if uniformPods(records, stateMap) {
@@ -485,6 +501,40 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		}
 	}
 	return decisions
+}
+
+// splitRoles splits a model's GPU target total across its roles by demand dem,
+// each role at least its floor and at most its share ceiling
+// (roleShareCeilings). A role held against scale-down keeps at least what it
+// holds cur: when its share falls below that, it is set to cur and the other
+// roles split what is left. Its cur is not reserved as a floor beneath a share
+// of the rest: the fill then made the role's new pods next cycle's floor, so
+// at a constant target it took a share of the other role's GPUs every cycle
+// and moved pods to it for cycle after cycle (#440).
+func splitRoles(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	accType string, roles []string, total int, dem, cur, floor map[string]int) map[string]int {
+	low := maps.Clone(floor)
+	kept := map[string]int{}
+	for {
+		uncapped := distributeGPUsByWeight(total, roles, dem, cur, low, kept)
+		ceil := roleShareCeilings(records, stateMap, accType, roles, dem, uncapped)
+		maps.Copy(ceil, kept)
+		out := distributeGPUsByWeight(total, roles, dem, cur, low, ceil)
+		more := false
+		for _, role := range roles {
+			if _, ok := kept[role]; ok || !e.Holds[role].NoScaleDown || out[role] >= cur[role] {
+				continue
+			}
+			// Held at what it holds, its floor and its ceiling: what its
+			// share would have added re-splits over the others.
+			keep := max(cur[role], low[role])
+			kept[role], low[role] = keep, keep
+			more = true
+		}
+		if !more {
+			return out
+		}
+	}
 }
 
 // roleGrowth is n replicas a rescale fill added to variant.
@@ -808,7 +858,8 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 
 		// A role that may not shrink keeps what it has in the water-fill too:
 		// weighed as if it would shrink, the model was given a target it never
-		// reached, and the GPUs it kept were missing from the others'.
+		// reached, and the GPUs it kept were missing from the others'. It is
+		// kept as HeldGPUs, not as a floor (heldRescaleTargets).
 		heldFloor := 0
 		for _, role := range modelRolesOnType(records, accType) {
 			rf := roleFloorGPUs(records, stateMap, accType, role)
@@ -817,7 +868,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			}
 			heldFloor += rf
 		}
-		floorGPUs = max(floorGPUs, heldFloor)
+		heldGPUs := max(floorGPUs, heldFloor)
 
 		// Each role is capped at its own ceiling before the sum: a P/D role at
 		// its maxReplicas cannot take GPUs for the demand beyond it, and since
@@ -837,11 +888,11 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		// What the model can take, for the contention check: its cap before
 		// the group budget bounds it, so one model wanting more than the
 		// budget still contends for it.
-		wantGPUs := max(capGPUs, floorGPUs)
+		wantGPUs := max(capGPUs, heldGPUs)
 		if !maxBounded {
 			capGPUs = min(capGPUs, budget) // unbounded max: cap at the group budget
 		}
-		capGPUs = max(capGPUs, floorGPUs)
+		capGPUs = max(capGPUs, heldGPUs)
 		// A model with a role held both ways is frozen by rescaleModelDecisions,
 		// so it holds exactly what it has: the water-fill gives it that and
 		// shares the rest. Weighed on its demand, it was set a share it never
@@ -851,7 +902,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			for _, role := range modelRolesOnType(records, accType) {
 				cur += roleCurrentGPUs(records, stateMap, accType, role)
 			}
-			floorGPUs, capGPUs, wantGPUs = cur, cur, cur
+			floorGPUs, capGPUs, wantGPUs, heldGPUs = cur, cur, cur, cur
 		}
 
 		inputs = append(inputs, rescaleInput{
@@ -860,6 +911,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			Demand:    modelWeightDemand(satNamed, records, accType),
 			FloorGPUs: floorGPUs,
 			CapGPUs:   capGPUs,
+			HeldGPUs:  heldGPUs,
 		})
 		sumWantGPUs += wantGPUs
 	}

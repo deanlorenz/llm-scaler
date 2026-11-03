@@ -256,7 +256,7 @@ func TestRescaleSizesOnAnotherFramesDemand(t *testing.T) {
 
 	held := pdRescaleRequest(map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}})
 	in, _ = rescaleInputsForGroup([]ModelScalingRequest{held}, "A100", 16)
-	assert.Equal(t, 4, in[0].FloorGPUs, "a role that may not shrink keeps all 4")
+	assert.Equal(t, 4, in[0].HeldGPUs, "a role that may not shrink keeps all 4")
 }
 
 // TestRescaleFillsWholePods: rescale rounds a role's share to whole pods.

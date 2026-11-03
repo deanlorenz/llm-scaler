@@ -287,13 +287,8 @@ func podRoleShares(req ModelScalingRequest, targetGPUs int) map[string]int {
 		cur[role] = roleCurrentGPUs(records, stateMap, "A100", role)
 		dem[role] = roleDemandGPUs(nr, records, stateMap, "A100", role)
 		floor[role] = roleFloorGPUs(records, stateMap, "A100", role)
-		if nr.Holds[role].NoScaleDown {
-			floor[role] = max(floor[role], cur[role])
-		}
 	}
-	uncapped := distributeGPUsByWeight(targetGPUs, roles, dem, cur, floor, nil)
-	ceil := roleShareCeilings(records, stateMap, "A100", roles, dem, uncapped)
-	return distributeGPUsByWeight(targetGPUs, roles, dem, cur, floor, ceil)
+	return splitRoles(nr, records, stateMap, "A100", roles, targetGPUs, dem, cur, floor)
 }
 
 // TestRescaleMixedKeepsTheScaleDownRules: over a grid of mixed-size models
@@ -664,4 +659,104 @@ func TestRescaleWholeNodeMixedStress(t *testing.T) {
 			assert.Less(t, got, cur, "target %d", target)
 		}
 	}
+}
+
+// podSettle reruns req at targetGPUs, each cycle from what the last one set,
+// for at most cycles cycles, and returns the model where it stopped and the
+// cycles it took to stop moving, or -1 when it was still moving.
+func podSettle(req ModelScalingRequest, targetGPUs, cycles int) (ModelScalingRequest, int) {
+	for i := range cycles {
+		next := podApplied(req, targetGPUs)
+		if slices.EqualFunc(next.VariantStates, req.VariantStates, func(a, b domain.VariantReplicaState) bool {
+			return a.CurrentReplicas == b.CurrentReplicas
+		}) {
+			return req, i
+		}
+		req = next
+	}
+	return req, -1
+}
+
+// podRoleGPUs is the GPUs role holds.
+func podRoleGPUs(req ModelScalingRequest, role string) int {
+	total := 0
+	for _, st := range req.VariantStates {
+		if st.Role == role {
+			total += st.CurrentReplicas * st.GPUsPerReplica
+		}
+	}
+	return total
+}
+
+// TestRescaleMixedHeldRoleSettles is #440. Prefill, held against scale-down,
+// holds two 1-GPU pods and three 2-GPU pods (its maximum), 8 GPUs; decode one
+// 8-GPU pod beside an empty 2-GPU variant. Demand is for 5 prefill and 18
+// decode GPUs, and the target is 50. The split reserved prefill what it held
+// and gave it a share of the rest on top, 17 GPUs: the pods it gained were
+// next cycle's reserve, so every rerun at 50 moved decode 2-GPU pods to
+// prefill 1-GPU pods, 16 GPUs to 22, 28, 32 and on to 42. Prefill's share is
+// 11 of the 50; held, it may keep more than that, but not gain it.
+func TestRescaleMixedHeldRoleSettles(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 500, domain.RoleDecode: 1800}, []podVariant{
+		{name: "p1", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
+		{name: "p2", role: domain.RolePrefill, gpus: 2, cur: 3, maxR: 3, cost: 2, perGPU: 100},
+		{name: "d2", role: domain.RoleDecode, gpus: 2, cost: 2, perGPU: 100},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 1, maxR: 3, cost: 8, perGPU: 100},
+	})
+	req.CompositeSignal.Holds = map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}}
+	require.Equal(t, 16, podCurrentGPUs(req))
+	assert.Equal(t, map[string]int{domain.RolePrefill: 11, domain.RoleDecode: 39}, podRoleShares(req, 50))
+
+	got, cycles := podSettle(req, 50, 8)
+	require.NotEqual(t, -1, cycles, "still moving after 8 cycles at the same target: %s", describePodModel(got, 50))
+	assert.LessOrEqual(t, cycles, 2, "settles within two cycles: %s", describePodModel(got, 50))
+	assert.Equal(t, 50, podCurrentGPUs(got), describePodModel(got, 50))
+	assert.LessOrEqual(t, podRoleGPUs(got, domain.RolePrefill), 11,
+		"the held role grows no further than its share: %s", describePodModel(got, 50))
+}
+
+// TestRescaleMixedHeldRerunSettles: over a grid of mixed-size models, two
+// thirds of them with a role held against scale-up or scale-down, and targets
+// within 16 GPUs of what each holds, rerunning the same target reaches a cycle
+// that moves nothing within 8 cycles, and a model with a role held against
+// scale-down within 2. With the held role's pods reserved beneath a share of
+// the rest (#440), 1 point was still moving after 8 cycles and 1780 held
+// points took more than 2.
+func TestRescaleMixedHeldRerunSettles(t *testing.T) {
+	r := rand.New(rand.NewPCG(440, 1))
+	hr := rand.New(rand.NewPCG(440, 2))
+	points, held, moving, slow := 0, 0, 0, 0
+	example := ""
+	for range 3000 {
+		req := randomPodModel(r, true, false)
+		down := false
+		if h := hr.IntN(3); h > 0 {
+			roles := modelRolesOnType(buildVariantRecords(req, req.CompositeSignal.Result), "A100")
+			down = h == 1
+			req.CompositeSignal.Holds = map[string]RoleHold{roles[hr.IntN(len(roles))]: {NoScaleDown: down, NoScaleUp: !down}}
+		}
+		cur := podCurrentGPUs(req)
+		for target := max(cur-16, 0); target <= cur+16; target++ {
+			points++
+			if down {
+				held++
+			}
+			_, cycles := podSettle(req, target, 8)
+			if cycles < 0 {
+				moving++
+			}
+			if down && (cycles < 0 || cycles > 2) {
+				slow++
+				if example == "" {
+					example = fmt.Sprintf("target %d, %d cycles: %s", target, cycles, describePodModel(req, target))
+				}
+			}
+		}
+	}
+	t.Logf("%d points, %d held against scale-down: %d still moving after 8 cycles, %d held taking more than 2",
+		points, held, moving, slow)
+	assert.Greater(t, points, 90000)
+	assert.Greater(t, held, 25000)
+	assert.Zero(t, moving, "a rerun at the same target keeps moving")
+	assert.Zero(t, slow, "a held model takes more than 2 cycles, first at %s", example)
 }
