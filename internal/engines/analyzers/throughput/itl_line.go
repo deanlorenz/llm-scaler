@@ -31,14 +31,14 @@ import (
 // steadyGate.minSettledSamples settled; B is remembered only when positive;
 // an ITL of +Inf is no reading; and when there are too few readings the
 // line holds its last A (Reason T2-held), for at most the slope hold and
-// under the same engine arguments. A key with neither a line in the band nor
-// a slope it may hold -- one that never fitted, under load that holds every
-// replica above the band -- fits from its steady, settled readings above the
-// band instead (Reason T2-above-band, itl.Admission.AboveBandFallback),
-// until the band fits. A shape change empties the window and drops the held
-// slope: the old shape's A is not held into the new shape. The settle is the
-// key's own trace of each replica (the engine's settle tracker is PR 4b-2's).
-// Off, as before: a
+// under the same engine arguments. A key with neither a line in the band
+// nor a slope it may hold -- one that never fitted, under load that holds
+// every replica above the band -- fits from its steady, settled readings
+// above the band instead (Reason T2-above-band,
+// itl.Admission.AboveBandFallback), until the band fits. A shape change
+// empties the window and drops the held slope: the old shape's A is not
+// held into the new shape. The settle is the key's own trace of each
+// replica (the engine's settle tracker is PR 4b-2's). Off, as before: a
 // window of every healthy reading in the band, OLS when it is ready, else A
 // by least squares through B over the cycle's healthy rows, at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"

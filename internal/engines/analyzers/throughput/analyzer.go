@@ -62,7 +62,7 @@ type ThroughputAnalyzer struct {
 	itlSteadyGate, itlKeepsOnGPSMismatch bool
 	// noAboveBandFallback turns the line's above-band fallback off
 	// (itl.Admission.AboveBandFallback), for the tests' negative controls
-	// only: nothing in production sets it.
+	// only: set by withoutAboveBandFallback, which only tests define.
 	noAboveBandFallback bool
 	// paths counts the line's fits by path, for the replay (path_counts.go).
 	paths pathCounters

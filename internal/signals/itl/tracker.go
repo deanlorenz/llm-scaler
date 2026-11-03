@@ -194,14 +194,12 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	if !ok {
 		// The windows span the whole cache: the band is the Admission's,
 		// applied below, where a capped replica's reading may pass it.
-		w = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, 0, 1)
+		w = newKeyWindow(DefaultWindowMaxSize)
 		t.windows[key] = w
 	}
 	sw, ok := t.steady[key]
 	if !ok {
-		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, 0, 1)
+		sw = newKeyWindow(DefaultSteadyWindowMaxSize)
 		t.steady[key] = sw
 	}
 	traces, ok := t.traces[key]
@@ -275,7 +273,11 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			// Kept for the fallback only, stamped as a reading in the band
 			// is, and only at a k of at least the one the line is priced at
 			// (fitAboveBand: what makes the fallback one-sided).
-			if aw != nil && k >= DefaultKSat && !aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) && steady {
+			if aw == nil || k < DefaultKSat {
+				break
+			}
+			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling})
+			if !dropped && steady {
 				asw.Add(k, rm.AvgITL, now)
 			}
 		default:
@@ -437,15 +439,23 @@ func (t *Tracker) aboveWindows(key string) (all, steady *Window) {
 	all, ok := t.above[key]
 	if !ok {
 		// The band is the Admission's: these windows take what lies above it.
-		all = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples, DefaultMinKSpread, 0, 1)
+		all = newKeyWindow(DefaultWindowMaxSize)
 		t.above[key] = all
 	}
 	steady, ok = t.aboveSteady[key]
 	if !ok {
-		steady = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples, DefaultMinKSpread, 0, 1)
+		steady = newKeyWindow(DefaultSteadyWindowMaxSize)
 		t.aboveSteady[key] = steady
 	}
 	return all, steady
+}
+
+// newKeyWindow is one of a key's windows, holding up to size readings. It
+// spans the whole cache, [0, 1]: the band is the Admission's, applied in
+// Observe, where a capped replica's reading may pass it and a reading above
+// it may go to the above-band window.
+func newKeyWindow(size int) *Window {
+	return NewWindow(size, DefaultObservationMaxAge, DefaultMinSamples, DefaultMinKSpread, 0, 1)
 }
 
 // aboveBandLine is r with the above-band fallback's line, when obs and
@@ -529,23 +539,14 @@ func aboveBandB(obs []Observation) float64 {
 // Pinned at DefaultBaselineSec instead, as the band's fit pins a key that
 // never fitted, b is below a true B' of 10 ms and the term goes negative:
 // that case then prices under the truth on every seed.
+//
+// No clamp on A is needed: with b the least ITL, every ITL_i - b is >= 0,
+// and a sum of non-negative floats is non-negative. A b passed below that
+// (the tests' negative control pins DefaultBaselineSec) still gives A >= 0
+// on a fleet above the band; a negative A is refused all the same.
 func fitAboveBand(obs []Observation, b float64) (Model, bool) {
-	if !(b > 0) {
-		return Model{}, false
-	}
-	var above, load float64
-	for _, o := range obs {
-		if !(o.K > 0) || !(o.ITLSec > 0) || math.IsInf(o.K, 0) || math.IsInf(o.ITLSec, 0) {
-			continue
-		}
-		above += o.ITLSec - b
-		load += o.K
-	}
-	if !(load > 0) {
-		return Model{}, false
-	}
-	a := max(above/load, 0)
-	if math.IsNaN(a) || math.IsInf(a, 0) {
+	a, ok := pinnedSlope(obs, b)
+	if !ok || !(a >= 0) {
 		return Model{}, false
 	}
 	return Model{A: a, B: b}, true
@@ -615,8 +616,10 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	for _, w := range t.windows {
 		w.Prune(now)
 	}
-	for _, w := range t.steady {
-		w.Prune(now)
+	for _, m := range []map[string]*Window{t.steady, t.above, t.aboveSteady} {
+		for _, w := range m {
+			w.Prune(now)
+		}
 	}
 	for key := range t.windows {
 		if stale(key) {
@@ -677,7 +680,8 @@ func (t *Tracker) ClearWindow(key string) bool {
 }
 
 // ForgetSlope drops the key's last A, so no slope is held for it until a
-// new one is fitted, and keeps its windows and intercept.
+// new one is fitted, and keeps its windows and intercept: ForgetSlopes for
+// one key.
 func (t *Tracker) ForgetSlope(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

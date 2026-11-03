@@ -215,3 +215,49 @@ func logContext() (context.Context, *bytes.Buffer) {
 	core := zapcore.NewCore(enc, zapcore.AddSync(&buf), zapcore.InfoLevel)
 	return logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core))), &buf
 }
+
+// withoutAboveBandFallback turns the line's above-band fallback off, for a
+// negative control.
+func (a *ThroughputAnalyzer) withoutAboveBandFallback() *ThroughputAnalyzer {
+	a.noAboveBandFallback = true
+	return a
+}
+
+// A flat above-band line (A = 0: every reading the same ITL, B pinned at
+// it) is a price end to end: the line prices one ITL at every k, the
+// variant keeps a finite, positive per-replica capacity on every cycle, the
+// k-based local demand (no completion rate) and the GPS diagnostic read it
+// without a division by A, and the variant is never silent once priced.
+func TestITLLine_AFlatAboveBandLineIsAPrice(t *testing.T) {
+	r := newLineRun(t, NewThroughputAnalyzer())
+	rows := func() []domain.ReplicaMetrics {
+		out := steadyFleet()
+		for i := range out {
+			out[i].KvCacheUsage, out[i].KvUsageInstant, out[i].AvgITL = 0.90, 0.90, lineAt(0.90)
+			out[i].RequestRate = 0 // demand from k (computeLocalDemand)
+			out[i].GenerationTokenRate = 1e6
+		}
+		return out
+	}
+	priced := 0
+	for c := range 20 {
+		vc, has := r.step(rows())
+		if c < 3 {
+			require.False(t, has, "cycle %d: a line from fewer than ten readings", c)
+			continue
+		}
+		require.True(t, has, "cycle %d: the flat line went silent", c)
+		require.Equal(t, itlReasonT2AboveBand, vc.Reason)
+		st, _ := r.a.VariantState("m", "ns", "v1")
+		require.Zero(t, st.ITLModel.A, "premise: the line is flat")
+		require.InDelta(t, lineAt(0.90), st.ITLModel.B, 1e-12, "B pinned at the readings' ITL")
+		require.Equal(t, st.ITLModel.ITLAt(0.10), st.ITLModel.ITLAt(itl.DefaultKSat), "a flat line prices one ITL at every k")
+		for _, v := range []float64{vc.PerReplicaCapacity, st.PerReplicaSupply, st.TotalSupply, st.Demand, vc.TotalDemand} {
+			require.False(t, math.IsNaN(v) || math.IsInf(v, 0), "cycle %d: a non-finite figure from a flat line: %+v", c, vc)
+		}
+		require.Positive(t, vc.PerReplicaCapacity, "cycle %d", c)
+		require.Positive(t, st.Demand, "cycle %d: the k-based demand", c)
+		priced++
+	}
+	require.Equal(t, 17, priced)
+}

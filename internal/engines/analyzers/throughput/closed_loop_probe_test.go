@@ -264,9 +264,7 @@ func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *tes
 	require.LessOrEqual(t, on.UnderFor, learnertest.UnderFor)
 
 	off := runProbe(t, restartCase(15*time.Second), func() *ThroughputAnalyzer {
-		a := NewThroughputAnalyzer()
-		a.noAboveBandFallback = true
-		return a
+		return NewThroughputAnalyzer().withoutAboveBandFallback()
 	})
 	t.Logf("negative control, no above-band fallback: %s", off)
 	require.Contains(t, off.Verdict(), "under-ordered", "negative control: without the fallback the restarted line stays silent")
