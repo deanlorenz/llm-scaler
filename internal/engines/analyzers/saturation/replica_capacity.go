@@ -9,6 +9,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
@@ -1237,6 +1238,75 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams)
 }
 
+// SwitchZeroReplicaDataParallel is the replay switch for the data-parallel
+// ranks of a vLLM variant at zero replicas (issue #438). On, the estimate
+// for a decode or aggregated variant is one engine rank's figure times the
+// ranks its leader pod runs (zeroReplicaRanks): the derived figure, and the
+// budget it falls back to with no workload averages. Off, as before, one
+// rank's figure: a pod of eight ranks was priced at an eighth of its
+// capacity from zero.
+const SwitchZeroReplicaDataParallel = "zero-replica-data-parallel"
+
+// zeroReplicaRanks is how many engine ranks the estimate of a variant at
+// zero replicas is multiplied by, with SwitchZeroReplicaDataParallel on: the
+// ranks one pod of a vLLM decode or aggregated variant runs, read from its
+// flags. That is --data-parallel-size-local where stated, else, for a
+// single-pod replica, --data-parallel-size. It is 1 otherwise, and for a
+// size not stated or not above 1.
+//
+// It aims at the ranks a live replica reports (ReplicaMetrics.Ranks), which
+// computeK2 multiplies the same per-rank figure by. A live row counts the
+// cache_config_info series of the leader's API server, one per engine it
+// manages, so the multiply is only as good as that count:
+//
+//   - SGLang: 1. The collector reads no rank count for it, so a live SGLang
+//     replica is priced at one rank, and with --enable-dp-attention its caps
+//     are the pod's already; --dp-size here would price it above its first
+//     replica.
+//   - A multi-pod replica (a LeaderWorkerSet group, podsPerReplica above 1)
+//     with no local size stated: 1. --data-parallel-size counts the ranks of
+//     every pod of the group, and the live row is the leader's alone.
+//     Stated, the local size is what a leader in hybrid or external load
+//     balancing reports. A leader in vLLM's internal load balancing manages
+//     every rank and reports the global count, so there the local size
+//     under-prices, the safe side.
+//   - A replica whose pods are unknown (podsPerReplica 0: no pod requests a
+//     GPU explicitly, PodGPUs nil) with no local size stated: 1, unless its
+//     GPUs (gpusPerReplica) are exactly the ranks' data x tensor x pipeline
+//     parallel GPUs. With no requests GPUsPerReplica defaults to 1 for a
+//     Deployment and a LeaderWorkerSet alike, which says nothing about how
+//     many pods hold the ranks; a single pod with no GPU requests is then
+//     priced at one rank too, the safe side.
+//   - Prefill: 1, as it keeps the flags' cap (zeroReplicaBatchCap). P3
+//     never prices a live prefill replica, so the formula is not the figure
+//     its first replica will get.
+//
+// The clamps after it bound the product. The compatible variant's and the
+// prior live figure are measured whole replicas, and a carried KV total is
+// the collector's sum over ranks. A k1 from --num-gpu-blocks-override is one
+// engine's KV (the store reads it as the replica's), so it still holds a
+// data-parallel variant to about one rank: an under-price, left for its own
+// change.
+func (a *SaturationAnalyzer) zeroReplicaRanks(role string, params *capacity.EngineParams,
+	podsPerReplica, gpusPerReplica int) int64 {
+	if !a.zeroReplicaDP || params == nil || params.Engine != inferenceengine.EngineVLLM ||
+		domain.CanonicalRole(role) == domain.RolePrefill {
+		return 1
+	}
+	global := max(params.DataParallelSize, 1)
+	if params.DataParallelSizeLocal > 0 {
+		return int64(min(params.DataParallelSizeLocal, global))
+	}
+	if podsPerReplica > 1 {
+		return 1
+	}
+	rankGPUs := global * max(params.TensorParallelSize, 1) * max(params.PipelineParallelSize, 1)
+	if podsPerReplica == 0 && gpusPerReplica != rankGPUs {
+		return 1
+	}
+	return int64(global)
+}
+
 // estimateStoredCapacity returns a capacity estimate for a zero-replica variant
 // using its stored capacity.Record. For live records (from a previously running
 // pod), the stored EffectiveCapacity is authoritative. For "deployment" records,
@@ -1273,6 +1343,9 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	// role is the variant's role: a prefill variant keeps the batch cap
 	// its flags state or the default (zeroReplicaBatchCap).
 	role string,
+	// podsPerReplica is how many pods one replica runs: above 1 for a
+	// LeaderWorkerSet group (zeroReplicaRanks).
+	podsPerReplica int,
 	logger logr.Logger,
 ) float64 {
 	if rec == nil {
@@ -1288,13 +1361,17 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		return float64(rec.EffectiveCapacity)
 	}
 
+	// The formula, and the budget it falls back to, price one engine rank;
+	// the leader pod runs ranks of them (zeroReplicaRanks, issue #438).
+	ranks := a.zeroReplicaRanks(role, rec.EngineParams, podsPerReplica, gpuCount)
+
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {
 		// S is the cap the scale target states, flags else declared, else
 		// the default, and never the learned cap (zeroReplicaBatchCap,
 		// issue #427).
 		batchCap := a.zeroReplicaBatchCap(namespace, modelID, variantName, role, rec.EngineParams)
-		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
+		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor) * ranks; derived > 0 {
 			bounded := derived
 			boundedBy := "derived"
 
@@ -1353,14 +1430,17 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				"derivedCapacity", derived, "perReplicaCapacity", bounded,
 				"modelAvgInputTokens", modelAvgInput, "modelAvgOutputTokens", modelAvgOutput,
 				"modelOutputFactor", modelFactor,
-				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source)
+				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source,
+				"engineRanks", ranks)
 			return float64(bounded)
 		}
 	}
 
 	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from
-	// LoadFromDeployment), under the same prior-live ceiling.
-	fallback := rec.EffectiveCapacity
+	// LoadFromDeployment), under the same prior-live ceiling. The budget is
+	// one engine rank's, as the derived figure is, and scales the same way:
+	// a pod of ranks engines runs ranks budgets a step.
+	fallback := rec.EffectiveCapacity * ranks
 	if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < fallback {
 		fallback = rec.PriorLiveCapacity
 	}
@@ -1368,7 +1448,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"source", "deployment-stored-fallback",
 		"reason", "no workload averages or derivation available; using raw stored EffectiveMaxBatchedTokens",
-		"perReplicaCapacity", fallback)
+		"perReplicaCapacity", fallback, "engineRanks", ranks)
 	return float64(fallback)
 }
 
@@ -1384,10 +1464,9 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 // 0 when S or avgOutput is not positive, or when params carry no budget.
 //
 // The figure is ONE engine's: B and S bound a single data-parallel rank.
-// computeK2 multiplies it by the ranks the live replica reports. The
-// zero-replica path has no live replica to count and keeps the one-engine
-// figure, which can only under-price a data-parallel variant and order more
-// on its way up from zero; its first live replica then prices it in full.
+// computeK2 multiplies it by the ranks the live replica reports, and
+// estimateStoredCapacity by the ranks the scale target's flags state
+// (zeroReplicaRanks).
 //
 // I + O/2 is a resident request's KV averaged over its life when every
 // request generates O tokens. With lengths that vary, a request generating

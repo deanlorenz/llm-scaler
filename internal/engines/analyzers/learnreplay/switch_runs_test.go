@@ -69,69 +69,25 @@ import (
 // TestITLAggregated_AnOldShapeLineNeverOrders and
 // TestITLAggregated_AHeldLineNeverOrders hold it.
 //
-// Earlier PRs' rows: #277's switch (kv-per-request-hits-resident) went to
-// earlierSeams; off alone from all on it still moves only e1 and e1-tuned.
-//
-// The forget-learned-state annotation, the GPS check and the learner report
-// role move no golden; their unit tests hold them in the saturation package.
-var replaySwitches = map[string][]string{
-	saturation.SwitchITLFitsAggregated: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
-	},
-}
-
-// kvHitsResidentSeam is #277's row, an earlier seam now (merged into
-// earlierSeams).
-//
-// #277 prices a resident request, where the running requests are read, at
-// the KV they are measured to hold, between the hit rate's discount and none;
-// with no reading, at the discount as before. It moves the derived mu, and
-// the decode demand the floor prices from it, in the two fixtures whose
-// derived mu the KV binds rather than the batch cap: e1 and e1-tuned, both
-// cluster recordings with a hit rate of about 1.5%. Every rate moved falls
-// (ServiceRate.Rate on 153 and 158 rows, by 0.02% to 0.54%), as the change
-// says it must: a reading can take the discount back, never add to it. Of
-// the derived-mu lines with the switch on, e1 priced 19 inside the bounds,
-// 275 at the upper bound, 180 at the lower (as before), 457 with no reading
-// (as before) and 208 for a replica with no hit (as before); e1-tuned 19,
-// 288, 150, 466 and 208. The band's count gate takes no reading that moved
-// a golden: the outputs are the ones the fill gate alone gave.
-//
-// The decode demand rises on most cycles it moves (70 of 107 in e1, 57 of
-// 93 in e1-tuned, by up to 0.49%) and falls on the rest, by at most 0.08%.
-// Traced cycle by cycle with the switch off and on, every fall (37 and 36)
-// is the floor's trust blend, and none the backlog cap, which binds on none
-// of them: the floor moves want towards the resident demand by trust, and
-// trust grows with the arrival demand lambda x PerReplica / mu, which a
-// lower mu raises (throughput_floor.go,
-// want -= trust x (want - max(resident, tokens))).
-// In e1, ns-01's decode on the second floor line: mu 6.3771 -> 6.3678 at an
-// arrival of 12/s, flooredTo 683929.0 -> 683923.9, between the resident
-// 683453 and the 684954 before the floor, with one request queued and none
-// capped.
-//
-// The acceptance, engine and mu-paths fixtures carry a hit rate of 0.1 and
-// read at the upper bound on every priced line, but move nothing: every
-// derived mu they price is capped at their batch cap of 64 before the KV
-// binds.
+// #438 prices a vLLM data-parallel decode or aggregated variant at zero
+// replicas at every engine rank its leader pod runs, not one: the derived
+// figure, and the stored budget it falls back to. It moves no golden: no
+// recorded scale target states a data-parallel size above 1, so every
+// zero-replica estimate the fixtures price is one rank's either way. Its unit
+// tests hold it (heldBy).
 //
 // Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
 // readers, #274's ITL per accepted token, #276's output spread, #427's
 // zero-replica batch cap, #431's forget of the slo line, #277's resident
-// KV) are not in replaySwitches: "all off" is this PR's switches, and an
+// prefix-cache hits) are not here: "all off" is this PR's switches, and an
 // earlier PR's stay at their constructor default, on, as the base goldens
 // were written (analyzer-learner.md, 2.5).
-//
-// #277's reading applies to an aggregated variant's derived mu too, with no
-// change of its own: fleetResidentKVPerRequest reads every Ready generating
-// replica (generatesOutput, every role but prefill), and the derived mu of
-// every role priced from a line takes it.
-var kvHitsResidentSeam = map[string][]string{
-	saturation.SwitchKVPerRequestHitsResident: {
-		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
-		"e1/results.csv", "e1/variant-capacities.csv",
+var replaySwitches = map[string][]string{
+	saturation.SwitchZeroReplicaDataParallel: nil,
+	saturation.SwitchITLFitsAggregated: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 }
 
@@ -194,7 +150,7 @@ func switchPackage(name string) string {
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, merged in.
-var earlierSeams = withSeams(kvHitsResidentSeam, withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
@@ -236,7 +192,15 @@ var earlierSeams = withSeams(kvHitsResidentSeam, withSeams(learner4aSeams, map[s
 	// jumps a day and that window would have aged out anyway. No cluster
 	// recording forgets. Its unit tests hold it (heldBy).
 	slo.SwitchITLForgetReachesTheLine: nil,
-}))
+	// #277 prices a resident request at the KV it is measured to hold,
+	// between the prefix-cache hit rate's discount and none. It moves the
+	// derived mu, and the decode demand the floor prices from it, in the two
+	// fixtures whose derived mu the KV binds rather than the batch cap.
+	saturation.SwitchKVPerRequestHitsResident: {
+		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
+		"e1/results.csv", "e1/variant-capacities.csv",
+	},
+})
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -259,6 +223,15 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #438's data-parallel ranks at zero replicas.
+	saturation.SwitchZeroReplicaDataParallel: {
+		{"../saturation", "TestZeroReplicaDataParallel_AnEightRankDecodeIsPricedAtEveryRank"},
+		{"../saturation", "TestZeroReplicaDataParallel_AWholeNodePodWithNoDeclaredCap"},
+		{"../saturation", "TestZeroReplicaDataParallel_TheClampsStillBound"},
+		{"../saturation", "TestZeroReplicaDataParallel_AGroupIsPricedAtItsLeadersRanks"},
+		{"../saturation", "TestZeroReplicaDataParallel_TheColdStartBudgetIsEveryRanks"},
+		{"../saturation", "TestZeroReplicaDataParallel_UnknownPodsNeedTheGPUsToMatch"},
+	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {
 		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
@@ -445,8 +418,8 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (64f4747b0, main after #446; the six are
-// unchanged since 0da4f9ac2).
+// base commit's goldens hold it (ebcba8528, main after #450; the six are
+// unchanged since 0da4f9ac2). #438's switch names none.
 var switchBase = map[string]string{
 	"acceptance/learned-state.csv":      "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
 	"acceptance/lines.csv":              "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",

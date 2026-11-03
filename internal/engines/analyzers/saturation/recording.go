@@ -117,8 +117,9 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence,
-// SwitchKVPerRequestHitsResident and SwitchITLFitsAggregated; a name it does not know is an error, and
-// sets nothing. Never called on a production path; a test holds that.
+// SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel and
+// SwitchITLFitsAggregated; a name it does not know is an error, and sets
+// nothing. Never called on a production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -172,6 +173,10 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 
 		// #277: a prefix-cache hit stays resident.
 		SwitchKVPerRequestHitsResident: &a.kvHitsResident,
+
+		// #438: a data-parallel variant at zero replicas is priced at
+		// every engine rank its pod runs.
+		SwitchZeroReplicaDataParallel: &a.zeroReplicaDP,
 
 		// #432: an aggregated variant fits an ITL line.
 		SwitchITLFitsAggregated: &a.itlFitsAggregated,

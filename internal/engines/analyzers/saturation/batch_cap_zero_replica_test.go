@@ -129,14 +129,14 @@ func TestBatchCapZeroReplica_ALearnedCapIsNeverRead(t *testing.T) {
 	}
 }
 
-// A data-parallel variant at zero replicas is priced at one engine rank's
-// figure, not the pod's: an 8-GPU pod of 8 ranks that declares 64 per rank
-// is 64 x 1250 = 80,000, an eighth of what its first replica will be priced
-// at. A known under-price (#438), pinned so that changing it is deliberate.
+// The declared cap is per engine rank. With SwitchZeroReplicaDataParallel
+// off, an 8-GPU pod of 8 ranks that declares 64 is priced at one rank's
+// figure, 64 x 1250 = 80,000, as before #438; on, at all eight
+// (zero_replica_data_parallel_test.go).
 func TestBatchCapZeroReplica_ADataParallelVariantIsPricedAtOneRank(t *testing.T) {
 	params := declaredParams(64)
 	params.DataParallelSize = 8
-	f := zeroReplicaEstimateAs(t, params, domain.RoleDecode, 8, 1, nil)
+	f := zeroReplicaEstimateAs(t, params, domain.RoleDecode, 8, 1, zeroReplicaDPOff)
 	assert.EqualValues(t, 64, f["batchCap"])
 	assert.EqualValues(t, 80_000, f["derivedCapacity"])
 	assert.EqualValues(t, 80_000, f["perReplicaCapacity"])

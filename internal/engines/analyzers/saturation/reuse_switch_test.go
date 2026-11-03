@@ -229,7 +229,7 @@ func TestTheReuseSwitchDoesNotRemoveACapacityCeiling(t *testing.T) {
 	// construction; what is asserted is that the clamped figure is the
 	// sibling's ceiling and not the much larger own derivation.
 	got := build().estimateStoredCapacity(rec, model, ns, zero, accel, 1,
-		0.9, 1000, 600, 1, "", logr.Discard())
+		0.9, 1000, 600, 1, "", 1, logr.Discard())
 	require.LessOrEqual(t, got, float64(900_000),
 		"the estimate must not exceed the variant's own stored capacity")
 	require.Greater(t, got, 0.0, "precondition: the estimate path ran at all")

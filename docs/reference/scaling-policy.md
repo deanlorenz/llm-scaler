@@ -1470,6 +1470,13 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 - It takes effect on the next cycle and keeps everything the variant has
   learned.
 - A value that is not a positive whole number is ignored.
+- **It is per engine rank.** A vLLM pod with `--data-parallel-size 8` that
+  declares 64 admits 8 x 64. A vLLM decode or aggregated variant at zero
+  replicas is priced at the ranks one pod runs, as a running replica is:
+  `--data-parallel-size-local` where stated, else `--data-parallel-size`.
+  A LeaderWorkerSet group that states no local size is priced at one rank,
+  and so is a variant whose pods request no GPUs explicitly, and SGLang,
+  whose running replicas report no rank count.
 - Two variants that declare different caps never price each other.
 - **On a P/D decode, declare the cap.** Learning does not see it there (below).
 
