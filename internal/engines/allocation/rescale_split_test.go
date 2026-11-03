@@ -183,8 +183,9 @@ func TestHeldRescaleTargets(t *testing.T) {
 
 // TestRescaleHeldRoleAboveItsModelsShare: model a holds 60 GPUs of prefill,
 // held against scale-down, and 10 of decode; b holds 30. a's share of the 100
-// GPUs is 37, below what its prefill holds, so a keeps 60 and b is given the
-// other 40: a sheds decode to its last pod and b grows into what that frees.
+// GPUs is 37, below what its prefill holds, so a's target is 60 and b's the
+// other 40. a sheds decode to its last pod, which it keeps, so a ends at 61
+// and b grows into the 39 that frees.
 // Reserved its 60 beneath a share of the rest, a was given 75, kept all 10
 // decode pods, and b stayed at 30.
 func TestRescaleHeldRoleAboveItsModelsShare(t *testing.T) {

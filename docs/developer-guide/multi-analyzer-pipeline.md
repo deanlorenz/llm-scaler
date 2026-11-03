@@ -556,7 +556,9 @@ the other role cycle after cycle. The water-fill across models does the same
 (`heldRescaleTargets`, `rescaleInput.HeldGPUs`): a model keeps at least what
 its held roles hold, and is not reserved that beneath its share of the rest,
 which let a model with a held role grow toward two thirds of a budget it
-shared evenly. A model's
+shared evenly. So while a role is held against scale-down and holds more than
+its model's share, the model's other roles can drop to their last pod; this
+clears when the hold lifts. A model's
 water-fill cap is each role's demand in GPUs capped at that role's
 `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
 GPUs sized the cap on 560, and the GPUs that share left free stayed free
