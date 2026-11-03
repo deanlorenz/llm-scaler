@@ -100,8 +100,6 @@ Single runs unless noted; each link has the method and caveats.
   waits for the scale-up decision: it came 33–143 s after each rise
   ([why llm-scaling-manager](docs/why.md)).
 
-![Warm pool: near-floor latency on 3 of 4 rises, for 12 % fewer GPU-seconds](docs/figures/warm-pool-latency-vs-cost.svg)
-
 ## Models and variants
 
 A **model** is what a client asks for by name. A **variant** is one way of
