@@ -733,6 +733,20 @@ across a restart, are otherwise visible only in the logs.
   - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
 - **Use Case**: Alert on any increase.
 
+### Passive mode
+
+### `wva_passive_mode`
+- **Type**: Gauge
+- **Description**: `1` for the [passive mode](scaling-policy.md#passive) a variant's trigger is in, `0` for the other three. `active`: scaled as usual. `hold`: our trigger is alone on the ScaledObject and answers the live replica count, so nothing moves it. `observe`: our trigger sits beside others, answers `0`, and KEDA scales on the others. `observe-unsafe`: as `observe`, but a `scalingModifiers` formula names our trigger, which is unsupported. Published by the leader every cycle; a variant that leaves the fleet loses its series.
+- **Labels**: `namespace`, `model_name`, `variant_name`, `mode`, optional `controller_instance`
+- **Use Case**: Compare a passive model's would-be count with the real one, with nothing else installed:
+
+```promql
+# what the controller would run, next to what runs
+wva_desired_replicas - on(namespace, variant_name) wva_current_replicas
+  and on(namespace, variant_name) (wva_passive_mode{mode=~"hold|observe"} == 1)
+```
+
 ### Optimization metrics
 
 ### `wva_optimization_duration_seconds`

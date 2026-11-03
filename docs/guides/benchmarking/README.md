@@ -206,8 +206,61 @@ Notes on the defaults:
 - [FMA post-mortem](../../proposals/fma-post-mortem.md)
 - [After the install](../../reference/operations.md): what the metrics mean
 - [Configuration](../../reference/configuration.md): every installer variable
+- [Side by side with KEDA](#side-by-side-with-keda): KEDA scales, the scaling
+  manager only says what it would do
 
 ## Details
+
+### Side by side with KEDA
+
+To compare the scaling manager with a KEDA trigger you already trust, let KEDA
+scale and have the scaling manager only report. Nothing else is needed.
+
+1. Make the model passive. On the scaling manager's policy, in the
+   controller's namespace:
+
+   ```yaml
+   # kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
+   data:
+     cmp.<namespace>: |
+       model_id: <model-id>
+       namespace: <namespace>
+       passive: true
+   ```
+
+2. Put our trigger beside KEDA's on the model's ScaledObject. With another
+   trigger there, ours answers 0 and inactive (mode `observe`), so the HPA
+   follows KEDA's trigger alone. Do not name ours in a `scalingModifiers`
+   formula.
+
+   ```yaml
+   triggers:
+     - type: prometheus          # yours, unchanged: this one scales
+       metadata: {serverAddress: ..., query: ..., threshold: "..."}
+     - type: external-push       # ours: observes
+       name: wva
+       metadata:
+         scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
+         modelID: <model-id>
+   ```
+
+3. Check the mode, then read the two counts side by side over the run:
+
+   ```bash
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep "Passive mode entered"
+   ```
+
+   ```promql
+   wva_passive_mode{model_name="<model-id>", mode="observe"} == 1
+   wva_desired_replicas{namespace="<namespace>"}   # what the scaling manager would run
+   wva_current_replicas{namespace="<namespace>"}   # what KEDA runs
+   ```
+
+The would-be count is computed from a fleet KEDA sized, so it says what the
+scaling manager would order next from where KEDA is, not where its own fleet
+would be. To let it scale, set `passive: false` (or delete the entry) and
+remove the other trigger. [Passive mode](../../reference/scaling-policy.md#passive)
+has the details.
 
 ### The model cache must be ReadWriteMany
 

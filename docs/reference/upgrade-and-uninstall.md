@@ -1053,6 +1053,23 @@ it):
   kubectl delete networkpolicy wva-external-scaler-from-keda -n "$NS" --ignore-not-found
   ```
 
+### Passive mode on upgrade and rollback
+
+`make deploy-wva` keeps passive mode: the live `WVA_PASSIVE` in
+`wva-manager-config`, and `passive` on the scaling-policy `default` entry. Pass
+`WVA_PASSIVE=true` or `false` to change the controller-wide one.
+
+**Rolling back to a release without passive mode starts scaling every passive
+model at once.** That release ignores `WVA_PASSIVE` and logs `passive` as an
+unknown key, and acts on its decisions as usual. Before you roll back, stop
+KEDA from acting on the models that must not move:
+
+```bash
+kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true
+```
+
+Remove the annotation once you want them scaled.
+
 ## After every upgrade or restart
 
 A new controller pod starts with no decision in memory. Until it has one:
