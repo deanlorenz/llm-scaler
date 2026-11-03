@@ -252,9 +252,10 @@ func TestThroughputProbe_AControllerRestartBeforeALoadStepSettlesAtNeed(t *testi
 // Before the fallback, measured on this case: need 9, final 4, peak 4, under
 // need for 24m45s, reasons T2-default 58 (before the restart) and T2-failed
 // 102 -- the restarted line was silent for the rest of the run, and alone
-// the analyzer never ordered the scale-up. With it: need 9, final 9, peak
-// 9, under need for 30s. Negative control: with the fallback off the case
-// fails as it did.
+// the analyzer never ordered the scale-up. With it: need 9, final 10, peak
+// 10 (inside the over-order bound), under need for 30s, 7 cycles priced from
+// above the band. Negative control: with the fallback off the case fails as
+// it did.
 func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *testing.T) {
 	on := runProbe(t, restartCase(15*time.Second), NewThroughputAnalyzer)
 	t.Logf("on the tracker: %s", on)

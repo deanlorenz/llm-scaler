@@ -45,9 +45,9 @@ func TestTracker_AboveBandFallbackFitsAKeyThatNeverFitted(t *testing.T) {
 	if !last.AboveBandFit || last.Tier != TierPinnedB || last.AboveBandHeld != min(24, DefaultWindowMaxSize) || last.Held != 0 {
 		t.Fatalf("not the fallback's line: %+v", last)
 	}
-	// Pinned at DefaultBaselineSec: A = (0.055 - 0.006) / 0.90.
-	if want := (0.05*0.90 + 0.010 - DefaultBaselineSec) / 0.90; math.Abs(last.Model.A-want) > 1e-9 {
-		t.Errorf("A %g, want %g", last.Model.A, want)
+	// Every reading the same ITL, 55 ms: B pinned at it, a flat line there.
+	if want := (Model{A: 0, B: 0.05*0.90 + 0.010}); math.Abs(last.Model.A-want.A) > 1e-12 || math.Abs(last.Model.B-want.B) > 1e-12 {
+		t.Errorf("line %+v, want %+v", last.Model, want)
 	}
 	if _, held := tr.Slopes()["k"]; held {
 		t.Error("the fallback's A was remembered as the held slope")
@@ -129,5 +129,53 @@ func TestTracker_ForgetSlopeDropsOnlyTheSlope(t *testing.T) {
 	}
 	if b, ok := tr.Baseline("k"); !ok || b != 0.007 {
 		t.Errorf("the intercept was dropped: %v %v", b, ok)
+	}
+}
+
+// The fallback is one-sided: B pinned at the least ITL, readings at k of at
+// least DefaultKSat, it prices at DefaultKSat at least the true line's ITL,
+// whatever the true B. Negative control: pinned at DefaultBaselineSec, as
+// the band's fit pins a key that never fitted, it prices under a true line
+// whose B is 10 ms.
+func TestFitAboveBand_NeverPricesUnderTheTrueLine(t *testing.T) {
+	const a = 0.05
+	ks := []float64{0.86, 0.90, 0.94}
+	noise := []float64{-0.02, 0.01, 0.02, -0.01, 0}
+	for _, b := range []float64{0.004, 0.010} {
+		var obs []Observation
+		for i := range 15 {
+			k := ks[i%len(ks)]
+			obs = append(obs, Observation{K: k, ITLSec: (a*k + b) * (1 + noise[i%len(noise)])})
+		}
+		truth := a*DefaultKSat + b
+		m, ok := fitAboveBand(obs, aboveBandB(obs))
+		if !ok {
+			t.Fatalf("true B %g: no line", b)
+		}
+		if p := m.ITLAt(DefaultKSat); p < truth {
+			t.Errorf("true B %g: priced %.5f s, under the truth %.5f s", b, p, truth)
+		}
+		if b > DefaultBaselineSec {
+			d, ok := fitAboveBand(obs, DefaultBaselineSec)
+			if !ok || d.ITLAt(DefaultKSat) >= truth {
+				t.Errorf("negative control: pinned at the default, true B %g priced %.5f s, not under the truth %.5f s",
+					b, d.ITLAt(DefaultKSat), truth)
+			}
+		}
+	}
+}
+
+// A reading above the band but under DefaultKSat is not kept for the
+// fallback: between the band's top and the price, a B pinned above the true
+// one would price under the truth.
+func TestTracker_AboveBandFallbackKeepsOnlyReadingsAtThePrice(t *testing.T) {
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	tr := NewTracker()
+	var r Reading
+	for c := range 6 {
+		r = tr.Observe("k", "v", aboveRows(3, 0.82, start), Admission{AboveBandFallback: true}, start.Add(time.Duration(c)*15*time.Second))
+	}
+	if r.AboveBand != 3 || r.AboveBandHeld != 0 || r.Tier != "" {
+		t.Fatalf("readings at k 0.82 were kept for the fallback: %+v", r)
 	}
 }

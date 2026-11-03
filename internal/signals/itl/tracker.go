@@ -2,6 +2,7 @@ package itl
 
 import (
 	"maps"
+	"math"
 	"sync"
 	"time"
 
@@ -271,8 +272,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			r.BelowBand++
 		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
-			// Kept for the fallback only, stamped as a reading in the band is.
-			if aw != nil && !aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) && steady {
+			// Kept for the fallback only, stamped as a reading in the band
+			// is, and only at a k of at least the one the line is priced at
+			// (fitAboveBand: what makes the fallback one-sided).
+			if aw != nil && k >= DefaultKSat && !aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) && steady {
 				asw.Add(k, rm.AvgITL, now)
 			}
 		default:
@@ -392,7 +395,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		held, have := t.slopes[key]
 		t.mu.Unlock()
 		if !have || !adm.mayHold(held, now) {
-			return aboveBandLine(r, aboveObs, aboveSteadyObs, baseline, s)
+			return aboveBandLine(r, aboveObs, aboveSteadyObs, s)
 		}
 		r.Model, r.Tier, r.SlopeHeld = Model{A: held.a, B: baseline}, TierPinnedB, true
 		r.SlopeFittedAt = held.fittedAt
@@ -446,13 +449,15 @@ func (t *Tracker) aboveWindows(key string) (all, steady *Window) {
 }
 
 // aboveBandLine is r with the above-band fallback's line, when obs and
-// steady -- the key's readings above the band, and the steady ones among
-// them -- give one by the pinned fit's own rules: pinnedReadings, at least
-// DefaultMinSamples readings and s.MinSettledSamples past their settle, B
-// pinned as the band's fit pins it. Observe calls it only when the band gave
-// no line and the key holds no slope it may hold, so it never replaces an
-// in-band fit or a held slope, and the first in-band fit replaces it. Its A is
-// not remembered: a later hold holds only a slope fitted in the band.
+// steady -- the key's readings above the band at a k of at least
+// DefaultKSat, and the steady ones among them -- give one by the pinned
+// fit's own rules: pinnedReadings, at least DefaultMinSamples readings and
+// s.MinSettledSamples past their settle. Observe calls it only when the band
+// gave no line and the key holds no slope it may hold, so it never replaces
+// an in-band fit or a held slope, and the first in-band fit replaces it. Its
+// A is not remembered, and its B never becomes the key's intercept: a later
+// hold holds only a slope fitted in the band, and a later pinned fit pins
+// only a B a full fit measured.
 //
 // The case it is for: a key that has never fitted, under load that holds
 // every replica above the band -- a controller restart into saturation, or a
@@ -461,32 +466,89 @@ func (t *Tracker) aboveWindows(key string) (all, steady *Window) {
 // analyzer alone, nothing ordered the scale-up that would bring the fleet
 // back into the band.
 //
-// Which side it errs on. On readings of one line ITL = A k + B', the pinned
-// fit through B prices ITL(DefaultKSat) = A kSat + B' + (B' - B)(kSat/kbar
-// - 1), kbar the readings' mean k. A replica pushed past the band reads
-// above that line (it queues; its batch is past where the line was fitted),
-// and that only steepens A: a higher priced ITL, a lower mu, a larger fleet.
-// The B term is the one that can go the other way, and it is smaller here
-// than in the band: above the band kbar lies in (MaxK, 1], so |kSat/kbar - 1|
-// is at most 0.15 on the default band, against 0.06 to 4.7 for readings in
-// it. When B is not below B' the term is on the safe side, and the fallback
-// prices no higher mu than an in-band fit at the same line under the same B.
-// When B is below B' -- a key that never fitted pins DefaultBaselineSec, 6
-// ms -- the in-band fit's own term is on the safe side and the fallback's
-// is not: it can price under the truth by up to 0.15 (B' - B), 0.6 ms at B'
-// = 10 ms, about 1 % of the priced ITL on the throughput analyzer's
-// property case, which states the measured margins.
-func aboveBandLine(r Reading, obs, steady []Observation, b float64, s Steadiness) Reading {
+// It errs on one side only, by construction: see fitAboveBand.
+func aboveBandLine(r Reading, obs, steady []Observation, s Steadiness) Reading {
 	pinned, settled := pinnedReadings(obs, steady)
 	if !settled || len(pinned) < s.MinSettledSamples {
 		return r
 	}
-	m, ok := FitPinnedB(pinned, b)
+	m, ok := fitAboveBand(pinned, aboveBandB(pinned))
 	if !ok {
 		return r
 	}
 	r.Model, r.Tier, r.AboveBandFit = m, TierPinnedB, true
 	return r
+}
+
+// aboveBandB is the B the above-band fallback pins: the least ITL among its
+// readings, the strict minimum. Zero when there is no finite positive one.
+//
+// Every reading is ITL = B' + A k + noise, with A >= 0 and k > 0, so the
+// least ITL is at least the true B' up to the noise -- and above the band the
+// noise is small against A k (a 2 % gauge on 50 ms is 1 ms, A k is 40 ms or
+// more), so one low reading does not bring it under B'. A low quantile would
+// guard against an outlier the gauge does not produce, at the cost of a B
+// nearer B'; the strict minimum is kept.
+func aboveBandB(obs []Observation) float64 {
+	b := math.Inf(1)
+	for _, o := range obs {
+		if o.ITLSec > 0 && !math.IsInf(o.ITLSec, 0) && o.K > 0 && !math.IsInf(o.K, 0) {
+			b = min(b, o.ITLSec)
+		}
+	}
+	if math.IsInf(b, 1) {
+		return 0
+	}
+	return b
+}
+
+// fitAboveBand is the above-band fallback's line through b: A = sum(ITL_i -
+// b) / sum(k_i), the pinned fit's k-weighted slope (FitPinnedB). Unlike
+// FitPinnedB it takes A = 0: with b the least ITL, readings that all share
+// one ITL give a flat line at that ITL, which is still a price (see below),
+// where FitPinnedB refuses a flat fit as noise.
+//
+// Why it errs on one side only. With b at or above the true B' (aboveBandB)
+// and every reading at k_i >= DefaultKSat (Observe keeps no other), the line
+// priced at kSat = DefaultKSat is, on readings of the true line ITL = A' k +
+// B',
+//
+//	b + kSat (ITLbar - b) / kbar = A' kSat + B' + (b - B')(1 - kSat/kbar)
+//
+// with kbar the readings' mean k and ITLbar their mean ITL. Both factors of
+// the last term are >= 0, so the priced ITL is at least the true line's at
+// kSat: never a higher mu than the truth. A replica pushed past the band reads
+// above the line (it queues; its batch is past where the line was fitted),
+// which raises ITLbar and the price with it. The k floor is what makes the
+// second factor >= 0: the band's top, 0.80 by default, lies under kSat (0.85),
+// and a reading between them would turn the term against the truth.
+//
+// The term is also the margin that absorbs the gauge's noise: b, the least
+// ITL, sits far above B' (about 48 ms against 4 or 10 on the throughput
+// property case, which measured the priced ITL at least 2 % over the truth).
+// Pinned at DefaultBaselineSec instead, as the band's fit pins a key that
+// never fitted, b is below a true B' of 10 ms and the term goes negative:
+// that case then prices under the truth on every seed.
+func fitAboveBand(obs []Observation, b float64) (Model, bool) {
+	if !(b > 0) {
+		return Model{}, false
+	}
+	var above, load float64
+	for _, o := range obs {
+		if !(o.K > 0) || !(o.ITLSec > 0) || math.IsInf(o.K, 0) || math.IsInf(o.ITLSec, 0) {
+			continue
+		}
+		above += o.ITLSec - b
+		load += o.K
+	}
+	if !(load > 0) {
+		return Model{}, false
+	}
+	a := max(above/load, 0)
+	if math.IsNaN(a) || math.IsInf(a, 0) {
+		return Model{}, false
+	}
+	return Model{A: a, B: b}, true
 }
 
 // DefaultMinSettledSamples is the fewest readings, from replicas past their
