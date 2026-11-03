@@ -40,68 +40,28 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// Learner PR 4a moves the ITL line, and the slo analyzer's line, onto the
-// settle tracker, six switches each.
-//
-//   - The wait after a controller restart moves the goldens whose load
-//     reaches the line within its settle of the controller start: the
-//     in-process runs, and the ols-sweep-slo-restart recording, whose
-//     controller came back under load. Each line refits steadyFor later.
-//   - The move itself moves the in-process runs on the cycles after their
-//     clock jumps a day: 25 hours with no cycle at all is, to the tracker,
-//     an absence past its tolerance (settle.Rejoined), and the replicas
-//     settle again; the line's own trace counted an absence only by cycles
-//     that went without a replica, and saw none. In the acceptance and
-//     engine runs that is one full fit the line no longer publishes (10:32
-//     the next day), and in the slo line four cycles priced from a pinned
-//     fit, not a full one. The cluster recordings are held.
-//   - The absence rule and the Finite-only reading move nothing: no
-//     recording misses a replica's row for a cycle, and every recorded Pod
-//     is one rank. Neither do the tracker's two rules with switches of
-//     their own, a restart under the same name and idle on evidence: no
-//     recording has a Pod's Ready time change with no row that is not Ready
-//     between, or a row that read nothing. Their unit tests hold all four
-//     (heldBy).
-//
-// The acceptance and engine recordings were taken again for this PR, with
-// the generator's Ready time fixed for the day: the earlier ones gave each
-// replica a new Ready time on every cycle, an engine restart each time to
-// the tracker, and no line of theirs ever settled. Their base digests below
-// are the all-off replays of the new recordings.
-//
-// Earlier PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch
-// cap, #415's mu key, #392's first k2 reading, #420's batch-cap readers,
-// #274's ITL per accepted token, #276's output spread, #427's zero-replica
-// batch cap) are not here: "all
-// off" is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
+// #277 prices a resident request at the KV the running requests are
+// measured to hold, between the hit rate's discount and none, and at none
+// with no reading. It moves the derived mu, and with it the decode demand
+// the floor and the backlog cap price from it, in the two fixtures whose
+// derived mu the KV binds, not the batch cap: e1 and e1-tuned, both
+// cluster recordings with a hit rate of about 1.5%. Every rate moved falls
+// (ServiceRate.Rate by 0.02% to 0.86%), as the change says it must: a
+// reading can take the discount back, never add to it. The decode demand
+// rises with it on most cycles it moves (246 of 285 in e1, 191 of 229 in
+// e1-tuned, by up to 0.87%) and falls on the rest by at most 0.08%: the
+// backlog an engine is charged is capped at what it drains, mu x T
+// (localQueueBacklog), so a lower mu can lower that term (not traced cycle
+// by cycle). In e1 1020 derived-mu lines priced a reading and 119 had none
+// and priced no discount; in e1-tuned 1034 and 97. The acceptance, engine and mu-paths
+// fixtures carry a hit rate of 0.1 but move nothing: every derived mu they
+// price is capped at their batch cap of 64, which the KV per request does
+// not reach.
 var replaySwitches = map[string][]string{
-	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
-	saturation.SwitchITLWaitsAfterRestart: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
-		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
-		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
-		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+	saturation.SwitchKVPerRequestHitsResident: {
+		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
+		"e1/results.csv", "e1/variant-capacities.csv",
 	},
-	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
-	saturation.SwitchITLReadsFinitePodMean:           nil,
-	saturation.SwitchITLRestartUnderName:             nil,
-	saturation.SwitchITLIdleOnEvidence:               nil,
-	slo.SwitchITLReadsSettle: {
-		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
-		"engine/slo-published.csv", "engine/variant-capacities.csv",
-	},
-	slo.SwitchITLWaitsAfterRestart: {
-		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
-		"engine/slo-published.csv", "engine/variant-capacities.csv",
-		"mu-paths/slo-published.csv", "mu-paths/variant-capacities.csv",
-		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
-	},
-	slo.SwitchITLKeepsSettleThroughMissingRow: nil,
-	slo.SwitchITLReadsFinitePodMean:           nil,
-	slo.SwitchITLRestartUnderName:             nil,
-	slo.SwitchITLIdleOnEvidence:               nil,
 }
 
 // switchPackage is the package whose hook accepts the switch name.
@@ -148,6 +108,37 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchBatchCapZeroReplica: nil,
 	// #276's spread of output lengths in the KV per request.
 	saturation.SwitchKVPerRequestOutputDispersion: nil,
+	// Learner PR 4a: the ITL line, and the slo analyzer's line, on the
+	// settle tracker. The wait after a controller restart moves the goldens
+	// whose load reaches the line within its settle of the controller start;
+	// the move itself the in-process runs after their clock jumps a day. The
+	// other four of each move nothing and are held by their unit tests.
+	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
+	saturation.SwitchITLWaitsAfterRestart: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
+		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
+		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+	},
+	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
+	saturation.SwitchITLReadsFinitePodMean:           nil,
+	saturation.SwitchITLRestartUnderName:             nil,
+	saturation.SwitchITLIdleOnEvidence:               nil,
+	slo.SwitchITLReadsSettle: {
+		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
+		"engine/slo-published.csv", "engine/variant-capacities.csv",
+	},
+	slo.SwitchITLWaitsAfterRestart: {
+		"acceptance/slo-published.csv", "acceptance/variant-capacities.csv",
+		"engine/slo-published.csv", "engine/variant-capacities.csv",
+		"mu-paths/slo-published.csv", "mu-paths/variant-capacities.csv",
+		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+	},
+	slo.SwitchITLKeepsSettleThroughMissingRow: nil,
+	slo.SwitchITLReadsFinitePodMean:           nil,
+	slo.SwitchITLRestartUnderName:             nil,
+	slo.SwitchITLIdleOnEvidence:               nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -339,28 +330,12 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (a16c161a3, main after #441, whose goldens are
-// main's after #437, 939af5e36), and for the
-// acceptance and engine goldens, taken again here, their all-off replays.
+// commit's goldens hold it (ebefc0b74, main after #443).
 var switchBase = map[string]string{
-	"acceptance/learned-state.csv":                 "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
-	"acceptance/lines.csv":                         "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
-	"acceptance/slo-published.csv":                 "2276ef61bd4b7203d9d06c26192046b2429ad12b5e5ef668c776a46a15ba36f8",
-	"acceptance/variant-capacities.csv":            "a7ad07abe1eb85bcaf3786d10d9822785a2ec073cd0dee0c02f78eea2dee9c73",
-	"engine/composite-variants.csv":                "f0d66647fc3b2d02a4c2f9d79616ebfb7123a4a31746644079f720522d68d64d",
-	"engine/learned-state.csv":                     "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
-	"engine/lines.csv":                             "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
-	"engine/slo-published.csv":                     "ed09c2bd28e3055a9b8744d87c588c2231e64906516f28d8b93b7e908e04e912",
-	"engine/variant-capacities.csv":                "052ea4872813f6401a7536a2a359e2cbcbb4dcedfc12a315dba9f9c93411fd79",
-	"mu-paths/learned-state.csv":                   "4a7667542a86f5fb12a683a01eea3426c51b668ddd0e7aab18ed133608a1a8e9",
-	"mu-paths/lines.csv":                           "b293056a8e459d7d6fd05755aa8fa5e7920f4f68355a29a381fb1b789121f396",
-	"mu-paths/slo-published.csv":                   "761496fb84fd97d26bb873e52051eded6bd7ca82d36dfe59bca597f905aad6f1",
-	"mu-paths/variant-capacities.csv":              "d8fdaadd8f890d8b3bba0e925bbd9ccca03b650911222f3bd9b9f79f7531cdba",
-	"ols-sweep-slo-restart/composite-results.csv":  "661c30baab0ade02fcd3cc9de75c8c4916ebdf52f4382a67f285cc8142c9ba8c",
-	"ols-sweep-slo-restart/lines.csv":              "322e9075099cd49f4480ac06e85a9febbef96ba71af0f056448e1d366c07cb1f",
-	"ols-sweep-slo-restart/results.csv":            "38f2ca37c1246dff5cb3d713cbf73e10e189345e24bbe3c757a90d01137755b4",
-	"ols-sweep-slo-restart/slo-published.csv":      "7629254bdea8f46e51e241e9d6bf7644914dbbb5c69fc310f424643cc41cba87",
-	"ols-sweep-slo-restart/variant-capacities.csv": "9aa0b55d9a5742e32dc1ede8df641bbc1374429cb6c25680e666d465f257fb08",
+	"e1-tuned/results.csv":            "2112395c6117d8706af287683103ea5e50427d06185d06c56b68b81595777f01",
+	"e1-tuned/variant-capacities.csv": "e5bb2e56c8ce764f3eb3ca38619f91f37e722e9ba271cdce401e3c2086bf4c08",
+	"e1/results.csv":                  "5f88c8ad7b27f1e80cb6751fdd490653e3b399afc6e386cffdc187154f2cbcd8",
+	"e1/variant-capacities.csv":       "a84f06a5af093a84ad5b7f49ace7f02fd80d9e595c8fcca3fd5ea1c9c528af9b",
 }
 
 // The slow tests of this package run in parallel with each other (each

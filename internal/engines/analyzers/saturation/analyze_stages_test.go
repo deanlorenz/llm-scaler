@@ -54,6 +54,7 @@ var derivedMuFields = []string{
 	"pod",
 	"rate",
 	"replicaKvTokens",
+	"residentKVKnown", "residentKVPerSeq",
 	"seqs",
 	"tokenSec",
 	"variant",

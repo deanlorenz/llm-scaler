@@ -423,7 +423,10 @@ prefill-role Pod reads Empty permanently, so readers gate by role.
 `RunningRequestsKnown` is a prerequisite of #277 (reading
 `num_requests_running` as resident load). `RunningRequests` is "zero when the
 metric is unavailable" today, so without the bit a missing series would read
-as 0 resident.
+as 0 resident. #277 reads it as that: the derived mu prices a resident request
+at the KV the running requests hold, between the hit rate's discount and none,
+and a row without the bit is no reading, priced at no discount (behind the
+switch `kv-per-request-hits-resident`).
 
 **ITL is three-state:** finite, empty window, or absent. ITL is
 `rate(sum[1m]) / rate(count[1m])`

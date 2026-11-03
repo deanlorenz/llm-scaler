@@ -1126,6 +1126,7 @@ kueue.releaseToNonReclaimingLenders
 kueueBorrowedGPUs
 kv-bound
 kv-cache-utilization-scorer
+kv-per-request-hits-resident
 kv-per-request-output-dispersion
 kvCacheThreshold
 kvCacheUsagePct
@@ -1770,6 +1771,8 @@ reserved
 residency
 resident
 residentDemand
+residentKVKnown
+residentKVPerSeq
 residual
 resolve
 resolved

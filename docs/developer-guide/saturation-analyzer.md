@@ -130,6 +130,51 @@ likewise, and `zero-replica-capacity-estimate` the factor as
 `modelOutputFactor`. The throughput and slo analyzers still price
 `ILeff + OL/2` (#433).
 
+### Prefix-cache hits stay resident
+
+`ILeff` is right for compute and wrong for memory (issue #277). A hit saves KV
+only when the block it hits is held by another running request too. A hit on a
+block that a finished request left behind makes that block the new request's
+own, so it stays resident as if it had been computed. With multi-turn reuse
+most hits are of that kind, and `ILeff + D x OL/2` then over-counts the
+requests a cache holds, by up to about 4x. The derived mu sizes its sequence
+count by that figure, so it over-stated mu and ordered too few replicas.
+
+The engine reports how many requests it is running
+(`vllm:num_requests_running`, `sglang:num_running_reqs`,
+`ReplicaMetrics.RunningRequests`), so the derived mu and the GPS check price a
+resident request at the KV those requests are measured to hold
+(`prefix_cache_kv.go`):
+
+```
+measured = sum(KvUsageInstant x TotalKvCapacityTokens) / sum(RunningRequests)
+KVreq    = clamp(measured, ILeff + D x OL/2, IL + D x OL/2)
+```
+
+The sums run over the Ready generating replicas that report both readings
+(`fleetResidentKVPerRequest`). Warm-pool bridges and replicas with no live
+capacity are left out. The clamp keeps the reading to the hit term. Below the
+lower bound, requests are part way through their prefill; above the upper
+bound, the prompt length lags the workload. Neither is more or less sharing
+than the hit rate allows.
+
+With no reading, the request is priced at `IL + D x OL/2`, with no discount.
+No reading means fewer than eight requests running across the fleet
+(`minResidentSequences`), a missing running-requests or KV series, or an
+outstanding shape change, when the resident requests belong to both shapes.
+The issue left this choice open, and this is the safer side: keeping `ILeff`
+is the over-statement the issue is about. So the derived mu is never above the
+one before. The cost is an over-order of up to the hit discount on a caching
+fleet with fewer than eight requests running, where the arrival rate is small.
+
+The prompt that prefill's throughput key is discounted by (`throughputKeyInput`)
+keeps `ILeff`, because a hit does save prefill compute. The derived k2 and the
+zero-replica estimate already price the full prompt. `derived-mu` logs the
+reading as `residentKVPerSeq` and whether there was one as `residentKVKnown`.
+The replay switch is `kv-per-request-hits-resident`
+(`SwitchKVPerRequestHitsResident`). The throughput and slo analyzers still
+price their KV per request at `ILeff`.
+
 `KVreq` is the single most load-bearing quantity in the analyzer. Everything
 that asks "how many requests fit" divides by it.
 
@@ -1516,7 +1561,10 @@ the per-variant `replica-capacity-summary` stands in for them.
   sequence count, the ITL line or the pricing point. `kvReqPerSeq` is the
   priced shape and `kvReqFleet` the fleet's own; `outputDispersion` is the
   spread of output lengths priced into `kvReqPerSeq` (1 is none, or none
-  read); `muShortWindow` says whether the pair moved to the short window.
+  read); `residentKVPerSeq` is the KV the running requests were measured to
+  hold, which bounds `kvReqPerSeq` between the hit rate's discount and none,
+  and `residentKVKnown` says whether there was a reading (issue #277);
+  `muShortWindow` says whether the pair moved to the short window.
   It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
   `itl-line-borrowed`, `itl-line-none`, `itl-gps-mismatch`), carries `namespace` beside
   `variant`: one Deployment applied to two namespaces logs the same variant
