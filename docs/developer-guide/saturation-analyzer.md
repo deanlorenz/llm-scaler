@@ -49,7 +49,7 @@ recalibrated downstream — see [RC and SC](#rc-and-sc).
    outstanding ([Shape change](#shape-change)).
 3. Resolve the generation length the queue is priced at, and the shape `mu` is
    priced at ([The service rate](#the-service-rate-mu)).
-4. Fit one ITL line per decode variant ([The ITL line](#the-itl-line)).
+4. Fit one ITL line per decode or aggregated variant ([The ITL line](#the-itl-line)).
 5. Per replica: compute `k1`, `k2`, the effective capacity, and `mu`
    ([Per-replica capacity](#per-replica-capacity)).
 6. Price the scheduler queue and attribute it to a role
@@ -531,6 +531,50 @@ A fit is refused unless it is usable (`ValidModel`): `A` and `B` finite,
 `A > 1e-12` (a flat or falling line is not this physics), and
 `A x 0.85 + B > 0`.
 
+### Which roles fit a line
+
+`itlLineRole` (`itl_aggregated.go`) decides which variants fit a line:
+decode always, an aggregated variant (`RoleBoth`, or no role label) with
+`SwitchITLFitsAggregated` (`itl-line-fits-aggregated`, issue #432) on, and
+prefill never. Before #432 only decode fitted, so an ordinary unlabeled
+deployment had no line at all. The same rule gates the derived mu
+(`priceReplicas`), the service-rate signal (`attachServiceRates`, which reads
+`itlModels`), the GPS check (`noteLineMismatch`) and the learner report's
+role. The settle tracker, the ITL band and the cap admission were never
+role-gated beyond prefill and need nothing. What stays decode-only is
+P/D-specific: the decode view of the queue (`pd_decode_queue.go`), the
+settled-idle count that relaxes prefill's hold (`idle_room.go`) and decode's
+saturation flag.
+
+An aggregated line is **reported, never priced** (`itlLineReportOnly`, until
+#275). `priceReplicas` derives its mu and logs it (`derived-mu` with
+`reportOnly=true`), then prices the replica with no derived figure
+(`derivedWhyReportOnly`), exactly as with the switch off: no order, no
+settled shape change and no borrow record rests on it. The figure reaches
+`wva_service_rate_per_replica` as `source=derived-report-only` when the
+variant has no other rate. Why it may not size yet, the inputs for #275:
+
+- Shape dependence. An aggregated pod's ITL carries the chunked prefill it
+  runs between decode steps, about `n*IL/OL` prompt tokens a step, so the
+  line is a property of the request shape. A line fitted under one shape
+  mis-prices another, and nothing bounds how long: a pinned fit takes several
+  cycles to move, a held slope (#284), a restored line and a `|both` borrow
+  carry an old shape for as long as they are kept, well past the 5-minute
+  shape-change window.
+- Prefill occupancy. A sequence being prefilled holds KV and emits no token,
+  so a mu priced from `k` and `ITL(k)` over-states the rate by about
+  `TTFT/(OL*ITL)`.
+- One shape per fleet. The line is fitted at the fleet's shape, so a variant
+  serving a shape of its own gets an average.
+
+An aggregated line is shared under its own key: `itlLineKeyForRole` appends
+`|both` to the physics key, so the same model on the same engine
+configuration keeps one line for decode pods and another for aggregated pods,
+and neither lends to the other. The window key is per variant already. An
+aggregated pod's ITL also carries the chunked prefill it interleaves, so its
+line depends on the request shape (issue #275); it is fitted at the shape the
+fleet runs and is not corrected for a change of it.
+
 ### ITL per accepted token (speculative decoding)
 
 vLLM observes `inter_token_latency` once per request per engine step, however
@@ -715,7 +759,7 @@ Each of the six is a replay switch, in both analyzers:
 `itl-keeps-the-settle-through-a-missing-row` and
 `itl-reads-the-finite-pod-mean`, with an `slo-` prefix in the slo analyzer.
 Off, each does what the line did before 4a. The line is a
-learner on the shared rules too: a `learn.Report` per decode variant
+learner on the shared rules too: a `learn.Report` per variant that fits a line
 (`itl_learner.go`), `learner-write` at `--v=3` when A or B moves more than
 `ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
 so the forget-learned-state annotation reaches it by name.

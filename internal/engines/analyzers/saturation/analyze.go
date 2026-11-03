@@ -117,7 +117,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	// learner-write lines.
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
-	a.closeITLCycle(input.Namespace, input.ModelID)
+	a.closeITLCycle(input.Namespace, input.ModelID, c.rolesByVariant)
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
@@ -236,6 +236,10 @@ type cycle struct {
 	// itlHeld marks a variant whose own line is its last slope held for want
 	// of readings (itl.Reading.SlopeHeld), not a fit made this cycle.
 	itlHeld map[string]bool
+	// reportedMu is, per variant, the derived mu of each of its own
+	// replicas that was reported and not priced (itlLineReportOnly), for the
+	// service-rate signal. Written by priceReplicas.
+	reportedMu map[string][]float64
 	// itlSamples is how many readings each decode variant's OWN ITL window
 	// holds after this cycle's, whatever line it ends up priced on. Carried
 	// for the service-rate signal (attachServiceRates), where it is the
@@ -465,7 +469,8 @@ func (c *cycle) fitLines() {
 	sort.Strings(variants)
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
-		// Decode only. ITL is the latency between GENERATED tokens, and
+		// Decode, and an aggregated variant (itlLineRole, issue #432); never
+		// prefill. ITL is the latency between GENERATED tokens, and
 		// deriveMuAtCap divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
 		// same arithmetic would read three orders of magnitude low, which is
@@ -474,7 +479,7 @@ func (c *cycle) fitLines() {
 		// How long this variant's replicas take to become Ready, folded in from
 		// whatever finished starting since the last cycle.
 		//
-		// BEFORE the decode guard, deliberately. That guard is about ITL -- the
+		// BEFORE the role guard, deliberately. That guard is about ITL -- the
 		// latency between generated tokens, which prefill barely has -- while a
 		// start time is an image and a node, which prefill has exactly like
 		// decode. A P/D fleet projects its prefill backlog too, and leaving
@@ -485,7 +490,8 @@ func (c *cycle) fitLines() {
 		c.a.noteReplicaStart(variantKey,
 			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
 
-		if domain.CanonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
+		role := c.rolesByVariant[variant]
+		if !c.a.itlLineRole(role) {
 			continue
 		}
 		// Fit this variant's OWN readings first, into its own window, keyed
@@ -532,14 +538,17 @@ func (c *cycle) fitLines() {
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
 		// The line as a learner: its report and learner-write (itl_learner.go).
-		c.a.noteITLLearner(c.input.Namespace, c.input.ModelID, variant, variantKey, reading, c.a.now(), c.logger)
+		c.a.noteITLLearner(c.input.Namespace, c.input.ModelID, variant, role, variantKey, reading, c.a.now(), c.logger)
 		own := reading.Model
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.
 		c.itlSamples[variant] = c.a.itlWindowLen(variantKey)
-		physicsKey := c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant])
+		// An aggregated variant's line is shared only with other aggregated
+		// variants: its ITL carries the prefill it interleaves, so it is not a
+		// decode variant's line (itlLineKeyForRole).
+		physicsKey := itlLineKeyForRole(c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
+			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant]), role, c.fpByVariant[variant])
 
 		if !own.IsZero() {
 			// A measured line becomes the line for this engine configuration,
@@ -618,6 +627,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// Why a decode replica has no derived mu, by pod, for
 	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
 	muMissing := make(map[string]string)
+	c.reportedMu = make(map[string][]float64)
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
@@ -686,15 +696,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// between two generated tokens, and a prefill replica emits one and
 		// hands the KV to decode, so tokenSec/avgOutput does not describe it.
 		//
-		// This has always held, but only by accident: fitLines populates
-		// itlModels for RoleDecode alone, so a prefill lookup returned the
-		// zero Model and deriveMuAtCap declined on IsZero() in another file, keyed
-		// on the opposite condition. A role-classification slip, or anyone
-		// legitimately extending that population to RoleBoth, would have
-		// started pricing prefill from decode's physics with nothing to say
-		// so. Stated here instead, beside the call it governs.
+		// The roles priced from it are the roles fitLines fits a line for,
+		// by the same rule (itlLineRole): decode, and an aggregated variant
+		// (issue #432), whose pods generate as decode's do. Stated here as
+		// well as there, so a prefill replica is never priced from a line
+		// even if one were in itlModels.
 		var derived derivedMu
-		if domain.CanonicalRole(role) == domain.RoleDecode {
+		if c.a.itlLineRole(role) {
 			kPrice := pricingK(c.cfg)
 			// The cap the derived k2 is priced at (pricingBatchCap), so a
 			// declared or learned cap reaches mu as it reaches P3
@@ -727,6 +735,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.logger.V(perReplicaLogLevel).Info("derived-mu",
 				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 				"ok", derived.ok,
+				// An aggregated line's figure is reported, not priced (#432).
+				"reportOnly", itlLineReportOnly(role),
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
@@ -768,9 +778,19 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
+		// An aggregated line's derived mu is reported, never priced
+		// (itlLineReportOnly): the replica is priced as if it had none, and
+		// the figure goes to the service-rate signal only.
+		priced := derived
+		if derived.ok && itlLineReportOnly(role) {
+			if !rm.FromWarmPool {
+				c.reportedMu[rm.VariantName] = append(c.reportedMu[rm.VariantName], derived.rate)
+			}
+			priced = derivedMu{why: derivedWhyReportOnly}
+		}
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.tune, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.keys, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
+			c.fleetHitRate, priced, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.shapeChanging, c.logger)

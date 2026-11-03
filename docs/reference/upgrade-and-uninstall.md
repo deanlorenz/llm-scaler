@@ -104,6 +104,10 @@ only to change it. Limiters an admin published in a policy namespace
    NAMESPACE=<namespace> WVA_NS=wva-<namespace> make scaledobjects-rewire
    ```
 
+### Upgrading from v0.10.2 to the next release
+
+An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now reports an inter-token-latency line and the service rate it derives: `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived-report-only"}` appear for it. Its sizing does not change: nothing is sized from that rate until issue #275 makes the line account for the request shape.
+
 ### Upgrading from v0.10.1 to v0.10.2
 
 Follow [Upgrade](#upgrade) above: back up the policy first, check out

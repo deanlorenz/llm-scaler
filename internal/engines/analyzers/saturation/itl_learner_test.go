@@ -152,9 +152,9 @@ func TestITLLearner_LearnerWriteLogsALineThatDrops(t *testing.T) {
 	line := itl.Reading{Model: itl.Model{A: 0.04, B: 0.008}, Tier: itl.TierOLS}
 	var none itl.Reading
 	for i, r := range []itl.Reading{line, none, none, line} {
-		a.noteITLLearner("ns", "m", "v", "ns|m|v|H200|1", r, itlSettleT0.Add(time.Duration(i)*restartCycle), logger)
+		a.noteITLLearner("ns", "m", "v", domain.RoleDecode, "ns|m|v|H200|1", r, itlSettleT0.Add(time.Duration(i)*restartCycle), logger)
 	}
-	a.noteITLLearner("ns", "m", "w", "ns|m|w|H200|1", none, itlSettleT0, logger)
+	a.noteITLLearner("ns", "m", "w", domain.RoleDecode, "ns|m|w|H200|1", none, itlSettleT0, logger)
 	writes := learnerWrites(logs, learn.ITL)
 	require.Len(t, writes, 3, "the first line, its drop once, and its return")
 	drop := writes[1].ContextMap()
