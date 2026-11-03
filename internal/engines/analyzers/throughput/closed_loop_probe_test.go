@@ -96,7 +96,6 @@ type probeCase struct {
 type probeResult struct {
 	learnertest.Result
 	reasons map[string]int
-	held    int
 }
 
 // runProbe drives pc with the analyzer newA builds (again at a restart).

@@ -21,7 +21,7 @@ func stepFleet() Fleet {
 			}
 			return 6
 		},
-		Need:    func(lambda float64) int { return Ceil(lambda) },
+		Need:    Ceil,
 		Horizon: 30 * time.Minute}
 }
 
