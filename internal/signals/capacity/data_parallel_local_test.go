@@ -30,6 +30,15 @@ func TestVLLMReadsTheLocalDataParallelSize(t *testing.T) {
 	assert.False(t, p.IsCapacityCompatible(&q), "but compared for capacity")
 	assert.True(t, p.IsCapacityCompatible(&p))
 
+	// Compared as the engine runs it: a local size equal to the global one,
+	// or above it, is the same engine as one left unstated.
+	for _, local := range []int{16, 32} {
+		s := q
+		s.DataParallelSizeLocal = local
+		assert.True(t, s.IsCapacityCompatible(&q), "local %d against unstated", local)
+		assert.True(t, q.IsCapacityCompatible(&s), "unstated against local %d", local)
+	}
+
 	r := ParseEngineArgs(inferenceengine.EngineVLLM, deploymentWithContainers(vllmContainer([]string{
 		"vllm", "serve", "org/m", "--data-parallel-size", "8",
 	})))

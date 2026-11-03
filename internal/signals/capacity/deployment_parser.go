@@ -350,6 +350,18 @@ func parallelSize(n int) int {
 	return n
 }
 
+// localDataParallelSize is the ranks one pod runs as the engine reads its
+// flags: --data-parallel-size-local where stated, never above the global
+// size, else the global size. Two records that state the local size and
+// leave it to default compare equal when the engine runs them alike.
+func (p *EngineParams) localDataParallelSize() int {
+	global := parallelSize(p.DataParallelSize)
+	if p.DataParallelSizeLocal > 0 {
+		return min(p.DataParallelSizeLocal, global)
+	}
+	return global
+}
+
 // Complete reports whether every flag this parser maps was actually read.
 //
 // A false result does not mean the params are unusable -- the defaults are
@@ -1474,7 +1486,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.Quantization == other.Quantization &&
 		p.MemoryLayout == other.MemoryLayout &&
 		parallelSize(p.DataParallelSize) == parallelSize(other.DataParallelSize) &&
-		p.DataParallelSizeLocal == other.DataParallelSizeLocal &&
+		p.localDataParallelSize() == other.localDataParallelSize() &&
 		parallelSize(p.PipelineParallelSize) == parallelSize(other.PipelineParallelSize) &&
 		p.ExpertParallel == other.ExpertParallel &&
 		p.SpeculativeConfig == other.SpeculativeConfig &&

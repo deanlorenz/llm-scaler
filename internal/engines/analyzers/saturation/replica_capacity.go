@@ -1270,6 +1270,13 @@ const SwitchZeroReplicaDataParallel = "zero-replica-data-parallel"
 //     balancing reports. A leader in vLLM's internal load balancing manages
 //     every rank and reports the global count, so there the local size
 //     under-prices, the safe side.
+//   - A replica whose pods are unknown (podsPerReplica 0: no pod requests a
+//     GPU explicitly, PodGPUs nil) with no local size stated: 1, unless its
+//     GPUs (gpusPerReplica) are exactly the ranks' data x tensor x pipeline
+//     parallel GPUs. With no requests GPUsPerReplica defaults to 1 for a
+//     Deployment and a LeaderWorkerSet alike, which says nothing about how
+//     many pods hold the ranks; a single pod with no GPU requests is then
+//     priced at one rank too, the safe side.
 //   - Prefill: 1, as it keeps the flags' cap (zeroReplicaBatchCap). P3
 //     never prices a live prefill replica, so the formula is not the figure
 //     its first replica will get.
@@ -1280,7 +1287,8 @@ const SwitchZeroReplicaDataParallel = "zero-replica-data-parallel"
 // engine's KV (the store reads it as the replica's), so it still holds a
 // data-parallel variant to about one rank: an under-price, left for its own
 // change.
-func (a *SaturationAnalyzer) zeroReplicaRanks(role string, params *capacity.EngineParams, podsPerReplica int) int64 {
+func (a *SaturationAnalyzer) zeroReplicaRanks(role string, params *capacity.EngineParams,
+	podsPerReplica, gpusPerReplica int) int64 {
 	if !a.zeroReplicaDP || params == nil || params.Engine != inferenceengine.EngineVLLM ||
 		domain.CanonicalRole(role) == domain.RolePrefill {
 		return 1
@@ -1290,6 +1298,10 @@ func (a *SaturationAnalyzer) zeroReplicaRanks(role string, params *capacity.Engi
 		return int64(min(params.DataParallelSizeLocal, global))
 	}
 	if podsPerReplica > 1 {
+		return 1
+	}
+	rankGPUs := global * max(params.TensorParallelSize, 1) * max(params.PipelineParallelSize, 1)
+	if podsPerReplica == 0 && gpusPerReplica != rankGPUs {
 		return 1
 	}
 	return int64(global)
@@ -1351,7 +1363,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 
 	// The formula, and the budget it falls back to, price one engine rank;
 	// the leader pod runs ranks of them (zeroReplicaRanks, issue #438).
-	ranks := a.zeroReplicaRanks(role, rec.EngineParams, podsPerReplica)
+	ranks := a.zeroReplicaRanks(role, rec.EngineParams, podsPerReplica, gpuCount)
 
 	// For deployment-derived records, try k2 derivation with workload data
 	if rec.EngineParams != nil && modelAvgOutput > 0 {

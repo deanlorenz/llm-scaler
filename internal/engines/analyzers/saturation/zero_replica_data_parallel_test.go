@@ -181,6 +181,29 @@ func TestZeroReplicaDataParallel_AGroupIsPricedAtItsLeadersRanks(t *testing.T) {
 	assert.EqualValues(t, 8, f["engineRanks"])
 }
 
+// With the pods of a replica unknown (no pod requests a GPU explicitly, so
+// PodGPUs is nil) and no local size stated, the global size is read only when
+// the replica's GPUs are exactly its ranks'. With no requests GPUsPerReplica
+// defaults to 1, for a LeaderWorkerSet group of 16 ranks and a single pod of
+// 8 alike, and both stay at one rank; so does a count that does not add up.
+// A replica of 16 GPUs for 16 ranks of one GPU reads as one pod: what is left
+// of the ambiguity, pinned.
+func TestZeroReplicaDataParallel_UnknownPodsNeedTheGPUsToMatch(t *testing.T) {
+	for _, tc := range []struct {
+		dp, gpus int
+		ranks    int64
+	}{
+		{16, 1, 1},
+		{8, 1, 1},
+		{16, 32, 1},
+		{16, 16, 16},
+	} {
+		f, perReplica := dpRun{params: dpParams(tc.dp, 1, 0), gpus: tc.gpus}.derived(t)
+		assert.EqualValues(t, tc.ranks, f["engineRanks"], "dp %d on %d GPUs", tc.dp, tc.gpus)
+		assert.EqualValues(t, tc.ranks*320_000, perReplica, "dp %d on %d GPUs", tc.dp, tc.gpus)
+	}
+}
+
 // With no workload averages yet, the estimate falls back to the stored
 // budget, one rank's 8192 tokens a step; a pod of 8 ranks runs eight:
 // 65,536. Off, 8192 as before.

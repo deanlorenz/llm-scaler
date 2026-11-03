@@ -155,7 +155,7 @@ func TestEveryComparedFieldChangesTheAnswer(t *testing.T) {
 		"WeightDtype":               func(p *EngineParams) { p.WeightDtype = "float16" },
 		"Quantization":              func(p *EngineParams) { p.Quantization = "awq" },
 		"DataParallelSize":          func(p *EngineParams) { p.DataParallelSize = 8 },
-		"DataParallelSizeLocal":     func(p *EngineParams) { p.DataParallelSizeLocal = 4 },
+		"DataParallelSizeLocal":     func(p *EngineParams) { p.DataParallelSize, p.DataParallelSizeLocal = 8, 4 },
 		"PipelineParallelSize":      func(p *EngineParams) { p.PipelineParallelSize = 2 },
 		"ExpertParallel":            func(p *EngineParams) { p.ExpertParallel = true },
 		"SpeculativeConfig":         func(p *EngineParams) { p.SpeculativeConfig = testSpeculativeConfig },

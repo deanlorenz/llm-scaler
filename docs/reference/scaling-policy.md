@@ -1475,7 +1475,8 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
   replicas is priced at the ranks one pod runs, as a running replica is:
   `--data-parallel-size-local` where stated, else `--data-parallel-size`.
   A LeaderWorkerSet group that states no local size is priced at one rank,
-  and so is SGLang, whose running replicas report no rank count.
+  and so is a variant whose pods request no GPUs explicitly, and SGLang,
+  whose running replicas report no rank count.
 - Two variants that declare different caps never price each other.
 - **On a P/D decode, declare the cap.** Learning does not see it there (below).
 
