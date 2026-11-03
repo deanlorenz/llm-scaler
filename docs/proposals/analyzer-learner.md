@@ -1553,7 +1553,8 @@ keys differ. What blocks the move today, each fixed in 4b-0:
 
 The `Reason` values map from `itl.Reading`: `TierOLS` is `T1-ols`; pinned with
 a learned B `T2-pinned`, else `T2-default`; no line `T2-failed`; a held slope
-`T2-held` (new).
+`T2-held` (new); the above-band fallback `T2-above-band` (new, added in
+4b-1's review: [4b-1 as built](#4b-1-as-built)).
 
 #### Named changes
 
@@ -1563,7 +1564,7 @@ base goldens.
 
 | switch | changes | an operator sees | negative control (fails on the parent) |
 | --- | --- | --- | --- |
-| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. The shape-change clear through `ClearWindow` | `Reason` `T2-held`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
+| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. The shape-change clear through `ClearWindow`, which drops the held slope too; the above-band fallback for a key with no line and no slope to hold ([as built](#4b-1-as-built)) | `Reason` `T2-held` and `T2-above-band`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
 | `throughput-itl-keeps-the-window-on-gps-mismatch` | Three cycles of GPS mismatch no longer clear the window; the comparison stays a diagnostic, on the minute-mean k, one summary line per variant ([why](#the-gps-mismatch-clear-dropped-in-4b-1)) | `GPS mismatch persisted, clearing observation window` is gone; `GPS mismatch detected` moves to the debug level with a per-variant summary. More full fits on a P/D decode fleet | A correct line with the generation rate 30 % off for three cycles: the window empties on the parent, keeps every reading on |
 | `throughput-itl-reads-the-settle-tracker` | A replica's settle start comes from the engine's tracker, with 4a's rules: restart under its name, idle on evidence, the absence tolerance, the Finite pod mean. Meaningful only with the gate on; on alone it moves nothing | None in logs; a missed scrape no longer restarts a replica's settle | A restart under the same Pod name with no not-Ready row between: settles on, not on the key's own trace |
 | `throughput-itl-waits-after-controller-restart` | After a controller restart, replicas already serving wait their settle. With no snapshot of this line (none exists), the analyzer has no line for `steadyFor` | `T2-failed` and no throughput capacity for about 2 min after a restart: the analyzer is not live, so it neither orders nor vetoes a scale-down | The restart case of 4a, through the throughput analyzer: a line on the first cycle on the parent, none for `steadyFor` on |
@@ -1661,7 +1662,8 @@ recordings then land in 4b-2 with their base goldens. Forget for this line
 own after 4b-3.
 
 Decided on the design: the real 2-GPU recording; the cap stays synthetic;
-the shape-change clear is kept, holding B and the last A (the GPS-mismatch
+the shape-change clear is kept, holding B (it held the last A too until
+4b-1's review dropped that: see [4b-1 as built](#4b-1-as-built)) (the GPS-mismatch
 clear, first kept too, is dropped: see below); the
 analyzer reads `EngineParams` from the store now, not after #345;
 `T2-held` is a new `Reason`; the k-weighted pinned fit is in scope (the
@@ -1701,30 +1703,70 @@ What else 4b-1 built:
   contamination paired with heterogeneity (one slower replica moves A by its
   weight); known truth at `itl.DefaultKSat`, direct and on the time base;
   edges (10 readings, spread 0.30, the band at the default and at
-  [0.05, 0.90], `steadyFor` at the default and at 10 min, the sequence cap).
-  The mutant is the steady gate off: joiner warm-up, load step, one reading,
+  [0.05, 0.90], `steadyFor` at the default and at 10 min, the sequence cap);
+  and the above-band fallback against an in-band fit and the truth (below).
+  The stale-B case's 15 % is its declared tolerance: on the tracker the
+  converged B's error has mean about 0 and SD about 3.6 %, so 15 % is about
+  4 SD. The mutant is the steady gate off: joiner warm-up, load step, one reading,
   +Inf ITL, ten readings and both `steadyFor` edges fail on the parent
   (`TestThroughputPropertyMutants`). One ledger row: the sequence cap, owner
   4b-3.
+- **The above-band fallback** (part of `throughput-itl-steady-gate`;
+  `itl.Admission.AboveBandFallback`, which only this line sets). A key with
+  no line from the band and no slope it may hold -- one that never fitted,
+  under load that holds every replica above the band -- fits A from its
+  readings above the band, under the same steady gate, settle stamp and
+  floors (10 readings, 3 settled), with B pinned as the band's fit pins it
+  (`Reason` `T2-above-band`). The band's first fit replaces it; it is never
+  used while the band gives a line or a slope is held, and its A is never
+  held or its B remembered. Without it, a controller restart 15 s before a
+  step into saturation left the restarted line silent for as long as the
+  load stayed up, and with throughput alone the fleet stayed at 4 against a
+  need of 9. Which side it errs on: overloaded readings sit above the line
+  and only steepen A (a lower mu); the pinned B's error enters with a lever
+  of at most 0.15 above the band (0.06 to 4.7 in it). When the pinned B is
+  at or above the true one the fallback prices no higher mu than an in-band
+  fit on the same line; when it is below (a key that never fitted pins 6
+  ms), it can price a little under the truth -- measured at most 2.7 % on
+  the property case `known-truth/throughput-itl/above-band-fallback`, inside
+  known truth's 5 %.
+- **A shape change drops the held slope.** The clear empties the window and
+  now forgets the held A too (`itl.Tracker.ForgetSlope`), on this line only:
+  shorter requests have a higher A, and the old shape's A held into them
+  priced a lower ITL, so fewer replicas, until ten new readings arrived.
+  Until the new shape fits, the line is the above-band fallback or silent.
+  The saturation analyzer's clear is unchanged.
+- **One summary line when the line goes silent or comes back,** at the
+  default level, as the GPS summary: `throughput analyzer: ITL line` with
+  `silent`, the `source`, and the cycle's rows in the band, above it, below
+  it and settling, and what the band's and the above-band windows hold. A
+  GPS mismatch the log opened is closed when the line goes silent or the
+  variant has no shape, and a NaN GPS error (an infinite observed rate) is
+  no mismatch.
 - **Closed-loop probe** (`throughput/closed_loop_probe_test.go`), each
   case run on the tracker and on the parent's line: the slope hold through
   35 min of light load (on: settles at need, the line held 39 cycles;
   parent: runs to the replica cap, ends 6 against a need of 3); a scale-up
   whose joiners carry warm-up ITL (on: peak 6, need 6; parent: peak 33); a
   restart 2 min before a step (on: settles at need; parent: peak 40, ends
-  over). Two known-failing cases: a restart 15 s before a step that pushes
-  every replica above the band leaves the restarted line with no reading
-  for the rest of the run (open; under the engine the saturation analyzer's
-  order carries it, a throughput-only policy has no such floor), and a
-  replica at its cap with siblings below the band has no line (4b-3).
+  over); a restart 15 s before a step that pushes every replica above the
+  band (on: need 9, final 9, under need for 30 s, 8 cycles priced from
+  above the band; with the fallback off, the negative control, final 4 and
+  under need for 24m45s of the 25 min after the restart, as before the
+  fallback). A replica at its cap with siblings below the band: the band
+  still admits nothing (4b-3), and the fallback prices the variant from the
+  capped replica's readings after its tenth.
 - **Verbosity** (`throughput/replica_log_test.go`): the shipped-behaviour
-  row's two tests. At the default level a run logs the same lines at 8
-  replicas as at 64 (1 line, the variant's GPS summary); the parent's line
-  logs 76 and 616. No line passes the CRI limit at the default or the
-  verbose level.
+  row's two tests. At the default level a run does not log more lines at 64
+  replicas than at 8 (1 line at 64, the variant's GPS summary; 3 at 8,
+  where the line is silent for its first cycles and logs that and its
+  return); the parent's line logs 76 and 616. No line passes the CRI limit
+  at the default or the verbose level.
 - **Per-path counters** (`throughput.PathNames`): `throughput-itl-ols`,
-  `throughput-itl-pinned`, `throughput-itl-held` and
-  `throughput-itl-settling`. The golden check requires the first three (the
+  `throughput-itl-pinned`, `throughput-itl-held`,
+  `throughput-itl-settling` and `throughput-itl-above-band`, the last not
+  required of any golden (a recording reaches it only by starting into
+  saturated load). The golden check requires the first three (the
   in-process goldens reach each); settling is zero there by construction and
   is required by `TestGoldens_ThroughputSweepFloors`, which skips, saying
   so, until the `throughput-sweep` recordings are listed in `goldens.yaml`,
