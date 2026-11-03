@@ -397,7 +397,7 @@ func TestPropertyMutants(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(run.failures) == 0 {
+			if len(run.Failures) == 0 {
 				t.Errorf("%s passes on the mutant (%s: %s). The check no longer detects this defect: if a production change weakened the learner or the case, fix that; do not move the row",
 					m.caseID, m.level, m.how)
 				return

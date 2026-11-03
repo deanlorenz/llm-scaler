@@ -243,7 +243,7 @@ func checkMuFirstSampleTimeBase(seed uint64) error {
 			path[s] = truth
 		}
 	}
-	first := sampleTimeBase(path).rate1m[0]
+	first := sampleTimeBase(path).Rate1m[0]
 	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 	if t.throughputRefusal(first, first, derivedMu{rate: truth, ok: true}, 0, false) != "" {
 		return nil
@@ -269,11 +269,11 @@ func checkITLMissedRowTimeBase(newL func() itlLearner) func(uint64) error {
 			}
 			ks[p], lats[p] = sampleTimeBase(k), sampleTimeBase(lat)
 		}
-		cycles := len(ks[0].instant)
+		cycles := len(ks[0].Instant)
 		fleet := func(i int) []domain.ReplicaMetrics {
 			rows := make([]domain.ReplicaMetrics, n)
 			for p := range n {
-				rows[p] = itlRow(fmt.Sprintf("r%d", p), ks[p].instant[i], lats[p].rate1m[i])
+				rows[p] = itlRow(fmt.Sprintf("r%d", p), ks[p].Instant[i], lats[p].Rate1m[i])
 			}
 			return rows
 		}
@@ -345,7 +345,7 @@ func checkK2ScaleTimeBase(seed uint64) error {
 	tb := sampleTimeBase(path)
 	run := func(block int64) (float64, error) {
 		rig := newPropRig()
-		for _, k := range tb.peak1m {
+		for _, k := range tb.Peak1m {
 			rm := satRow("r0", int64(math.Min(k, 0.99)*float64(propKv)), 10, 6)
 			rm.BlockSize, rm.NumGpuBlocks = block, propKv/block
 			if _, err := rig.analyze([]domain.ReplicaMetrics{rm}, decodeStates(1), 6, propCycle); err != nil {
@@ -385,11 +385,11 @@ func checkK2LivenessTimeBase(seed uint64) error {
 	}
 	rig := newPropRig()
 	sum, n := 0.0, 0
-	for i := range min(13, len(tbs[0].peak1m)) {
+	for i := range min(13, len(tbs[0].Peak1m)) {
 		rows := make([]domain.ReplicaMetrics, 2)
 		for p := range rows {
-			rows[p] = satRow(fmt.Sprintf("r%d", p), int64(tbs[p].peak1m[i]*float64(propKv)), 10, 6)
-			sum += tbs[p].peak1m[i] * float64(propKv)
+			rows[p] = satRow(fmt.Sprintf("r%d", p), int64(tbs[p].Peak1m[i]*float64(propKv)), 10, 6)
+			sum += tbs[p].Peak1m[i] * float64(propKv)
 			n++
 		}
 		if _, err := rig.analyze(rows, decodeStates(2), 12, propCycle); err != nil {
@@ -412,7 +412,7 @@ func checkFloorMonotoneTimeBase(seed uint64) error {
 	for s := range arrivals {
 		arrivals[s] = poisson(r, 2+4*float64(s)/float64(secs))
 	}
-	lambdas := sampleTimeBase(arrivals).rate1m
+	lambdas := sampleTimeBase(arrivals).Rate1m
 	rig, err := floorRig()
 	if err != nil {
 		return err

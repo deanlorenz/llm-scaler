@@ -218,7 +218,7 @@ func checkK2FillOn(newL func() k2FillLearner) func(uint64) error {
 		}
 		tb := sampleTimeBase(path)
 		l := newL()
-		for i, tok := range tb.peak1m {
+		for i, tok := range tb.Peak1m {
 			queue := 0
 			if 60+i*int(propCycle/time.Second) >= idleFor {
 				queue = 200
@@ -406,7 +406,7 @@ func checkDemandAlternating(wrap func(*domain.ReplicaMetrics)) func(uint64) erro
 			rig := newPropRig()
 			rig.wrap = wrap
 			var res *domain.AnalyzerResult
-			for i := range tb0.instant {
+			for i := range tb0.Instant {
 				var err error
 				if res, err = rig.analyze([]domain.ReplicaMetrics{tbRow("r0", tb0, i), tbRow("r1", tb1, i)}, decodeStates(2), 0, propCycle); err != nil {
 					return 0, err
@@ -432,8 +432,8 @@ func checkDemandAlternating(wrap func(*domain.ReplicaMetrics)) func(uint64) erro
 // tbRow is a decode replica whose KV is sampled from tb at cycle i: the peak
 // as KvCacheUsage and TokensInUse, the instant as KvUsageInstant.
 func tbRow(pod string, tb timeBase, i int) domain.ReplicaMetrics {
-	rm := satRow(pod, int64(tb.peak1m[i]*float64(propKv)), 0, 1)
-	rm.KvUsageInstant, rm.KvUsageInstantKnown = tb.instant[i], true
+	rm := satRow(pod, int64(tb.Peak1m[i]*float64(propKv)), 0, 1)
+	rm.KvUsageInstant, rm.KvUsageInstantKnown = tb.Instant[i], true
 	return rm
 }
 
@@ -729,7 +729,7 @@ func TestPropertyK2KeyEdgeRejectsAFrozenFirstBucket(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		failed += len(run.failures)
+		failed += len(run.Failures)
 	}
 	if failed == 0 {
 		t.Errorf("a key frozen at its first reading's bucket passed every seed; want the seeds whose first reading is under 500 to fail")
@@ -748,7 +748,7 @@ func TestPropertyK2KeyPositiveControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(run.failures) != 3 {
+	if len(run.Failures) != 3 {
 		t.Errorf("a k2 key that ignores the output length: %s; want every seed to fail", run)
 	}
 	t.Logf("a k2 key that ignores the output length: %s", run)
