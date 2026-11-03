@@ -416,7 +416,7 @@ func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, varian
 	n := f.ForgetVariant(namespace, modelID, variant, token)
 	sloN := 0
 	if e.sloAnalyzer != nil {
-		sloN = e.sloAnalyzer.ForgetVariant(namespace, modelID, variant)
+		sloN = e.sloAnalyzer.ForgetVariant(ctx, namespace, modelID, variant)
 	}
 	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
 		"namespace", namespace, "modelID", modelID, "variant", variant,
@@ -467,7 +467,7 @@ type sloStateKeeper interface {
 	presenceNoter
 	EvictStale(now time.Time) slo.Evicted
 	BeginCycle()
-	ForgetVariant(namespace, modelID, variant string) int
+	ForgetVariant(ctx context.Context, namespace, modelID, variant string) int
 }
 
 var _ sloStateKeeper = (*slo.Analyzer)(nil)

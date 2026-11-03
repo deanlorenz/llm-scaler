@@ -70,7 +70,9 @@ The engine holds the analyzer as `sloAnalyzer`, an interface
   `llm-d.ai/forget-learned-state` token, `ForgetVariant` drops the variant's
   line under every key (window, steady window, traces, intercept, held slope),
   the engine arguments it was learned under, and the variant's accelerator
-  memo, and logs each key it forgot. The token is the saturation analyzer's;
+  memo, and logs each key it forgot on the caller's logger
+  (`ForgottenKeyMessage`). The replay applies the recorded
+  `slo.ForgetVariant` (`TestReplay_TheSLOForgetIsApplied`). The token is the saturation analyzer's;
   this analyzer keeps none. It walks `learn.Learners` and forgets `learn.ITL`,
   its own instance of the line (`forget.go`, issue #431, which also names
   the maps a forget keeps). Replay switch `slo-itl-forget-reaches-the-line`;

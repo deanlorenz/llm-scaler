@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
@@ -22,7 +23,7 @@ import (
 // its line still priced from the readings taken before it, and held the
 // slope fitted from them for up to the slope hold.
 //
-// What a forget takes, per map of the Analyzer: the line (lines), the
+// What a forget takes, per field of the Analyzer: the line (lines), the
 // engine arguments it was learned under (args), its last-seen stamp (seen),
 // and the accelerator memo (accelerators), as the saturation analyzer drops
 // its lastAccelerator: a variant forgotten after a move to new hardware
@@ -30,8 +31,10 @@ import (
 // pods do not resolve one. What it keeps: transients, the model's recent
 // fleet history, which is no learned state of the variant; ownSettled (and
 // ownSettle), when each replica was last seen, which the line reads its
-// settle from and the engine's tracker keeps alike. A test holds every map
-// field to one of the two lists (TestForget_EveryMapIsForgottenOrKept).
+// settle from and the engine's tracker keeps alike; paths, the replay's
+// counters over every fit. The rest is configuration or plumbing (router,
+// store, now, mu, rec, settle). A test holds every field that is not a
+// plain value to one of the three lists (TestForget_EveryFieldIsClassified).
 
 // SwitchITLForgetReachesTheLine is the replay switch for the forget: on, the
 // annotation forgets the variant's ITL line here too, under every key it was
@@ -65,16 +68,19 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 	return n, forgotten
 }
 
-// logForgotten logs each key a forget took, one line per key, with the
-// learner and what forgot it: the keys the saturation analyzer files in its
-// learner report (learn.Report.Forgotten), which this analyzer, with no
-// learner report, logs.
-func logForgotten(namespace, modelID, variant string, forgotten []learn.Forgotten) {
-	logger := ctrl.Log.WithName("slo")
+// ForgottenKeyMessage is the line logged once per key a forget takes, at
+// the default verbosity, beside the engine's one line per variant.
+const ForgottenKeyMessage = "Learned state forgotten for one key, on request"
+
+// logForgotten logs each key a forget took, one line per key, on the
+// caller's logger: the keys the saturation analyzer files in its learner
+// report (learn.Report.Forgotten), which this analyzer, with no learner
+// report, logs. Every key here is forgotten by the operator, so the line
+// names no cause.
+func logForgotten(logger logr.Logger, namespace, modelID, variant string, forgotten []learn.Forgotten) {
 	for _, f := range forgotten {
-		logger.Info("Learned state forgotten for one key, on request",
-			"learner", learn.ITL, "namespace", namespace, "modelID", modelID, "variant", variant,
-			"key", f.Key, "by", f.By)
+		logger.Info(ForgottenKeyMessage, "analyzer", "slo", "learner", learn.ITL,
+			"namespace", namespace, "modelID", modelID, "variant", variant, "key", f.Key)
 	}
 }
 

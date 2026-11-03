@@ -6,6 +6,8 @@ import (
 	"slices"
 	"time"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -190,19 +192,18 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 }
 
 // ForgetVariant forgets one variant's ITL line on an operator's request
-// (forgetVariant), and records the call. The engine calls it when the
-// saturation analyzer acts on a forget token, after that analyzer's own
-// ForgetVariant. It returns how many entries it dropped.
-func (a *Analyzer) ForgetVariant(namespace, modelID, variant string) int {
-	if !a.rec.Active() {
-		n, forgotten := a.forgetVariant(namespace, modelID, variant)
-		logForgotten(namespace, modelID, variant, forgotten)
-		return n
-	}
+// (forgetVariant), logs each key it forgot on ctx's logger, and records the
+// call. The engine calls it when the saturation analyzer acts on a forget
+// token, after that analyzer's own ForgetVariant. It returns how many
+// entries it dropped. One path for recording on and off, which differ only
+// in the event: a forget is rare, so the clock is read either way.
+func (a *Analyzer) ForgetVariant(ctx context.Context, namespace, modelID, variant string) int {
 	now := a.now()
 	n, forgotten := a.forgetVariant(namespace, modelID, variant)
-	logForgotten(namespace, modelID, variant, forgotten)
-	a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
-		Variant: variant, Dropped: n})
+	logForgotten(ctrl.LoggerFrom(ctx), namespace, modelID, variant, forgotten)
+	if a.rec.Active() {
+		a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
+			Variant: variant, Dropped: n})
+	}
 	return n
 }

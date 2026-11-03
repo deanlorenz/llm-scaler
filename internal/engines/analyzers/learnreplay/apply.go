@@ -176,7 +176,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if err := ev.DecodeData(&d); err != nil {
 			return err
 		}
-		r.slo.ForgetVariant(d.Namespace, d.ModelID, d.Variant)
+		r.slo.ForgetVariant(ctx, d.Namespace, d.ModelID, d.Variant)
 
 	case throughput.KindAnalyze:
 		if r.tp == nil {

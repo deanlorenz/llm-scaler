@@ -104,6 +104,22 @@ func TestForgetOnRequest_ReachesTheSLOAnalyzerOncePerToken(t *testing.T) {
 	assert.Equal(t, []string{"ns/m/v1", "ns/m/v1"}, spy.forgotten, "a new token did not ask the slo analyzer again")
 }
 
+// An engine with no slo analyzer (a hand-built one; NewEngine always builds
+// it) still forgets in the saturation analyzer, and does not reach for the
+// missing one.
+func TestForgetOnRequest_NoSLOAnalyzerStillForgetsInSaturation(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	sat := saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(sat)
+	require.Nil(t, e.sloAnalyzer, "premise: the engine has no slo analyzer")
+	deploy := deployWithArgs()
+	deploy.Annotations = map[string]string{annotations.ForgetLearnedState: "t1"}
+	require.NotPanics(t, func() {
+		e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deploy))
+	})
+	assert.Equal(t, "t1", sat.ForgottenToken("ns", "v1"), "the saturation analyzer acted on the token")
+}
+
 // With no saturation analyzer to keep the token, nothing is forgotten in the
 // slo analyzer either: it would forget again on every cycle.
 func TestForgetOnRequest_NoSaturationForgetterForgetsNothingInSLO(t *testing.T) {

@@ -142,7 +142,7 @@ type sloKeeperSpy struct {
 	forgotten []string
 }
 
-func (s *sloKeeperSpy) ForgetVariant(namespace, modelID, variant string) int {
+func (s *sloKeeperSpy) ForgetVariant(_ context.Context, namespace, modelID, variant string) int {
 	s.forgotten = append(s.forgotten, namespace+"/"+modelID+"/"+variant)
 	return 0
 }

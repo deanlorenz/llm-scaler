@@ -163,7 +163,7 @@ func TestCoverage_EachRecordedCallWritesOneEvent(t *testing.T) {
 		{"slo.EvictStale", slo.KindEvictStale, func(f *fixture) { f.slo.EvictStale(at) }},
 		{"slo.BeginCycle", slo.KindBeginCycle, func(f *fixture) { f.slo.BeginCycle() }},
 		{"slo.NoteVariantsPresent", slo.KindNoteVariantsPresent, func(f *fixture) { f.slo.NoteVariantsPresent("ns", "m", []string{"v"}) }},
-		{"slo.ForgetVariant", slo.KindForgetVariant, func(f *fixture) { f.slo.ForgetVariant("ns", "m", "v") }},
+		{"slo.ForgetVariant", slo.KindForgetVariant, func(f *fixture) { f.slo.ForgetVariant(ctx, "ns", "m", "v") }},
 		{"throughput.Analyze", throughput.KindAnalyze, func(f *fixture) { _, _ = f.tp.Analyze(ctx, input) }},
 		{"throughput.Observe", throughput.KindObserve, func(f *fixture) { f.tp.Observe(ctx, at, "m", "ns", input.ReplicaMetrics) }},
 		{"store.FileScaleTarget", capacity.KindFileScaleTarget, func(f *fixture) {

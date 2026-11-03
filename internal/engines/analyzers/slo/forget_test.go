@@ -1,18 +1,26 @@
 package slo
 
 import (
+	"bytes"
+	"context"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
@@ -59,7 +67,7 @@ func TestForget_TheAnnotationForgetsTheLine(t *testing.T) {
 		require.Greater(t, agg.Held, replicas, "premise: agg's window holds more than one cycle")
 		require.Greater(t, sib.Held, replicas, "premise: the sibling's window holds more than one cycle")
 
-		dropped := r.a.ForgetVariant("ns", "m", "agg")
+		dropped := r.a.ForgetVariant(context.Background(), "ns", "m", "agg")
 		after, sibAfter := forgetCycle(r)
 		if !on {
 			assert.Zero(t, dropped, "switch off: nothing is forgotten")
@@ -84,13 +92,13 @@ func TestForget_OnlyTheNamedModelsVariant(t *testing.T) {
 	for range settleCycles + 10 {
 		forgetCycle(r)
 	}
-	assert.Zero(t, r.a.ForgetVariant("ns", "other-model", "agg"))
-	assert.Zero(t, r.a.ForgetVariant("other-ns", "m", "agg"))
-	assert.Zero(t, r.a.ForgetVariant("ns", "m", "ag"), "a name agg starts with")
+	assert.Zero(t, r.a.ForgetVariant(context.Background(), "ns", "other-model", "agg"))
+	assert.Zero(t, r.a.ForgetVariant(context.Background(), "other-ns", "m", "agg"))
+	assert.Zero(t, r.a.ForgetVariant(context.Background(), "ns", "m", "ag"), "a name agg starts with")
 	agg, _ := forgetCycle(r)
 	assert.Equal(t, itl.TierOLS, agg.Tier, "agg's line is untouched")
 	// Control: the same analyzer forgets agg when asked by its own name.
-	assert.Equal(t, 2, r.a.ForgetVariant("ns", "m", "agg"))
+	assert.Equal(t, 2, r.a.ForgetVariant(context.Background(), "ns", "m", "agg"))
 }
 
 // The forget also drops the engine arguments the line was learned under: a
@@ -107,7 +115,7 @@ func TestForget_DropsTheArgumentsTheLineWasLearnedUnder(t *testing.T) {
 	a.seen[key], a.seen[sib] = now, now
 	a.mu.Unlock()
 
-	a.ForgetVariant("ns", "m", "agg")
+	a.ForgetVariant(context.Background(), "ns", "m", "agg")
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	assert.NotContains(t, a.args, key)
@@ -150,7 +158,7 @@ func TestForget_DropsTheAcceleratorMemo(t *testing.T) {
 		held := windowKey("ns", "m", settleAgg)
 		require.Equal(t, held, a.variantKey("ns", "m", unresolved(settleAgg)), "premise: the memo keys an unresolved cycle")
 
-		dropped := a.ForgetVariant("ns", "m", "agg")
+		dropped := a.ForgetVariant(context.Background(), "ns", "m", "agg")
 		got := a.variantKey("ns", "m", unresolved(settleAgg))
 		if !on {
 			assert.Zero(t, dropped)
@@ -186,23 +194,71 @@ func TestForget_ReportsEachForgottenKey(t *testing.T) {
 	}
 }
 
-// Every map the Analyzer holds is either forgotten by a forget or kept on
-// purpose (forget.go names each): a map added later fails here until someone
-// decides. The forgotten ones are held by the tests above; the trackers are
-// listed the same way.
-func TestForget_EveryMapIsForgottenOrKept(t *testing.T) {
+// Every field of the Analyzer that is not a plain value (a bool, a number,
+// a string) is either forgotten by a forget, kept on purpose, or
+// configuration and plumbing (forget.go names each): a map, slice, pointer,
+// struct, interface, func or sync type added later fails here until someone
+// decides. The forgotten ones are held by the tests above.
+func TestForget_EveryFieldIsClassified(t *testing.T) {
 	forgotten := []string{"lines", "seen", "args", "accelerators"}
-	kept := []string{"transients", "ownSettle", "ownSettled"}
+	kept := []string{"transients", "ownSettle", "ownSettled", "paths"}
+	plumbing := []string{"router", "store", "now", "mu", "rec", "settle"}
+	plain := func(k reflect.Kind) bool {
+		switch k {
+		case reflect.Bool, reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			return true
+		}
+		return false
+	}
 	var state []string
 	typ := reflect.TypeFor[Analyzer]()
 	for i := range typ.NumField() {
-		f := typ.Field(i)
-		isTracker := f.Type.Kind() == reflect.Pointer && strings.HasSuffix(f.Type.Elem().Name(), "Tracker")
-		if f.Type.Kind() == reflect.Map || isTracker {
+		if f := typ.Field(i); !plain(f.Type.Kind()) {
 			state = append(state, f.Name)
 		}
 	}
-	require.NotEmpty(t, state, "premise: the reflection found the analyzer's maps")
-	assert.ElementsMatch(t, append(slices.Clone(forgotten), kept...), state,
-		"each map and tracker of the Analyzer must be on forgotten or kept; say which in forget.go")
+	require.Contains(t, state, "lines", "premise: the reflection found the analyzer's state")
+	assert.ElementsMatch(t, slices.Concat(forgotten, kept, plumbing), state,
+		"each field of the Analyzer that is not a plain value must be forgotten, kept or plumbing; say which in forget.go")
+}
+
+// The forget logs one line per key it took, at the default verbosity, on
+// the caller's logger (its fields carried), with recording off and on.
+func TestForget_LogsEachForgottenKeyOnTheCallersLogger(t *testing.T) {
+	other := domain.VariantReplicaState{VariantName: "agg", Role: domain.RoleBoth, AcceleratorName: "H200", GPUsPerReplica: 2}
+	for _, recording := range []bool{false, true} {
+		r := newSettleRig(t, nil)
+		var buf bytes.Buffer
+		if recording {
+			r.a.WithRecorder(learnrec.New(&buf, 0))
+		}
+		for range settleCycles + 2 {
+			forgetCycle(r)
+		}
+		r.a.lines.Observe(windowKey("ns", "m", other), "agg", settleFleet(), itl.Admission{}, r.now)
+
+		// The shipped verbosity: Info and nothing more verbose.
+		core, logs := observer.New(zapcore.InfoLevel)
+		ctx := logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)).WithValues("cycle", "c-1"))
+		r.a.ForgetVariant(ctx, "ns", "m", "agg")
+		lines := logs.FilterMessage(ForgottenKeyMessage).All()
+		require.Len(t, lines, 2, "recording %v: one line per key", recording)
+		for i, want := range []string{windowKey("ns", "m", settleAgg), windowKey("ns", "m", other)} {
+			fields := lines[i].ContextMap()
+			assert.Equal(t, zapcore.InfoLevel, lines[i].Level)
+			assert.Equal(t, want, fields["key"])
+			assert.Equal(t, "agg", fields["variant"])
+			assert.Equal(t, learn.ITL, fields["learner"])
+			assert.Equal(t, "c-1", fields["cycle"], "the caller's logger, with its fields")
+			assert.NotContains(t, fields, "by", "every key here is the operator's: no cause field")
+		}
+		assert.Equal(t, recording, strings.Contains(buf.String(), KindForgetVariant), "the event is recorded only with recording on")
+
+		// Control: a second forget takes nothing and logs nothing.
+		r.a.ForgetVariant(ctx, "ns", "m", "agg")
+		assert.Len(t, logs.FilterMessage(ForgottenKeyMessage).All(), 2)
+	}
 }
