@@ -117,8 +117,9 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence,
-// SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel and
-// SwitchITLFitsAggregated; a name it does not know is an error, and sets
+// SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
+// SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm and
+// SwitchITLAggregatedSizes; a name it does not know is an error, and sets
 // nothing. Never called on a production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -180,6 +181,11 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 
 		// #432: an aggregated variant fits an ITL line.
 		SwitchITLFitsAggregated: &a.itlFitsAggregated,
+
+		// #275: an aggregated line priced by request shape, and sizing
+		// from it.
+		SwitchITLAggregatedShapeTerm: &a.itlAggShapeTerm,
+		SwitchITLAggregatedSizes:     &a.itlAggSizes,
 	}
 }
 

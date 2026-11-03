@@ -126,3 +126,36 @@ func TestTheTrimDropsAnOrphanedLineUnitMarkFirst(t *testing.T) {
 		t.Errorf("the line or its mark was dropped before the orphan: %+v %+v", doc.State.ITLLines, doc.State.ITLLinesPerToken)
 	}
 }
+
+// A line's shape left with no line (#275) is spare, as its unit mark is: the
+// size bound drops it before any entry that prices something, and a line
+// keeps its own shape.
+func TestTheTrimDropsAnOrphanedLineShapeFirst(t *testing.T) {
+	now := time.Now()
+	s := saturation.LearnedState{
+		ITLLines: map[string]saturation.LineSnapshot{"line": {A: 0.05, B: 0.01, FromVariant: "ns|m|v|H100|1",
+			LearnedAt: now.Add(-time.Hour)}},
+		ITLLineShapes: map[string]saturation.LineShapeSnapshot{"line": {G: 250}, "orphan": {G: 600}},
+	}
+	full, dropped, err := encodeLearnedState(s, now, 1<<20)
+	if err != nil || dropped != 0 {
+		t.Fatalf("precondition: full encode, dropped=%d err=%v", dropped, err)
+	}
+	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	if err != nil {
+		t.Fatalf("trimmed encode: %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("one entry over the bound, %d dropped", dropped)
+	}
+	var doc learnedStateDoc
+	if err := json.NewDecoder(strings.NewReader(raw)).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := doc.State.ITLLineShapes["orphan"]; kept {
+		t.Error("the orphaned shape was kept and something else dropped")
+	}
+	if _, kept := doc.State.ITLLines["line"]; !kept || doc.State.ITLLineShapes["line"].G != 250 {
+		t.Errorf("the line or its shape was dropped before the orphan: %+v %+v", doc.State.ITLLines, doc.State.ITLLineShapes)
+	}
+}

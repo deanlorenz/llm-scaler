@@ -187,6 +187,13 @@ func (a *SaturationAnalyzer) forgetITLLocked(namespace, modelID, variant string,
 			delete(a.itlLogged, key)
 		}
 	}
+	// The shape of an aggregated variant's window and line goes with them
+	// (itl_aggregated_shape.go).
+	for key := range a.itlAggregated {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.itlAggregated, key)
+		}
+	}
 	if len(forgotten) > 0 {
 		model := namespace + "|" + modelID
 		if a.itlForgotten[model] == nil {
