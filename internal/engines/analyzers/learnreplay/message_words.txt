@@ -263,6 +263,7 @@ Skipping
 StartOptimizeLoop
 Successfully
 T1-ols
+T2-above-band
 T2-default
 T2-failed
 T2-held
@@ -317,6 +318,7 @@ about
 above
 above-band
 aboveBand
+aboveBandHeld
 absent
 accType
 accelerator
@@ -1032,6 +1034,7 @@ implausible
 important
 in
 in-flight
+inBand
 inactive
 included
 incomplete
@@ -2059,6 +2062,7 @@ side
 sight
 sigmaOK
 signal
+silent
 since
 single
 single-accelerator
@@ -2229,6 +2233,7 @@ thresholdPct
 throughput
 throughput-demand-floor
 throughput-demand-floor-total
+throughput-itl-above-band
 throughput-itl-held
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
