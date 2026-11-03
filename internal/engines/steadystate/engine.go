@@ -1572,6 +1572,7 @@ func (e *Engine) optimizeV2(
 
 		reportSignalReason(namespace, modelID, req)
 
+		req.Passive = e.modelPassive(namespace, modelID)
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
 		modelScaleTargets[utils.GetNamespacedKey(namespace, modelID)] = data.scaleTargets

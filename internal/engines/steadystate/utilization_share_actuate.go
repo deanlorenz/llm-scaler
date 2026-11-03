@@ -755,7 +755,18 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		// on the node its hole is on, not on the freest node.
 		allocation.ReservePromised(g.Nodes, holes)
 	}
-	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
+	// Under a limiter, the passive models are left out of the real pass: they
+	// count against the budget at their real usage, which the limiters already
+	// read, and their would-be growth takes nothing from a model that scales.
+	// Their would-be figures come from a quiet pass over what is left.
+	var decisions []domain.VariantDecision
+	if active, passive := allocation.SplitPassive(requests); greedy && len(passive) > 0 {
+		withheld := allocation.WithholdPromised(constraints, promised)
+		decisions = optimizer.Optimize(ctx, active, withheld)
+		decisions = append(decisions, g.PassiveWouldBe(ctx, passive, withheld, decisions)...)
+	} else {
+		decisions = optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
+	}
 	if e.cycleFitted {
 		// The nodes the pass chose are held from a wake at once, not only
 		// once the cycle's targets are final (WN5). Its borrowed placements

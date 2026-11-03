@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -596,14 +597,8 @@ func (e *Engine) processInactiveModel(
 	// A passive model is observed, never woken. Checked before the verdict,
 	// which already holds node holes and draws borrowed capacity for the
 	// replicas it picks.
-	if e.Passive != nil {
-		if p, source := e.Passive.Model(group.namespace, group.modelID); p {
-			if e.refusalChanged(group.key(), OutcomePassive) {
-				logger.Info("Scale-from-zero: passive model has pending requests; the scale-from-zero engine takes no action for it",
-					"namespace", group.namespace, "modelID", group.modelID, "source", source)
-			}
-			return nil
-		}
+	if e.passiveGate(logger, group) {
+		return nil
 	}
 
 	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
@@ -667,6 +662,25 @@ func (e *Engine) processInactiveModel(
 		e.publishActivation(ctx, scaleTargets, va, pool, 1, outcome)
 	}
 	return nil
+}
+
+// passiveGate reports whether group's model is passive, so the engine takes
+// no action for it: no wake is published, no node hole held and no borrowed
+// capacity drawn. The first time, and again after any other outcome, it says
+// so in the log.
+func (e *Engine) passiveGate(logger logr.Logger, group modelGroup) bool {
+	if e.Passive == nil {
+		return false
+	}
+	p, source := e.Passive.Model(group.namespace, group.modelID)
+	if !p {
+		return false
+	}
+	if e.refusalChanged(group.key(), OutcomePassive) {
+		logger.Info("Scale-from-zero: passive model has pending requests; the scale-from-zero engine takes no action for it",
+			"namespace", group.namespace, "modelID", group.modelID, "source", source)
+	}
+	return true
 }
 
 // wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a

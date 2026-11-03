@@ -4,7 +4,6 @@ import (
 	"context"
 
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
@@ -71,19 +70,19 @@ func (h *Handler) passiveAnswer(ctx context.Context, ref *pb.ScaledObjectRef, t 
 // passiveActive is the activation a passive variant reports: never in
 // observe, so KEDA's any-trigger activation rests on the other triggers; in
 // hold, whether the held count is above zero, so a target at zero stays there
-// and a running one is never deactivated. An unreadable count reports active,
-// the direction that scales nothing to zero (as currentlyRunning).
-func (h *Handler) passiveActive(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, mode passive.Mode) bool {
+// and a running one is never deactivated. An unreadable count is an error, not
+// active: active would wake a target parked at zero on the strength of a
+// failed read, and inactive would park a running one. KEDA counts the error
+// as a failed trigger read and changes nothing (see errNotLeader).
+func (h *Handler) passiveActive(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, mode passive.Mode) (bool, error) {
 	if mode.Answers0() {
-		return false
+		return false, nil
 	}
 	n, err := h.passiveAnswer(ctx, ref, t, mode)
 	if err != nil {
-		log.FromContext(ctx).V(1).Info("passive variant's scale target unreadable; reporting active",
-			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
-		return true
+		return false, err
 	}
-	return n > 0
+	return n > 0, nil
 }
 
 // standbyObserve reports whether a replica that does not hold the lease can

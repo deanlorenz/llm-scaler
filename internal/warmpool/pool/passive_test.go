@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -32,41 +33,39 @@ func (p *countingPool) Evict(context.Context, types.NamespacedName, ModelRef) er
 	return nil
 }
 
-// TestPassiveGuardSkipsPassiveModels: the pool writes nothing for a passive
-// model -- no supervisor create or delete, no pod patch -- and passes an
-// active model's calls through.
+// TestPassiveGuardSkipsPassiveModels: the pool adds nothing for a passive
+// model -- no copy loaded (a supervisor create), none woken into a serving
+// replica (a pod patch) -- and still gives capacity back for it: Deactivate and
+// Evict pass through. An active model's calls all pass through.
 func TestPassiveGuardSkipsPassiveModels(t *testing.T) {
 	inner := &countingPool{}
 	g := &PassiveGuard{Pool: inner, Passive: func(_, variant string) bool { return variant == "observed" }}
 	ctx, pod := context.Background(), types.NamespacedName{Namespace: "pool", Name: "p0"}
-	run := func(variant string) []error {
-		m := ModelRef{Namespace: "ns", Variant: variant}
-		_, aerr := g.Activate(ctx, pod, m)
-		return []error{g.Warm(ctx, pod, m, Ram), aerr, g.Deactivate(ctx, pod, m), g.Evict(ctx, pod, m)}
+	m := ModelRef{Namespace: "ns", Variant: "observed"}
+	if err := g.Warm(ctx, pod, m, Ram); !errors.Is(err, ErrPassive) {
+		t.Errorf("Warm for a passive model: err = %v, want ErrPassive", err)
 	}
-	for i, err := range run("observed") {
-		if !errors.Is(err, ErrPassive) {
-			t.Errorf("call %d for a passive model: err = %v, want ErrPassive", i, err)
-		}
+	if _, err := g.Activate(ctx, pod, m); !errors.Is(err, ErrPassive) {
+		t.Errorf("Activate for a passive model: err = %v, want ErrPassive", err)
 	}
-	if len(inner.calls) != 0 {
-		t.Fatalf("a passive model's calls reached the pool: %v", inner.calls)
+	if err := g.Deactivate(ctx, pod, m); err != nil {
+		t.Errorf("Deactivate for a passive model: %v, want it passed through", err)
 	}
-	if _, err := g.ListWarm(ctx); err != nil {
-		t.Fatal(err)
+	if err := g.Evict(ctx, pod, m); err != nil {
+		t.Errorf("Evict for a passive model: %v, want it passed through", err)
 	}
-	for i, err := range run("scaled") {
+	if want := []string{"deactivate", "evict"}; !slices.Equal(inner.calls, want) {
+		t.Fatalf("a passive model's calls reaching the pool: %v, want %v", inner.calls, want)
+	}
+	inner.calls = nil
+	a := ModelRef{Namespace: "ns", Variant: "scaled"}
+	_, aerr := g.Activate(ctx, pod, a)
+	for i, err := range []error{g.Warm(ctx, pod, a, Ram), aerr, g.Deactivate(ctx, pod, a), g.Evict(ctx, pod, a)} {
 		if err != nil {
 			t.Errorf("call %d for an active model: %v", i, err)
 		}
 	}
-	want := []string{"list", "activate", "warm", "deactivate", "evict"}
-	if len(inner.calls) != len(want) {
+	if want := []string{"activate", "warm", "deactivate", "evict"}; !slices.Equal(inner.calls, want) {
 		t.Fatalf("calls = %v, want %v", inner.calls, want)
-	}
-	for i := range want {
-		if inner.calls[i] != want[i] {
-			t.Fatalf("calls = %v, want %v", inner.calls, want)
-		}
 	}
 }

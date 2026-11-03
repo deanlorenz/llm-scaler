@@ -699,6 +699,11 @@ func main() {
 	// for tools and operators that would otherwise grep the log. Built before the
 	// bootstrap so the policy it loads is recorded; written only by the leader.
 	controllerStatus := controllerstatus.New(mgr.GetClient(), mgr.GetAPIReader(), config.SystemNamespace())
+	// What this process read, so the installer can tell a restart is due.
+	controllerStatus.SetPassiveDefault(cfg.PassiveDefault())
+	if cfg.PassiveDefault() {
+		setupLog.Info("Passive mode is on controller-wide (WVA_PASSIVE=true): no replica count is changed unless a scaling-policy entry sets passive: false")
+	}
 	if err := mgr.Add(controllerStatus); err != nil {
 		setupLog.Error(err, "unable to add the controller-status publisher to the manager")
 		os.Exit(1)
@@ -1542,8 +1547,14 @@ func runWarmPool(
 			GPUMemoryUtilization: *warmPoolGPUUtil,
 			Registry:             registry.Default,
 			Decisions:            decision.Default,
-			Client:               mgr.GetClient(),
-			Datastore:            ds,
+			// A passive model is observed, never scaled: no copy is planned
+			// for it, and no borrow.
+			Passive: func(namespace, variant string) bool {
+				m, _ := passiveResolver.Variant(namespace, variant)
+				return m.Passive()
+			},
+			Client:    mgr.GetClient(),
+			Datastore: ds,
 			// SERVING replicas rather than merely Ready ones, for the return
 			// rule -- see Demand.Serving. Unknown falls back to the Ready count,
 			// which is all a fleet whose collector has not run yet has.

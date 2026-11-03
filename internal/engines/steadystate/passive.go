@@ -20,9 +20,10 @@ import (
 // passiveVariantState is what the last cycle reported about one variant's
 // passive mode, so a change is logged once rather than every cycle.
 type passiveVariantState struct {
-	mode   passive.Mode
-	source string
-	paused bool
+	mode     passive.Mode
+	source   string
+	paused   bool
+	fallback bool
 }
 
 // observePassive resolves every active variant's passive mode for this cycle,
@@ -58,7 +59,8 @@ func (e *Engine) observePassive(logger logr.Logger, vas []llmdVariantAutoscaling
 			meta = entry.Metadata
 		}
 		mode, source := e.Passive.ForMetadata(va.Namespace, meta, entry.Target)
-		st := passiveVariantState{mode: mode, source: source, paused: entry.Target.KEDAPaused}
+		st := passiveVariantState{mode: mode, source: source, paused: entry.Target.KEDAPaused,
+			fallback: mode == passive.Hold && entry.Target.HasFallback}
 		next[key] = st
 		e.cyclePassiveVariants[key] = mode
 		if mode.Passive() {
@@ -91,6 +93,11 @@ func (e *Engine) reportPassiveChange(logger logr.Logger, va *llmdVariantAutoscal
 		logger.Info("WARNING: passive observe is unsupported here: the ScaledObject's scalingModifiers formula names "+
 			"this controller's trigger, so its answer of 0 enters the formula. Remove the trigger from the formula, "+
 			"or remove the trigger", kv...)
+	}
+	if cur.fallback && !prev.fallback {
+		logger.Info("WARNING: the held variant's ScaledObject sets spec.fallback: if the scaler cannot read the "+
+			"replica count it answers an error, and after failureThreshold errors KEDA sets the target to "+
+			"fallback.replicas. Remove spec.fallback for a strict hold", kv...)
 	}
 	if cur.paused != prev.paused {
 		if cur.paused {

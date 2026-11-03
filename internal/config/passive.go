@@ -1,5 +1,7 @@
 package config
 
+import "slices"
+
 // Passive-mode sources: the layer whose value decided a model's passive mode,
 // as ResolvePassive reports it and the "Passive mode" log lines print it.
 const (
@@ -20,8 +22,7 @@ const (
 // -- and the layer that decided it.
 //
 // tiers is the tier each of the model's variants names in its trigger
-// metadata, "" for none (ModelTiers normalises it). The layers, most specific
-// first:
+// metadata, "" for none. The layers, most specific first:
 //
 //  1. a per-model entry that sets `passive` (FindModelOverride);
 //  2. the tier the variant names, else `default.defaultPolicy`;
@@ -31,7 +32,10 @@ const (
 //
 // When the variants name different tiers the model is passive if ANY of them
 // resolves passive: a model is scaled whole, and passive is the side that
-// moves nothing. A per-model entry sits above every tier, so its `passive:
+// moves nothing. A variant that names none counts as the default entry (and
+// its defaultPolicy) does: unlike the thresholds (ModelTiers), it is not
+// folded into the tiers its siblings name, since "any" must see every
+// variant. A per-model entry sits above every tier, so its `passive:
 // false` makes the whole model active.
 //
 // modelID "" (a warm pool's trigger, which serves no model) skips layer 1.
@@ -55,7 +59,7 @@ func ResolvePassive(cfg *Config, namespace, modelID string, tiers []string) (boo
 		}
 	}
 	first, firstSource := false, ""
-	for i, tier := range ModelTiers(tiers) {
+	for i, tier := range passiveTiers(tiers) {
 		if tier == "" {
 			tier = def.DefaultPolicy
 		}
@@ -71,4 +75,19 @@ func ResolvePassive(cfg *Config, namespace, modelID string, tiers []string) (boo
 		}
 	}
 	return first, firstSource
+}
+
+// passiveTiers is tiers sorted and distinct, "" kept; one "" when empty.
+func passiveTiers(tiers []string) []string {
+	out := []string{}
+	for _, t := range tiers {
+		if !slices.Contains(out, t) {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	slices.Sort(out)
+	return out
 }

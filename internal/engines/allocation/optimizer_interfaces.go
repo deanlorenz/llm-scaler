@@ -191,6 +191,26 @@ type ModelScalingRequest struct {
 	// against the weight classes in force by config.UtilizationShare.Weight.
 	WeightClass string
 	Weight      config.ModelWeight
+
+	// Passive is a model the controller observes and never scales
+	// (docs/reference/scaling-policy.md, "passive"). Its decisions are
+	// would-be figures: nothing acts on them, so the Kueue release paths
+	// count no GPU its would-be shrink frees and lower nothing of it.
+	Passive bool
+}
+
+// passiveModels is the requests' passive models, keyed "namespace/modelID".
+func passiveModels(requests []ModelScalingRequest) map[string]bool {
+	var out map[string]bool
+	for _, req := range requests {
+		if req.Passive {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[req.Namespace+"/"+req.ModelID] = true
+		}
+	}
+	return out
 }
 
 // ScalingOptimizer makes final scaling decisions for all models.

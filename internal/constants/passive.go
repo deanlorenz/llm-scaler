@@ -27,3 +27,7 @@ var PassiveModes = []string{PassiveModeActive, PassiveModeHold, PassiveModeObser
 // where an active one would get ScaledUp, ScaledDown or ScaledToZero: what
 // the controller would have done, without the claim that it did it.
 const K8SEventPassiveRecommendation = "PassiveRecommendation"
+
+// K8SEventPassiveRestartRequired is the Warning event on wva-manager-config
+// when its WVA_PASSIVE differs from the one the controller read at start.
+const K8SEventPassiveRestartRequired = "PassiveRestartRequired"

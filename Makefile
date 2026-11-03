@@ -3019,6 +3019,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# borrowNamespaces turns a pilot into borrowing everywhere, and the
 	@# document it writes is perfectly valid.
 	@bash hack/check-kueue-borrow-keep.sh
+	@echo "Checking a re-install keeps passive mode through the apply..."
+	@# Executes the passive keep against a stub kubectl. Restoring it after
+	@# the apply left a window where a new pod started active, and a
+	@# passive: false read through the yq alternative operator came back empty.
+	@bash hack/check-passive-keep.sh
 	@echo "Checking the controller readiness check..."
 	@# Executes it against a stub kubectl. `rollout status` passes at once for
 	@# a Deployment at 0 replicas, so an install over a controller at 0/0

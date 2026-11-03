@@ -2,7 +2,7 @@ package scaler_test
 
 import (
 	"context"
-	"math"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -137,6 +137,50 @@ var _ = Describe("Passive mode through the external scaler", func() {
 			Eventually(done).Should(Receive(BeNil()))
 		})
 
+		It("answers an error, not active, when the count of a target at zero cannot be read", func() {
+			// No Deployment: the scale read fails.
+			h := newHandler(passiveModels{passiveModel: true}, so(ptr(0), nil, "", ourTrigger()))
+			store.Set(testNamespace, "chat-decode-deploy", 3)
+			_, err := h.IsActive(ctx, ref("chat-decode", meta))
+			Expect(err).To(HaveOccurred())
+			sctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			stream := newFakeStream(sctx)
+			Expect(h.StreamIsActive(ref("chat-decode", meta), stream)).NotTo(Succeed())
+			Expect(stream.sent).To(BeEmpty(), "nothing is pushed, least of all active")
+		})
+
+		It("reports a kubectl scale from zero on the push stream within the recheck", func() {
+			defer scaler.SetPassiveZeroRecheckForTest(50 * time.Millisecond)()
+			h := newHandler(passiveModels{passiveModel: true}, so(ptr(0), nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(0)))
+			sctx, cancel := context.WithCancel(ctx)
+			stream := newFakeStream(sctx)
+			done := make(chan error, 1)
+			go func() { done <- h.StreamIsActive(ref("chat-decode", meta), stream) }()
+			Expect(stream.nextPush()).To(BeFalse())
+			setReplicas(2) // no decision-store write: only the recheck can see it
+			Expect(stream.nextPush()).To(BeTrue())
+			cancel()
+			Eventually(done).Should(Receive(BeNil()))
+		})
+
+		It("follows the enrichment on an open stream: hold turns to observe when a trigger is added", func() {
+			h := newHandler(passiveModels{passiveModel: true}, so(nil, nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(3)))
+			reg.Observe(testNamespace, "chat-decode", meta)
+			reg.SetTarget(testNamespace, "chat-decode", registry.Target{Name: "chat-decode-deploy", Kind: "Deployment", APIVersion: "apps/v1"})
+			sctx, cancel := context.WithCancel(ctx)
+			stream := newFakeStream(sctx)
+			done := make(chan error, 1)
+			go func() { done <- h.StreamIsActive(ref("chat-decode", meta), stream) }()
+			Expect(stream.nextPush()).To(BeTrue(), "hold at 3 replicas")
+			reg.SetTarget(testNamespace, "chat-decode", registry.Target{Name: "chat-decode-deploy", Kind: "Deployment",
+				APIVersion: "apps/v1", ForeignTriggers: 1})
+			store.Set(testNamespace, "chat-decode-deploy", 5) // wakes the stream
+			Expect(stream.nextPush()).To(BeFalse(), "observe never reports active")
+			cancel()
+			Eventually(done).Should(Receive(BeNil()))
+		})
+
 		It("answers the decision for an active model (control)", func() {
 			h := newHandler(passiveModels{}, so(nil, nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(3)))
 			store.Set(testNamespace, "chat-decode-deploy", 9)
@@ -186,10 +230,20 @@ var _ = Describe("Passive mode through the external scaler", func() {
 	// and KEDA's activation (inactive at minReplicaCount 0 parks the target,
 	// active at zero wakes it). Status replicas are taken equal to spec.
 	Describe("an HPA and KEDA driven by the scaler's answers", func() {
-		hpaStep := func(h *scaler.Handler, foreign int64, min int32) int32 {
+		// hpaStepStatus is one sync with status.replicas at status (the pods
+		// that exist), which differs from spec during a rollout. The
+		// per-metric rule is the HPA's for AverageValue
+		// (GetExternalPerPodMetricReplicas): ratio = value / status; inside
+		// [0.9, 1.1], inclusive, it proposes status, else ceil(value).
+		// Stabilization windows are not modelled: a proposal below the count
+		// is what the scale-down window then holds.
+		hpaStepStatus := func(h *scaler.Handler, foreign int64, min, status int32) int32 {
 			var d appsv1.Deployment
 			Expect(c.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "chat-decode-deploy"}, &d)).To(Succeed())
 			cur := *d.Spec.Replicas
+			if status < 0 {
+				status = cur
+			}
 			value, err := getMetrics(h)
 			Expect(err).NotTo(HaveOccurred(), "an erroring metric holds every scale-down")
 			active := isActive(h) || foreign > 0
@@ -200,15 +254,31 @@ var _ = Describe("Passive mode through the external scaler", func() {
 			case cur > 0 && !active && min == 0:
 				next = 0
 			case cur > 0:
-				ours := int64(cur)
-				if math.Abs(float64(value)/float64(cur)-1) > 0.1 {
-					ours = value
+				ours := value // ceil(value / 1): already a whole count
+				if ratio := float64(value) / float64(status); 1.0-0.1 <= ratio && ratio <= 1.0+0.1 {
+					ours = int64(status)
 				}
 				next = int32(max(ours, foreign, int64(min), 1))
 			}
 			setReplicas(next)
 			return next
 		}
+		hpaStep := func(h *scaler.Handler, foreign int64, min int32) int32 {
+			return hpaStepStatus(h, foreign, min, -1)
+		}
+
+		// The drift the scaling-policy reference documents: inside the
+		// HPA's tolerance it proposes the pods that exist, not our answer.
+		DescribeTable("hold: a rollout moves the held count inside the HPA's tolerance",
+			func(spec, status, want int32) {
+				h := newHandler(passiveModels{passiveModel: true}, so(ptr(1), nil, "", ourTrigger()), deployment("chat-decode-deploy", ptr(spec)))
+				Expect(hpaStepStatus(h, 0, 1, status)).To(Equal(want))
+			},
+			Entry("a surge pod at 9 replicas ratchets the count up by one", int32(9), int32(10), int32(10)),
+			Entry("a surge pod at 8 replicas is outside the tolerance: held", int32(8), int32(9), int32(8)),
+			Entry("a missing pod at 11 replicas proposes one fewer (the scale-down window holds it)", int32(11), int32(10), int32(10)),
+			Entry("a missing pod at 10 replicas is outside the tolerance: held", int32(10), int32(9), int32(10)),
+		)
 		decisions := []int32{0, 1, 12, 3, 0, 7, 20, 2, 0, 5}
 
 		It("hold: the replica count never moves while the decision swings", func() {

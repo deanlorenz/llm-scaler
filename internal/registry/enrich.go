@@ -146,7 +146,7 @@ func (e *Enricher) Refresh(ctx context.Context) {
 		default:
 		}
 
-		so, target, err := e.readTarget(ctx, entry.Namespace, entry.Name)
+		so, target, err := e.readTarget(ctx, entry.Namespace, entry.Name, entry.Metadata[ScalerAddressKey])
 		switch {
 		case apierrors.IsNotFound(err):
 			// KEDA can still be mid-reconcile against an object it has just lost,
@@ -173,12 +173,13 @@ func (e *Enricher) Refresh(ctx context.Context) {
 
 // readTarget resolves one ScaledObject into the fields WVA needs, and returns
 // the object itself for reportMetadata.
-func (e *Enricher) readTarget(ctx context.Context, namespace, name string) (*kedav1alpha1.ScaledObject, Target, error) {
+// ownAddress is the scalerAddress of the trigger that registered the entry.
+func (e *Enricher) readTarget(ctx context.Context, namespace, name, ownAddress string) (*kedav1alpha1.ScaledObject, Target, error) {
 	var so kedav1alpha1.ScaledObject
 	if err := e.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &so); err != nil {
 		return nil, Target{}, err
 	}
-	return &so, TargetFromScaledObject(&so), nil
+	return &so, TargetFromScaledObjectFor(&so, ownAddress), nil
 }
 
 // reportMetadata says, at the default log level and as a Warning event on the
@@ -224,6 +225,13 @@ func (e *Enricher) reportMetadata(ctx context.Context, entry Entry, so *kedav1al
 // applying KEDA's own defaults for an omitted kind and apiVersion so that a
 // minimal `scaleTargetRef: {name: x}` resolves the same way KEDA resolves it.
 func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
+	return TargetFromScaledObjectFor(so, "")
+}
+
+// TargetFromScaledObjectFor is TargetFromScaledObject that knows our trigger
+// by its scalerAddress too: the address of the trigger that called, as KEDA
+// delivered it. "" matches by our metadata schema alone (OwnTrigger).
+func TargetFromScaledObjectFor(so *kedav1alpha1.ScaledObject, ownAddress string) Target {
 	t := Target{
 		UID:         so.UID,
 		Labels:      maps.Clone(so.Labels),
@@ -235,9 +243,10 @@ func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 		PollingIntervalSeconds: so.Spec.PollingInterval,
 	}
 	t.KEDAPaused = so.NeedToBePausedByAnnotation()
+	t.HasFallback = so.Spec.Fallback != nil
 	var own []string
 	for _, tr := range so.Spec.Triggers {
-		if OwnTrigger(tr.Type, tr.Metadata) {
+		if OwnTrigger(tr.Type, tr.Metadata, ownAddress) {
 			own = append(own, tr.Name)
 			continue
 		}
@@ -270,10 +279,14 @@ func ptr(v int32) *int32 { return &v }
 
 // OwnTrigger reports whether a ScaledObject trigger is this controller's: an
 // external or external-push trigger whose metadata is in our schema -- it
-// names a model or a warm pool. Another external scaler's trigger names
-// neither, and is foreign.
-func OwnTrigger(triggerType string, metadata map[string]string) bool {
+// names a model or a warm pool -- and, when ownAddress is known, that
+// addresses this scaler. Another external scaler's trigger is foreign, even
+// one that happens to carry a modelID.
+func OwnTrigger(triggerType string, metadata map[string]string, ownAddress string) bool {
 	if triggerType != "external" && triggerType != "external-push" {
+		return false
+	}
+	if ownAddress != "" && metadata[ScalerAddressKey] != ownAddress {
 		return false
 	}
 	return metadata[ModelIDKey] != "" || metadata[WarmPoolNameKey] != ""

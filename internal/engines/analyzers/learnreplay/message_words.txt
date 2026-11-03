@@ -380,6 +380,7 @@ and
 annotation
 another
 answer
+answers
 any
 anything
 app.kubernetes.io/component
@@ -798,6 +799,7 @@ eppQueueBytes
 eppQueueSize
 errPct
 error
+errors
 estimate
 estimateSeconds
 estimatedTokens
@@ -828,9 +830,11 @@ factor
 factory
 failed
 failing
+failureThreshold
 fair-share
 fall
 fallback
+fallback.replicas
 fallbackSource
 false
 fewer
@@ -2027,6 +2031,7 @@ source
 spaces
 spare
 spec
+spec.fallback
 speculative
 speculative_
 speculative_algorithm
@@ -2088,6 +2093,7 @@ stored
 stored-live
 str
 stream
+strict
 string
 subjects
 succeeds

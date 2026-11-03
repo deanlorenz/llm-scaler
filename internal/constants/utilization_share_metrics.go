@@ -94,6 +94,11 @@ const (
 	// while the spare is spread. Published only while the optimizer acts.
 	WVAUtilizationShareHeadroomCapped = "wva_utilization_share_headroom_capped"
 
+	// WVAUtilizationSharePassiveShadow is a gauge: 1 while a group is planned
+	// in shadow because it holds a passive model, under an optimizer that
+	// otherwise acts; 0 for every other group the optimizer plans.
+	WVAUtilizationSharePassiveShadow = "wva_utilization_share_passive_shadow"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

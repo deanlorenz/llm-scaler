@@ -114,6 +114,10 @@ type Target struct {
 	// paused-replicas annotation on the ScaledObject: KEDA does not act on
 	// any answer while it is set. Reported, never acted on.
 	KEDAPaused bool
+	// HasFallback reports a spec.fallback on the ScaledObject: after its
+	// failureThreshold of failed reads KEDA sets the target to
+	// fallback.replicas, whatever our trigger answered before.
+	HasFallback bool
 }
 
 // TiersOf returns the tier (scalingPolicy) each live entry of one model names,

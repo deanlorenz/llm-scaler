@@ -259,18 +259,24 @@ wva_resolve_prometheus_url() {
 # verified against a mounted CA verifying against the public roots only, and
 # it could no longer connect. See wva_prometheus_ca_path.
 wva_render_manager_config_patch() {
-    local tmp_overlay="$1" src rendered
+    local tmp_overlay="$1" src rendered passive
     src="$WVA_PROJECT/config/base/manager/manager-configmap.yaml"
     [ -f "$src" ] || return 0
-    [ -n "${PROMETHEUS_URL:-}" ] || return 0
+    # WVA_PASSIVE too: rendered, not patched after the apply, so the applied
+    # ConfigMap never carries the shipped false over a passive controller.
+    passive="$(wva_passive_want)" || exit 1
+    [ -n "${PROMETHEUS_URL:-}" ] || [ -n "$passive" ] || return 0
 
-    local skip ca
-    skip="$(wva_prometheus_skip_verify)"
-    ca="$(wva_prometheus_ca_path)"
+    local skip="" ca=""
+    if [ -n "${PROMETHEUS_URL:-}" ]; then
+        skip="$(wva_prometheus_skip_verify)"
+        ca="$(wva_prometheus_ca_path)"
+    fi
     rendered="$(yq '.data."config.yaml"' "$src" \
-        | WVA_URL="$PROMETHEUS_URL" yq '.PROMETHEUS_BASE_URL = strenv(WVA_URL)' \
+        | if [ -n "${PROMETHEUS_URL:-}" ]; then WVA_URL="$PROMETHEUS_URL" yq '.PROMETHEUS_BASE_URL = strenv(WVA_URL)'; else cat; fi \
         | if [ -n "$skip" ]; then WVA_SKIP="$skip" yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = strenv(WVA_SKIP)'; else cat; fi \
-        | if [ -n "$ca" ]; then WVA_CA="$ca" yq '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'; else cat; fi)" || return 0
+        | if [ -n "$ca" ]; then WVA_CA="$ca" yq '.PROMETHEUS_CA_CERT_PATH = strenv(WVA_CA)'; else cat; fi \
+        | if [ -n "$passive" ]; then WVA_P="$passive" yq '.WVA_PASSIVE = strenv(WVA_P)'; else cat; fi)" || return 0
     [ -n "$rendered" ] || return 0
 
     {
@@ -1991,6 +1997,11 @@ EOF
     # the Deployment the first apply creates already verify with it.
     wva_sync_prometheus_ca
     wva_refuse_unknown_prometheus_tls
+    # Passive mode as the live controller runs it, read before anything is
+    # applied so the render below and the policy patch carry it.
+    if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then
+        wva_live_passive "$WVA_NS"
+    fi
     wva_render_manager_config_patch "$tmp_overlay"
     wva_append_prometheus_ca_mount_patch "$tmp_overlay/kustomization.yaml"
 
@@ -2153,15 +2164,17 @@ EOF
         # `{"data":{}}` is "nothing but default", which needs no restoring.
         [ "$preserved_policy" = '{"data":{}}' ] && preserved_policy=""
 
+        # Passive mode must hold THROUGH the apply, not be put back after it: a
+        # pod that starts between the two would start scaling. So the entries
+        # above, and `passive` on the default entry, go into the applied
+        # manifest itself (the manager ConfigMap's WVA_PASSIVE already went into
+        # it, in wva_render_manager_config_patch).
+        wva_render_policy_keep_patch "$tmp_overlay" "$preserved_policy" || exit 1
+
         # And the limiter the live `default` declares, which the same apply resets
         # to the shipped none. Kept below when WVA_LIMITER is not given -- see
         # wva_live_limiters. Unreadable with WVA_LIMITER unset is a refusal: the
         # install cannot tell whether it is about to unbound a bounded controller.
-        # Passive mode, which the same apply resets: WVA_PASSIVE in the manager
-        # ConfigMap and `passive` on the default entry. Put back below unless
-        # WVA_PASSIVE is given -- see wva_live_passive.
-        wva_live_passive "$WVA_NS"
-
         local live_rc=0
         wva_live_limiters "$WVA_NS" || live_rc=$?
         if [ "$live_rc" -ne 0 ] && [ -z "${WVA_LIMITER:-}" ]; then
@@ -2303,9 +2316,9 @@ wva_reconcile_prometheus_scheme() {
         patch_manager_config '.WVA_SCALE_TO_ZERO = "true"'
     fi
 
-    # Passive mode survives a re-run: an upgrade is not a decision to let a
-    # controller that only observes start scaling.
-    wva_keep_passive "$WVA_NS"
+    # Passive mode was rendered into the apply. WVA_PASSIVE is read at start, so
+    # a controller that read another value is restarted.
+    wva_passive_restart_if_stale "$WVA_NS"
 
     # Declare a GPU limiter, if asked.
     #
@@ -2487,58 +2500,97 @@ patch_manager_config() {
         -p "$(jq -n --arg cfg "$updated" '{data:{"config.yaml":$cfg}}')"
 }
 
+# wva_yaml_scalar prints the value at path in the YAML on stdin, or nothing
+# when it is absent or null. Not `// ""`: yq's alternative operator treats
+# false as absent, and passive: false is a value to keep.
+wva_yaml_scalar() {
+    local v
+    v="$(yq "$1" 2>/dev/null)" || return 0
+    [ "$v" = null ] && v=""
+    printf '%s' "$v"
+}
+
 # wva_live_passive reads the passive settings the live controller runs with,
-# before the apply resets them: WVA_PASSIVE in wva-manager-config into
-# WVA_LIVE_PASSIVE, and `passive` on the default entry of
-# wva-scaling-policy-config into WVA_LIVE_DEFAULT_PASSIVE. Each is empty when
-# unset or unreadable (a first install).
+# before the apply: WVA_PASSIVE in wva-manager-config into WVA_LIVE_PASSIVE,
+# and `passive` on the default entry of wva-scaling-policy-config into
+# WVA_LIVE_DEFAULT_PASSIVE. Each is empty when unset or unreadable (a first
+# install).
 wva_live_passive() {
     local ns="$1" cfg def
     WVA_LIVE_PASSIVE=""
     WVA_LIVE_DEFAULT_PASSIVE=""
     cfg="$(kubectl get configmap wva-manager-config -n "$ns" -o jsonpath='{.data.config\.yaml}' 2>/dev/null)" || cfg=""
     if [ -n "$cfg" ]; then
-        WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | yq '.WVA_PASSIVE // ""' 2>/dev/null)" || WVA_LIVE_PASSIVE=""
+        WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | wva_yaml_scalar '.WVA_PASSIVE')"
     fi
     def="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || def=""
     if [ -n "$def" ]; then
-        WVA_LIVE_DEFAULT_PASSIVE="$(printf '%s\n' "$def" | yq '.passive // ""' 2>/dev/null)" || WVA_LIVE_DEFAULT_PASSIVE=""
+        WVA_LIVE_DEFAULT_PASSIVE="$(printf '%s\n' "$def" | wva_yaml_scalar '.passive')"
     fi
 }
 
-# wva_keep_passive puts passive mode back after the apply. WVA_PASSIVE, when
-# given (true or false), is written to wva-manager-config; when not, the live
-# value read by wva_live_passive is kept. The default entry's `passive` is
-# always kept: the apply resets that entry, and only an edit of the ConfigMap
-# turns it off.
-wva_keep_passive() {
-    local ns="$1" want="${WVA_PASSIVE:-${WVA_LIVE_PASSIVE:-}}" def updated
+# wva_passive_want prints the WVA_PASSIVE this install writes: the install
+# variable when given, else the live value (wva_live_passive), else nothing --
+# the shipped value. Anything but true or false is refused.
+wva_passive_want() {
+    local want="${WVA_PASSIVE:-${WVA_LIVE_PASSIVE:-}}"
     case "$want" in
-        '') ;;
-        true|false)
-            patch_manager_config ".WVA_PASSIVE = \"$want\""
-            if [ "$want" = true ]; then
-                log_warning "Passive mode is ON controller-wide (WVA_PASSIVE=true): the controller computes and publishes, and changes no replica count. Pass WVA_PASSIVE=false to turn it off."
-            fi
-            ;;
-        *) log_error "WVA_PASSIVE must be true or false (got '$want')" ;;
+        ''|true|false) printf '%s' "$want" ;;
+        *) log_error "WVA_PASSIVE must be true or false (got: $want)"; return 1 ;;
     esac
+}
+
+# wva_render_policy_keep_patch writes, into the overlay, a patch of
+# wva-scaling-policy-config that carries what the apply would otherwise reset:
+# every entry but `default` the live ConfigMap holds (preserved, a JSON
+# {"data": {...}}), and the default entry as the overlay renders it with the
+# live `passive` set on it. Nothing is written when there is nothing to keep.
+wva_render_policy_keep_patch() {
+    local tmp_overlay="$1" preserved="${2:-}" data='{}' def
+    [ -n "$preserved" ] && data="$(printf '%s' "$preserved" | jq -c '.data // {}')"
     case "${WVA_LIVE_DEFAULT_PASSIVE:-}" in
         true|false)
-            def="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || def=""
-            if [ -z "$def" ]; then
-                log_warning "could not read the default entry after the apply, so its passive: ${WVA_LIVE_DEFAULT_PASSIVE} was not put back. Add it to the default entry of wva-scaling-policy-config in $ns."
-                return 0
+            def="$(kubectl kustomize "$tmp_overlay" 2>/dev/null \
+                | yq 'select(.kind == "ConfigMap" and .metadata.name == "wva-scaling-policy-config") | .data.default')" || def=""
+            if [ -z "$def" ] || [ "$def" = null ]; then
+                log_error "could not render the default entry of wva-scaling-policy-config to keep its passive: ${WVA_LIVE_DEFAULT_PASSIVE}; refusing an apply that would reset it"
+                return 1
             fi
-            updated="$(printf '%s\n' "$def" | yq ".passive = ${WVA_LIVE_DEFAULT_PASSIVE}")" || return 0
-            if kubectl patch configmap wva-scaling-policy-config -n "$ns" --type=merge \
-                    -p "$(jq -n --arg d "$updated" '{data:{"default":$d}}')" >/dev/null; then
-                log_info "Kept passive: ${WVA_LIVE_DEFAULT_PASSIVE} on the default entry of wva-scaling-policy-config"
-            else
-                log_warning "could not write passive: ${WVA_LIVE_DEFAULT_PASSIVE} back to the default entry of wva-scaling-policy-config in $ns. Add it by hand."
-            fi
+            def="$(printf '%s\n' "$def" | yq ".passive = ${WVA_LIVE_DEFAULT_PASSIVE}")" || return 1
+            data="$(printf '%s' "$data" | jq -c --arg d "$def" '. + {default: $d}')"
+            log_info "Keeping passive: ${WVA_LIVE_DEFAULT_PASSIVE} on the default entry of wva-scaling-policy-config"
             ;;
     esac
+    [ "$data" = '{}' ] && return 0
+    jq -n --argjson data "$data" \
+        '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "wva-scaling-policy-config"}, data: $data}' \
+        | yq -P '.' > "$tmp_overlay/policy-keep-patch.yaml"
+    cat >> "$tmp_overlay/kustomization.yaml" <<EOF
+- path: policy-keep-patch.yaml
+  target:
+    kind: ConfigMap
+    name: wva-scaling-policy-config
+EOF
+}
+
+# wva_passive_restart_if_stale restarts the controller when the WVA_PASSIVE it
+# read at start (passiveDefault in wva-controller-status) is not the one now in
+# wva-manager-config: the flag is read only at start, so the running pod would
+# go on with the other value. A controller that has not published the key (an
+# older release, or one not yet elected) is left to the rollout.
+wva_passive_restart_if_stale() {
+    local ns="$1" running want
+    want="$(wva_passive_want)" || return 1
+    [ -n "$want" ] || want=false
+    if [ "$want" = true ]; then
+        log_warning "Passive mode is ON controller-wide (WVA_PASSIVE=true): the controller computes and publishes, and changes no replica count. Pass WVA_PASSIVE=false to turn it off."
+    fi
+    running="$(kubectl get configmap wva-controller-status -n "$ns" -o jsonpath='{.data.passiveDefault}' 2>/dev/null)" || running=""
+    [ -n "$running" ] || return 0
+    [ "$running" = "$want" ] && return 0
+    log_warning "The controller runs with WVA_PASSIVE=$running and wva-manager-config now says $want; it is read only at start. Restarting the controller."
+    kubectl rollout restart deployment/wva-controller-manager -n "$ns" >/dev/null 2>&1 \
+        || log_warning "could not restart deployment/wva-controller-manager in $ns: restart it to apply WVA_PASSIVE=$want"
 }
 
 create_namespaces_shared_loop() {
