@@ -68,6 +68,7 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"outputDispersion":     {excluded: "a term of kvReqPerSeq (#276), and published with it: the shape family (stage 1), not built yet"},
 	"residentKVPerSeq":     {excluded: "the measured KV per running request (#277), which kvReqPerSeq is that reading held to its bounds: the shape family (stage 1), not built yet"},
 	"residentRunning":      {excluded: "how many running requests residentKVPerSeq was measured over (#277): a term of kvReqPerSeq, published with it"},
+	"reportOnly":           {excluded: "an aggregated line's figure is reported, not priced (#432); wva_service_rate_per_replica publishes it as source=derived-report-only"},
 	"residentKVBound":      {excluded: "which bound kvReqPerSeq held residentKVPerSeq to (#277), a label, not a figure: the shape family (stage 1), not built yet"},
 	"residentKVBoundFleet": {excluded: "which bound kvReqFleet held residentKVPerSeq to (#277), a label, not a figure: the shape family (stage 1), not built yet"},
 }

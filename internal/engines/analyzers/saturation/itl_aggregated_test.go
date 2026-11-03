@@ -142,8 +142,9 @@ func signal(t *testing.T, res *domain.AnalyzerResult, variant string) *domain.Se
 }
 
 // An unlabeled (aggregated) variant fits a line of its own, publishes it,
-// and its replicas are priced from it: the service-rate signal has the line
-// and a derived rate. Off, as before: no line and no derived rate.
+// and reports the mu it derives: the service-rate signal has the line and a
+// rate under source derived-report-only. Off, as before: no line and no
+// rate.
 func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 	for _, role := range []string{"", domain.RoleBoth} {
 		t.Run("role="+role, func(t *testing.T) {
@@ -153,7 +154,7 @@ func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 			assert.True(t, sig.HasLine, "an aggregated variant fitted no line: %+v", sig)
 			assert.InDelta(t, propTrueA, sig.LineSlope, 0.005)
 			assert.InDelta(t, propTrueB, sig.LineIntercept, 0.002)
-			assert.Equal(t, domain.ServiceRateSourceDerived, sig.RateSource, "its mu is not derived from its line")
+			assert.Equal(t, domain.ServiceRateSourceReportOnly, sig.RateSource, "its mu is not derived from its line and reported")
 			assert.Greater(t, sig.Rate, 0.0)
 			assert.Equal(t, domain.RoleBoth, sig.Role)
 			_, _, ok := r.line("agg")
@@ -162,7 +163,7 @@ func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 			off := newAggregatedRig(false, false, aggVariant{name: "agg", role: role, slope: propTrueA, inBand: true})
 			offSig := signal(t, off.run(t), "agg")
 			assert.False(t, offSig.HasLine, "with the switch off an aggregated variant fits no line")
-			assert.NotEqual(t, domain.ServiceRateSourceDerived, offSig.RateSource)
+			assert.Empty(t, offSig.RateSource)
 			_, _, ok = off.line("agg")
 			assert.False(t, ok)
 		})
@@ -229,7 +230,7 @@ func TestITLAggregated_AnAggregatedAndADecodeVariantKeepSeparateLines(t *testing
 	assert.InDelta(t, propTrueA, decLine.model.A, 0.005, "the decode line is not its own fit")
 
 	agg, dec := signal(t, res, "agg"), signal(t, res, "dec")
-	assert.Equal(t, domain.ServiceRateSourceDerived, agg.RateSource, "the aggregated variant borrowed")
+	assert.Equal(t, domain.ServiceRateSourceReportOnly, agg.RateSource, "the aggregated variant borrowed")
 	assert.Equal(t, domain.ServiceRateSourceDerived, dec.RateSource, "the decode variant borrowed")
 	assert.InDelta(t, aggLine.model.A, agg.LineSlope, 1e-12)
 	assert.InDelta(t, decLine.model.A, dec.LineSlope, 1e-12)
@@ -254,105 +255,124 @@ func TestITLAggregated_AnAggregatedAndADecodeVariantKeepSeparateLines(t *testing
 	}
 }
 
-// The aggregated line sizes the fleet: at steady load, an aggregated
-// variant with a line of its own has a derived mu, the throughput floor
-// prices the arrival rate on it, and the model's demand is what the floor
-// asks for, lambda x P x scaleUpThreshold / mu (floor.replicaCost: a derived
-// mu has the headroom in it). Off, as before, the variant has no derived mu
-// and no measured window, the floor has nothing to order on, and the demand
-// is its KV occupancy alone.
-//
-// The rig: 10 replicas of 16,000 KV tokens at fills 0.20-0.65 (68,000 tokens
-// in use), requests of 1,000 in and 500 out, P = 12,800 tokens, and
-// 50 requests/s arriving. The derived mu is about 0.396/s a replica, so the
-// floor asks for 50 x 12,800 x 0.85 / 0.396, about 1,375,000 tokens:
-// about 20x the occupancy, the floor binding.
-func TestITLAggregated_TheDerivedMuSizesTheFleet(t *testing.T) {
-	demand := func(on bool) (*domain.AnalyzerResult, *domain.ServiceRateSignal) {
-		r := newAggregatedRig(on, false, aggVariant{name: "agg", role: "", slope: propTrueA, inBand: true})
+// onAndOff runs scenario on a rig of one variant of role with the switch on
+// and with it off, and returns each run's total demand per cycle and the
+// on run's last service-rate signal.
+func onAndOff(t *testing.T, role string, scenario func(r *aggregatedRig) []*domain.AnalyzerResult) (on, off []float64, sig *domain.ServiceRateSignal) {
+	t.Helper()
+	totals := func(fits bool) ([]float64, *domain.AnalyzerResult) {
+		r := newAggregatedRig(fits, false, aggVariant{name: "v", role: role, slope: propTrueA, inBand: true})
 		r.in, r.out = 1000, 500
+		results := scenario(r)
+		require.NotEmpty(t, results)
+		out := make([]float64, len(results))
+		for i, res := range results {
+			out[i] = res.TotalDemand
+		}
+		return out, results[len(results)-1]
+	}
+	on, last := totals(true)
+	off, _ = totals(false)
+	return on, off, signal(t, last, "v")
+}
+
+// steps runs n cycles of r and returns their results.
+func steps(t *testing.T, r *aggregatedRig, n int) []*domain.AnalyzerResult {
+	t.Helper()
+	out := make([]*domain.AnalyzerResult, 0, n)
+	for range n {
+		out = append(out, r.step(t))
+	}
+	return out
+}
+
+// The aggregated line is reported and sizes nothing (itlLineReportOnly,
+// until #275): at steady load with 50 requests/s arriving, the variant
+// reports the mu its line derives (about 0.396/s a replica, under source
+// derived-report-only), and its demand is what it is with the switch off --
+// 68,000 tokens of KV occupancy (10 replicas at fills 0.20-0.65 of 16,000)
+// -- where a priced line would have ordered about 1,375,000
+// (50 x 12,800 x 0.85 / 0.396).
+func TestITLAggregated_TheDerivedMuIsReportedNotPriced(t *testing.T) {
+	on, off, sig := onAndOff(t, "", func(r *aggregatedRig) []*domain.AnalyzerResult {
 		r.run(t)
 		r.arrival = 50
-		res := r.step(t)
-		return res, signal(t, res, "agg")
-	}
-	off, offSig := demand(false)
-	assert.InDelta(t, 68000, off.TotalDemand, 1, "off: the occupancy alone")
-	assert.Empty(t, offSig.RateSource, "off: no rate to price the arrivals on")
+		return steps(t, r, 3)
+	})
+	assert.Equal(t, off, on, "the aggregated line moved the demand")
+	assert.InDelta(t, 68000, on[len(on)-1], 1, "the occupancy alone")
+	assert.True(t, sig.HasLine)
+	assert.Equal(t, domain.ServiceRateSourceReportOnly, sig.RateSource)
+	assert.InDelta(t, 0.396, sig.Rate, 0.001, "the reported mu")
 
-	on, onSig := demand(true)
-	require.Equal(t, domain.ServiceRateSourceDerived, onSig.RateSource)
-	assert.InDelta(t, 0.396, onSig.Rate, 0.001, "the derived mu")
-	p := on.VariantCapacities[0].PerReplicaCapacity
-	assert.InDelta(t, 12800, p, 1)
-	want := 50 * p * 0.85 / onSig.Rate
-	assert.InEpsilon(t, want, on.TotalDemand, 0.005, "the floor's lambda x P x scaleUp / mu")
-	assert.InDelta(t, 1375000, on.TotalDemand, 5000)
-	assert.Greater(t, on.TotalDemand, 10*off.TotalDemand, "the floor does not bind")
+	// A decode variant on the same run prices its line, as before.
+	dec, _, decSig := onAndOff(t, domain.RoleDecode, func(r *aggregatedRig) []*domain.AnalyzerResult {
+		r.run(t)
+		r.arrival = 50
+		return steps(t, r, 3)
+	})
+	assert.Equal(t, domain.ServiceRateSourceDerived, decSig.RateSource)
+	assert.InDelta(t, 50*12800*0.85/decSig.Rate, dec[len(dec)-1], 0.005*dec[len(dec)-1], "decode: the floor's lambda x P x scaleUp / mu")
 }
 
-// While the request shape changes (1,000/500 to 8,000/1,000 here), an
-// aggregated line is stale: it was fitted under the shape that left, and an
-// aggregated pod's ITL carries the prefill it interleaves, which the new
-// shape changes (issue #275). Its derived figure then does what a borrowed
-// line's does: it does not settle the shape change, so the hold stays
-// outstanding, and the floor may hold the fleet on it but not grow it -- the
-// demand stays at the hold, scaleUpThreshold x the 10 replicas' P
-// (0.85 x 128,000 = 108,800 tokens), where the stale line alone would order
-// 100 requests/s at its mu of 0.029/s. A decode variant on the same run
-// keeps its licence: its line describes the engine at every shape, so it
-// settles the change and orders, as before.
-func TestITLAggregated_AStaleLineHoldsAndDoesNotGrow(t *testing.T) {
-	run := func(role string) (demands []float64, outstanding []bool, sig *domain.ServiceRateSignal) {
-		r := newAggregatedRig(true, false, aggVariant{name: "v", role: role, slope: propTrueA, inBand: true})
-		r.in, r.out, r.arrival = 1000, 500, 100
+// Through a shape change (1,000/500 to 8,000/1,000), while the hold is
+// outstanding and after it has ended, with the hold on and with it off, the
+// aggregated line fitted under the old shape orders nothing and settles
+// nothing: the demand and the hold are the switch-off run's on every cycle.
+// A decode line settles the change and orders, as before.
+func TestITLAggregated_AnOldShapeLineNeverOrders(t *testing.T) {
+	for _, noHold := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noHold=%v", noHold), func(t *testing.T) {
+			var outstanding []bool
+			on, off, sig := onAndOff(t, "", func(r *aggregatedRig) []*domain.AnalyzerResult {
+				r.arrival, r.noHold = 100, noHold
+				r.run(t)
+				r.in, r.out = 8000, 1000
+				// 30 cycles: 7.5 minutes, past the 5-minute hold and window.
+				var res []*domain.AnalyzerResult
+				outstanding = outstanding[:0]
+				for range 30 {
+					res = append(res, r.step(t))
+					_, _, out := r.a.fleetShapeState("test-ns", "test-model")
+					outstanding = append(outstanding, out)
+				}
+				return res
+			})
+			assert.Equal(t, off, on, "the old-shape aggregated line moved the demand")
+			assert.Equal(t, domain.ServiceRateSourceReportOnly, sig.RateSource)
+			if !noHold {
+				// outstanding is the off run's (the scenario ran on, then off);
+				// the on run is checked against it through the demand above.
+				assert.True(t, outstanding[0], "precondition: the change raised a hold")
+			}
+		})
+	}
+	dec, decOff, _ := onAndOff(t, domain.RoleDecode, func(r *aggregatedRig) []*domain.AnalyzerResult {
+		r.arrival = 100
 		r.run(t)
 		r.in, r.out = 8000, 1000
-		for range 8 {
-			res := r.step(t)
-			_, _, out := r.a.fleetShapeState("test-ns", "test-model")
-			demands = append(demands, res.TotalDemand)
-			outstanding = append(outstanding, out)
-			sig = signal(t, res, "v")
-		}
-		return demands, outstanding, sig
-	}
-
-	demands, outstanding, sig := run("")
-	require.Equal(t, domain.ServiceRateSourceDerived, sig.RateSource, "the stale line still prices the variant")
-	hold := 0.85 * aggregatedReplicas * 12800
-	for i := range demands {
-		assert.True(t, outstanding[i], "cycle %d: the stale aggregated line settled the shape change", i)
-		assert.LessOrEqual(t, demands[i], hold+1, "cycle %d: the stale aggregated line grew the fleet", i)
-	}
-	assert.InDelta(t, hold, demands[len(demands)-1], 1, "the fleet is held at its supply")
-
-	decode, decodeOutstanding, _ := run(domain.RoleDecode)
-	assert.False(t, decodeOutstanding[len(decodeOutstanding)-1], "decode: its own line settles the change, as before")
-	assert.Greater(t, decode[len(decode)-1], 10*hold, "decode: its own line orders through the change, as before")
+		return steps(t, r, 8)
+	})
+	assert.Equal(t, decOff, dec, "decode is the same with the switch on or off")
+	assert.Greater(t, dec[len(dec)-1], 10*0.85*aggregatedReplicas*12800, "decode: its own line orders through the change")
 }
 
-// With the shape-change hold turned off (disableShapeChangeHold) no change is
-// ever outstanding, but the shape still changed within the window
-// (c.shapeChanging), and the aggregated line is as stale: its figure still
-// holds the fleet at its supply and does not grow it. A decode line orders.
-func TestITLAggregated_AStaleLineDoesNotGrowWithTheHoldOff(t *testing.T) {
-	last := func(role string) float64 {
-		r := newAggregatedRig(true, false, aggVariant{name: "v", role: role, slope: propTrueA, inBand: true})
-		r.in, r.out, r.arrival, r.noHold = 1000, 500, 100, true
+// A line kept through light load (the held slope, issue #284): fitted in the
+// band, then 35 minutes below it, so its window ages under the 10 readings a
+// fit needs and the slope is held. Arrivals then come at 100/s. The held
+// aggregated line is reported and orders nothing.
+func TestITLAggregated_AHeldLineNeverOrders(t *testing.T) {
+	on, off, sig := onAndOff(t, "", func(r *aggregatedRig) []*domain.AnalyzerResult {
 		r.run(t)
-		r.in, r.out = 8000, 1000
-		var res *domain.AnalyzerResult
-		for range 4 {
-			res = r.step(t)
-		}
-		_, _, out := r.a.fleetShapeState("test-ns", "test-model")
-		require.False(t, out, "precondition: with the hold off no change is outstanding")
-		return res.TotalDemand
-	}
-	hold := 0.85 * aggregatedReplicas * 12800
-	assert.InDelta(t, hold, last(""), 1, "the stale aggregated line grew the fleet")
-	assert.Greater(t, last(domain.RoleDecode), 10*hold, "decode: its own line orders, as before")
+		r.variants[0].inBand = false
+		steps(t, r, 140)
+		r.arrival = 100
+		return steps(t, r, 3)
+	})
+	assert.Equal(t, off, on, "the held aggregated line moved the demand")
+	assert.True(t, sig.HasLine, "precondition: the line is kept")
+	assert.Less(t, sig.LineSamples, 10, "precondition: the window holds too few readings to fit, so the slope is held")
+	assert.Equal(t, domain.ServiceRateSourceReportOnly, sig.RateSource)
 }
 
 // The learner report names an aggregated variant's own role, and with the

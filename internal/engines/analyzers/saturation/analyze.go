@@ -236,6 +236,10 @@ type cycle struct {
 	// itlHeld marks a variant whose own line is its last slope held for want
 	// of readings (itl.Reading.SlopeHeld), not a fit made this cycle.
 	itlHeld map[string]bool
+	// reportedMu is, per variant, the derived mu of each of its own
+	// replicas that was reported and not priced (itlLineReportOnly), for the
+	// service-rate signal. Written by priceReplicas.
+	reportedMu map[string][]float64
 	// itlSamples is how many readings each decode variant's OWN ITL window
 	// holds after this cycle's, whatever line it ends up priced on. Carried
 	// for the service-rate signal (attachServiceRates), where it is the
@@ -623,6 +627,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// Why a decode replica has no derived mu, by pod, for
 	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
 	muMissing := make(map[string]string)
+	c.reportedMu = make(map[string][]float64)
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
@@ -730,6 +735,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.logger.V(perReplicaLogLevel).Info("derived-mu",
 				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 				"ok", derived.ok,
+				// An aggregated line's figure is reported, not priced (#432).
+				"reportOnly", itlLineReportOnly(role),
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
@@ -771,9 +778,19 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
+		// An aggregated line's derived mu is reported, never priced
+		// (itlLineReportOnly): the replica is priced as if it had none, and
+		// the figure goes to the service-rate signal only.
+		priced := derived
+		if derived.ok && itlLineReportOnly(role) {
+			if !rm.FromWarmPool {
+				c.reportedMu[rm.VariantName] = append(c.reportedMu[rm.VariantName], derived.rate)
+			}
+			priced = derivedMu{why: derivedWhyReportOnly}
+		}
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.tune, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.keys, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
+			c.fleetHitRate, priced, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.shapeChanging, c.logger)
@@ -789,11 +806,6 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// order it has earned.
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
-			// An aggregated line depends on the request shape (issue #275), so
-			// while the shape changes its derived figure may hold the fleet and
-			// not grow it, and does not settle the change (itlShapeStale).
-			rc.SaturatedThroughputShapeStale = rc.SaturatedThroughputDerived &&
-				itlShapeStale(role, c.shapeChanging || c.shapeChanged)
 			replicaCapacities = append(replicaCapacities, *rc)
 			pricedRows = append(pricedRows, raw)
 		}

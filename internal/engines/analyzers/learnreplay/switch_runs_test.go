@@ -41,7 +41,8 @@ import (
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
 // #432 fits an ITL line for an aggregated (unlabeled, RoleBoth) variant, as
-// for decode, and prices its replicas from it; its line is shared only with
+// for decode, and reports the mu it derives without pricing it (until #275:
+// the line depends on the request shape); its line is shared only with
 // other aggregated variants (a physics key ending in |both). It moves the
 // acceptance and engine fixtures, the two whose models run aggregated
 // variants (model-01's variant-01 and variant-02, model-02's variant-03); no
@@ -56,20 +57,17 @@ import (
 //     (engine), all on the three aggregated variants. ServiceRate reads the
 //     ITL window on all 28 and its sample count on 16; on six rows of
 //     variant-01 and variant-02 it has a line (A 0.020, B 0.006,
-//     ITL 0.0196 s at the pricing point) and a derived rate of 10.88/s. On
-//     variant-02's three borrowing cycles the record names the borrow
-//     (Borrowed: itl-line from variant-01). No demand, capacity or reason
-//     moves: TotalDemand, PerReplicaCapacity and Reason are unchanged on
-//     every row.
-//   - engine/composite-variants.csv: variant-02's three borrow rows, as
-//     above.
+//     ITL 0.0196 s at the pricing point) and a reported rate of 10.88/s,
+//     source derived-report-only. Nothing is priced from it: no demand,
+//     capacity, reason or borrow record moves (TotalDemand,
+//     PerReplicaCapacity, Reason and Borrowed are unchanged on every row),
+//     and the composite's records do not move at all.
 //
-// While the shape changes, an aggregated line's derived figure may hold the
-// fleet and not grow it, and does not settle the change
-// (SaturatedThroughputShapeStale). No fixture prices an aggregated variant
-// from its line while a change is outstanding, so that moves no golden
-// further; TestITLAggregated_AStaleLineHoldsAndDoesNotGrow and
-// TestITLAggregated_AStaleLineDoesNotGrowWithTheHoldOff hold it.
+// That the line never sizes -- at steady load, through a shape change and
+// after it, held through light load -- moves no golden further: no fixture
+// would order on it. TestITLAggregated_TheDerivedMuIsReportedNotPriced,
+// TestITLAggregated_AnOldShapeLineNeverOrders and
+// TestITLAggregated_AHeldLineNeverOrders hold it.
 //
 // Earlier PRs' rows: #277's switch (kv-per-request-hits-resident) went to
 // earlierSeams; off alone from all on it still moves only e1 and e1-tuned.
@@ -79,8 +77,7 @@ import (
 var replaySwitches = map[string][]string{
 	saturation.SwitchITLFitsAggregated: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv",
-		"engine/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 }
 
@@ -149,13 +146,12 @@ var learner4aSeams = map[string][]string{
 	// Since #432 the move reaches the aggregated line of the acceptance and
 	// engine fixtures too: off, model-01's variant-01 does not settle in
 	// time for its first fit at 09:32:00, so it publishes no |both line that
-	// cycle, variant-02 borrows none, and their service rates and the
-	// learned-state export lose them, as the slo analyzer's line does under
-	// slo.SwitchITLReadsSettle.
+	// cycle, variant-02 borrows none, and their reported service rates and
+	// the learned-state export lose them, as the slo analyzer's line does
+	// under slo.SwitchITLReadsSettle.
 	saturation.SwitchITLReadsSettle: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv",
-		"engine/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
@@ -449,13 +445,12 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (64f4747b0, main after #446; the seven are
+// base commit's goldens hold it (64f4747b0, main after #446; the six are
 // unchanged since 0da4f9ac2).
 var switchBase = map[string]string{
 	"acceptance/learned-state.csv":      "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
 	"acceptance/lines.csv":              "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
 	"acceptance/variant-capacities.csv": "30f5279ca4c19b6e50fb1567b8e018172423e5756782535a9a94411591ffb63a",
-	"engine/composite-variants.csv":     "43bb85189c577d3c09508de664d37c55c5302fa22cb41f03f1d581722b3f078f",
 	"engine/learned-state.csv":          "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
 	"engine/lines.csv":                  "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
 	"engine/variant-capacities.csv":     "4765d306858eb2dc564bc93cf352c5947ec85f3ca9d503d48629a98e11cab755",

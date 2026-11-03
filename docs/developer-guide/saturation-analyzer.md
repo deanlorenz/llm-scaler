@@ -533,21 +533,39 @@ A fit is refused unless it is usable (`ValidModel`): `A` and `B` finite,
 
 ### Which roles fit a line
 
-`itlLineRole` (`itl_aggregated.go`) decides, for `fitLines` and for every
-consumer that prices from the line: decode always, an aggregated variant
-(`RoleBoth`, or no role label) with `SwitchITLFitsAggregated`
-(`itl-line-fits-aggregated`, issue #432) on, and prefill never. Before #432
-only decode fitted, so an ordinary unlabeled deployment had no derived mu and
-no service-rate line. The consumers that follow the rule are the derived mu
+`itlLineRole` (`itl_aggregated.go`) decides which variants fit a line:
+decode always, an aggregated variant (`RoleBoth`, or no role label) with
+`SwitchITLFitsAggregated` (`itl-line-fits-aggregated`, issue #432) on, and
+prefill never. Before #432 only decode fitted, so an ordinary unlabeled
+deployment had no line at all. The same rule gates the derived mu
 (`priceReplicas`), the service-rate signal (`attachServiceRates`, which reads
 `itlModels`), the GPS check (`noteLineMismatch`) and the learner report's
 role. The settle tracker, the ITL band and the cap admission were never
-role-gated beyond prefill and need nothing. #277's resident-KV reading
-(`fleetResidentKVPerRequest`) already reads every generating replica, so it
-prices an aggregated variant's derived mu too. What stays decode-only is
+role-gated beyond prefill and need nothing. What stays decode-only is
 P/D-specific: the decode view of the queue (`pd_decode_queue.go`), the
 settled-idle count that relaxes prefill's hold (`idle_room.go`) and decode's
 saturation flag.
+
+An aggregated line is **reported, never priced** (`itlLineReportOnly`, until
+#275). `priceReplicas` derives its mu and logs it (`derived-mu` with
+`reportOnly=true`), then prices the replica with no derived figure
+(`derivedWhyReportOnly`), exactly as with the switch off: no order, no
+settled shape change and no borrow record rests on it. The figure reaches
+`wva_service_rate_per_replica` as `source=derived-report-only` when the
+variant has no other rate. Why it may not size yet, the inputs for #275:
+
+- Shape dependence. An aggregated pod's ITL carries the chunked prefill it
+  runs between decode steps, about `n*IL/OL` prompt tokens a step, so the
+  line is a property of the request shape. A line fitted under one shape
+  mis-prices another, and nothing bounds how long: a pinned fit takes several
+  cycles to move, a held slope (#284), a restored line and a `|both` borrow
+  carry an old shape for as long as they are kept, well past the 5-minute
+  shape-change window.
+- Prefill occupancy. A sequence being prefilled holds KV and emits no token,
+  so a mu priced from `k` and `ITL(k)` over-states the rate by about
+  `TTFT/(OL*ITL)`.
+- One shape per fleet. The line is fitted at the fleet's shape, so a variant
+  serving a shape of its own gets an average.
 
 An aggregated line is shared under its own key: `itlLineKeyForRole` appends
 `|both` to the physics key, so the same model on the same engine
@@ -555,13 +573,7 @@ configuration keeps one line for decode pods and another for aggregated pods,
 and neither lends to the other. The window key is per variant already. An
 aggregated pod's ITL also carries the chunked prefill it interleaves, so its
 line depends on the request shape (issue #275); it is fitted at the shape the
-fleet runs and is not corrected for a change of it. So while a shape change
-is outstanding (`c.shapeChanging` or `c.shapeChanged`), a figure derived
-from an aggregated line is marked `SaturatedThroughputShapeStale`
-(`itlShapeStale`): `fleetHasMeasuredItself` does not count it, so it does
-not settle the change, and `floor.borrowedReading` routes it as a borrowed
-line, so it may hold the role and not grow it (`heldWhy=shape-stale-line`).
-A decode line is never marked.
+fleet runs and is not corrected for a change of it.
 
 ### ITL per accepted token (speculative decoding)
 

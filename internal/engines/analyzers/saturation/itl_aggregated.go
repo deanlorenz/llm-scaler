@@ -23,13 +23,15 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 // line, and the two are never shared: a line fitted on an aggregated variant
 // is published and borrowed under a key of its own (itlLineKeyForRole), so a
 // decode variant of the same model and engine configuration neither lends to
-// it nor borrows from it.
+// it nor borrows from it. Until #275 models that, the line is fitted and
+// reported but sizes nothing (itlLineReportOnly).
 
 // SwitchITLFitsAggregated is the replay switch for the line of an aggregated
 // variant (issue #432). On, a variant whose role is RoleBoth (or unlabeled)
-// fits, publishes and borrows an ITL line, and its replicas are priced from
-// it (the derived mu, the service-rate signal, the GPS check) as a decode
-// variant's are. Off, as before, only decode fits a line.
+// fits, publishes and borrows an ITL line, and its derived mu is reported
+// (the derived-mu log line, the service-rate signal, the GPS check, the
+// learner report) but not priced (itlLineReportOnly). Off, as before, only
+// decode fits a line.
 const SwitchITLFitsAggregated = "itl-line-fits-aggregated"
 
 // itlLineRole reports whether a variant of this role fits, and is priced
@@ -65,17 +67,29 @@ func itlLineKeyForRole(physicsKey, role, fingerprint string) string {
 	return physicsKey + "|" + domain.RoleBoth
 }
 
-// itlShapeStale reports whether a line of this role is stale while the
-// fleet's shape changes: an aggregated variant's is. Its ITL carries the
-// chunked prefill it runs between decode steps, about n*IL/OL prompt tokens
-// a step, so a line fitted under one shape mis-prices another (issue #275),
-// where a decode line describes the engine at every shape. A derived figure
-// from a stale line is then held to what a borrowed line may do
-// (capacity.ReplicaCapacity.SaturatedThroughputShapeStale): hold the fleet,
-// not grow it, and not settle the change. A decode variant's is never stale.
-func itlShapeStale(role string, shapeChanging bool) bool {
-	return shapeChanging && domain.CanonicalRole(role) == domain.RoleBoth
+// itlLineReportOnly reports whether the mu derived from a line of this role
+// is reported and not priced: an aggregated variant's is, until issue #275.
+//
+// An aggregated pod's ITL carries the chunked prefill it runs between decode
+// steps, about n*IL/OL prompt tokens a step, so its line is a property of
+// the request shape as well as of the engine. A line fitted under one shape
+// mis-prices another, and nothing bounds how long it does: a pinned fit
+// takes several cycles to move, a held slope (issue #284), a restored line
+// and a borrowed one carry an old shape for as long as they are kept. The
+// derived mu also over-states the rate by about TTFT/(OL*ITL): a sequence
+// being prefilled holds KV and emits no token. And the line is fitted at
+// the fleet's shape, so a variant serving a shape of its own gets an
+// average. So the figure is reported -- the derived-mu log line, the
+// learner report, the service-rate signal (derivedWhyReportOnly) -- and the
+// replica is priced as if it had no line: no order and no settled shape
+// change rests on it. A decode line is priced as before.
+func itlLineReportOnly(role string) bool {
+	return domain.CanonicalRole(role) == domain.RoleBoth
 }
+
+// derivedWhyReportOnly is the derivedMu.why a replica is priced with when its
+// line's figure is reported only (itlLineReportOnly).
+const derivedWhyReportOnly = "report-only"
 
 // itlReportRole is the role an ITL learner report and its learner-write line
 // name for a variant: the variant's own with SwitchITLFitsAggregated on,

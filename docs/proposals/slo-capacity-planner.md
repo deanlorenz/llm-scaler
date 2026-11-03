@@ -374,7 +374,7 @@ TTFT's rows are on [its page](slo-capacity-planner-ttft.md#where-it-is-most-wron
 | Positive prompt/output correlation | Over-promises | — |
 | ITL depends on shape on aggregated pods | Either way; about 40% of ITL at 1000/500 | #275 |
 | SLO analyzer reads step time, not per token | Under-promises on speculating vLLM by `1 + E` | #274 |
-| No saturation line for an unlabeled aggregated variant | Fixed, but shape-dependent until #275: saturation fits it under its own key (switch `itl-line-fits-aggregated`), and holds rather than grows on it while the shape changes | #432 |
+| No saturation line for an unlabeled aggregated variant | Line fitted and reported (switch `itl-line-fits-aggregated`, its own key); sizing from it waits on #275 | #432 |
 | Residence exponential in the admission chain | Either way; a constant ITL would over-promise near the knee | — |
 | `R_q` learned under one load and applied at another | Learned at lower load and applied near the knee, over-promises (the spread grows with load); the reverse under-promises | — |
 | `R_q` pooled across output lengths, applied to a short-output bucket | Over-promises | — |

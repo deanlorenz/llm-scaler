@@ -675,6 +675,7 @@ derivation
 derived
 derived-from-args
 derived-mu
+derived-report-only
 derivedCapacity
 derivedMu
 derivedOK
@@ -1751,6 +1752,8 @@ replicas
 replicasByVariant
 replicasImplied
 replicasToMove
+report-only
+reportOnly
 reported
 reporting
 reports
@@ -1938,7 +1941,6 @@ sh
 shadow
 shape
 shape-change
-shape-stale-line
 shapeChangeHoldSeconds
 share
 share-claimed

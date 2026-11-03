@@ -106,7 +106,7 @@ only to change it. Limiters an admin published in a policy namespace
 
 ### Upgrading from v0.10.2 to the next release
 
-An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now has an inter-token-latency line and a derived service rate, as decode variants do, so its sizing gains a new input: under steady load the throughput floor can order replicas from that rate where it used to size by KV occupancy alone, and `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived"}` appear for it. While the request shape changes, that rate may hold the fleet and not grow it (`heldWhy=shape-stale-line`).
+An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now reports an inter-token-latency line and the service rate it derives: `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived-report-only"}` appear for it. Its sizing does not change: nothing is sized from that rate until issue #275 makes the line account for the request shape.
 
 ### Upgrading from v0.10.1 to v0.10.2
 

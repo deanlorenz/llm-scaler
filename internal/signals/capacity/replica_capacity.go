@@ -94,13 +94,6 @@ type ReplicaCapacity struct {
 	// not GROW one on it, which is the same rule it already applies to a
 	// reading borrowed from a neighbouring shape bucket.
 	SaturatedThroughputLineBorrowed bool
-	// SaturatedThroughputShapeStale is set when the derived figure came from
-	// a line whose physics depend on the request shape -- an aggregated
-	// variant's, whose ITL carries the prefill it interleaves (issues #432,
-	// #275) -- while a shape change is outstanding. The line was fitted under
-	// the shape that left, so, as for a borrowed line, the floor may hold a
-	// fleet on it and must not grow one, and it does not settle the change.
-	SaturatedThroughputShapeStale bool
 	// SaturatedThroughputLowerBound is set when SaturatedThroughput is a
 	// prefill replica's LOWER BOUND on its service rate rather than a
 	// reading of it: the computed prompt tokens per second it was seen to
