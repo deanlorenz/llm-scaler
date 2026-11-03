@@ -2157,6 +2157,11 @@ EOF
         # to the shipped none. Kept below when WVA_LIMITER is not given -- see
         # wva_live_limiters. Unreadable with WVA_LIMITER unset is a refusal: the
         # install cannot tell whether it is about to unbound a bounded controller.
+        # Passive mode, which the same apply resets: WVA_PASSIVE in the manager
+        # ConfigMap and `passive` on the default entry. Put back below unless
+        # WVA_PASSIVE is given -- see wva_live_passive.
+        wva_live_passive "$WVA_NS"
+
         local live_rc=0
         wva_live_limiters "$WVA_NS" || live_rc=$?
         if [ "$live_rc" -ne 0 ] && [ -z "${WVA_LIMITER:-}" ]; then
@@ -2297,6 +2302,10 @@ wva_reconcile_prometheus_scheme() {
         log_info "Enabling scale-to-zero in WVA ConfigMap (ENABLE_SCALE_TO_ZERO=true)..."
         patch_manager_config '.WVA_SCALE_TO_ZERO = "true"'
     fi
+
+    # Passive mode survives a re-run: an upgrade is not a decision to let a
+    # controller that only observes start scaling.
+    wva_keep_passive "$WVA_NS"
 
     # Declare a GPU limiter, if asked.
     #
@@ -2476,6 +2485,60 @@ patch_manager_config() {
     updated=$(echo "$current" | yq "$expr")
     kubectl patch configmap wva-manager-config -n "$WVA_NS" --type=merge \
         -p "$(jq -n --arg cfg "$updated" '{data:{"config.yaml":$cfg}}')"
+}
+
+# wva_live_passive reads the passive settings the live controller runs with,
+# before the apply resets them: WVA_PASSIVE in wva-manager-config into
+# WVA_LIVE_PASSIVE, and `passive` on the default entry of
+# wva-scaling-policy-config into WVA_LIVE_DEFAULT_PASSIVE. Each is empty when
+# unset or unreadable (a first install).
+wva_live_passive() {
+    local ns="$1" cfg def
+    WVA_LIVE_PASSIVE=""
+    WVA_LIVE_DEFAULT_PASSIVE=""
+    cfg="$(kubectl get configmap wva-manager-config -n "$ns" -o jsonpath='{.data.config\.yaml}' 2>/dev/null)" || cfg=""
+    if [ -n "$cfg" ]; then
+        WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | yq '.WVA_PASSIVE // ""' 2>/dev/null)" || WVA_LIVE_PASSIVE=""
+    fi
+    def="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || def=""
+    if [ -n "$def" ]; then
+        WVA_LIVE_DEFAULT_PASSIVE="$(printf '%s\n' "$def" | yq '.passive // ""' 2>/dev/null)" || WVA_LIVE_DEFAULT_PASSIVE=""
+    fi
+}
+
+# wva_keep_passive puts passive mode back after the apply. WVA_PASSIVE, when
+# given (true or false), is written to wva-manager-config; when not, the live
+# value read by wva_live_passive is kept. The default entry's `passive` is
+# always kept: the apply resets that entry, and only an edit of the ConfigMap
+# turns it off.
+wva_keep_passive() {
+    local ns="$1" want="${WVA_PASSIVE:-${WVA_LIVE_PASSIVE:-}}" def updated
+    case "$want" in
+        '') ;;
+        true|false)
+            patch_manager_config ".WVA_PASSIVE = \"$want\""
+            if [ "$want" = true ]; then
+                log_warning "Passive mode is ON controller-wide (WVA_PASSIVE=true): the controller computes and publishes, and changes no replica count. Pass WVA_PASSIVE=false to turn it off."
+            fi
+            ;;
+        *) log_error "WVA_PASSIVE must be true or false (got '$want')" ;;
+    esac
+    case "${WVA_LIVE_DEFAULT_PASSIVE:-}" in
+        true|false)
+            def="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>/dev/null)" || def=""
+            if [ -z "$def" ]; then
+                log_warning "could not read the default entry after the apply, so its passive: ${WVA_LIVE_DEFAULT_PASSIVE} was not put back. Add it to the default entry of wva-scaling-policy-config in $ns."
+                return 0
+            fi
+            updated="$(printf '%s\n' "$def" | yq ".passive = ${WVA_LIVE_DEFAULT_PASSIVE}")" || return 0
+            if kubectl patch configmap wva-scaling-policy-config -n "$ns" --type=merge \
+                    -p "$(jq -n --arg d "$updated" '{data:{"default":$d}}')" >/dev/null; then
+                log_info "Kept passive: ${WVA_LIVE_DEFAULT_PASSIVE} on the default entry of wva-scaling-policy-config"
+            else
+                log_warning "could not write passive: ${WVA_LIVE_DEFAULT_PASSIVE} back to the default entry of wva-scaling-policy-config in $ns. Add it by hand."
+            fi
+            ;;
+    esac
 }
 
 create_namespaces_shared_loop() {
