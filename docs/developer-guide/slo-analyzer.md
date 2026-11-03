@@ -62,10 +62,17 @@ hands the optimizer `namedResults[0]`, saturation's.
 ## The engine's hooks
 
 The engine holds the analyzer as `sloAnalyzer`, an interface
-(`sloStateKeeper`: `BeginCycle`, `NoteVariantsPresent`, `EvictStale`), and
-calls:
+(`sloStateKeeper`: `BeginCycle`, `NoteVariantsPresent`, `EvictStale`,
+`ForgetVariant`), and calls:
 
 - `beginSLOCycle` (above);
+- `forgetOnRequest`: when the saturation analyzer acts on a
+  `llm-d.ai/forget-learned-state` token, `ForgetVariant` drops the variant's
+  line under every key (window, steady window, traces, intercept, held slope)
+  and the engine arguments it was learned under. The token is the saturation
+  analyzer's; this analyzer keeps none. It walks `learn.Learners` and forgets
+  `learn.ITL`, its own instance of the line (`forget.go`, issue #431). Replay
+  switch `slo-itl-forget-reaches-the-line`; off, nothing is forgotten here;
 - `notePresentVariants`: `NoteVariantsPresent` stamps a parked variant's line,
   accelerator memo and transient memo, so parking does not age them out;
 - `evictStaleLearnedState`: `EvictStale` forgets what was not analyzed or

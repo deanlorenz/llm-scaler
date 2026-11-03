@@ -1212,12 +1212,14 @@ what it has learned.
    ```
 
 2. Check the controller log on the variant's next cycle:
-   `Learned state forgotten for one variant, on request`, with the variant and
-   the number of `entries` dropped.
+   `Learned state forgotten for one variant, on request`, with the variant,
+   the number of `entries` dropped, and `sloEntries`, the number the SLO
+   analyzer dropped.
 
 What is forgotten: the variant's measured k2 and throughput, its ITL line
 (including one it lent to siblings), its replica start estimate, and its
-capacity record. Also its previous k2 (`P2-prior`), the old service rate that
+capacity record. The SLO analyzer keeps an ITL line of its own for the
+variant, and that is forgotten too. Also its previous k2 (`P2-prior`), the old service rate that
 holds the throughput floor after a change of arguments, and the windows set
 aside under earlier arguments for a rollback. The variant then prices as a new variant would until it
 saturates again: from its deployment-derived figure, or from a lower measured

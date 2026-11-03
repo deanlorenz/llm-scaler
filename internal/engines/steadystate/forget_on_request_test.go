@@ -77,3 +77,42 @@ func TestBuildAnalyzerInput_ForgetsOneVariantOnRequest(t *testing.T) {
 	run("2026-10-15T13:00")
 	assert.False(t, isLive(), "a new token did not ask again")
 }
+
+// The forget reaches the slo analyzer too (issue #431), on the token the
+// saturation analyzer acts on: once per token, and again for a new one.
+// Before, the slo analyzer's ITL line kept pricing from the readings taken
+// before the forget.
+func TestForgetOnRequest_ReachesTheSLOAnalyzerOncePerToken(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	deploy := deployWithArgs("--max-num-seqs=128")
+	forget := func(token string) {
+		deploy.Annotations = map[string]string{annotations.ForgetLearnedState: token}
+		e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deploy))
+	}
+
+	e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deployWithArgs()))
+	assert.Empty(t, spy.forgotten, "control: no annotation, nothing forgotten")
+
+	forget("t1")
+	assert.Equal(t, []string{"ns/m/v1"}, spy.forgotten, "the annotation did not reach the slo analyzer")
+	forget("t1")
+	assert.Len(t, spy.forgotten, 1, "a token left in place forgot the slo line again")
+	forget("t2")
+	assert.Equal(t, []string{"ns/m/v1", "ns/m/v1"}, spy.forgotten, "a new token did not ask the slo analyzer again")
+}
+
+// With no saturation analyzer to keep the token, nothing is forgotten in the
+// slo analyzer either: it would forget again on every cycle.
+func TestForgetOnRequest_NoSaturationForgetterForgetsNothingInSLO(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	e.setSaturation(plainAnalyzer{})
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	deploy := deployWithArgs()
+	deploy.Annotations = map[string]string{annotations.ForgetLearnedState: "t1"}
+	e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deploy))
+	assert.Empty(t, spy.forgotten)
+}

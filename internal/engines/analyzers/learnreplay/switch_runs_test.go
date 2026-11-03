@@ -40,42 +40,32 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// Learner PR 4a moves the ITL line, and the slo analyzer's line, onto the
-// settle tracker, six switches each.
+// Issue #431 routes the forget-learned-state annotation to the slo
+// analyzer's line, one switch. It moves no golden: the engine records the
+// slo analyzer's forget as an event of its own (slo.ForgetVariant), which
+// no committed recording carries, and a replay forgets in the slo analyzer
+// only where the run did. The acceptance and engine recordings forget a
+// variant, but through the saturation analyzer alone, as the engine did
+// when they were taken. Its unit tests hold it (heldBy).
 //
-//   - The wait after a controller restart moves the goldens whose load
-//     reaches the line within its settle of the controller start: the
-//     in-process runs, and the ols-sweep-slo-restart recording, whose
-//     controller came back under load. Each line refits steadyFor later.
-//   - The move itself moves the in-process runs on the cycles after their
-//     clock jumps a day: 25 hours with no cycle at all is, to the tracker,
-//     an absence past its tolerance (settle.Rejoined), and the replicas
-//     settle again; the line's own trace counted an absence only by cycles
-//     that went without a replica, and saw none. In the acceptance and
-//     engine runs that is one full fit the line no longer publishes (10:32
-//     the next day), and in the slo line four cycles priced from a pinned
-//     fit, not a full one. The cluster recordings are held.
-//   - The absence rule and the Finite-only reading move nothing: no
-//     recording misses a replica's row for a cycle, and every recorded Pod
-//     is one rank. Neither do the tracker's two rules with switches of
-//     their own, a restart under the same name and idle on evidence: no
-//     recording has a Pod's Ready time change with no row that is not Ready
-//     between, or a row that read nothing. Their unit tests hold all four
-//     (heldBy).
-//
-// The acceptance and engine recordings were taken again for this PR, with
-// the generator's Ready time fixed for the day: the earlier ones gave each
-// replica a new Ready time on every cycle, an engine restart each time to
-// the tracker, and no line of theirs ever settled. Their base digests below
-// are the all-off replays of the new recordings.
-//
-// Earlier PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch
-// cap, #415's mu key, #392's first k2 reading, #420's batch-cap readers,
-// #274's ITL per accepted token, #276's output spread, #427's zero-replica
-// batch cap) are not here: "all
-// off" is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
+// Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
+// batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
+// readers, #274's ITL per accepted token, #276's output spread, #427's
+// zero-replica batch cap) are not here: "all off" is this PR's switches,
+// and an earlier PR's stay at their constructor default, on, as the base
+// goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
+	slo.SwitchITLForgetReachesTheLine: nil,
+}
+
+// learner4aSeams is learner PR 4a's switches, earlier seams now (merged
+// into earlierSeams): the ITL line, and the slo analyzer's line, on the
+// settle tracker, six switches each, with the outputs 4a named each to
+// move. The restart wait moves the in-process runs and
+// ols-sweep-slo-restart; the move itself the in-process runs on the cycles
+// after their clock jumps a day (settle.Rejoined); the other four move
+// nothing and are held by their unit tests (heldBy).
+var learner4aSeams = map[string][]string{
 	saturation.SwitchITLReadsSettle: {"acceptance/lines.csv", "engine/lines.csv"},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
@@ -116,8 +106,9 @@ func switchPackage(name string) string {
 // code still has, and the golden outputs that PR named it to move. Each
 // stays on, at its constructor default, in this PR's runs; off alone, from
 // all on, it may move only what it named. A seam's row goes with the seam,
-// in the PR, or cleanup PR, that deletes it with zero golden diff.
-var earlierSeams = map[string][]string{
+// in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
+// PR 4a's rows are learner4aSeams, merged in.
+var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
@@ -148,6 +139,18 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchBatchCapZeroReplica: nil,
 	// #276's spread of output lengths in the KV per request.
 	saturation.SwitchKVPerRequestOutputDispersion: nil,
+})
+
+// withSeams is rows with more's rows added; a name in both is a row given
+// twice, and panics.
+func withSeams(more, rows map[string][]string) map[string][]string {
+	for name, outs := range more {
+		if _, dup := rows[name]; dup {
+			panic("earlierSeams: " + name + " has two rows")
+		}
+		rows[name] = outs
+	}
+	return rows
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -159,6 +162,10 @@ var earlierSeams = map[string][]string{
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #431's forget of the slo line.
+	slo.SwitchITLForgetReachesTheLine: {
+		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
+	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
 	},
@@ -338,30 +345,11 @@ func mergedRows() map[string][]string {
 	return out
 }
 
-// switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (a16c161a3, main after #441, whose goldens are
-// main's after #437, 939af5e36), and for the
-// acceptance and engine goldens, taken again here, their all-off replays.
-var switchBase = map[string]string{
-	"acceptance/learned-state.csv":                 "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
-	"acceptance/lines.csv":                         "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
-	"acceptance/slo-published.csv":                 "2276ef61bd4b7203d9d06c26192046b2429ad12b5e5ef668c776a46a15ba36f8",
-	"acceptance/variant-capacities.csv":            "a7ad07abe1eb85bcaf3786d10d9822785a2ec073cd0dee0c02f78eea2dee9c73",
-	"engine/composite-variants.csv":                "f0d66647fc3b2d02a4c2f9d79616ebfb7123a4a31746644079f720522d68d64d",
-	"engine/learned-state.csv":                     "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",
-	"engine/lines.csv":                             "09ed3da7b44df960f33e4cb6c3cdbb6c6fc4d6ad4d8f3c970999582e124b239c",
-	"engine/slo-published.csv":                     "ed09c2bd28e3055a9b8744d87c588c2231e64906516f28d8b93b7e908e04e912",
-	"engine/variant-capacities.csv":                "052ea4872813f6401a7536a2a359e2cbcbb4dcedfc12a315dba9f9c93411fd79",
-	"mu-paths/learned-state.csv":                   "4a7667542a86f5fb12a683a01eea3426c51b668ddd0e7aab18ed133608a1a8e9",
-	"mu-paths/lines.csv":                           "b293056a8e459d7d6fd05755aa8fa5e7920f4f68355a29a381fb1b789121f396",
-	"mu-paths/slo-published.csv":                   "761496fb84fd97d26bb873e52051eded6bd7ca82d36dfe59bca597f905aad6f1",
-	"mu-paths/variant-capacities.csv":              "d8fdaadd8f890d8b3bba0e925bbd9ccca03b650911222f3bd9b9f79f7531cdba",
-	"ols-sweep-slo-restart/composite-results.csv":  "661c30baab0ade02fcd3cc9de75c8c4916ebdf52f4382a67f285cc8142c9ba8c",
-	"ols-sweep-slo-restart/lines.csv":              "322e9075099cd49f4480ac06e85a9febbef96ba71af0f056448e1d366c07cb1f",
-	"ols-sweep-slo-restart/results.csv":            "38f2ca37c1246dff5cb3d713cbf73e10e189345e24bbe3c757a90d01137755b4",
-	"ols-sweep-slo-restart/slo-published.csv":      "7629254bdea8f46e51e241e9d6bf7644914dbbb5c69fc310f424643cc41cba87",
-	"ols-sweep-slo-restart/variant-capacities.csv": "9aa0b55d9a5742e32dc1ede8df641bbc1374429cb6c25680e666d465f257fb08",
-}
+// switchBase is the sha256 of each output a switch of this PR names, as the
+// base commit's goldens hold it. This PR's one switch names none (#431), so
+// all off is the committed goldens, every output. Learner PR 4a's digests
+// went with its rows to earlierSeams, which are replayed from all on.
+var switchBase = map[string]string{}
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays

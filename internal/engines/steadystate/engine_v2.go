@@ -401,7 +401,9 @@ func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerato
 
 // forgetOnRequest forgets one variant's learned state when its scale target
 // carries the ForgetLearnedState annotation with a token not yet acted on.
-// Nothing is forgotten when the saturation analyzer cannot forget.
+// Nothing is forgotten when the saturation analyzer cannot forget: it keeps
+// the token acted on. When it acts on one, the slo analyzer forgets the
+// variant's ITL line too (issue #431); its entries are logged apart.
 func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
 	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
 	if token == "" {
@@ -412,9 +414,13 @@ func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, varian
 		return
 	}
 	n := f.ForgetVariant(namespace, modelID, variant, token)
+	sloN := 0
+	if e.sloAnalyzer != nil {
+		sloN = e.sloAnalyzer.ForgetVariant(namespace, modelID, variant)
+	}
 	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
 		"namespace", namespace, "modelID", modelID, "variant", variant,
-		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n)
+		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n, "sloEntries", sloN)
 }
 
 // beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
@@ -454,12 +460,14 @@ func (e *Engine) sloMissedAfter() time.Duration {
 }
 
 // sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
-// its learned state is stamped by notePresentVariants and aged by
-// evictStaleLearnedState, like the saturation analyzer's.
+// its learned state is stamped by notePresentVariants, aged by
+// evictStaleLearnedState and forgotten on request by forgetOnRequest, like
+// the saturation analyzer's.
 type sloStateKeeper interface {
 	presenceNoter
 	EvictStale(now time.Time) slo.Evicted
 	BeginCycle()
+	ForgetVariant(namespace, modelID, variant string) int
 }
 
 var _ sloStateKeeper = (*slo.Analyzer)(nil)

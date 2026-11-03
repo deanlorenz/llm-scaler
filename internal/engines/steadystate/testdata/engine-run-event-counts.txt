@@ -99,6 +99,7 @@
 2026-03-02T09:31:30Z slo.Analyze 2
 2026-03-02T09:31:30Z slo.BeginCycle 1
 2026-03-02T09:31:30Z slo.EvictStale 1
+2026-03-02T09:31:30Z slo.ForgetVariant 1
 2026-03-02T09:31:30Z slo.NoteVariantsPresent 2
 2026-03-02T09:31:30Z store.EvictStale 1
 2026-03-02T09:31:30Z store.FileScaleTarget 5

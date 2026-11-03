@@ -23,6 +23,7 @@ const (
 	KindEvictStale          = "slo.EvictStale"
 	KindBeginCycle          = "slo.BeginCycle"
 	KindNoteVariantsPresent = "slo.NoteVariantsPresent"
+	KindForgetVariant       = "slo.ForgetVariant"
 )
 
 // judged is what one Analyze read from the router and published, beside its
@@ -70,6 +71,13 @@ type PresentEvent struct {
 	Variants           []string
 }
 
+// ForgetVariantEvent is ForgetVariant's arguments and how many entries it
+// dropped.
+type ForgetVariantEvent struct {
+	Namespace, ModelID, Variant string
+	Dropped                     int
+}
+
 // WithRecorder records the analyzer's calls to rec; nil turns recording off.
 // Call it before the analyzer is used.
 func (a *Analyzer) WithRecorder(rec *learnrec.Recorder) *Analyzer {
@@ -85,8 +93,9 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // The switches are SwitchBatchCapAdmission, SwitchBatchCapPerRank,
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
-// SwitchITLRestartUnderName and SwitchITLIdleOnEvidence; a name it does not
-// know is an error, and sets nothing. Never called on a
+// SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
+// SwitchITLForgetReachesTheLine; a name it does not know is an error, and
+// sets nothing. Never called on a
 // production path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -116,6 +125,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
+
+		// Issue #431: the forget-learned-state annotation reaches the line
+		// (forget.go).
+		SwitchITLForgetReachesTheLine: &a.itlForgetReachesLine,
 	}
 }
 
@@ -174,4 +187,19 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 		a.rec.Record(KindNoteVariantsPresent, a.now(), PresentEvent{Namespace: namespace, ModelID: modelID, Variants: variantNames})
 	}
 	a.noteVariantsPresent(namespace, modelID, variantNames)
+}
+
+// ForgetVariant forgets one variant's ITL line on an operator's request
+// (forgetVariant), and records the call. The engine calls it when the
+// saturation analyzer acts on a forget token, after that analyzer's own
+// ForgetVariant. It returns how many entries it dropped.
+func (a *Analyzer) ForgetVariant(namespace, modelID, variant string) int {
+	if !a.rec.Active() {
+		return a.forgetVariant(namespace, modelID, variant)
+	}
+	now := a.now()
+	n := a.forgetVariant(namespace, modelID, variant)
+	a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
+		Variant: variant, Dropped: n})
+	return n
 }
